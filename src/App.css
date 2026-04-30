@@ -1256,3 +1256,282 @@ td strong {
     margin: 0;
   }
 }
+
+/* --- Sharing control (chip-based viewer/editor picker) ---------------- */
+
+.sharing-control {
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.sharing-helper {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
+.sharing-chips {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sharing-chip {
+  align-items: center;
+  background: #f3eef4;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+}
+
+.sharing-chip.owner-chip {
+  background: rgba(60, 32, 68, 0.08);
+  border-color: rgba(60, 32, 68, 0.18);
+}
+
+.sharing-chip strong {
+  font-size: 12px;
+}
+
+.sharing-chip .chip-status {
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 1px 8px;
+}
+
+.sharing-chip .chip-toggle {
+  cursor: pointer;
+}
+
+.sharing-chip .chip-toggle:hover {
+  background: #fff;
+  color: var(--ink);
+}
+
+.sharing-chip .chip-remove {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  color: var(--muted);
+  display: flex;
+  height: 18px;
+  justify-content: center;
+  padding: 0;
+  width: 18px;
+}
+
+.sharing-chip .chip-remove:hover {
+  background: rgba(173, 48, 66, 0.12);
+  color: var(--red);
+}
+
+.sharing-add {
+  position: relative;
+}
+
+.add-person-pill {
+  background: transparent;
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.add-person-pill:hover {
+  background: #fff;
+  border-color: var(--bluegray);
+  color: var(--ink);
+}
+
+.sharing-add-menu {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  left: 0;
+  min-width: 180px;
+  padding: 4px;
+  position: absolute;
+  top: calc(100% + 4px);
+  z-index: 5;
+}
+
+.sharing-add-menu button {
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.sharing-add-menu button:hover {
+  background: var(--soft);
+}
+
+/* --- Filter bar ------------------------------------------------------- */
+
+.filter-bar {
+  align-items: flex-end;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+}
+
+.filter-field {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 4px;
+}
+
+.filter-field span {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.clear-filters-link {
+  background: transparent;
+  border: none;
+  color: var(--berry);
+  font-size: 13px;
+  margin-left: auto;
+  padding: 6px 0;
+  text-decoration: underline;
+}
+
+.clear-filters-link:hover {
+  color: var(--jam);
+}
+
+/* --- Checklist groups + focused card --------------------------------- */
+
+.checklist-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.checklist-group-header {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+  padding: 8px 0;
+  text-align: left;
+}
+
+.checklist-group-header strong {
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.checklist-group-header span {
+  background: var(--soft);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 1px 8px;
+}
+
+.checklist-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.checklist-block.focused {
+  border-color: var(--berry);
+  box-shadow: 0 0 0 2px rgba(142, 47, 82, 0.15);
+}
+
+.checklist-meta-line {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* --- Quick template form --------------------------------------------- */
+
+.quick-template-form {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.quick-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quick-row-meta {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.quick-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.quick-items {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  min-height: 110px;
+}
+
+.template-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* --- Gantt clickable row --------------------------------------------- */
+
+.gantt-row-clickable {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.gantt-row-clickable:hover .gantt-bar {
+  filter: brightness(0.95);
+}
+
+.gantt-row-clickable:focus-visible {
+  outline: 2px solid var(--berry);
+  outline-offset: 2px;
+}
+
