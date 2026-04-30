@@ -11,6 +11,7 @@ playwright-report
 tmp
 design
 .omc
+~$*
 
 node_modules
 dist

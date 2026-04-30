@@ -64,6 +64,8 @@ create table if not exists checklists (
   template_id text,
   frequency text,
   due_date date not null,
+  viewer_ids text[] not null default '{}',
+  editor_ids text[] not null default '{}',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -86,6 +88,8 @@ create table if not exists checklist_templates (
   frequency text not null check (frequency in ('daily', 'weekly', 'monthly', 'quarterly', 'annually')),
   next_due_date date not null,
   active boolean not null default true,
+  viewer_ids text[] not null default '{}',
+  editor_ids text[] not null default '{}',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

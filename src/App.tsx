@@ -1,4 +1,5 @@
 import {
+  BarChart3,
   Building2,
   CalendarDays,
   CircleDollarSign,
@@ -75,6 +76,8 @@ type ChecklistTemplate = {
   frequency: ChecklistFrequency
   nextDueDate: string
   active: boolean
+  viewerIds: string[]
+  editorIds: string[]
   items: ChecklistTemplateItem[]
 }
 
@@ -86,6 +89,9 @@ type Checklist = {
   templateId?: string
   frequency?: ChecklistFrequency
   dueDate: string
+  viewerIds: string[]
+  editorIds: string[]
+  createdAt?: string
   items: ChecklistItem[]
 }
 
@@ -185,6 +191,7 @@ const navItems: Array<{ id: string; label: string; icon: LucideIcon; ownerOnly?:
   { id: 'checklists', label: 'Checklists', icon: ListChecks },
   { id: 'clients', label: 'Clients', icon: Building2 },
   { id: 'reports', label: 'Reports', icon: FolderKanban, ownerOnly: true },
+  { id: 'gantt', label: 'Gantt', icon: BarChart3, ownerOnly: true },
   { id: 'invoices', label: 'Invoices', icon: ReceiptText, ownerOnly: true },
   { id: 'plans', label: 'Plans', icon: WalletCards, ownerOnly: true },
 ]
@@ -264,8 +271,16 @@ function sortChecklists(checklists: Checklist[]) {
 }
 
 function ensureRecurringChecklists(data: AppData) {
-  const templates = data.checklistTemplates ?? []
-  const existingChecklists = data.checklists ?? []
+  const templates = (data.checklistTemplates ?? []).map((template) => ({
+    ...template,
+    viewerIds: Array.isArray(template.viewerIds) ? template.viewerIds : [],
+    editorIds: Array.isArray(template.editorIds) ? template.editorIds : [],
+  }))
+  const existingChecklists = (data.checklists ?? []).map((checklist) => ({
+    ...checklist,
+    viewerIds: Array.isArray(checklist.viewerIds) ? checklist.viewerIds : [],
+    editorIds: Array.isArray(checklist.editorIds) ? checklist.editorIds : [],
+  }))
   const existingKeys = new Set(
     existingChecklists
       .filter((checklist) => checklist.templateId)
@@ -296,6 +311,9 @@ function ensureRecurringChecklists(data: AppData) {
           assigneeId: template.assigneeId,
           frequency: template.frequency,
           dueDate: template.nextDueDate,
+          viewerIds: Array.isArray(template.viewerIds) ? [...template.viewerIds] : [],
+          editorIds: Array.isArray(template.editorIds) ? [...template.editorIds] : [],
+          createdAt: new Date().toISOString().slice(0, 10),
           items: template.items.map((item) => ({
             id: makeId('item'),
             label: item.label,
@@ -317,12 +335,8 @@ function ensureRecurringChecklists(data: AppData) {
     }
   }
 
-  if (!changed) {
-    return { changed: false, data }
-  }
-
   return {
-    changed: true,
+    changed,
     data: {
       ...data,
       checklistTemplates,
@@ -441,6 +455,8 @@ function createSeedData(): AppData {
         frequency: 'monthly',
         nextDueDate: dateOffset(-2),
         active: true,
+        viewerIds: ['emp-jordan'],
+        editorIds: [],
         items: [
           { id: 'template-monthly-bookkeeping-1', label: 'Clear Bank Feed - Vystar' },
           { id: 'template-monthly-bookkeeping-2', label: 'Clear Bank Feed - Amex' },
@@ -460,6 +476,8 @@ function createSeedData(): AppData {
         frequency: 'quarterly',
         nextDueDate: dateOffset(70),
         active: true,
+        viewerIds: [],
+        editorIds: [],
         items: [
           { id: 'template-quarterly-bookkeeping-1', label: 'Clear Bank Feed - Vystar' },
           { id: 'template-quarterly-bookkeeping-2', label: 'Clear Bank Feed - Amex' },
@@ -481,6 +499,8 @@ function createSeedData(): AppData {
         frequency: 'weekly',
         nextDueDate: dateOffset(4),
         active: true,
+        viewerIds: [],
+        editorIds: [],
         items: [
           { id: 'template-payroll-1', label: 'Review payroll draft' },
           { id: 'template-payroll-2', label: 'Confirm payroll liabilities' },
@@ -495,6 +515,8 @@ function createSeedData(): AppData {
         frequency: 'monthly',
         nextDueDate: dateOffset(20),
         active: true,
+        viewerIds: [],
+        editorIds: [],
         items: [
           { id: 'template-sales-tax-1', label: 'Pull taxable sales report' },
           { id: 'template-sales-tax-2', label: 'Review exemptions and adjustments' },
@@ -509,6 +531,8 @@ function createSeedData(): AppData {
         frequency: 'annually',
         nextDueDate: '2026-11-30',
         active: true,
+        viewerIds: [],
+        editorIds: [],
         items: [
           { id: 'template-1099-1', label: 'Review GL for payments made to vendors' },
           { id: 'template-1099-2', label: 'Review GL after final transactions added for YE' },
@@ -619,6 +643,44 @@ async function toggleChecklistItemRequest(checklistId: string, itemId: string) {
   }
 
   return (await response.json()) as Checklist
+}
+
+async function setChecklistViewersRequest(
+  checklistId: string,
+  viewerIds: string[],
+  editorIds: string[],
+) {
+  const response = await fetch(`/api/checklists/${checklistId}/viewers`, {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ viewerIds, editorIds }),
+  })
+
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to update checklist viewers (${response.status})`)
+  }
+
+  return (await response.json()) as Checklist
+}
+
+async function setTemplateViewersRequest(
+  templateId: string,
+  viewerIds: string[],
+  editorIds: string[],
+) {
+  const response = await fetch(`/api/checklist-templates/${templateId}/viewers`, {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ viewerIds, editorIds }),
+  })
+
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to update template viewers (${response.status})`)
+  }
+
+  return (await response.json()) as ChecklistTemplate
 }
 
 function formatHours(minutes: number) {
@@ -836,7 +898,13 @@ function App() {
       return sortChecklists(data.checklists)
     }
 
-    return sortChecklists(data.checklists.filter((checklist) => checklist.assigneeId === activeEmployeeId))
+    return sortChecklists(
+      data.checklists.filter(
+        (checklist) =>
+          checklist.assigneeId === activeEmployeeId ||
+          (checklist.viewerIds ?? []).includes(activeEmployeeId),
+      ),
+    )
   }, [activeEmployeeId, data.checklists, role])
 
   const visibleClientIds = useMemo(() => {
@@ -1003,6 +1071,60 @@ function App() {
         ...current,
         checklists: current.checklists.map((checklist) =>
           checklist.id === checklistId ? updatedChecklist : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+
+      setDataSyncState('error')
+    }
+  }
+
+  const setChecklistViewers = async (
+    checklistId: string,
+    viewerIds: string[],
+    editorIds: string[],
+  ) => {
+    try {
+      setDataSyncState('saving')
+      const updated = await setChecklistViewersRequest(checklistId, viewerIds, editorIds)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? { ...checklist, ...updated } : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+
+      setDataSyncState('error')
+    }
+  }
+
+  const setTemplateViewers = async (
+    templateId: string,
+    viewerIds: string[],
+    editorIds: string[],
+  ) => {
+    try {
+      setDataSyncState('saving')
+      const updated = await setTemplateViewersRequest(templateId, viewerIds, editorIds)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklistTemplates: current.checklistTemplates.map((template) =>
+          template.id === templateId ? { ...template, ...updated } : template,
         ),
       }))
       setDataSyncState('synced')
@@ -1260,9 +1382,11 @@ function App() {
 
           <section className="content-grid two-column" id="checklists">
             <ChecklistPanel
+              activeEmployeeId={activeEmployeeId}
               checklists={visibleChecklists}
               clients={data.clients}
               employees={data.employees}
+              onSetViewers={setChecklistViewers}
               onToggle={toggleChecklistItem}
               role={role}
             />
@@ -1274,6 +1398,7 @@ function App() {
                 onCreate={addChecklistTemplate}
                 onDeleteItem={removeChecklistTemplateItem}
                 onDeleteTemplate={deleteChecklistTemplate}
+                onSetViewers={setTemplateViewers}
                 onUpdateItem={updateChecklistTemplateItem}
                 onUpdateTemplate={updateChecklistTemplate}
                 templates={data.checklistTemplates}
@@ -1323,6 +1448,14 @@ function App() {
                   ownerInternalMinutes={ownerInternalMinutes}
                   ownerInvoiceTotal={ownerInvoiceTotal}
                   ownerTrackedMinutes={ownerTrackedMinutes}
+                />
+              </section>
+
+              <section className="content-grid" id="gantt">
+                <GanttView
+                  checklists={data.checklists}
+                  clients={data.clients}
+                  employees={data.employees}
                 />
               </section>
 
@@ -1680,15 +1813,19 @@ function RecentTimeEntries({
 }
 
 function ChecklistPanel({
+  activeEmployeeId,
   checklists,
   clients,
   employees,
+  onSetViewers,
   onToggle,
   role,
 }: {
+  activeEmployeeId: string
   checklists: Checklist[]
   clients: Client[]
   employees: Employee[]
+  onSetViewers: (checklistId: string, viewerIds: string[], editorIds: string[]) => void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
   role: Role
 }) {
@@ -1704,6 +1841,12 @@ function ChecklistPanel({
         {checklists.length === 0 ? <p className="empty-state">No checklist instances are due yet.</p> : null}
         {checklists.map((checklist) => {
           const completed = checklist.items.filter((item) => item.done).length
+          const viewerIds = checklist.viewerIds ?? []
+          const editorIds = checklist.editorIds ?? []
+          const isAssignee = checklist.assigneeId === activeEmployeeId
+          const isEditor = editorIds.includes(activeEmployeeId)
+          const isViewerOnly = role !== 'owner' && !isAssignee && viewerIds.includes(activeEmployeeId) && !isEditor
+          const canToggle = role === 'owner' || isAssignee || isEditor
           return (
             <article className="checklist-block" key={checklist.id}>
               <header>
@@ -1717,6 +1860,7 @@ function ChecklistPanel({
                   {checklist.frequency ? (
                     <span className="status-pill">{getChecklistFrequencyLabel(checklist.frequency)}</span>
                   ) : null}
+                  {isViewerOnly ? <span className="status-pill">View only</span> : null}
                   <small>Due {shortDate.format(new Date(`${checklist.dueDate}T12:00:00`))}</small>
                 </div>
               </header>
@@ -1726,16 +1870,102 @@ function ChecklistPanel({
               <div className="task-list">
                 {checklist.items.map((item) => (
                   <label className={item.done ? 'task-row done' : 'task-row'} key={item.id}>
-                    <input checked={item.done} onChange={() => void onToggle(checklist.id, item.id)} type="checkbox" />
+                    <input
+                      checked={item.done}
+                      disabled={!canToggle}
+                      onChange={() => void onToggle(checklist.id, item.id)}
+                      type="checkbox"
+                    />
                     <span>{item.label}</span>
                   </label>
                 ))}
               </div>
+              {role === 'owner' ? (
+                <ViewerEditorPicker
+                  assigneeId={checklist.assigneeId}
+                  editorIds={editorIds}
+                  employees={employees}
+                  onChange={(nextViewerIds, nextEditorIds) =>
+                    onSetViewers(checklist.id, nextViewerIds, nextEditorIds)
+                  }
+                  viewerIds={viewerIds}
+                />
+              ) : null}
             </article>
           )
         })}
       </div>
     </section>
+  )
+}
+
+function ViewerEditorPicker({
+  assigneeId,
+  editorIds,
+  employees,
+  onChange,
+  viewerIds,
+}: {
+  assigneeId: string
+  editorIds: string[]
+  employees: Employee[]
+  onChange: (viewerIds: string[], editorIds: string[]) => void
+  viewerIds: string[]
+}) {
+  const eligible = employees.filter((employee) => employee.id !== assigneeId && employee.role !== 'Owner')
+
+  const toggleViewer = (employeeId: string) => {
+    if (viewerIds.includes(employeeId)) {
+      onChange(
+        viewerIds.filter((id) => id !== employeeId),
+        editorIds.filter((id) => id !== employeeId),
+      )
+    } else {
+      onChange([...viewerIds, employeeId], editorIds)
+    }
+  }
+
+  const toggleEditor = (employeeId: string) => {
+    if (!viewerIds.includes(employeeId)) {
+      return
+    }
+
+    if (editorIds.includes(employeeId)) {
+      onChange(viewerIds, editorIds.filter((id) => id !== employeeId))
+    } else {
+      onChange(viewerIds, [...editorIds, employeeId])
+    }
+  }
+
+  if (eligible.length === 0) {
+    return null
+  }
+
+  return (
+    <fieldset className="assignment-field viewer-field">
+      <legend>Viewers &amp; editors</legend>
+      {eligible.map((employee) => {
+        const isViewer = viewerIds.includes(employee.id)
+        const isEditor = editorIds.includes(employee.id)
+        return (
+          <div className="viewer-row" key={employee.id}>
+            <label className="check-row">
+              <input checked={isViewer} onChange={() => toggleViewer(employee.id)} type="checkbox" />
+              <span>{employee.name}</span>
+            </label>
+            <label className="check-row">
+              <input
+                checked={isEditor}
+                disabled={!isViewer}
+                onChange={() => toggleEditor(employee.id)}
+                type="checkbox"
+              />
+              <span>Can complete</span>
+            </label>
+          </div>
+        )
+      })}
+    </fieldset>
   )
 }
 
@@ -1746,6 +1976,7 @@ function ChecklistTemplateManager({
   onCreate,
   onDeleteItem,
   onDeleteTemplate,
+  onSetViewers,
   onUpdateItem,
   onUpdateTemplate,
   templates,
@@ -1756,6 +1987,7 @@ function ChecklistTemplateManager({
   onCreate: (template: Omit<ChecklistTemplate, 'id'>) => void
   onDeleteItem: (templateId: string, itemId: string) => void
   onDeleteTemplate: (templateId: string) => void
+  onSetViewers: (templateId: string, viewerIds: string[], editorIds: string[]) => void
   onUpdateItem: (templateId: string, itemId: string, label: string) => void
   onUpdateTemplate: (templateId: string, updater: (template: ChecklistTemplate) => ChecklistTemplate) => void
   templates: ChecklistTemplate[]
@@ -1786,6 +2018,8 @@ function ChecklistTemplateManager({
       frequency,
       nextDueDate,
       active: true,
+      viewerIds: [],
+      editorIds: [],
       items,
     })
 
@@ -1971,6 +2205,15 @@ function ChecklistTemplateManager({
                   Add item
                 </button>
               </div>
+              <ViewerEditorPicker
+                assigneeId={template.assigneeId}
+                editorIds={template.editorIds ?? []}
+                employees={employees}
+                onChange={(nextViewerIds, nextEditorIds) =>
+                  onSetViewers(template.id, nextViewerIds, nextEditorIds)
+                }
+                viewerIds={template.viewerIds ?? []}
+              />
             </article>
           ))}
         </div>
@@ -2602,6 +2845,172 @@ function InvoiceDocument({ invoice }: { invoice: Invoice }) {
         <strong>{currency.format(invoice.total)}</strong>
       </footer>
       <p>Thank you for trusting PB&amp;J Strategic Accounting.</p>
+    </section>
+  )
+}
+
+function GanttView({
+  checklists,
+  clients,
+  employees,
+}: {
+  checklists: Checklist[]
+  clients: Client[]
+  employees: Employee[]
+}) {
+  const today = new Date()
+  const rangeStart = new Date(today.getFullYear(), today.getMonth(), 1)
+  const rangeEnd = new Date(today.getFullYear(), today.getMonth() + 2, 0)
+  const totalDays = Math.max(
+    1,
+    Math.round((rangeEnd.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24)) + 1,
+  )
+  const todayIndex = Math.max(
+    0,
+    Math.min(totalDays - 1, Math.round((today.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24))),
+  )
+  const todayPercent = (todayIndex / totalDays) * 100
+
+  const monthHeaders: Array<{ label: string; widthPercent: number }> = []
+  for (let monthOffset = 0; monthOffset < 2; monthOffset += 1) {
+    const monthStart = new Date(rangeStart.getFullYear(), rangeStart.getMonth() + monthOffset, 1)
+    const monthEnd = new Date(rangeStart.getFullYear(), rangeStart.getMonth() + monthOffset + 1, 0)
+    const monthDays =
+      Math.round((monthEnd.getTime() - monthStart.getTime()) / (1000 * 60 * 60 * 24)) + 1
+    monthHeaders.push({
+      label: new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(monthStart),
+      widthPercent: (monthDays / totalDays) * 100,
+    })
+  }
+
+  const groupedByAssignee = new Map<string, Checklist[]>()
+  for (const checklist of checklists) {
+    const existing = groupedByAssignee.get(checklist.assigneeId) ?? []
+    existing.push(checklist)
+    groupedByAssignee.set(checklist.assigneeId, existing)
+  }
+
+  const orderedGroups = [...groupedByAssignee.entries()].sort((left, right) =>
+    employeeName(employees, left[0]).localeCompare(employeeName(employees, right[0])),
+  )
+
+  const todayDateOnly = today.toISOString().slice(0, 10)
+
+  const computeBarMetrics = (checklist: Checklist) => {
+    const dueDateOnly = checklist.dueDate
+    const dueDate = new Date(`${dueDateOnly}T12:00:00`)
+    const startSource = checklist.createdAt
+      ? new Date(`${checklist.createdAt}T12:00:00`)
+      : new Date(dueDate.getTime() - 7 * 24 * 60 * 60 * 1000)
+
+    const startMs = Math.max(rangeStart.getTime(), startSource.getTime())
+    const endMs = Math.min(rangeEnd.getTime() + 24 * 60 * 60 * 1000 - 1, dueDate.getTime())
+    const inRange = endMs >= rangeStart.getTime() && startMs <= rangeEnd.getTime() + 24 * 60 * 60 * 1000
+
+    const startDayIndex = Math.max(
+      0,
+      Math.round((startMs - rangeStart.getTime()) / (1000 * 60 * 60 * 24)),
+    )
+    const endDayIndex = Math.min(
+      totalDays,
+      Math.max(startDayIndex + 1, Math.round((endMs - rangeStart.getTime()) / (1000 * 60 * 60 * 24)) + 1),
+    )
+
+    const completed = checklist.items.filter((item) => item.done).length
+    const total = checklist.items.length
+    const allDone = total > 0 && completed === total
+    const noneDone = completed === 0
+    const overdue = !allDone && dueDateOnly < todayDateOnly
+
+    let stateClass = 'gantt-bar-not-started'
+    if (overdue) {
+      stateClass = 'gantt-bar-overdue'
+    } else if (allDone) {
+      stateClass = 'gantt-bar-done'
+    } else if (!noneDone) {
+      stateClass = 'gantt-bar-progress'
+    }
+
+    return {
+      inRange,
+      leftPercent: (startDayIndex / totalDays) * 100,
+      widthPercent: Math.max(1, ((endDayIndex - startDayIndex) / totalDays) * 100),
+      diamondPercent:
+        Math.max(0, Math.min(totalDays - 1, Math.round((dueDate.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24)))) /
+        totalDays *
+        100,
+      completed,
+      total,
+      stateClass,
+    }
+  }
+
+  return (
+    <section className="panel gantt-panel">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Owner planning</p>
+          <h2>Checklist Gantt</h2>
+        </div>
+      </div>
+      <p className="report-caption">
+        One bar per checklist instance, grouped by assignee. Bars span notional start to due date with a diamond marker
+        on the due date.
+      </p>
+      <div className="gantt-legend">
+        <span className="gantt-legend-swatch gantt-bar-not-started" /> Not started
+        <span className="gantt-legend-swatch gantt-bar-progress" /> In progress
+        <span className="gantt-legend-swatch gantt-bar-done" /> Completed
+        <span className="gantt-legend-swatch gantt-bar-overdue" /> Overdue
+      </div>
+      <div className="gantt-wrap">
+        <div className="gantt-header">
+          {monthHeaders.map((header) => (
+            <div className="gantt-month" key={header.label} style={{ width: `${header.widthPercent}%` }}>
+              {header.label}
+            </div>
+          ))}
+        </div>
+        {orderedGroups.length === 0 ? (
+          <p className="empty-state">No checklist instances to plot.</p>
+        ) : (
+          orderedGroups.map(([assigneeId, group]) => (
+            <div className="gantt-group" key={assigneeId}>
+              <div className="gantt-group-label">{employeeName(employees, assigneeId)}</div>
+              <div className="gantt-rows">
+                {group
+                  .map((checklist) => ({ checklist, metrics: computeBarMetrics(checklist) }))
+                  .filter(({ metrics }) => metrics.inRange)
+                  .map(({ checklist, metrics }) => (
+                    <div className="gantt-row" key={checklist.id}>
+                      <div className="gantt-track">
+                        <div className="gantt-today" style={{ left: `${todayPercent}%` }} aria-hidden="true" />
+                        <div
+                          className={`gantt-bar ${metrics.stateClass}`}
+                          style={{ left: `${metrics.leftPercent}%`, width: `${metrics.widthPercent}%` }}
+                          title={`${checklist.title} - ${clientName(clients, checklist.clientId)} - ${metrics.completed}/${metrics.total} complete`}
+                        >
+                          <span className="gantt-bar-label">{checklist.title}</span>
+                        </div>
+                        <div
+                          className="gantt-diamond"
+                          style={{ left: `calc(${metrics.diamondPercent}% - 6px)` }}
+                          aria-hidden="true"
+                        />
+                      </div>
+                      <div className="gantt-meta">
+                        <strong>{checklist.title}</strong>
+                        <span>
+                          {clientName(clients, checklist.clientId)} · {metrics.completed}/{metrics.total} done
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
     </section>
   )
 }

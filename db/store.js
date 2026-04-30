@@ -187,6 +187,8 @@ function materializeRecurringChecklists(data) {
           assigneeId: template.assigneeId,
           dueDate: template.nextDueDate,
           frequency: template.frequency,
+          viewerIds: Array.isArray(template.viewerIds) ? [...template.viewerIds] : [],
+          editorIds: Array.isArray(template.editorIds) ? [...template.editorIds] : [],
           items: template.items.map((item) => ({
             id: `item-${randomUUID().slice(0, 8)}`,
             label: item.label,
@@ -310,9 +312,21 @@ export class AppDataStore {
           template_id text,
           frequency text,
           due_date date not null,
+          viewer_ids text[] not null default '{}',
+          editor_ids text[] not null default '{}',
           created_at timestamptz not null default now(),
           updated_at timestamptz not null default now()
         )
+      `)
+
+      await this.pool.query(`
+        alter table checklists
+          add column if not exists viewer_ids text[] not null default '{}'
+      `)
+
+      await this.pool.query(`
+        alter table checklists
+          add column if not exists editor_ids text[] not null default '{}'
       `)
 
       await this.pool.query(`
@@ -336,9 +350,21 @@ export class AppDataStore {
           frequency text not null check (frequency in ('daily', 'weekly', 'monthly', 'quarterly', 'annually')),
           next_due_date date not null,
           active boolean not null default true,
+          viewer_ids text[] not null default '{}',
+          editor_ids text[] not null default '{}',
           created_at timestamptz not null default now(),
           updated_at timestamptz not null default now()
         )
+      `)
+
+      await this.pool.query(`
+        alter table checklist_templates
+          add column if not exists viewer_ids text[] not null default '{}'
+      `)
+
+      await this.pool.query(`
+        alter table checklist_templates
+          add column if not exists editor_ids text[] not null default '{}'
       `)
 
       await this.pool.query(`
@@ -458,7 +484,7 @@ export class AppDataStore {
             order by entry_date desc, id desc
           `),
           this.pool.query(`
-            select id, title, client_id, assignee_id, template_id, frequency, due_date
+            select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids
             from checklists
             order by due_date asc, id asc
           `),
@@ -468,7 +494,7 @@ export class AppDataStore {
             order by checklist_id asc, sort_order asc, id asc
           `),
           this.pool.query(`
-            select id, title, client_id, assignee_id, frequency, next_due_date, active
+            select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids
             from checklist_templates
             order by title asc
           `),
@@ -547,6 +573,8 @@ export class AppDataStore {
           templateId: row.template_id,
           frequency: row.frequency,
           dueDate: row.due_date.toISOString().slice(0, 10),
+          viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
+          editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
           items: itemsByChecklist.get(row.id) ?? [],
         })),
         checklistTemplates: checklistTemplatesResult.rows.map((row) => ({
@@ -557,6 +585,8 @@ export class AppDataStore {
           frequency: row.frequency,
           nextDueDate: row.next_due_date.toISOString().slice(0, 10),
           active: row.active,
+          viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
+          editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
           items: templateItemsByTemplate.get(row.id) ?? [],
         })),
       }
@@ -678,8 +708,8 @@ export class AppDataStore {
         for (const template of data.checklistTemplates ?? []) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
             `,
             [
               template.id,
@@ -689,6 +719,8 @@ export class AppDataStore {
               template.frequency,
               template.nextDueDate,
               template.active,
+              Array.isArray(template.viewerIds) ? template.viewerIds : [],
+              Array.isArray(template.editorIds) ? template.editorIds : [],
             ],
           )
 
@@ -706,8 +738,8 @@ export class AppDataStore {
         for (const checklist of data.checklists) {
           await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
             `,
             [
               checklist.id,
@@ -717,6 +749,8 @@ export class AppDataStore {
               checklist.templateId ?? null,
               checklist.frequency ?? null,
               checklist.dueDate,
+              Array.isArray(checklist.viewerIds) ? checklist.viewerIds : [],
+              Array.isArray(checklist.editorIds) ? checklist.editorIds : [],
             ],
           )
 
@@ -782,6 +816,8 @@ export class AppDataStore {
     const nextChecklist = {
       ...checklist,
       id: checklist.id ?? `check-${randomUUID().slice(0, 8)}`,
+      viewerIds: Array.isArray(checklist.viewerIds) ? checklist.viewerIds : [],
+      editorIds: Array.isArray(checklist.editorIds) ? checklist.editorIds : [],
       items: checklist.items.map((item, index) => ({
         ...item,
         id: item.id ?? `item-${randomUUID().slice(0, 8)}`,
@@ -797,8 +833,8 @@ export class AppDataStore {
         await client.query('begin')
         await client.query(
           `
-            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, updated_at)
-            values ($1, $2, $3, $4, $5, $6, $7, now())
+            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, updated_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
           `,
           [
             nextChecklist.id,
@@ -808,6 +844,8 @@ export class AppDataStore {
             nextChecklist.templateId ?? null,
             nextChecklist.frequency ?? null,
             nextChecklist.dueDate,
+            nextChecklist.viewerIds,
+            nextChecklist.editorIds,
           ],
         )
 
@@ -907,6 +945,106 @@ export class AppDataStore {
 
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return updatedChecklist
+  }
+
+  async setChecklistViewers(checklistId, viewerIds, editorIds) {
+    const safeViewerIds = Array.isArray(viewerIds) ? [...new Set(viewerIds)] : []
+    const safeEditorIds = Array.isArray(editorIds)
+      ? [...new Set(editorIds)].filter((id) => safeViewerIds.includes(id))
+      : []
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `
+          update checklists
+          set viewer_ids = $2,
+              editor_ids = $3,
+              updated_at = now()
+          where id = $1
+          returning id
+        `,
+        [checklistId, safeViewerIds, safeEditorIds],
+      )
+
+      if (!result.rowCount) {
+        return null
+      }
+
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) {
+        return checklist
+      }
+
+      updatedChecklist = {
+        ...checklist,
+        viewerIds: safeViewerIds,
+        editorIds: safeEditorIds,
+      }
+      return updatedChecklist
+    })
+
+    if (!updatedChecklist) {
+      return null
+    }
+
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  async setChecklistTemplateViewers(templateId, viewerIds, editorIds) {
+    const safeViewerIds = Array.isArray(viewerIds) ? [...new Set(viewerIds)] : []
+    const safeEditorIds = Array.isArray(editorIds)
+      ? [...new Set(editorIds)].filter((id) => safeViewerIds.includes(id))
+      : []
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `
+          update checklist_templates
+          set viewer_ids = $2,
+              editor_ids = $3,
+              updated_at = now()
+          where id = $1
+          returning id
+        `,
+        [templateId, safeViewerIds, safeEditorIds],
+      )
+
+      if (!result.rowCount) {
+        return null
+      }
+
+      const data = await this.read()
+      return data.checklistTemplates.find((template) => template.id === templateId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedTemplate = null
+    data.checklistTemplates = (data.checklistTemplates ?? []).map((template) => {
+      if (template.id !== templateId) {
+        return template
+      }
+
+      updatedTemplate = {
+        ...template,
+        viewerIds: safeViewerIds,
+        editorIds: safeEditorIds,
+      }
+      return updatedTemplate
+    })
+
+    if (!updatedTemplate) {
+      return null
+    }
+
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedTemplate
   }
 
   async getLoginOptions() {

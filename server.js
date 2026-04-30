@@ -307,7 +307,13 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      if (session.user.role !== 'owner' && checklist.assigneeId !== session.user.id) {
+      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+      const canEdit =
+        session.user.role === 'owner' ||
+        checklist.assigneeId === session.user.id ||
+        editorIds.includes(session.user.id)
+
+      if (!canEdit) {
         sendJson(response, 403, { error: 'You can only update your assigned checklists' })
         return
       }
@@ -325,6 +331,78 @@ const server = createServer(async (request, response) => {
       }
 
       sendJson(response, 200, updatedChecklist)
+      return
+    }
+
+    const checklistViewersMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/viewers$/)
+    if (checklistViewersMatch) {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+
+      if (request.method !== 'PUT') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can update checklist viewers' })
+        return
+      }
+
+      const checklistId = checklistViewersMatch[1]
+      const payload = await readJsonBody(request)
+      const viewerIds = Array.isArray(payload?.viewerIds)
+        ? payload.viewerIds.filter((id) => typeof id === 'string')
+        : []
+      const editorIds = Array.isArray(payload?.editorIds)
+        ? payload.editorIds.filter((id) => typeof id === 'string')
+        : []
+
+      const updated = await appDataStore.setChecklistViewers(checklistId, viewerIds, editorIds)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      sendJson(response, 200, updated)
+      return
+    }
+
+    const checklistTemplateViewersMatch = normalizedPath.match(/^\/api\/checklist-templates\/([^/]+)\/viewers$/)
+    if (checklistTemplateViewersMatch) {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+
+      if (request.method !== 'PUT') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can update template viewers' })
+        return
+      }
+
+      const templateId = checklistTemplateViewersMatch[1]
+      const payload = await readJsonBody(request)
+      const viewerIds = Array.isArray(payload?.viewerIds)
+        ? payload.viewerIds.filter((id) => typeof id === 'string')
+        : []
+      const editorIds = Array.isArray(payload?.editorIds)
+        ? payload.editorIds.filter((id) => typeof id === 'string')
+        : []
+
+      const updated = await appDataStore.setChecklistTemplateViewers(templateId, viewerIds, editorIds)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Checklist template not found' })
+        return
+      }
+
+      sendJson(response, 200, updated)
       return
     }
 

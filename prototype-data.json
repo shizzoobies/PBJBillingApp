@@ -107,6 +107,8 @@
       "frequency": "monthly",
       "nextDueDate": "2026-04-28",
       "active": true,
+      "viewerIds": ["emp-jordan"],
+      "editorIds": [],
       "items": [
         { "id": "template-monthly-bookkeeping-1", "label": "Clear Bank Feed - Vystar" },
         { "id": "template-monthly-bookkeeping-2", "label": "Clear Bank Feed - Amex" },
@@ -183,5 +185,22 @@
       ]
     }
   ],
-  "checklists": []
+  "checklists": [
+    {
+      "id": "check-seed-monthly",
+      "templateId": "template-monthly-bookkeeping",
+      "title": "Monthly Bookkeeping - CD",
+      "clientId": "client-clover",
+      "assigneeId": "emp-avery",
+      "frequency": "monthly",
+      "dueDate": "2026-05-15",
+      "viewerIds": ["emp-jordan"],
+      "editorIds": [],
+      "items": [
+        { "id": "item-seed-1", "label": "Clear Bank Feed - Vystar", "done": false },
+        { "id": "item-seed-2", "label": "Clear Bank Feed - Amex", "done": false },
+        { "id": "item-seed-3", "label": "Reconcile Books to Statements - Vystar CK", "done": false }
+      ]
+    }
+  ]
 }
