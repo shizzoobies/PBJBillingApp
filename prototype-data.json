@@ -1,0 +1,187 @@
+{
+  "employees": [
+    { "id": "emp-avery", "name": "Avery Johnson", "role": "Senior Bookkeeper" },
+    { "id": "emp-jordan", "name": "Jordan Ellis", "role": "Bookkeeper" },
+    { "id": "emp-patrice", "name": "Patrice Bell", "role": "Owner" }
+  ],
+  "clients": [
+    {
+      "id": "client-clover",
+      "name": "Clover Ridge Dental",
+      "contact": "Dr. Maya Kent",
+      "billingMode": "hourly",
+      "hourlyRate": 145,
+      "planId": null,
+      "assignedEmployeeIds": ["emp-avery"]
+    },
+    {
+      "id": "client-northstar",
+      "name": "Northstar Wellness Co.",
+      "contact": "Amara Stone",
+      "billingMode": "subscription",
+      "hourlyRate": 150,
+      "planId": "plan-growth",
+      "assignedEmployeeIds": ["emp-avery"]
+    },
+    {
+      "id": "client-riverbend",
+      "name": "Riverbend Market",
+      "contact": "Jon Bellamy",
+      "billingMode": "subscription",
+      "hourlyRate": 125,
+      "planId": "plan-essentials",
+      "assignedEmployeeIds": ["emp-jordan"]
+    }
+  ],
+  "plans": [
+    {
+      "id": "plan-essentials",
+      "name": "Monthly Close Essentials",
+      "monthlyFee": 900,
+      "includedHours": 8,
+      "notes": "Bank feeds, reconciliations, and monthly close checklist."
+    },
+    {
+      "id": "plan-growth",
+      "name": "Growth Advisory",
+      "monthlyFee": 1850,
+      "includedHours": 15,
+      "notes": "Close support, payroll review, owner reporting, and advisory calls."
+    },
+    {
+      "id": "plan-payroll",
+      "name": "Payroll Plus",
+      "monthlyFee": 520,
+      "includedHours": 3,
+      "notes": "Payroll review, filings checklist, and exception tracking."
+    }
+  ],
+  "timeEntries": [
+    {
+      "id": "time-1",
+      "employeeId": "emp-avery",
+      "clientId": "client-northstar",
+      "date": "2026-04-29",
+      "minutes": 135,
+      "category": "Bookkeeping",
+      "description": "Reconciled operating account and reviewed uncategorized feed items.",
+      "billable": true
+    },
+    {
+      "id": "time-2",
+      "employeeId": "emp-jordan",
+      "clientId": "client-riverbend",
+      "date": "2026-04-28",
+      "minutes": 75,
+      "category": "Payroll",
+      "description": "Checked payroll register against wage expense and benefits deductions.",
+      "billable": true
+    },
+    {
+      "id": "time-3",
+      "employeeId": "emp-avery",
+      "clientId": "client-clover",
+      "date": "2026-04-27",
+      "minutes": 110,
+      "category": "Cleanup",
+      "description": "Reviewed dental supply vendor splits and added supporting notes.",
+      "billable": true
+    },
+    {
+      "id": "time-4",
+      "employeeId": "emp-jordan",
+      "clientId": "client-riverbend",
+      "date": "2026-04-26",
+      "minutes": 35,
+      "category": "Admin",
+      "description": "Internal checklist prep for month-end meeting.",
+      "billable": false
+    }
+  ],
+  "checklistTemplates": [
+    {
+      "id": "template-monthly-bookkeeping",
+      "title": "Monthly Bookkeeping - CD",
+      "clientId": "client-clover",
+      "assigneeId": "emp-avery",
+      "frequency": "monthly",
+      "nextDueDate": "2026-04-28",
+      "active": true,
+      "items": [
+        { "id": "template-monthly-bookkeeping-1", "label": "Clear Bank Feed - Vystar" },
+        { "id": "template-monthly-bookkeeping-2", "label": "Clear Bank Feed - Amex" },
+        { "id": "template-monthly-bookkeeping-3", "label": "Reconcile Books to Statements - Vystar CK" },
+        { "id": "template-monthly-bookkeeping-4", "label": "Reconcile Books to Statements - Vystar SVG" },
+        { "id": "template-monthly-bookkeeping-5", "label": "Reconcile Books to Statements - Vystar Loan" },
+        { "id": "template-monthly-bookkeeping-6", "label": "Reconcile Books to Statements - Vystar LOC" },
+        { "id": "template-monthly-bookkeeping-7", "label": "Reconcile Books to Statements - Amex" },
+        { "id": "template-monthly-bookkeeping-8", "label": "Reconcile Books to Statements - Madison Trust Co" }
+      ]
+    },
+    {
+      "id": "template-quarterly-bookkeeping",
+      "title": "Quarterly Bookkeeping - CD",
+      "clientId": "client-clover",
+      "assigneeId": "emp-avery",
+      "frequency": "quarterly",
+      "nextDueDate": "2026-07-09",
+      "active": true,
+      "items": [
+        { "id": "template-quarterly-bookkeeping-1", "label": "Clear Bank Feed - Vystar" },
+        { "id": "template-quarterly-bookkeeping-2", "label": "Clear Bank Feed - Amex" },
+        { "id": "template-quarterly-bookkeeping-3", "label": "Reconcile Books to Statements - Vystar CK" },
+        { "id": "template-quarterly-bookkeeping-4", "label": "Reconcile Books to Statements - Vystar SVG" },
+        { "id": "template-quarterly-bookkeeping-5", "label": "Reconcile Books to Statements - Vystar Loan" },
+        { "id": "template-quarterly-bookkeeping-6", "label": "Reconcile Books to Statements - Vystar LOC" },
+        { "id": "template-quarterly-bookkeeping-7", "label": "Review each balance sheet item matches statements" },
+        { "id": "template-quarterly-bookkeeping-8", "label": "Review each account on the P&L" },
+        { "id": "template-quarterly-bookkeeping-9", "label": "Send reports to client" },
+        { "id": "template-quarterly-bookkeeping-10", "label": "Client call" }
+      ]
+    },
+    {
+      "id": "template-payroll",
+      "title": "Payroll - CD",
+      "clientId": "client-clover",
+      "assigneeId": "emp-jordan",
+      "frequency": "weekly",
+      "nextDueDate": "2026-05-04",
+      "active": true,
+      "items": [
+        { "id": "template-payroll-1", "label": "Review payroll draft" },
+        { "id": "template-payroll-2", "label": "Confirm payroll liabilities" },
+        { "id": "template-payroll-3", "label": "Post payroll journal entry" }
+      ]
+    },
+    {
+      "id": "template-sales-tax",
+      "title": "Monthly Sales Tax - CD",
+      "clientId": "client-riverbend",
+      "assigneeId": "emp-jordan",
+      "frequency": "monthly",
+      "nextDueDate": "2026-05-20",
+      "active": true,
+      "items": [
+        { "id": "template-sales-tax-1", "label": "Pull taxable sales report" },
+        { "id": "template-sales-tax-2", "label": "Review exemptions and adjustments" },
+        { "id": "template-sales-tax-3", "label": "File and confirm payment" }
+      ]
+    },
+    {
+      "id": "template-1099",
+      "title": "1099 Preparation - CD",
+      "clientId": "client-clover",
+      "assigneeId": "emp-patrice",
+      "frequency": "annually",
+      "nextDueDate": "2026-11-30",
+      "active": true,
+      "items": [
+        { "id": "template-1099-1", "label": "Review GL for payments made to vendors" },
+        { "id": "template-1099-2", "label": "Review GL after final transactions added for YE" },
+        { "id": "template-1099-3", "label": "Send 1099 list to client for approval" },
+        { "id": "template-1099-4", "label": "Prepare and send 1099s" }
+      ]
+    }
+  ],
+  "checklists": []
+}

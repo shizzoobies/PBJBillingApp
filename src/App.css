@@ -146,11 +146,96 @@ button {
   padding: 28px;
 }
 
+.auth-shell {
+  align-items: center;
+  display: grid;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.auth-card {
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  box-shadow: 0 24px 60px rgba(31, 43, 58, 0.12);
+  display: grid;
+  gap: 18px;
+  margin: 0 auto;
+  max-width: 540px;
+  padding: 32px;
+  width: 100%;
+}
+
+.auth-copy {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.auth-form {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-error {
+  color: #8a3d12;
+  margin: 0;
+}
+
+.auth-submit {
+  justify-content: center;
+}
+
 .topbar {
   align-items: center;
   display: flex;
   gap: 20px;
   justify-content: space-between;
+}
+
+.sync-banner {
+  color: #5b6472;
+  margin: 8px 0 0;
+  font-size: 0.92rem;
+}
+
+.sync-saving,
+.sync-synced {
+  color: #24563b;
+}
+
+.sync-offline,
+.sync-error {
+  color: #8a3d12;
+}
+
+.account-pill {
+  background: #ebe3ec;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: grid;
+  gap: 2px;
+  min-height: 40px;
+  padding: 8px 12px;
+}
+
+.account-pill strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.account-pill span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.logout-button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  min-height: 40px;
+  padding: 0 14px;
 }
 
 .eyeline,
@@ -323,6 +408,10 @@ h2 {
 
 .invoice-layout {
   grid-template-columns: minmax(0, 1fr) minmax(310px, 0.65fr);
+}
+
+.reports-layout {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .panel {
@@ -545,6 +634,67 @@ textarea.input {
   text-decoration: line-through;
 }
 
+.empty-state {
+  color: var(--muted);
+  margin: 0;
+}
+
+.checklist-meta {
+  align-items: flex-end;
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+.template-manager,
+.template-list,
+.template-items {
+  display: grid;
+  gap: 14px;
+}
+
+.template-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.template-card-header {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.template-card-header strong,
+.template-card-header span {
+  display: block;
+}
+
+.template-card-header span {
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.template-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.template-toggle {
+  align-self: end;
+  min-height: 38px;
+}
+
+.template-item-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .visibility-panel {
   min-height: 100%;
 }
@@ -649,6 +799,67 @@ td strong {
   overflow: hidden;
 }
 
+.report-caption {
+  color: var(--muted);
+  margin: 0 0 14px;
+}
+
+.report-metric-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.report-metric-card {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 14px;
+}
+
+.report-metric-card span,
+.report-metric-card small,
+.category-row-header span {
+  color: var(--muted);
+}
+
+.report-metric-card strong {
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.report-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.category-row {
+  display: grid;
+  gap: 8px;
+}
+
+.category-row-header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.category-bar {
+  background: #f0e9f1;
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.category-bar span {
+  background: linear-gradient(90deg, var(--berry), var(--gold));
+  display: block;
+  height: 100%;
+}
+
 .invoice-context {
   display: flex;
   flex-wrap: wrap;
@@ -742,6 +953,7 @@ td strong {
 
   .two-column,
   .client-layout,
+  .reports-layout,
   .invoice-layout {
     grid-template-columns: 1fr;
   }
@@ -771,6 +983,8 @@ td strong {
 
   .summary-strip,
   .form-grid,
+  .report-metric-grid,
+  .template-grid,
   .client-layout > .panel:last-child .form-grid.single {
     grid-template-columns: 1fr;
   }
