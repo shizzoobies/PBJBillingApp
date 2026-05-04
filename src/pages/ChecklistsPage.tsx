@@ -35,6 +35,7 @@ import {
 } from '../lib/utils'
 
 type Group = 'today' | 'week' | 'later' | 'completed'
+type CreateMode = 'one-time' | 'repeating' | null
 
 function parseBulkLines(value: string): string[] {
   return value
@@ -103,31 +104,128 @@ export function ChecklistsPage() {
     deleteChecklistItem,
   } = useAppContext()
 
+  // The unified "+ New" dropdown. Mode controls whether the create form is in
+  // one-time or repeating shape; both paths render the SAME NewTaskForm.
+  const [createMode, setCreateMode] = useState<CreateMode>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+
+  // Close the dropdown when clicking outside.
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDocClick = (event: MouseEvent) => {
+      if (!menuRef.current) return
+      if (menuRef.current.contains(event.target as Node)) return
+      setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [menuOpen])
+
+  const handleCreateOneTime = async (payload: {
+    title: string
+    clientId: string
+    assigneeId: string
+    dueDate: string
+    items: Array<{ label: string }>
+  }) => {
+    await createChecklist(payload)
+    setCreateMode(null)
+  }
+
+  const handleCreateRepeating = (template: Omit<ChecklistTemplate, 'id'>) => {
+    addChecklistTemplate(template)
+    setCreateMode(null)
+  }
+
   return (
-    <section className="content-grid two-column" id="checklists">
-      <ChecklistPanel
-        activeEmployeeId={activeEmployeeId}
-        checklists={visibleChecklists}
-        clients={data.clients}
-        employees={data.employees}
-        onBulkAddItems={bulkAddChecklistItems}
-        onCreateChecklist={createChecklist}
-        onDeleteItem={deleteChecklistItem}
-        onReorderItems={reorderChecklistItems}
-        onSetViewers={setChecklistViewers}
-        onToggle={toggleChecklistItem}
-        onUpdateItem={updateChecklistItem}
-        ownerMode={ownerMode}
-        role={role}
-      />
+    <section className="content-grid one-column" id="checklists">
+      <section className="panel">
+        <div className="section-heading">
+          <div>
+            <h2>Tasks</h2>
+          </div>
+          {ownerMode ? (
+            <div className="new-task-menu" ref={menuRef}>
+              <button
+                type="button"
+                className="primary-action"
+                onClick={() => setMenuOpen((value) => !value)}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+              >
+                <Plus size={14} />
+                New
+                <ChevronDown size={14} />
+              </button>
+              {menuOpen ? (
+                <div className="new-task-menu-popover" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="new-task-menu-item"
+                    onClick={() => {
+                      setCreateMode('one-time')
+                      setMenuOpen(false)
+                    }}
+                  >
+                    <strong>One-time task</strong>
+                    <span>For a single thing that needs to get done once.</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="new-task-menu-item"
+                    onClick={() => {
+                      setCreateMode('repeating')
+                      setMenuOpen(false)
+                    }}
+                  >
+                    <strong>Repeating task</strong>
+                    <span>For something that comes back on a schedule.</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
+        {createMode && ownerMode ? (
+          <NewTaskForm
+            mode={createMode}
+            activeEmployeeId={activeEmployeeId}
+            clients={data.clients}
+            employees={data.employees}
+            role={role}
+            onCancel={() => setCreateMode(null)}
+            onCreateOneTime={handleCreateOneTime}
+            onCreateRepeating={handleCreateRepeating}
+          />
+        ) : null}
+
+        <ChecklistInProgressSection
+          activeEmployeeId={activeEmployeeId}
+          checklists={visibleChecklists}
+          clients={data.clients}
+          employees={data.employees}
+          onBulkAddItems={bulkAddChecklistItems}
+          onDeleteItem={deleteChecklistItem}
+          onReorderItems={reorderChecklistItems}
+          onSetViewers={setChecklistViewers}
+          onToggle={toggleChecklistItem}
+          onUpdateItem={updateChecklistItem}
+          ownerMode={ownerMode}
+          role={role}
+        />
+      </section>
+
       {ownerMode ? (
-        <ChecklistTemplateManager
+        <RepeatingTasksManager
           clients={data.clients}
           employees={data.employees}
           onAddItem={addChecklistTemplateItem}
           onAddStage={addTemplateStage}
           onBulkAddItems={bulkAddChecklistTemplateItems}
-          onCreate={addChecklistTemplate}
           onDeleteItem={removeChecklistTemplateItem}
           onDeleteTemplate={deleteChecklistTemplate}
           onDuplicate={duplicateChecklistTemplate}
@@ -147,13 +245,12 @@ export function ChecklistsPage() {
   )
 }
 
-function ChecklistPanel({
+function ChecklistInProgressSection({
   activeEmployeeId,
   checklists,
   clients,
   employees,
   onBulkAddItems,
-  onCreateChecklist,
   onDeleteItem,
   onReorderItems,
   onSetViewers,
@@ -167,13 +264,6 @@ function ChecklistPanel({
   clients: Client[]
   employees: Employee[]
   onBulkAddItems: (checklistId: string, labels: string[]) => void
-  onCreateChecklist: (payload: {
-    title: string
-    clientId: string
-    assigneeId: string
-    dueDate: string
-    items: Array<{ label: string }>
-  }) => Promise<void>
   onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
   onSetViewers: (
@@ -238,48 +328,17 @@ function ChecklistPanel({
     { key: 'completed', label: 'Completed', defaultOpen: false },
   ]
 
-  const [showNewChecklist, setShowNewChecklist] = useState(false)
-  // Server currently restricts /api/checklists POST to owners; gate the UI to match.
-  const canCreateOneOff = role === 'owner'
-
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">
-            {role === 'owner' ? 'Owner checklist view' : 'Assigned checklist'}
-          </p>
-          <h2>Active checklists</h2>
-        </div>
-        {canCreateOneOff ? (
-          <button
-            type="button"
-            className="primary-action"
-            onClick={() => setShowNewChecklist((value) => !value)}
-            aria-expanded={showNewChecklist}
-          >
-            <Plus size={14} />
-            {showNewChecklist ? 'Cancel' : 'New checklist'}
-          </button>
-        ) : null}
+    <div className="checklist-in-progress">
+      <div className="subsection-heading">
+        <h3>In progress</h3>
       </div>
-      {showNewChecklist && canCreateOneOff ? (
-        <NewChecklistForm
-          activeEmployeeId={activeEmployeeId}
-          clients={clients}
-          employees={employees}
-          onCancel={() => setShowNewChecklist(false)}
-          onCreate={async (payload) => {
-            await onCreateChecklist(payload)
-            setShowNewChecklist(false)
-          }}
-          role={role}
-        />
-      ) : null}
       <FilterBar employees={employees} clients={clients} />
       <div className="checklist-stack">
-        {filtered.length === 0 ? (
-          <p className="empty-state">No checklist instances match your filters.</p>
+        {checklists.length === 0 ? (
+          <p className="empty-state">No tasks in progress. Hit + New to add one.</p>
+        ) : filtered.length === 0 ? (
+          <p className="empty-state">No tasks match your filters.</p>
         ) : null}
         {groupConfig.map((group) =>
           grouped[group.key].length === 0 ? null : (
@@ -312,7 +371,7 @@ function ChecklistPanel({
           ),
         )}
       </div>
-    </section>
+    </div>
   )
 }
 
@@ -427,7 +486,7 @@ function ChecklistCard({
           <strong>{checklist.title}</strong>
           {showStageBadge ? (
             <span className="stage-badge">
-              Stage {stageNumber} of {stageCount}
+              Step {stageNumber} of {stageCount}
               {checklist.caseId && ownerMode ? (
                 <Link
                   className="stage-badge-link"
@@ -800,26 +859,38 @@ function ChecklistBulkAdd({
   )
 }
 
-function NewChecklistForm({
+/**
+ * The unified create form. Used for BOTH one-time and repeating tasks.
+ * The only differences are:
+ *   - "How often" picker is rendered only in repeating mode
+ *   - "+ Add a hand-off step" link is rendered only in repeating mode
+ *   - On submit, repeating mode constructs a ChecklistTemplate (with stages),
+ *     one-time mode posts a Checklist
+ */
+function NewTaskForm({
+  mode,
   activeEmployeeId,
   clients,
   employees,
-  onCancel,
-  onCreate,
   role,
+  onCancel,
+  onCreateOneTime,
+  onCreateRepeating,
 }: {
+  mode: 'one-time' | 'repeating'
   activeEmployeeId: string
   clients: Client[]
   employees: Employee[]
+  role: Role
   onCancel: () => void
-  onCreate: (payload: {
+  onCreateOneTime: (payload: {
     title: string
     clientId: string
     assigneeId: string
     dueDate: string
     items: Array<{ label: string }>
   }) => Promise<void>
-  role: Role
+  onCreateRepeating: (template: Omit<ChecklistTemplate, 'id'>) => void
 }) {
   // Owners can pick any employee. Non-owners are filtered out at the panel
   // level today (server only permits owners to create), but keep this guard
@@ -829,24 +900,64 @@ function NewChecklistForm({
     return employees.filter((employee) => employee.id === activeEmployeeId)
   }, [employees, role, activeEmployeeId])
 
-  const [title, setTitle] = useState('')
-  const [clientId, setClientId] = useState(clients[0]?.id ?? '')
-  const [assigneeId, setAssigneeId] = useState(
-    assignableEmployees[0]?.id ?? activeEmployeeId,
+  // Smart defaults
+  const sortedClients = useMemo(
+    () => [...clients].sort((a, b) => a.name.localeCompare(b.name)),
+    [clients],
   )
+  const defaultAssigneeId =
+    assignableEmployees.find((emp) => emp.id === activeEmployeeId)?.id ??
+    assignableEmployees[0]?.id ??
+    ''
+
+  const [title, setTitle] = useState('')
+  const [clientId, setClientId] = useState(sortedClients[0]?.id ?? '')
+  const [assigneeId, setAssigneeId] = useState(defaultAssigneeId)
   const [dueDate, setDueDate] = useState(lastDayOfCurrentMonth())
+  const [frequency, setFrequency] = useState<ChecklistFrequency>('monthly')
   const [itemDraft, setItemDraft] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
+  // Hand-off (multi-stage) toggle. Only available in repeating mode.
+  // When enabled, we render an editor for additional stages.
+  const [extraStages, setExtraStages] = useState<TemplateStage[]>([])
+  const showHandOffControls = mode === 'repeating'
+
+  const addHandOffStage = () => {
+    setExtraStages((current) => [
+      ...current,
+      {
+        id: makeId('stage'),
+        name: `Step ${current.length + 2}`,
+        assigneeId: defaultAssigneeId,
+        offsetDays: 0,
+        viewerIds: [],
+        editorIds: [],
+        items: [],
+      },
+    ])
+  }
+
+  const updateExtraStage = (stageId: string, patch: Partial<TemplateStage>) => {
+    setExtraStages((current) =>
+      current.map((stage) => (stage.id === stageId ? { ...stage, ...patch } : stage)),
+    )
+  }
+
+  const removeExtraStage = (stageId: string) => {
+    setExtraStages((current) => current.filter((stage) => stage.id !== stageId))
+  }
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (submitting) return
+
     const trimmedTitle = title.trim()
     const items = parseBulkLines(itemDraft).map((label) => ({ label }))
 
     if (!trimmedTitle) {
-      setError('Give the checklist a title.')
+      setError('Give the task a title.')
       return
     }
     if (!clientId) {
@@ -854,7 +965,7 @@ function NewChecklistForm({
       return
     }
     if (!assigneeId) {
-      setError('Pick an assignee.')
+      setError('Pick who does this.')
       return
     }
     if (!dueDate) {
@@ -862,84 +973,236 @@ function NewChecklistForm({
       return
     }
     if (items.length === 0) {
-      setError('Add at least one item — type one per line.')
+      setError('Add at least one step — one per line.')
       return
     }
 
     setError('')
-    setSubmitting(true)
-    try {
-      await onCreate({
-        title: trimmedTitle,
-        clientId,
-        assigneeId,
-        dueDate,
-        items,
-      })
-      setTitle('')
-      setItemDraft('')
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Could not create checklist.',
-      )
-    } finally {
-      setSubmitting(false)
+
+    if (mode === 'one-time') {
+      setSubmitting(true)
+      try {
+        await onCreateOneTime({
+          title: trimmedTitle,
+          clientId,
+          assigneeId,
+          dueDate,
+          items,
+        })
+        setTitle('')
+        setItemDraft('')
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not create task.')
+      } finally {
+        setSubmitting(false)
+      }
+      return
     }
+
+    // Repeating mode: build a ChecklistTemplate. The first stage is the
+    // user's main step list; any extra hand-off stages are appended.
+    const firstStage: TemplateStage = {
+      id: makeId('stage'),
+      name: 'Step 1',
+      assigneeId,
+      offsetDays: 0,
+      viewerIds: [],
+      editorIds: [],
+      items: items.map((item) => ({ id: makeId('template-item'), label: item.label })),
+    }
+    onCreateRepeating({
+      title: trimmedTitle,
+      clientId,
+      assigneeId,
+      frequency,
+      nextDueDate: dueDate,
+      active: true,
+      viewerIds: [],
+      editorIds: [],
+      stages: [firstStage, ...extraStages],
+    })
+    setTitle('')
+    setItemDraft('')
+    setExtraStages([])
   }
 
   return (
-    <form className="quick-template-form new-checklist-form" onSubmit={handleSubmit}>
-      <div className="quick-row">
+    <form className="new-task-form" onSubmit={handleSubmit}>
+      <div className="new-task-form-mode-pill">
+        {mode === 'one-time' ? 'New one-time task' : 'New repeating task'}
+      </div>
+
+      <label className="new-task-field">
+        <span>Title</span>
         <input
-          className="input quick-title"
-          placeholder="Checklist title (e.g. Onboard Riverbend)"
+          className="input"
+          placeholder="What needs to get done?"
           onChange={(event) => setTitle(event.target.value)}
           value={title}
+          autoFocus
         />
+      </label>
+
+      <div className="new-task-field-row">
+        <label className="new-task-field">
+          <span>For which client</span>
+          <select
+            className="input"
+            value={clientId}
+            onChange={(event) => setClientId(event.target.value)}
+          >
+            {sortedClients.map((client) => (
+              <option key={client.id} value={client.id}>
+                {client.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="new-task-field">
+          <span>Who does this</span>
+          <select
+            className="input"
+            value={assigneeId}
+            onChange={(event) => setAssigneeId(event.target.value)}
+          >
+            {assignableEmployees.map((employee) => (
+              <option key={employee.id} value={employee.id}>
+                {employee.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="new-task-field">
+          <span>Due</span>
+          <input
+            className="input"
+            type="date"
+            value={dueDate}
+            onChange={(event) => setDueDate(event.target.value)}
+          />
+        </label>
+
+        {mode === 'repeating' ? (
+          <label className="new-task-field">
+            <span>How often</span>
+            <select
+              className="input"
+              value={frequency}
+              onChange={(event) =>
+                setFrequency(event.target.value as ChecklistFrequency)
+              }
+            >
+              {checklistFrequencies.map((option) => (
+                <option key={option} value={option}>
+                  {getChecklistFrequencyLabel(option)}
+                </option>
+              ))}
+            </select>
+            <small className="new-task-hint">
+              Tasks repeat at this rate. The next one will appear automatically.
+            </small>
+          </label>
+        ) : null}
       </div>
-      <div className="quick-row quick-row-meta">
-        <select
-          className="compact-input"
-          aria-label="Client"
-          onChange={(event) => setClientId(event.target.value)}
-          value={clientId}
-        >
-          {clients.map((client) => (
-            <option key={client.id} value={client.id}>
-              {client.name}
-            </option>
-          ))}
-        </select>
-        <select
-          className="compact-input"
-          aria-label="Assignee"
-          onChange={(event) => setAssigneeId(event.target.value)}
-          value={assigneeId}
-        >
-          {assignableEmployees.map((employee) => (
-            <option key={employee.id} value={employee.id}>
-              {employee.name}
-            </option>
-          ))}
-        </select>
-        <input
-          aria-label="Due date"
-          className="compact-input"
-          onChange={(event) => setDueDate(event.target.value)}
-          type="date"
-          value={dueDate}
+
+      <label className="new-task-field">
+        <span>Steps</span>
+        <textarea
+          className="input new-task-steps"
+          placeholder={
+            'One per line. Example:\nReconcile bank feed\nReview payroll clearing\nSend month-end report'
+          }
+          rows={5}
+          value={itemDraft}
+          onChange={(event) => setItemDraft(event.target.value)}
         />
-      </div>
-      <textarea
-        className="input quick-items"
-        placeholder={
-          'One item per line.\n# lines starting with # are ignored.\nReconcile bank feeds\nReview payroll clearing'
-        }
-        onChange={(event) => setItemDraft(event.target.value)}
-        rows={4}
-        value={itemDraft}
-      />
+      </label>
+
+      {showHandOffControls ? (
+        <div className="hand-off-block">
+          {extraStages.length === 0 ? (
+            <button
+              type="button"
+              className="link-action"
+              onClick={addHandOffStage}
+            >
+              + Add a hand-off step
+            </button>
+          ) : (
+            <div className="hand-off-stages">
+              {extraStages.map((stage, index) => (
+                <div key={stage.id} className="hand-off-stage-row">
+                  <div className="hand-off-stage-header">
+                    <strong>Step {index + 2}</strong>
+                    <button
+                      type="button"
+                      className="item-delete-btn"
+                      title="Remove this hand-off"
+                      aria-label="Remove hand-off"
+                      onClick={() => removeExtraStage(stage.id)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div className="hand-off-stage-fields">
+                    <label className="new-task-field">
+                      <span>Name</span>
+                      <input
+                        className="input"
+                        value={stage.name}
+                        onChange={(event) =>
+                          updateExtraStage(stage.id, { name: event.target.value })
+                        }
+                      />
+                    </label>
+                    <label className="new-task-field">
+                      <span>Who picks it up</span>
+                      <select
+                        className="input"
+                        value={stage.assigneeId}
+                        onChange={(event) =>
+                          updateExtraStage(stage.id, { assigneeId: event.target.value })
+                        }
+                      >
+                        {employees.map((employee) => (
+                          <option key={employee.id} value={employee.id}>
+                            {employee.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="new-task-field">
+                      <span>Days after previous step</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        value={stage.offsetDays}
+                        onChange={(event) =>
+                          updateExtraStage(stage.id, {
+                            offsetDays: Number(event.target.value) || 0,
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                </div>
+              ))}
+              <button type="button" className="link-action" onClick={addHandOffStage}>
+                + Add another hand-off step
+              </button>
+            </div>
+          )}
+          <small className="new-task-hint">
+            Use this if a different person picks up after the first person finishes.
+          </small>
+        </div>
+      ) : null}
+
       {error ? <p className="auth-error">{error}</p> : null}
+
       <div className="form-row-actions">
         <button
           type="button"
@@ -951,20 +1214,19 @@ function NewChecklistForm({
         </button>
         <button className="primary-action" type="submit" disabled={submitting}>
           <Plus size={16} />
-          {submitting ? 'Creating...' : 'Create checklist'}
+          {submitting ? 'Saving...' : 'Create'}
         </button>
       </div>
     </form>
   )
 }
 
-type TemplateManagerProps = {
+type RepeatingTasksManagerProps = {
   clients: Client[]
   employees: Employee[]
   onAddItem: (templateId: string, stageId: string) => void
   onAddStage: (templateId: string) => void
   onBulkAddItems: (templateId: string, stageId: string, labels: string[]) => void
-  onCreate: (template: Omit<ChecklistTemplate, 'id'>) => void
   onDeleteItem: (templateId: string, stageId: string, itemId: string) => void
   onDeleteTemplate: (templateId: string) => void
   onDuplicate: (templateId: string) => void
@@ -1002,272 +1264,129 @@ type TemplateManagerProps = {
   templates: ChecklistTemplate[]
 }
 
-function ChecklistTemplateManager(props: TemplateManagerProps) {
-  const [showNewTemplate, setShowNewTemplate] = useState(false)
+/**
+ * Compact list of repeating tasks. Each row collapses by default to a single
+ * inbox-style line; only one row open at a time.
+ */
+function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
+  const [openId, setOpenId] = useState<string | null>(null)
+
+  const toggleOpen = (templateId: string) => {
+    setOpenId((current) => (current === templateId ? null : templateId))
+  }
+
   return (
     <section className="panel">
       <div className="section-heading">
         <div>
-          <p className="section-kicker">Owner template controls</p>
-          <h2>Recurring templates</h2>
+          <h2>Repeating tasks</h2>
         </div>
-        <button
-          type="button"
-          className="primary-action"
-          onClick={() => setShowNewTemplate((value) => !value)}
-          aria-expanded={showNewTemplate}
-        >
-          <Plus size={14} />
-          {showNewTemplate ? 'Cancel' : 'New template'}
-        </button>
       </div>
-      <div className="template-manager">
-        {showNewTemplate ? (
-          <QuickTemplateForm
+      <div className="repeating-task-list">
+        {props.templates.length === 0 ? (
+          <p className="empty-state">No repeating tasks yet. Hit + New to add one.</p>
+        ) : null}
+        {props.templates.map((template) => (
+          <RepeatingTaskRow
+            key={template.id}
+            template={template}
             clients={props.clients}
             employees={props.employees}
-            onCreate={(template) => {
-              props.onCreate(template)
-              setShowNewTemplate(false)
-            }}
+            open={openId === template.id}
+            onToggleOpen={() => toggleOpen(template.id)}
+            onAddItem={props.onAddItem}
+            onAddStage={props.onAddStage}
+            onBulkAddItems={props.onBulkAddItems}
+            onDeleteItem={props.onDeleteItem}
+            onDeleteTemplate={props.onDeleteTemplate}
+            onDuplicate={props.onDuplicate}
+            onPatchStage={props.onPatchStage}
+            onRemoveStage={props.onRemoveStage}
+            onReorderItems={props.onReorderItems}
+            onReorderStages={props.onReorderStages}
+            onSetItemAssignee={props.onSetItemAssignee}
+            onSetItemDueDate={props.onSetItemDueDate}
+            onSetViewers={props.onSetViewers}
+            onUpdateItem={props.onUpdateItem}
+            onUpdateTemplate={props.onUpdateTemplate}
           />
-        ) : null}
-        <div className="template-list">
-          {props.templates.map((template) => (
-            <TemplateCard
-              key={template.id}
-              template={template}
-              clients={props.clients}
-              employees={props.employees}
-              onAddItem={props.onAddItem}
-              onAddStage={props.onAddStage}
-              onBulkAddItems={props.onBulkAddItems}
-              onDeleteItem={props.onDeleteItem}
-              onDeleteTemplate={props.onDeleteTemplate}
-              onDuplicate={props.onDuplicate}
-              onPatchStage={props.onPatchStage}
-              onRemoveStage={props.onRemoveStage}
-              onReorderItems={props.onReorderItems}
-              onReorderStages={props.onReorderStages}
-              onSetItemAssignee={props.onSetItemAssignee}
-              onSetItemDueDate={props.onSetItemDueDate}
-              onSetViewers={props.onSetViewers}
-              onUpdateItem={props.onUpdateItem}
-              onUpdateTemplate={props.onUpdateTemplate}
-            />
-          ))}
-        </div>
+        ))}
       </div>
     </section>
   )
 }
 
-function QuickTemplateForm({
-  clients,
-  employees,
-  onCreate,
-}: {
-  clients: Client[]
-  employees: Employee[]
-  onCreate: (template: Omit<ChecklistTemplate, 'id'>) => void
-}) {
-  // Sensible defaults: monthly cadence, due last day of current month, title blank, items textarea
-  const [title, setTitle] = useState('')
-  const [clientId, setClientId] = useState(clients[0]?.id ?? '')
-  const [assigneeId, setAssigneeId] = useState(employees[0]?.id ?? '')
-  const [frequency, setFrequency] = useState<ChecklistFrequency>('monthly')
-  const [nextDueDate, setNextDueDate] = useState(lastDayOfCurrentMonth())
-  const [itemDraft, setItemDraft] = useState('')
-  const [error, setError] = useState('')
+type RepeatingTaskRowProps = Omit<RepeatingTasksManagerProps, 'templates'> & {
+  template: ChecklistTemplate
+  open: boolean
+  onToggleOpen: () => void
+}
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const items: ChecklistTemplateItem[] = parseBulkLines(itemDraft).map((label) => ({
-      id: makeId('template-item'),
-      label,
-    }))
-
-    if (!title.trim()) {
-      setError('Give the template a title.')
-      return
-    }
-    if (items.length === 0) {
-      setError('Add at least one item — type one per line.')
-      return
-    }
-    setError('')
-
-    const stage: TemplateStage = {
-      id: makeId('stage'),
-      name: 'Stage 1',
-      assigneeId: assigneeId || employees[0]?.id || '',
-      offsetDays: 0,
-      viewerIds: [],
-      editorIds: [],
-      items,
-    }
-
-    onCreate({
-      title: title.trim(),
-      clientId: clientId || clients[0]?.id || '',
-      assigneeId: assigneeId || employees[0]?.id || '',
-      frequency,
-      nextDueDate,
-      active: true,
-      viewerIds: [],
-      editorIds: [],
-      stages: [stage],
-    })
-
-    setTitle('')
-    setItemDraft('')
-  }
+function RepeatingTaskRow(props: RepeatingTaskRowProps) {
+  const { template, open, onToggleOpen } = props
+  const dueLabel = template.nextDueDate
+    ? shortDate.format(new Date(`${template.nextDueDate}T12:00:00`))
+    : '—'
 
   return (
-    <form className="quick-template-form" onSubmit={handleSubmit}>
-      <div className="quick-row">
-        <input
-          className="input quick-title"
-          placeholder="Template title (e.g. Monthly close — Riverbend)"
-          onChange={(event) => setTitle(event.target.value)}
-          value={title}
-        />
-      </div>
-      <div className="quick-row quick-row-meta">
-        <select
-          className="compact-input"
-          aria-label="Client"
-          onChange={(event) => setClientId(event.target.value)}
-          value={clientId}
+    <article className={open ? 'repeating-task-row open' : 'repeating-task-row'}>
+      <button
+        type="button"
+        className="repeating-task-summary"
+        onClick={onToggleOpen}
+        aria-expanded={open}
+      >
+        <span className="repeating-task-title">{template.title}</span>
+        <span className="repeating-task-meta">
+          {clientName(props.clients, template.clientId)}
+        </span>
+        <span className="repeating-task-meta">
+          Who: {employeeName(props.employees, template.assigneeId)}
+        </span>
+        <span className="repeating-task-meta">
+          How often: {getChecklistFrequencyLabel(template.frequency)}
+        </span>
+        <span className="repeating-task-meta">Next due: {dueLabel}</span>
+        <span
+          className={
+            template.active
+              ? 'repeating-task-toggle-pill on'
+              : 'repeating-task-toggle-pill off'
+          }
         >
-          {clients.map((client) => (
-            <option key={client.id} value={client.id}>
-              {client.name}
-            </option>
-          ))}
-        </select>
-        <select
-          className="compact-input"
-          aria-label="Assignee"
-          onChange={(event) => setAssigneeId(event.target.value)}
-          value={assigneeId}
-        >
-          {employees.map((employee) => (
-            <option key={employee.id} value={employee.id}>
-              {employee.name}
-            </option>
-          ))}
-        </select>
-        <select
-          className="compact-input"
-          aria-label="Frequency"
-          onChange={(event) => setFrequency(event.target.value as ChecklistFrequency)}
-          value={frequency}
-        >
-          {checklistFrequencies.map((option) => (
-            <option key={option} value={option}>
-              {getChecklistFrequencyLabel(option)}
-            </option>
-          ))}
-        </select>
-        <input
-          aria-label="First due date"
-          className="compact-input"
-          onChange={(event) => setNextDueDate(event.target.value)}
-          type="date"
-          value={nextDueDate}
-        />
-      </div>
-      <textarea
-        className="input quick-items"
-        placeholder="One item per line.&#10;Reconcile bank feeds&#10;Review payroll clearing&#10;Send month-end report"
-        onChange={(event) => setItemDraft(event.target.value)}
-        rows={5}
-        value={itemDraft}
-      />
-      {error ? <p className="auth-error">{error}</p> : null}
-      <button className="primary-action" type="submit">
-        <Plus size={16} />
-        Save template
+          {template.active ? 'On' : 'Off'}
+        </span>
+        <span className="repeating-task-chevron" aria-hidden="true">
+          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </span>
       </button>
-    </form>
+      {open ? <TemplateEditor {...props} /> : null}
+    </article>
   )
 }
 
-type TemplateCardProps = {
-  template: ChecklistTemplate
-  clients: Client[]
-  employees: Employee[]
-  onAddItem: (templateId: string, stageId: string) => void
-  onAddStage: (templateId: string) => void
-  onBulkAddItems: (templateId: string, stageId: string, labels: string[]) => void
-  onDeleteItem: (templateId: string, stageId: string, itemId: string) => void
-  onDeleteTemplate: (templateId: string) => void
-  onDuplicate: (templateId: string) => void
-  onPatchStage: (
-    templateId: string,
-    stageId: string,
-    patch: Partial<TemplateStage>,
-  ) => void
-  onRemoveStage: (templateId: string, stageId: string) => void
-  onReorderItems: (templateId: string, stageId: string, orderedIds: string[]) => void
-  onReorderStages: (templateId: string, orderedStageIds: string[]) => void
-  onSetItemAssignee: (
-    templateId: string,
-    stageId: string,
-    itemId: string,
-    assigneeId: string,
-  ) => void
-  onSetItemDueDate: (
-    templateId: string,
-    stageId: string,
-    itemId: string,
-    dueDate: string,
-  ) => void
-  onSetViewers: (templateId: string, viewerIds: string[], editorIds: string[]) => void
-  onUpdateItem: (
-    templateId: string,
-    stageId: string,
-    itemId: string,
-    label: string,
-  ) => void
-  onUpdateTemplate: (
-    templateId: string,
-    updater: (template: ChecklistTemplate) => ChecklistTemplate,
-  ) => void
-}
-
-function TemplateCard(props: TemplateCardProps) {
+function TemplateEditor(props: RepeatingTaskRowProps) {
   const { template } = props
   const stages = template.stages ?? []
   return (
-    <article className="template-card" key={template.id}>
-      <div className="template-card-header">
-        <div>
-          <strong>{template.title}</strong>
-          <span>
-            {clientName(props.clients, template.clientId)} ·{' '}
-            {employeeName(props.employees, template.assigneeId)}
-          </span>
-        </div>
-        <div className="template-card-actions">
-          <button
-            className="secondary-action"
-            onClick={() => props.onDuplicate(template.id)}
-            type="button"
-            title="Create a new template pre-filled from this one"
-          >
-            <Copy size={14} />
-            Duplicate
-          </button>
-          <button
-            className="secondary-action danger"
-            onClick={() => props.onDeleteTemplate(template.id)}
-            type="button"
-          >
-            Remove
-          </button>
-        </div>
+    <div className="repeating-task-body">
+      <div className="template-card-actions">
+        <button
+          className="secondary-action"
+          onClick={() => props.onDuplicate(template.id)}
+          type="button"
+          title="Create a new repeating task pre-filled from this one"
+        >
+          <Copy size={14} />
+          Duplicate
+        </button>
+        <button
+          className="secondary-action danger"
+          onClick={() => props.onDeleteTemplate(template.id)}
+          type="button"
+        >
+          Remove
+        </button>
       </div>
       <div className="template-grid">
         <label className="field">
@@ -1303,7 +1422,7 @@ function TemplateCard(props: TemplateCardProps) {
           </select>
         </label>
         <label className="field">
-          <span>Default assignee</span>
+          <span>Who does this</span>
           <select
             className="input"
             onChange={(event) =>
@@ -1322,7 +1441,7 @@ function TemplateCard(props: TemplateCardProps) {
           </select>
         </label>
         <label className="field">
-          <span>Frequency</span>
+          <span>How often</span>
           <select
             className="input"
             onChange={(event) =>
@@ -1341,7 +1460,7 @@ function TemplateCard(props: TemplateCardProps) {
           </select>
         </label>
         <label className="field">
-          <span>Next due date</span>
+          <span>Next due</span>
           <input
             className="input"
             onChange={(event) =>
@@ -1354,7 +1473,7 @@ function TemplateCard(props: TemplateCardProps) {
             value={template.nextDueDate}
           />
         </label>
-        <label className="check-row template-toggle">
+        <label className="repeating-task-on-off-row">
           <input
             checked={template.active}
             onChange={(event) =>
@@ -1365,7 +1484,7 @@ function TemplateCard(props: TemplateCardProps) {
             }
             type="checkbox"
           />
-          <span>Active recurring template</span>
+          <span>{template.active ? 'On' : 'Off'}</span>
         </label>
       </div>
       <StagesAccordion {...props} stages={stages} />
@@ -1375,7 +1494,7 @@ function TemplateCard(props: TemplateCardProps) {
         type="button"
       >
         <Plus size={16} />
-        Add stage
+        Add hand-off step
       </button>
       <SharingControl
         assigneeId={template.assigneeId}
@@ -1386,11 +1505,11 @@ function TemplateCard(props: TemplateCardProps) {
         }
         viewerIds={template.viewerIds ?? []}
       />
-    </article>
+    </div>
   )
 }
 
-function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] }) {
+function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[] }) {
   const { stages, template } = props
   // Stage-level drag-and-drop reorders entire stages by their header.
   const [draggingStageId, setDraggingStageId] = useState<string | null>(null)
@@ -1477,13 +1596,13 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
                 type="button"
                 className="stage-toggle-btn"
                 aria-expanded={isOpen}
-                aria-label={isOpen ? 'Collapse stage' : 'Expand stage'}
-                title={isOpen ? 'Collapse stage' : 'Expand stage'}
+                aria-label={isOpen ? 'Collapse step' : 'Expand step'}
+                title={isOpen ? 'Collapse step' : 'Expand step'}
                 onClick={() => toggleStageOpen(stage.id)}
               >
                 {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               </button>
-              <span className="stage-index-pill">Stage {index + 1}</span>
+              <span className="stage-index-pill">Step {index + 1}</span>
               <input
                 className="input stage-name-input"
                 value={stage.name}
@@ -1492,14 +1611,14 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
                 }
               />
               <button
-                aria-label="Remove stage"
+                aria-label="Remove step"
                 className="item-delete-btn"
-                title="Remove stage"
+                title="Remove step"
                 type="button"
                 onClick={() => {
                   if (
                     stage.items.length > 0 &&
-                    !window.confirm('This stage has items. Remove stage anyway?')
+                    !window.confirm('This step has items. Remove anyway?')
                   ) {
                     return
                   }
@@ -1513,7 +1632,7 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
             <div className="stage-card-body">
               <div className="stage-meta-row">
                 <label className="field">
-                  <span>Stage assignee</span>
+                  <span>Who does this step</span>
                   <select
                     className="input"
                     value={stage.assigneeId}
@@ -1533,8 +1652,8 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
                 <label className="field">
                   <span>
                     {index === 0
-                      ? 'Days after template due date'
-                      : 'Days after previous stage'}
+                      ? 'Days after the task is due'
+                      : 'Days after previous step'}
                   </span>
                   <input
                     className="input"

@@ -350,7 +350,9 @@ const server = createServer(async (request, response) => {
 
         const data = await appDataStore.read()
         const clientExists = data.clients.some((client) => client.id === clientId)
-        const assigneeExists = data.employees.some((employee) => employee.id === assigneeId && employee.role !== 'Owner')
+        // Any employee (any role, including Owner) can be assigned to a checklist —
+        // the owner needs to be able to assign tasks to themselves.
+        const assigneeExists = data.employees.some((employee) => employee.id === assigneeId)
 
         if (!clientExists || !assigneeExists) {
           sendJson(response, 400, { error: 'Checklist references an invalid client or assignee' })
