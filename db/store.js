@@ -152,6 +152,30 @@ function advanceChecklistFrequency(dateString, frequency) {
   return addMonths(dateString, 1)
 }
 
+function normalizeClientProfile(client) {
+  return {
+    ...client,
+    email: client.email ?? '',
+    contactName: client.contactName ?? '',
+    phone: client.phone ?? '',
+    addressLine1: client.addressLine1 ?? '',
+    addressLine2: client.addressLine2 ?? '',
+    city: client.city ?? '',
+    state: client.state ?? '',
+    postalCode: client.postalCode ?? '',
+    logoUrl: client.logoUrl ?? '',
+    paymentTerms: client.paymentTerms ?? '',
+    footerNote: client.footerNote ?? '',
+    quickbooksPayUrl: client.quickbooksPayUrl ?? '',
+    invoiceShowTimeBreakdown:
+      typeof client.invoiceShowTimeBreakdown === 'boolean' ? client.invoiceShowTimeBreakdown : true,
+    invoiceHideInternalHours:
+      typeof client.invoiceHideInternalHours === 'boolean' ? client.invoiceHideInternalHours : true,
+    invoiceGroupByCategory:
+      typeof client.invoiceGroupByCategory === 'boolean' ? client.invoiceGroupByCategory : false,
+  }
+}
+
 function sortChecklists(checklists) {
   return [...checklists].sort((left, right) => {
     if (left.dueDate !== right.dueDate) {
@@ -314,6 +338,28 @@ export class AppDataStore {
           updated_at timestamptz not null default now()
         )
       `)
+
+      await this.pool.query(`alter table clients add column if not exists email text`)
+      await this.pool.query(`alter table clients add column if not exists contact_name text`)
+      await this.pool.query(`alter table clients add column if not exists phone text`)
+      await this.pool.query(`alter table clients add column if not exists address_line1 text`)
+      await this.pool.query(`alter table clients add column if not exists address_line2 text`)
+      await this.pool.query(`alter table clients add column if not exists city text`)
+      await this.pool.query(`alter table clients add column if not exists state text`)
+      await this.pool.query(`alter table clients add column if not exists postal_code text`)
+      await this.pool.query(`alter table clients add column if not exists logo_url text`)
+      await this.pool.query(`alter table clients add column if not exists payment_terms text`)
+      await this.pool.query(`alter table clients add column if not exists footer_note text`)
+      await this.pool.query(`alter table clients add column if not exists quickbooks_pay_url text`)
+      await this.pool.query(
+        `alter table clients add column if not exists invoice_show_time_breakdown boolean not null default true`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists invoice_hide_internal_hours boolean not null default true`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists invoice_group_by_category boolean not null default false`,
+      )
 
       await this.pool.query(`
         create table if not exists client_assignments (
@@ -556,7 +602,11 @@ export class AppDataStore {
             order by name asc
           `),
           this.pool.query(`
-            select id, name, contact, billing_mode, hourly_rate, plan_id
+            select id, name, contact, billing_mode, hourly_rate, plan_id,
+                   email, contact_name, phone, address_line1, address_line2,
+                   city, state, postal_code, logo_url, payment_terms,
+                   footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
+                   invoice_hide_internal_hours, invoice_group_by_category
             from clients
             order by name asc
           `),
@@ -655,6 +705,21 @@ export class AppDataStore {
           hourlyRate: Number(row.hourly_rate),
           planId: row.plan_id,
           assignedEmployeeIds: assignmentsByClient.get(row.id) ?? [],
+          email: row.email ?? '',
+          contactName: row.contact_name ?? '',
+          phone: row.phone ?? '',
+          addressLine1: row.address_line1 ?? '',
+          addressLine2: row.address_line2 ?? '',
+          city: row.city ?? '',
+          state: row.state ?? '',
+          postalCode: row.postal_code ?? '',
+          logoUrl: row.logo_url ?? '',
+          paymentTerms: row.payment_terms ?? '',
+          footerNote: row.footer_note ?? '',
+          quickbooksPayUrl: row.quickbooks_pay_url ?? '',
+          invoiceShowTimeBreakdown: row.invoice_show_time_breakdown ?? true,
+          invoiceHideInternalHours: row.invoice_hide_internal_hours ?? true,
+          invoiceGroupByCategory: row.invoice_group_by_category ?? false,
         })),
         timeEntries: timeEntriesResult.rows.map((row) => ({
           id: row.id,
@@ -710,6 +775,9 @@ export class AppDataStore {
     if (!Array.isArray(data.checklistTemplates)) {
       const seed = await this.getSeedData()
       data.checklistTemplates = seed.checklistTemplates ?? []
+    }
+    if (Array.isArray(data.clients)) {
+      data.clients = data.clients.map(normalizeClientProfile)
     }
     const materialized = materializeRecurringChecklists(data)
     if (materialized.changed) {
@@ -772,8 +840,14 @@ export class AppDataStore {
         for (const clientRecord of data.clients) {
           await client.query(
             `
-              insert into clients (id, name, contact, billing_mode, hourly_rate, plan_id, updated_at)
-              values ($1, $2, $3, $4, $5, $6, now())
+              insert into clients (
+                id, name, contact, billing_mode, hourly_rate, plan_id,
+                email, contact_name, phone, address_line1, address_line2,
+                city, state, postal_code, logo_url, payment_terms,
+                footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
+                invoice_hide_internal_hours, invoice_group_by_category, updated_at
+              )
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, now())
             `,
             [
               clientRecord.id,
@@ -782,6 +856,21 @@ export class AppDataStore {
               clientRecord.billingMode,
               clientRecord.hourlyRate,
               clientRecord.planId,
+              clientRecord.email ?? '',
+              clientRecord.contactName ?? '',
+              clientRecord.phone ?? '',
+              clientRecord.addressLine1 ?? '',
+              clientRecord.addressLine2 ?? '',
+              clientRecord.city ?? '',
+              clientRecord.state ?? '',
+              clientRecord.postalCode ?? '',
+              clientRecord.logoUrl ?? '',
+              clientRecord.paymentTerms ?? '',
+              clientRecord.footerNote ?? '',
+              clientRecord.quickbooksPayUrl ?? '',
+              clientRecord.invoiceShowTimeBreakdown ?? true,
+              clientRecord.invoiceHideInternalHours ?? true,
+              clientRecord.invoiceGroupByCategory ?? false,
             ],
           )
 

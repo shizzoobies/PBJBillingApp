@@ -260,6 +260,16 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
   return (await response.json()) as Checklist
 }
 
+export async function recordClientProfileActivity(clientId: string) {
+  const response = await fetch(`/api/clients/${encodeURIComponent(clientId)}/activity`, {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok && response.status !== 204) {
+    throw new ApiError(response.status, `Failed to record client activity (${response.status})`)
+  }
+}
+
 async function safeErrorMessage(response: Response): Promise<string> {
   try {
     const body = await response.json()

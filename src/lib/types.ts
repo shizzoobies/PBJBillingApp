@@ -16,6 +16,22 @@ export type Client = {
   hourlyRate: number
   planId: string | null
   assignedEmployeeIds?: string[]
+  // Phase 4: profile + invoice customization
+  email?: string
+  contactName?: string
+  phone?: string
+  addressLine1?: string
+  addressLine2?: string
+  city?: string
+  state?: string
+  postalCode?: string
+  logoUrl?: string
+  paymentTerms?: string
+  footerNote?: string
+  quickbooksPayUrl?: string
+  invoiceShowTimeBreakdown?: boolean
+  invoiceHideInternalHours?: boolean
+  invoiceGroupByCategory?: boolean
 }
 
 export type SubscriptionPlan = {

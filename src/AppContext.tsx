@@ -71,6 +71,8 @@ export type AppContextValue = {
   ) => Promise<void>
   deleteChecklistItem: (checklistId: string, itemId: string) => Promise<void>
   updateClientPlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
+  updateClient: (clientId: string, patch: Partial<Client>) => void
+  deleteClient: (clientId: string) => void
   addClient: (client: Omit<Client, 'id'>) => void
   addPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void
   selectedClientId: string

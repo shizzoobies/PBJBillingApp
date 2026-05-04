@@ -1,5 +1,6 @@
-import { Plus, ShieldCheck } from 'lucide-react'
+import { ChevronRight, Plus, ShieldCheck } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
+import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import type {
   BillingMode,
@@ -233,7 +234,14 @@ function ClientTable({
             return (
               <tr key={client.id}>
                 <td>
-                  <strong>{client.name}</strong>
+                  {ownerMode ? (
+                    <Link className="client-name-link" to={`/clients/${client.id}`}>
+                      <strong>{client.name}</strong>
+                      <ChevronRight size={14} />
+                    </Link>
+                  ) : (
+                    <strong>{client.name}</strong>
+                  )}
                 </td>
                 <td>{client.contact}</td>
                 <td>

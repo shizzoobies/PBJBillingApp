@@ -716,6 +716,32 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    const clientActivityMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/activity$/)
+    if (clientActivityMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can record client activity' })
+        return
+      }
+      const clientId = clientActivityMatch[1]
+      const data = await appDataStore.read()
+      const clientRecord = data.clients.find((c) => c.id === clientId)
+      if (!clientRecord) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'client_profile_updated',
+        clientRecord.name,
+      )
+      sendEmpty(response, 204)
+      return
+    }
+
     if (normalizedPath === '/api/team' && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) {

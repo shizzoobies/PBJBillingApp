@@ -53,6 +53,22 @@ create table if not exists clients (
   updated_at timestamptz not null default now()
 );
 
+alter table clients add column if not exists email text;
+alter table clients add column if not exists contact_name text;
+alter table clients add column if not exists phone text;
+alter table clients add column if not exists address_line1 text;
+alter table clients add column if not exists address_line2 text;
+alter table clients add column if not exists city text;
+alter table clients add column if not exists state text;
+alter table clients add column if not exists postal_code text;
+alter table clients add column if not exists logo_url text;
+alter table clients add column if not exists payment_terms text;
+alter table clients add column if not exists footer_note text;
+alter table clients add column if not exists quickbooks_pay_url text;
+alter table clients add column if not exists invoice_show_time_breakdown boolean not null default true;
+alter table clients add column if not exists invoice_hide_internal_hours boolean not null default true;
+alter table clients add column if not exists invoice_group_by_category boolean not null default false;
+
 create table if not exists client_assignments (
   client_id text not null references clients(id) on delete cascade,
   user_id text not null references users(id) on delete cascade,

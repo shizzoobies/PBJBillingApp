@@ -51,6 +51,7 @@ import {
   sortChecklists,
 } from './lib/utils'
 import { ChecklistsPage } from './pages/ChecklistsPage'
+import { ClientDetailPage } from './pages/ClientDetailPage'
 import { ClientsPage } from './pages/ClientsPage'
 import { GanttPage } from './pages/GanttPage'
 import { InvoicesPage } from './pages/InvoicesPage'
@@ -617,6 +618,22 @@ function App() {
     }))
   }
 
+  const updateClient = (clientId: string, patch: Partial<Client>) => {
+    updateWorkspaceData((current) => ({
+      ...current,
+      clients: current.clients.map((client) =>
+        client.id === clientId ? { ...client, ...patch } : client,
+      ),
+    }))
+  }
+
+  const deleteClient = (clientId: string) => {
+    updateWorkspaceData((current) => ({
+      ...current,
+      clients: current.clients.filter((client) => client.id !== clientId),
+    }))
+  }
+
   const addClient = (client: Omit<Client, 'id'>) => {
     updateWorkspaceData((current) => ({
       ...current,
@@ -734,6 +751,8 @@ function App() {
     updateChecklistItem,
     deleteChecklistItem,
     updateClientPlan,
+    updateClient,
+    deleteClient,
     addClient,
     addPlan,
     selectedClientId,
@@ -772,6 +791,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
         <Route path="/time" element={<TimePage />} />
         <Route path="/checklists" element={<ChecklistsPage />} />
         <Route path="/clients" element={<ClientsPage />} />
+        <Route
+          path="/clients/:clientId"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <ClientDetailPage />
+            </OwnerOnly>
+          }
+        />
         <Route
           path="/reports"
           element={

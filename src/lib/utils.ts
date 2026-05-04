@@ -350,6 +350,8 @@ export function describeActivityAction(action: string): string {
       return 'restored access for'
     case 'team_removed':
       return 'removed'
+    case 'client_profile_updated':
+      return 'updated client profile'
     default:
       return action.replace(/_/g, ' ')
   }
