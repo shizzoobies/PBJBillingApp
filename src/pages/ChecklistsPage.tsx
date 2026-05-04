@@ -7,7 +7,7 @@ import {
   type DragEvent,
   type FormEvent,
 } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { FilterBar } from '../components/FilterBar'
 import { useFilters } from '../components/useFilters'
@@ -21,6 +21,7 @@ import type {
   Client,
   Employee,
   Role,
+  TemplateStage,
 } from '../lib/types'
 import {
   checklistFrequencies,
@@ -90,6 +91,10 @@ export function ChecklistsPage() {
     reorderChecklistTemplateItems,
     bulkAddChecklistTemplateItems,
     duplicateChecklistTemplate,
+    addTemplateStage,
+    removeTemplateStage,
+    patchTemplateStage,
+    reorderTemplateStages,
     reorderChecklistItems,
     bulkAddChecklistItems,
     updateChecklistItem,
@@ -117,12 +122,16 @@ export function ChecklistsPage() {
           clients={data.clients}
           employees={data.employees}
           onAddItem={addChecklistTemplateItem}
+          onAddStage={addTemplateStage}
           onBulkAddItems={bulkAddChecklistTemplateItems}
           onCreate={addChecklistTemplate}
           onDeleteItem={removeChecklistTemplateItem}
           onDeleteTemplate={deleteChecklistTemplate}
           onDuplicate={duplicateChecklistTemplate}
+          onPatchStage={patchTemplateStage}
+          onRemoveStage={removeTemplateStage}
           onReorderItems={reorderChecklistTemplateItems}
+          onReorderStages={reorderTemplateStages}
           onSetItemAssignee={setChecklistTemplateItemAssignee}
           onSetItemDueDate={setChecklistTemplateItemDueDate}
           onSetViewers={setTemplateViewers}
@@ -338,6 +347,7 @@ function ChecklistCard({
 }) {
   const todayDateOnly = new Date().toISOString().slice(0, 10)
   const completed = checklist.items.filter((item) => item.done).length
+  const allDone = checklist.items.length > 0 && completed === checklist.items.length
   const viewerIds = checklist.viewerIds ?? []
   const editorIds = checklist.editorIds ?? []
   const isAssignee = checklist.assigneeId === activeEmployeeId
@@ -346,6 +356,17 @@ function ChecklistCard({
     role !== 'owner' && !isAssignee && viewerIds.includes(activeEmployeeId) && !isEditor
   // Whether the current viewer can edit checklist structure (reorder, bulk add)
   const canEditStructure = role === 'owner' || isAssignee || isEditor
+
+  const stageCount = checklist.stageCount ?? 1
+  const stageIndex = checklist.stageIndex ?? 0
+  const showStageBadge = stageCount > 1
+  const stageNumber = stageIndex + 1
+  const isLastStage = stageNumber >= stageCount
+  // When all items are checked off and there's a next stage, the next stage's
+  // assignee gets a fresh checklist; show a hand-off indicator instead of the
+  // toggle controls. We don't know the next assignee's name from this scope,
+  // so we just report the hand-off generically.
+  const handedOff = allDone && !isLastStage
 
   const canToggleItem = (item: ChecklistItem) => {
     if (role === 'owner') return true
@@ -365,6 +386,19 @@ function ChecklistCard({
       <header>
         <div>
           <strong>{checklist.title}</strong>
+          {showStageBadge ? (
+            <span className="stage-badge">
+              Stage {stageNumber} of {stageCount}
+              {checklist.caseId && ownerMode ? (
+                <Link
+                  className="stage-badge-link"
+                  to={`/cases/${encodeURIComponent(checklist.caseId)}`}
+                >
+                  Open case
+                </Link>
+              ) : null}
+            </span>
+          ) : null}
           <span className="checklist-meta-line">
             {clientName(clients, checklist.clientId)} ·{' '}
             {employeeName(employees, checklist.assigneeId)} · Due{' '}
@@ -375,6 +409,7 @@ function ChecklistCard({
           </span>
         </div>
         <div className="checklist-meta">
+          {handedOff ? <span className="status-pill">Handed off</span> : null}
           {isViewerOnly ? <span className="status-pill">View only</span> : null}
         </div>
       </header>
@@ -650,42 +685,51 @@ function ChecklistBulkAdd({ onAdd }: { onAdd: (labels: string[]) => void }) {
   )
 }
 
-function ChecklistTemplateManager({
-  clients,
-  employees,
-  onAddItem,
-  onBulkAddItems,
-  onCreate,
-  onDeleteItem,
-  onDeleteTemplate,
-  onDuplicate,
-  onReorderItems,
-  onSetItemAssignee,
-  onSetItemDueDate,
-  onSetViewers,
-  onUpdateItem,
-  onUpdateTemplate,
-  templates,
-}: {
+type TemplateManagerProps = {
   clients: Client[]
   employees: Employee[]
-  onAddItem: (templateId: string) => void
-  onBulkAddItems: (templateId: string, labels: string[]) => void
+  onAddItem: (templateId: string, stageId: string) => void
+  onAddStage: (templateId: string) => void
+  onBulkAddItems: (templateId: string, stageId: string, labels: string[]) => void
   onCreate: (template: Omit<ChecklistTemplate, 'id'>) => void
-  onDeleteItem: (templateId: string, itemId: string) => void
+  onDeleteItem: (templateId: string, stageId: string, itemId: string) => void
   onDeleteTemplate: (templateId: string) => void
   onDuplicate: (templateId: string) => void
-  onReorderItems: (templateId: string, orderedIds: string[]) => void
-  onSetItemAssignee: (templateId: string, itemId: string, assigneeId: string) => void
-  onSetItemDueDate: (templateId: string, itemId: string, dueDate: string) => void
+  onPatchStage: (
+    templateId: string,
+    stageId: string,
+    patch: Partial<TemplateStage>,
+  ) => void
+  onRemoveStage: (templateId: string, stageId: string) => void
+  onReorderItems: (templateId: string, stageId: string, orderedIds: string[]) => void
+  onReorderStages: (templateId: string, orderedStageIds: string[]) => void
+  onSetItemAssignee: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    assigneeId: string,
+  ) => void
+  onSetItemDueDate: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    dueDate: string,
+  ) => void
   onSetViewers: (templateId: string, viewerIds: string[], editorIds: string[]) => void
-  onUpdateItem: (templateId: string, itemId: string, label: string) => void
+  onUpdateItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    label: string,
+  ) => void
   onUpdateTemplate: (
     templateId: string,
     updater: (template: ChecklistTemplate) => ChecklistTemplate,
   ) => void
   templates: ChecklistTemplate[]
-}) {
+}
+
+function ChecklistTemplateManager(props: TemplateManagerProps) {
   return (
     <section className="panel">
       <div className="section-heading">
@@ -695,25 +739,33 @@ function ChecklistTemplateManager({
         </div>
       </div>
       <div className="template-manager">
-        <QuickTemplateForm clients={clients} employees={employees} onCreate={onCreate} />
+        <QuickTemplateForm
+          clients={props.clients}
+          employees={props.employees}
+          onCreate={props.onCreate}
+        />
         <div className="template-list">
-          {templates.map((template) => (
+          {props.templates.map((template) => (
             <TemplateCard
               key={template.id}
               template={template}
-              clients={clients}
-              employees={employees}
-              onAddItem={onAddItem}
-              onBulkAddItems={onBulkAddItems}
-              onDeleteItem={onDeleteItem}
-              onDeleteTemplate={onDeleteTemplate}
-              onDuplicate={onDuplicate}
-              onReorderItems={onReorderItems}
-              onSetItemAssignee={onSetItemAssignee}
-              onSetItemDueDate={onSetItemDueDate}
-              onSetViewers={onSetViewers}
-              onUpdateItem={onUpdateItem}
-              onUpdateTemplate={onUpdateTemplate}
+              clients={props.clients}
+              employees={props.employees}
+              onAddItem={props.onAddItem}
+              onAddStage={props.onAddStage}
+              onBulkAddItems={props.onBulkAddItems}
+              onDeleteItem={props.onDeleteItem}
+              onDeleteTemplate={props.onDeleteTemplate}
+              onDuplicate={props.onDuplicate}
+              onPatchStage={props.onPatchStage}
+              onRemoveStage={props.onRemoveStage}
+              onReorderItems={props.onReorderItems}
+              onReorderStages={props.onReorderStages}
+              onSetItemAssignee={props.onSetItemAssignee}
+              onSetItemDueDate={props.onSetItemDueDate}
+              onSetViewers={props.onSetViewers}
+              onUpdateItem={props.onUpdateItem}
+              onUpdateTemplate={props.onUpdateTemplate}
             />
           ))}
         </div>
@@ -742,7 +794,7 @@ function QuickTemplateForm({
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const items = parseBulkLines(itemDraft).map((label) => ({
+    const items: ChecklistTemplateItem[] = parseBulkLines(itemDraft).map((label) => ({
       id: makeId('template-item'),
       label,
     }))
@@ -757,6 +809,16 @@ function QuickTemplateForm({
     }
     setError('')
 
+    const stage: TemplateStage = {
+      id: makeId('stage'),
+      name: 'Stage 1',
+      assigneeId: assigneeId || employees[0]?.id || '',
+      offsetDays: 0,
+      viewerIds: [],
+      editorIds: [],
+      items,
+    }
+
     onCreate({
       title: title.trim(),
       clientId: clientId || clients[0]?.id || '',
@@ -766,7 +828,7 @@ function QuickTemplateForm({
       active: true,
       viewerIds: [],
       editorIds: [],
-      items,
+      stages: [stage],
     })
 
     setTitle('')
@@ -844,54 +906,66 @@ function QuickTemplateForm({
   )
 }
 
-function TemplateCard({
-  template,
-  clients,
-  employees,
-  onAddItem,
-  onBulkAddItems,
-  onDeleteItem,
-  onDeleteTemplate,
-  onDuplicate,
-  onReorderItems,
-  onSetItemAssignee,
-  onSetItemDueDate,
-  onSetViewers,
-  onUpdateItem,
-  onUpdateTemplate,
-}: {
+type TemplateCardProps = {
   template: ChecklistTemplate
   clients: Client[]
   employees: Employee[]
-  onAddItem: (templateId: string) => void
-  onBulkAddItems: (templateId: string, labels: string[]) => void
-  onDeleteItem: (templateId: string, itemId: string) => void
+  onAddItem: (templateId: string, stageId: string) => void
+  onAddStage: (templateId: string) => void
+  onBulkAddItems: (templateId: string, stageId: string, labels: string[]) => void
+  onDeleteItem: (templateId: string, stageId: string, itemId: string) => void
   onDeleteTemplate: (templateId: string) => void
   onDuplicate: (templateId: string) => void
-  onReorderItems: (templateId: string, orderedIds: string[]) => void
-  onSetItemAssignee: (templateId: string, itemId: string, assigneeId: string) => void
-  onSetItemDueDate: (templateId: string, itemId: string, dueDate: string) => void
+  onPatchStage: (
+    templateId: string,
+    stageId: string,
+    patch: Partial<TemplateStage>,
+  ) => void
+  onRemoveStage: (templateId: string, stageId: string) => void
+  onReorderItems: (templateId: string, stageId: string, orderedIds: string[]) => void
+  onReorderStages: (templateId: string, orderedStageIds: string[]) => void
+  onSetItemAssignee: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    assigneeId: string,
+  ) => void
+  onSetItemDueDate: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    dueDate: string,
+  ) => void
   onSetViewers: (templateId: string, viewerIds: string[], editorIds: string[]) => void
-  onUpdateItem: (templateId: string, itemId: string, label: string) => void
+  onUpdateItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    label: string,
+  ) => void
   onUpdateTemplate: (
     templateId: string,
     updater: (template: ChecklistTemplate) => ChecklistTemplate,
   ) => void
-}) {
+}
+
+function TemplateCard(props: TemplateCardProps) {
+  const { template } = props
+  const stages = template.stages ?? []
   return (
     <article className="template-card" key={template.id}>
       <div className="template-card-header">
         <div>
           <strong>{template.title}</strong>
           <span>
-            {clientName(clients, template.clientId)} ·{' '}
-            {employeeName(employees, template.assigneeId)}
+            {clientName(props.clients, template.clientId)} ·{' '}
+            {employeeName(props.employees, template.assigneeId)}
           </span>
         </div>
         <div className="template-card-actions">
           <button
             className="secondary-action"
-            onClick={() => onDuplicate(template.id)}
+            onClick={() => props.onDuplicate(template.id)}
             type="button"
             title="Create a new template pre-filled from this one"
           >
@@ -900,7 +974,7 @@ function TemplateCard({
           </button>
           <button
             className="secondary-action danger"
-            onClick={() => onDeleteTemplate(template.id)}
+            onClick={() => props.onDeleteTemplate(template.id)}
             type="button"
           >
             Remove
@@ -913,7 +987,7 @@ function TemplateCard({
           <input
             className="input"
             onChange={(event) =>
-              onUpdateTemplate(template.id, (current) => ({
+              props.onUpdateTemplate(template.id, (current) => ({
                 ...current,
                 title: event.target.value,
               }))
@@ -926,14 +1000,14 @@ function TemplateCard({
           <select
             className="input"
             onChange={(event) =>
-              onUpdateTemplate(template.id, (current) => ({
+              props.onUpdateTemplate(template.id, (current) => ({
                 ...current,
                 clientId: event.target.value,
               }))
             }
             value={template.clientId}
           >
-            {clients.map((client) => (
+            {props.clients.map((client) => (
               <option key={client.id} value={client.id}>
                 {client.name}
               </option>
@@ -941,18 +1015,18 @@ function TemplateCard({
           </select>
         </label>
         <label className="field">
-          <span>Employee</span>
+          <span>Default assignee</span>
           <select
             className="input"
             onChange={(event) =>
-              onUpdateTemplate(template.id, (current) => ({
+              props.onUpdateTemplate(template.id, (current) => ({
                 ...current,
                 assigneeId: event.target.value,
               }))
             }
             value={template.assigneeId}
           >
-            {employees.map((employee) => (
+            {props.employees.map((employee) => (
               <option key={employee.id} value={employee.id}>
                 {employee.name}
               </option>
@@ -964,7 +1038,7 @@ function TemplateCard({
           <select
             className="input"
             onChange={(event) =>
-              onUpdateTemplate(template.id, (current) => ({
+              props.onUpdateTemplate(template.id, (current) => ({
                 ...current,
                 frequency: event.target.value as ChecklistFrequency,
               }))
@@ -983,7 +1057,7 @@ function TemplateCard({
           <input
             className="input"
             onChange={(event) =>
-              onUpdateTemplate(template.id, (current) => ({
+              props.onUpdateTemplate(template.id, (current) => ({
                 ...current,
                 nextDueDate: event.target.value,
               }))
@@ -996,7 +1070,7 @@ function TemplateCard({
           <input
             checked={template.active}
             onChange={(event) =>
-              onUpdateTemplate(template.id, (current) => ({
+              props.onUpdateTemplate(template.id, (current) => ({
                 ...current,
                 active: event.target.checked,
               }))
@@ -1006,38 +1080,203 @@ function TemplateCard({
           <span>Active recurring template</span>
         </label>
       </div>
-      <DraggableTemplateItems
-        employees={employees}
-        items={template.items}
-        onDeleteItem={(itemId) => onDeleteItem(template.id, itemId)}
-        onReorderItems={(orderedIds) => onReorderItems(template.id, orderedIds)}
-        onSetItemAssignee={(itemId, assigneeId) =>
-          onSetItemAssignee(template.id, itemId, assigneeId)
-        }
-        onSetItemDueDate={(itemId, dueDate) =>
-          onSetItemDueDate(template.id, itemId, dueDate)
-        }
-        onUpdateItem={(itemId, label) => onUpdateItem(template.id, itemId, label)}
-      />
+      <StagesAccordion {...props} stages={stages} />
       <button
         className="secondary-action"
-        onClick={() => onAddItem(template.id)}
+        onClick={() => props.onAddStage(template.id)}
         type="button"
       >
         <Plus size={16} />
-        Add item
+        Add stage
       </button>
-      <ChecklistBulkAdd onAdd={(labels) => onBulkAddItems(template.id, labels)} />
       <SharingControl
         assigneeId={template.assigneeId}
         editorIds={template.editorIds ?? []}
-        employees={employees}
+        employees={props.employees}
         onChange={(nextViewerIds, nextEditorIds) =>
-          onSetViewers(template.id, nextViewerIds, nextEditorIds)
+          props.onSetViewers(template.id, nextViewerIds, nextEditorIds)
         }
         viewerIds={template.viewerIds ?? []}
       />
     </article>
+  )
+}
+
+function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] }) {
+  const { stages, template } = props
+  // Stage-level drag-and-drop reorders entire stages by their header.
+  const [draggingStageId, setDraggingStageId] = useState<string | null>(null)
+  const [dropTargetStageId, setDropTargetStageId] = useState<string | null>(null)
+
+  const handleStageDragStart = (event: DragEvent<HTMLDivElement>, stageId: string) => {
+    setDraggingStageId(stageId)
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', stageId)
+  }
+
+  const handleStageDragOver = (event: DragEvent<HTMLDivElement>, stageId: string) => {
+    if (!draggingStageId || draggingStageId === stageId) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    setDropTargetStageId(stageId)
+  }
+
+  const handleStageDrop = (event: DragEvent<HTMLDivElement>, targetId: string) => {
+    event.preventDefault()
+    if (!draggingStageId || draggingStageId === targetId) {
+      setDraggingStageId(null)
+      setDropTargetStageId(null)
+      return
+    }
+    const order = stages.map((stage) => stage.id)
+    const fromIdx = order.indexOf(draggingStageId)
+    const toIdx = order.indexOf(targetId)
+    if (fromIdx === -1 || toIdx === -1) {
+      setDraggingStageId(null)
+      setDropTargetStageId(null)
+      return
+    }
+    order.splice(fromIdx, 1)
+    order.splice(toIdx, 0, draggingStageId)
+    props.onReorderStages(template.id, order)
+    setDraggingStageId(null)
+    setDropTargetStageId(null)
+  }
+
+  const handleStageDragEnd = () => {
+    setDraggingStageId(null)
+    setDropTargetStageId(null)
+  }
+
+  return (
+    <div className="stages-accordion">
+      {stages.map((stage, index) => {
+        const stageClasses = ['stage-card']
+        if (draggingStageId === stage.id) stageClasses.push('dragging')
+        if (dropTargetStageId === stage.id) stageClasses.push('drop-target')
+        return (
+          <div key={stage.id} className={stageClasses.join(' ')}>
+            <div
+              className="stage-card-header"
+              draggable
+              onDragStart={(event) => handleStageDragStart(event, stage.id)}
+              onDragOver={(event) => handleStageDragOver(event, stage.id)}
+              onDragLeave={() => setDropTargetStageId(null)}
+              onDrop={(event) => handleStageDrop(event, stage.id)}
+              onDragEnd={handleStageDragEnd}
+            >
+              <span className="drag-handle" aria-hidden="true">
+                <GripVertical size={14} />
+              </span>
+              <span className="stage-index-pill">Stage {index + 1}</span>
+              <input
+                className="input stage-name-input"
+                value={stage.name}
+                onChange={(event) =>
+                  props.onPatchStage(template.id, stage.id, { name: event.target.value })
+                }
+              />
+              <button
+                aria-label="Remove stage"
+                className="item-delete-btn"
+                type="button"
+                onClick={() => {
+                  if (
+                    stage.items.length > 0 &&
+                    !window.confirm('This stage has items. Remove stage anyway?')
+                  ) {
+                    return
+                  }
+                  props.onRemoveStage(template.id, stage.id)
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <div className="stage-card-body">
+              <div className="stage-meta-row">
+                <label className="field">
+                  <span>Stage assignee</span>
+                  <select
+                    className="input"
+                    value={stage.assigneeId}
+                    onChange={(event) =>
+                      props.onPatchStage(template.id, stage.id, {
+                        assigneeId: event.target.value,
+                      })
+                    }
+                  >
+                    {props.employees.map((employee) => (
+                      <option key={employee.id} value={employee.id}>
+                        {employee.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>
+                    {index === 0
+                      ? 'Days after template due date'
+                      : 'Days after previous stage'}
+                  </span>
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    value={stage.offsetDays}
+                    onChange={(event) =>
+                      props.onPatchStage(template.id, stage.id, {
+                        offsetDays: Number(event.target.value) || 0,
+                      })
+                    }
+                  />
+                </label>
+              </div>
+              <DraggableTemplateItems
+                employees={props.employees}
+                items={stage.items}
+                onDeleteItem={(itemId) => props.onDeleteItem(template.id, stage.id, itemId)}
+                onReorderItems={(orderedIds) =>
+                  props.onReorderItems(template.id, stage.id, orderedIds)
+                }
+                onSetItemAssignee={(itemId, assigneeId) =>
+                  props.onSetItemAssignee(template.id, stage.id, itemId, assigneeId)
+                }
+                onSetItemDueDate={(itemId, dueDate) =>
+                  props.onSetItemDueDate(template.id, stage.id, itemId, dueDate)
+                }
+                onUpdateItem={(itemId, label) =>
+                  props.onUpdateItem(template.id, stage.id, itemId, label)
+                }
+              />
+              <button
+                className="secondary-action"
+                onClick={() => props.onAddItem(template.id, stage.id)}
+                type="button"
+              >
+                <Plus size={16} />
+                Add item
+              </button>
+              <ChecklistBulkAdd
+                onAdd={(labels) => props.onBulkAddItems(template.id, stage.id, labels)}
+              />
+              <SharingControl
+                assigneeId={stage.assigneeId}
+                editorIds={stage.editorIds ?? []}
+                employees={props.employees}
+                onChange={(nextViewerIds, nextEditorIds) =>
+                  props.onPatchStage(template.id, stage.id, {
+                    viewerIds: nextViewerIds,
+                    editorIds: nextEditorIds,
+                  })
+                }
+                viewerIds={stage.viewerIds ?? []}
+              />
+            </div>
+          </div>
+        )
+      })}
+    </div>
   )
 }
 

@@ -68,6 +68,16 @@ export type ChecklistTemplateItem = {
   assigneeId?: string
 }
 
+export type TemplateStage = {
+  id: string
+  name: string
+  assigneeId: string
+  offsetDays: number
+  viewerIds: string[]
+  editorIds: string[]
+  items: ChecklistTemplateItem[]
+}
+
 export type ChecklistTemplate = {
   id: string
   title: string
@@ -78,7 +88,9 @@ export type ChecklistTemplate = {
   active: boolean
   viewerIds: string[]
   editorIds: string[]
-  items: ChecklistTemplateItem[]
+  stages: TemplateStage[]
+  /** @deprecated Kept transiently for backwards-compat reads; new writes serialize `stages`. */
+  items?: ChecklistTemplateItem[]
 }
 
 export type Checklist = {
@@ -93,6 +105,10 @@ export type Checklist = {
   editorIds: string[]
   createdAt?: string
   items: ChecklistItem[]
+  caseId?: string
+  stageId?: string
+  stageIndex?: number
+  stageCount?: number
 }
 
 export type AppData = {

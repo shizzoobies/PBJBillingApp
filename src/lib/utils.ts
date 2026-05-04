@@ -2,11 +2,13 @@ import type {
   AppData,
   Checklist,
   ChecklistFrequency,
+  ChecklistTemplate,
   Client,
   Employee,
   Invoice,
   InvoiceLine,
   SubscriptionPlan,
+  TemplateStage,
   TimeEntry,
 } from './types'
 
@@ -102,58 +104,151 @@ export function sortChecklists(checklists: Checklist[]) {
   })
 }
 
+/**
+ * Backwards-compat: take a template that may still have flat `items` and ensure
+ * it has a `stages` array. Idempotent — templates that already have stages are
+ * returned with their stage shape normalized. Pre-stage templates' top-level
+ * assigneeId/viewerIds/editorIds become Stage 1's defaults.
+ */
+export function ensureTemplateStages(template: ChecklistTemplate): ChecklistTemplate {
+  const viewerIds = Array.isArray(template.viewerIds) ? [...template.viewerIds] : []
+  const editorIds = Array.isArray(template.editorIds) ? [...template.editorIds] : []
+  const existingStages = Array.isArray((template as { stages?: TemplateStage[] }).stages)
+    ? (template as { stages?: TemplateStage[] }).stages!
+    : null
+
+  if (existingStages && existingStages.length > 0) {
+    const stages = existingStages.map((stage, index) => ({
+      id: stage.id || makeId('stage'),
+      name: stage.name || `Stage ${index + 1}`,
+      assigneeId: stage.assigneeId || template.assigneeId,
+      offsetDays: Number.isFinite(stage.offsetDays) ? Number(stage.offsetDays) : 0,
+      viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
+      editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
+      items: Array.isArray(stage.items) ? stage.items.map((item) => ({ ...item })) : [],
+    }))
+    return { ...template, viewerIds, editorIds, stages }
+  }
+
+  const flatItems = Array.isArray(template.items) ? template.items.map((item) => ({ ...item })) : []
+  const stage: TemplateStage = {
+    id: makeId('stage'),
+    name: 'Stage 1',
+    assigneeId: template.assigneeId,
+    offsetDays: 0,
+    viewerIds,
+    editorIds,
+    items: flatItems,
+  }
+  return { ...template, viewerIds, editorIds, stages: [stage] }
+}
+
+function buildChecklistFromStage(
+  template: ChecklistTemplate,
+  stage: TemplateStage,
+  stageIndex: number,
+  stageCount: number,
+  caseId: string,
+  dueDate: string,
+): Checklist {
+  return {
+    id: makeId('check'),
+    templateId: template.id,
+    title: template.title,
+    clientId: template.clientId,
+    assigneeId: stage.assigneeId,
+    frequency: template.frequency,
+    dueDate,
+    viewerIds: [...stage.viewerIds],
+    editorIds: [...stage.editorIds],
+    createdAt: new Date().toISOString().slice(0, 10),
+    caseId,
+    stageId: stage.id,
+    stageIndex,
+    stageCount,
+    items: stage.items.map((item) => ({
+      id: makeId('item'),
+      label: item.label,
+      done: false,
+      ...(item.dueDate ? { dueDate: item.dueDate } : {}),
+      ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
+    })),
+  }
+}
+
 export function ensureRecurringChecklists(data: AppData) {
-  const templates = (data.checklistTemplates ?? []).map((template) => ({
-    ...template,
-    viewerIds: Array.isArray(template.viewerIds) ? template.viewerIds : [],
-    editorIds: Array.isArray(template.editorIds) ? template.editorIds : [],
-  }))
+  const templates = (data.checklistTemplates ?? []).map((template) => ensureTemplateStages(template))
   const existingChecklists = (data.checklists ?? []).map((checklist) => ({
     ...checklist,
     viewerIds: Array.isArray(checklist.viewerIds) ? checklist.viewerIds : [],
     editorIds: Array.isArray(checklist.editorIds) ? checklist.editorIds : [],
   }))
-  const existingKeys = new Set(
-    existingChecklists
-      .filter((checklist) => checklist.templateId)
-      .map((checklist) => `${checklist.templateId}:${checklist.dueDate}`),
-  )
-  const today = new Date().toISOString().slice(0, 10)
-  const checklistTemplates = templates.map((template) => ({
-    ...template,
-    items: template.items.map((item) => ({ ...item })),
-  }))
-  const checklists = [...existingChecklists]
-  let changed = false
 
-  for (const template of checklistTemplates) {
-    if (!template.active || template.items.length === 0) {
+  // Backfill case/stage fields on legacy checklists.
+  let changed = false
+  const templatesById = new Map(templates.map((template) => [template.id, template] as const))
+  const checklistsBackfilled = existingChecklists.map((checklist) => {
+    const next = { ...checklist }
+    let mutated = false
+    if (!next.caseId) {
+      next.caseId = next.id
+      mutated = true
+    }
+    if (typeof next.stageIndex !== 'number') {
+      next.stageIndex = 0
+      mutated = true
+    }
+    if (typeof next.stageCount !== 'number') {
+      next.stageCount = 1
+      mutated = true
+    }
+    if (!next.stageId && next.templateId) {
+      const owningTemplate = templatesById.get(next.templateId)
+      const firstStage = owningTemplate?.stages?.[0]
+      if (firstStage) {
+        next.stageId = firstStage.id
+        next.stageCount = owningTemplate!.stages.length
+        mutated = true
+      }
+    }
+    if (mutated) changed = true
+    return next
+  })
+
+  // Materialise stage 1 instances for due/overdue templates.
+  const today = new Date().toISOString().slice(0, 10)
+  const existingKeys = new Set(
+    checklistsBackfilled
+      .filter((checklist) => checklist.templateId)
+      .map((checklist) => `${checklist.templateId}:${checklist.dueDate}:${checklist.stageIndex ?? 0}`),
+  )
+  const checklists = [...checklistsBackfilled]
+
+  for (const template of templates) {
+    const stages = template.stages ?? []
+    if (!template.active || stages.length === 0 || stages[0].items.length === 0) {
       continue
     }
 
     let safetyCounter = 0
     while (template.nextDueDate <= today && safetyCounter < 60) {
-      const instanceKey = `${template.id}:${template.nextDueDate}`
+      const instanceKey = `${template.id}:${template.nextDueDate}:0`
       if (!existingKeys.has(instanceKey)) {
-        checklists.push({
-          id: makeId('check'),
-          templateId: template.id,
-          title: template.title,
-          clientId: template.clientId,
-          assigneeId: template.assigneeId,
-          frequency: template.frequency,
-          dueDate: template.nextDueDate,
-          viewerIds: Array.isArray(template.viewerIds) ? [...template.viewerIds] : [],
-          editorIds: Array.isArray(template.editorIds) ? [...template.editorIds] : [],
-          createdAt: new Date().toISOString().slice(0, 10),
-          items: template.items.map((item) => ({
-            id: makeId('item'),
-            label: item.label,
-            done: false,
-            ...(item.dueDate ? { dueDate: item.dueDate } : {}),
-            ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
-          })),
-        })
+        const stageOne = stages[0]
+        const stageOneDue = stageOne.offsetDays
+          ? addDays(template.nextDueDate, stageOne.offsetDays)
+          : template.nextDueDate
+        const caseId = makeId('case')
+        checklists.push(
+          buildChecklistFromStage(
+            template,
+            stageOne,
+            0,
+            stages.length,
+            caseId,
+            stageOneDue,
+          ),
+        )
         existingKeys.add(instanceKey)
         changed = true
       }
@@ -173,7 +268,7 @@ export function ensureRecurringChecklists(data: AppData) {
     changed,
     data: {
       ...data,
-      checklistTemplates,
+      checklistTemplates: templates,
       checklists: sortChecklists(checklists),
     },
   }
@@ -352,6 +447,20 @@ export function describeActivityAction(action: string): string {
       return 'removed'
     case 'client_profile_updated':
       return 'updated client profile'
+    case 'case_started':
+      return 'started case'
+    case 'case_advanced':
+      return 'advanced case'
+    case 'case_completed':
+      return 'completed case'
+    case 'template_stage_added':
+      return 'added template stage'
+    case 'template_stage_removed':
+      return 'removed template stage'
+    case 'template_stage_edited':
+      return 'edited template stage'
+    case 'template_stages_reordered':
+      return 'reordered template stages'
     default:
       return action.replace(/_/g, ' ')
   }

@@ -186,6 +186,68 @@ function sortChecklists(checklists) {
   })
 }
 
+/**
+ * Migrate a template that may still carry a flat `items` array into one that
+ * has a `stages` array. Idempotent. The legacy top-level
+ * assigneeId/viewerIds/editorIds become Stage 1's defaults so existing
+ * pre-Phase-3 templates show up as a single stage the owner can rename or
+ * extend. Forward-only chain: there is no send-back from later stages.
+ */
+function ensureTemplateStages(template) {
+  const viewerIds = Array.isArray(template.viewerIds) ? [...template.viewerIds] : []
+  const editorIds = Array.isArray(template.editorIds) ? [...template.editorIds] : []
+  const existingStages = Array.isArray(template.stages) ? template.stages : null
+  if (existingStages && existingStages.length > 0) {
+    const stages = existingStages.map((stage, index) => ({
+      id: stage.id || `stage-${randomUUID().slice(0, 8)}`,
+      name: stage.name || `Stage ${index + 1}`,
+      assigneeId: stage.assigneeId || template.assigneeId,
+      offsetDays: Number.isFinite(Number(stage.offsetDays)) ? Number(stage.offsetDays) : 0,
+      viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
+      editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
+      items: Array.isArray(stage.items) ? stage.items.map((item) => ({ ...item })) : [],
+    }))
+    return { ...template, viewerIds, editorIds, stages }
+  }
+
+  const flatItems = Array.isArray(template.items) ? template.items.map((item) => ({ ...item })) : []
+  const stage = {
+    id: `stage-${randomUUID().slice(0, 8)}`,
+    name: 'Stage 1',
+    assigneeId: template.assigneeId,
+    offsetDays: 0,
+    viewerIds,
+    editorIds,
+    items: flatItems,
+  }
+  return { ...template, viewerIds, editorIds, stages: [stage] }
+}
+
+function buildChecklistFromStage({ template, stage, stageIndex, stageCount, caseId, dueDate }) {
+  return {
+    id: `check-${randomUUID().slice(0, 8)}`,
+    templateId: template.id,
+    title: template.title,
+    clientId: template.clientId,
+    assigneeId: stage.assigneeId,
+    frequency: template.frequency,
+    dueDate,
+    viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
+    editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
+    caseId,
+    stageId: stage.id,
+    stageIndex,
+    stageCount,
+    items: stage.items.map((item) => ({
+      id: `item-${randomUUID().slice(0, 8)}`,
+      label: item.label,
+      done: false,
+      ...(item.dueDate ? { dueDate: item.dueDate } : {}),
+      ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
+    })),
+  }
+}
+
 function materializeRecurringChecklists(data) {
   const templates = Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []
   if (templates.length === 0) {
@@ -193,47 +255,78 @@ function materializeRecurringChecklists(data) {
   }
 
   const today = formatDateOnly(new Date())
-  const existingKeys = new Set(
-    data.checklists
-      .filter((checklist) => checklist.templateId && checklist.dueDate)
-      .map((checklist) => `${checklist.templateId}:${checklist.dueDate}`),
-  )
 
   let changed = false
-  const nextTemplates = templates.map((template) => ({
-    ...template,
-    items: (template.items ?? []).map((item) => ({ ...item })),
-  }))
-  const nextChecklists = [...data.checklists]
+  const nextTemplates = templates.map((template) => {
+    const migrated = ensureTemplateStages(template)
+    if (!Array.isArray(template.stages) || template.stages.length === 0) {
+      changed = true
+    }
+    return migrated
+  })
+
+  // Backfill case/stage fields on legacy checklist instances.
+  const templatesById = new Map(nextTemplates.map((template) => [template.id, template]))
+  const nextChecklists = (data.checklists ?? []).map((checklist) => {
+    const next = { ...checklist }
+    let mutated = false
+    if (!next.caseId) {
+      next.caseId = next.id
+      mutated = true
+    }
+    if (typeof next.stageIndex !== 'number') {
+      next.stageIndex = 0
+      mutated = true
+    }
+    if (typeof next.stageCount !== 'number') {
+      next.stageCount = 1
+      mutated = true
+    }
+    if (!next.stageId && next.templateId) {
+      const owningTemplate = templatesById.get(next.templateId)
+      const firstStage = owningTemplate?.stages?.[0]
+      if (firstStage) {
+        next.stageId = firstStage.id
+        next.stageCount = owningTemplate.stages.length
+        mutated = true
+      }
+    }
+    if (mutated) changed = true
+    return next
+  })
+
+  const existingKeys = new Set(
+    nextChecklists
+      .filter((checklist) => checklist.templateId && checklist.dueDate)
+      .map((checklist) => `${checklist.templateId}:${checklist.dueDate}:${checklist.stageIndex ?? 0}`),
+  )
 
   for (const template of nextTemplates) {
-    if (!template.active || !template.nextDueDate || (template.items ?? []).length === 0) {
+    const stages = template.stages ?? []
+    if (!template.active || !template.nextDueDate || stages.length === 0 || stages[0].items.length === 0) {
       continue
     }
 
     let safetyCounter = 0
     while (template.nextDueDate <= today && safetyCounter < 60) {
-      const instanceKey = `${template.id}:${template.nextDueDate}`
+      const instanceKey = `${template.id}:${template.nextDueDate}:0`
 
       if (!existingKeys.has(instanceKey)) {
-        nextChecklists.push({
-          id: `check-${randomUUID().slice(0, 8)}`,
-          templateId: template.id,
-          title: template.title,
-          clientId: template.clientId,
-          assigneeId: template.assigneeId,
-          dueDate: template.nextDueDate,
-          frequency: template.frequency,
-          viewerIds: Array.isArray(template.viewerIds) ? [...template.viewerIds] : [],
-          editorIds: Array.isArray(template.editorIds) ? [...template.editorIds] : [],
-          items: template.items.map((item) => ({
-            id: `item-${randomUUID().slice(0, 8)}`,
-            label: item.label,
-            done: false,
-            ...(item.dueDate ? { dueDate: item.dueDate } : {}),
-            ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
-          })),
-        })
+        const stageOne = stages[0]
+        const stageOneDue = stageOne.offsetDays
+          ? addDays(template.nextDueDate, Number(stageOne.offsetDays))
+          : template.nextDueDate
+        const caseId = `case-${randomUUID().slice(0, 8)}`
+        nextChecklists.push(
+          buildChecklistFromStage({
+            template,
+            stage: stageOne,
+            stageIndex: 0,
+            stageCount: stages.length,
+            caseId,
+            dueDate: stageOneDue,
+          }),
+        )
         existingKeys.add(instanceKey)
         changed = true
       }
@@ -261,6 +354,37 @@ function materializeRecurringChecklists(data) {
       checklists: sortChecklists(nextChecklists),
     },
   }
+}
+
+/**
+ * Forward-only stage progression. When `justCompletedChecklist` represents the
+ * final state of a stage instance whose every item is done, materialise the
+ * next stage as a fresh checklist instance. Returns the spawned checklist (if
+ * any). The caller guards against double-spawn by checking for an existing
+ * checklist with the same caseId/stageIndex+1 in the current data set.
+ */
+function buildSpawnedNextStageChecklist({ template, justCompletedChecklist }) {
+  const stages = template?.stages ?? []
+  if (stages.length === 0) return null
+  const currentStageIndex = typeof justCompletedChecklist.stageIndex === 'number'
+    ? justCompletedChecklist.stageIndex
+    : 0
+  const nextStageIndex = currentStageIndex + 1
+  if (nextStageIndex >= stages.length) return null
+  const nextStage = stages[nextStageIndex]
+  if (!nextStage || (nextStage.items ?? []).length === 0) return null
+  const offset = Number(nextStage.offsetDays) || 0
+  const dueDate = offset
+    ? addDays(justCompletedChecklist.dueDate, offset)
+    : justCompletedChecklist.dueDate
+  return buildChecklistFromStage({
+    template,
+    stage: nextStage,
+    stageIndex: nextStageIndex,
+    stageCount: stages.length,
+    caseId: justCompletedChecklist.caseId || justCompletedChecklist.id,
+    dueDate,
+  })
 }
 
 export class AppDataStore {
@@ -469,6 +593,29 @@ export class AppDataStore {
 
       await this.pool.query(`alter table checklist_template_items add column if not exists due_date date`)
       await this.pool.query(`alter table checklist_template_items add column if not exists assignee_id text`)
+      await this.pool.query(`alter table checklist_template_items add column if not exists stage_id text`)
+
+      // Phase 3: workflow stages on templates.
+      await this.pool.query(`
+        create table if not exists checklist_template_stages (
+          id text primary key,
+          template_id text not null references checklist_templates(id) on delete cascade,
+          name text not null,
+          assignee_id text,
+          offset_days int not null default 0,
+          position int not null default 0,
+          viewer_ids text[] not null default '{}',
+          editor_ids text[] not null default '{}',
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists checklist_template_stages_template_idx on checklist_template_stages(template_id)
+      `)
+      await this.pool.query(`alter table checklists add column if not exists case_id text`)
+      await this.pool.query(`alter table checklists add column if not exists stage_id text`)
+      await this.pool.query(`alter table checklists add column if not exists stage_index int`)
+      await this.pool.query(`alter table checklists add column if not exists stage_count int`)
 
       await this.pool.query(`
         create table if not exists invoice_drafts (
@@ -589,6 +736,7 @@ export class AppDataStore {
         checklistItemsResult,
         checklistTemplatesResult,
         checklistTemplateItemsResult,
+        checklistTemplateStagesResult,
       ] =
         await Promise.all([
           this.pool.query(`
@@ -621,7 +769,8 @@ export class AppDataStore {
             order by entry_date desc, id desc
           `),
           this.pool.query(`
-            select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids
+            select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
+                   case_id, stage_id, stage_index, stage_count
             from checklists
             order by due_date asc, id asc
           `),
@@ -636,9 +785,14 @@ export class AppDataStore {
             order by title asc
           `),
           this.pool.query(`
-            select id, template_id, label, sort_order, due_date, assignee_id
+            select id, template_id, label, sort_order, due_date, assignee_id, stage_id
             from checklist_template_items
             order by template_id asc, sort_order asc, id asc
+          `),
+          this.pool.query(`
+            select id, template_id, name, assignee_id, offset_days, position, viewer_ids, editor_ids
+            from checklist_template_stages
+            order by template_id asc, position asc, id asc
           `),
         ])
 
@@ -668,8 +822,8 @@ export class AppDataStore {
       }
 
       const templateItemsByTemplate = new Map()
+      const templateItemsByStage = new Map()
       for (const row of checklistTemplateItemsResult.rows) {
-        const existing = templateItemsByTemplate.get(row.template_id) ?? []
         const item = {
           id: row.id,
           label: row.label,
@@ -680,8 +834,31 @@ export class AppDataStore {
         if (row.assignee_id) {
           item.assigneeId = row.assignee_id
         }
-        existing.push(item)
-        templateItemsByTemplate.set(row.template_id, existing)
+        const allForTemplate = templateItemsByTemplate.get(row.template_id) ?? []
+        allForTemplate.push(item)
+        templateItemsByTemplate.set(row.template_id, allForTemplate)
+
+        if (row.stage_id) {
+          const list = templateItemsByStage.get(row.stage_id) ?? []
+          list.push(item)
+          templateItemsByStage.set(row.stage_id, list)
+        }
+      }
+
+      const stagesByTemplate = new Map()
+      for (const row of checklistTemplateStagesResult.rows) {
+        const stage = {
+          id: row.id,
+          name: row.name,
+          assigneeId: row.assignee_id ?? '',
+          offsetDays: Number(row.offset_days) || 0,
+          viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
+          editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
+          items: templateItemsByStage.get(row.id) ?? [],
+        }
+        const list = stagesByTemplate.get(row.template_id) ?? []
+        list.push(stage)
+        stagesByTemplate.set(row.template_id, list)
       }
 
       const data = {
@@ -741,6 +918,10 @@ export class AppDataStore {
           dueDate: row.due_date.toISOString().slice(0, 10),
           viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
           editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
+          caseId: row.case_id ?? row.id,
+          stageId: row.stage_id ?? null,
+          stageIndex: typeof row.stage_index === 'number' ? row.stage_index : 0,
+          stageCount: typeof row.stage_count === 'number' ? row.stage_count : 1,
           items: itemsByChecklist.get(row.id) ?? [],
         })),
         checklistTemplates: checklistTemplatesResult.rows.map((row) => ({
@@ -753,6 +934,7 @@ export class AppDataStore {
           active: row.active,
           viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
           editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
+          stages: stagesByTemplate.get(row.id) ?? [],
           items: templateItemsByTemplate.get(row.id) ?? [],
         })),
       }
@@ -797,6 +979,7 @@ export class AppDataStore {
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
         await client.query('delete from checklist_template_items')
+        await client.query('delete from checklist_template_stages')
         await client.query('delete from checklist_templates')
         await client.query('delete from time_entries')
         await client.query('delete from client_assignments')
@@ -914,22 +1097,45 @@ export class AppDataStore {
             ],
           )
 
-          for (const [index, item] of (template.items ?? []).entries()) {
+          // Stages-aware persistence. Migrate flat `items` into a synthetic
+          // Stage 1 if the template still carries the legacy shape so writes
+          // never lose data.
+          const migratedTemplate = ensureTemplateStages(template)
+          for (const [stageIdx, stage] of migratedTemplate.stages.entries()) {
             await client.query(
               `
-                insert into checklist_template_items (id, template_id, label, sort_order, due_date, assignee_id, updated_at)
-                values ($1, $2, $3, $4, $5, $6, now())
+                insert into checklist_template_stages (id, template_id, name, assignee_id, offset_days, position, viewer_ids, editor_ids, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, now())
               `,
-              [item.id, template.id, item.label, index, item.dueDate ?? null, item.assigneeId ?? null],
+              [
+                stage.id,
+                template.id,
+                stage.name,
+                stage.assigneeId || null,
+                Number(stage.offsetDays) || 0,
+                stageIdx,
+                Array.isArray(stage.viewerIds) ? stage.viewerIds : [],
+                Array.isArray(stage.editorIds) ? stage.editorIds : [],
+              ],
             )
+
+            for (const [index, item] of (stage.items ?? []).entries()) {
+              await client.query(
+                `
+                  insert into checklist_template_items (id, template_id, label, sort_order, due_date, assignee_id, stage_id, updated_at)
+                  values ($1, $2, $3, $4, $5, $6, $7, now())
+                `,
+                [item.id, template.id, item.label, index, item.dueDate ?? null, item.assigneeId ?? null, stage.id],
+              )
+            }
           }
         }
 
         for (const checklist of data.checklists) {
           await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
             `,
             [
               checklist.id,
@@ -941,6 +1147,10 @@ export class AppDataStore {
               checklist.dueDate,
               Array.isArray(checklist.viewerIds) ? checklist.viewerIds : [],
               Array.isArray(checklist.editorIds) ? checklist.editorIds : [],
+              checklist.caseId ?? checklist.id,
+              checklist.stageId ?? null,
+              typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0,
+              typeof checklist.stageCount === 'number' ? checklist.stageCount : 1,
             ],
           )
 
@@ -1008,6 +1218,10 @@ export class AppDataStore {
       id: checklist.id ?? `check-${randomUUID().slice(0, 8)}`,
       viewerIds: Array.isArray(checklist.viewerIds) ? checklist.viewerIds : [],
       editorIds: Array.isArray(checklist.editorIds) ? checklist.editorIds : [],
+      caseId: checklist.caseId ?? checklist.id ?? `case-${randomUUID().slice(0, 8)}`,
+      stageId: checklist.stageId ?? null,
+      stageIndex: typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0,
+      stageCount: typeof checklist.stageCount === 'number' ? checklist.stageCount : 1,
       items: checklist.items.map((item, index) => ({
         ...item,
         id: item.id ?? `item-${randomUUID().slice(0, 8)}`,
@@ -1017,6 +1231,9 @@ export class AppDataStore {
         assigneeId: item.assigneeId ?? null,
       })),
     }
+    if (!nextChecklist.caseId) {
+      nextChecklist.caseId = nextChecklist.id
+    }
 
     if (this.pool) {
       const client = await this.pool.connect()
@@ -1025,8 +1242,8 @@ export class AppDataStore {
         await client.query('begin')
         await client.query(
           `
-            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, updated_at)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, updated_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
           `,
           [
             nextChecklist.id,
@@ -1038,6 +1255,10 @@ export class AppDataStore {
             nextChecklist.dueDate,
             nextChecklist.viewerIds,
             nextChecklist.editorIds,
+            nextChecklist.caseId,
+            nextChecklist.stageId,
+            nextChecklist.stageIndex,
+            nextChecklist.stageCount,
           ],
         )
 
@@ -1095,7 +1316,9 @@ export class AppDataStore {
       }
 
       const data = await this.read()
-      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+      const updated = data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+      const spawn = await this.maybeSpawnNextStage(data, updated)
+      return { checklist: updated, spawned: spawn }
     }
 
     const data = await readJson(localDataPath)
@@ -1135,8 +1358,67 @@ export class AppDataStore {
       return null
     }
 
+    // Auto-spawn next stage atomically with the toggle so the next assignee
+    // sees the new live checklist on their next refetch.
+    const spawn = await this.maybeSpawnNextStage(data, updatedChecklist, { fileMode: true })
+    if (spawn) {
+      data.checklists = sortChecklists([...data.checklists, spawn])
+    }
+
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
+    return { checklist: updatedChecklist, spawned: spawn }
+  }
+
+  /**
+   * If every item on `checklist` is done, this is the final stage's last toggle,
+   * and there's a next stage on the parent template, materialise the next-stage
+   * checklist. Guarded against double-spawn by checking for an existing
+   * checklist with the same caseId+stageIndex+1. Returns the spawned checklist
+   * (if any) or null.
+   *
+   * In Postgres mode the new checklist is inserted via the existing
+   * createChecklist path so activity log + persistence are consistent. In file
+   * mode the caller is expected to push the returned checklist into data and
+   * persist (since we already hold the open data snapshot for that write).
+   */
+  async maybeSpawnNextStage(data, checklist, { fileMode = false } = {}) {
+    if (!checklist || !Array.isArray(checklist.items) || checklist.items.length === 0) {
+      return null
+    }
+    const allDone = checklist.items.every((item) => item.done)
+    if (!allDone) return null
+    if (!checklist.templateId) return null
+    const stageCount = typeof checklist.stageCount === 'number' ? checklist.stageCount : 1
+    const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
+    if (stageIndex + 1 >= stageCount) return null
+
+    const template = (data.checklistTemplates ?? []).find((t) => t.id === checklist.templateId)
+    if (!template) return null
+    const stages = Array.isArray(template.stages) && template.stages.length > 0
+      ? template.stages
+      : ensureTemplateStages(template).stages
+    if (!stages || stageIndex + 1 >= stages.length) return null
+
+    const caseId = checklist.caseId || checklist.id
+    const alreadySpawned = (data.checklists ?? []).some(
+      (entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1,
+    )
+    if (alreadySpawned) return null
+
+    const spawn = buildSpawnedNextStageChecklist({
+      template: { ...template, stages },
+      justCompletedChecklist: checklist,
+    })
+    if (!spawn) return null
+
+    if (fileMode) {
+      // Caller persists; just return the new instance.
+      return spawn
+    }
+
+    // Postgres mode: insert via createChecklist so it goes through the same
+    // path other instances do.
+    return this.createChecklist(spawn)
   }
 
   async setChecklistViewers(checklistId, viewerIds, editorIds) {
@@ -2029,6 +2311,172 @@ export class AppDataStore {
       .slice()
       .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
       .slice(0, safeLimit)
+  }
+
+  // ---- Phase 3: template stage mutations ----
+
+  async _readTemplateForStageUpdate(templateId) {
+    if (this.pool) {
+      const data = await this.read()
+      const template = (data.checklistTemplates ?? []).find((t) => t.id === templateId) ?? null
+      return { data, template, source: 'pg' }
+    }
+    const data = await readJson(localDataPath)
+    if (Array.isArray(data.checklists)) {
+      // ensure stage normalisation runs even before persistence
+    }
+    const templates = (data.checklistTemplates ?? []).map((t) => ensureTemplateStages(t))
+    data.checklistTemplates = templates
+    const template = templates.find((t) => t.id === templateId) ?? null
+    return { data, template, source: 'file' }
+  }
+
+  async _persistTemplate(data, source) {
+    if (source === 'pg') {
+      await this.write(data)
+    } else {
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+  }
+
+  async addTemplateStage(templateId, stageInput) {
+    const { data, template, source } = await this._readTemplateForStageUpdate(templateId)
+    if (!template) return null
+    const stages = Array.isArray(template.stages) ? template.stages : []
+    const newStage = {
+      id: `stage-${randomUUID().slice(0, 8)}`,
+      name: typeof stageInput?.name === 'string' && stageInput.name.trim()
+        ? stageInput.name.trim()
+        : `Stage ${stages.length + 1}`,
+      assigneeId: typeof stageInput?.assigneeId === 'string' && stageInput.assigneeId
+        ? stageInput.assigneeId
+        : template.assigneeId,
+      offsetDays: Number.isFinite(Number(stageInput?.offsetDays)) ? Number(stageInput.offsetDays) : 0,
+      viewerIds: Array.isArray(stageInput?.viewerIds) ? [...stageInput.viewerIds] : [],
+      editorIds: Array.isArray(stageInput?.editorIds) ? [...stageInput.editorIds] : [],
+      items: [],
+    }
+    const nextTemplates = (data.checklistTemplates ?? []).map((t) =>
+      t.id === templateId ? { ...t, stages: [...stages, newStage] } : t,
+    )
+    const nextData = { ...data, checklistTemplates: nextTemplates }
+    await this._persistTemplate(nextData, source)
+    return { template: nextTemplates.find((t) => t.id === templateId), stage: newStage }
+  }
+
+  async removeTemplateStage(templateId, stageId) {
+    const { data, template, source } = await this._readTemplateForStageUpdate(templateId)
+    if (!template) return null
+    const stages = Array.isArray(template.stages) ? template.stages : []
+    const filtered = stages.filter((stage) => stage.id !== stageId)
+    if (filtered.length === stages.length) return null
+    const nextTemplates = (data.checklistTemplates ?? []).map((t) =>
+      t.id === templateId ? { ...t, stages: filtered } : t,
+    )
+    const nextData = { ...data, checklistTemplates: nextTemplates }
+    await this._persistTemplate(nextData, source)
+    return nextTemplates.find((t) => t.id === templateId)
+  }
+
+  async patchTemplateStage(templateId, stageId, patch) {
+    const { data, template, source } = await this._readTemplateForStageUpdate(templateId)
+    if (!template) return null
+    const stages = Array.isArray(template.stages) ? template.stages : []
+    let mutated = false
+    const nextStages = stages.map((stage) => {
+      if (stage.id !== stageId) return stage
+      mutated = true
+      const next = { ...stage }
+      if (typeof patch?.name === 'string' && patch.name.trim()) next.name = patch.name.trim()
+      if (typeof patch?.assigneeId === 'string' && patch.assigneeId) next.assigneeId = patch.assigneeId
+      if (Number.isFinite(Number(patch?.offsetDays))) next.offsetDays = Number(patch.offsetDays)
+      if (Array.isArray(patch?.viewerIds)) {
+        next.viewerIds = [...new Set(patch.viewerIds.filter((id) => typeof id === 'string'))]
+      }
+      if (Array.isArray(patch?.editorIds)) {
+        next.editorIds = [...new Set(
+          patch.editorIds.filter((id) => typeof id === 'string' && next.viewerIds.includes(id)),
+        )]
+      }
+      return next
+    })
+    if (!mutated) return null
+    const nextTemplates = (data.checklistTemplates ?? []).map((t) =>
+      t.id === templateId ? { ...t, stages: nextStages } : t,
+    )
+    const nextData = { ...data, checklistTemplates: nextTemplates }
+    await this._persistTemplate(nextData, source)
+    return nextTemplates.find((t) => t.id === templateId)
+  }
+
+  async reorderTemplateStages(templateId, orderedStageIds) {
+    const { data, template, source } = await this._readTemplateForStageUpdate(templateId)
+    if (!template) return null
+    const stages = Array.isArray(template.stages) ? template.stages : []
+    const byId = new Map(stages.map((stage) => [stage.id, stage]))
+    const reordered = orderedStageIds
+      .map((id) => byId.get(id))
+      .filter((stage) => Boolean(stage))
+    const seen = new Set(orderedStageIds)
+    const tail = stages.filter((stage) => !seen.has(stage.id))
+    const nextStages = [...reordered, ...tail]
+    const nextTemplates = (data.checklistTemplates ?? []).map((t) =>
+      t.id === templateId ? { ...t, stages: nextStages } : t,
+    )
+    const nextData = { ...data, checklistTemplates: nextTemplates }
+    await this._persistTemplate(nextData, source)
+    return nextTemplates.find((t) => t.id === templateId)
+  }
+
+  /**
+   * Returns { template, client, stages: [{ stage, checklist }], activity }
+   * for the case identified by caseId. Owner-only — caller enforces auth.
+   */
+  async getCase(caseId) {
+    const data = await this.read()
+    const checklistsForCase = (data.checklists ?? []).filter((c) => c.caseId === caseId)
+    if (checklistsForCase.length === 0) return null
+    const templateId = checklistsForCase[0].templateId
+    const template = (data.checklistTemplates ?? []).find((t) => t.id === templateId) ?? null
+    if (!template) return null
+    const client = (data.clients ?? []).find((c) => c.id === template.clientId) ?? null
+    const stages = (template.stages ?? []).map((stage, index) => {
+      const checklist = checklistsForCase.find(
+        (c) => c.stageId === stage.id || c.stageIndex === index,
+      ) ?? null
+      return { stage, checklist }
+    })
+
+    // Pull case-tagged activity entries.
+    let activity = []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `
+          select id, user_id, action, target, created_at
+          from activity_log
+          where target like $1
+          order by created_at desc
+          limit 100
+        `,
+        [`%${caseId}%`],
+      )
+      activity = result.rows.map((row) => ({
+        id: row.id,
+        userId: row.user_id,
+        action: row.action,
+        target: row.target,
+        timestamp: row.created_at ? new Date(row.created_at).toISOString() : nowIso(),
+      }))
+    } else {
+      const authState = await readJson(localAuthPath)
+      activity = (authState.activityLog ?? [])
+        .filter((entry) => typeof entry.target === 'string' && entry.target.includes(caseId))
+        .slice()
+        .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
+        .slice(0, 100)
+    }
+
+    return { template, client, stages, activity, caseId }
   }
 
   async close() {

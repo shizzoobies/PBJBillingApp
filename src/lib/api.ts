@@ -282,6 +282,102 @@ async function safeErrorMessage(response: Response): Promise<string> {
   return ''
 }
 
+// ---- Phase 3: stages + cases ----
+
+export type CaseDetail = {
+  caseId: string
+  template: ChecklistTemplate
+  client: { id: string; name: string } | null
+  stages: Array<{ stage: NonNullable<ChecklistTemplate['stages']>[number]; checklist: Checklist | null }>
+  activity: ActivityEntry[]
+}
+
+export async function fetchCase(caseId: string, signal?: AbortSignal) {
+  const response = await fetch(`/api/cases/${encodeURIComponent(caseId)}`, {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load case (${response.status})`)
+  }
+  return (await response.json()) as CaseDetail
+}
+
+export async function addTemplateStageRequest(
+  templateId: string,
+  payload: {
+    name?: string
+    assigneeId?: string
+    offsetDays?: number
+    viewerIds?: string[]
+    editorIds?: string[]
+  },
+) {
+  const response = await fetch(`/api/checklist-templates/${templateId}/stages`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to add stage (${response.status})`)
+  }
+  return (await response.json()) as ChecklistTemplate
+}
+
+export async function patchTemplateStageRequest(
+  templateId: string,
+  stageId: string,
+  patch: {
+    name?: string
+    assigneeId?: string
+    offsetDays?: number
+    viewerIds?: string[]
+    editorIds?: string[]
+  },
+) {
+  const response = await fetch(
+    `/api/checklist-templates/${templateId}/stages/${encodeURIComponent(stageId)}`,
+    {
+      credentials: 'same-origin',
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to update stage (${response.status})`)
+  }
+  return (await response.json()) as ChecklistTemplate
+}
+
+export async function deleteTemplateStageRequest(templateId: string, stageId: string) {
+  const response = await fetch(
+    `/api/checklist-templates/${templateId}/stages/${encodeURIComponent(stageId)}`,
+    {
+      credentials: 'same-origin',
+      method: 'DELETE',
+    },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to remove stage (${response.status})`)
+  }
+  return (await response.json()) as ChecklistTemplate
+}
+
+export async function reorderTemplateStagesRequest(templateId: string, stageIds: string[]) {
+  const response = await fetch(`/api/checklist-templates/${templateId}/stages/reorder`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stageIds }),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to reorder stages (${response.status})`)
+  }
+  return (await response.json()) as ChecklistTemplate
+}
+
 export async function setTemplateViewersRequest(
   templateId: string,
   viewerIds: string[],

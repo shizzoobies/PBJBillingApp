@@ -2192,3 +2192,162 @@ td strong {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---- Phase 3: stages + case timeline ---- */
+.stage-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: #ecf3ff;
+  color: #1c4587;
+  border-radius: 999px;
+}
+.stage-badge-link {
+  color: #1c4587;
+  text-decoration: underline;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.stages-accordion {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 0;
+}
+.stage-card {
+  border: 1px solid #e5dfd2;
+  border-radius: 10px;
+  background: #fbf9f3;
+  overflow: hidden;
+}
+.stage-card.dragging {
+  opacity: 0.5;
+}
+.stage-card.drop-target {
+  outline: 2px dashed #c7a248;
+}
+.stage-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #f3ecd9;
+  cursor: grab;
+}
+.stage-card-header:active {
+  cursor: grabbing;
+}
+.stage-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+}
+.stage-name-input {
+  flex: 1 1 auto;
+}
+.stage-index-pill {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: #fff;
+  border: 1px solid #d8caa1;
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: #6b5f3a;
+}
+.stage-meta-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.stage-meta-row .field {
+  flex: 1 1 180px;
+  min-width: 180px;
+}
+
+.case-detail.content-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 960px) {
+  .case-detail.content-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.case-timeline {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.case-timeline-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.case-timeline-dot {
+  flex: 0 0 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #1c4587;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 13px;
+}
+.case-timeline-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.case-timeline-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.case-timeline-meta {
+  font-size: 13px;
+  color: #6e6571;
+}
+.activity-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.activity-row {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px;
+  border: 1px solid #e5dfd2;
+  border-radius: 8px;
+  background: #fbf9f3;
+  font-size: 13px;
+}
+.activity-action {
+  font-weight: 600;
+}
+.activity-target {
+  color: #4a4640;
+}
+.activity-time {
+  color: #8a8378;
+  font-size: 12px;
+}

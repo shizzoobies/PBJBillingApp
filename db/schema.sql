@@ -139,12 +139,33 @@ create table if not exists checklist_template_items (
   sort_order integer not null default 0,
   due_date date,
   assignee_id text,
+  stage_id text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
 alter table checklist_template_items add column if not exists due_date date;
 alter table checklist_template_items add column if not exists assignee_id text;
+alter table checklist_template_items add column if not exists stage_id text;
+
+-- Phase 3: workflow stages on templates
+create table if not exists checklist_template_stages (
+  id text primary key,
+  template_id text not null references checklist_templates(id) on delete cascade,
+  name text not null,
+  assignee_id text,
+  offset_days int not null default 0,
+  position int not null default 0,
+  viewer_ids text[] not null default '{}',
+  editor_ids text[] not null default '{}',
+  updated_at timestamptz not null default now()
+);
+create index if not exists checklist_template_stages_template_idx on checklist_template_stages(template_id);
+
+alter table checklists add column if not exists case_id text;
+alter table checklists add column if not exists stage_id text;
+alter table checklists add column if not exists stage_index int;
+alter table checklists add column if not exists stage_count int;
 
 create table if not exists invoice_drafts (
   id text primary key,

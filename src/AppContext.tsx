@@ -8,6 +8,7 @@ import type {
   Role,
   SessionUser,
   SubscriptionPlan,
+  TemplateStage,
   TimeEntry,
   TimerState,
 } from './lib/types'
@@ -46,21 +47,44 @@ export type AppContextValue = {
     updater: (template: ChecklistTemplate) => ChecklistTemplate,
   ) => void
   deleteChecklistTemplate: (templateId: string) => void
-  addChecklistTemplateItem: (templateId: string) => void
-  updateChecklistTemplateItem: (templateId: string, itemId: string, label: string) => void
+  addChecklistTemplateItem: (templateId: string, stageId: string) => void
+  updateChecklistTemplateItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    label: string,
+  ) => void
   setChecklistTemplateItemDueDate: (
     templateId: string,
+    stageId: string,
     itemId: string,
     dueDate: string,
   ) => void
   setChecklistTemplateItemAssignee: (
     templateId: string,
+    stageId: string,
     itemId: string,
     assigneeId: string,
   ) => void
-  reorderChecklistTemplateItems: (templateId: string, orderedIds: string[]) => void
-  bulkAddChecklistTemplateItems: (templateId: string, labels: string[]) => void
-  removeChecklistTemplateItem: (templateId: string, itemId: string) => void
+  reorderChecklistTemplateItems: (
+    templateId: string,
+    stageId: string,
+    orderedIds: string[],
+  ) => void
+  bulkAddChecklistTemplateItems: (
+    templateId: string,
+    stageId: string,
+    labels: string[],
+  ) => void
+  removeChecklistTemplateItem: (templateId: string, stageId: string, itemId: string) => void
+  addTemplateStage: (templateId: string) => void
+  removeTemplateStage: (templateId: string, stageId: string) => void
+  patchTemplateStage: (
+    templateId: string,
+    stageId: string,
+    patch: Partial<TemplateStage>,
+  ) => void
+  reorderTemplateStages: (templateId: string, orderedStageIds: string[]) => void
   duplicateChecklistTemplate: (templateId: string) => void
   reorderChecklistItems: (checklistId: string, orderedIds: string[]) => void
   bulkAddChecklistItems: (checklistId: string, labels: string[]) => void

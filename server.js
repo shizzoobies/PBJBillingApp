@@ -416,12 +416,13 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const updatedChecklist = await appDataStore.toggleChecklistItem(checklistId, itemId)
-      if (!updatedChecklist) {
+      const toggleResult = await appDataStore.toggleChecklistItem(checklistId, itemId)
+      if (!toggleResult || !toggleResult.checklist) {
         sendJson(response, 404, { error: 'Checklist item not found' })
         return
       }
 
+      const updatedChecklist = toggleResult.checklist
       const toggledItem = updatedChecklist.items.find((entry) => entry.id === itemId)
       const action = toggledItem?.done ? 'checklist_item_checked' : 'checklist_item_unchecked'
       await appDataStore.recordActivity(
@@ -429,6 +430,32 @@ const server = createServer(async (request, response) => {
         action,
         `${updatedChecklist.title}: ${toggledItem?.label ?? ''}`.trim(),
       )
+
+      // Phase 3 stage progression activity logging.
+      if (toggleResult.spawned) {
+        const fromIdx = (updatedChecklist.stageIndex ?? 0) + 1
+        const toIdx = fromIdx + 1
+        const caseId = updatedChecklist.caseId || updatedChecklist.id
+        await appDataStore.recordActivity(
+          session.user.id,
+          'case_advanced',
+          `${updatedChecklist.title} · case ${caseId} · stage ${fromIdx} -> stage ${toIdx}`,
+        )
+      } else if (
+        toggledItem?.done &&
+        updatedChecklist.items.every((item) => item.done) &&
+        typeof updatedChecklist.stageIndex === 'number' &&
+        typeof updatedChecklist.stageCount === 'number' &&
+        updatedChecklist.stageIndex + 1 >= updatedChecklist.stageCount
+      ) {
+        const caseId = updatedChecklist.caseId || updatedChecklist.id
+        await appDataStore.recordActivity(
+          session.user.id,
+          'case_completed',
+          `${updatedChecklist.title} · case ${caseId}`,
+        )
+      }
+
       sendJson(response, 200, updatedChecklist)
       return
     }
@@ -899,6 +926,115 @@ const server = createServer(async (request, response) => {
       const limit = Number(requestUrl.searchParams.get('limit')) || 20
       const entries = await appDataStore.getRecentActivity(userId, limit)
       sendJson(response, 200, { entries })
+      return
+    }
+
+    // ---- Phase 3: case timeline ----
+    const caseDetailMatch = normalizedPath.match(/^\/api\/cases\/([^/]+)$/)
+    if (caseDetailMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can view cases' })
+        return
+      }
+      const caseRecord = await appDataStore.getCase(decodeURIComponent(caseDetailMatch[1]))
+      if (!caseRecord) {
+        sendJson(response, 404, { error: 'Case not found' })
+        return
+      }
+      sendJson(response, 200, caseRecord)
+      return
+    }
+
+    // ---- Phase 3: template stage CRUD (owner only) ----
+    const templateStageReorderMatch = normalizedPath.match(
+      /^\/api\/checklist-templates\/([^/]+)\/stages\/reorder$/,
+    )
+    if (templateStageReorderMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can reorder stages' })
+        return
+      }
+      const templateId = templateStageReorderMatch[1]
+      const payload = await readJsonBody(request)
+      const stageIds = Array.isArray(payload?.stageIds)
+        ? payload.stageIds.filter((id) => typeof id === 'string')
+        : []
+      const updated = await appDataStore.reorderTemplateStages(templateId, stageIds)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Template not found' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'template_stages_reordered', updated.title)
+      sendJson(response, 200, updated)
+      return
+    }
+
+    const templateStageItemMatch = normalizedPath.match(
+      /^\/api\/checklist-templates\/([^/]+)\/stages(?:\/([^/]+))?$/,
+    )
+    if (templateStageItemMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can update template stages' })
+        return
+      }
+      const templateId = templateStageItemMatch[1]
+      const stageId = templateStageItemMatch[2]
+
+      if (!stageId && request.method === 'POST') {
+        const payload = await readJsonBody(request)
+        const result = await appDataStore.addTemplateStage(templateId, payload ?? {})
+        if (!result) {
+          sendJson(response, 404, { error: 'Template not found' })
+          return
+        }
+        await appDataStore.recordActivity(
+          session.user.id,
+          'template_stage_added',
+          `${result.template.title}: ${result.stage.name}`,
+        )
+        sendJson(response, 201, result.template)
+        return
+      }
+
+      if (stageId && request.method === 'PATCH') {
+        const payload = await readJsonBody(request)
+        const updated = await appDataStore.patchTemplateStage(templateId, stageId, payload ?? {})
+        if (!updated) {
+          sendJson(response, 404, { error: 'Stage not found' })
+          return
+        }
+        const stage = (updated.stages ?? []).find((s) => s.id === stageId)
+        await appDataStore.recordActivity(
+          session.user.id,
+          'template_stage_edited',
+          `${updated.title}: ${stage?.name ?? stageId}`,
+        )
+        sendJson(response, 200, updated)
+        return
+      }
+
+      if (stageId && request.method === 'DELETE') {
+        const updated = await appDataStore.removeTemplateStage(templateId, stageId)
+        if (!updated) {
+          sendJson(response, 404, { error: 'Stage not found' })
+          return
+        }
+        await appDataStore.recordActivity(
+          session.user.id,
+          'template_stage_removed',
+          `${updated.title}: ${stageId}`,
+        )
+        sendJson(response, 200, updated)
+        return
+      }
+
+      sendJson(response, 405, { error: 'Method not allowed' })
       return
     }
 

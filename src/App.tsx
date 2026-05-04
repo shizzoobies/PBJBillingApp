@@ -50,6 +50,7 @@ import {
   makeId,
   sortChecklists,
 } from './lib/utils'
+import { CaseDetailPage } from './pages/CaseDetailPage'
 import { ChecklistsPage } from './pages/ChecklistsPage'
 import { ClientDetailPage } from './pages/ClientDetailPage'
 import { ClientsPage } from './pages/ClientsPage'
@@ -400,44 +401,59 @@ function App() {
     }))
   }
 
-  const addChecklistTemplateItem = (templateId: string) => {
+  // Phase 3: stage-aware mutators. Each mutator targets a specific stage by id;
+  // the legacy single-list handlers are gone. Forward-only: items can move
+  // across stages via remove/add, but there's no send-back chain.
+  const mutateStage = (
+    templateId: string,
+    stageId: string,
+    updater: (stage: ChecklistTemplate['stages'][number]) => ChecklistTemplate['stages'][number],
+  ) => {
     updateChecklistTemplate(templateId, (template) => ({
       ...template,
-      items: [...template.items, { id: makeId('template-item'), label: 'New checklist item' }],
+      stages: (template.stages ?? []).map((stage) => (stage.id === stageId ? updater(stage) : stage)),
     }))
   }
 
-  const updateChecklistTemplateItem = (templateId: string, itemId: string, label: string) => {
-    updateChecklistTemplate(templateId, (template) => ({
-      ...template,
-      items: template.items.map((item) => (item.id === itemId ? { ...item, label } : item)),
+  const addChecklistTemplateItem = (templateId: string, stageId: string) => {
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: [...stage.items, { id: makeId('template-item'), label: 'New checklist item' }],
     }))
   }
 
-  const removeChecklistTemplateItem = (templateId: string, itemId: string) => {
-    updateChecklistTemplate(templateId, (template) => ({
-      ...template,
-      items: template.items.filter((item) => item.id !== itemId),
+  const updateChecklistTemplateItem = (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    label: string,
+  ) => {
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.map((item) => (item.id === itemId ? { ...item, label } : item)),
+    }))
+  }
+
+  const removeChecklistTemplateItem = (templateId: string, stageId: string, itemId: string) => {
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.filter((item) => item.id !== itemId),
     }))
   }
 
   const setChecklistTemplateItemDueDate = (
     templateId: string,
+    stageId: string,
     itemId: string,
     dueDate: string,
   ) => {
-    updateChecklistTemplate(templateId, (template) => ({
-      ...template,
-      items: template.items.map((item) => {
-        if (item.id !== itemId) {
-          return item
-        }
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.map((item) => {
+        if (item.id !== itemId) return item
         const next = { ...item }
-        if (!dueDate) {
-          delete next.dueDate
-        } else {
-          next.dueDate = dueDate
-        }
+        if (!dueDate) delete next.dueDate
+        else next.dueDate = dueDate
         return next
       }),
     }))
@@ -445,49 +461,100 @@ function App() {
 
   const setChecklistTemplateItemAssignee = (
     templateId: string,
+    stageId: string,
     itemId: string,
     assigneeId: string,
   ) => {
-    updateChecklistTemplate(templateId, (template) => ({
-      ...template,
-      items: template.items.map((item) => {
-        if (item.id !== itemId) {
-          return item
-        }
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.map((item) => {
+        if (item.id !== itemId) return item
         const next = { ...item }
-        if (!assigneeId) {
-          delete next.assigneeId
-        } else {
-          next.assigneeId = assigneeId
-        }
+        if (!assigneeId) delete next.assigneeId
+        else next.assigneeId = assigneeId
         return next
       }),
     }))
   }
 
-  const reorderChecklistTemplateItems = (templateId: string, orderedIds: string[]) => {
-    updateChecklistTemplate(templateId, (template) => {
-      const byId = new Map(template.items.map((item) => [item.id, item]))
+  const reorderChecklistTemplateItems = (
+    templateId: string,
+    stageId: string,
+    orderedIds: string[],
+  ) => {
+    mutateStage(templateId, stageId, (stage) => {
+      const byId = new Map(stage.items.map((item) => [item.id, item]))
       const next = orderedIds
         .map((id) => byId.get(id))
-        .filter((item): item is (typeof template.items)[number] => Boolean(item))
+        .filter((item): item is (typeof stage.items)[number] => Boolean(item))
       const seen = new Set(orderedIds)
-      const tail = template.items.filter((item) => !seen.has(item.id))
-      return { ...template, items: [...next, ...tail] }
+      const tail = stage.items.filter((item) => !seen.has(item.id))
+      return { ...stage, items: [...next, ...tail] }
     })
   }
 
-  const bulkAddChecklistTemplateItems = (templateId: string, labels: string[]) => {
-    if (labels.length === 0) {
-      return
-    }
-    updateChecklistTemplate(templateId, (template) => ({
-      ...template,
+  const bulkAddChecklistTemplateItems = (
+    templateId: string,
+    stageId: string,
+    labels: string[],
+  ) => {
+    if (labels.length === 0) return
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
       items: [
-        ...template.items,
+        ...stage.items,
         ...labels.map((label) => ({ id: makeId('template-item'), label })),
       ],
     }))
+  }
+
+  const addTemplateStage = (templateId: string) => {
+    updateChecklistTemplate(templateId, (template) => {
+      const existing = template.stages ?? []
+      const defaultAssignee = existing[existing.length - 1]?.assigneeId || template.assigneeId
+      return {
+        ...template,
+        stages: [
+          ...existing,
+          {
+            id: makeId('stage'),
+            name: `Stage ${existing.length + 1}`,
+            assigneeId: defaultAssignee,
+            offsetDays: 0,
+            viewerIds: [],
+            editorIds: [],
+            items: [],
+          },
+        ],
+      }
+    })
+  }
+
+  const removeTemplateStage = (templateId: string, stageId: string) => {
+    updateChecklistTemplate(templateId, (template) => ({
+      ...template,
+      stages: (template.stages ?? []).filter((stage) => stage.id !== stageId),
+    }))
+  }
+
+  const patchTemplateStage = (
+    templateId: string,
+    stageId: string,
+    patch: Partial<ChecklistTemplate['stages'][number]>,
+  ) => {
+    mutateStage(templateId, stageId, (stage) => ({ ...stage, ...patch }))
+  }
+
+  const reorderTemplateStages = (templateId: string, orderedStageIds: string[]) => {
+    updateChecklistTemplate(templateId, (template) => {
+      const byId = new Map((template.stages ?? []).map((stage) => [stage.id, stage]))
+      const reordered = orderedStageIds
+        .map((id) => byId.get(id))
+        .filter((stage): stage is ChecklistTemplate['stages'][number] => Boolean(stage))
+      const seen = new Set(orderedStageIds)
+      const tail = (template.stages ?? []).filter((stage) => !seen.has(stage.id))
+      return { ...template, stages: [...reordered, ...tail] }
+    })
   }
 
   const reorderChecklistItems = async (checklistId: string, orderedIds: string[]) => {
@@ -596,9 +663,12 @@ function App() {
         title: `${source.title} (copy)`,
         viewerIds: [...(source.viewerIds ?? [])],
         editorIds: [...(source.editorIds ?? [])],
-        items: source.items.map((item) => ({
-          id: makeId('template-item'),
-          label: item.label,
+        stages: (source.stages ?? []).map((stage) => ({
+          ...stage,
+          id: makeId('stage'),
+          viewerIds: [...(stage.viewerIds ?? [])],
+          editorIds: [...(stage.editorIds ?? [])],
+          items: stage.items.map((item) => ({ id: makeId('template-item'), label: item.label })),
         })),
       }
 
@@ -745,6 +815,10 @@ function App() {
     reorderChecklistTemplateItems,
     bulkAddChecklistTemplateItems,
     removeChecklistTemplateItem,
+    addTemplateStage,
+    removeTemplateStage,
+    patchTemplateStage,
+    reorderTemplateStages,
     duplicateChecklistTemplate,
     reorderChecklistItems,
     bulkAddChecklistItems,
@@ -778,7 +852,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   const location = useLocation()
   const navigate = useNavigate()
   useEffect(() => {
-    const ownerOnly = ['/reports', '/gantt', '/invoices', '/plans', '/team']
+    const ownerOnly = ['/reports', '/gantt', '/invoices', '/plans', '/team', '/cases']
     if (!ownerMode && ownerOnly.some((path) => location.pathname.startsWith(path))) {
       navigate('/time', { replace: true })
     }
@@ -836,6 +910,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           element={
             <OwnerOnly ownerMode={ownerMode}>
               <TeamPage />
+            </OwnerOnly>
+          }
+        />
+        <Route
+          path="/cases/:caseId"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <CaseDetailPage />
             </OwnerOnly>
           }
         />
