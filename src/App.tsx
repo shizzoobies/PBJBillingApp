@@ -56,6 +56,7 @@ import { ClientDetailPage } from './pages/ClientDetailPage'
 import { ClientsPage } from './pages/ClientsPage'
 import { GanttPage } from './pages/GanttPage'
 import { InvoicesPage } from './pages/InvoicesPage'
+import { NotificationsPage } from './pages/NotificationsPage'
 import { PlansPage } from './pages/PlansPage'
 import { ReportsPage } from './pages/ReportsPage'
 import { TeamPage } from './pages/TeamPage'
@@ -921,6 +922,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
             </OwnerOnly>
           }
         />
+        <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="*" element={<Navigate to="/time" replace />} />
       </Route>
     </Routes>

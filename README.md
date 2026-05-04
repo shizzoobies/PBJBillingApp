@@ -35,6 +35,8 @@ npm start
 - `DATABASE_URL`: when present, the server stores shared app data in Postgres.
 - `AUTH_DEMO_PASSWORD`: optional override for the temporary seeded login password. Defaults to `pbj-demo`.
 - `APP_PUBLIC_URL`: public origin of the deployed app (e.g. `https://pbjbillingapp-production.up.railway.app`). Used to build magic-link URLs surfaced on the owner-only Team page. When unset, the server falls back to constructing the URL from the incoming request host.
+- `RESEND_API_KEY`: optional. When set, notification emails are sent via the [Resend](https://resend.com) HTTP API in addition to being persisted for the in-app bell. When unset, notifications are in-app only.
+- `EMAIL_FROM`: required if `RESEND_API_KEY` is set. The `From:` address used for notification emails (e.g. `notifications@pbj.local`). Without it, the email side is silently skipped even if the API key is present.
 
 If `DATABASE_URL` is not set, the server falls back to `tmp/app-data.json` so local development still uses the API layer without needing a database immediately.
 

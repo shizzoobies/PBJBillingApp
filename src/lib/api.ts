@@ -5,6 +5,7 @@ import {
   type Checklist,
   type ChecklistTemplate,
   type LoginOption,
+  type NotificationEntry,
   type SessionUser,
   type TeamMember,
   type TimeEntry,
@@ -395,4 +396,56 @@ export async function setTemplateViewersRequest(
   }
 
   return (await response.json()) as ChecklistTemplate
+}
+
+// ---- Phase 5: notifications ----
+
+export async function fetchNotifications(
+  { unreadOnly = false, limit = 50 }: { unreadOnly?: boolean; limit?: number } = {},
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams()
+  if (unreadOnly) params.set('unreadOnly', 'true')
+  if (limit) params.set('limit', String(limit))
+  const response = await fetch(`/api/notifications?${params.toString()}`, {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load notifications (${response.status})`)
+  }
+  return (await response.json()) as { entries: NotificationEntry[] }
+}
+
+export async function fetchUnreadNotificationCount(signal?: AbortSignal) {
+  const response = await fetch('/api/notifications/unread-count', {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load unread count (${response.status})`)
+  }
+  return (await response.json()) as { count: number }
+}
+
+export async function markNotificationReadRequest(notificationId: string) {
+  const response = await fetch(
+    `/api/notifications/${encodeURIComponent(notificationId)}/read`,
+    { credentials: 'same-origin', method: 'POST' },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to mark notification read (${response.status})`)
+  }
+  return (await response.json()) as NotificationEntry
+}
+
+export async function markAllNotificationsReadRequest() {
+  const response = await fetch('/api/notifications/read-all', {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to mark all read (${response.status})`)
+  }
+  return (await response.json()) as { updated: number }
 }

@@ -185,3 +185,16 @@ create table if not exists sessions (
   expires_at timestamptz not null,
   created_at timestamptz not null default now()
 );
+
+-- Phase 5: notifications (in-app bell + email-ready)
+create table if not exists notifications (
+  id text primary key,
+  user_id text not null,
+  event text not null,
+  message text not null,
+  link text,
+  payload jsonb,
+  read_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists notifications_user_idx on notifications(user_id, created_at desc);

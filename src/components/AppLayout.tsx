@@ -8,6 +8,7 @@ import {
 import { NavLink, Outlet } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { currency, formatHours, getBillingPeriodLabel, isInBillingPeriod } from '../lib/utils'
+import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
 import { navItems } from './navItems'
 
@@ -116,6 +117,7 @@ export function AppLayout() {
                 value={billingPeriod}
               />
             </label>
+            <NotificationBell />
             <div className="account-pill" aria-label="Current account">
               <strong>{sessionUser.name}</strong>
               <span>{sessionUser.staffRole}</span>

@@ -438,6 +438,26 @@ export class AppDataStore {
         )
       `)
 
+      // Phase 5: notifications (in-app bell + email-ready).
+      await this.pool.query(`
+        create table if not exists notifications (
+          id text primary key,
+          user_id text not null,
+          event text not null,
+          message text not null,
+          link text,
+          payload jsonb,
+          read_at timestamptz,
+          created_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`alter table notifications add column if not exists link text`)
+      await this.pool.query(`alter table notifications add column if not exists payload jsonb`)
+      await this.pool.query(`alter table notifications add column if not exists read_at timestamptz`)
+      await this.pool.query(`
+        create index if not exists notifications_user_idx on notifications(user_id, created_at desc)
+      `)
+
       await this.pool.query(`
         create table if not exists subscription_plans (
           id text primary key,
@@ -646,7 +666,7 @@ export class AppDataStore {
       await writeFile(
         localAuthPath,
         JSON.stringify(
-          { users: createSeededAuthUsers(), sessions: [], activityLog: [] },
+          { users: createSeededAuthUsers(), sessions: [], activityLog: [], notifications: [] },
           null,
           2,
         ),
@@ -682,6 +702,10 @@ export class AppDataStore {
       })
       if (!Array.isArray(authState.activityLog)) {
         authState.activityLog = []
+        mutated = true
+      }
+      if (!Array.isArray(authState.notifications)) {
+        authState.notifications = []
         mutated = true
       }
       if (mutated) {
@@ -2477,6 +2501,186 @@ export class AppDataStore {
     }
 
     return { template, client, stages, activity, caseId }
+  }
+
+  // ---- Phase 5: notifications ----
+
+  async createNotification(userId, event, message, link, payload) {
+    if (!userId || !event) {
+      return null
+    }
+    const id = `notif-${randomUUID().slice(0, 8)}`
+    const createdAt = nowIso()
+    const safeMessage = String(message ?? '')
+    const safeLink = link ? String(link) : null
+    const safePayload = payload && typeof payload === 'object' ? payload : {}
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into notifications (id, user_id, event, message, link, payload, created_at)
+         values ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+        [id, userId, event, safeMessage, safeLink, JSON.stringify(safePayload), createdAt],
+      )
+      return {
+        id,
+        userId,
+        event,
+        message: safeMessage,
+        link: safeLink,
+        payload: safePayload,
+        readAt: null,
+        createdAt,
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.notifications)) {
+      authState.notifications = []
+    }
+    const entry = {
+      id,
+      userId,
+      event,
+      message: safeMessage,
+      link: safeLink,
+      payload: safePayload,
+      readAt: null,
+      createdAt,
+    }
+    authState.notifications.push(entry)
+    // Trim per-user to last 100 (oldest dropped).
+    const counts = new Map()
+    const trimmed = []
+    for (let i = authState.notifications.length - 1; i >= 0; i -= 1) {
+      const item = authState.notifications[i]
+      const next = (counts.get(item.userId) ?? 0) + 1
+      if (next <= 100) {
+        trimmed.unshift(item)
+        counts.set(item.userId, next)
+      }
+    }
+    authState.notifications = trimmed
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return entry
+  }
+
+  async listNotifications(userId, { limit = 50, unreadOnly = false } = {}) {
+    if (!userId) return []
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || 50))
+
+    if (this.pool) {
+      const params = [userId]
+      let where = `where user_id = $1`
+      if (unreadOnly) {
+        where += ` and read_at is null`
+      }
+      params.push(safeLimit)
+      const result = await this.pool.query(
+        `select id, user_id, event, message, link, payload, read_at, created_at
+         from notifications
+         ${where}
+         order by created_at desc
+         limit $${params.length}`,
+        params,
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        userId: row.user_id,
+        event: row.event,
+        message: row.message,
+        link: row.link,
+        payload: row.payload ?? {},
+        readAt: row.read_at ? new Date(row.read_at).toISOString() : null,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : nowIso(),
+      }))
+    }
+
+    const authState = await readJson(localAuthPath)
+    return (authState.notifications ?? [])
+      .filter((entry) => entry.userId === userId)
+      .filter((entry) => (unreadOnly ? !entry.readAt : true))
+      .slice()
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .slice(0, safeLimit)
+  }
+
+  async markNotificationRead(notificationId, userId) {
+    if (!notificationId || !userId) return null
+    const readAt = nowIso()
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update notifications
+         set read_at = coalesce(read_at, $3)
+         where id = $1 and user_id = $2
+         returning id, user_id, event, message, link, payload, read_at, created_at`,
+        [notificationId, userId, readAt],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return {
+        id: row.id,
+        userId: row.user_id,
+        event: row.event,
+        message: row.message,
+        link: row.link,
+        payload: row.payload ?? {},
+        readAt: row.read_at ? new Date(row.read_at).toISOString() : readAt,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : nowIso(),
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    let found = null
+    authState.notifications = (authState.notifications ?? []).map((entry) => {
+      if (entry.id !== notificationId || entry.userId !== userId) return entry
+      const next = { ...entry, readAt: entry.readAt ?? readAt }
+      found = next
+      return next
+    })
+    if (!found) return null
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return found
+  }
+
+  async markAllNotificationsRead(userId) {
+    if (!userId) return 0
+    const readAt = nowIso()
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update notifications set read_at = $2 where user_id = $1 and read_at is null`,
+        [userId, readAt],
+      )
+      return result.rowCount ?? 0
+    }
+
+    const authState = await readJson(localAuthPath)
+    let count = 0
+    authState.notifications = (authState.notifications ?? []).map((entry) => {
+      if (entry.userId !== userId || entry.readAt) return entry
+      count += 1
+      return { ...entry, readAt }
+    })
+    if (count > 0) {
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+    return count
+  }
+
+  async unreadNotificationCount(userId) {
+    if (!userId) return 0
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select count(*)::int as count from notifications where user_id = $1 and read_at is null`,
+        [userId],
+      )
+      return result.rows[0]?.count ?? 0
+    }
+    const authState = await readJson(localAuthPath)
+    return (authState.notifications ?? []).filter(
+      (entry) => entry.userId === userId && !entry.readAt,
+    ).length
   }
 
   async close() {

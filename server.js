@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AppDataStore } from './db/store.js'
+import { notify } from './lib/notify.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -365,6 +366,17 @@ const server = createServer(async (request, response) => {
         })
 
         await appDataStore.recordActivity(session.user.id, 'checklist_created', checklist.title)
+
+        // Phase 5: notify the assignee if it's not the creator (no self-notify).
+        if (checklist.assigneeId && checklist.assigneeId !== session.user.id) {
+          await notify(appDataStore, checklist.assigneeId, 'task_assigned', {
+            checklistId: checklist.id,
+            message: `New task: ${checklist.title}`,
+            link: `/checklists?focus=${checklist.id}`,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
+
         sendJson(response, 201, checklist)
         return
       }
@@ -441,6 +453,23 @@ const server = createServer(async (request, response) => {
           'case_advanced',
           `${updatedChecklist.title} · case ${caseId} · stage ${fromIdx} -> stage ${toIdx}`,
         )
+
+        // Phase 5: notify the next stage's primary assignee (skip self).
+        // v1: primary assignee only — viewerIds intentionally not notified to
+        // avoid noise; revisit if owners ask for stage-watcher notifications.
+        const spawned = toggleResult.spawned
+        const nextAssigneeId = spawned?.assigneeId
+        if (nextAssigneeId && nextAssigneeId !== session.user.id) {
+          await notify(appDataStore, nextAssigneeId, 'task_assigned', {
+            checklistId: spawned.id,
+            caseId,
+            stageIndex: spawned.stageIndex,
+            stageCount: spawned.stageCount,
+            message: `New task: ${spawned.title} (Stage ${(spawned.stageIndex ?? 0) + 1} of ${spawned.stageCount ?? 1})`,
+            link: `/checklists?focus=${spawned.id}`,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
       } else if (
         toggledItem?.done &&
         updatedChecklist.items.every((item) => item.done) &&
@@ -454,6 +483,27 @@ const server = createServer(async (request, response) => {
           'case_completed',
           `${updatedChecklist.title} · case ${caseId}`,
         )
+
+        // Phase 5: notify the case opener (template's stage-1 assignee).
+        // Skip if they're the one who just completed it.
+        try {
+          const data = await appDataStore.read()
+          const template = (data.checklistTemplates ?? []).find(
+            (t) => t.id === updatedChecklist.templateId,
+          )
+          const openerId = template?.stages?.[0]?.assigneeId || template?.assigneeId
+          if (openerId && openerId !== session.user.id) {
+            await notify(appDataStore, openerId, 'case_completed', {
+              checklistId: updatedChecklist.id,
+              caseId,
+              message: `Workflow completed: ${updatedChecklist.title}`,
+              link: `/cases/${caseId}`,
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+        } catch (err) {
+          console.error('[notify] case_completed dispatch failed:', err?.message || err)
+        }
       }
 
       sendJson(response, 200, updatedChecklist)
@@ -1037,6 +1087,63 @@ const server = createServer(async (request, response) => {
       sendJson(response, 405, { error: 'Method not allowed' })
       return
     }
+
+    // ---- Phase 5: notifications API ----
+    if (normalizedPath === '/api/notifications' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const unreadOnly = requestUrl.searchParams.get('unreadOnly') === 'true'
+      const limit = Number(requestUrl.searchParams.get('limit')) || 50
+      const entries = await appDataStore.listNotifications(session.user.id, {
+        limit,
+        unreadOnly,
+      })
+      sendJson(response, 200, { entries })
+      return
+    }
+
+    if (normalizedPath === '/api/notifications/unread-count' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const count = await appDataStore.unreadNotificationCount(session.user.id)
+      sendJson(response, 200, { count })
+      return
+    }
+
+    if (normalizedPath === '/api/notifications/read-all' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const updated = await appDataStore.markAllNotificationsRead(session.user.id)
+      sendJson(response, 200, { updated })
+      return
+    }
+
+    const notificationReadMatch = normalizedPath.match(/^\/api\/notifications\/([^/]+)\/read$/)
+    if (notificationReadMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const notificationId = notificationReadMatch[1]
+      const updated = await appDataStore.markNotificationRead(notificationId, session.user.id)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Notification not found' })
+        return
+      }
+      sendJson(response, 200, updated)
+      return
+    }
+
+    // TODO Phase 6: monthly invoice cron
+    // Each month on the 1st (or per-client schedule), iterate clients,
+    // generate invoice draft, mark "ready_to_send", and call:
+    //   notify(appDataStore, ownerUserId, 'invoice_ready', {
+    //     clientId,
+    //     message: 'Invoice ready to send for <client>',
+    //     link: '/invoices?focus=<draftId>',
+    //     appPublicUrl: getPublicAppUrl(request),
+    //   })
+    // The notify() abstraction + Resend wiring handle email delivery once
+    // RESEND_API_KEY and EMAIL_FROM are set in Railway. No cron implementation
+    // yet — leave this hook visible for the next milestone.
 
     const requestedFile = path.join(distDir, normalizedPath)
     const safePath = path.normalize(requestedFile)

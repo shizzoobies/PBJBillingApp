@@ -204,6 +204,23 @@ export type ActivityEntry = {
   timestamp: string
 }
 
+export type NotificationEvent =
+  | 'task_assigned'
+  | 'case_advanced'
+  | 'case_completed'
+  | 'invoice_ready'
+
+export type NotificationEntry = {
+  id: string
+  userId: string
+  event: NotificationEvent | string
+  message: string
+  link: string | null
+  payload: Record<string, unknown>
+  readAt: string | null
+  createdAt: string
+}
+
 export class ApiError extends Error {
   status: number
 
