@@ -34,6 +34,7 @@ npm start
 - `PORT`: port for the production web server. Railway injects this automatically.
 - `DATABASE_URL`: when present, the server stores shared app data in Postgres.
 - `AUTH_DEMO_PASSWORD`: optional override for the temporary seeded login password. Defaults to `pbj-demo`.
+- `APP_PUBLIC_URL`: public origin of the deployed app (e.g. `https://pbjbillingapp-production.up.railway.app`). Used to build magic-link URLs surfaced on the owner-only Team page. When unset, the server falls back to constructing the URL from the incoming request host.
 
 If `DATABASE_URL` is not set, the server falls back to `tmp/app-data.json` so local development still uses the API layer without needing a database immediately.
 

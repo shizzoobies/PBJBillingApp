@@ -5,6 +5,7 @@ import {
   FolderKanban,
   ListChecks,
   ReceiptText,
+  Users,
   WalletCards,
   type LucideIcon,
 } from 'lucide-react'
@@ -22,4 +23,5 @@ export const navItems: Array<{
   { to: '/gantt', label: 'Gantt', icon: BarChart3, ownerOnly: true },
   { to: '/invoices', label: 'Invoices', icon: ReceiptText, ownerOnly: true },
   { to: '/plans', label: 'Plans', icon: WalletCards, ownerOnly: true },
+  { to: '/team', label: 'Team', icon: Users, ownerOnly: true },
 ]

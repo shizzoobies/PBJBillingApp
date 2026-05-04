@@ -147,6 +147,27 @@ export type SessionUser = {
 
 export type LoginOption = SessionUser
 
+export type TeamMember = {
+  id: string
+  name: string
+  email: string
+  role: Role
+  staffRole: string
+  magicToken: string | null
+  magicUrl: string | null
+  tokenRevokedAt: string | null
+  lastActiveAt: string | null
+  createdAt: string | null
+}
+
+export type ActivityEntry = {
+  id: string
+  userId: string
+  action: string
+  target: string
+  timestamp: string
+}
+
 export class ApiError extends Error {
   status: number
 

@@ -52,6 +52,7 @@ import { GanttPage } from './pages/GanttPage'
 import { InvoicesPage } from './pages/InvoicesPage'
 import { PlansPage } from './pages/PlansPage'
 import { ReportsPage } from './pages/ReportsPage'
+import { TeamPage } from './pages/TeamPage'
 import { TimePage } from './pages/TimePage'
 
 function OwnerOnly({
@@ -584,7 +585,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   const location = useLocation()
   const navigate = useNavigate()
   useEffect(() => {
-    const ownerOnly = ['/reports', '/gantt', '/invoices', '/plans']
+    const ownerOnly = ['/reports', '/gantt', '/invoices', '/plans', '/team']
     if (!ownerMode && ownerOnly.some((path) => location.pathname.startsWith(path))) {
       navigate('/time', { replace: true })
     }
@@ -626,6 +627,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           element={
             <OwnerOnly ownerMode={ownerMode}>
               <PlansPage />
+            </OwnerOnly>
+          }
+        />
+        <Route
+          path="/team"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <TeamPage />
             </OwnerOnly>
           }
         />

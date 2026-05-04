@@ -11,9 +11,26 @@ create table if not exists users (
   role text not null check (role in ('owner', 'bookkeeper', 'senior_bookkeeper')),
   staff_role text not null,
   password_hash text not null,
+  magic_token text,
+  token_revoked_at timestamptz,
+  last_active_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table users add column if not exists magic_token text;
+alter table users add column if not exists token_revoked_at timestamptz;
+alter table users add column if not exists last_active_at timestamptz;
+create unique index if not exists users_magic_token_unique on users (magic_token) where magic_token is not null;
+
+create table if not exists activity_log (
+  id text primary key,
+  user_id text not null,
+  action text not null,
+  target text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists activity_log_user_idx on activity_log (user_id, created_at desc);
 
 create table if not exists subscription_plans (
   id text primary key,

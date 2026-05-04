@@ -266,6 +266,93 @@ export function getInvoice(
   }
 }
 
+export function relativeTime(value: string | null | undefined): string {
+  if (!value) {
+    return 'Never'
+  }
+  const then = new Date(value).getTime()
+  if (Number.isNaN(then)) {
+    return 'Never'
+  }
+  const diffSeconds = Math.round((Date.now() - then) / 1000)
+  if (diffSeconds < 0) {
+    return 'just now'
+  }
+  if (diffSeconds < 45) {
+    return 'just now'
+  }
+  if (diffSeconds < 90) {
+    return '1 minute ago'
+  }
+  const diffMinutes = Math.round(diffSeconds / 60)
+  if (diffMinutes < 45) {
+    return `${diffMinutes} minutes ago`
+  }
+  if (diffMinutes < 90) {
+    return '1 hour ago'
+  }
+  const diffHours = Math.round(diffMinutes / 60)
+  if (diffHours < 24) {
+    return `${diffHours} hours ago`
+  }
+  if (diffHours < 36) {
+    return '1 day ago'
+  }
+  const diffDays = Math.round(diffHours / 24)
+  if (diffDays < 30) {
+    return `${diffDays} days ago`
+  }
+  const diffMonths = Math.round(diffDays / 30)
+  if (diffMonths < 12) {
+    return `${diffMonths} months ago`
+  }
+  const diffYears = Math.round(diffMonths / 12)
+  return `${diffYears} years ago`
+}
+
+export function formatActivityTimestamp(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
+}
+
+export function describeActivityAction(action: string): string {
+  switch (action) {
+    case 'login_password':
+      return 'logged in with password'
+    case 'login_via_magic_link':
+      return 'logged in via magic link'
+    case 'checklist_item_checked':
+      return 'checked off'
+    case 'checklist_item_unchecked':
+      return 'unchecked'
+    case 'checklist_created':
+      return 'created checklist'
+    case 'template_viewers_updated':
+      return 'updated template viewers'
+    case 'team_invited':
+      return 'invited'
+    case 'team_revoked':
+      return 'revoked link for'
+    case 'team_link_regenerated':
+      return 'regenerated link for'
+    case 'team_link_restored':
+      return 'restored access for'
+    case 'team_removed':
+      return 'removed'
+    default:
+      return action.replace(/_/g, ' ')
+  }
+}
+
 export function lastDayOfCurrentMonth() {
   const date = new Date()
   const last = new Date(date.getFullYear(), date.getMonth() + 1, 0)

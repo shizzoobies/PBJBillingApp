@@ -1,10 +1,12 @@
 import {
   ApiError,
+  type ActivityEntry,
   type AppData,
   type Checklist,
   type ChecklistTemplate,
   type LoginOption,
   type SessionUser,
+  type TeamMember,
   type TimeEntry,
 } from './types'
 
@@ -125,6 +127,95 @@ export async function setChecklistViewersRequest(
   }
 
   return (await response.json()) as Checklist
+}
+
+export async function fetchTeam(signal?: AbortSignal) {
+  const response = await fetch('/api/team', { credentials: 'same-origin', signal })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load team (${response.status})`)
+  }
+  return (await response.json()) as { users: TeamMember[] }
+}
+
+export async function inviteTeamMember(payload: { name: string; email: string; role: string }) {
+  const response = await fetch('/api/team/invite', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to invite member (${response.status})`)
+  }
+  return (await response.json()) as { user: TeamMember }
+}
+
+export async function revokeTeamMember(userId: string) {
+  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/revoke`, {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to revoke link (${response.status})`)
+  }
+  return (await response.json()) as { user: TeamMember }
+}
+
+export async function regenerateTeamMember(userId: string) {
+  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/regenerate`, {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to regenerate link (${response.status})`)
+  }
+  return (await response.json()) as { user: TeamMember }
+}
+
+export async function restoreTeamMember(userId: string) {
+  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/restore`, {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to restore access (${response.status})`)
+  }
+  return (await response.json()) as { user: TeamMember }
+}
+
+export async function deleteTeamMember(userId: string) {
+  const response = await fetch(`/api/team/${encodeURIComponent(userId)}`, {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok && response.status !== 204) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to remove member (${response.status})`)
+  }
+}
+
+export async function fetchTeamActivity(userId: string, limit = 20) {
+  const response = await fetch(
+    `/api/team/${encodeURIComponent(userId)}/activity?limit=${limit}`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load activity (${response.status})`)
+  }
+  return (await response.json()) as { entries: ActivityEntry[] }
+}
+
+async function safeErrorMessage(response: Response): Promise<string> {
+  try {
+    const body = await response.json()
+    if (body && typeof body.error === 'string') {
+      return body.error
+    }
+  } catch {
+    // ignore
+  }
+  return ''
 }
 
 export async function setTemplateViewersRequest(

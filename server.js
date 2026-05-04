@@ -103,6 +103,58 @@ async function requireSession(request, response) {
   return session
 }
 
+function getPublicAppUrl(request) {
+  const configured = process.env.APP_PUBLIC_URL
+  if (configured) {
+    return configured.replace(/\/$/, '')
+  }
+
+  const host = request.headers.host || `localhost:${port}`
+  const proto =
+    request.headers['x-forwarded-proto'] ||
+    (process.env.NODE_ENV === 'production' ? 'https' : 'http')
+  return `${proto}://${host}`
+}
+
+function buildMagicUrl(request, token) {
+  if (!token) {
+    return null
+  }
+  return `${getPublicAppUrl(request)}/login/${encodeURIComponent(token)}`
+}
+
+function decorateTeamMember(member, request) {
+  if (!member) {
+    return member
+  }
+  return {
+    ...member,
+    magicUrl: member.tokenRevokedAt ? null : buildMagicUrl(request, member.magicToken),
+  }
+}
+
+function renderMagicLinkErrorPage() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Link no longer valid - PB&amp;J Strategic Accounting</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f6f5f1; color: #1f1d1a; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  .card { background: #fff; padding: 32px 36px; border-radius: 14px; box-shadow: 0 12px 40px rgba(31, 29, 26, 0.08); max-width: 420px; }
+  h1 { margin: 0 0 12px 0; font-size: 22px; }
+  p { line-height: 1.5; margin: 0 0 8px 0; color: #555049; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>This link is no longer valid</h1>
+    <p>Contact your owner to request a new sign-in link.</p>
+  </div>
+</body>
+</html>`
+}
+
 const server = createServer(async (request, response) => {
   try {
     const requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
@@ -110,6 +162,39 @@ const server = createServer(async (request, response) => {
 
     if (normalizedPath === '/health') {
       sendJson(response, 200, { ok: true, mode: appDataStore.mode })
+      return
+    }
+
+    const magicLinkMatch = normalizedPath.match(/^\/login\/([^/]+)$/)
+    if (magicLinkMatch && request.method === 'GET') {
+      const token = decodeURIComponent(magicLinkMatch[1])
+      const user = await appDataStore.findUserByMagicToken(token)
+      if (!user || user.tokenRevokedAt) {
+        response.writeHead(401, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-cache',
+        })
+        response.end(renderMagicLinkErrorPage())
+        return
+      }
+
+      const session = await appDataStore.createSessionForUser(user.id)
+      if (!session) {
+        response.writeHead(401, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-cache',
+        })
+        response.end(renderMagicLinkErrorPage())
+        return
+      }
+
+      await appDataStore.recordActivity(user.id, 'login_via_magic_link', '')
+      response.writeHead(302, {
+        'Set-Cookie': buildSessionCookie(session.sessionId, session.expiresAt),
+        Location: '/',
+        'Cache-Control': 'no-cache',
+      })
+      response.end()
       return
     }
 
@@ -142,6 +227,8 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      await appDataStore.touchUserActivity(session.user.id)
+      await appDataStore.recordActivity(session.user.id, 'login_password', '')
       response.setHeader('Set-Cookie', buildSessionCookie(session.sessionId, session.expiresAt))
       sendJson(response, 200, { user: session.user })
       return
@@ -277,6 +364,7 @@ const server = createServer(async (request, response) => {
           items,
         })
 
+        await appDataStore.recordActivity(session.user.id, 'checklist_created', checklist.title)
         sendJson(response, 201, checklist)
         return
       }
@@ -330,6 +418,13 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      const toggledItem = updatedChecklist.items.find((entry) => entry.id === itemId)
+      const action = toggledItem?.done ? 'checklist_item_checked' : 'checklist_item_unchecked'
+      await appDataStore.recordActivity(
+        session.user.id,
+        action,
+        `${updatedChecklist.title}: ${toggledItem?.label ?? ''}`.trim(),
+      )
       sendJson(response, 200, updatedChecklist)
       return
     }
@@ -402,7 +497,172 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      await appDataStore.recordActivity(
+        session.user.id,
+        'template_viewers_updated',
+        updated.title ?? templateId,
+      )
       sendJson(response, 200, updated)
+      return
+    }
+
+    if (normalizedPath === '/api/team' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can view the team' })
+        return
+      }
+      const members = await appDataStore.getTeamMembers()
+      sendJson(response, 200, {
+        users: members.map((member) => decorateTeamMember(member, request)),
+      })
+      return
+    }
+
+    if (normalizedPath === '/api/team/invite' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can invite team members' })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const name = typeof payload?.name === 'string' ? payload.name.trim() : ''
+      const email = typeof payload?.email === 'string' ? payload.email.trim() : ''
+      const role = typeof payload?.role === 'string' ? payload.role : 'Bookkeeper'
+
+      if (!name || !email) {
+        sendJson(response, 400, { error: 'Name and email are required' })
+        return
+      }
+
+      try {
+        const member = await appDataStore.createTeamMember({
+          name,
+          email,
+          staffRole: role,
+        })
+        await appDataStore.recordActivity(session.user.id, 'team_invited', member.email ?? member.name)
+        sendJson(response, 201, { user: decorateTeamMember(member, request) })
+      } catch (error) {
+        sendJson(response, 400, { error: error?.message || 'Failed to create team member' })
+      }
+      return
+    }
+
+    const teamRevokeMatch = normalizedPath.match(/^\/api\/team\/([^/]+)\/revoke$/)
+    if (teamRevokeMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can revoke team links' })
+        return
+      }
+
+      const userId = teamRevokeMatch[1]
+      const member = await appDataStore.revokeMagicToken(userId)
+      if (!member) {
+        sendJson(response, 404, { error: 'Team member not found' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'team_revoked', member.name)
+      sendJson(response, 200, { user: decorateTeamMember(member, request) })
+      return
+    }
+
+    const teamRegenerateMatch = normalizedPath.match(/^\/api\/team\/([^/]+)\/regenerate$/)
+    if (teamRegenerateMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can regenerate team links' })
+        return
+      }
+
+      const userId = teamRegenerateMatch[1]
+      const member = await appDataStore.regenerateMagicToken(userId)
+      if (!member) {
+        sendJson(response, 404, { error: 'Team member not found' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'team_link_regenerated', member.name)
+      sendJson(response, 200, { user: decorateTeamMember(member, request) })
+      return
+    }
+
+    const teamRestoreMatch = normalizedPath.match(/^\/api\/team\/([^/]+)\/restore$/)
+    if (teamRestoreMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can restore team links' })
+        return
+      }
+
+      const userId = teamRestoreMatch[1]
+      const member = await appDataStore.restoreMagicToken(userId)
+      if (!member) {
+        sendJson(response, 404, { error: 'Team member not found' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'team_link_restored', member.name)
+      sendJson(response, 200, { user: decorateTeamMember(member, request) })
+      return
+    }
+
+    const teamDeleteMatch = normalizedPath.match(/^\/api\/team\/([^/]+)$/)
+    if (teamDeleteMatch && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can remove team members' })
+        return
+      }
+
+      const userId = teamDeleteMatch[1]
+      const result = await appDataStore.deleteTeamMember(userId)
+      if (!result.ok && result.reason === 'has_checklists') {
+        sendJson(response, 409, { error: 'Reassign their work first' })
+        return
+      }
+      if (!result.ok) {
+        sendJson(response, 404, { error: 'Team member not found' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'team_removed', userId)
+      sendEmpty(response, 204)
+      return
+    }
+
+    const teamActivityMatch = normalizedPath.match(/^\/api\/team\/([^/]+)\/activity$/)
+    if (teamActivityMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can view activity' })
+        return
+      }
+
+      const userId = teamActivityMatch[1]
+      const limit = Number(requestUrl.searchParams.get('limit')) || 20
+      const entries = await appDataStore.getRecentActivity(userId, limit)
+      sendJson(response, 200, { entries })
       return
     }
 

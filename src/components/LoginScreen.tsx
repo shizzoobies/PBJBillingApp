@@ -68,6 +68,7 @@ export function LoginScreen({
             {loading ? 'Signing in...' : 'Sign in'}
           </button>
         </form>
+        <p className="auth-footer">Have a personal link? Just open it.</p>
       </section>
     </main>
   )

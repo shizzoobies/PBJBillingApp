@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 
@@ -72,10 +72,23 @@ function mapSessionUser(user) {
   }
 }
 
+function generateMagicToken() {
+  return randomBytes(32).toString('base64url')
+}
+
+function nowIso() {
+  return new Date().toISOString()
+}
+
 function createSeededAuthUsers() {
+  const createdAt = nowIso()
   return seededUsers.map((user) => ({
     ...user,
     passwordHash: hashPassword(demoPassword),
+    magicToken: generateMagicToken(),
+    tokenRevokedAt: null,
+    lastActiveAt: null,
+    createdAt,
   }))
 }
 
@@ -245,6 +258,27 @@ export class AppDataStore {
         )
       `)
 
+      await this.pool.query(`alter table users add column if not exists magic_token text`)
+      await this.pool.query(`alter table users add column if not exists token_revoked_at timestamptz`)
+      await this.pool.query(`alter table users add column if not exists last_active_at timestamptz`)
+      await this.pool.query(`
+        create unique index if not exists users_magic_token_unique on users (magic_token)
+        where magic_token is not null
+      `)
+
+      await this.pool.query(`
+        create table if not exists activity_log (
+          id text primary key,
+          user_id text not null,
+          action text not null,
+          target text not null default '',
+          created_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists activity_log_user_idx on activity_log (user_id, created_at desc)
+      `)
+
       await this.pool.query(`
         create table if not exists sessions (
           id text primary key,
@@ -406,8 +440,48 @@ export class AppDataStore {
     if (!existsSync(localAuthPath)) {
       await writeFile(
         localAuthPath,
-        JSON.stringify({ users: createSeededAuthUsers(), sessions: [] }, null, 2),
+        JSON.stringify(
+          { users: createSeededAuthUsers(), sessions: [], activityLog: [] },
+          null,
+          2,
+        ),
       )
+    } else {
+      // Backfill missing fields on existing local auth state for legacy installs.
+      const authState = await readJson(localAuthPath)
+      let mutated = false
+      const createdAt = nowIso()
+      authState.users = (authState.users ?? []).map((user) => {
+        let next = user
+        if (!user.magicToken) {
+          next = { ...next, magicToken: generateMagicToken() }
+          mutated = true
+        }
+        if (next.tokenRevokedAt === undefined) {
+          next = { ...next, tokenRevokedAt: null }
+          mutated = true
+        }
+        if (next.lastActiveAt === undefined) {
+          next = { ...next, lastActiveAt: null }
+          mutated = true
+        }
+        if (!next.createdAt) {
+          next = { ...next, createdAt }
+          mutated = true
+        }
+        if (!next.email) {
+          next = { ...next, email: `${next.id}@pbj.local` }
+          mutated = true
+        }
+        return next
+      })
+      if (!Array.isArray(authState.activityLog)) {
+        authState.activityLog = []
+        mutated = true
+      }
+      if (mutated) {
+        await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      }
     }
   }
 
@@ -415,17 +489,18 @@ export class AppDataStore {
     for (const user of createSeededAuthUsers()) {
       await this.pool.query(
         `
-          insert into users (id, name, email, role, staff_role, password_hash)
-          values ($1, $2, $3, $4, $5, $6)
+          insert into users (id, name, email, role, staff_role, password_hash, magic_token)
+          values ($1, $2, $3, $4, $5, $6, $7)
           on conflict (id) do update
           set name = excluded.name,
               email = excluded.email,
               role = excluded.role,
               staff_role = excluded.staff_role,
               password_hash = excluded.password_hash,
+              magic_token = coalesce(users.magic_token, excluded.magic_token),
               updated_at = now()
         `,
-        [user.id, user.name, user.email, user.role, user.staffRole, user.passwordHash],
+        [user.id, user.name, user.email, user.role, user.staffRole, user.passwordHash, user.magicToken],
       )
     }
   }
@@ -1206,6 +1281,420 @@ export class AppDataStore {
     const authState = await readJson(localAuthPath)
     authState.sessions = authState.sessions.filter((session) => session.id !== sessionId)
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+
+  async getTeamMembers() {
+    if (this.pool) {
+      const result = await this.pool.query(`
+        select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at, created_at
+        from users
+        order by case when role = 'owner' then 0 else 1 end, name asc
+      `)
+
+      return result.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        role: row.role === 'owner' ? 'owner' : 'employee',
+        staffRole: row.staff_role,
+        magicToken: row.magic_token ?? null,
+        tokenRevokedAt: row.token_revoked_at ? new Date(row.token_revoked_at).toISOString() : null,
+        lastActiveAt: row.last_active_at ? new Date(row.last_active_at).toISOString() : null,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+      }))
+    }
+
+    const authState = await readJson(localAuthPath)
+    return (authState.users ?? []).map((user) => ({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role === 'owner' ? 'owner' : 'employee',
+      staffRole: user.staffRole,
+      magicToken: user.magicToken ?? null,
+      tokenRevokedAt: user.tokenRevokedAt ?? null,
+      lastActiveAt: user.lastActiveAt ?? null,
+      createdAt: user.createdAt ?? null,
+    }))
+  }
+
+  async getTeamMember(userId) {
+    const members = await this.getTeamMembers()
+    return members.find((member) => member.id === userId) ?? null
+  }
+
+  async createTeamMember({ name, email, staffRole }) {
+    const trimmedName = String(name ?? '').trim()
+    const trimmedEmail = String(email ?? '').trim().toLowerCase()
+    const safeStaffRole = ['Owner', 'Senior Bookkeeper', 'Bookkeeper'].includes(staffRole)
+      ? staffRole
+      : 'Bookkeeper'
+
+    if (!trimmedName || !trimmedEmail) {
+      throw new Error('Name and email are required')
+    }
+
+    const id = `emp-${randomUUID().slice(0, 8)}`
+    const role = roleToDbRole(safeStaffRole)
+    const magicToken = generateMagicToken()
+    const passwordHash = hashPassword(demoPassword)
+    const createdAt = nowIso()
+
+    if (this.pool) {
+      await this.pool.query(
+        `
+          insert into users (id, name, email, role, staff_role, password_hash, magic_token)
+          values ($1, $2, $3, $4, $5, $6, $7)
+        `,
+        [id, trimmedName, trimmedEmail, role, safeStaffRole, passwordHash, magicToken],
+      )
+      return this.getTeamMember(id)
+    }
+
+    const authState = await readJson(localAuthPath)
+    if ((authState.users ?? []).some((user) => user.email && user.email.toLowerCase() === trimmedEmail)) {
+      throw new Error('A team member with that email already exists')
+    }
+
+    authState.users = [
+      ...(authState.users ?? []),
+      {
+        id,
+        name: trimmedName,
+        email: trimmedEmail,
+        role,
+        staffRole: safeStaffRole,
+        passwordHash,
+        magicToken,
+        tokenRevokedAt: null,
+        lastActiveAt: null,
+        createdAt,
+      },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return this.getTeamMember(id)
+  }
+
+  async regenerateMagicToken(userId) {
+    const token = generateMagicToken()
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `
+          update users
+          set magic_token = $2,
+              token_revoked_at = null,
+              updated_at = now()
+          where id = $1
+          returning id
+        `,
+        [userId, token],
+      )
+      if (!result.rowCount) {
+        return null
+      }
+      return this.getTeamMember(userId)
+    }
+
+    const authState = await readJson(localAuthPath)
+    let found = false
+    authState.users = (authState.users ?? []).map((user) => {
+      if (user.id !== userId) {
+        return user
+      }
+      found = true
+      return { ...user, magicToken: token, tokenRevokedAt: null }
+    })
+    if (!found) {
+      return null
+    }
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return this.getTeamMember(userId)
+  }
+
+  async revokeMagicToken(userId) {
+    const revokedAt = nowIso()
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `
+          update users
+          set token_revoked_at = $2,
+              updated_at = now()
+          where id = $1
+          returning id
+        `,
+        [userId, revokedAt],
+      )
+      if (!result.rowCount) {
+        return null
+      }
+      // Also clear active sessions for this user.
+      await this.pool.query('delete from sessions where user_id = $1', [userId])
+      return this.getTeamMember(userId)
+    }
+
+    const authState = await readJson(localAuthPath)
+    let found = false
+    authState.users = (authState.users ?? []).map((user) => {
+      if (user.id !== userId) {
+        return user
+      }
+      found = true
+      return { ...user, tokenRevokedAt: revokedAt }
+    })
+    if (!found) {
+      return null
+    }
+    authState.sessions = (authState.sessions ?? []).filter((session) => session.userId !== userId)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return this.getTeamMember(userId)
+  }
+
+  async restoreMagicToken(userId) {
+    // Restore is implemented as regenerate: clears revoked flag AND issues a fresh token.
+    return this.regenerateMagicToken(userId)
+  }
+
+  async deleteTeamMember(userId) {
+    if (this.pool) {
+      const assignedResult = await this.pool.query(
+        `select 1 from checklists where assignee_id = $1 limit 1`,
+        [userId],
+      )
+      if (assignedResult.rowCount) {
+        return { ok: false, reason: 'has_checklists' }
+      }
+      const result = await this.pool.query('delete from users where id = $1 returning id', [userId])
+      if (!result.rowCount) {
+        return { ok: false, reason: 'not_found' }
+      }
+      return { ok: true }
+    }
+
+    const data = await readJson(localDataPath)
+    const hasChecklist = (data.checklists ?? []).some((checklist) => checklist.assigneeId === userId)
+    if (hasChecklist) {
+      return { ok: false, reason: 'has_checklists' }
+    }
+    const hasTemplate = (data.checklistTemplates ?? []).some(
+      (template) => template.assigneeId === userId,
+    )
+    if (hasTemplate) {
+      return { ok: false, reason: 'has_checklists' }
+    }
+
+    const authState = await readJson(localAuthPath)
+    const before = (authState.users ?? []).length
+    authState.users = (authState.users ?? []).filter((user) => user.id !== userId)
+    if (authState.users.length === before) {
+      return { ok: false, reason: 'not_found' }
+    }
+    authState.sessions = (authState.sessions ?? []).filter((session) => session.userId !== userId)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return { ok: true }
+  }
+
+  async findUserByMagicToken(token) {
+    if (!token) {
+      return null
+    }
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `
+          select id, name, email, role, staff_role, magic_token, token_revoked_at
+          from users
+          where magic_token = $1
+        `,
+        [token],
+      )
+      if (!result.rowCount) {
+        return null
+      }
+      const row = result.rows[0]
+      return {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        role: row.role,
+        staffRole: row.staff_role,
+        magicToken: row.magic_token,
+        tokenRevokedAt: row.token_revoked_at ? new Date(row.token_revoked_at).toISOString() : null,
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((entry) => entry.magicToken === token)
+    if (!user) {
+      return null
+    }
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      staffRole: user.staffRole,
+      magicToken: user.magicToken,
+      tokenRevokedAt: user.tokenRevokedAt ?? null,
+    }
+  }
+
+  async createSessionForUser(userId) {
+    const sessionId = randomUUID()
+    const expiresAt = new Date(Date.now() + sessionTtlMs)
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into sessions (id, user_id, expires_at) values ($1, $2, $3)`,
+        [sessionId, userId, expiresAt.toISOString()],
+      )
+      await this.pool.query(
+        `update users set last_active_at = now() where id = $1`,
+        [userId],
+      )
+      const result = await this.pool.query(
+        `select id, name, email, role, staff_role from users where id = $1`,
+        [userId],
+      )
+      if (!result.rowCount) {
+        return null
+      }
+      const row = result.rows[0]
+      return {
+        sessionId,
+        expiresAt,
+        user: mapSessionUser({
+          id: row.id,
+          name: row.name,
+          email: row.email,
+          role: row.role,
+          staffRole: row.staff_role,
+        }),
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((entry) => entry.id === userId)
+    if (!user) {
+      return null
+    }
+    user.lastActiveAt = nowIso()
+    authState.sessions = [
+      ...((authState.sessions ?? []).filter(
+        (session) => new Date(session.expiresAt).getTime() > Date.now(),
+      )),
+      { id: sessionId, userId: user.id, expiresAt: expiresAt.toISOString() },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return {
+      sessionId,
+      expiresAt,
+      user: mapSessionUser(user),
+    }
+  }
+
+  async touchUserActivity(userId) {
+    if (!userId) {
+      return
+    }
+
+    if (this.pool) {
+      await this.pool.query(`update users set last_active_at = now() where id = $1`, [userId])
+      return
+    }
+
+    const authState = await readJson(localAuthPath)
+    let mutated = false
+    authState.users = (authState.users ?? []).map((user) => {
+      if (user.id !== userId) {
+        return user
+      }
+      mutated = true
+      return { ...user, lastActiveAt: nowIso() }
+    })
+    if (mutated) {
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+  }
+
+  async recordActivity(userId, action, target = '') {
+    if (!userId || !action) {
+      return
+    }
+
+    const id = `act-${randomUUID().slice(0, 8)}`
+    const createdAt = nowIso()
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into activity_log (id, user_id, action, target, created_at) values ($1, $2, $3, $4, $5)`,
+        [id, userId, action, target, createdAt],
+      )
+      // Trim to last 200 entries per user.
+      await this.pool.query(
+        `
+          delete from activity_log
+          where user_id = $1
+            and id not in (
+              select id from activity_log
+              where user_id = $1
+              order by created_at desc
+              limit 200
+            )
+        `,
+        [userId],
+      )
+      return
+    }
+
+    const authState = await readJson(localAuthPath)
+    const log = Array.isArray(authState.activityLog) ? authState.activityLog : []
+    log.push({ id, userId, action, target, timestamp: createdAt })
+    // Trim to last 200 per user.
+    const counts = new Map()
+    const trimmed = []
+    for (let i = log.length - 1; i >= 0; i -= 1) {
+      const entry = log[i]
+      const next = (counts.get(entry.userId) ?? 0) + 1
+      if (next <= 200) {
+        trimmed.unshift(entry)
+        counts.set(entry.userId, next)
+      }
+    }
+    authState.activityLog = trimmed
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+
+  async getRecentActivity(userId, limit = 20) {
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || 20))
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `
+          select id, user_id, action, target, created_at
+          from activity_log
+          where user_id = $1
+          order by created_at desc
+          limit $2
+        `,
+        [userId, safeLimit],
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        userId: row.user_id,
+        action: row.action,
+        target: row.target,
+        timestamp: row.created_at ? new Date(row.created_at).toISOString() : nowIso(),
+      }))
+    }
+
+    const authState = await readJson(localAuthPath)
+    return (authState.activityLog ?? [])
+      .filter((entry) => entry.userId === userId)
+      .slice()
+      .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
+      .slice(0, safeLimit)
   }
 
   async close() {
