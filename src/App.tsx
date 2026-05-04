@@ -12,16 +12,20 @@ import { AppContext, type AppContextValue } from './AppContext'
 import { AppLayout } from './components/AppLayout'
 import { LoginScreen } from './components/LoginScreen'
 import {
+  appendChecklistItemsRequest,
   createTimeEntry,
+  deleteChecklistItemRequest,
   fetchAppData,
   fetchLoginOptions,
   fetchSession,
   loginWithPassword,
   logoutSession,
+  reorderChecklistItemsRequest,
   saveAppData,
   setChecklistViewersRequest,
   setTemplateViewersRequest,
   toggleChecklistItemRequest,
+  updateChecklistItemRequest,
 } from './lib/api'
 import { createSeedData } from './lib/seed'
 import {
@@ -416,6 +420,168 @@ function App() {
     }))
   }
 
+  const setChecklistTemplateItemDueDate = (
+    templateId: string,
+    itemId: string,
+    dueDate: string,
+  ) => {
+    updateChecklistTemplate(templateId, (template) => ({
+      ...template,
+      items: template.items.map((item) => {
+        if (item.id !== itemId) {
+          return item
+        }
+        const next = { ...item }
+        if (!dueDate) {
+          delete next.dueDate
+        } else {
+          next.dueDate = dueDate
+        }
+        return next
+      }),
+    }))
+  }
+
+  const setChecklistTemplateItemAssignee = (
+    templateId: string,
+    itemId: string,
+    assigneeId: string,
+  ) => {
+    updateChecklistTemplate(templateId, (template) => ({
+      ...template,
+      items: template.items.map((item) => {
+        if (item.id !== itemId) {
+          return item
+        }
+        const next = { ...item }
+        if (!assigneeId) {
+          delete next.assigneeId
+        } else {
+          next.assigneeId = assigneeId
+        }
+        return next
+      }),
+    }))
+  }
+
+  const reorderChecklistTemplateItems = (templateId: string, orderedIds: string[]) => {
+    updateChecklistTemplate(templateId, (template) => {
+      const byId = new Map(template.items.map((item) => [item.id, item]))
+      const next = orderedIds
+        .map((id) => byId.get(id))
+        .filter((item): item is (typeof template.items)[number] => Boolean(item))
+      const seen = new Set(orderedIds)
+      const tail = template.items.filter((item) => !seen.has(item.id))
+      return { ...template, items: [...next, ...tail] }
+    })
+  }
+
+  const bulkAddChecklistTemplateItems = (templateId: string, labels: string[]) => {
+    if (labels.length === 0) {
+      return
+    }
+    updateChecklistTemplate(templateId, (template) => ({
+      ...template,
+      items: [
+        ...template.items,
+        ...labels.map((label) => ({ id: makeId('template-item'), label })),
+      ],
+    }))
+  }
+
+  const reorderChecklistItems = async (checklistId: string, orderedIds: string[]) => {
+    try {
+      setDataSyncState('saving')
+      const updated = await reorderChecklistItemsRequest(checklistId, orderedIds)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updated : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  const bulkAddChecklistItems = async (checklistId: string, labels: string[]) => {
+    if (labels.length === 0) return
+    try {
+      setDataSyncState('saving')
+      const updated = await appendChecklistItemsRequest(checklistId, labels)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updated : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  const updateChecklistItem = async (
+    checklistId: string,
+    itemId: string,
+    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+  ) => {
+    try {
+      setDataSyncState('saving')
+      const updated = await updateChecklistItemRequest(checklistId, itemId, patch)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updated : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  const deleteChecklistItem = async (checklistId: string, itemId: string) => {
+    try {
+      setDataSyncState('saving')
+      const updated = await deleteChecklistItemRequest(checklistId, itemId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updated : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
   const duplicateChecklistTemplate = (templateId: string) => {
     updateWorkspaceData((current) => {
       const source = current.checklistTemplates.find((template) => template.id === templateId)
@@ -557,8 +723,16 @@ function App() {
     deleteChecklistTemplate,
     addChecklistTemplateItem,
     updateChecklistTemplateItem,
+    setChecklistTemplateItemDueDate,
+    setChecklistTemplateItemAssignee,
+    reorderChecklistTemplateItems,
+    bulkAddChecklistTemplateItems,
     removeChecklistTemplateItem,
     duplicateChecklistTemplate,
+    reorderChecklistItems,
+    bulkAddChecklistItems,
+    updateChecklistItem,
+    deleteChecklistItem,
     updateClientPlan,
     addClient,
     addPlan,

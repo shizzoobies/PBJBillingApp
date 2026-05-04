@@ -206,6 +206,60 @@ export async function fetchTeamActivity(userId: string, limit = 20) {
   return (await response.json()) as { entries: ActivityEntry[] }
 }
 
+export async function reorderChecklistItemsRequest(checklistId: string, itemIds: string[]) {
+  const response = await fetch(`/api/checklists/${checklistId}/items/reorder`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ itemIds }),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to reorder checklist items (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
+export async function appendChecklistItemsRequest(checklistId: string, titles: string[]) {
+  const response = await fetch(`/api/checklists/${checklistId}/items`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ titles }),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to add checklist items (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
+export async function updateChecklistItemRequest(
+  checklistId: string,
+  itemId: string,
+  patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+) {
+  const response = await fetch(`/api/checklists/${checklistId}/items/${itemId}`, {
+    credentials: 'same-origin',
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to update checklist item (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
+export async function deleteChecklistItemRequest(checklistId: string, itemId: string) {
+  const response = await fetch(`/api/checklists/${checklistId}/items/${itemId}`, {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to delete checklist item (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
 async function safeErrorMessage(response: Response): Promise<string> {
   try {
     const body = await response.json()

@@ -396,19 +396,23 @@ const server = createServer(async (request, response) => {
       }
 
       const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
-      const canEdit =
-        session.user.role === 'owner' ||
-        checklist.assigneeId === session.user.id ||
-        editorIds.includes(session.user.id)
-
-      if (!canEdit) {
-        sendJson(response, 403, { error: 'You can only update your assigned checklists' })
+      const targetItem = checklist.items.find((item) => item.id === itemId)
+      if (!targetItem) {
+        sendJson(response, 404, { error: 'Checklist item not found' })
         return
       }
 
-      const itemExists = checklist.items.some((item) => item.id === itemId)
-      if (!itemExists) {
-        sendJson(response, 404, { error: 'Checklist item not found' })
+      const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
+      const canEdit = itemAssigneeId
+        ? session.user.role === 'owner' ||
+          itemAssigneeId === session.user.id ||
+          editorIds.includes(session.user.id)
+        : session.user.role === 'owner' ||
+          checklist.assigneeId === session.user.id ||
+          editorIds.includes(session.user.id)
+
+      if (!canEdit) {
+        sendJson(response, 403, { error: 'You can only update your assigned checklists' })
         return
       }
 
@@ -426,6 +430,212 @@ const server = createServer(async (request, response) => {
         `${updatedChecklist.title}: ${toggledItem?.label ?? ''}`.trim(),
       )
       sendJson(response, 200, updatedChecklist)
+      return
+    }
+
+    // POST /api/checklists/:id/items/reorder  — reorder items (owner / assignee / editor)
+    const checklistItemsReorderMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/items\/reorder$/)
+    if (checklistItemsReorderMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      const checklistId = checklistItemsReorderMatch[1]
+      const data = await appDataStore.read()
+      const checklist = data.checklists.find((c) => c.id === checklistId)
+      if (!checklist) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+      const canEdit =
+        session.user.role === 'owner' ||
+        checklist.assigneeId === session.user.id ||
+        editorIds.includes(session.user.id)
+      if (!canEdit) {
+        sendJson(response, 403, { error: 'You do not have permission to reorder items' })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const itemIds = Array.isArray(payload?.itemIds)
+        ? payload.itemIds.filter((id) => typeof id === 'string')
+        : []
+
+      const updated = await appDataStore.reorderChecklistItems(checklistId, itemIds)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      await appDataStore.recordActivity(session.user.id, 'checklist_items_reordered', checklist.title)
+      sendJson(response, 200, updated)
+      return
+    }
+
+    // POST /api/checklists/:id/items  — append items (owner / assignee / editor)
+    // PATCH /api/checklists/:id/items/:itemId  — edit item (owner / assignee / editor / per-item assignee)
+    // DELETE /api/checklists/:id/items/:itemId  — delete item (owner / assignee / editor)
+    const checklistItemMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/items(?:\/([^/]+))?$/)
+    if (checklistItemMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+
+      const checklistId = checklistItemMatch[1]
+      const itemId = checklistItemMatch[2] // undefined for the collection route
+
+      const data = await appDataStore.read()
+      const checklist = data.checklists.find((c) => c.id === checklistId)
+      if (!checklist) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+
+      // --- POST /api/checklists/:id/items (bulk append) ---
+      if (!itemId && request.method === 'POST') {
+        const canEdit =
+          session.user.role === 'owner' ||
+          checklist.assigneeId === session.user.id ||
+          editorIds.includes(session.user.id)
+        if (!canEdit) {
+          sendJson(response, 403, { error: 'You do not have permission to add items' })
+          return
+        }
+
+        const payload = await readJsonBody(request)
+        const titles = Array.isArray(payload?.titles)
+          ? payload.titles.filter((t) => typeof t === 'string' && t.trim())
+          : []
+        if (titles.length === 0) {
+          sendJson(response, 400, { error: 'titles must be a non-empty array of strings' })
+          return
+        }
+
+        const updated = await appDataStore.appendChecklistItems(checklistId, titles)
+        if (!updated) {
+          sendJson(response, 404, { error: 'Checklist not found' })
+          return
+        }
+
+        for (const title of titles) {
+          await appDataStore.recordActivity(
+            session.user.id,
+            'checklist_item_added',
+            `${checklist.title}: ${title}`,
+          )
+        }
+        sendJson(response, 200, updated)
+        return
+      }
+
+      // --- PATCH /api/checklists/:id/items/:itemId ---
+      if (itemId && request.method === 'PATCH') {
+        const targetItem = checklist.items.find((item) => item.id === itemId)
+        if (!targetItem) {
+          sendJson(response, 404, { error: 'Checklist item not found' })
+          return
+        }
+
+        // Per-item assignee also gets edit access
+        const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
+        const canEdit = itemAssigneeId
+          ? session.user.role === 'owner' ||
+            itemAssigneeId === session.user.id ||
+            editorIds.includes(session.user.id)
+          : session.user.role === 'owner' ||
+            checklist.assigneeId === session.user.id ||
+            editorIds.includes(session.user.id)
+        if (!canEdit) {
+          sendJson(response, 403, { error: 'You do not have permission to edit this item' })
+          return
+        }
+
+        const payload = await readJsonBody(request)
+        const patch = {}
+
+        if ('title' in payload && typeof payload.title === 'string') {
+          const trimmed = payload.title.trim()
+          if (!trimmed) {
+            sendJson(response, 400, { error: 'title cannot be blank' })
+            return
+          }
+          patch.title = trimmed
+        }
+
+        if ('dueDate' in payload) {
+          // null or empty string clears the field
+          patch.dueDate = payload.dueDate === null ? '' : String(payload.dueDate ?? '')
+        }
+
+        if ('assigneeId' in payload) {
+          const incoming = payload.assigneeId === null ? '' : String(payload.assigneeId ?? '')
+          if (incoming) {
+            // Validate it is a real employee
+            const allData = await appDataStore.read()
+            const validIds = new Set(allData.employees.map((e) => e.id))
+            if (!validIds.has(incoming)) {
+              sendJson(response, 400, { error: 'Invalid assigneeId' })
+              return
+            }
+          }
+          patch.assigneeId = incoming
+        }
+
+        const updated = await appDataStore.updateChecklistItem(checklistId, itemId, patch)
+        if (!updated) {
+          sendJson(response, 404, { error: 'Checklist item not found' })
+          return
+        }
+
+        await appDataStore.recordActivity(
+          session.user.id,
+          'checklist_item_edited',
+          `${checklist.title}: ${targetItem.label}`,
+        )
+        sendJson(response, 200, updated)
+        return
+      }
+
+      // --- DELETE /api/checklists/:id/items/:itemId ---
+      if (itemId && request.method === 'DELETE') {
+        const targetItem = checklist.items.find((item) => item.id === itemId)
+        if (!targetItem) {
+          sendJson(response, 404, { error: 'Checklist item not found' })
+          return
+        }
+
+        const canEdit =
+          session.user.role === 'owner' ||
+          checklist.assigneeId === session.user.id ||
+          editorIds.includes(session.user.id)
+        if (!canEdit) {
+          sendJson(response, 403, { error: 'You do not have permission to delete this item' })
+          return
+        }
+
+        const updated = await appDataStore.deleteChecklistItem(checklistId, itemId)
+        if (!updated) {
+          sendJson(response, 404, { error: 'Checklist item not found' })
+          return
+        }
+
+        await appDataStore.recordActivity(
+          session.user.id,
+          'checklist_item_removed',
+          `${checklist.title}: ${targetItem.label}`,
+        )
+        sendJson(response, 200, updated)
+        return
+      }
+
+      sendJson(response, 405, { error: 'Method not allowed' })
       return
     }
 

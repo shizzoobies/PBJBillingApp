@@ -206,6 +206,8 @@ function materializeRecurringChecklists(data) {
             id: `item-${randomUUID().slice(0, 8)}`,
             label: item.label,
             done: false,
+            ...(item.dueDate ? { dueDate: item.dueDate } : {}),
+            ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
           })),
         })
         existingKeys.add(instanceKey)
@@ -370,10 +372,15 @@ export class AppDataStore {
           label text not null,
           done boolean not null default false,
           sort_order integer not null default 0,
+          due_date date,
+          assignee_id text,
           created_at timestamptz not null default now(),
           updated_at timestamptz not null default now()
         )
       `)
+
+      await this.pool.query(`alter table checklist_items add column if not exists due_date date`)
+      await this.pool.query(`alter table checklist_items add column if not exists assignee_id text`)
 
       await this.pool.query(`
         create table if not exists checklist_templates (
@@ -407,10 +414,15 @@ export class AppDataStore {
           template_id text not null references checklist_templates(id) on delete cascade,
           label text not null,
           sort_order integer not null default 0,
+          due_date date,
+          assignee_id text,
           created_at timestamptz not null default now(),
           updated_at timestamptz not null default now()
         )
       `)
+
+      await this.pool.query(`alter table checklist_template_items add column if not exists due_date date`)
+      await this.pool.query(`alter table checklist_template_items add column if not exists assignee_id text`)
 
       await this.pool.query(`
         create table if not exists invoice_drafts (
@@ -564,7 +576,7 @@ export class AppDataStore {
             order by due_date asc, id asc
           `),
           this.pool.query(`
-            select id, checklist_id, label, done, sort_order
+            select id, checklist_id, label, done, sort_order, due_date, assignee_id
             from checklist_items
             order by checklist_id asc, sort_order asc, id asc
           `),
@@ -574,7 +586,7 @@ export class AppDataStore {
             order by title asc
           `),
           this.pool.query(`
-            select id, template_id, label, sort_order
+            select id, template_id, label, sort_order, due_date, assignee_id
             from checklist_template_items
             order by template_id asc, sort_order asc, id asc
           `),
@@ -590,21 +602,35 @@ export class AppDataStore {
       const itemsByChecklist = new Map()
       for (const row of checklistItemsResult.rows) {
         const existing = itemsByChecklist.get(row.checklist_id) ?? []
-        existing.push({
+        const item = {
           id: row.id,
           label: row.label,
           done: row.done,
-        })
+        }
+        if (row.due_date) {
+          item.dueDate = row.due_date.toISOString().slice(0, 10)
+        }
+        if (row.assignee_id) {
+          item.assigneeId = row.assignee_id
+        }
+        existing.push(item)
         itemsByChecklist.set(row.checklist_id, existing)
       }
 
       const templateItemsByTemplate = new Map()
       for (const row of checklistTemplateItemsResult.rows) {
         const existing = templateItemsByTemplate.get(row.template_id) ?? []
-        existing.push({
+        const item = {
           id: row.id,
           label: row.label,
-        })
+        }
+        if (row.due_date) {
+          item.dueDate = row.due_date.toISOString().slice(0, 10)
+        }
+        if (row.assignee_id) {
+          item.assigneeId = row.assignee_id
+        }
+        existing.push(item)
         templateItemsByTemplate.set(row.template_id, existing)
       }
 
@@ -802,10 +828,10 @@ export class AppDataStore {
           for (const [index, item] of (template.items ?? []).entries()) {
             await client.query(
               `
-                insert into checklist_template_items (id, template_id, label, sort_order, updated_at)
-                values ($1, $2, $3, $4, now())
+                insert into checklist_template_items (id, template_id, label, sort_order, due_date, assignee_id, updated_at)
+                values ($1, $2, $3, $4, $5, $6, now())
               `,
-              [item.id, template.id, item.label, index],
+              [item.id, template.id, item.label, index, item.dueDate ?? null, item.assigneeId ?? null],
             )
           }
         }
@@ -832,10 +858,10 @@ export class AppDataStore {
           for (const [index, item] of checklist.items.entries()) {
             await client.query(
               `
-                insert into checklist_items (id, checklist_id, label, done, sort_order, updated_at)
-                values ($1, $2, $3, $4, $5, now())
+                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, assignee_id, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, now())
               `,
-              [item.id, checklist.id, item.label, item.done, index],
+              [item.id, checklist.id, item.label, item.done, index, item.dueDate ?? null, item.assigneeId ?? null],
             )
           }
         }
@@ -898,6 +924,8 @@ export class AppDataStore {
         id: item.id ?? `item-${randomUUID().slice(0, 8)}`,
         done: Boolean(item.done),
         sortOrder: index,
+        dueDate: item.dueDate ?? null,
+        assigneeId: item.assigneeId ?? null,
       })),
     }
 
@@ -927,10 +955,10 @@ export class AppDataStore {
         for (const item of nextChecklist.items) {
           await client.query(
             `
-              insert into checklist_items (id, checklist_id, label, done, sort_order, updated_at)
-              values ($1, $2, $3, $4, $5, now())
+              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, assignee_id, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, now())
             `,
-            [item.id, nextChecklist.id, item.label, item.done, item.sortOrder],
+            [item.id, nextChecklist.id, item.label, item.done, item.sortOrder, item.dueDate ?? null, item.assigneeId ?? null],
           )
         }
 
@@ -1120,6 +1148,223 @@ export class AppDataStore {
 
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return updatedTemplate
+  }
+
+  async reorderChecklistItems(checklistId, orderedIds) {
+    if (this.pool) {
+      // Update sort_order for each item using a CASE expression
+      if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+        return null
+      }
+      const cases = orderedIds.map((id, idx) => `when id = $${idx + 2} then ${idx}`).join(' ')
+      const params = [checklistId, ...orderedIds]
+      const result = await this.pool.query(
+        `
+          update checklist_items
+          set sort_order = case ${cases} end,
+              updated_at = now()
+          where checklist_id = $1 and id = any($${params.length + 1}::text[])
+          returning checklist_id
+        `,
+        [...params, orderedIds],
+      )
+      if (!result.rowCount) {
+        return null
+      }
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) {
+        return checklist
+      }
+      const byId = new Map(checklist.items.map((item) => [item.id, item]))
+      const reordered = orderedIds.map((id) => byId.get(id)).filter(Boolean)
+      const seen = new Set(orderedIds)
+      const tail = checklist.items.filter((item) => !seen.has(item.id))
+      updatedChecklist = { ...checklist, items: [...reordered, ...tail] }
+      return updatedChecklist
+    })
+    if (!updatedChecklist) {
+      return null
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  async appendChecklistItems(checklistId, labels) {
+    if (!Array.isArray(labels) || labels.length === 0) {
+      return null
+    }
+    if (this.pool) {
+      // Find current max sort_order
+      const sortResult = await this.pool.query(
+        `select coalesce(max(sort_order), -1) as max_order from checklist_items where checklist_id = $1`,
+        [checklistId],
+      )
+      let nextOrder = (sortResult.rows[0]?.max_order ?? -1) + 1
+
+      // Verify checklist exists
+      const checkResult = await this.pool.query(
+        `select id from checklists where id = $1`,
+        [checklistId],
+      )
+      if (!checkResult.rowCount) {
+        return null
+      }
+
+      for (const label of labels) {
+        const id = `item-${randomUUID().slice(0, 8)}`
+        await this.pool.query(
+          `insert into checklist_items (id, checklist_id, label, done, sort_order, created_at, updated_at)
+           values ($1, $2, $3, false, $4, now(), now())`,
+          [id, checklistId, label, nextOrder],
+        )
+        nextOrder += 1
+      }
+
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) {
+        return checklist
+      }
+      const newItems = labels.map((label) => ({
+        id: `item-${randomUUID().slice(0, 8)}`,
+        label,
+        done: false,
+      }))
+      updatedChecklist = { ...checklist, items: [...checklist.items, ...newItems] }
+      return updatedChecklist
+    })
+    if (!updatedChecklist) {
+      return null
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  async updateChecklistItem(checklistId, itemId, patch) {
+    const { title, dueDate, assigneeId } = patch ?? {}
+
+    if (this.pool) {
+      const setClauses = []
+      const params = [checklistId, itemId]
+
+      if (title !== undefined) {
+        params.push(title)
+        setClauses.push(`label = $${params.length}`)
+      }
+      if (dueDate !== undefined) {
+        params.push(dueDate === '' || dueDate === null ? null : dueDate)
+        setClauses.push(`due_date = $${params.length}`)
+      }
+      if (assigneeId !== undefined) {
+        params.push(assigneeId === '' || assigneeId === null ? null : assigneeId)
+        setClauses.push(`assignee_id = $${params.length}`)
+      }
+
+      if (setClauses.length === 0) {
+        const data = await this.read()
+        return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+      }
+
+      setClauses.push('updated_at = now()')
+      const result = await this.pool.query(
+        `update checklist_items set ${setClauses.join(', ')} where checklist_id = $1 and id = $2 returning id`,
+        params,
+      )
+      if (!result.rowCount) {
+        return null
+      }
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    let itemFound = false
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) {
+        return checklist
+      }
+      const items = checklist.items.map((item) => {
+        if (item.id !== itemId) {
+          return item
+        }
+        itemFound = true
+        const next = { ...item }
+        if (title !== undefined) {
+          next.label = title
+        }
+        if (dueDate !== undefined) {
+          if (dueDate === '' || dueDate === null) {
+            delete next.dueDate
+          } else {
+            next.dueDate = dueDate
+          }
+        }
+        if (assigneeId !== undefined) {
+          if (assigneeId === '' || assigneeId === null) {
+            delete next.assigneeId
+          } else {
+            next.assigneeId = assigneeId
+          }
+        }
+        return next
+      })
+      updatedChecklist = { ...checklist, items }
+      return updatedChecklist
+    })
+    if (!itemFound || !updatedChecklist) {
+      return null
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  async deleteChecklistItem(checklistId, itemId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `delete from checklist_items where checklist_id = $1 and id = $2 returning id`,
+        [checklistId, itemId],
+      )
+      if (!result.rowCount) {
+        return null
+      }
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    let itemFound = false
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) {
+        return checklist
+      }
+      const items = checklist.items.filter((item) => {
+        if (item.id === itemId) {
+          itemFound = true
+          return false
+        }
+        return true
+      })
+      updatedChecklist = { ...checklist, items }
+      return updatedChecklist
+    })
+    if (!itemFound || !updatedChecklist) {
+      return null
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
   }
 
   async getLoginOptions() {

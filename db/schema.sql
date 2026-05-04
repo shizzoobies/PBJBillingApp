@@ -93,9 +93,14 @@ create table if not exists checklist_items (
   label text not null,
   done boolean not null default false,
   sort_order integer not null default 0,
+  due_date date,
+  assignee_id text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table checklist_items add column if not exists due_date date;
+alter table checklist_items add column if not exists assignee_id text;
 
 create table if not exists checklist_templates (
   id text primary key,
@@ -116,9 +121,14 @@ create table if not exists checklist_template_items (
   template_id text not null references checklist_templates(id) on delete cascade,
   label text not null,
   sort_order integer not null default 0,
+  due_date date,
+  assignee_id text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table checklist_template_items add column if not exists due_date date;
+alter table checklist_template_items add column if not exists assignee_id text;
 
 create table if not exists invoice_drafts (
   id text primary key,

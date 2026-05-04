@@ -116,8 +116,8 @@
         { "id": "template-monthly-bookkeeping-4", "label": "Reconcile Books to Statements - Vystar SVG" },
         { "id": "template-monthly-bookkeeping-5", "label": "Reconcile Books to Statements - Vystar Loan" },
         { "id": "template-monthly-bookkeeping-6", "label": "Reconcile Books to Statements - Vystar LOC" },
-        { "id": "template-monthly-bookkeeping-7", "label": "Reconcile Books to Statements - Amex" },
-        { "id": "template-monthly-bookkeeping-8", "label": "Reconcile Books to Statements - Madison Trust Co" }
+        { "id": "template-monthly-bookkeeping-7", "label": "Reconcile Books to Statements - Amex", "assigneeId": "emp-jordan" },
+        { "id": "template-monthly-bookkeeping-8", "label": "Reconcile Books to Statements - Madison Trust Co", "dueDate": "2026-05-10" }
       ]
     },
     {
@@ -198,8 +198,8 @@
       "editorIds": [],
       "items": [
         { "id": "item-seed-1", "label": "Clear Bank Feed - Vystar", "done": false },
-        { "id": "item-seed-2", "label": "Clear Bank Feed - Amex", "done": false },
-        { "id": "item-seed-3", "label": "Reconcile Books to Statements - Vystar CK", "done": false }
+        { "id": "item-seed-2", "label": "Clear Bank Feed - Amex", "done": false, "assigneeId": "emp-jordan" },
+        { "id": "item-seed-3", "label": "Reconcile Books to Statements - Vystar CK", "done": false, "dueDate": "2026-05-10" }
       ]
     }
   ]

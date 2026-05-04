@@ -690,9 +690,159 @@ textarea.input {
 }
 
 .template-item-row {
+  align-items: center;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+}
+
+.template-item-row.dragging {
+  opacity: 0.4;
+}
+
+.template-item-row.drop-target {
+  border-top: 2px solid var(--berry);
+  padding-top: 4px;
+}
+
+.task-row .drag-handle,
+.template-item-row .drag-handle {
+  align-items: center;
+  color: var(--muted);
+  cursor: grab;
+  display: inline-flex;
+  height: 18px;
+  justify-content: center;
+  width: 14px;
+}
+
+.task-row.dragging {
+  opacity: 0.4;
+}
+
+.task-row.drop-target {
+  border-top: 2px solid var(--berry);
+  padding-top: 4px;
+}
+
+.task-row {
+  align-items: flex-start;
+}
+
+.task-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.task-row-title {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.overdue-dot {
+  background: #c0392b;
+  border-radius: 999px;
+  display: inline-block;
+  height: 6px;
+  width: 6px;
+}
+
+.task-row-chips {
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.task-chip {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-weight: 600;
+  padding: 1px 8px;
+}
+
+.task-row-inline-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  flex-wrap: wrap;
+}
+
+.item-date-input {
+  font-size: 11px;
+  padding: 1px 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  height: 22px;
+}
+
+.item-assignee-select {
+  font-size: 11px;
+  padding: 1px 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  height: 22px;
+  max-width: 100px;
+}
+
+.item-delete-btn {
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 5px;
+  height: 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+.item-delete-btn:hover {
+  background: var(--soft);
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.bulk-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.bulk-add-toggle {
+  align-self: flex-start;
+}
+
+.bulk-add-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bulk-add-footer {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.bulk-add-preview {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .visibility-panel {

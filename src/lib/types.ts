@@ -41,11 +41,15 @@ export type ChecklistItem = {
   id: string
   label: string
   done: boolean
+  dueDate?: string
+  assigneeId?: string
 }
 
 export type ChecklistTemplateItem = {
   id: string
   label: string
+  dueDate?: string
+  assigneeId?: string
 }
 
 export type ChecklistTemplate = {

@@ -150,6 +150,8 @@ export function ensureRecurringChecklists(data: AppData) {
             id: makeId('item'),
             label: item.label,
             done: false,
+            ...(item.dueDate ? { dueDate: item.dueDate } : {}),
+            ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
           })),
         })
         existingKeys.add(instanceKey)

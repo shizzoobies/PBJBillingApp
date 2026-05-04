@@ -48,8 +48,28 @@ export type AppContextValue = {
   deleteChecklistTemplate: (templateId: string) => void
   addChecklistTemplateItem: (templateId: string) => void
   updateChecklistTemplateItem: (templateId: string, itemId: string, label: string) => void
+  setChecklistTemplateItemDueDate: (
+    templateId: string,
+    itemId: string,
+    dueDate: string,
+  ) => void
+  setChecklistTemplateItemAssignee: (
+    templateId: string,
+    itemId: string,
+    assigneeId: string,
+  ) => void
+  reorderChecklistTemplateItems: (templateId: string, orderedIds: string[]) => void
+  bulkAddChecklistTemplateItems: (templateId: string, labels: string[]) => void
   removeChecklistTemplateItem: (templateId: string, itemId: string) => void
   duplicateChecklistTemplate: (templateId: string) => void
+  reorderChecklistItems: (checklistId: string, orderedIds: string[]) => void
+  bulkAddChecklistItems: (checklistId: string, labels: string[]) => void
+  updateChecklistItem: (
+    checklistId: string,
+    itemId: string,
+    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+  ) => Promise<void>
+  deleteChecklistItem: (checklistId: string, itemId: string) => Promise<void>
   updateClientPlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
   addClient: (client: Omit<Client, 'id'>) => void
   addPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void
