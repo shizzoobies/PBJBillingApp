@@ -220,6 +220,29 @@ export async function reorderChecklistItemsRequest(checklistId: string, itemIds:
   return (await response.json()) as Checklist
 }
 
+export async function createChecklistRequest(payload: {
+  title: string
+  clientId: string
+  assigneeId: string
+  dueDate: string
+  items: Array<{ label: string }>
+}) {
+  const response = await fetch('/api/checklists', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to create checklist (${response.status})`,
+    )
+  }
+  return (await response.json()) as Checklist
+}
+
 export async function appendChecklistItemsRequest(checklistId: string, titles: string[]) {
   const response = await fetch(`/api/checklists/${checklistId}/items`, {
     credentials: 'same-origin',

@@ -88,6 +88,13 @@ export type AppContextValue = {
   duplicateChecklistTemplate: (templateId: string) => void
   reorderChecklistItems: (checklistId: string, orderedIds: string[]) => void
   bulkAddChecklistItems: (checklistId: string, labels: string[]) => void
+  createChecklist: (payload: {
+    title: string
+    clientId: string
+    assigneeId: string
+    dueDate: string
+    items: Array<{ label: string }>
+  }) => Promise<void>
   updateChecklistItem: (
     checklistId: string,
     itemId: string,

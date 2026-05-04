@@ -6,6 +6,7 @@ import {
   useState,
   type DragEvent,
   type FormEvent,
+  type KeyboardEvent,
 } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
@@ -97,6 +98,7 @@ export function ChecklistsPage() {
     reorderTemplateStages,
     reorderChecklistItems,
     bulkAddChecklistItems,
+    createChecklist,
     updateChecklistItem,
     deleteChecklistItem,
   } = useAppContext()
@@ -109,6 +111,7 @@ export function ChecklistsPage() {
         clients={data.clients}
         employees={data.employees}
         onBulkAddItems={bulkAddChecklistItems}
+        onCreateChecklist={createChecklist}
         onDeleteItem={deleteChecklistItem}
         onReorderItems={reorderChecklistItems}
         onSetViewers={setChecklistViewers}
@@ -150,6 +153,7 @@ function ChecklistPanel({
   clients,
   employees,
   onBulkAddItems,
+  onCreateChecklist,
   onDeleteItem,
   onReorderItems,
   onSetViewers,
@@ -163,6 +167,13 @@ function ChecklistPanel({
   clients: Client[]
   employees: Employee[]
   onBulkAddItems: (checklistId: string, labels: string[]) => void
+  onCreateChecklist: (payload: {
+    title: string
+    clientId: string
+    assigneeId: string
+    dueDate: string
+    items: Array<{ label: string }>
+  }) => Promise<void>
   onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
   onSetViewers: (
@@ -227,6 +238,10 @@ function ChecklistPanel({
     { key: 'completed', label: 'Completed', defaultOpen: false },
   ]
 
+  const [showNewChecklist, setShowNewChecklist] = useState(false)
+  // Server currently restricts /api/checklists POST to owners; gate the UI to match.
+  const canCreateOneOff = role === 'owner'
+
   return (
     <section className="panel">
       <div className="section-heading">
@@ -234,9 +249,33 @@ function ChecklistPanel({
           <p className="section-kicker">
             {role === 'owner' ? 'Owner checklist view' : 'Assigned checklist'}
           </p>
-          <h2>Live checklists</h2>
+          <h2>Active checklists</h2>
         </div>
+        {canCreateOneOff ? (
+          <button
+            type="button"
+            className="primary-action"
+            onClick={() => setShowNewChecklist((value) => !value)}
+            aria-expanded={showNewChecklist}
+          >
+            <Plus size={14} />
+            {showNewChecklist ? 'Cancel' : 'New checklist'}
+          </button>
+        ) : null}
       </div>
+      {showNewChecklist && canCreateOneOff ? (
+        <NewChecklistForm
+          activeEmployeeId={activeEmployeeId}
+          clients={clients}
+          employees={employees}
+          onCancel={() => setShowNewChecklist(false)}
+          onCreate={async (payload) => {
+            await onCreateChecklist(payload)
+            setShowNewChecklist(false)
+          }}
+          role={role}
+        />
+      ) : null}
       <FilterBar employees={employees} clients={clients} />
       <div className="checklist-stack">
         {filtered.length === 0 ? (
@@ -420,6 +459,9 @@ function ChecklistCard({
           }}
         />
       </div>
+      {canEditStructure && checklist.items.length === 0 ? (
+        <p className="checklist-empty-hint">No items yet — add one below.</p>
+      ) : null}
       <DraggableTaskList
         canEdit={canEditStructure}
         canReorder={canEditStructure}
@@ -434,9 +476,16 @@ function ChecklistCard({
         todayDateOnly={todayDateOnly}
       />
       {canEditStructure ? (
-        <ChecklistBulkAdd
-          onAdd={(labels) => onBulkAddItems(checklist.id, labels)}
-        />
+        <>
+          <InlineAddItemRow
+            onAdd={(label) => onBulkAddItems(checklist.id, [label])}
+            placeholder="Add an item..."
+          />
+          <ChecklistBulkAdd
+            label="Paste a list"
+            onAdd={(labels) => onBulkAddItems(checklist.id, labels)}
+          />
+        </>
       ) : null}
       {ownerMode ? (
         <SharingControl
@@ -552,7 +601,11 @@ function DraggableTaskList({
             onDragEnd={handleDragEnd}
           >
             {canReorder ? (
-              <span className="drag-handle" aria-hidden="true">
+              <span
+                className="drag-handle"
+                aria-hidden="true"
+                title="Drag to reorder"
+              >
                 <GripVertical size={14} />
               </span>
             ) : null}
@@ -578,6 +631,7 @@ function DraggableTaskList({
                   <input
                     aria-label="Due date"
                     className="item-date-input"
+                    title="Item due date (optional)"
                     type="date"
                     value={item.dueDate ?? ''}
                     onChange={(e) => {
@@ -589,6 +643,7 @@ function DraggableTaskList({
                   <select
                     aria-label="Assignee"
                     className="item-assignee-select"
+                    title="Assign to (optional)"
                     value={item.assigneeId ?? ''}
                     onChange={(e) => {
                       void onUpdateItem(item.id, {
@@ -607,6 +662,7 @@ function DraggableTaskList({
                     type="button"
                     aria-label="Delete item"
                     className="item-delete-btn"
+                    title="Delete item"
                     onClick={() => void onDeleteItem(item.id)}
                   >
                     ×
@@ -634,7 +690,66 @@ function DraggableTaskList({
   )
 }
 
-function ChecklistBulkAdd({ onAdd }: { onAdd: (labels: string[]) => void }) {
+function InlineAddItemRow({
+  onAdd,
+  placeholder,
+}: {
+  onAdd: (label: string) => void
+  placeholder: string
+}) {
+  const [draft, setDraft] = useState('')
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  const submit = () => {
+    const value = draft.trim()
+    if (!value) return
+    onAdd(value)
+    setDraft('')
+    // Keep focus so users can rapid-fire add multiple items.
+    inputRef.current?.focus()
+  }
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      submit()
+    }
+  }
+
+  return (
+    <div className="inline-add-row">
+      <span className="inline-add-checkbox" aria-hidden="true" />
+      <input
+        ref={inputRef}
+        className="inline-add-input"
+        aria-label="Add an item"
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        type="text"
+        value={draft}
+      />
+      <button
+        type="button"
+        aria-label="Add item"
+        className="inline-add-btn"
+        disabled={draft.trim().length === 0}
+        onClick={submit}
+        title="Add item (Enter)"
+      >
+        <Plus size={14} />
+      </button>
+    </div>
+  )
+}
+
+function ChecklistBulkAdd({
+  label = 'Bulk add',
+  onAdd,
+}: {
+  label?: string
+  onAdd: (labels: string[]) => void
+}) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
   const lines = useMemo(() => parseBulkLines(draft), [draft])
@@ -654,7 +769,7 @@ function ChecklistBulkAdd({ onAdd }: { onAdd: (labels: string[]) => void }) {
         onClick={() => setOpen((value) => !value)}
       >
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        Bulk add
+        {label}
       </button>
       {open ? (
         <div className="bulk-add-body">
@@ -682,6 +797,164 @@ function ChecklistBulkAdd({ onAdd }: { onAdd: (labels: string[]) => void }) {
         </div>
       ) : null}
     </div>
+  )
+}
+
+function NewChecklistForm({
+  activeEmployeeId,
+  clients,
+  employees,
+  onCancel,
+  onCreate,
+  role,
+}: {
+  activeEmployeeId: string
+  clients: Client[]
+  employees: Employee[]
+  onCancel: () => void
+  onCreate: (payload: {
+    title: string
+    clientId: string
+    assigneeId: string
+    dueDate: string
+    items: Array<{ label: string }>
+  }) => Promise<void>
+  role: Role
+}) {
+  // Owners can pick any employee. Non-owners are filtered out at the panel
+  // level today (server only permits owners to create), but keep this guard
+  // so that if the server later allows employees, they only see themselves.
+  const assignableEmployees = useMemo(() => {
+    if (role === 'owner') return employees
+    return employees.filter((employee) => employee.id === activeEmployeeId)
+  }, [employees, role, activeEmployeeId])
+
+  const [title, setTitle] = useState('')
+  const [clientId, setClientId] = useState(clients[0]?.id ?? '')
+  const [assigneeId, setAssigneeId] = useState(
+    assignableEmployees[0]?.id ?? activeEmployeeId,
+  )
+  const [dueDate, setDueDate] = useState(lastDayOfCurrentMonth())
+  const [itemDraft, setItemDraft] = useState('')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (submitting) return
+    const trimmedTitle = title.trim()
+    const items = parseBulkLines(itemDraft).map((label) => ({ label }))
+
+    if (!trimmedTitle) {
+      setError('Give the checklist a title.')
+      return
+    }
+    if (!clientId) {
+      setError('Pick a client.')
+      return
+    }
+    if (!assigneeId) {
+      setError('Pick an assignee.')
+      return
+    }
+    if (!dueDate) {
+      setError('Pick a due date.')
+      return
+    }
+    if (items.length === 0) {
+      setError('Add at least one item — type one per line.')
+      return
+    }
+
+    setError('')
+    setSubmitting(true)
+    try {
+      await onCreate({
+        title: trimmedTitle,
+        clientId,
+        assigneeId,
+        dueDate,
+        items,
+      })
+      setTitle('')
+      setItemDraft('')
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Could not create checklist.',
+      )
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <form className="quick-template-form new-checklist-form" onSubmit={handleSubmit}>
+      <div className="quick-row">
+        <input
+          className="input quick-title"
+          placeholder="Checklist title (e.g. Onboard Riverbend)"
+          onChange={(event) => setTitle(event.target.value)}
+          value={title}
+        />
+      </div>
+      <div className="quick-row quick-row-meta">
+        <select
+          className="compact-input"
+          aria-label="Client"
+          onChange={(event) => setClientId(event.target.value)}
+          value={clientId}
+        >
+          {clients.map((client) => (
+            <option key={client.id} value={client.id}>
+              {client.name}
+            </option>
+          ))}
+        </select>
+        <select
+          className="compact-input"
+          aria-label="Assignee"
+          onChange={(event) => setAssigneeId(event.target.value)}
+          value={assigneeId}
+        >
+          {assignableEmployees.map((employee) => (
+            <option key={employee.id} value={employee.id}>
+              {employee.name}
+            </option>
+          ))}
+        </select>
+        <input
+          aria-label="Due date"
+          className="compact-input"
+          onChange={(event) => setDueDate(event.target.value)}
+          type="date"
+          value={dueDate}
+        />
+      </div>
+      <textarea
+        className="input quick-items"
+        placeholder={
+          'One item per line.\n# lines starting with # are ignored.\nReconcile bank feeds\nReview payroll clearing'
+        }
+        onChange={(event) => setItemDraft(event.target.value)}
+        rows={4}
+        value={itemDraft}
+      />
+      {error ? <p className="auth-error">{error}</p> : null}
+      <div className="form-row-actions">
+        <button
+          type="button"
+          className="secondary-action"
+          onClick={onCancel}
+          disabled={submitting}
+        >
+          Cancel
+        </button>
+        <button className="primary-action" type="submit" disabled={submitting}>
+          <Plus size={16} />
+          {submitting ? 'Creating...' : 'Create checklist'}
+        </button>
+      </div>
+    </form>
   )
 }
 
@@ -730,20 +1003,35 @@ type TemplateManagerProps = {
 }
 
 function ChecklistTemplateManager(props: TemplateManagerProps) {
+  const [showNewTemplate, setShowNewTemplate] = useState(false)
   return (
     <section className="panel">
       <div className="section-heading">
         <div>
           <p className="section-kicker">Owner template controls</p>
-          <h2>Recurring checklist templates</h2>
+          <h2>Recurring templates</h2>
         </div>
+        <button
+          type="button"
+          className="primary-action"
+          onClick={() => setShowNewTemplate((value) => !value)}
+          aria-expanded={showNewTemplate}
+        >
+          <Plus size={14} />
+          {showNewTemplate ? 'Cancel' : 'New template'}
+        </button>
       </div>
       <div className="template-manager">
-        <QuickTemplateForm
-          clients={props.clients}
-          employees={props.employees}
-          onCreate={props.onCreate}
-        />
+        {showNewTemplate ? (
+          <QuickTemplateForm
+            clients={props.clients}
+            employees={props.employees}
+            onCreate={(template) => {
+              props.onCreate(template)
+              setShowNewTemplate(false)
+            }}
+          />
+        ) : null}
         <div className="template-list">
           {props.templates.map((template) => (
             <TemplateCard
@@ -1107,6 +1395,22 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
   // Stage-level drag-and-drop reorders entire stages by their header.
   const [draggingStageId, setDraggingStageId] = useState<string | null>(null)
   const [dropTargetStageId, setDropTargetStageId] = useState<string | null>(null)
+  // Single-stage templates auto-expand for the common case; multi-stage stays
+  // collapsed by default.
+  const [openStageIds, setOpenStageIds] = useState<Set<string>>(() =>
+    stages.length === 1 ? new Set(stages.map((stage) => stage.id)) : new Set(),
+  )
+  const toggleStageOpen = (stageId: string) => {
+    setOpenStageIds((current) => {
+      const next = new Set(current)
+      if (next.has(stageId)) {
+        next.delete(stageId)
+      } else {
+        next.add(stageId)
+      }
+      return next
+    })
+  }
 
   const handleStageDragStart = (event: DragEvent<HTMLDivElement>, stageId: string) => {
     setDraggingStageId(stageId)
@@ -1154,6 +1458,7 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
         const stageClasses = ['stage-card']
         if (draggingStageId === stage.id) stageClasses.push('dragging')
         if (dropTargetStageId === stage.id) stageClasses.push('drop-target')
+        const isOpen = openStageIds.has(stage.id)
         return (
           <div key={stage.id} className={stageClasses.join(' ')}>
             <div
@@ -1165,9 +1470,19 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
               onDrop={(event) => handleStageDrop(event, stage.id)}
               onDragEnd={handleStageDragEnd}
             >
-              <span className="drag-handle" aria-hidden="true">
+              <span className="drag-handle" aria-hidden="true" title="Drag to reorder">
                 <GripVertical size={14} />
               </span>
+              <button
+                type="button"
+                className="stage-toggle-btn"
+                aria-expanded={isOpen}
+                aria-label={isOpen ? 'Collapse stage' : 'Expand stage'}
+                title={isOpen ? 'Collapse stage' : 'Expand stage'}
+                onClick={() => toggleStageOpen(stage.id)}
+              >
+                {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              </button>
               <span className="stage-index-pill">Stage {index + 1}</span>
               <input
                 className="input stage-name-input"
@@ -1179,6 +1494,7 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
               <button
                 aria-label="Remove stage"
                 className="item-delete-btn"
+                title="Remove stage"
                 type="button"
                 onClick={() => {
                   if (
@@ -1193,6 +1509,7 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
                 ×
               </button>
             </div>
+            {isOpen ? (
             <div className="stage-card-body">
               <div className="stage-meta-row">
                 <label className="field">
@@ -1249,15 +1566,14 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
                   props.onUpdateItem(template.id, stage.id, itemId, label)
                 }
               />
-              <button
-                className="secondary-action"
-                onClick={() => props.onAddItem(template.id, stage.id)}
-                type="button"
-              >
-                <Plus size={16} />
-                Add item
-              </button>
+              <InlineAddItemRow
+                onAdd={(label) =>
+                  props.onBulkAddItems(template.id, stage.id, [label])
+                }
+                placeholder="Add an item..."
+              />
               <ChecklistBulkAdd
+                label="Paste a list"
                 onAdd={(labels) => props.onBulkAddItems(template.id, stage.id, labels)}
               />
               <SharingControl
@@ -1273,6 +1589,7 @@ function StagesAccordion(props: TemplateCardProps & { stages: TemplateStage[] })
                 viewerIds={stage.viewerIds ?? []}
               />
             </div>
+            ) : null}
           </div>
         )
       })}

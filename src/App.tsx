@@ -13,6 +13,7 @@ import { AppLayout } from './components/AppLayout'
 import { LoginScreen } from './components/LoginScreen'
 import {
   appendChecklistItemsRequest,
+  createChecklistRequest,
   createTimeEntry,
   deleteChecklistItemRequest,
   fetchAppData,
@@ -603,6 +604,33 @@ function App() {
     }
   }
 
+  const createChecklist = async (payload: {
+    title: string
+    clientId: string
+    assigneeId: string
+    dueDate: string
+    items: Array<{ label: string }>
+  }) => {
+    try {
+      setDataSyncState('saving')
+      const created = await createChecklistRequest(payload)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: [...current.checklists, created],
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
   const updateChecklistItem = async (
     checklistId: string,
     itemId: string,
@@ -823,6 +851,7 @@ function App() {
     duplicateChecklistTemplate,
     reorderChecklistItems,
     bulkAddChecklistItems,
+    createChecklist,
     updateChecklistItem,
     deleteChecklistItem,
     updateClientPlan,
