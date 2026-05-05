@@ -150,8 +150,38 @@ export function TwoFactorSetupPage({
           <div className="auth-form">
             <p className="auth-copy">
               {forced
-                ? 'Owners are required to use two-factor authentication. Open your authenticator app (Google Authenticator, 1Password, Microsoft Authenticator, etc.) and scan this QR code.'
-                : 'Open your authenticator app and scan this QR code, then enter the 6-digit code it shows.'}
+                ? "Owners are required to use two-factor authentication. You'll need an authenticator app on your phone — most people use the one that came with their phone (Apple Passwords on iPhone, Google Authenticator on Android) or a password manager (1Password, Bitwarden)."
+                : "You'll need an authenticator app on your phone — most people use Apple Passwords (iPhone), Google Authenticator (Android), or a password manager."}
+            </p>
+
+            <a
+              className="primary-action auth-submit"
+              href={setup.otpauthUri}
+              style={{ textAlign: 'center', textDecoration: 'none', display: 'block' }}
+            >
+              Open in my authenticator app
+            </a>
+            <p className="auth-copy" style={{ fontSize: 13, color: '#695f71', marginTop: 4 }}>
+              ↑ Tap this if you're on your phone — it opens your authenticator app and adds the
+              account in one tap.
+            </p>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '16px 0' }}>
+              <hr style={{ flex: 1, border: 0, borderTop: '1px solid #e6dde8' }} />
+              <span style={{ fontSize: 12, color: '#695f71' }}>OR SCAN THIS QR FROM ANOTHER DEVICE</span>
+              <hr style={{ flex: 1, border: 0, borderTop: '1px solid #e6dde8' }} />
+            </div>
+
+            <p className="auth-copy" style={{ fontSize: 14 }}>
+              On your phone:
+              <br />
+              1. Open your authenticator app
+              <br />
+              2. Tap the <strong>+</strong> (add) button
+              <br />
+              3. Choose <strong>Scan a QR code</strong>
+              <br />
+              4. Point your camera at the code below
             </p>
             <div
               aria-label="Authenticator QR code"
@@ -159,27 +189,34 @@ export function TwoFactorSetupPage({
               dangerouslySetInnerHTML={{ __html: setup.qrSvg }}
               style={{ display: 'flex', justifyContent: 'center', padding: '12px 0' }}
             />
+
             <button
               className="auth-secondary"
               onClick={() => setShowSecret((current) => !current)}
               type="button"
             >
-              {showSecret ? 'Hide manual entry secret' : "Can't scan? Enter this manually"}
+              {showSecret ? 'Hide manual entry code' : "Still stuck? Type the setup code instead"}
             </button>
             {showSecret ? (
-              <p
-                className="auth-copy"
-                style={{ wordBreak: 'break-all', fontFamily: 'ui-monospace, monospace' }}
-              >
-                <strong>{setup.secret}</strong>
-              </p>
+              <>
+                <p className="auth-copy" style={{ fontSize: 13, marginBottom: 4 }}>
+                  In your authenticator app, choose "Enter a setup key" and paste this:
+                </p>
+                <p
+                  className="auth-copy"
+                  style={{ wordBreak: 'break-all', fontFamily: 'ui-monospace, monospace' }}
+                >
+                  <strong>{setup.secret}</strong>
+                </p>
+              </>
             ) : null}
+
             <button
               className="primary-action auth-submit"
               onClick={() => setStep('verify')}
               type="button"
             >
-              Next
+              I added it — next
             </button>
           </div>
         ) : null}
