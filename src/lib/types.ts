@@ -16,6 +16,12 @@ export type Client = {
   hourlyRate: number
   planId: string | null
   assignedEmployeeIds?: string[]
+  /**
+   * Server-enforced visibility scoping. Owners always see all clients. A
+   * non-owner can only see clients where their user id appears in this array.
+   * Auto-populated when a non-owner is assigned to any task on this client.
+   */
+  assignedBookkeeperIds?: string[]
   // Phase 4: profile + invoice customization
   email?: string
   contactName?: string
@@ -51,6 +57,8 @@ export type TimeEntry = {
   category: string
   description: string
   billable: boolean
+  /** Optional link to a checklist (task) this entry was logged against. */
+  taskId?: string | null
 }
 
 export type ChecklistItem = {
@@ -111,6 +119,40 @@ export type Checklist = {
   stageCount?: number
 }
 
+export type FirmSettings = {
+  name: string
+  tagline?: string
+  logoUrl?: string
+  brandColor?: string
+  addressLine1?: string
+  addressLine2?: string
+  city?: string
+  state?: string
+  postalCode?: string
+  phone?: string
+  email?: string
+  website?: string
+  ein?: string
+}
+
+export type PublicFirmSettings = Pick<FirmSettings, 'name' | 'tagline' | 'logoUrl' | 'brandColor'>
+
+export const DEFAULT_FIRM_SETTINGS: FirmSettings = {
+  name: 'PB&J Strategic Accounting',
+  tagline: '',
+  logoUrl: '',
+  brandColor: '#3c2044',
+  addressLine1: '',
+  addressLine2: '',
+  city: '',
+  state: '',
+  postalCode: '',
+  phone: '',
+  email: '',
+  website: '',
+  ein: '',
+}
+
 export type AppData = {
   employees: Employee[]
   clients: Client[]
@@ -118,6 +160,7 @@ export type AppData = {
   timeEntries: TimeEntry[]
   checklistTemplates: ChecklistTemplate[]
   checklists: Checklist[]
+  firmSettings?: FirmSettings
 }
 
 export type TimerState = {

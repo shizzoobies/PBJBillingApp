@@ -10,14 +10,15 @@ import {
   regenerateTeamMember,
   restoreTeamMember,
   revokeTeamMember,
+  setClientAssignedTeamRequest,
 } from '../lib/api'
-import { ApiError, type ActivityEntry, type TeamMember } from '../lib/types'
+import { ApiError, type ActivityEntry, type Client, type TeamMember } from '../lib/types'
 import { describeActivityAction, formatActivityTimestamp, relativeTime } from '../lib/utils'
 
 const STAFF_ROLES = ['Owner', 'Senior Bookkeeper', 'Bookkeeper'] as const
 
 export function TeamPage() {
-  const { ownerMode, setPreviewUserId } = useAppContext()
+  const { data, ownerMode, setPreviewUserId, updateClient } = useAppContext()
   const navigate = useNavigate()
   const [members, setMembers] = useState<TeamMember[]>([])
   const [loading, setLoading] = useState(true)
@@ -353,6 +354,19 @@ export function TeamPage() {
                         </button>
                       </div>
 
+                      {member.staffRole !== 'Owner' ? (
+                        <ClientsTheyCanSeeSection
+                          memberId={member.id}
+                          clients={data.clients}
+                          onChangeClient={(clientId, nextIds) => {
+                            updateClient(clientId, { assignedBookkeeperIds: nextIds })
+                            void setClientAssignedTeamRequest(clientId, nextIds).catch(() => {
+                              // best-effort; the next /api/app-data refresh reconciles
+                            })
+                          }}
+                        />
+                      ) : null}
+
                       <div className="team-activity">
                         <h4>Recent activity</h4>
                         {activityLoading === member.id ? (
@@ -384,5 +398,93 @@ export function TeamPage() {
         )}
       </section>
     </section>
+  )
+}
+
+/**
+ * Per-team-member view of the inverse relationship: shows every client this
+ * non-owner can currently see, with chips to remove a client from their
+ * visibility list and a "+ Add client" pill to grant access.
+ */
+function ClientsTheyCanSeeSection({
+  memberId,
+  clients,
+  onChangeClient,
+}: {
+  memberId: string
+  clients: Client[]
+  onChangeClient: (clientId: string, nextIds: string[]) => void
+}) {
+  const [adderOpen, setAdderOpen] = useState(false)
+
+  const visibleClients = clients.filter((client) =>
+    (client.assignedBookkeeperIds ?? []).includes(memberId),
+  )
+  const addableClients = clients.filter(
+    (client) => !(client.assignedBookkeeperIds ?? []).includes(memberId),
+  )
+
+  const removeClient = (client: Client) => {
+    const next = (client.assignedBookkeeperIds ?? []).filter((id) => id !== memberId)
+    onChangeClient(client.id, next)
+  }
+
+  const addClient = (client: Client) => {
+    const current = client.assignedBookkeeperIds ?? []
+    if (current.includes(memberId)) {
+      setAdderOpen(false)
+      return
+    }
+    onChangeClient(client.id, [...current, memberId])
+    setAdderOpen(false)
+  }
+
+  return (
+    <div className="sharing-control">
+      <p className="sharing-helper">Clients they can see</p>
+      <div className="sharing-chips">
+        {visibleClients.length === 0 ? (
+          <span className="sharing-helper">No clients assigned yet.</span>
+        ) : null}
+        {visibleClients.map((client) => (
+          <span className="sharing-chip" key={client.id}>
+            <strong>{client.name}</strong>
+            <button
+              type="button"
+              className="chip-remove"
+              onClick={() => removeClient(client)}
+              aria-label={`Remove ${client.name}`}
+            >
+              <X size={12} />
+            </button>
+          </span>
+        ))}
+        {addableClients.length > 0 ? (
+          <div className="sharing-add">
+            <button
+              type="button"
+              className="add-person-pill"
+              onClick={() => setAdderOpen((open) => !open)}
+            >
+              + Add client
+            </button>
+            {adderOpen ? (
+              <div className="sharing-add-menu" role="menu">
+                {addableClients.map((client) => (
+                  <button
+                    key={client.id}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => addClient(client)}
+                  >
+                    {client.name}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
   )
 }

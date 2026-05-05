@@ -23,11 +23,13 @@ import type {
   Employee,
   Role,
   TemplateStage,
+  TimeEntry,
 } from '../lib/types'
 import {
   checklistFrequencies,
   clientName,
   employeeName,
+  formatHours,
   getChecklistFrequencyLabel,
   lastDayOfCurrentMonth,
   makeId,
@@ -216,6 +218,7 @@ export function ChecklistsPage() {
           onUpdateItem={updateChecklistItem}
           ownerMode={ownerMode}
           role={role}
+          timeEntries={data.timeEntries}
         />
       </section>
 
@@ -258,6 +261,7 @@ function ChecklistInProgressSection({
   onUpdateItem,
   ownerMode,
   role,
+  timeEntries,
 }: {
   activeEmployeeId: string
   checklists: Checklist[]
@@ -279,6 +283,7 @@ function ChecklistInProgressSection({
   ) => Promise<void>
   ownerMode: boolean
   role: Role
+  timeEntries: TimeEntry[]
 }) {
   const todayDateOnly = new Date().toISOString().slice(0, 10)
   const { assignee, client, status } = useFilters()
@@ -365,6 +370,7 @@ function ChecklistInProgressSection({
                   onUpdateItem={onUpdateItem}
                   ownerMode={ownerMode}
                   role={role}
+                  timeEntries={timeEntries}
                 />
               ))}
             </ChecklistGroup>
@@ -419,6 +425,7 @@ function ChecklistCard({
   onUpdateItem,
   ownerMode,
   role,
+  timeEntries,
 }: {
   activeEmployeeId: string
   checklist: Checklist
@@ -442,6 +449,7 @@ function ChecklistCard({
   ) => Promise<void>
   ownerMode: boolean
   role: Role
+  timeEntries: TimeEntry[]
 }) {
   const todayDateOnly = new Date().toISOString().slice(0, 10)
   const completed = checklist.items.filter((item) => item.done).length
@@ -505,6 +513,14 @@ function ChecklistCard({
               ? ` · ${getChecklistFrequencyLabel(checklist.frequency)}`
               : ''}
           </span>
+          {(() => {
+            const totalMinutes = timeEntries
+              .filter((entry) => entry.taskId === checklist.id)
+              .reduce((sum, entry) => sum + entry.minutes, 0)
+            return totalMinutes > 0 ? (
+              <span className="checklist-meta-line">Time logged: {formatHours(totalMinutes)}</span>
+            ) : null
+          })()}
         </div>
         <div className="checklist-meta">
           {handedOff ? <span className="status-pill">Handed off</span> : null}

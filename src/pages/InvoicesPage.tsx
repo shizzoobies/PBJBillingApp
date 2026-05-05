@@ -328,6 +328,7 @@ function BillingQueue({
 
 function InvoiceDocument({ display }: { display: DisplayInvoice }) {
   const { invoice } = display
+  const { firmSettings } = useAppContext()
   const issuedDate = new Intl.DateTimeFormat('en-US', {
     month: 'long',
     day: 'numeric',
@@ -343,15 +344,29 @@ function InvoiceDocument({ display }: { display: DisplayInvoice }) {
       .join(', '),
   ].filter((line) => line && line.trim().length > 0)
 
+  const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
+  const firmTagline = firmSettings?.tagline || 'Strategic bookkeeping, payroll, and advisory support'
+  const firmAddressLines = [
+    firmSettings?.addressLine1,
+    firmSettings?.addressLine2,
+    [firmSettings?.city, firmSettings?.state, firmSettings?.postalCode]
+      .filter((part) => part && part.trim())
+      .join(', '),
+  ].filter((line) => line && line.trim().length > 0) as string[]
+  const headerLogoUrl = billingClient.logoUrl || firmSettings?.logoUrl || ''
+
   return (
     <section className="print-sheet">
       <header>
         <div>
-          <strong>PB&amp;J Strategic Accounting</strong>
-          <span>Strategic bookkeeping, payroll, and advisory support</span>
+          <strong>{firmName}</strong>
+          {firmTagline ? <span>{firmTagline}</span> : null}
+          {firmAddressLines.map((line) => (
+            <span key={line}>{line}</span>
+          ))}
         </div>
-        {billingClient.logoUrl ? (
-          <img alt={`${billingClient.name} logo`} className="print-logo" src={billingClient.logoUrl} />
+        {headerLogoUrl ? (
+          <img alt={`${firmName} logo`} className="print-logo" src={headerLogoUrl} />
         ) : (
           <FileText size={34} />
         )}
@@ -414,7 +429,7 @@ function InvoiceDocument({ display }: { display: DisplayInvoice }) {
       {billingClient.footerNote ? (
         <p className="print-footer-note">{billingClient.footerNote}</p>
       ) : (
-        <p>Thank you for trusting PB&amp;J Strategic Accounting.</p>
+        <p>Thank you for trusting {firmName}.</p>
       )}
     </section>
   )

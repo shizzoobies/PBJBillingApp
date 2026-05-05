@@ -8,6 +8,7 @@ import {
   describeActivityAction,
   employeeName,
   formatActivityTimestamp,
+  formatHours,
   shortDate,
 } from '../lib/utils'
 
@@ -82,6 +83,11 @@ export function CaseDetailPage() {
           {stages.map(({ stage, checklist }, idx) => {
             const total = checklist?.items.length ?? 0
             const done = checklist ? checklist.items.filter((i) => i.done).length : 0
+            const loggedMinutes = checklist
+              ? data.timeEntries
+                  .filter((entry) => entry.taskId === checklist.id)
+                  .reduce((sum, entry) => sum + entry.minutes, 0)
+              : 0
             return (
               <li key={stage.id} className="case-timeline-row">
                 <div className="case-timeline-dot" aria-hidden="true">
@@ -100,6 +106,11 @@ export function CaseDetailPage() {
                         )}`
                       : ' · Awaiting previous stage'}
                   </div>
+                  {loggedMinutes > 0 ? (
+                    <div className="case-timeline-meta">
+                      Time logged: {formatHours(loggedMinutes)}
+                    </div>
+                  ) : null}
                   {checklist ? (
                     <Link
                       className="secondary-action"

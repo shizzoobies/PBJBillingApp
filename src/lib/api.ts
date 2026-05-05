@@ -4,12 +4,47 @@ import {
   type AppData,
   type Checklist,
   type ChecklistTemplate,
+  type Client,
+  type FirmSettings,
   type LoginOption,
   type NotificationEntry,
+  type PublicFirmSettings,
   type SessionUser,
   type TeamMember,
   type TimeEntry,
 } from './types'
+
+export async function fetchFirmSettings(signal?: AbortSignal) {
+  const response = await fetch('/api/firm-settings', { credentials: 'same-origin', signal })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load firm settings (${response.status})`)
+  }
+  return (await response.json()) as FirmSettings
+}
+
+export async function updateFirmSettingsRequest(patch: Partial<FirmSettings>) {
+  const response = await fetch('/api/firm-settings', {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to save firm settings (${response.status})`)
+  }
+  return (await response.json()) as FirmSettings
+}
+
+export async function fetchPublicFirmSettings(signal?: AbortSignal) {
+  const response = await fetch('/api/firm-settings/public', {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load public firm settings (${response.status})`)
+  }
+  return (await response.json()) as PublicFirmSettings
+}
 
 export async function fetchAppData(signal: AbortSignal) {
   const response = await fetch('/api/app-data', { credentials: 'same-origin', signal })
@@ -310,6 +345,26 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
     throw new ApiError(response.status, `Failed to delete checklist item (${response.status})`)
   }
   return (await response.json()) as Checklist
+}
+
+export async function setClientAssignedTeamRequest(clientId: string, bookkeeperIds: string[]) {
+  const response = await fetch(
+    `/api/clients/${encodeURIComponent(clientId)}/assigned-team`,
+    {
+      credentials: 'same-origin',
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookkeeperIds }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to update assigned team (${response.status})`,
+    )
+  }
+  return (await response.json()) as Client
 }
 
 export async function recordClientProfileActivity(clientId: string) {

@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   ListChecks,
   ReceiptText,
+  Settings,
   Users,
   WalletCards,
   type LucideIcon,
@@ -28,4 +29,5 @@ export const navItems: Array<{
   { to: '/invoices', label: 'Invoices', icon: ReceiptText, ownerOnly: true },
   { to: '/plans', label: 'Plans', icon: WalletCards, ownerOnly: true },
   { to: '/team', label: 'Team', icon: Users, ownerOnly: true },
+  { to: '/settings', label: 'Settings', icon: Settings, ownerOnly: true },
 ]

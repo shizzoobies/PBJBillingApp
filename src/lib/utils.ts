@@ -447,6 +447,8 @@ export function describeActivityAction(action: string): string {
       return 'removed'
     case 'client_profile_updated':
       return 'updated client profile'
+    case 'client_team_updated':
+      return 'updated client assigned team'
     case 'case_started':
       return 'started case'
     case 'case_advanced':

@@ -2,8 +2,9 @@ import { ArrowLeft, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
-import { recordClientProfileActivity } from '../lib/api'
-import type { Client } from '../lib/types'
+import { AssignedTeamControl } from '../components/AssignedTeamControl'
+import { recordClientProfileActivity, setClientAssignedTeamRequest } from '../lib/api'
+import { ApiError, type Client } from '../lib/types'
 import {
   clientName,
   employeeName,
@@ -16,6 +17,7 @@ export function ClientDetailPage() {
   const { clientId } = useParams<{ clientId: string }>()
   const navigate = useNavigate()
   const { data, ownerMode, updateClient, deleteClient } = useAppContext()
+  const [assignedTeamError, setAssignedTeamError] = useState('')
 
   const client = useMemo(
     () => data.clients.find((entry) => entry.id === clientId),
@@ -127,6 +129,34 @@ export function ClientDetailPage() {
       </div>
 
       <ContactSection client={client} onCommit={commit} />
+
+      <section className="panel">
+        <div className="section-heading">
+          <div>
+            <p className="section-kicker">Visibility</p>
+            <h2>Assigned team</h2>
+          </div>
+        </div>
+        <AssignedTeamControl
+          assignedIds={client.assignedBookkeeperIds ?? []}
+          employees={data.employees}
+          onChange={(nextIds) => {
+            // Optimistic local update + server commit. The server validates
+            // and returns the canonical record; reconciliation happens via
+            // the next /api/app-data refresh.
+            updateClient(client.id, { assignedBookkeeperIds: nextIds })
+            setAssignedTeamError('')
+            void setClientAssignedTeamRequest(client.id, nextIds).catch((err) => {
+              setAssignedTeamError(
+                err instanceof ApiError ? err.message : 'Could not save assigned team.',
+              )
+            })
+            flashSaved()
+          }}
+        />
+        {assignedTeamError ? <p className="auth-error">{assignedTeamError}</p> : null}
+      </section>
+
       <BrandingSection client={client} onCommit={commit} />
       <InvoiceSettingsSection client={client} onCommit={commit} />
 

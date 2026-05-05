@@ -1,4 +1,7 @@
+import { Download, Printer } from 'lucide-react'
 import { useAppContext } from '../AppContext'
+import { PrintHeader } from '../components/PrintHeader'
+import { downloadCsv } from '../lib/csv'
 import type {
   CategoryReportRow,
   Client,
@@ -99,8 +102,20 @@ export function ReportsPage() {
 
   return (
     <section className="content-grid reports-layout" id="reports">
+      <PrintHeader title="Owner Reports" subtitle={billingPeriodLabel} />
+      <div className="page-actions no-print">
+        <button
+          type="button"
+          className="ghost-action"
+          onClick={() => window.print()}
+        >
+          <Printer size={14} />
+          Print
+        </button>
+      </div>
       <ReportsOverview
         activeClientCount={activeClientCount}
+        billingPeriod={billingPeriod}
         billingPeriodLabel={billingPeriodLabel}
         categoryRows={categoryReportRows}
         clientRows={clientReportRows}
@@ -118,6 +133,7 @@ export function ReportsPage() {
 
 function ReportsOverview({
   activeClientCount,
+  billingPeriod,
   billingPeriodLabel,
   categoryRows,
   clientRows,
@@ -130,6 +146,7 @@ function ReportsOverview({
   ownerTrackedMinutes,
 }: {
   activeClientCount: number
+  billingPeriod: string
   billingPeriodLabel: string
   categoryRows: CategoryReportRow[]
   clientRows: ClientReportRow[]
@@ -144,9 +161,52 @@ function ReportsOverview({
   const billableRate =
     ownerTrackedMinutes === 0 ? 0 : Math.round((ownerBillableMinutes / ownerTrackedMinutes) * 100)
 
+  const periodSlug = billingPeriod || 'period'
+  const exportEmployees = () =>
+    downloadCsv(
+      `employee-report-${periodSlug}.csv`,
+      ['Employee', 'Tracked hours', 'Billable hours', 'Internal hours', 'Entries', 'Clients'],
+      employeeRows.map((row) => [
+        employeeName(employees, row.employeeId),
+        (row.minutes / 60).toFixed(2),
+        (row.billableMinutes / 60).toFixed(2),
+        (row.internalMinutes / 60).toFixed(2),
+        row.entryCount,
+        row.clientCount,
+      ]),
+    )
+
+  const exportClients = () =>
+    downloadCsv(
+      `client-report-${periodSlug}.csv`,
+      [
+        'Client',
+        'Tracked hours',
+        'Billable hours',
+        'Internal hours',
+        'Staff',
+        'Projected billing',
+      ],
+      clientRows.map((row) => [
+        clientName(clients, row.clientId),
+        (row.minutes / 60).toFixed(2),
+        (row.billableMinutes / 60).toFixed(2),
+        (row.internalMinutes / 60).toFixed(2),
+        row.employeeCount,
+        row.invoiceTotal.toFixed(2),
+      ]),
+    )
+
+  const exportCategories = () =>
+    downloadCsv(
+      `category-report-${periodSlug}.csv`,
+      ['Category', 'Hours', 'Entries'],
+      categoryRows.map((row) => [row.category, (row.minutes / 60).toFixed(2), row.entryCount]),
+    )
+
   return (
     <>
-      <section className="panel">
+      <section className="panel report-section">
         <div className="section-heading">
           <div>
             <p className="section-kicker">Owner reporting</p>
@@ -178,12 +238,20 @@ function ReportsOverview({
         </div>
       </section>
 
-      <section className="panel">
+      <section className="panel report-section">
         <div className="section-heading">
           <div>
             <p className="section-kicker">Hours by person</p>
             <h2>Employee report</h2>
           </div>
+          <button
+            type="button"
+            className="ghost-action no-print"
+            onClick={exportEmployees}
+          >
+            <Download size={14} />
+            Download CSV
+          </button>
         </div>
         <ReportTable
           columns={['Employee', 'Tracked', 'Billable', 'Internal', 'Entries', 'Clients']}
@@ -198,12 +266,16 @@ function ReportsOverview({
         />
       </section>
 
-      <section className="panel">
+      <section className="panel report-section">
         <div className="section-heading">
           <div>
             <p className="section-kicker">Hours by client</p>
             <h2>Client report</h2>
           </div>
+          <button type="button" className="ghost-action no-print" onClick={exportClients}>
+            <Download size={14} />
+            Download CSV
+          </button>
         </div>
         <ReportTable
           columns={['Client', 'Tracked', 'Billable', 'Internal', 'Staff', 'Projected billing']}
@@ -218,12 +290,16 @@ function ReportsOverview({
         />
       </section>
 
-      <section className="panel">
+      <section className="panel report-section">
         <div className="section-heading">
           <div>
             <p className="section-kicker">Work mix</p>
             <h2>Category breakdown</h2>
           </div>
+          <button type="button" className="ghost-action no-print" onClick={exportCategories}>
+            <Download size={14} />
+            Download CSV
+          </button>
         </div>
         <div className="report-stack">
           {categoryRows.length === 0 ? (

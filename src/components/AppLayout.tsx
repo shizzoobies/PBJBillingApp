@@ -27,7 +27,18 @@ export function AppLayout() {
     handleLogout,
     dataSyncState,
     syncMessage,
+    firmSettings,
   } = useAppContext()
+
+  const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
+  const firmTagline = firmSettings?.tagline || 'Strategic Accounting'
+  const firmLogoUrl = firmSettings?.logoUrl || ''
+  const initials = firmName
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() ?? '')
+    .join('')
+    .slice(0, 3) || 'PB'
 
   const location = useLocation()
   const showSummaryStrip = !ownerMode && location.pathname.startsWith('/time')
@@ -52,11 +63,15 @@ export function AppLayout() {
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true">
-            PB
+            {firmLogoUrl ? (
+              <img alt="" src={firmLogoUrl} className="brand-mark-img" />
+            ) : (
+              initials
+            )}
           </div>
           <div>
-            <strong>PB&amp;J</strong>
-            <span>Strategic Accounting</span>
+            <strong>{firmName}</strong>
+            {firmTagline ? <span>{firmTagline}</span> : null}
           </div>
         </div>
 
@@ -102,7 +117,7 @@ export function AppLayout() {
         ) : null}
         <header className="topbar">
           <div>
-            <p className="eyeline">PB&amp;J Strategic Accounting</p>
+            <p className="eyeline">{firmName}</p>
             <h1>Time, checklists, and client billing</h1>
             <p className={`sync-banner sync-${dataSyncState}`}>{syncMessage}</p>
           </div>

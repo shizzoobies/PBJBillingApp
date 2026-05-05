@@ -17,6 +17,49 @@ const sessionTtlMs = 1000 * 60 * 60 * 24 * 7
 
 const demoPassword = process.env.AUTH_DEMO_PASSWORD || 'pbj-demo'
 
+const DEFAULT_FIRM_SETTINGS = {
+  name: 'PB&J Strategic Accounting',
+  tagline: '',
+  logoUrl: '',
+  brandColor: '#3c2044',
+  addressLine1: '',
+  addressLine2: '',
+  city: '',
+  state: '',
+  postalCode: '',
+  phone: '',
+  email: '',
+  website: '',
+  ein: '',
+}
+
+const FIRM_SETTINGS_FIELDS = [
+  ['name', 'name'],
+  ['tagline', 'tagline'],
+  ['logoUrl', 'logo_url'],
+  ['brandColor', 'brand_color'],
+  ['addressLine1', 'address_line1'],
+  ['addressLine2', 'address_line2'],
+  ['city', 'city'],
+  ['state', 'state'],
+  ['postalCode', 'postal_code'],
+  ['phone', 'phone'],
+  ['email', 'email'],
+  ['website', 'website'],
+  ['ein', 'ein'],
+]
+
+function rowToFirmSettings(row) {
+  if (!row) return { ...DEFAULT_FIRM_SETTINGS }
+  const settings = { ...DEFAULT_FIRM_SETTINGS }
+  for (const [appKey, dbCol] of FIRM_SETTINGS_FIELDS) {
+    if (row[dbCol] !== null && row[dbCol] !== undefined) {
+      settings[appKey] = row[dbCol]
+    }
+  }
+  return settings
+}
+
 const seededUsers = [
   {
     id: 'emp-patrice',
@@ -155,6 +198,9 @@ function advanceChecklistFrequency(dateString, frequency) {
 function normalizeClientProfile(client) {
   return {
     ...client,
+    assignedBookkeeperIds: Array.isArray(client.assignedBookkeeperIds)
+      ? [...new Set(client.assignedBookkeeperIds.filter((id) => typeof id === 'string'))]
+      : [],
     email: client.email ?? '',
     contactName: client.contactName ?? '',
     phone: client.phone ?? '',
@@ -248,9 +294,69 @@ function buildChecklistFromStage({ template, stage, stageIndex, stageCount, case
   }
 }
 
+/**
+ * Backfill `assignedBookkeeperIds` on each client from existing live
+ * checklists, recurring templates, and template stages. Idempotent. Owners
+ * are never added — visibility scoping is for non-owner roles only. Returns
+ * the (possibly mutated) clients array and a `changed` flag.
+ */
+function backfillAssignedBookkeepers(data) {
+  const clients = Array.isArray(data.clients) ? data.clients : []
+  if (clients.length === 0) {
+    return { changed: false, clients }
+  }
+  const employees = Array.isArray(data.employees) ? data.employees : []
+  const ownerIds = new Set(employees.filter((e) => e.role === 'Owner').map((e) => e.id))
+  const known = new Set(employees.map((e) => e.id))
+
+  const byClient = new Map(
+    clients.map((client) => [
+      client.id,
+      new Set(
+        Array.isArray(client.assignedBookkeeperIds)
+          ? client.assignedBookkeeperIds.filter((id) => typeof id === 'string')
+          : [],
+      ),
+    ]),
+  )
+
+  const grant = (clientId, userId) => {
+    if (!clientId || !userId || ownerIds.has(userId) || !known.has(userId)) return
+    const set = byClient.get(clientId)
+    if (set) set.add(userId)
+  }
+
+  for (const checklist of data.checklists ?? []) {
+    grant(checklist.clientId, checklist.assigneeId)
+  }
+  for (const template of data.checklistTemplates ?? []) {
+    grant(template.clientId, template.assigneeId)
+    for (const stage of template.stages ?? []) {
+      grant(template.clientId, stage.assigneeId)
+    }
+  }
+
+  let changed = false
+  const nextClients = clients.map((client) => {
+    const set = byClient.get(client.id) ?? new Set()
+    const next = [...set]
+    const prev = Array.isArray(client.assignedBookkeeperIds) ? client.assignedBookkeeperIds : []
+    if (prev.length !== next.length || prev.some((id) => !set.has(id))) {
+      changed = true
+    }
+    return { ...client, assignedBookkeeperIds: next }
+  })
+
+  return { changed, clients: nextClients }
+}
+
 function materializeRecurringChecklists(data) {
   const templates = Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []
   if (templates.length === 0) {
+    const backfill = backfillAssignedBookkeepers(data)
+    if (backfill.changed) {
+      return { changed: true, data: { ...data, clients: backfill.clients } }
+    }
     return { changed: false, data }
   }
 
@@ -342,16 +448,22 @@ function materializeRecurringChecklists(data) {
     }
   }
 
-  if (!changed) {
+  const intermediateData = {
+    ...data,
+    checklistTemplates: nextTemplates,
+    checklists: sortChecklists(nextChecklists),
+  }
+  const backfill = backfillAssignedBookkeepers(intermediateData)
+
+  if (!changed && !backfill.changed) {
     return { changed: false, data }
   }
 
   return {
     changed: true,
     data: {
-      ...data,
-      checklistTemplates: nextTemplates,
-      checklists: sortChecklists(nextChecklists),
+      ...intermediateData,
+      clients: backfill.changed ? backfill.clients : intermediateData.clients,
     },
   }
 }
@@ -438,6 +550,33 @@ export class AppDataStore {
         )
       `)
 
+      // Firm-wide branding/settings (singleton row).
+      await this.pool.query(`
+        create table if not exists firm_settings (
+          id text primary key default 'singleton',
+          name text not null default 'PB&J Strategic Accounting',
+          tagline text,
+          logo_url text,
+          brand_color text default '#3c2044',
+          address_line1 text,
+          address_line2 text,
+          city text,
+          state text,
+          postal_code text,
+          phone text,
+          email text,
+          website text,
+          ein text,
+          updated_at timestamptz not null default now(),
+          check (id = 'singleton')
+        )
+      `)
+      await this.pool.query(`
+        insert into firm_settings (id, name)
+        values ('singleton', 'PB&J Strategic Accounting')
+        on conflict (id) do nothing
+      `)
+
       // Phase 5: notifications (in-app bell + email-ready).
       await this.pool.query(`
         create table if not exists notifications (
@@ -504,6 +643,9 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists invoice_group_by_category boolean not null default false`,
       )
+      await this.pool.query(
+        `alter table clients add column if not exists assigned_bookkeeper_ids text[] not null default '{}'`,
+      )
 
       await this.pool.query(`
         create table if not exists client_assignments (
@@ -528,6 +670,7 @@ export class AppDataStore {
           updated_at timestamptz not null default now()
         )
       `)
+      await this.pool.query(`alter table time_entries add column if not exists task_id text`)
 
       await this.pool.query(`
         create table if not exists checklists (
@@ -778,7 +921,8 @@ export class AppDataStore {
                    email, contact_name, phone, address_line1, address_line2,
                    city, state, postal_code, logo_url, payment_terms,
                    footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
-                   invoice_hide_internal_hours, invoice_group_by_category
+                   invoice_hide_internal_hours, invoice_group_by_category,
+                   assigned_bookkeeper_ids
             from clients
             order by name asc
           `),
@@ -788,7 +932,7 @@ export class AppDataStore {
             order by client_id asc, user_id asc
           `),
           this.pool.query(`
-            select id, user_id, client_id, entry_date, minutes, category, description, billable
+            select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -906,6 +1050,9 @@ export class AppDataStore {
           hourlyRate: Number(row.hourly_rate),
           planId: row.plan_id,
           assignedEmployeeIds: assignmentsByClient.get(row.id) ?? [],
+          assignedBookkeeperIds: Array.isArray(row.assigned_bookkeeper_ids)
+            ? [...new Set(row.assigned_bookkeeper_ids.filter((id) => typeof id === 'string'))]
+            : [],
           email: row.email ?? '',
           contactName: row.contact_name ?? '',
           phone: row.phone ?? '',
@@ -931,6 +1078,7 @@ export class AppDataStore {
           category: row.category,
           description: row.description,
           billable: row.billable,
+          taskId: row.task_id ?? null,
         })),
         checklists: checklistsResult.rows.map((row) => ({
           id: row.id,
@@ -968,6 +1116,8 @@ export class AppDataStore {
         data.checklistTemplates = seed.checklistTemplates ?? []
       }
 
+      data.firmSettings = await this.getFirmSettings()
+
       const materialized = materializeRecurringChecklists(data)
       if (materialized.changed) {
         await this.write(materialized.data)
@@ -985,6 +1135,7 @@ export class AppDataStore {
     if (Array.isArray(data.clients)) {
       data.clients = data.clients.map(normalizeClientProfile)
     }
+    data.firmSettings = { ...DEFAULT_FIRM_SETTINGS, ...(data.firmSettings || {}) }
     const materialized = materializeRecurringChecklists(data)
     if (materialized.changed) {
       await writeFile(localDataPath, JSON.stringify(materialized.data, null, 2))
@@ -1052,9 +1203,10 @@ export class AppDataStore {
                 email, contact_name, phone, address_line1, address_line2,
                 city, state, postal_code, logo_url, payment_terms,
                 footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
-                invoice_hide_internal_hours, invoice_group_by_category, updated_at
+                invoice_hide_internal_hours, invoice_group_by_category,
+                assigned_bookkeeper_ids, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, now())
             `,
             [
               clientRecord.id,
@@ -1078,6 +1230,9 @@ export class AppDataStore {
               clientRecord.invoiceShowTimeBreakdown ?? true,
               clientRecord.invoiceHideInternalHours ?? true,
               clientRecord.invoiceGroupByCategory ?? false,
+              Array.isArray(clientRecord.assignedBookkeeperIds)
+                ? clientRecord.assignedBookkeeperIds
+                : [],
             ],
           )
 
@@ -1095,10 +1250,20 @@ export class AppDataStore {
         for (const entry of data.timeEntries) {
           await client.query(
             `
-              insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, now())
+              insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
             `,
-            [entry.id, entry.employeeId, entry.clientId, entry.date, entry.minutes, entry.category, entry.description, entry.billable],
+            [
+              entry.id,
+              entry.employeeId,
+              entry.clientId,
+              entry.date,
+              entry.minutes,
+              entry.category,
+              entry.description,
+              entry.billable,
+              entry.taskId ?? null,
+            ],
           )
         }
 
@@ -1207,13 +1372,14 @@ export class AppDataStore {
     const nextEntry = {
       ...entry,
       id: entry.id ?? `time-${randomUUID().slice(0, 8)}`,
+      taskId: entry.taskId ?? null,
     }
 
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
         `,
         [
           nextEntry.id,
@@ -1224,6 +1390,7 @@ export class AppDataStore {
           nextEntry.category,
           nextEntry.description,
           nextEntry.billable,
+          nextEntry.taskId,
         ],
       )
 
@@ -1234,6 +1401,95 @@ export class AppDataStore {
     data.timeEntries = [nextEntry, ...data.timeEntries]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return nextEntry
+  }
+
+  /**
+   * Idempotently add `userId` to a client's `assignedBookkeeperIds`. Owners
+   * are skipped. Returns the (possibly mutated) client record. Best-effort —
+   * silent no-op if the client/user can't be found.
+   */
+  async grantClientVisibility(clientId, userId) {
+    if (!clientId || !userId) return null
+
+    if (this.pool) {
+      // Skip if user is owner.
+      const userResult = await this.pool.query(
+        `select role from users where id = $1`,
+        [userId],
+      )
+      if (!userResult.rowCount || userResult.rows[0].role === 'owner') return null
+
+      await this.pool.query(
+        `
+          update clients
+          set assigned_bookkeeper_ids = (
+            select coalesce(array_agg(distinct x), '{}')
+            from unnest(coalesce(assigned_bookkeeper_ids, '{}')::text[] || array[$2]::text[]) as x
+          ),
+          updated_at = now()
+          where id = $1
+        `,
+        [clientId, userId],
+      )
+      return null
+    }
+
+    const data = await readJson(localDataPath)
+    const employees = Array.isArray(data.employees) ? data.employees : []
+    const employee = employees.find((e) => e.id === userId)
+    if (!employee || employee.role === 'Owner') return null
+
+    let mutated = false
+    data.clients = (data.clients ?? []).map((client) => {
+      if (client.id !== clientId) return client
+      const ids = Array.isArray(client.assignedBookkeeperIds) ? client.assignedBookkeeperIds : []
+      if (ids.includes(userId)) return client
+      mutated = true
+      return { ...client, assignedBookkeeperIds: [...ids, userId] }
+    })
+    if (mutated) {
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    return null
+  }
+
+  /**
+   * Owner-only: replace the assigned-team list for a client. Filters owners
+   * and unknown ids. Returns the updated client or null.
+   */
+  async setClientAssignedTeam(clientId, bookkeeperIds) {
+    if (this.pool) {
+      const usersResult = await this.pool.query(
+        `select id from users where role <> 'owner'`,
+      )
+      const valid = new Set(usersResult.rows.map((r) => r.id))
+      const safe = [...new Set((bookkeeperIds ?? []).filter((id) => valid.has(id)))]
+      const result = await this.pool.query(
+        `update clients set assigned_bookkeeper_ids = $2, updated_at = now()
+         where id = $1
+         returning id`,
+        [clientId, safe],
+      )
+      if (!result.rowCount) return null
+      const data = await this.read()
+      return data.clients.find((client) => client.id === clientId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    const employees = Array.isArray(data.employees) ? data.employees : []
+    const valid = new Set(
+      employees.filter((e) => e.role !== 'Owner').map((e) => e.id),
+    )
+    const safe = [...new Set((bookkeeperIds ?? []).filter((id) => valid.has(id)))]
+    let updated = null
+    data.clients = (data.clients ?? []).map((client) => {
+      if (client.id !== clientId) return client
+      updated = { ...client, assignedBookkeeperIds: safe }
+      return updated
+    })
+    if (!updated) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updated
   }
 
   async createChecklist(checklist) {
@@ -1442,7 +1698,10 @@ export class AppDataStore {
 
     // Postgres mode: insert via createChecklist so it goes through the same
     // path other instances do.
-    return this.createChecklist(spawn)
+    const created = await this.createChecklist(spawn)
+    // Auto-grant the new stage's assignee visibility into the client.
+    await this.grantClientVisibility(created.clientId, created.assigneeId)
+    return created
   }
 
   async setChecklistViewers(checklistId, viewerIds, editorIds) {
@@ -2743,6 +3002,83 @@ export class AppDataStore {
     return (authState.notifications ?? []).filter(
       (entry) => entry.userId === userId && !entry.readAt,
     ).length
+  }
+
+  async getFirmSettings() {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select name, tagline, logo_url, brand_color, address_line1, address_line2,
+                city, state, postal_code, phone, email, website, ein
+           from firm_settings where id = 'singleton'`,
+      )
+      return rowToFirmSettings(result.rows[0])
+    }
+    const data = await readJson(localDataPath)
+    const stored = data.firmSettings || {}
+    return { ...DEFAULT_FIRM_SETTINGS, ...stored }
+  }
+
+  async updateFirmSettings(patch) {
+    const current = await this.getFirmSettings()
+    const next = { ...current }
+    for (const [appKey] of FIRM_SETTINGS_FIELDS) {
+      if (patch && Object.prototype.hasOwnProperty.call(patch, appKey)) {
+        const value = patch[appKey]
+        if (typeof value === 'string') {
+          next[appKey] = value
+        } else if (value === null || value === undefined) {
+          next[appKey] = appKey === 'name' ? DEFAULT_FIRM_SETTINGS.name : ''
+        }
+      }
+    }
+    if (!next.name || !next.name.trim()) {
+      next.name = DEFAULT_FIRM_SETTINGS.name
+    }
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into firm_settings (id, name, tagline, logo_url, brand_color,
+            address_line1, address_line2, city, state, postal_code,
+            phone, email, website, ein, updated_at)
+         values ('singleton', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+         on conflict (id) do update set
+            name = excluded.name,
+            tagline = excluded.tagline,
+            logo_url = excluded.logo_url,
+            brand_color = excluded.brand_color,
+            address_line1 = excluded.address_line1,
+            address_line2 = excluded.address_line2,
+            city = excluded.city,
+            state = excluded.state,
+            postal_code = excluded.postal_code,
+            phone = excluded.phone,
+            email = excluded.email,
+            website = excluded.website,
+            ein = excluded.ein,
+            updated_at = now()`,
+        [
+          next.name,
+          next.tagline || null,
+          next.logoUrl || null,
+          next.brandColor || null,
+          next.addressLine1 || null,
+          next.addressLine2 || null,
+          next.city || null,
+          next.state || null,
+          next.postalCode || null,
+          next.phone || null,
+          next.email || null,
+          next.website || null,
+          next.ein || null,
+        ],
+      )
+      return next
+    }
+
+    const data = await readJson(localDataPath)
+    data.firmSettings = next
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return next
   }
 
   async close() {

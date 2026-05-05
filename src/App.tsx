@@ -17,7 +17,9 @@ import {
   createTimeEntry,
   deleteChecklistItemRequest,
   fetchAppData,
+  fetchFirmSettings,
   fetchLoginOptions,
+  fetchPublicFirmSettings,
   fetchSession,
   loginWithPassword,
   logoutSession,
@@ -31,13 +33,16 @@ import {
 import { createSeedData } from './lib/seed'
 import {
   ApiError,
+  DEFAULT_FIRM_SETTINGS,
   type AppData,
   type AuthState,
   type BillingMode,
   type ChecklistTemplate,
   type Client,
   type DataSyncState,
+  type FirmSettings,
   type LoginOption,
+  type PublicFirmSettings,
   type SessionUser,
   type SubscriptionPlan,
   type TimeEntry,
@@ -62,6 +67,7 @@ import { NotificationsPage } from './pages/NotificationsPage'
 import { PlansPage } from './pages/PlansPage'
 import { ProductivityPage } from './pages/ProductivityPage'
 import { ReportsPage } from './pages/ReportsPage'
+import { SettingsPage } from './pages/SettingsPage'
 import { TeamPage } from './pages/TeamPage'
 import { TimePage } from './pages/TimePage'
 
@@ -93,6 +99,13 @@ function App() {
   const [billingPeriod, setBillingPeriod] = useState(currentBillingPeriod())
   const [timer, setTimer] = useState<TimerState | null>(null)
   const [now, setNow] = useState(0)
+  const [firmSettings, setFirmSettings] = useState<FirmSettings>(DEFAULT_FIRM_SETTINGS)
+  const [publicFirmSettings, setPublicFirmSettings] = useState<PublicFirmSettings>({
+    name: DEFAULT_FIRM_SETTINGS.name,
+    tagline: DEFAULT_FIRM_SETTINGS.tagline ?? '',
+    logoUrl: DEFAULT_FIRM_SETTINGS.logoUrl ?? '',
+    brandColor: DEFAULT_FIRM_SETTINGS.brandColor ?? '#3c2044',
+  })
   const skipAutosaveRef = useRef(0)
   const role = sessionUser?.role ?? 'employee'
 
@@ -125,6 +138,60 @@ function App() {
 
     return () => controller.abort()
   }, [])
+
+  // Public firm branding: load once at boot so the login screen, tab title,
+  // and brand color reflect the configured firm even before sign-in.
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchPublicFirmSettings(controller.signal)
+      .then((settings) => {
+        if (controller.signal.aborted) return
+        setPublicFirmSettings({
+          name: settings.name || DEFAULT_FIRM_SETTINGS.name,
+          tagline: settings.tagline ?? '',
+          logoUrl: settings.logoUrl ?? '',
+          brandColor: settings.brandColor || (DEFAULT_FIRM_SETTINGS.brandColor ?? '#3c2044'),
+        })
+      })
+      .catch(() => {
+        /* fall back to defaults */
+      })
+    return () => controller.abort()
+  }, [])
+
+  // Owner-authenticated full firm settings (address/contact/etc.)
+  useEffect(() => {
+    if (!sessionUser) return
+    const controller = new AbortController()
+    fetchFirmSettings(controller.signal)
+      .then((settings) => {
+        if (controller.signal.aborted) return
+        const merged = { ...DEFAULT_FIRM_SETTINGS, ...settings }
+        setFirmSettings(merged)
+        setPublicFirmSettings({
+          name: merged.name,
+          tagline: merged.tagline ?? '',
+          logoUrl: merged.logoUrl ?? '',
+          brandColor: merged.brandColor || '#3c2044',
+        })
+      })
+      .catch(() => {
+        /* not fatal — keep defaults */
+      })
+    return () => controller.abort()
+  }, [sessionUser])
+
+  // Apply firm name to the browser tab title.
+  useEffect(() => {
+    document.title = publicFirmSettings.name || DEFAULT_FIRM_SETTINGS.name
+  }, [publicFirmSettings.name])
+
+  // Push the firm brand color into the --plum CSS variable so it cascades to
+  // the sidebar and other accent surfaces that already reference it.
+  useEffect(() => {
+    const color = publicFirmSettings.brandColor || '#3c2044'
+    document.documentElement.style.setProperty('--plum', color)
+  }, [publicFirmSettings.brandColor])
 
   useEffect(() => {
     if (!sessionUser) {
@@ -817,7 +884,14 @@ function App() {
             : 'API unavailable. Showing seed data until the backend is reachable.'
 
   if (authState === 'loading') {
-    return <LoginScreen loading loginOptions={loginOptions} onLogin={handleLogin} />
+    return (
+      <LoginScreen
+        loading
+        loginOptions={loginOptions}
+        onLogin={handleLogin}
+        firmSettings={publicFirmSettings}
+      />
+    )
   }
 
   if (!sessionUser) {
@@ -827,6 +901,7 @@ function App() {
         loading={loginPending}
         loginOptions={loginOptions}
         onLogin={handleLogin}
+        firmSettings={publicFirmSettings}
       />
     )
   }
@@ -886,6 +961,17 @@ function App() {
     handleLogout,
     dataSyncState,
     syncMessage,
+    firmSettings,
+    setFirmSettings: (next: FirmSettings) => {
+      const merged = { ...DEFAULT_FIRM_SETTINGS, ...next }
+      setFirmSettings(merged)
+      setPublicFirmSettings({
+        name: merged.name,
+        tagline: merged.tagline ?? '',
+        logoUrl: merged.logoUrl ?? '',
+        brandColor: merged.brandColor || '#3c2044',
+      })
+    },
   }
 
   return (
@@ -903,7 +989,16 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   const location = useLocation()
   const navigate = useNavigate()
   useEffect(() => {
-    const ownerOnly = ['/reports', '/productivity', '/gantt', '/invoices', '/plans', '/team', '/cases']
+    const ownerOnly = [
+      '/reports',
+      '/productivity',
+      '/gantt',
+      '/invoices',
+      '/plans',
+      '/team',
+      '/cases',
+      '/settings',
+    ]
     if (!ownerMode && ownerOnly.some((path) => location.pathname.startsWith(path))) {
       navigate('/time', { replace: true })
     }
@@ -970,6 +1065,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           element={
             <OwnerOnly ownerMode={ownerMode}>
               <TeamPage />
+            </OwnerOnly>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <SettingsPage />
             </OwnerOnly>
           }
         />

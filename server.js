@@ -124,6 +124,82 @@ function buildMagicUrl(request, token) {
   return `${getPublicAppUrl(request)}/login/${encodeURIComponent(token)}`
 }
 
+/**
+ * Compute the set of client ids visible to a session. Owners always see
+ * everything. Non-owners see only clients where their user id appears in the
+ * client's `assignedBookkeeperIds` array.
+ */
+function visibleClientIdSet(session, clients) {
+  if (session.user.role === 'owner') {
+    return new Set(clients.map((client) => client.id))
+  }
+  const me = session.user.id
+  return new Set(
+    clients
+      .filter((client) =>
+        Array.isArray(client.assignedBookkeeperIds) &&
+        client.assignedBookkeeperIds.includes(me),
+      )
+      .map((client) => client.id),
+  )
+}
+
+/**
+ * Strip data so a non-owner only sees clients they're scoped to and
+ * derivative records (checklists, templates, time entries, plans) that
+ * reference those clients. Owners get the data unchanged.
+ */
+function scopeAppDataForSession(session, data) {
+  if (session.user.role === 'owner') return data
+  const allowedClientIds = visibleClientIdSet(session, data.clients ?? [])
+  const me = session.user.id
+
+  const clients = (data.clients ?? []).filter((client) => allowedClientIds.has(client.id))
+  const checklists = (data.checklists ?? []).filter((checklist) => {
+    if (!allowedClientIds.has(checklist.clientId)) return false
+    // Existing assignee/viewer/editor filtering is still applied.
+    const viewerIds = Array.isArray(checklist.viewerIds) ? checklist.viewerIds : []
+    return checklist.assigneeId === me || viewerIds.includes(me)
+  })
+  const checklistTemplates = (data.checklistTemplates ?? []).filter((template) =>
+    allowedClientIds.has(template.clientId),
+  )
+  const timeEntries = (data.timeEntries ?? []).filter(
+    (entry) => entry.employeeId === me && allowedClientIds.has(entry.clientId),
+  )
+  const plans = (data.plans ?? []).filter((plan) => {
+    if (!plan.clientId) return true // global plans are not gated
+    return allowedClientIds.has(plan.clientId)
+  })
+
+  return {
+    ...data,
+    clients,
+    checklists,
+    checklistTemplates,
+    timeEntries,
+    plans,
+  }
+}
+
+/**
+ * Scrub activity entries when they reference a client name the session
+ * cannot see. Best-effort substring match — we'd rather hide than leak.
+ */
+function scopeActivityEntriesForSession(session, entries, allClients) {
+  if (session.user.role === 'owner') return entries
+  const visible = visibleClientIdSet(session, allClients)
+  const hiddenClientNames = (allClients ?? [])
+    .filter((client) => !visible.has(client.id))
+    .map((client) => (client.name ?? '').toLowerCase())
+    .filter(Boolean)
+  if (hiddenClientNames.length === 0) return entries
+  return entries.filter((entry) => {
+    const target = String(entry.target ?? '').toLowerCase()
+    return !hiddenClientNames.some((name) => target.includes(name))
+  })
+}
+
 function decorateTeamMember(member, request) {
   if (!member) {
     return member
@@ -243,6 +319,46 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (normalizedPath === '/api/firm-settings/public' && request.method === 'GET') {
+      const settings = await appDataStore.getFirmSettings()
+      sendJson(response, 200, {
+        name: settings.name,
+        tagline: settings.tagline ?? '',
+        logoUrl: settings.logoUrl ?? '',
+        brandColor: settings.brandColor ?? '#3c2044',
+      })
+      return
+    }
+
+    if (normalizedPath === '/api/firm-settings') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+
+      if (request.method === 'GET') {
+        const settings = await appDataStore.getFirmSettings()
+        sendJson(response, 200, settings)
+        return
+      }
+
+      if (request.method === 'PUT') {
+        if (session.user.role !== 'owner') {
+          sendJson(response, 403, { error: 'Only owners can update firm settings' })
+          return
+        }
+
+        const payload = await readJsonBody(request)
+        const updated = await appDataStore.updateFirmSettings(payload || {})
+        await appDataStore.recordActivity(session.user.id, 'firm_settings_updated', 'branding')
+        sendJson(response, 200, updated)
+        return
+      }
+
+      sendJson(response, 405, { error: 'Method not allowed' })
+      return
+    }
+
     if (normalizedPath === '/api/app-data') {
       const session = await requireSession(request, response)
       if (!session) {
@@ -251,7 +367,7 @@ const server = createServer(async (request, response) => {
 
       if (request.method === 'GET') {
         const data = await appDataStore.read()
-        sendJson(response, 200, data)
+        sendJson(response, 200, scopeAppDataForSession(session, data))
         return
       }
 
@@ -292,10 +408,41 @@ const server = createServer(async (request, response) => {
         const category = typeof payload?.category === 'string' ? payload.category : ''
         const description = typeof payload?.description === 'string' ? payload.description : ''
         const billable = Boolean(payload?.billable)
+        const taskIdRaw = payload?.taskId
+        const taskId =
+          typeof taskIdRaw === 'string' && taskIdRaw.trim() ? taskIdRaw.trim() : null
 
         if (!employeeId || !clientId || !date || Number.isNaN(minutes) || minutes <= 0 || !category) {
           sendJson(response, 400, { error: 'Invalid time entry payload' })
           return
+        }
+
+        // Visibility scoping: a non-owner can only log time against clients
+        // they have visibility on.
+        const allData = await appDataStore.read()
+        const allowed = visibleClientIdSet(session, allData.clients ?? [])
+        if (!allowed.has(clientId)) {
+          sendJson(response, 403, { error: 'Client not visible to this user' })
+          return
+        }
+
+        // Validate taskId if provided: must reference an existing checklist
+        // for the same client and the user must be allowed to log against it.
+        if (taskId) {
+          const checklist = (allData.checklists ?? []).find((c) => c.id === taskId)
+          if (!checklist || checklist.clientId !== clientId) {
+            sendJson(response, 400, { error: 'Invalid taskId for this client' })
+            return
+          }
+          const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+          const allowedToLog =
+            session.user.role === 'owner' ||
+            checklist.assigneeId === employeeId ||
+            editorIds.includes(employeeId)
+          if (!allowedToLog) {
+            sendJson(response, 403, { error: 'You cannot log time against this task' })
+            return
+          }
         }
 
         const entry = await appDataStore.createTimeEntry({
@@ -306,6 +453,7 @@ const server = createServer(async (request, response) => {
           category,
           description,
           billable,
+          taskId,
         })
 
         sendJson(response, 201, entry)
@@ -366,6 +514,10 @@ const server = createServer(async (request, response) => {
           dueDate,
           items,
         })
+
+        // Auto-grant: a non-owner being assigned a task on this client gains
+        // visibility into the client (idempotent; owners are skipped).
+        await appDataStore.grantClientVisibility(checklist.clientId, checklist.assigneeId)
 
         await appDataStore.recordActivity(session.user.id, 'checklist_created', checklist.title)
 
@@ -795,6 +947,39 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // PUT /api/clients/:id/assigned-team — owner-only. Replaces the per-client
+    // assigned-team list. Validates each id is a real non-owner employee.
+    const clientAssignedTeamMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/assigned-team$/)
+    if (clientAssignedTeamMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'PUT') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can update client assigned team' })
+        return
+      }
+      const clientId = clientAssignedTeamMatch[1]
+      const payload = await readJsonBody(request)
+      const bookkeeperIds = Array.isArray(payload?.bookkeeperIds)
+        ? payload.bookkeeperIds.filter((id) => typeof id === 'string')
+        : []
+      const updated = await appDataStore.setClientAssignedTeam(clientId, bookkeeperIds)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'client_team_updated',
+        updated.name ?? clientId,
+      )
+      sendJson(response, 200, updated)
+      return
+    }
+
     const clientActivityMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/activity$/)
     if (clientActivityMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
@@ -1018,14 +1203,24 @@ const server = createServer(async (request, response) => {
     if (caseDetailMatch && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
-      if (session.user.role !== 'owner') {
-        sendJson(response, 403, { error: 'Only owners can view cases' })
-        return
-      }
       const caseRecord = await appDataStore.getCase(decodeURIComponent(caseDetailMatch[1]))
       if (!caseRecord) {
         sendJson(response, 404, { error: 'Case not found' })
         return
+      }
+      if (session.user.role !== 'owner') {
+        const allData = await appDataStore.read()
+        const allowed = visibleClientIdSet(session, allData.clients ?? [])
+        if (!caseRecord.client || !allowed.has(caseRecord.client.id)) {
+          sendJson(response, 403, { error: 'Case not visible to this user' })
+          return
+        }
+        // Scrub activity entries that mention clients the user can't see.
+        caseRecord.activity = scopeActivityEntriesForSession(
+          session,
+          caseRecord.activity ?? [],
+          allData.clients ?? [],
+        )
       }
       sendJson(response, 200, caseRecord)
       return
@@ -1077,6 +1272,13 @@ const server = createServer(async (request, response) => {
           sendJson(response, 404, { error: 'Template not found' })
           return
         }
+        // Auto-grant: a freshly-added stage may have a non-owner assignee.
+        if (result.stage?.assigneeId) {
+          await appDataStore.grantClientVisibility(
+            result.template.clientId,
+            result.stage.assigneeId,
+          )
+        }
         await appDataStore.recordActivity(
           session.user.id,
           'template_stage_added',
@@ -1094,6 +1296,11 @@ const server = createServer(async (request, response) => {
           return
         }
         const stage = (updated.stages ?? []).find((s) => s.id === stageId)
+        // Auto-grant: if the stage's assigneeId was set to a non-owner, give
+        // them visibility into the parent client.
+        if (stage?.assigneeId) {
+          await appDataStore.grantClientVisibility(updated.clientId, stage.assigneeId)
+        }
         await appDataStore.recordActivity(
           session.user.id,
           'template_stage_edited',

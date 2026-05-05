@@ -1,7 +1,10 @@
+import { Download, Printer } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { fetchActivityRange, fetchTeam } from '../lib/api'
 import { useAppContext } from '../AppContext'
+import { PrintHeader } from '../components/PrintHeader'
+import { downloadCsv } from '../lib/csv'
 import type { ActivityEntry, Employee, TeamMember } from '../lib/types'
 import { formatHours, relativeTime } from '../lib/utils'
 import {
@@ -233,11 +236,20 @@ export function ProductivityPage() {
 
   return (
     <section className="content-grid productivity-layout" id="productivity">
+      <PrintHeader title="Team Productivity Report" subtitle={`${fromIso} to ${toIso}`} />
       <header className="productivity-header">
-        <h1>Productivity</h1>
-        <p className="productivity-subtitle">
-          How the team is spending time and moving work forward.
-        </p>
+        <div>
+          <h1>Productivity</h1>
+          <p className="productivity-subtitle">
+            How the team is spending time and moving work forward.
+          </p>
+        </div>
+        <div className="page-actions no-print">
+          <button type="button" className="ghost-action" onClick={() => window.print()}>
+            <Printer size={14} />
+            Print
+          </button>
+        </div>
       </header>
 
       <div className="productivity-controls">
@@ -341,6 +353,8 @@ export function ProductivityPage() {
           sortDir={sortDir}
           onSort={toggleSort}
           onRowClick={(id) => patchParams({ focus: id })}
+          fromIso={fromIso}
+          toIso={toIso}
         />
       )}
 
@@ -365,22 +379,59 @@ function TeamComparison({
   sortDir,
   onSort,
   onRowClick,
+  fromIso,
+  toIso,
 }: {
   stats: EmployeeStats[]
   sortKey: SortKey
   sortDir: SortDir
   onSort: (key: SortKey) => void
   onRowClick: (employeeId: string) => void
+  fromIso: string
+  toIso: string
 }) {
   const noData = stats.every((s) => s.minutes === 0 && s.tasksCompleted === 0)
 
+  const exportCsv = () =>
+    downloadCsv(
+      `team-productivity-${fromIso}-to-${toIso}.csv`,
+      [
+        'Name',
+        'Role',
+        'Hours',
+        'Billable hours',
+        'Internal hours',
+        'Tasks completed',
+        'Cases handed off',
+        'Cases finished',
+        'Avg items/day',
+        'Last active',
+      ],
+      stats.map((row) => [
+        row.name,
+        row.role,
+        (row.minutes / 60).toFixed(2),
+        (row.billableMinutes / 60).toFixed(2),
+        (row.internalMinutes / 60).toFixed(2),
+        row.tasksCompleted,
+        row.casesAdvanced,
+        row.casesCompleted,
+        row.avgPerDay.toFixed(1),
+        row.lastActiveAt ?? '',
+      ]),
+    )
+
   return (
-    <section className="panel">
+    <section className="panel report-section">
       <div className="section-heading">
         <div>
           <p className="section-kicker">Team comparison</p>
           <h2>Throughput by person</h2>
         </div>
+        <button type="button" className="ghost-action no-print" onClick={exportCsv}>
+          <Download size={14} />
+          Download CSV
+        </button>
       </div>
       {noData ? (
         <p className="empty-state">No activity in this range. Try widening the dates.</p>
@@ -624,6 +675,28 @@ function PerPersonDetail({
         </span>
       </div>
 
+      <div className="page-actions no-print">
+        <button
+          type="button"
+          className="ghost-action"
+          onClick={() =>
+            downloadCsv(
+              `productivity-${employee.id}-${fromIso}-to-${toIso}.csv`,
+              ['Period', 'Hours', 'Billable hours', 'Items completed', 'Cases moved'],
+              periodRows.map((row) => [
+                formatPeriodLabel(row.period, granularity),
+                (row.minutes / 60).toFixed(2),
+                (row.billable / 60).toFixed(2),
+                row.items,
+                row.cases,
+              ]),
+            )
+          }
+        >
+          <Download size={14} />
+          Download CSV
+        </button>
+      </div>
       <div className="table-wrap">
         <table className="productivity-table">
           <thead>

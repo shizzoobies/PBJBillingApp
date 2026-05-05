@@ -68,6 +68,7 @@ alter table clients add column if not exists quickbooks_pay_url text;
 alter table clients add column if not exists invoice_show_time_breakdown boolean not null default true;
 alter table clients add column if not exists invoice_hide_internal_hours boolean not null default true;
 alter table clients add column if not exists invoice_group_by_category boolean not null default false;
+alter table clients add column if not exists assigned_bookkeeper_ids text[] not null default '{}';
 
 create table if not exists client_assignments (
   client_id text not null references clients(id) on delete cascade,
@@ -88,6 +89,8 @@ create table if not exists time_entries (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table time_entries add column if not exists task_id text;
 
 create table if not exists checklists (
   id text primary key,
@@ -184,6 +187,26 @@ create table if not exists sessions (
   user_id text not null references users(id) on delete cascade,
   expires_at timestamptz not null,
   created_at timestamptz not null default now()
+);
+
+-- Firm-wide branding/settings (singleton row)
+create table if not exists firm_settings (
+  id text primary key default 'singleton',
+  name text not null default 'PB&J Strategic Accounting',
+  tagline text,
+  logo_url text,
+  brand_color text default '#3c2044',
+  address_line1 text,
+  address_line2 text,
+  city text,
+  state text,
+  postal_code text,
+  phone text,
+  email text,
+  website text,
+  ein text,
+  updated_at timestamptz not null default now(),
+  check (id = 'singleton')
 );
 
 -- Phase 5: notifications (in-app bell + email-ready)

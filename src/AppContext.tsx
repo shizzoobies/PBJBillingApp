@@ -5,6 +5,7 @@ import type {
   Checklist,
   ChecklistTemplate,
   Client,
+  FirmSettings,
   Role,
   SessionUser,
   SubscriptionPlan,
@@ -116,6 +117,8 @@ export type AppContextValue = {
   handleLogout: () => Promise<void>
   dataSyncState: 'loading' | 'saving' | 'synced' | 'offline' | 'error'
   syncMessage: string
+  firmSettings: FirmSettings
+  setFirmSettings: (settings: FirmSettings) => void
 }
 
 export const AppContext = createContext<AppContextValue | null>(null)

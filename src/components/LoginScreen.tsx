@@ -1,17 +1,20 @@
 import { useState, type FormEvent } from 'react'
-import type { LoginOption } from '../lib/types'
+import type { LoginOption, PublicFirmSettings } from '../lib/types'
 
 export function LoginScreen({
   error,
   loading = false,
   loginOptions,
   onLogin,
+  firmSettings,
 }: {
   error?: string
   loading?: boolean
   loginOptions: LoginOption[]
   onLogin: (userId: string, password: string) => Promise<void>
+  firmSettings?: PublicFirmSettings
 }) {
+  const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
   const [userId, setUserId] = useState('')
   const [password, setPassword] = useState('pbj-demo')
   const selectedUserId = userId || loginOptions[0]?.id || ''
@@ -28,7 +31,7 @@ export function LoginScreen({
   return (
     <main className="auth-shell">
       <section className="auth-card">
-        <p className="eyeline">PB&amp;J Strategic Accounting</p>
+        <p className="eyeline">{firmName}</p>
         <h1>Sign in to the workspace</h1>
         <p className="auth-copy">
           This prototype now uses server-backed sessions. Use the temporary password{' '}

@@ -1,7 +1,7 @@
 import { Clock3, TimerReset } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
-import type { Client, Employee, Role, TimeEntry, TimerState } from '../lib/types'
+import type { Checklist, Client, Employee, Role, TimeEntry, TimerState } from '../lib/types'
 import { clientName, employeeName, formatHours } from '../lib/utils'
 
 export function TimePage() {
@@ -23,6 +23,7 @@ export function TimePage() {
       <TimeCapture
         activeEmployeeId={activeEmployeeId}
         clients={visibleClients}
+        checklists={data.checklists}
         employees={data.employees}
         onLog={logTime}
         onStartTimer={startTimer}
@@ -32,6 +33,7 @@ export function TimePage() {
         timerElapsed={timer ? timerElapsed : '0:00'}
       />
       <RecentTimeEntries
+        checklists={data.checklists}
         clients={data.clients}
         employees={data.employees}
         entries={visibleEntries}
@@ -41,9 +43,32 @@ export function TimePage() {
   )
 }
 
+/**
+ * Pick checklists eligible for time-attach: same client, not yet completed,
+ * and either the user is assignee/editor (or owner — owners see all).
+ */
+function eligibleChecklistsFor(
+  checklists: Checklist[],
+  clientId: string,
+  userId: string,
+  role: Role,
+): Checklist[] {
+  if (!clientId) return []
+  return checklists.filter((checklist) => {
+    if (checklist.clientId !== clientId) return false
+    const total = checklist.items.length
+    const done = checklist.items.filter((item) => item.done).length
+    if (total > 0 && done === total) return false
+    if (role === 'owner') return true
+    const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+    return checklist.assigneeId === userId || editorIds.includes(userId)
+  })
+}
+
 function TimeCapture({
   activeEmployeeId,
   clients,
+  checklists,
   employees,
   onLog,
   onStartTimer,
@@ -54,6 +79,7 @@ function TimeCapture({
 }: {
   activeEmployeeId: string
   clients: Client[]
+  checklists: Checklist[]
   employees: Employee[]
   onLog: (entry: Omit<TimeEntry, 'id'>) => Promise<void>
   onStartTimer: (timer: TimerState) => void
@@ -66,14 +92,41 @@ function TimeCapture({
   const [employeeId, setEmployeeId] = useState(activeEmployeeId)
   const [hours, setHours] = useState('1.25')
   const [category, setCategory] = useState('Bookkeeping')
+  // Tracks whether the user has manually changed the work-type field. We only
+  // auto-fill from the picked task on first selection so we never clobber a
+  // deliberate override.
+  const [categoryDirty, setCategoryDirty] = useState(false)
   const [description, setDescription] = useState('Reviewed transactions and added client notes.')
   const [billable, setBillable] = useState(true)
+  const [taskId, setTaskId] = useState<string>('')
   const [submitError, setSubmitError] = useState('')
   const [submitPending, setSubmitPending] = useState(false)
   const effectiveClientId = clients.some((client) => client.id === clientId)
     ? clientId
     : clients[0]?.id ?? ''
   const effectiveEmployeeId = role === 'owner' ? employeeId : activeEmployeeId
+
+  const eligibleTasks = useMemo(
+    () => eligibleChecklistsFor(checklists, effectiveClientId, effectiveEmployeeId, role),
+    [checklists, effectiveClientId, effectiveEmployeeId, role],
+  )
+
+  // Reset taskId if the previously-chosen task isn't valid for the new client.
+  const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
+
+  const handleTaskPick = (nextTaskId: string) => {
+    setTaskId(nextTaskId)
+    if (!nextTaskId || categoryDirty) return
+    // Categories on tasks aren't a first-class field today, but we can pick
+    // up a sensible work-type from the title prefix (e.g. "Payroll - CD" →
+    // "Payroll"). Only the predefined options are honored.
+    const task = eligibleTasks.find((entry) => entry.id === nextTaskId)
+    if (!task) return
+    const titleHead = task.title.split(/[-:]/, 1)[0]?.trim() ?? ''
+    const known = ['Bookkeeping', 'Payroll', 'Cleanup', 'Advisory', 'Admin']
+    const match = known.find((option) => option.toLowerCase() === titleHead.toLowerCase())
+    if (match) setCategory(match)
+  }
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -94,9 +147,12 @@ function TimeCapture({
         category,
         description,
         billable,
+        taskId: effectiveTaskId || null,
       })
       setDescription('')
       setHours('0.50')
+      setTaskId('')
+      setCategoryDirty(false)
     } catch {
       setSubmitError('Time entry could not be saved.')
     } finally {
@@ -154,7 +210,10 @@ function TimeCapture({
           <span>Client</span>
           <select
             className="input"
-            onChange={(event) => setClientId(event.target.value)}
+            onChange={(event) => {
+              setClientId(event.target.value)
+              setTaskId('')
+            }}
             value={effectiveClientId}
           >
             {clients.map((client) => (
@@ -165,10 +224,29 @@ function TimeCapture({
           </select>
         </label>
         <label className="field">
+          <span>Attach to task (optional)</span>
+          <select
+            className="input"
+            onChange={(event) => handleTaskPick(event.target.value)}
+            value={effectiveTaskId}
+            disabled={eligibleTasks.length === 0}
+          >
+            <option value="">(none)</option>
+            {eligibleTasks.map((task) => (
+              <option key={task.id} value={task.id}>
+                {task.title}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
           <span>Work type</span>
           <select
             className="input"
-            onChange={(event) => setCategory(event.target.value)}
+            onChange={(event) => {
+              setCategory(event.target.value)
+              setCategoryDirty(true)
+            }}
             value={category}
           >
             <option>Bookkeeping</option>
@@ -240,11 +318,13 @@ function TimeCapture({
 }
 
 function RecentTimeEntries({
+  checklists,
   clients,
   employees,
   entries,
   role,
 }: {
+  checklists: Checklist[]
   clients: Client[]
   employees: Employee[]
   entries: TimeEntry[]
@@ -259,21 +339,29 @@ function RecentTimeEntries({
         </div>
       </div>
       <div className="entry-list">
-        {entries.slice(0, 6).map((entry) => (
-          <article className="entry-row" key={entry.id}>
-            <div>
-              <strong>{clientName(clients, entry.clientId)}</strong>
-              <span>{entry.description}</span>
-              <small>
-                {entry.category} · {employeeName(employees, entry.employeeId)}
-              </small>
-            </div>
-            <div className="entry-meta">
-              <strong>{formatHours(entry.minutes)}</strong>
-              <span>{entry.billable ? 'Billable' : 'Internal'}</span>
-            </div>
-          </article>
-        ))}
+        {entries.slice(0, 6).map((entry) => {
+          const linkedTask = entry.taskId
+            ? checklists.find((checklist) => checklist.id === entry.taskId)
+            : null
+          return (
+            <article className="entry-row" key={entry.id}>
+              <div>
+                <strong>{clientName(clients, entry.clientId)}</strong>
+                <span>{entry.description}</span>
+                <small>
+                  {entry.category} · {employeeName(employees, entry.employeeId)}
+                </small>
+                {linkedTask ? (
+                  <small className="task-chip">Task: {linkedTask.title}</small>
+                ) : null}
+              </div>
+              <div className="entry-meta">
+                <strong>{formatHours(entry.minutes)}</strong>
+                <span>{entry.billable ? 'Billable' : 'Internal'}</span>
+              </div>
+            </article>
+          )
+        })}
       </div>
     </section>
   )

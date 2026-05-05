@@ -3585,3 +3585,146 @@ td strong {
     margin-left: 0;
   }
 }
+
+/* --- Brand mark with logo support ---------------------------------------- */
+
+.brand-mark-img {
+  border-radius: 6px;
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+/* --- Page actions (Print / CSV buttons in report headers) ---------------- */
+
+.page-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin: 8px 0;
+}
+
+.ghost-action {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 600;
+  gap: 6px;
+  padding: 7px 12px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.ghost-action:hover {
+  background: var(--soft);
+  border-color: var(--plum);
+}
+
+/* --- Settings page ------------------------------------------------------- */
+
+.settings-layout {
+  gap: 18px;
+}
+
+/* --- Print header (rendered on every printable page) --------------------- */
+
+.print-header {
+  display: none;
+}
+
+.print-header-firm {
+  align-items: flex-start;
+  display: flex;
+  gap: 14px;
+}
+
+.print-header-logo {
+  height: 56px;
+  max-width: 200px;
+  object-fit: contain;
+}
+
+.print-header-firm-text strong {
+  display: block;
+  font-size: 18px;
+}
+
+.print-header-firm-text span {
+  color: #5a5360;
+  display: block;
+  font-size: 12px;
+}
+
+.print-header-report h2 {
+  margin: 0;
+}
+
+.print-header-report .print-header-meta {
+  color: #5a5360;
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+@media print {
+  @page {
+    margin: 0.55in;
+    size: letter;
+  }
+
+  body {
+    background: #fff;
+  }
+
+  /* Hide app chrome and any explicitly opted-out interactive UI. */
+  .sidebar,
+  .topbar,
+  .preview-banner,
+  .summary-strip,
+  .dashboard-view-as,
+  .filter-bar,
+  .productivity-controls,
+  .no-print {
+    display: none !important;
+  }
+
+  .app-shell {
+    display: block;
+  }
+
+  .workspace {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+  }
+
+  .print-header {
+    align-items: flex-start;
+    border-bottom: 2px solid #1b1720;
+    color: #1b1720;
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 18px;
+    padding-bottom: 12px;
+  }
+
+  .report-section {
+    page-break-inside: avoid;
+  }
+
+  .panel {
+    background: #fff;
+    box-shadow: none;
+    page-break-inside: avoid;
+  }
+
+  .productivity-header h1,
+  .reports-layout h1 {
+    margin-top: 0;
+  }
+}
+
