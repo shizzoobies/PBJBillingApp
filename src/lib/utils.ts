@@ -427,6 +427,16 @@ export function describeActivityAction(action: string): string {
       return 'logged in with password'
     case 'login_via_magic_link':
       return 'logged in via magic link'
+    case 'login_via_email_link':
+      return 'signed in via email link'
+    case 'login_link_requested':
+      return 'requested a sign-in link for'
+    case 'signed_out':
+      return 'signed out'
+    case 'session_revoked':
+      return 'revoked a session for'
+    case 'team_link_resent':
+      return 'resent sign-in link to'
     case 'checklist_item_checked':
       return 'checked off'
     case 'checklist_item_unchecked':
@@ -463,6 +473,16 @@ export function describeActivityAction(action: string): string {
       return 'edited template stage'
     case 'template_stages_reordered':
       return 'reordered template stages'
+    case 'totp_enabled':
+      return 'enabled two-factor authentication'
+    case 'totp_disabled':
+      return 'disabled two-factor authentication'
+    case 'totp_backup_codes_regenerated':
+      return 'regenerated backup codes for'
+    case 'totp_used_backup_code':
+      return 'used a backup code'
+    case 'totp_reset_by_admin':
+      return 'reset two-factor for'
     default:
       return action.replace(/_/g, ' ')
   }

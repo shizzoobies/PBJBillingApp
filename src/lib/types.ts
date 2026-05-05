@@ -222,9 +222,9 @@ export type SessionUser = {
   email: string
   role: Role
   staffRole: string
+  /** TOTP two-factor enrollment flag — present when the server includes it. */
+  totpEnabled?: boolean
 }
-
-export type LoginOption = SessionUser
 
 export type TeamMember = {
   id: string
@@ -232,11 +232,37 @@ export type TeamMember = {
   email: string
   role: Role
   staffRole: string
-  magicToken: string | null
-  magicUrl: string | null
+  /**
+   * @deprecated Email-gated auth removed surfacing of the legacy magic link.
+   * Field stays optional for transition reads only — UI should not rely on it.
+   */
+  magicUrl?: string | null
   tokenRevokedAt: string | null
   lastActiveAt: string | null
   createdAt: string | null
+  /** TOTP two-factor enrollment flag. */
+  totpEnabled?: boolean
+}
+
+export type TotpStatus = {
+  enabled: boolean
+  remainingBackupCodes: number
+  requiredForRole: boolean
+}
+
+export type TotpSetupInit = {
+  secret: string
+  otpauthUri: string
+  qrSvg: string
+}
+
+export type TeamSession = {
+  id: string
+  userId: string
+  createdAt: string | null
+  lastSeenAt: string | null
+  userAgent: string | null
+  ipAddress: string | null
 }
 
 export type ActivityEntry = {

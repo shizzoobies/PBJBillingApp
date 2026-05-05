@@ -10,7 +10,7 @@ import {
 import './App.css'
 import { AppContext, type AppContextValue } from './AppContext'
 import { AppLayout } from './components/AppLayout'
-import { LoginScreen } from './components/LoginScreen'
+import { SignInScreen } from './components/SignInScreen'
 import {
   appendChecklistItemsRequest,
   createChecklistRequest,
@@ -18,10 +18,8 @@ import {
   deleteChecklistItemRequest,
   fetchAppData,
   fetchFirmSettings,
-  fetchLoginOptions,
   fetchPublicFirmSettings,
   fetchSession,
-  loginWithPassword,
   logoutSession,
   reorderChecklistItemsRequest,
   saveAppData,
@@ -41,7 +39,6 @@ import {
   type Client,
   type DataSyncState,
   type FirmSettings,
-  type LoginOption,
   type PublicFirmSettings,
   type SessionUser,
   type SubscriptionPlan,
@@ -70,6 +67,9 @@ import { ReportsPage } from './pages/ReportsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { TeamPage } from './pages/TeamPage'
 import { TimePage } from './pages/TimePage'
+import { SecurityPage } from './pages/SecurityPage'
+import { TwoFactorPage } from './pages/TwoFactorPage'
+import { TwoFactorSetupPage } from './pages/TwoFactorSetupPage'
 
 function OwnerOnly({
   ownerMode,
@@ -88,9 +88,6 @@ function App() {
   const [data, setData] = useState<AppData>(createSeedData)
   const [authState, setAuthState] = useState<AuthState>('loading')
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null)
-  const [loginOptions, setLoginOptions] = useState<LoginOption[]>([])
-  const [loginError, setLoginError] = useState('')
-  const [loginPending, setLoginPending] = useState(false)
   const [dataSyncState, setDataSyncState] = useState<DataSyncState>('loading')
   const [serverPersistenceEnabled, setServerPersistenceEnabled] = useState(false)
   const [activeEmployeeId, setActiveEmployeeId] = useState('emp-avery')
@@ -114,11 +111,7 @@ function App() {
 
     const load = async () => {
       try {
-        const [loginResponse, sessionResponse] = await Promise.all([
-          fetchLoginOptions(controller.signal),
-          fetchSession(controller.signal),
-        ])
-        setLoginOptions(loginResponse.users)
+        const sessionResponse = await fetchSession(controller.signal)
         setSessionUser(sessionResponse.user)
         if (sessionResponse.user?.role === 'employee') {
           setActiveEmployeeId(sessionResponse.user.id)
@@ -826,26 +819,6 @@ function App() {
     setTimer(nextTimer)
   }
 
-  const handleLogin = async (userId: string, password: string) => {
-    setLoginPending(true)
-    setLoginError('')
-
-    try {
-      const response = await loginWithPassword(userId, password)
-      setSessionUser(response.user)
-      if (response.user.role === 'employee') {
-        setActiveEmployeeId(response.user.id)
-      }
-      setDataSyncState('loading')
-    } catch (error) {
-      setLoginError(
-        error instanceof ApiError && error.status === 401 ? 'Invalid password.' : 'Login failed.',
-      )
-    } finally {
-      setLoginPending(false)
-    }
-  }
-
   const handleLogout = async () => {
     try {
       await logoutSession()
@@ -885,24 +858,49 @@ function App() {
 
   if (authState === 'loading') {
     return (
-      <LoginScreen
-        loading
-        loginOptions={loginOptions}
-        onLogin={handleLogin}
-        firmSettings={publicFirmSettings}
-      />
+      <main className="auth-shell">
+        <section className="auth-card">
+          <p className="eyeline">{publicFirmSettings.name}</p>
+          <h1>Loading…</h1>
+        </section>
+      </main>
     )
   }
 
   if (!sessionUser) {
+    // Two role-segmented entry routes — bookkeepers land on /staff (the
+    // default), the owner bookmarks /owner. Anything else routes to /staff
+    // so the owner URL stays unadvertised. The two /two-factor* routes are
+    // reachable without a session because they're gated by the
+    // pbj_2fa_pending cookie set immediately before the redirect.
     return (
-      <LoginScreen
-        error={loginError}
-        loading={loginPending}
-        loginOptions={loginOptions}
-        onLogin={handleLogin}
-        firmSettings={publicFirmSettings}
-      />
+      <BrowserRouter>
+        <Routes>
+          <Route
+            path="/owner"
+            element={
+              <SignInScreen
+                role="owner"
+                heading="Owner sign-in"
+                firmSettings={publicFirmSettings}
+              />
+            }
+          />
+          <Route
+            path="/staff"
+            element={
+              <SignInScreen
+                role="staff"
+                heading="Staff sign-in"
+                firmSettings={publicFirmSettings}
+              />
+            }
+          />
+          <Route path="/two-factor" element={<TwoFactorPage />} />
+          <Route path="/two-factor/setup" element={<TwoFactorSetupPage forced />} />
+          <Route path="*" element={<Navigate to="/staff" replace />} />
+        </Routes>
+      </BrowserRouter>
     )
   }
 
@@ -1006,6 +1004,11 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
 
   return (
     <Routes>
+      {/* Authenticated visitors who land on the unauth entry pages get */}
+      {/* bounced to the role-aware dashboard. */}
+      <Route path="/staff" element={<Navigate to="/dashboard" replace />} />
+      <Route path="/owner" element={<Navigate to="/dashboard" replace />} />
+      <Route path="/login" element={<Navigate to="/dashboard" replace />} />
       <Route element={<AppLayout />}>
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<DashboardPage />} />
@@ -1084,7 +1087,9 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
             </OwnerOnly>
           }
         />
+        <Route path="/security" element={<SecurityPage />} />
         <Route path="/notifications" element={<NotificationsPage />} />
+        <Route path="/two-factor/setup" element={<TwoFactorSetupPage />} />
         <Route path="*" element={<Navigate to="/time" replace />} />
       </Route>
     </Routes>

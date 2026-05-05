@@ -6,7 +6,7 @@ export function createSeedData(): AppData {
     employees: [
       { id: 'emp-avery', name: 'Avery Johnson', role: 'Senior Bookkeeper' },
       { id: 'emp-jordan', name: 'Jordan Ellis', role: 'Bookkeeper' },
-      { id: 'emp-patrice', name: 'Patrice Bell', role: 'Owner' },
+      { id: 'emp-patrice', name: 'Brittany Ferguson', role: 'Owner' },
     ],
     clients: [
       {

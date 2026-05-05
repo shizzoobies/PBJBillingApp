@@ -1,8 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
-import { fetchFirmSettings, updateFirmSettingsRequest } from '../lib/api'
-import { DEFAULT_FIRM_SETTINGS, type FirmSettings } from '../lib/types'
+import {
+  fetchAuthStatus,
+  fetchFirmSettings,
+  fetchTotpStatus,
+  totpDisable,
+  totpRegenerateBackups,
+  updateFirmSettingsRequest,
+  type AuthStatus,
+} from '../lib/api'
+import {
+  ApiError,
+  DEFAULT_FIRM_SETTINGS,
+  type FirmSettings,
+  type TotpStatus,
+} from '../lib/types'
 
 export function SettingsPage() {
   const { ownerMode, setFirmSettings } = useAppContext()
@@ -90,6 +103,266 @@ export function SettingsPage() {
       <AddressSection settings={settings} onCommit={commit} />
       <ContactSection settings={settings} onCommit={commit} />
       <BusinessSection settings={settings} onCommit={commit} />
+      <AuthenticationSection />
+      <SecuritySection />
+    </section>
+  )
+}
+
+function SecuritySection() {
+  const navigate = useNavigate()
+  const [status, setStatus] = useState<TotpStatus | null>(null)
+  const [error, setError] = useState('')
+  const [disableCode, setDisableCode] = useState('')
+  const [regenCode, setRegenCode] = useState('')
+  const [disabling, setDisabling] = useState(false)
+  const [regenerating, setRegenerating] = useState(false)
+  const [newBackupCodes, setNewBackupCodes] = useState<string[] | null>(null)
+
+  const refresh = async () => {
+    try {
+      const next = await fetchTotpStatus()
+      setStatus(next)
+    } catch {
+      setStatus(null)
+    }
+  }
+
+  useEffect(() => {
+    let active = true
+    fetchTotpStatus()
+      .then((next) => {
+        if (active) setStatus(next)
+      })
+      .catch(() => {
+        if (active) setStatus(null)
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const handleEnable = () => {
+    navigate('/two-factor/setup')
+  }
+
+  const handleDisable = async () => {
+    if (!disableCode.trim() || disabling) return
+    setDisabling(true)
+    setError('')
+    try {
+      await totpDisable(disableCode.trim())
+      setDisableCode('')
+      await refresh()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not disable two-factor.')
+    } finally {
+      setDisabling(false)
+    }
+  }
+
+  const handleRegenerate = async () => {
+    if (!regenCode.trim() || regenerating) return
+    setRegenerating(true)
+    setError('')
+    try {
+      const result = await totpRegenerateBackups(regenCode.trim())
+      setNewBackupCodes(result.backupCodes)
+      setRegenCode('')
+      await refresh()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not regenerate backup codes.')
+    } finally {
+      setRegenerating(false)
+    }
+  }
+
+  // Owner-required treatment: owners cannot disable.
+  const ownerRequired = Boolean(status?.requiredForRole)
+  const enabled = Boolean(status?.enabled)
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Security</p>
+          <h2>Two-factor authentication</h2>
+        </div>
+      </div>
+      <div className="form-grid">
+        {ownerRequired ? (
+          <p className="muted-text">
+            <strong>Owner two-factor:</strong>{' '}
+            {enabled ? (
+              <span style={{ color: '#1f7d4d' }}>Required, enabled</span>
+            ) : (
+              <span style={{ color: '#b45309' }}>Required, not yet set up</span>
+            )}
+          </p>
+        ) : (
+          <p className="muted-text">
+            <strong>Two-factor:</strong>{' '}
+            {enabled ? (
+              <span style={{ color: '#1f7d4d' }}>Enabled</span>
+            ) : (
+              <span>Not enabled</span>
+            )}
+          </p>
+        )}
+
+        {!enabled ? (
+          <button className="primary-action" onClick={handleEnable} type="button">
+            Enable two-factor
+          </button>
+        ) : (
+          <>
+            <p className="muted-text">
+              <strong>Backup codes remaining:</strong> {status?.remainingBackupCodes ?? 0} of 8
+            </p>
+            <div className="form-grid two-col">
+              <label className="field">
+                <span>Regenerate backup codes</span>
+                <input
+                  className="input"
+                  inputMode="numeric"
+                  maxLength={6}
+                  onChange={(event) => setRegenCode(event.target.value)}
+                  placeholder="Current 6-digit code"
+                  type="text"
+                  value={regenCode}
+                />
+                <small className="field-helper">
+                  Replaces all existing backup codes. Old codes stop working.
+                </small>
+                <button
+                  className="auth-secondary"
+                  disabled={regenerating || !regenCode.trim()}
+                  onClick={handleRegenerate}
+                  style={{ marginTop: 8 }}
+                  type="button"
+                >
+                  {regenerating ? 'Regenerating…' : 'Regenerate'}
+                </button>
+              </label>
+              {!ownerRequired ? (
+                <label className="field">
+                  <span>Disable two-factor</span>
+                  <input
+                    className="input"
+                    inputMode="numeric"
+                    maxLength={6}
+                    onChange={(event) => setDisableCode(event.target.value)}
+                    placeholder="Current 6-digit code"
+                    type="text"
+                    value={disableCode}
+                  />
+                  <small className="field-helper">
+                    Bookkeepers can opt out. You can re-enable any time.
+                  </small>
+                  <button
+                    className="team-danger-button"
+                    disabled={disabling || !disableCode.trim()}
+                    onClick={handleDisable}
+                    style={{ marginTop: 8 }}
+                    type="button"
+                  >
+                    {disabling ? 'Disabling…' : 'Disable'}
+                  </button>
+                </label>
+              ) : null}
+            </div>
+            {newBackupCodes ? (
+              <div>
+                <p className="muted-text">
+                  <strong>New backup codes — save these now.</strong> The old codes no longer work.
+                </p>
+                <ul
+                  style={{
+                    background: '#f6f5f1',
+                    border: '1px solid #e6e2dc',
+                    borderRadius: 10,
+                    padding: '12px 18px',
+                    margin: '4px 0',
+                    listStyle: 'none',
+                    fontFamily: 'ui-monospace, monospace',
+                  }}
+                >
+                  {newBackupCodes.map((code) => (
+                    <li key={code}>{code}</li>
+                  ))}
+                </ul>
+                <button
+                  className="auth-secondary"
+                  onClick={() => setNewBackupCodes(null)}
+                  type="button"
+                >
+                  Done
+                </button>
+              </div>
+            ) : null}
+          </>
+        )}
+
+        {error ? <p className="auth-error">{error}</p> : null}
+      </div>
+    </section>
+  )
+}
+
+function AuthenticationSection() {
+  const [status, setStatus] = useState<AuthStatus | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchAuthStatus(controller.signal)
+      .then((data) => {
+        if (!controller.signal.aborted) setStatus(data)
+      })
+      .catch(() => {
+        // Non-fatal — leave status null, UI falls back gracefully.
+      })
+    return () => controller.abort()
+  }, [])
+
+  const sendingDomain = status
+    ? (status.sendingDomain ?? 'Not configured — set EMAIL_FROM in Railway')
+    : '…'
+  const appUrl = status ? status.appUrl : '…'
+  const ownerWarning = status && !status.ownerEmailConfigured
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Authentication</p>
+          <h2>Sign-in</h2>
+        </div>
+      </div>
+      <div className="form-grid">
+        <p className="muted-text">
+          Email-gated sign-in is active. Bookkeepers receive a sign-in link by email each time
+          they sign in.
+        </p>
+        {ownerWarning && (
+          <p className="muted-text" style={{ color: 'var(--color-warning, #b45309)' }}>
+            <strong>Warning:</strong> OWNER_EMAIL is not set. If Brittany Ferguson's email is still
+            a placeholder (@pbj.local), sign-in will not work. Set OWNER_EMAIL in your Railway
+            environment.
+          </p>
+        )}
+        {status && !status.adminEmailConfigured && (
+          <p className="muted-text">
+            <strong>Note:</strong> ADMIN_EMAIL is not set. The second owner account (Alex Anderson)
+            will not be created until ADMIN_EMAIL is configured.
+          </p>
+        )}
+        <p className="muted-text">
+          <strong>Sending domain:</strong> {sendingDomain}
+        </p>
+        <p className="muted-text">
+          <strong>App URL:</strong> {appUrl}
+        </p>
+      </div>
     </section>
   )
 }

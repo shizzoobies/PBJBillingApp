@@ -63,8 +63,8 @@ function rowToFirmSettings(row) {
 const seededUsers = [
   {
     id: 'emp-patrice',
-    name: 'Patrice Bell',
-    email: 'owner@pbj.local',
+    name: 'Brittany Ferguson',
+    email: 'brittany-ferguson@pbj.local',
     staffRole: 'Owner',
     role: 'owner',
   },
@@ -597,6 +597,64 @@ export class AppDataStore {
         create index if not exists notifications_user_idx on notifications(user_id, created_at desc)
       `)
 
+      // Email-gated authentication: short-lived sign-in link tokens (single-use, 15 min).
+      await this.pool.query(`
+        create table if not exists login_tokens (
+          token text primary key,
+          user_id text not null,
+          expires_at timestamptz not null,
+          consumed_at timestamptz,
+          ip_address text,
+          created_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists login_tokens_user_idx on login_tokens(user_id)
+      `)
+
+      // Email-gated authentication: persistent user sessions (30-day sliding expiry).
+      await this.pool.query(`
+        create table if not exists user_sessions (
+          id text primary key,
+          user_id text not null,
+          created_at timestamptz not null default now(),
+          last_seen_at timestamptz not null default now(),
+          revoked_at timestamptz,
+          user_agent text,
+          ip_address text
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists user_sessions_user_idx on user_sessions(user_id)
+      `)
+
+      // TOTP two-factor: per-user secret + enable flag + backup codes.
+      // Stored as plaintext for v1 — encryption-at-rest at the DB layer is
+      // the right defense (see lib/totp.js header). Backup codes are stored
+      // pre-hashed (sha-256) so a DB read alone does not yield usable codes.
+      await this.pool.query(`alter table users add column if not exists totp_secret text`)
+      await this.pool.query(`alter table users add column if not exists totp_enabled boolean not null default false`)
+      await this.pool.query(`alter table users add column if not exists totp_backup_codes text[] not null default '{}'`)
+      await this.pool.query(`alter table users add column if not exists pending_totp_secret text`)
+
+      // TOTP two-factor: short-lived pending tokens (5 min) used between
+      // /verify/:token and /two-factor (or /two-factor/setup). One-shot.
+      await this.pool.query(`
+        create table if not exists pending_two_factor (
+          token text primary key,
+          user_id text not null,
+          requires_setup boolean not null default false,
+          attempts int not null default 0,
+          locked_at timestamptz,
+          expires_at timestamptz not null,
+          consumed_at timestamptz,
+          created_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists pending_two_factor_user_idx on pending_two_factor(user_id)
+      `)
+
       await this.pool.query(`
         create table if not exists subscription_plans (
           id text primary key,
@@ -796,6 +854,7 @@ export class AppDataStore {
 
       await this.seedUsersInPostgres()
       await this.seedRelationalDataInPostgres()
+      await this.syncOwnerEmailInPostgres()
       return
     }
 
@@ -809,7 +868,15 @@ export class AppDataStore {
       await writeFile(
         localAuthPath,
         JSON.stringify(
-          { users: createSeededAuthUsers(), sessions: [], activityLog: [], notifications: [] },
+          {
+            users: createSeededAuthUsers(),
+            sessions: [],
+            activityLog: [],
+            notifications: [],
+            loginTokens: [],
+            userSessions: [],
+            pendingTwoFactor: [],
+          },
           null,
           2,
         ),
@@ -841,6 +908,23 @@ export class AppDataStore {
           next = { ...next, email: `${next.id}@pbj.local` }
           mutated = true
         }
+        // TOTP fields backfill (idempotent).
+        if (next.totpSecret === undefined) {
+          next = { ...next, totpSecret: null }
+          mutated = true
+        }
+        if (next.totpEnabled === undefined) {
+          next = { ...next, totpEnabled: false }
+          mutated = true
+        }
+        if (!Array.isArray(next.totpBackupCodes)) {
+          next = { ...next, totpBackupCodes: [] }
+          mutated = true
+        }
+        if (next.pendingTotpSecret === undefined) {
+          next = { ...next, pendingTotpSecret: null }
+          mutated = true
+        }
         return next
       })
       if (!Array.isArray(authState.activityLog)) {
@@ -851,9 +935,122 @@ export class AppDataStore {
         authState.notifications = []
         mutated = true
       }
+      if (!Array.isArray(authState.loginTokens)) {
+        authState.loginTokens = []
+        mutated = true
+      }
+      if (!Array.isArray(authState.userSessions)) {
+        authState.userSessions = []
+        mutated = true
+      }
+      if (!Array.isArray(authState.pendingTwoFactor)) {
+        authState.pendingTwoFactor = []
+        mutated = true
+      }
       if (mutated) {
         await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
       }
+    }
+    await this.syncOwnerEmailInFile()
+  }
+
+  async syncOwnerEmailInPostgres() {
+    const ownerEmail = process.env.OWNER_EMAIL?.trim().toLowerCase()
+    if (!ownerEmail) {
+      const cur = await this.pool.query(`select email from users where id = 'emp-patrice'`)
+      const currentEmail = cur.rows[0]?.email ?? '(none)'
+      console.log(`[auth] OWNER_EMAIL not set; existing owner email left as ${currentEmail}`)
+    } else {
+      const result = await this.pool.query(
+        `update users set name = 'Brittany Ferguson', email = $1, updated_at = now()
+         where id = 'emp-patrice' and lower(coalesce(email, '')) != $1
+         returning id`,
+        [ownerEmail],
+      )
+      if (result.rowCount > 0) {
+        console.log(`[auth] Owner Brittany Ferguson email synced to ${ownerEmail}`)
+      }
+    }
+
+    const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase()
+    if (!adminEmail) {
+      console.log('[auth] ADMIN_EMAIL not set; admin owner not created')
+    } else {
+      await this.pool.query(
+        `insert into users (id, name, email, role, staff_role, password_hash)
+         values ('emp-alex-anderson', 'Alex Anderson', $1, 'owner', 'Owner', $2)
+         on conflict (id) do update
+           set name = 'Alex Anderson',
+               email = excluded.email,
+               role = 'owner',
+               staff_role = 'Owner',
+               updated_at = now()`,
+        [adminEmail, hashPassword(randomUUID())],
+      )
+      await this.pool.query(
+        `update users set name = 'Alex Anderson', email = $1, role = 'owner', staff_role = 'Owner', updated_at = now()
+         where lower(coalesce(email, '')) = $1 and id != 'emp-alex-anderson'`,
+        [adminEmail],
+      )
+      console.log(`[auth] Admin Alex Anderson seeded/updated with email ${adminEmail}`)
+    }
+  }
+
+  async syncOwnerEmailInFile() {
+    const authState = await readJson(localAuthPath)
+    let mutated = false
+
+    const ownerEmail = process.env.OWNER_EMAIL?.trim().toLowerCase()
+    if (!ownerEmail) {
+      const currentEmail = authState.users.find((u) => u.id === 'emp-patrice')?.email ?? '(none)'
+      console.log(`[auth] OWNER_EMAIL not set; existing owner email left as ${currentEmail}`)
+    } else {
+      authState.users = authState.users.map((user) => {
+        if (user.id === 'emp-patrice' && (user.email ?? '').toLowerCase() !== ownerEmail) {
+          mutated = true
+          return { ...user, name: 'Brittany Ferguson', email: ownerEmail }
+        }
+        return user
+      })
+      if (mutated) {
+        console.log(`[auth] Owner Brittany Ferguson email synced to ${ownerEmail}`)
+      }
+    }
+
+    const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase()
+    if (!adminEmail) {
+      console.log('[auth] ADMIN_EMAIL not set; admin owner not created')
+    } else {
+      const existingAdmin = authState.users.find((u) => u.id === 'emp-alex-anderson')
+      if (!existingAdmin) {
+        const createdAt = nowIso()
+        authState.users.push({
+          id: 'emp-alex-anderson',
+          name: 'Alex Anderson',
+          email: adminEmail,
+          staffRole: 'Owner',
+          role: 'owner',
+          passwordHash: hashPassword(randomUUID()),
+          magicToken: generateMagicToken(),
+          tokenRevokedAt: null,
+          lastActiveAt: null,
+          createdAt,
+        })
+        mutated = true
+      } else if (
+        existingAdmin.name !== 'Alex Anderson' ||
+        (existingAdmin.email ?? '').toLowerCase() !== adminEmail
+      ) {
+        authState.users = authState.users.map((u) =>
+          u.id === 'emp-alex-anderson' ? { ...u, name: 'Alex Anderson', email: adminEmail } : u,
+        )
+        mutated = true
+      }
+      console.log(`[auth] Admin Alex Anderson seeded/updated with email ${adminEmail}`)
+    }
+
+    if (mutated) {
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     }
   }
 
@@ -2185,7 +2382,8 @@ export class AppDataStore {
   async getTeamMembers() {
     if (this.pool) {
       const result = await this.pool.query(`
-        select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at, created_at
+        select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at, created_at,
+               totp_enabled
         from users
         order by case when role = 'owner' then 0 else 1 end, name asc
       `)
@@ -2200,6 +2398,7 @@ export class AppDataStore {
         tokenRevokedAt: row.token_revoked_at ? new Date(row.token_revoked_at).toISOString() : null,
         lastActiveAt: row.last_active_at ? new Date(row.last_active_at).toISOString() : null,
         createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+        totpEnabled: Boolean(row.totp_enabled),
       }))
     }
 
@@ -2214,6 +2413,7 @@ export class AppDataStore {
       tokenRevokedAt: user.tokenRevokedAt ?? null,
       lastActiveAt: user.lastActiveAt ?? null,
       createdAt: user.createdAt ?? null,
+      totpEnabled: Boolean(user.totpEnabled),
     }))
   }
 
@@ -3079,6 +3279,680 @@ export class AppDataStore {
     data.firmSettings = next
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return next
+  }
+
+  // ---- Email-gated authentication ----
+
+  /**
+   * Look up a user record by email (case-insensitive). Returns the
+   * full row shape used by createLoginToken / createUserSession; null if
+   * no match.
+   */
+  async findUserByEmail(email) {
+    const trimmed = String(email ?? '').trim().toLowerCase()
+    if (!trimmed) return null
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, name, email, role, staff_role from users where lower(email) = $1`,
+        [trimmed],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        role: row.role,
+        staffRole: row.staff_role,
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find(
+      (entry) => entry.email && entry.email.toLowerCase() === trimmed,
+    )
+    if (!user) return null
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      staffRole: user.staffRole,
+    }
+  }
+
+  /**
+   * Create a single-use 15-minute sign-in link token for the given user.
+   * Returns { token, expiresAt }.
+   */
+  async createLoginToken(userId, ipAddress = null) {
+    const token = randomBytes(32).toString('base64url')
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 15)
+    const createdAt = nowIso()
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into login_tokens (token, user_id, expires_at, ip_address, created_at)
+         values ($1, $2, $3, $4, $5)`,
+        [token, userId, expiresAt.toISOString(), ipAddress || null, createdAt],
+      )
+      return { token, expiresAt }
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.loginTokens)) authState.loginTokens = []
+    authState.loginTokens.push({
+      token,
+      userId,
+      expiresAt: expiresAt.toISOString(),
+      consumedAt: null,
+      ipAddress: ipAddress || null,
+      createdAt,
+    })
+    // Trim: keep only un-expired or recently-consumed (last 200) tokens.
+    const cutoff = Date.now() - 1000 * 60 * 60 * 24
+    authState.loginTokens = authState.loginTokens
+      .filter((entry) => {
+        const exp = new Date(entry.expiresAt).getTime()
+        const consumed = entry.consumedAt ? new Date(entry.consumedAt).getTime() : 0
+        return exp > Date.now() || consumed > cutoff
+      })
+      .slice(-500)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return { token, expiresAt }
+  }
+
+  /**
+   * Validate and consume a sign-in link token. Returns { userId } on success
+   * or null if the token is unknown, expired, or already consumed.
+   */
+  async consumeLoginToken(token) {
+    if (!token) return null
+    const consumedAt = nowIso()
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update login_tokens
+         set consumed_at = $2
+         where token = $1
+           and consumed_at is null
+           and expires_at > now()
+         returning user_id`,
+        [token, consumedAt],
+      )
+      if (!result.rowCount) return null
+      return { userId: result.rows[0].user_id }
+    }
+
+    const authState = await readJson(localAuthPath)
+    let consumed = null
+    authState.loginTokens = (authState.loginTokens ?? []).map((entry) => {
+      if (entry.token !== token) return entry
+      if (entry.consumedAt) return entry
+      if (new Date(entry.expiresAt).getTime() <= Date.now()) return entry
+      consumed = { userId: entry.userId }
+      return { ...entry, consumedAt }
+    })
+    if (!consumed) return null
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return consumed
+  }
+
+  /**
+   * Create a persistent user session. Returns { sessionId, user, lastSeenAt }.
+   * Used by /verify/:token after a successful link consumption.
+   */
+  async createUserSession(userId, userAgent = null, ipAddress = null) {
+    const sessionId = randomUUID()
+    const createdAt = nowIso()
+    const safeUa = userAgent ? String(userAgent).slice(0, 200) : null
+    const safeIp = ipAddress ? String(ipAddress).slice(0, 80) : null
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into user_sessions (id, user_id, created_at, last_seen_at, user_agent, ip_address)
+         values ($1, $2, $3, $3, $4, $5)`,
+        [sessionId, userId, createdAt, safeUa, safeIp],
+      )
+      await this.pool.query(`update users set last_active_at = now() where id = $1`, [userId])
+      const result = await this.pool.query(
+        `select id, name, email, role, staff_role from users where id = $1`,
+        [userId],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return {
+        sessionId,
+        lastSeenAt: createdAt,
+        user: mapSessionUser({
+          id: row.id,
+          name: row.name,
+          email: row.email,
+          role: row.role,
+          staffRole: row.staff_role,
+        }),
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((entry) => entry.id === userId)
+    if (!user) return null
+    user.lastActiveAt = createdAt
+    if (!Array.isArray(authState.userSessions)) authState.userSessions = []
+    authState.userSessions.push({
+      id: sessionId,
+      userId,
+      createdAt,
+      lastSeenAt: createdAt,
+      revokedAt: null,
+      userAgent: safeUa,
+      ipAddress: safeIp,
+    })
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return {
+      sessionId,
+      lastSeenAt: createdAt,
+      user: mapSessionUser(user),
+    }
+  }
+
+  /**
+   * Look up a session by id. Touches `lastSeenAt` to slide the 30-day expiry.
+   * Returns { sessionId, user, lastSeenAt } or null if unknown / revoked.
+   */
+  async getUserSession(sessionId) {
+    if (!sessionId) return null
+    const lastSeenAt = nowIso()
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select s.id, s.user_id, s.last_seen_at, s.revoked_at,
+                u.name, u.email, u.role, u.staff_role
+         from user_sessions s
+         join users u on u.id = s.user_id
+         where s.id = $1`,
+        [sessionId],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      if (row.revoked_at) return null
+      await this.pool.query(
+        `update user_sessions set last_seen_at = $2 where id = $1`,
+        [sessionId, lastSeenAt],
+      )
+      return {
+        sessionId,
+        lastSeenAt,
+        user: mapSessionUser({
+          id: row.user_id,
+          name: row.name,
+          email: row.email,
+          role: row.role,
+          staffRole: row.staff_role,
+        }),
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.userSessions) ? authState.userSessions : []
+    const entry = list.find((item) => item.id === sessionId)
+    if (!entry || entry.revokedAt) return null
+    const user = (authState.users ?? []).find((item) => item.id === entry.userId)
+    if (!user) return null
+    entry.lastSeenAt = lastSeenAt
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return {
+      sessionId,
+      lastSeenAt,
+      user: mapSessionUser(user),
+    }
+  }
+
+  async revokeUserSession(sessionId) {
+    if (!sessionId) return null
+    const revokedAt = nowIso()
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update user_sessions set revoked_at = $2 where id = $1 and revoked_at is null
+         returning id, user_id, user_agent, ip_address, last_seen_at`,
+        [sessionId, revokedAt],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return {
+        id: row.id,
+        userId: row.user_id,
+        userAgent: row.user_agent,
+        ipAddress: row.ip_address,
+        lastSeenAt: row.last_seen_at ? new Date(row.last_seen_at).toISOString() : null,
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    let revoked = null
+    authState.userSessions = (authState.userSessions ?? []).map((entry) => {
+      if (entry.id !== sessionId || entry.revokedAt) return entry
+      revoked = { ...entry, revokedAt }
+      return revoked
+    })
+    if (!revoked) return null
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return {
+      id: revoked.id,
+      userId: revoked.userId,
+      userAgent: revoked.userAgent,
+      ipAddress: revoked.ipAddress,
+      lastSeenAt: revoked.lastSeenAt,
+    }
+  }
+
+  /**
+   * Revoke every active session for the user. If `exceptSessionId` is
+   * provided, that session is left intact. Returns the number revoked.
+   */
+  async revokeAllUserSessions(userId, exceptSessionId = null) {
+    if (!userId) return 0
+    const revokedAt = nowIso()
+
+    if (this.pool) {
+      const params = [userId, revokedAt]
+      let where = `user_id = $1 and revoked_at is null`
+      if (exceptSessionId) {
+        params.push(exceptSessionId)
+        where += ` and id <> $${params.length}`
+      }
+      const result = await this.pool.query(
+        `update user_sessions set revoked_at = $2 where ${where}`,
+        params,
+      )
+      return result.rowCount ?? 0
+    }
+
+    const authState = await readJson(localAuthPath)
+    let count = 0
+    authState.userSessions = (authState.userSessions ?? []).map((entry) => {
+      if (entry.userId !== userId) return entry
+      if (entry.revokedAt) return entry
+      if (exceptSessionId && entry.id === exceptSessionId) return entry
+      count += 1
+      return { ...entry, revokedAt }
+    })
+    if (count > 0) {
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+    return count
+  }
+
+  /**
+   * List active (non-revoked) sessions for the user, newest first. Used by
+   * the owner-only Team page "Active sessions" list.
+   */
+  async listActiveSessions(userId) {
+    if (!userId) return []
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, user_id, created_at, last_seen_at, user_agent, ip_address
+         from user_sessions
+         where user_id = $1 and revoked_at is null
+         order by last_seen_at desc`,
+        [userId],
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        userId: row.user_id,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+        lastSeenAt: row.last_seen_at ? new Date(row.last_seen_at).toISOString() : null,
+        userAgent: row.user_agent ?? null,
+        ipAddress: row.ip_address ?? null,
+      }))
+    }
+
+    const authState = await readJson(localAuthPath)
+    return (authState.userSessions ?? [])
+      .filter((entry) => entry.userId === userId && !entry.revokedAt)
+      .slice()
+      .sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? 1 : -1))
+      .map((entry) => ({
+        id: entry.id,
+        userId: entry.userId,
+        createdAt: entry.createdAt,
+        lastSeenAt: entry.lastSeenAt,
+        userAgent: entry.userAgent ?? null,
+        ipAddress: entry.ipAddress ?? null,
+      }))
+  }
+
+  // ---- TOTP two-factor authentication ----
+
+  /**
+   * Read a user's TOTP-related fields. Returns null if no such user.
+   * Includes both the active `totpSecret` (used for verify) and the
+   * `pendingTotpSecret` (used during initial setup before the user has
+   * proven they can read codes from their authenticator).
+   */
+  async getUserTotpState(userId) {
+    if (!userId) return null
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, name, email, role, staff_role,
+                totp_secret, totp_enabled, totp_backup_codes, pending_totp_secret
+         from users where id = $1`,
+        [userId],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return {
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        role: row.role,
+        staffRole: row.staff_role,
+        totpSecret: row.totp_secret ?? null,
+        totpEnabled: Boolean(row.totp_enabled),
+        totpBackupCodes: Array.isArray(row.totp_backup_codes) ? row.totp_backup_codes : [],
+        pendingTotpSecret: row.pending_totp_secret ?? null,
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((entry) => entry.id === userId)
+    if (!user) return null
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      staffRole: user.staffRole,
+      totpSecret: user.totpSecret ?? null,
+      totpEnabled: Boolean(user.totpEnabled),
+      totpBackupCodes: Array.isArray(user.totpBackupCodes) ? user.totpBackupCodes : [],
+      pendingTotpSecret: user.pendingTotpSecret ?? null,
+    }
+  }
+
+  /**
+   * Save a candidate TOTP secret on the user row WITHOUT enabling 2FA.
+   * Step 1 of the setup flow: the user has not yet proven they can read
+   * codes from their app, so we keep the secret on a side field until
+   * `commitTotp` fires.
+   */
+  async savePendingTotpSecret(userId, secret) {
+    if (this.pool) {
+      await this.pool.query(
+        `update users set pending_totp_secret = $2, updated_at = now() where id = $1`,
+        [userId, secret || null],
+      )
+      return
+    }
+
+    const authState = await readJson(localAuthPath)
+    authState.users = (authState.users ?? []).map((user) =>
+      user.id === userId ? { ...user, pendingTotpSecret: secret || null } : user,
+    )
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+
+  /**
+   * Commit a verified TOTP secret + initial backup-code list. Clears the
+   * pending field. Returns true on success.
+   */
+  async commitTotp(userId, secret, hashedBackupCodes) {
+    if (!userId || !secret) return false
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update users
+         set totp_secret = $2,
+             totp_enabled = true,
+             totp_backup_codes = $3,
+             pending_totp_secret = null,
+             updated_at = now()
+         where id = $1
+         returning id`,
+        [userId, secret, hashedBackupCodes || []],
+      )
+      return result.rowCount > 0
+    }
+
+    const authState = await readJson(localAuthPath)
+    let found = false
+    authState.users = (authState.users ?? []).map((user) => {
+      if (user.id !== userId) return user
+      found = true
+      return {
+        ...user,
+        totpSecret: secret,
+        totpEnabled: true,
+        totpBackupCodes: hashedBackupCodes || [],
+        pendingTotpSecret: null,
+      }
+    })
+    if (!found) return false
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return true
+  }
+
+  /**
+   * Replace just the backup-code list (used by "Regenerate backup codes").
+   */
+  async replaceTotpBackupCodes(userId, hashedBackupCodes) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update users set totp_backup_codes = $2, updated_at = now() where id = $1 returning id`,
+        [userId, hashedBackupCodes || []],
+      )
+      return result.rowCount > 0
+    }
+
+    const authState = await readJson(localAuthPath)
+    let found = false
+    authState.users = (authState.users ?? []).map((user) => {
+      if (user.id !== userId) return user
+      found = true
+      return { ...user, totpBackupCodes: hashedBackupCodes || [] }
+    })
+    if (!found) return false
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return true
+  }
+
+  /**
+   * After a backup code is consumed, persist the shortened list.
+   */
+  async setTotpBackupCodes(userId, hashedBackupCodes) {
+    return this.replaceTotpBackupCodes(userId, hashedBackupCodes)
+  }
+
+  /**
+   * Wipe all TOTP state on a user. Used by both the user-initiated "Disable"
+   * (bookkeeper-only) and the owner-initiated "Reset 2FA" admin override.
+   */
+  async clearTotp(userId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update users
+         set totp_secret = null,
+             totp_enabled = false,
+             totp_backup_codes = '{}',
+             pending_totp_secret = null,
+             updated_at = now()
+         where id = $1
+         returning id`,
+        [userId],
+      )
+      return result.rowCount > 0
+    }
+
+    const authState = await readJson(localAuthPath)
+    let found = false
+    authState.users = (authState.users ?? []).map((user) => {
+      if (user.id !== userId) return user
+      found = true
+      return {
+        ...user,
+        totpSecret: null,
+        totpEnabled: false,
+        totpBackupCodes: [],
+        pendingTotpSecret: null,
+      }
+    })
+    if (!found) return false
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return true
+  }
+
+  /**
+   * Create a 5-minute single-use pending-2fa token. Used between
+   * /verify/:token and either /two-factor or /two-factor/setup. Set
+   * `requiresSetup=true` when the user has not yet enabled 2FA but is being
+   * forced into setup (currently: owners on first login).
+   */
+  async createPendingTwoFactor(userId, requiresSetup = false) {
+    const token = randomBytes(32).toString('base64url')
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 5)
+    const createdAt = nowIso()
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into pending_two_factor (token, user_id, requires_setup, expires_at, created_at)
+         values ($1, $2, $3, $4, $5)`,
+        [token, userId, Boolean(requiresSetup), expiresAt.toISOString(), createdAt],
+      )
+      return { token, expiresAt }
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.pendingTwoFactor)) authState.pendingTwoFactor = []
+    authState.pendingTwoFactor.push({
+      token,
+      userId,
+      requiresSetup: Boolean(requiresSetup),
+      attempts: 0,
+      lockedAt: null,
+      expiresAt: expiresAt.toISOString(),
+      consumedAt: null,
+      createdAt,
+    })
+    // Keep the list bounded — drop entries older than 1 hour.
+    const cutoff = Date.now() - 1000 * 60 * 60
+    authState.pendingTwoFactor = authState.pendingTwoFactor.filter(
+      (entry) => new Date(entry.createdAt).getTime() > cutoff,
+    )
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return { token, expiresAt }
+  }
+
+  /**
+   * Look up (without consuming) a pending-2fa token. Returns null if missing,
+   * expired, locked, or already consumed.
+   */
+  async getPendingTwoFactor(token) {
+    if (!token) return null
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select token, user_id, requires_setup, attempts, locked_at, expires_at, consumed_at
+         from pending_two_factor where token = $1`,
+        [token],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      if (row.consumed_at) return null
+      if (row.locked_at) return null
+      if (new Date(row.expires_at).getTime() <= Date.now()) return null
+      return {
+        token: row.token,
+        userId: row.user_id,
+        requiresSetup: Boolean(row.requires_setup),
+        attempts: Number(row.attempts) || 0,
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    const entry = (authState.pendingTwoFactor ?? []).find((e) => e.token === token)
+    if (!entry) return null
+    if (entry.consumedAt || entry.lockedAt) return null
+    if (new Date(entry.expiresAt).getTime() <= Date.now()) return null
+    return {
+      token: entry.token,
+      userId: entry.userId,
+      requiresSetup: Boolean(entry.requiresSetup),
+      attempts: Number(entry.attempts) || 0,
+    }
+  }
+
+  /**
+   * Increment the attempt counter on a pending-2fa token. After 5 attempts
+   * the token is locked (caller must request a fresh email link). Returns
+   * the new attempt count, or -1 if the token no longer exists.
+   */
+  async recordPendingTwoFactorAttempt(token) {
+    if (!token) return -1
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update pending_two_factor
+         set attempts = attempts + 1,
+             locked_at = case when attempts + 1 >= 5 then now() else locked_at end
+         where token = $1
+         returning attempts`,
+        [token],
+      )
+      if (!result.rowCount) return -1
+      return Number(result.rows[0].attempts) || 0
+    }
+
+    const authState = await readJson(localAuthPath)
+    let attempts = -1
+    authState.pendingTwoFactor = (authState.pendingTwoFactor ?? []).map((entry) => {
+      if (entry.token !== token) return entry
+      const next = (Number(entry.attempts) || 0) + 1
+      attempts = next
+      return { ...entry, attempts: next, lockedAt: next >= 5 ? nowIso() : entry.lockedAt }
+    })
+    if (attempts === -1) return -1
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return attempts
+  }
+
+  /**
+   * Mark a pending-2fa token consumed (single-shot). Called after a
+   * successful TOTP verification or backup-code use, just before issuing
+   * the full session cookie.
+   */
+  async consumePendingTwoFactor(token) {
+    if (!token) return null
+    const consumedAt = nowIso()
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update pending_two_factor
+         set consumed_at = $2
+         where token = $1 and consumed_at is null
+         returning user_id, requires_setup`,
+        [token, consumedAt],
+      )
+      if (!result.rowCount) return null
+      return {
+        userId: result.rows[0].user_id,
+        requiresSetup: Boolean(result.rows[0].requires_setup),
+      }
+    }
+
+    const authState = await readJson(localAuthPath)
+    let consumed = null
+    authState.pendingTwoFactor = (authState.pendingTwoFactor ?? []).map((entry) => {
+      if (entry.token !== token || entry.consumedAt) return entry
+      consumed = { userId: entry.userId, requiresSetup: Boolean(entry.requiresSetup) }
+      return { ...entry, consumedAt }
+    })
+    if (!consumed) return null
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return consumed
   }
 
   async close() {

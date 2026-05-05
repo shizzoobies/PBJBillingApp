@@ -1,18 +1,26 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Copy, Eye, KeyRound, RefreshCw, Trash2, UserPlus, X } from 'lucide-react'
+import { Eye, MailPlus, Send, Trash2, UserPlus, X } from 'lucide-react'
 import { useAppContext } from '../AppContext'
 import {
   deleteTeamMember,
   fetchTeam,
   fetchTeamActivity,
+  fetchTeamSessions,
   inviteTeamMember,
-  regenerateTeamMember,
-  restoreTeamMember,
-  revokeTeamMember,
+  resendTeamSignInLink,
+  revokeAllTeamSessions,
+  revokeTeamSession,
   setClientAssignedTeamRequest,
+  teamTotpReset,
 } from '../lib/api'
-import { ApiError, type ActivityEntry, type Client, type TeamMember } from '../lib/types'
+import {
+  ApiError,
+  type ActivityEntry,
+  type Client,
+  type TeamMember,
+  type TeamSession,
+} from '../lib/types'
 import { describeActivityAction, formatActivityTimestamp, relativeTime } from '../lib/utils'
 
 const STAFF_ROLES = ['Owner', 'Senior Bookkeeper', 'Bookkeeper'] as const
@@ -34,7 +42,10 @@ export function TeamPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [activity, setActivity] = useState<Record<string, ActivityEntry[]>>({})
   const [activityLoading, setActivityLoading] = useState<string | null>(null)
-  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [sessions, setSessions] = useState<Record<string, TeamSession[]>>({})
+  const [sessionsLoading, setSessionsLoading] = useState<string | null>(null)
+  const [resendingId, setResendingId] = useState<string | null>(null)
+  const [resendStatus, setResendStatus] = useState<Record<string, 'sent' | 'error'>>({})
 
   useEffect(() => {
     let active = true
@@ -86,47 +97,62 @@ export function TeamPage() {
     }
   }
 
-  const handleCopy = async (text: string | null, key: string) => {
-    if (!text) return
+  const refreshSessions = async (memberId: string) => {
+    setSessionsLoading(memberId)
     try {
-      await navigator.clipboard.writeText(text)
-      setCopiedId(key)
-      window.setTimeout(() => {
-        setCopiedId((current) => (current === key ? null : current))
-      }, 1500)
+      const response = await fetchTeamSessions(memberId)
+      setSessions((current) => ({ ...current, [memberId]: response.sessions }))
     } catch {
-      // ignore clipboard errors
+      setSessions((current) => ({ ...current, [memberId]: [] }))
+    } finally {
+      setSessionsLoading(null)
     }
   }
 
-  const handleRevoke = async (member: TeamMember) => {
+  const handleResendLink = async (member: TeamMember) => {
+    if (!member.email) return
+    setResendingId(member.id)
+    setResendStatus((current) => ({ ...current, [member.id]: 'sent' }))
+    try {
+      await resendTeamSignInLink(member.id)
+      setResendStatus((current) => ({ ...current, [member.id]: 'sent' }))
+    } catch {
+      setResendStatus((current) => ({ ...current, [member.id]: 'error' }))
+    } finally {
+      setResendingId(null)
+      window.setTimeout(() => {
+        setResendStatus((current) => {
+          const next = { ...current }
+          delete next[member.id]
+          return next
+        })
+      }, 4000)
+    }
+  }
+
+  const handleRevokeSession = async (member: TeamMember, sessionId: string) => {
     const confirmed = window.confirm(
-      `This will immediately log out ${member.name} and invalidate their link. Continue?`,
+      `Sign this device out for ${member.name}? They'll need a new sign-in link to get back in from that device.`,
     )
     if (!confirmed) return
     try {
-      const response = await revokeTeamMember(member.id)
-      upsertMember(response.user)
+      await revokeTeamSession(member.id, sessionId)
+      await refreshSessions(member.id)
     } catch (error) {
-      window.alert(error instanceof ApiError ? error.message : 'Failed to revoke link')
+      window.alert(error instanceof ApiError ? error.message : 'Failed to revoke session')
     }
   }
 
-  const handleRegenerate = async (member: TeamMember) => {
+  const handleRevokeAll = async (member: TeamMember) => {
+    const confirmed = window.confirm(
+      `Sign ${member.name} out of every device? They'll need a new sign-in link to get back in.`,
+    )
+    if (!confirmed) return
     try {
-      const response = await regenerateTeamMember(member.id)
-      upsertMember(response.user)
+      await revokeAllTeamSessions(member.id)
+      await refreshSessions(member.id)
     } catch (error) {
-      window.alert(error instanceof ApiError ? error.message : 'Failed to regenerate link')
-    }
-  }
-
-  const handleRestore = async (member: TeamMember) => {
-    try {
-      const response = await restoreTeamMember(member.id)
-      upsertMember(response.user)
-    } catch (error) {
-      window.alert(error instanceof ApiError ? error.message : 'Failed to restore access')
+      window.alert(error instanceof ApiError ? error.message : 'Failed to revoke sessions')
     }
   }
 
@@ -144,10 +170,29 @@ export function TeamPage() {
     }
   }
 
+  const handleResetTotp = async (member: TeamMember) => {
+    const confirmed = window.confirm(
+      `Reset two-factor for ${member.name}? They'll be prompted to set up again on next sign-in.`,
+    )
+    if (!confirmed) return
+    try {
+      await teamTotpReset(member.id)
+      // Optimistically update the local cache so the badge flips immediately.
+      setMembers((current) =>
+        current.map((entry) =>
+          entry.id === member.id ? { ...entry, totpEnabled: false } : entry,
+        ),
+      )
+    } catch (error) {
+      window.alert(error instanceof ApiError ? error.message : 'Failed to reset two-factor')
+    }
+  }
+
   const handleToggleExpand = async (member: TeamMember) => {
     const next = expandedId === member.id ? null : member.id
     setExpandedId(next)
-    if (next && !activity[member.id]) {
+    if (!next) return
+    if (!activity[member.id]) {
       setActivityLoading(member.id)
       try {
         const response = await fetchTeamActivity(member.id, 20)
@@ -157,6 +202,9 @@ export function TeamPage() {
       } finally {
         setActivityLoading(null)
       }
+    }
+    if (!sessions[member.id]) {
+      void refreshSessions(member.id)
     }
   }
 
@@ -211,10 +259,10 @@ export function TeamPage() {
           </button>
         </form>
         {inviteError ? <p className="team-error">{inviteError}</p> : null}
-        {lastInvited && lastInvited.magicUrl ? (
+        {lastInvited ? (
           <div className="team-invite-success">
             <div className="team-invite-success-header">
-              <strong>Invite ready for {lastInvited.name}</strong>
+              <strong>Invitation sent to {lastInvited.email}</strong>
               <button
                 className="team-icon-button"
                 onClick={() => setLastInvited(null)}
@@ -225,19 +273,9 @@ export function TeamPage() {
               </button>
             </div>
             <p className="team-success-copy">
-              Copy this magic link and send it to them directly. It signs them in instantly.
+              {lastInvited.name} will get a one-time sign-in link in their inbox. The link expires
+              in 15 minutes.
             </p>
-            <div className="team-magic-row">
-              <code className="team-magic-url">{lastInvited.magicUrl}</code>
-              <button
-                className="primary-action"
-                onClick={() => handleCopy(lastInvited.magicUrl, `invite-${lastInvited.id}`)}
-                type="button"
-              >
-                <Copy size={14} />{' '}
-                {copiedId === `invite-${lastInvited.id}` ? 'Copied' : 'Copy link'}
-              </button>
-            </div>
           </div>
         ) : null}
       </section>
@@ -258,7 +296,6 @@ export function TeamPage() {
         ) : (
           <ul className="team-list">
             {members.map((member) => {
-              const revoked = Boolean(member.tokenRevokedAt)
               const isExpanded = expandedId === member.id
               return (
                 <li className="team-card" key={member.id}>
@@ -274,15 +311,6 @@ export function TeamPage() {
                     </div>
                     <div className="team-card-meta">
                       <span className="team-role-badge">{member.staffRole}</span>
-                      <span
-                        className={
-                          revoked
-                            ? 'team-status-badge team-status-revoked'
-                            : 'team-status-badge team-status-active'
-                        }
-                      >
-                        {revoked ? 'Revoked' : 'Active'}
-                      </span>
                       <span className="team-card-last-active">
                         Last login: {relativeTime(member.lastActiveAt)}
                       </span>
@@ -290,22 +318,16 @@ export function TeamPage() {
                   </button>
                   {isExpanded ? (
                     <div className="team-card-body">
-                      {!revoked && member.magicUrl ? (
-                        <div className="team-magic-row">
-                          <code className="team-magic-url">{member.magicUrl}</code>
-                          <button
-                            className="team-icon-button"
-                            onClick={() => handleCopy(member.magicUrl, `link-${member.id}`)}
-                            type="button"
-                          >
-                            <Copy size={14} />{' '}
-                            {copiedId === `link-${member.id}` ? 'Copied' : 'Copy invite link'}
-                          </button>
-                        </div>
-                      ) : revoked ? (
-                        <p className="team-muted">Access revoked. Restore to issue a new link.</p>
+                      {member.staffRole !== 'Owner' ? (
+                        <p className="muted-text" style={{ marginTop: 0 }}>
+                          <strong>2FA:</strong>{' '}
+                          {member.totpEnabled ? (
+                            <span style={{ color: '#1f7d4d' }}>Enabled</span>
+                          ) : (
+                            <span>Not enabled</span>
+                          )}
+                        </p>
                       ) : null}
-
                       <div className="team-actions">
                         {ownerMode && member.staffRole !== 'Owner' ? (
                           <button
@@ -319,32 +341,36 @@ export function TeamPage() {
                             <Eye size={14} /> Preview their dashboard
                           </button>
                         ) : null}
-                        {revoked ? (
+                        <button
+                          className="team-icon-button"
+                          disabled={resendingId === member.id || !member.email}
+                          onClick={() => handleResendLink(member)}
+                          type="button"
+                          title={
+                            member.email
+                              ? 'Email a fresh sign-in link to this member'
+                              : 'No email on file'
+                          }
+                        >
+                          <MailPlus size={14} />
+                          {resendingId === member.id ? ' Sending…' : ' Resend sign-in link'}
+                        </button>
+                        {resendStatus[member.id] === 'sent' ? (
+                          <span className="team-success-copy">Email queued.</span>
+                        ) : null}
+                        {resendStatus[member.id] === 'error' ? (
+                          <span className="team-error">Could not send.</span>
+                        ) : null}
+                        {ownerMode ? (
                           <button
-                            className="primary-action"
-                            onClick={() => handleRestore(member)}
+                            className="team-icon-button"
+                            onClick={() => handleResetTotp(member)}
                             type="button"
+                            title="Wipe their 2FA enrollment so they can set up again"
                           >
-                            <KeyRound size={14} /> Restore access
+                            Reset 2FA
                           </button>
-                        ) : (
-                          <>
-                            <button
-                              className="team-icon-button"
-                              onClick={() => handleRegenerate(member)}
-                              type="button"
-                            >
-                              <RefreshCw size={14} /> Regenerate link
-                            </button>
-                            <button
-                              className="team-danger-button"
-                              onClick={() => handleRevoke(member)}
-                              type="button"
-                            >
-                              Revoke link
-                            </button>
-                          </>
-                        )}
+                        ) : null}
                         <button
                           className="team-danger-button"
                           onClick={() => handleDelete(member)}
@@ -352,6 +378,50 @@ export function TeamPage() {
                         >
                           <Trash2 size={14} /> Remove
                         </button>
+                      </div>
+
+                      <div className="team-activity">
+                        <div className="team-sessions-heading">
+                          <h4>Active sessions</h4>
+                          {(sessions[member.id]?.length ?? 0) > 0 ? (
+                            <button
+                              className="team-icon-button"
+                              onClick={() => handleRevokeAll(member)}
+                              type="button"
+                            >
+                              <Send size={12} /> Sign out everywhere
+                            </button>
+                          ) : null}
+                        </div>
+                        {sessionsLoading === member.id ? (
+                          <p className="team-muted">Loading sessions...</p>
+                        ) : (sessions[member.id] ?? []).length === 0 ? (
+                          <p className="team-muted">No active sessions.</p>
+                        ) : (
+                          <ul className="team-sessions-list">
+                            {(sessions[member.id] ?? []).map((sessionEntry) => (
+                              <li key={sessionEntry.id}>
+                                <div className="team-session-row">
+                                  <div className="team-session-meta">
+                                    <strong>{describeUserAgent(sessionEntry.userAgent)}</strong>
+                                    <span className="team-session-detail">
+                                      Last seen {relativeTime(sessionEntry.lastSeenAt)} ·{' '}
+                                      {sessionEntry.ipAddress || '—'}
+                                    </span>
+                                  </div>
+                                  <button
+                                    aria-label="Sign out this device"
+                                    className="team-icon-button"
+                                    onClick={() => handleRevokeSession(member, sessionEntry.id)}
+                                    type="button"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
 
                       {member.staffRole !== 'Owner' ? (
@@ -399,6 +469,35 @@ export function TeamPage() {
       </section>
     </section>
   )
+}
+
+/**
+ * Best-effort UA -> human label. Keeps the Active sessions list readable
+ * without pulling in a UA-parser dependency.
+ */
+function describeUserAgent(ua: string | null): string {
+  if (!ua) return 'Unknown device'
+  const platform = /Windows/.test(ua)
+    ? 'Windows'
+    : /Macintosh|Mac OS X/.test(ua)
+      ? 'macOS'
+      : /iPhone|iPad|iOS/.test(ua)
+        ? 'iOS'
+        : /Android/.test(ua)
+          ? 'Android'
+          : /Linux/.test(ua)
+            ? 'Linux'
+            : 'Unknown'
+  const browser = /Edg\//.test(ua)
+    ? 'Edge'
+    : /Chrome\//.test(ua) && !/Chromium\//.test(ua)
+      ? 'Chrome'
+      : /Firefox\//.test(ua)
+        ? 'Firefox'
+        : /Safari\//.test(ua)
+          ? 'Safari'
+          : 'Browser'
+  return `${browser} on ${platform}`
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   ListChecks,
   PlayCircle,
   Plus,
+  ShieldCheck,
   TrendingUp,
   UserPlus,
   Users,
@@ -483,11 +484,79 @@ function OwnerDashboardView() {
   )
 }
 
+function TwoFaBanner({ userId }: { userId: string }) {
+  const navigate = useNavigate()
+  const storageKey = `pbj_2fa_banner_dismissed_${userId}`
+  const [visible, setVisible] = useState(() => {
+    try {
+      return localStorage.getItem(storageKey) !== '1'
+    } catch {
+      return false
+    }
+  })
+
+  const dismiss = () => {
+    try {
+      localStorage.setItem(storageKey, '1')
+    } catch {
+      /* ignore */
+    }
+    setVisible(false)
+  }
+
+  if (!visible) return null
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        background: '#eef6fb',
+        border: '1px solid #b6d9ef',
+        borderRadius: 10,
+        padding: '10px 16px',
+        marginBottom: 16,
+        fontSize: 14,
+      }}
+      role="status"
+    >
+      <ShieldCheck size={18} style={{ color: '#1d6fa4', flexShrink: 0 }} />
+      <span style={{ flex: 1 }}>Protect your account with two-factor authentication.</span>
+      <button
+        className="primary-action"
+        onClick={() => navigate('/security')}
+        style={{ padding: '4px 12px', fontSize: 13 }}
+        type="button"
+      >
+        Set up
+      </button>
+      <button
+        aria-label="Dismiss"
+        onClick={dismiss}
+        style={{
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+          fontSize: 16,
+          lineHeight: 1,
+          color: '#666',
+          padding: '0 4px',
+        }}
+        type="button"
+      >
+        ×
+      </button>
+    </div>
+  )
+}
+
 function EmployeeDashboardView() {
   const {
     data,
     effectiveUser,
     role,
+    sessionUser,
     billingPeriod,
     toggleChecklistItem,
     previewMode,
@@ -630,6 +699,10 @@ function EmployeeDashboardView() {
   // Bookkeepers can't visit /reports (owner-only); route them to /time instead.
   const kpiHref = role === 'owner' ? '/reports' : '/time'
 
+  // Show the 2FA nudge banner to non-owners who haven't enabled it yet,
+  // but not while the owner is previewing as an employee.
+  const showTwofaBanner = !previewMode && role !== 'owner' && sessionUser.totpEnabled === false
+
   return (
     <div className="dashboard-page">
       <header className="dashboard-header">
@@ -646,6 +719,8 @@ function EmployeeDashboardView() {
           </Link>
         </div>
       </header>
+
+      {showTwofaBanner ? <TwoFaBanner userId={sessionUser.id} /> : null}
 
       <section className="dashboard-alerts" aria-label="Alerts">
         <button

@@ -209,6 +209,29 @@ create table if not exists firm_settings (
   check (id = 'singleton')
 );
 
+-- Email-gated authentication: short-lived sign-in link tokens (single-use, 15 min)
+create table if not exists login_tokens (
+  token text primary key,
+  user_id text not null,
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  ip_address text,
+  created_at timestamptz not null default now()
+);
+create index if not exists login_tokens_user_idx on login_tokens(user_id);
+
+-- Email-gated authentication: persistent user sessions (30-day sliding expiry)
+create table if not exists user_sessions (
+  id text primary key,
+  user_id text not null,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  revoked_at timestamptz,
+  user_agent text,
+  ip_address text
+);
+create index if not exists user_sessions_user_idx on user_sessions(user_id);
+
 -- Phase 5: notifications (in-app bell + email-ready)
 create table if not exists notifications (
   id text primary key,

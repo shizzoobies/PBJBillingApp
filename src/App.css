@@ -186,6 +186,58 @@ button {
   justify-content: center;
 }
 
+.auth-secondary {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 8px 16px;
+  justify-self: center;
+}
+
+.auth-secondary:hover {
+  background: #faf6f2;
+}
+
+.team-sessions-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.team-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 8px 0 0 0;
+  padding: 0;
+}
+
+.team-session-row {
+  align-items: center;
+  border: 1px solid #ebe3d8;
+  border-radius: 10px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.team-session-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.team-session-detail {
+  color: #6e6571;
+  font-size: 12px;
+}
+
 .topbar {
   align-items: center;
   display: flex;

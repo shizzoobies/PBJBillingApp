@@ -33,20 +33,28 @@ npm start
 
 - `PORT`: port for the production web server. Railway injects this automatically.
 - `DATABASE_URL`: when present, the server stores shared app data in Postgres.
-- `AUTH_DEMO_PASSWORD`: optional override for the temporary seeded login password. Defaults to `pbj-demo`.
-- `APP_PUBLIC_URL`: public origin of the deployed app (e.g. `https://pbjbillingapp-production.up.railway.app`). Used to build magic-link URLs surfaced on the owner-only Team page. When unset, the server falls back to constructing the URL from the incoming request host.
-- `RESEND_API_KEY`: optional. When set, notification emails are sent via the [Resend](https://resend.com) HTTP API in addition to being persisted for the in-app bell. When unset, notifications are in-app only.
-- `EMAIL_FROM`: required if `RESEND_API_KEY` is set. The `From:` address used for notification emails (e.g. `notifications@pbj.local`). Without it, the email side is silently skipped even if the API key is present.
+- `APP_PUBLIC_URL`: public origin of the deployed app (e.g. `https://pbjbillingapp-production.up.railway.app`). Used to build the sign-in link URL embedded in authentication emails. When unset, the server falls back to constructing the URL from the incoming request host.
+- `OWNER_EMAIL`: **recommended for first-time bootstrap.** The real inbox for Brittany Ferguson (the primary Owner account). On every server start, the server idempotently updates her email to this value. Without it, her account keeps a `@pbj.local` placeholder and **she will never receive a sign-in link.**
+- `ADMIN_EMAIL`: **recommended for multi-owner setup.** Creates (or updates) a second Owner account for Alex Anderson using this email address. Useful when a second person needs independent owner-level sign-in. Without it, this second account is not created.
+- `RESEND_API_KEY`: **required for sign-in.** When set, sign-in links and notification emails are sent via the [Resend](https://resend.com) HTTP API. The app technically still runs without it, but **no one can sign in until it's configured.**
+- `EMAIL_FROM`: **required for sign-in.** The `From:` address used for sign-in and notification emails (e.g. `notifications@pbj.local`). Without it, no sign-in emails go out and **no one can sign in.**
 
 If `DATABASE_URL` is not set, the server falls back to `tmp/app-data.json` so local development still uses the API layer without needing a database immediately.
 
 Starter Postgres schema notes live in [db/schema.sql](<D:/PBJ Accounting Work/AP For Time Stuff/db/schema.sql:1>).
 
-## Prototype Login
+## Authentication
 
-- Seeded accounts: Patrice Bell (Owner), Avery Johnson (Senior Bookkeeper), Jordan Ellis (Bookkeeper)
-- Default temporary password: `pbj-demo`
-- Session routes now live on the Node server, and `/api/app-data` requires an authenticated session
+Authentication is fully email-gated. There is no shared password and there are no copyable persistent magic-link URLs.
+
+- The two role-segmented entry pages are `/staff` (bookkeeper sign-in) and `/owner` (owner sign-in). The owner bookmarks `/owner`; bookkeepers should never see it. The site root and the legacy `/login` URL both redirect to `/staff` so the owner page stays unadvertised.
+- Each sign-in attempt POSTs the user's email to `/api/auth/request-link`. If the email is registered and matches the requested role, the server emails a one-time link to `${APP_PUBLIC_URL}/verify/<token>`. Links expire in 15 minutes and are single-use.
+- The endpoint always returns the same generic ok response whether the email exists or not, so it can't be used to enumerate registered users. There's a per-email rate limit (3 / 5 minutes).
+- Visiting `/verify/<token>` consumes the token, sets a 30-day session cookie (`HttpOnly; Secure; SameSite=Lax`; `Secure` is added only in production), and redirects to the dashboard. The cookie expiry slides forward on every authenticated request.
+- The owner-only Team page lists each member's active sessions with device / IP / last-seen, and supports per-device "Sign out this device" plus "Sign out everywhere" actions.
+- Bookkeeper invites are email-driven: when the owner invites someone, the server emails them a sign-in link directly. The owner never sees a token or URL. A "Resend sign-in link" button is available on each member's card.
+
+> **Migration note:** when this build is first deployed, any sessions in memory on the previous server are invalidated. Everyone (including the owner) must visit `/staff` or `/owner` and request a fresh sign-in link.
 
 ## Intended Deployment Path
 

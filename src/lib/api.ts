@@ -6,12 +6,14 @@ import {
   type ChecklistTemplate,
   type Client,
   type FirmSettings,
-  type LoginOption,
   type NotificationEntry,
   type PublicFirmSettings,
   type SessionUser,
   type TeamMember,
+  type TeamSession,
   type TimeEntry,
+  type TotpSetupInit,
+  type TotpStatus,
 } from './types'
 
 export async function fetchFirmSettings(signal?: AbortSignal) {
@@ -79,30 +81,24 @@ export async function fetchSession(signal: AbortSignal) {
   return (await response.json()) as { user: SessionUser | null }
 }
 
-export async function fetchLoginOptions(signal: AbortSignal) {
-  const response = await fetch('/api/login-options', { credentials: 'same-origin', signal })
-  if (!response.ok) {
-    throw new ApiError(response.status, `Failed to load login options (${response.status})`)
-  }
-
-  return (await response.json()) as { users: LoginOption[] }
-}
-
-export async function loginWithPassword(userId: string, password: string) {
-  const response = await fetch('/api/login', {
+/**
+ * Email-gated sign-in: request a sign-in link. The server always returns the
+ * same generic ok response so callers cannot infer whether the email is
+ * registered or whether the role hint matched.
+ */
+export async function requestSignInLink(email: string, role: 'staff' | 'owner') {
+  const response = await fetch('/api/auth/request-link', {
     credentials: 'same-origin',
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ userId, password }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, role }),
   })
 
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to log in (${response.status})`)
+    throw new ApiError(response.status, `Failed to request sign-in link (${response.status})`)
   }
 
-  return (await response.json()) as { user: SessionUser }
+  return (await response.json()) as { ok: boolean; message: string }
 }
 
 export async function logoutSession() {
@@ -187,37 +183,56 @@ export async function inviteTeamMember(payload: { name: string; email: string; r
   return (await response.json()) as { user: TeamMember }
 }
 
-export async function revokeTeamMember(userId: string) {
-  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/revoke`, {
+/** Owner-only: resend a one-time email sign-in link to a team member. */
+export async function resendTeamSignInLink(userId: string) {
+  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/resend-link`, {
     credentials: 'same-origin',
     method: 'POST',
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to revoke link (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to resend sign-in link (${response.status})`,
+    )
   }
-  return (await response.json()) as { user: TeamMember }
+  return (await response.json()) as { ok: boolean }
 }
 
-export async function regenerateTeamMember(userId: string) {
-  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/regenerate`, {
+/** Owner-only: list a team member's active (non-revoked) sessions. */
+export async function fetchTeamSessions(userId: string, signal?: AbortSignal) {
+  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/sessions`, {
     credentials: 'same-origin',
-    method: 'POST',
+    signal,
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to regenerate link (${response.status})`)
+    throw new ApiError(response.status, `Failed to load sessions (${response.status})`)
   }
-  return (await response.json()) as { user: TeamMember }
+  return (await response.json()) as { sessions: TeamSession[] }
 }
 
-export async function restoreTeamMember(userId: string) {
-  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/restore`, {
-    credentials: 'same-origin',
-    method: 'POST',
-  })
+/** Owner-only: revoke one specific session for a team member. */
+export async function revokeTeamSession(userId: string, sessionId: string) {
+  const response = await fetch(
+    `/api/team/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}/revoke`,
+    { credentials: 'same-origin', method: 'POST' },
+  )
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to restore access (${response.status})`)
+    throw new ApiError(response.status, `Failed to revoke session (${response.status})`)
   }
-  return (await response.json()) as { user: TeamMember }
+  return (await response.json()) as { ok: boolean }
+}
+
+/** Owner-only: revoke every active session for a team member at once. */
+export async function revokeAllTeamSessions(userId: string) {
+  const response = await fetch(
+    `/api/team/${encodeURIComponent(userId)}/sessions/revoke-all`,
+    { credentials: 'same-origin', method: 'POST' },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to revoke sessions (${response.status})`)
+  }
+  return (await response.json()) as { revoked: number }
 }
 
 export async function deleteTeamMember(userId: string) {
@@ -229,6 +244,21 @@ export async function deleteTeamMember(userId: string) {
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to remove member (${response.status})`)
   }
+}
+
+export type AuthStatus = {
+  ownerEmailConfigured: boolean
+  adminEmailConfigured: boolean
+  sendingDomain: string | null
+  appUrl: string
+}
+
+export async function fetchAuthStatus(signal?: AbortSignal) {
+  const response = await fetch('/api/auth/status', { credentials: 'same-origin', signal })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load auth status (${response.status})`)
+  }
+  return (await response.json()) as AuthStatus
 }
 
 export async function fetchGlobalActivity(limit = 15, signal?: AbortSignal) {
@@ -554,4 +584,134 @@ export async function markAllNotificationsReadRequest() {
     throw new ApiError(response.status, `Failed to mark all read (${response.status})`)
   }
   return (await response.json()) as { updated: number }
+}
+
+// ---- TOTP two-factor authentication ----
+
+export async function fetchTotpStatus(signal?: AbortSignal) {
+  const response = await fetch('/api/auth/totp/status', { credentials: 'same-origin', signal })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load 2FA status (${response.status})`)
+  }
+  return (await response.json()) as TotpStatus
+}
+
+export async function totpSetupInit() {
+  const response = await fetch('/api/auth/totp/setup-init', {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to start setup (${response.status})`)
+  }
+  return (await response.json()) as TotpSetupInit
+}
+
+export async function totpSetupVerify(code: string) {
+  const response = await fetch('/api/auth/totp/setup-verify', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Could not verify code (${response.status})`)
+  }
+  return (await response.json()) as {
+    ok: boolean
+    backupCodes: string[]
+    needsSessionFinalize: boolean
+  }
+}
+
+export async function totpSetupComplete() {
+  const response = await fetch('/api/auth/totp/setup-complete', {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to finalize sign-in (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; redirectTo: string }
+}
+
+export async function totpVerifyChallenge(code: string) {
+  const response = await fetch('/api/auth/totp/verify', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Could not verify code (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; redirectTo: string }
+}
+
+export async function totpVerifyBackupChallenge(code: string) {
+  const response = await fetch('/api/auth/totp/verify-backup', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not verify backup code (${response.status})`,
+    )
+  }
+  return (await response.json()) as {
+    ok: boolean
+    redirectTo: string
+    remainingBackupCodes: number
+  }
+}
+
+export async function totpDisable(code: string) {
+  const response = await fetch('/api/auth/totp/disable', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to disable 2FA (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean }
+}
+
+export async function totpRegenerateBackups(code: string) {
+  const response = await fetch('/api/auth/totp/regenerate-backups', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to regenerate backup codes (${response.status})`,
+    )
+  }
+  return (await response.json()) as { ok: boolean; backupCodes: string[] }
+}
+
+export async function teamTotpReset(userId: string) {
+  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/totp/reset`, {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to reset 2FA (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean }
 }
