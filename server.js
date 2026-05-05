@@ -963,6 +963,21 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (normalizedPath === '/api/activity' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can view global activity' })
+        return
+      }
+      const limit = Number(requestUrl.searchParams.get('limit')) || 15
+      const entries = await appDataStore.getGlobalActivity(limit)
+      sendJson(response, 200, { entries })
+      return
+    }
+
     const teamActivityMatch = normalizedPath.match(/^\/api\/team\/([^/]+)\/activity$/)
     if (teamActivityMatch && request.method === 'GET') {
       const session = await requireSession(request, response)

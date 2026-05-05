@@ -5,9 +5,9 @@ import {
   ListChecks,
   ShieldCheck,
 } from 'lucide-react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
-import { currency, formatHours, getBillingPeriodLabel, isInBillingPeriod } from '../lib/utils'
+import { formatHours, getBillingPeriodLabel, isInBillingPeriod } from '../lib/utils'
 import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
 import { navItems } from './navItems'
@@ -19,7 +19,6 @@ export function AppLayout() {
     visibleClients,
     visibleEntries,
     visibleChecklists,
-    data,
     billingPeriod,
     setBillingPeriod,
     handleLogout,
@@ -27,12 +26,12 @@ export function AppLayout() {
     syncMessage,
   } = useAppContext()
 
-  const periodVisibleEntries = visibleEntries.filter((entry) =>
-    isInBillingPeriod(entry, billingPeriod),
-  )
-  const billingPeriodEntries = data.timeEntries.filter((entry) =>
-    isInBillingPeriod(entry, billingPeriod),
-  )
+  const location = useLocation()
+  const showSummaryStrip = !ownerMode && location.pathname.startsWith('/time')
+
+  const periodVisibleEntries = showSummaryStrip
+    ? visibleEntries.filter((entry) => isInBillingPeriod(entry, billingPeriod))
+    : []
   const billingPeriodLabel = getBillingPeriodLabel(billingPeriod)
 
   const billableMinutes = periodVisibleEntries
@@ -42,23 +41,6 @@ export function AppLayout() {
     (total, checklist) => total + checklist.items.filter((item) => !item.done).length,
     0,
   )
-
-  // For owner: total invoice draft for the period across all clients
-  const ownerInvoiceTotal = data.clients.reduce((total, client) => {
-    const minutes = billingPeriodEntries
-      .filter((entry) => entry.clientId === client.id && entry.billable)
-      .reduce((sum, entry) => sum + entry.minutes, 0)
-    const billable = (minutes / 60) * client.hourlyRate
-    if (client.billingMode === 'subscription' && client.planId) {
-      const plan = data.plans.find((item) => item.id === client.planId)
-      if (plan) {
-        const includedMinutes = plan.includedHours * 60
-        const overage = Math.max(0, minutes - includedMinutes)
-        return total + plan.monthlyFee + (overage / 60) * client.hourlyRate
-      }
-    }
-    return total + billable
-  }, 0)
 
   const roleLabel = ownerMode ? 'Owner access' : sessionUser?.staffRole ?? 'Employee access'
 
@@ -128,30 +110,28 @@ export function AppLayout() {
           </div>
         </header>
 
-        <section className="summary-strip" aria-label="Workspace summary">
-          <SummaryItem
-            icon={Clock3}
-            label={ownerMode ? 'Team billable time' : 'My billable time'}
-            value={formatHours(billableMinutes)}
-            detail={`${periodVisibleEntries.length} in ${billingPeriodLabel}`}
-          />
-          <SummaryItem
-            icon={ListChecks}
-            label={ownerMode ? 'Open checklist items' : 'Assigned checklist items'}
-            value={openChecklistItems.toString()}
-            detail={
-              ownerMode
-                ? `${visibleChecklists.length} live checklists from ${data.checklistTemplates.length} templates`
-                : `${visibleChecklists.length} assigned checklists`
-            }
-          />
-          <SummaryItem
-            icon={CircleDollarSign}
-            label={ownerMode ? 'Invoice draft total' : 'Visible clients'}
-            value={ownerMode ? currency.format(ownerInvoiceTotal) : visibleClients.length.toString()}
-            detail={ownerMode ? billingPeriodLabel : roleLabel}
-          />
-        </section>
+        {showSummaryStrip ? (
+          <section className="summary-strip" aria-label="Workspace summary">
+            <SummaryItem
+              icon={Clock3}
+              label="My billable time"
+              value={formatHours(billableMinutes)}
+              detail={`${periodVisibleEntries.length} in ${billingPeriodLabel}`}
+            />
+            <SummaryItem
+              icon={ListChecks}
+              label="Assigned checklist items"
+              value={openChecklistItems.toString()}
+              detail={`${visibleChecklists.length} assigned checklists`}
+            />
+            <SummaryItem
+              icon={CircleDollarSign}
+              label="Visible clients"
+              value={visibleClients.length.toString()}
+              detail={roleLabel}
+            />
+          </section>
+        ) : null}
 
         <Outlet />
       </main>

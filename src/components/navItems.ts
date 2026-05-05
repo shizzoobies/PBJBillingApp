@@ -3,6 +3,7 @@ import {
   Building2,
   Clock3,
   FolderKanban,
+  LayoutDashboard,
   ListChecks,
   ReceiptText,
   Users,
@@ -16,6 +17,7 @@ export const navItems: Array<{
   icon: LucideIcon
   ownerOnly?: boolean
 }> = [
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, ownerOnly: true },
   { to: '/time', label: 'Time', icon: Clock3 },
   { to: '/checklists', label: 'Checklists', icon: ListChecks },
   { to: '/clients', label: 'Clients', icon: Building2 },

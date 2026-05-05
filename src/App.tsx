@@ -53,6 +53,7 @@ import {
 } from './lib/utils'
 import { CaseDetailPage } from './pages/CaseDetailPage'
 import { ChecklistsPage } from './pages/ChecklistsPage'
+import { DashboardPage } from './pages/DashboardPage'
 import { ClientDetailPage } from './pages/ClientDetailPage'
 import { ClientsPage } from './pages/ClientsPage'
 import { GanttPage } from './pages/GanttPage'
@@ -882,7 +883,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   const location = useLocation()
   const navigate = useNavigate()
   useEffect(() => {
-    const ownerOnly = ['/reports', '/gantt', '/invoices', '/plans', '/team', '/cases']
+    const ownerOnly = ['/reports', '/gantt', '/invoices', '/plans', '/team', '/cases', '/dashboard']
     if (!ownerMode && ownerOnly.some((path) => location.pathname.startsWith(path))) {
       navigate('/time', { replace: true })
     }
@@ -891,7 +892,15 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   return (
     <Routes>
       <Route element={<AppLayout />}>
-        <Route index element={<Navigate to="/time" replace />} />
+        <Route index element={<Navigate to={ownerMode ? '/dashboard' : '/time'} replace />} />
+        <Route
+          path="/dashboard"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <DashboardPage />
+            </OwnerOnly>
+          }
+        />
         <Route path="/time" element={<TimePage />} />
         <Route path="/checklists" element={<ChecklistsPage />} />
         <Route path="/clients" element={<ClientsPage />} />

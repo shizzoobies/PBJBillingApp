@@ -2337,6 +2337,35 @@ export class AppDataStore {
       .slice(0, safeLimit)
   }
 
+  async getGlobalActivity(limit = 15) {
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || 15))
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `
+          select id, user_id, action, target, created_at
+          from activity_log
+          order by created_at desc
+          limit $1
+        `,
+        [safeLimit],
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        userId: row.user_id,
+        action: row.action,
+        target: row.target,
+        timestamp: row.created_at ? new Date(row.created_at).toISOString() : nowIso(),
+      }))
+    }
+
+    const authState = await readJson(localAuthPath)
+    return (authState.activityLog ?? [])
+      .slice()
+      .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
+      .slice(0, safeLimit)
+  }
+
   // ---- Phase 3: template stage mutations ----
 
   async _readTemplateForStageUpdate(templateId) {

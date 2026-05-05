@@ -196,6 +196,17 @@ export async function deleteTeamMember(userId: string) {
   }
 }
 
+export async function fetchGlobalActivity(limit = 15, signal?: AbortSignal) {
+  const response = await fetch(`/api/activity?limit=${limit}`, {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load activity (${response.status})`)
+  }
+  return (await response.json()) as { entries: ActivityEntry[] }
+}
+
 export async function fetchTeamActivity(userId: string, limit = 20) {
   const response = await fetch(
     `/api/team/${encodeURIComponent(userId)}/activity?limit=${limit}`,
