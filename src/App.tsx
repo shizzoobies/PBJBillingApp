@@ -87,6 +87,7 @@ function App() {
   const [dataSyncState, setDataSyncState] = useState<DataSyncState>('loading')
   const [serverPersistenceEnabled, setServerPersistenceEnabled] = useState(false)
   const [activeEmployeeId, setActiveEmployeeId] = useState('emp-avery')
+  const [previewUserId, setPreviewUserId] = useState<string | null>(null)
   const [selectedClientId, setSelectedClientId] = useState('client-northstar')
   const [billingPeriod, setBillingPeriod] = useState(currentBillingPeriod())
   const [timer, setTimer] = useState<TimerState | null>(null)
@@ -789,6 +790,20 @@ function App() {
   }
 
   const ownerMode = role === 'owner'
+  const previewMode = previewUserId !== null && ownerMode && Boolean(sessionUser)
+  const previewEmployee = previewMode
+    ? data.employees.find((employee) => employee.id === previewUserId)
+    : null
+  const effectiveUser: SessionUser =
+    previewMode && previewEmployee && sessionUser
+      ? {
+          id: previewEmployee.id,
+          name: previewEmployee.name,
+          email: sessionUser.email,
+          role: 'employee',
+          staffRole: previewEmployee.role,
+        }
+      : (sessionUser as SessionUser)
   const syncMessage =
     dataSyncState === 'loading'
       ? 'Loading server-backed workspace data...'
@@ -818,8 +833,12 @@ function App() {
   const contextValue: AppContextValue = {
     data,
     sessionUser,
+    effectiveUser,
     role,
     ownerMode,
+    previewUserId,
+    setPreviewUserId,
+    previewMode,
     activeEmployeeId,
     visibleChecklists,
     visibleClients,
@@ -883,7 +902,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   const location = useLocation()
   const navigate = useNavigate()
   useEffect(() => {
-    const ownerOnly = ['/reports', '/gantt', '/invoices', '/plans', '/team', '/cases', '/dashboard']
+    const ownerOnly = ['/reports', '/gantt', '/invoices', '/plans', '/team', '/cases']
     if (!ownerMode && ownerOnly.some((path) => location.pathname.startsWith(path))) {
       navigate('/time', { replace: true })
     }
@@ -892,15 +911,8 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   return (
     <Routes>
       <Route element={<AppLayout />}>
-        <Route index element={<Navigate to={ownerMode ? '/dashboard' : '/time'} replace />} />
-        <Route
-          path="/dashboard"
-          element={
-            <OwnerOnly ownerMode={ownerMode}>
-              <DashboardPage />
-            </OwnerOnly>
-          }
-        />
+        <Route index element={<Navigate to="/dashboard" replace />} />
+        <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/time" element={<TimePage />} />
         <Route path="/checklists" element={<ChecklistsPage />} />
         <Route path="/clients" element={<ClientsPage />} />

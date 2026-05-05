@@ -17,7 +17,7 @@ export const navItems: Array<{
   icon: LucideIcon
   ownerOnly?: boolean
 }> = [
-  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, ownerOnly: true },
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/time', label: 'Time', icon: Clock3 },
   { to: '/checklists', label: 'Checklists', icon: ListChecks },
   { to: '/clients', label: 'Clients', icon: Building2 },

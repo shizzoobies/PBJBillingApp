@@ -16,8 +16,12 @@ import type {
 export type AppContextValue = {
   data: AppData
   sessionUser: SessionUser
+  effectiveUser: SessionUser
   role: Role
   ownerMode: boolean
+  previewUserId: string | null
+  setPreviewUserId: (id: string | null) => void
+  previewMode: boolean
   activeEmployeeId: string
   visibleChecklists: Checklist[]
   visibleClients: Client[]

@@ -16,6 +16,9 @@ export function AppLayout() {
   const {
     sessionUser,
     ownerMode,
+    previewMode,
+    effectiveUser,
+    setPreviewUserId,
     visibleClients,
     visibleEntries,
     visibleChecklists,
@@ -82,6 +85,21 @@ export function AppLayout() {
       </aside>
 
       <main className="workspace">
+        {previewMode ? (
+          <div className="preview-banner" role="status">
+            <div>
+              <strong>Viewing as {effectiveUser.name}</strong>
+              <span> · You can see what they see but cannot make changes from here.</span>
+            </div>
+            <button
+              type="button"
+              className="preview-banner-exit"
+              onClick={() => setPreviewUserId(null)}
+            >
+              Exit preview
+            </button>
+          </div>
+        ) : null}
         <header className="topbar">
           <div>
             <p className="eyeline">PB&amp;J Strategic Accounting</p>

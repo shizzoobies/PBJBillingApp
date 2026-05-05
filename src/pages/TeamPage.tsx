@@ -1,5 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Copy, KeyRound, RefreshCw, Trash2, UserPlus, X } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Copy, Eye, KeyRound, RefreshCw, Trash2, UserPlus, X } from 'lucide-react'
+import { useAppContext } from '../AppContext'
 import {
   deleteTeamMember,
   fetchTeam,
@@ -15,6 +17,8 @@ import { describeActivityAction, formatActivityTimestamp, relativeTime } from '.
 const STAFF_ROLES = ['Owner', 'Senior Bookkeeper', 'Bookkeeper'] as const
 
 export function TeamPage() {
+  const { ownerMode, setPreviewUserId } = useAppContext()
+  const navigate = useNavigate()
   const [members, setMembers] = useState<TeamMember[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -302,6 +306,18 @@ export function TeamPage() {
                       ) : null}
 
                       <div className="team-actions">
+                        {ownerMode && member.staffRole !== 'Owner' ? (
+                          <button
+                            className="team-icon-button"
+                            onClick={() => {
+                              setPreviewUserId(member.id)
+                              navigate('/dashboard')
+                            }}
+                            type="button"
+                          >
+                            <Eye size={14} /> Preview their dashboard
+                          </button>
+                        ) : null}
                         {revoked ? (
                           <button
                             className="primary-action"
