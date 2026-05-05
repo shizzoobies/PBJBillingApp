@@ -3309,3 +3309,279 @@ td strong {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* ---- Productivity page ------------------------------------------------- */
+
+.productivity-layout {
+  display: grid;
+  gap: 18px;
+}
+
+.productivity-header h1 {
+  margin: 0 0 4px;
+}
+
+.productivity-subtitle {
+  color: var(--muted);
+  margin: 0;
+}
+
+.productivity-controls {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 14px;
+  position: sticky;
+  top: 8px;
+  z-index: 5;
+}
+
+.productivity-control {
+  align-items: center;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.productivity-control > span {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.productivity-control select,
+.productivity-control input {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  min-height: 32px;
+  padding: 4px 8px;
+}
+
+.productivity-segmented {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  display: inline-flex;
+  overflow: hidden;
+}
+
+.productivity-segmented button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 6px 14px;
+}
+
+.productivity-segmented button.is-active {
+  background: var(--berry);
+  color: #fffaf3;
+}
+
+.productivity-range-pill {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: auto;
+  padding: 4px 10px;
+}
+
+.productivity-table th button.productivity-sort-btn {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.productivity-row {
+  cursor: pointer;
+}
+
+.productivity-row:hover {
+  background: var(--soft);
+}
+
+.productivity-row-sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.productivity-pill {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.productivity-back {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--berry);
+  padding: 4px 10px;
+}
+
+.productivity-footnote {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 12px;
+}
+
+.productivity-chart {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 40px 1fr;
+  height: 220px;
+  margin-top: 16px;
+}
+
+.productivity-chart-y {
+  align-items: flex-end;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  justify-content: space-between;
+  padding-right: 6px;
+  text-align: right;
+}
+
+.productivity-chart-bars {
+  align-items: flex-end;
+  border-bottom: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  display: flex;
+  gap: 8px;
+  padding: 4px 4px 0;
+}
+
+.productivity-chart-period {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  height: 100%;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.productivity-chart-pair {
+  align-items: flex-end;
+  display: flex;
+  flex: 1;
+  gap: 2px;
+  width: 100%;
+}
+
+.productivity-chart-bar {
+  border-radius: 3px 3px 0 0;
+  flex: 1;
+}
+
+.productivity-chart-bar-hours {
+  background: color-mix(in srgb, var(--berry) 70%, transparent);
+}
+
+.productivity-chart-bar-items {
+  background: var(--plum);
+}
+
+.productivity-chart-tick {
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+  text-align: center;
+}
+
+.productivity-chart-legend {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  gap: 16px;
+  margin: 8px 0 16px;
+}
+
+.productivity-legend-swatch {
+  border-radius: 2px;
+  display: inline-block;
+  height: 10px;
+  margin-right: 6px;
+  vertical-align: middle;
+  width: 10px;
+}
+
+.productivity-legend-hours {
+  background: color-mix(in srgb, var(--berry) 70%, transparent);
+}
+
+.productivity-legend-items {
+  background: var(--plum);
+}
+
+.productivity-heatmap {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+  overflow-x: auto;
+}
+
+.productivity-heatmap-header,
+.productivity-heatmap-row {
+  align-items: center;
+  display: grid;
+  gap: 3px;
+  grid-template-columns: 140px repeat(var(--cols, auto-fill), minmax(18px, 1fr));
+}
+
+.productivity-heatmap-header {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.productivity-heatmap-tick {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.productivity-heatmap-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.productivity-heatmap-cell {
+  background: var(--soft);
+  border-radius: 3px;
+  display: block;
+  height: 22px;
+  min-width: 18px;
+}
+
+@media (max-width: 760px) {
+  .productivity-controls {
+    position: static;
+  }
+
+  .productivity-range-pill {
+    margin-left: 0;
+  }
+}

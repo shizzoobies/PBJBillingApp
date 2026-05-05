@@ -978,6 +978,23 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (normalizedPath === '/api/activity/range' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can view activity' })
+        return
+      }
+      const from = requestUrl.searchParams.get('from') || ''
+      const to = requestUrl.searchParams.get('to') || ''
+      const limit = Number(requestUrl.searchParams.get('limit')) || 2000
+      const entries = await appDataStore.getActivityRange(from, to, limit)
+      sendJson(response, 200, { entries })
+      return
+    }
+
     const teamActivityMatch = normalizedPath.match(/^\/api\/team\/([^/]+)\/activity$/)
     if (teamActivityMatch && request.method === 'GET') {
       const session = await requireSession(request, response)

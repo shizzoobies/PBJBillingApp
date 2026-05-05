@@ -207,6 +207,23 @@ export async function fetchGlobalActivity(limit = 15, signal?: AbortSignal) {
   return (await response.json()) as { entries: ActivityEntry[] }
 }
 
+export async function fetchActivityRange(
+  fromIso: string,
+  toIso: string,
+  limit = 2000,
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams({ from: fromIso, to: toIso, limit: String(limit) })
+  const response = await fetch(`/api/activity/range?${params.toString()}`, {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load activity range (${response.status})`)
+  }
+  return (await response.json()) as { entries: ActivityEntry[] }
+}
+
 export async function fetchTeamActivity(userId: string, limit = 20) {
   const response = await fetch(
     `/api/team/${encodeURIComponent(userId)}/activity?limit=${limit}`,
