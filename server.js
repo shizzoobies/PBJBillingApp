@@ -251,7 +251,12 @@ function scopeAppDataForSession(session, data) {
   const allowedClientIds = visibleClientIdSet(session, data.clients ?? [])
   const me = session.user.id
 
-  const clients = (data.clients ?? []).filter((client) => allowedClientIds.has(client.id))
+  // Billing rates are between the owner and the client. Never expose what
+  // PB&J charges to non-owners: strip the hourly rate and plan link from
+  // every client object the server sends them.
+  const clients = (data.clients ?? [])
+    .filter((client) => allowedClientIds.has(client.id))
+    .map((client) => ({ ...client, hourlyRate: 0, planId: null }))
   const checklists = (data.checklists ?? []).filter((checklist) => {
     if (!allowedClientIds.has(checklist.clientId)) return false
     // Existing assignee/viewer/editor filtering is still applied.
@@ -264,10 +269,9 @@ function scopeAppDataForSession(session, data) {
   const timeEntries = (data.timeEntries ?? []).filter(
     (entry) => entry.employeeId === me && allowedClientIds.has(entry.clientId),
   )
-  const plans = (data.plans ?? []).filter((plan) => {
-    if (!plan.clientId) return true // global plans are not gated
-    return allowedClientIds.has(plan.clientId)
-  })
+  // Subscription plans carry monthly fees — billing data the owner keeps
+  // private. Non-owners receive no plans at all.
+  const plans = []
   // A bookkeeper only needs to know about locks on their own timesheet.
   const timesheetLocks = (data.timesheetLocks ?? []).filter((lock) => lock.userId === me)
 

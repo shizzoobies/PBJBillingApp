@@ -222,10 +222,10 @@ function ClientTable({
           <tr>
             <th>Client</th>
             <th>Contact</th>
-            <th>Billing</th>
-            <th>Rate</th>
+            {ownerMode ? <th>Billing</th> : null}
+            {ownerMode ? <th>Rate</th> : null}
             <th>Assigned team</th>
-            <th>Subscription plan</th>
+            {ownerMode ? <th>Subscription plan</th> : null}
           </tr>
         </thead>
         <tbody>
@@ -244,8 +244,8 @@ function ClientTable({
                   )}
                 </td>
                 <td>{client.contact}</td>
-                <td>
-                  {ownerMode ? (
+                {ownerMode ? (
+                  <td>
                     <select
                       className="compact-input"
                       onChange={(event) =>
@@ -262,11 +262,9 @@ function ClientTable({
                       <option value="hourly">Hourly</option>
                       <option value="subscription">Subscription</option>
                     </select>
-                  ) : (
-                    <span className="status-pill">{client.billingMode}</span>
-                  )}
-                </td>
-                <td>{currency.format(client.hourlyRate)}/hr</td>
+                  </td>
+                ) : null}
+                {ownerMode ? <td>{currency.format(client.hourlyRate)}/hr</td> : null}
                 <td>
                   <div className="client-chip-list compact">
                     {getAssignedEmployeeIds(client).length > 0 ? (
@@ -278,25 +276,27 @@ function ClientTable({
                     )}
                   </div>
                 </td>
-                <td>
-                  {ownerMode && client.billingMode === 'subscription' ? (
-                    <select
-                      className="compact-input"
-                      onChange={(event) =>
-                        onUpdatePlan(client.id, 'subscription', event.target.value)
-                      }
-                      value={client.planId ?? plans[0]?.id ?? ''}
-                    >
-                      {plans.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.name}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    plan?.name ?? 'Hourly billing'
-                  )}
-                </td>
+                {ownerMode ? (
+                  <td>
+                    {client.billingMode === 'subscription' ? (
+                      <select
+                        className="compact-input"
+                        onChange={(event) =>
+                          onUpdatePlan(client.id, 'subscription', event.target.value)
+                        }
+                        value={client.planId ?? plans[0]?.id ?? ''}
+                      >
+                        {plans.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      plan?.name ?? 'Hourly billing'
+                    )}
+                  </td>
+                ) : null}
               </tr>
             )
           })}

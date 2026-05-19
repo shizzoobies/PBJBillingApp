@@ -687,13 +687,6 @@ function EmployeeDashboardView() {
     .reduce((sum, e) => sum + e.minutes, 0)
   const billablePct = hoursMinutes > 0 ? Math.round((billableMonthMinutes / hoursMinutes) * 100) : 0
   const touchedClientIds = new Set(monthEntries.map((e) => e.clientId))
-  const projectedBilling = data.clients.reduce((total, client) => {
-    if (!touchedClientIds.has(client.id)) return total
-    const minutes = monthEntries
-      .filter((entry) => entry.clientId === client.id && entry.billable)
-      .reduce((sum, e) => sum + e.minutes, 0)
-    return total + (minutes / 60) * client.hourlyRate
-  }, 0)
   const activeClientCount = touchedClientIds.size
 
   // Bookkeepers can't visit /reports (owner-only); route them to /time instead.
@@ -891,9 +884,9 @@ function EmployeeDashboardView() {
             <span>Billable</span>
           </div>
           <div className="kpi-stat">
-            <CircleDollarSign size={16} />
-            <strong>{currency.format(projectedBilling)}</strong>
-            <span>Projected billing</span>
+            <Clock3 size={16} />
+            <strong>{formatHours(billableMonthMinutes)}</strong>
+            <span>Billable hours</span>
           </div>
           <div className="kpi-stat">
             <Users size={16} />
