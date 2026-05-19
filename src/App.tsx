@@ -1201,7 +1201,7 @@ function App() {
   // their role drives the sidebar, owner-only routing, and permission-gated
   // controls; their id drives the per-user data memos below. `sessionUser`
   // stays the real owner (account pill, 2FA banner, logout).
-  const effectiveRole = effectiveUser.role
+  const effectiveRole = effectiveUser?.role ?? 'employee'
   const ownerMode = effectiveRole === 'owner'
   const effectiveEmployeeId =
     previewMode && previewEmployee ? previewEmployee.id : activeEmployeeId
