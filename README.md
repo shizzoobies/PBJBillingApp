@@ -29,6 +29,35 @@ npm run build
 npm start
 ```
 
+## Testing & verification
+
+The app has an automated safety net (Vitest). Run it before pushing and after every deploy.
+
+**Before every push — `npm run verify`:**
+
+```bash
+npm run verify
+```
+
+`verify` runs lint, then the production build (`tsc -b && vite build`), then the test suite (`npm test`). It must be green before you push. The build alone is **not** enough — `npm run build` only type-checks and bundles, it never actually runs the app, so a runtime crash on boot can pass the build and still ship a blank screen. The test suite is what catches that.
+
+**The tests:**
+
+```bash
+npm test          # run all tests once (CI mode)
+npm run test:watch  # re-run on file changes while developing
+```
+
+The most important test is the **App-boot smoke test** (`src/__tests__/app-boot.test.tsx`): it mounts the real `<App>` against a mocked backend in both the logged-out and logged-in states and fails if the app throws or renders blank on boot. There are also focused unit tests for the riskiest pure logic (TOTP two-factor, productivity date ranges, recurring-checklist materialization).
+
+**After a Railway deploy — `npm run health-check <url>`:**
+
+```bash
+npm run health-check https://pbjbillingapp-production.up.railway.app
+```
+
+The health check confirms the deployed server is up, that `/health` returns 200, that the root HTML serves a `#root` mount node plus a JS bundle reference, and that the bundle itself loads. It catches "build broke / assets 404 / server down". It does **not** execute the app's JavaScript — the App-boot smoke test above is what guards against runtime crashes, so make sure `npm run verify` passed before deploying.
+
 ## Environment
 
 - `PORT`: port for the production web server. Railway injects this automatically.
