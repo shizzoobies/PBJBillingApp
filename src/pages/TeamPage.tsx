@@ -23,7 +23,7 @@ import {
 } from '../lib/types'
 import { describeActivityAction, formatActivityTimestamp, relativeTime } from '../lib/utils'
 
-const STAFF_ROLES = ['Owner', 'Senior Bookkeeper', 'Bookkeeper'] as const
+const STAFF_ROLES = ['Owner', 'Accountant', 'Bookkeeper'] as const
 
 export function TeamPage() {
   const { data, ownerMode, setPreviewUserId, updateClient } = useAppContext()

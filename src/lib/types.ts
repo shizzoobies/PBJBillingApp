@@ -11,7 +11,7 @@ export type ChecklistFrequency =
 export type Employee = {
   id: string
   name: string
-  role: 'Bookkeeper' | 'Senior Bookkeeper' | 'Owner'
+  role: 'Bookkeeper' | 'Accountant' | 'Owner'
 }
 
 export type Client = {

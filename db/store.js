@@ -72,7 +72,7 @@ const seededUsers = [
     id: 'emp-avery',
     name: 'Avery Johnson',
     email: 'avery@pbj.local',
-    staffRole: 'Senior Bookkeeper',
+    staffRole: 'Accountant',
     role: 'senior_bookkeeper',
   },
   {
@@ -140,7 +140,9 @@ function roleToDbRole(role) {
     return 'owner'
   }
 
-  if (role === 'Senior Bookkeeper') {
+  // 'Senior Bookkeeper' is the legacy label for the 'Accountant' staff role;
+  // still accepted so stale callers map to the same DB value.
+  if (role === 'Accountant' || role === 'Senior Bookkeeper') {
     return 'senior_bookkeeper'
   }
 
@@ -152,8 +154,9 @@ function dbRoleToEmployeeRole(role) {
     return 'Owner'
   }
 
+  // DB value 'senior_bookkeeper' is the legacy identifier for 'Accountant'.
   if (role === 'senior_bookkeeper') {
-    return 'Senior Bookkeeper'
+    return 'Accountant'
   }
 
   return 'Bookkeeper'
@@ -3168,8 +3171,9 @@ export class AppDataStore {
   async createTeamMember({ name, email, staffRole }) {
     const trimmedName = String(name ?? '').trim()
     const trimmedEmail = String(email ?? '').trim().toLowerCase()
-    const safeStaffRole = ['Owner', 'Senior Bookkeeper', 'Bookkeeper'].includes(staffRole)
-      ? staffRole
+    const normalizedStaffRole = staffRole === 'Senior Bookkeeper' ? 'Accountant' : staffRole
+    const safeStaffRole = ['Owner', 'Accountant', 'Bookkeeper'].includes(normalizedStaffRole)
+      ? normalizedStaffRole
       : 'Bookkeeper'
 
     if (!trimmedName || !trimmedEmail) {

@@ -4,7 +4,7 @@ import { dateOffset } from './utils'
 export function createSeedData(): AppData {
   return {
     employees: [
-      { id: 'emp-avery', name: 'Avery Johnson', role: 'Senior Bookkeeper' },
+      { id: 'emp-avery', name: 'Avery Johnson', role: 'Accountant' },
       { id: 'emp-jordan', name: 'Jordan Ellis', role: 'Bookkeeper' },
       { id: 'emp-patrice', name: 'Brittany Ferguson', role: 'Owner' },
     ],
