@@ -1168,6 +1168,7 @@ function App() {
   }
 
   const startTimer = (nextTimer: TimerState) => {
+    if (previewActiveRef.current) return
     setNow(nextTimer.startedAt)
     setTimer(nextTimer)
   }

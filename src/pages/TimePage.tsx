@@ -26,6 +26,7 @@ export function TimePage() {
     logTime,
     updateTimeEntry,
     deleteTimeEntry,
+    previewMode,
   } = useAppContext()
 
   // The viewed period is the current month. A bookkeeper whose timesheet is
@@ -51,6 +52,7 @@ export function TimePage() {
         timer={timer}
         timerElapsed={timer ? timerElapsed : '0:00'}
         locked={lockedThisPeriod}
+        previewMode={previewMode}
         currentPeriod={currentPeriod}
       />
       <RecentTimeEntries
@@ -107,6 +109,7 @@ function TimeCapture({
   timer,
   timerElapsed,
   locked,
+  previewMode,
   currentPeriod,
 }: {
   activeEmployeeId: string
@@ -120,6 +123,7 @@ function TimeCapture({
   timer: TimerState | null
   timerElapsed: string
   locked: boolean
+  previewMode: boolean
   currentPeriod: string
 }) {
   const [clientId, setClientId] = useState(clients[0]?.id ?? '')
@@ -142,6 +146,10 @@ function TimeCapture({
 
   // Reset taskId if the previously-chosen task isn't valid for the new client.
   const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
+
+  // Form is read-only when the timesheet is locked OR an owner is previewing
+  // this person — preview mode must never be able to log or time work.
+  const inputsDisabled = locked || previewMode
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -237,7 +245,7 @@ function TimeCapture({
               setTaskId('')
             }}
             value={effectiveClientId}
-            disabled={locked}
+            disabled={inputsDisabled}
           >
             {clients.map((client) => (
               <option key={client.id} value={client.id}>
@@ -252,7 +260,7 @@ function TimeCapture({
             className="input"
             onChange={(event) => setTaskId(event.target.value)}
             value={effectiveTaskId}
-            disabled={locked || eligibleTasks.length === 0}
+            disabled={inputsDisabled || eligibleTasks.length === 0}
           >
             <option value="">(none / general)</option>
             {eligibleTasks.map((task) => (
@@ -271,7 +279,7 @@ function TimeCapture({
             step="0.25"
             type="number"
             value={hours}
-            disabled={locked}
+            disabled={inputsDisabled}
           />
         </label>
         <label className="field full-span">
@@ -281,7 +289,7 @@ function TimeCapture({
             onChange={(event) => setDescription(event.target.value)}
             rows={4}
             value={description}
-            disabled={locked}
+            disabled={inputsDisabled}
           />
         </label>
         <label className="check-row full-span">
@@ -289,7 +297,7 @@ function TimeCapture({
             checked={billable}
             onChange={(event) => setBillable(event.target.checked)}
             type="checkbox"
-            disabled={locked}
+            disabled={inputsDisabled}
           />
           <span>Billable</span>
         </label>
@@ -297,7 +305,7 @@ function TimeCapture({
         <div className="button-row full-span">
           <button
             className="primary-action"
-            disabled={submitPending || locked}
+            disabled={submitPending || inputsDisabled}
             type="submit"
           >
             <Clock3 size={16} />
@@ -306,7 +314,7 @@ function TimeCapture({
           {timer ? (
             <button
               className="secondary-action danger"
-              disabled={submitPending || locked}
+              disabled={submitPending || inputsDisabled}
               onClick={() => void onStopTimer()}
               type="button"
             >
@@ -316,7 +324,7 @@ function TimeCapture({
           ) : (
             <button
               className="secondary-action"
-              disabled={submitPending || locked}
+              disabled={submitPending || inputsDisabled}
               onClick={handleStartTimer}
               type="button"
             >
