@@ -33,6 +33,8 @@ import {
   getChecklistFrequencyLabel,
   lastDayOfCurrentMonth,
   makeId,
+  MAX_DUE_DAY_OF_MONTH,
+  monthShortNames,
   shortDate,
 } from '../lib/utils'
 
@@ -86,9 +88,47 @@ function frequencyCadence(frequency: ChecklistFrequency): string {
       return 'every quarter'
     case 'annually':
       return 'every year'
+    case 'specific-months':
+      return 'in specific months'
     default:
       return 'every month'
   }
+}
+
+/** Ordinal suffix for a day number — 1st, 2nd, 3rd, 21st… */
+function ordinalDay(day: number): string {
+  const mod100 = day % 100
+  if (mod100 >= 11 && mod100 <= 13) return `${day}th`
+  switch (day % 10) {
+    case 1:
+      return `${day}st`
+    case 2:
+      return `${day}nd`
+    case 3:
+      return `${day}rd`
+    default:
+      return `${day}th`
+  }
+}
+
+/**
+ * Plain-language schedule line for a specific-months template, e.g.
+ * "Runs in Jan, Apr, Jul, Oct — due on the 15th." Falls back gracefully when
+ * no months are selected yet.
+ */
+function specificMonthsSummary(template: ChecklistTemplate): string {
+  const months = (template.scheduledMonths ?? [])
+    .filter((m) => Number.isInteger(m) && m >= 1 && m <= 12)
+    .sort((a, b) => a - b)
+  if (months.length === 0) {
+    return 'Runs in specific months — pick at least one month below.'
+  }
+  const monthList = months.map((m) => monthShortNames[m]).join(', ')
+  const dueClause =
+    typeof template.dueDayOfMonth === 'number'
+      ? ` — due on the ${ordinalDay(template.dueDayOfMonth)}.`
+      : ' — due on the last day of the month.'
+  return `Runs in ${monthList}${dueClause}`
 }
 
 export function ChecklistsPage() {
@@ -99,6 +139,9 @@ export function ChecklistsPage() {
     role,
     ownerMode,
     toggleChecklistItem,
+    toggleSubItem,
+    addSubItem,
+    removeSubItem,
     setChecklistViewers,
     setTemplateViewers,
     addChecklistTemplate,
@@ -111,6 +154,9 @@ export function ChecklistsPage() {
     setChecklistTemplateItemAssignee,
     reorderChecklistTemplateItems,
     bulkAddChecklistTemplateItems,
+    addChecklistTemplateSubItem,
+    updateChecklistTemplateSubItem,
+    removeChecklistTemplateSubItem,
     duplicateChecklistTemplate,
     createStandardTemplate,
     applyTemplateToClient,
@@ -278,11 +324,14 @@ export function ChecklistsPage() {
           checklists={visibleChecklists}
           clients={data.clients}
           employees={data.employees}
+          onAddSubItem={addSubItem}
           onBulkAddItems={bulkAddChecklistItems}
           onDeleteItem={deleteChecklistItem}
+          onRemoveSubItem={removeSubItem}
           onReorderItems={reorderChecklistItems}
           onSetViewers={setChecklistViewers}
           onToggle={toggleChecklistItem}
+          onToggleSubItem={toggleSubItem}
           onUpdateItem={updateChecklistItem}
           ownerMode={ownerMode}
           role={role}
@@ -296,6 +345,7 @@ export function ChecklistsPage() {
           employees={data.employees}
           onAddItem={addChecklistTemplateItem}
           onAddStage={addTemplateStage}
+          onAddSubItem={addChecklistTemplateSubItem}
           onApplyToClient={applyTemplateToClient}
           onBulkAddItems={bulkAddChecklistTemplateItems}
           onDeleteItem={removeChecklistTemplateItem}
@@ -303,6 +353,7 @@ export function ChecklistsPage() {
           onDuplicate={duplicateChecklistTemplate}
           onGenerateNow={handleGenerateNow}
           onPatchStage={patchTemplateStage}
+          onRemoveSubItem={removeChecklistTemplateSubItem}
           onRemoveStage={removeTemplateStage}
           onReorderItems={reorderChecklistTemplateItems}
           onReorderStages={reorderTemplateStages}
@@ -310,6 +361,7 @@ export function ChecklistsPage() {
           onSetItemDueDate={setChecklistTemplateItemDueDate}
           onSetViewers={setTemplateViewers}
           onUpdateItem={updateChecklistTemplateItem}
+          onUpdateSubItem={updateChecklistTemplateSubItem}
           onUpdateTemplate={updateChecklistTemplate}
           templates={data.checklistTemplates}
         />
@@ -321,6 +373,7 @@ export function ChecklistsPage() {
           employees={data.employees}
           onAddItem={addChecklistTemplateItem}
           onAddStage={addTemplateStage}
+          onAddSubItem={addChecklistTemplateSubItem}
           onApplyToClient={applyTemplateToClient}
           onBulkAddItems={bulkAddChecklistTemplateItems}
           onCreateStandard={createStandardTemplate}
@@ -328,12 +381,14 @@ export function ChecklistsPage() {
           onDeleteTemplate={deleteChecklistTemplate}
           onPatchStage={patchTemplateStage}
           onRemoveStage={removeTemplateStage}
+          onRemoveSubItem={removeChecklistTemplateSubItem}
           onReorderItems={reorderChecklistTemplateItems}
           onReorderStages={reorderTemplateStages}
           onSetItemAssignee={setChecklistTemplateItemAssignee}
           onSetItemDueDate={setChecklistTemplateItemDueDate}
           onSetViewers={setTemplateViewers}
           onUpdateItem={updateChecklistTemplateItem}
+          onUpdateSubItem={updateChecklistTemplateSubItem}
           onUpdateTemplate={updateChecklistTemplate}
           templates={data.checklistTemplates}
         />
@@ -347,11 +402,14 @@ function ChecklistInProgressSection({
   checklists,
   clients,
   employees,
+  onAddSubItem,
   onBulkAddItems,
   onDeleteItem,
+  onRemoveSubItem,
   onReorderItems,
   onSetViewers,
   onToggle,
+  onToggleSubItem,
   onUpdateItem,
   ownerMode,
   role,
@@ -361,8 +419,10 @@ function ChecklistInProgressSection({
   checklists: Checklist[]
   clients: Client[]
   employees: Employee[]
+  onAddSubItem: (checklistId: string, itemId: string, title: string) => void
   onBulkAddItems: (checklistId: string, labels: string[]) => void
   onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
+  onRemoveSubItem: (checklistId: string, itemId: string, subItemId: string) => void
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
   onSetViewers: (
     checklistId: string,
@@ -370,6 +430,7 @@ function ChecklistInProgressSection({
     editorIds: string[],
   ) => Promise<void> | void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
+  onToggleSubItem: (checklistId: string, itemId: string, subItemId: string) => void
   onUpdateItem: (
     checklistId: string,
     itemId: string,
@@ -468,11 +529,14 @@ function ChecklistInProgressSection({
       employees={employees}
       focused={checklist.id === focusId}
       focusRef={checklist.id === focusId ? focusRef : null}
+      onAddSubItem={onAddSubItem}
       onBulkAddItems={onBulkAddItems}
       onDeleteItem={onDeleteItem}
+      onRemoveSubItem={onRemoveSubItem}
       onReorderItems={onReorderItems}
       onSetViewers={onSetViewers}
       onToggle={onToggle}
+      onToggleSubItem={onToggleSubItem}
       onUpdateItem={onUpdateItem}
       ownerMode={ownerMode}
       role={role}
@@ -595,11 +659,14 @@ function ChecklistCard({
   employees,
   focused,
   focusRef,
+  onAddSubItem,
   onBulkAddItems,
   onDeleteItem,
+  onRemoveSubItem,
   onReorderItems,
   onSetViewers,
   onToggle,
+  onToggleSubItem,
   onUpdateItem,
   ownerMode,
   role,
@@ -611,8 +678,10 @@ function ChecklistCard({
   employees: Employee[]
   focused: boolean
   focusRef: React.MutableRefObject<HTMLElement | null> | null
+  onAddSubItem: (checklistId: string, itemId: string, title: string) => void
   onBulkAddItems: (checklistId: string, labels: string[]) => void
   onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
+  onRemoveSubItem: (checklistId: string, itemId: string, subItemId: string) => void
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
   onSetViewers: (
     checklistId: string,
@@ -620,6 +689,7 @@ function ChecklistCard({
     editorIds: string[],
   ) => Promise<void> | void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
+  onToggleSubItem: (checklistId: string, itemId: string, subItemId: string) => void
   onUpdateItem: (
     checklistId: string,
     itemId: string,
@@ -721,10 +791,17 @@ function ChecklistCard({
         checklistId={checklist.id}
         employees={employees}
         items={checklist.items}
+        onAddSubItem={(itemId, title) => onAddSubItem(checklist.id, itemId, title)}
         onCanToggle={canToggleItem}
         onDeleteItem={(itemId) => onDeleteItem(checklist.id, itemId)}
+        onRemoveSubItem={(itemId, subItemId) =>
+          onRemoveSubItem(checklist.id, itemId, subItemId)
+        }
         onReorderItems={onReorderItems}
         onToggle={onToggle}
+        onToggleSubItem={(itemId, subItemId) =>
+          onToggleSubItem(checklist.id, itemId, subItemId)
+        }
         onUpdateItem={(itemId, patch) => onUpdateItem(checklist.id, itemId, patch)}
         todayDateOnly={todayDateOnly}
       />
@@ -761,10 +838,13 @@ function DraggableTaskList({
   checklistId,
   employees,
   items,
+  onAddSubItem,
   onCanToggle,
   onDeleteItem,
+  onRemoveSubItem,
   onReorderItems,
   onToggle,
+  onToggleSubItem,
   onUpdateItem,
   todayDateOnly,
 }: {
@@ -773,10 +853,13 @@ function DraggableTaskList({
   checklistId: string
   employees: Employee[]
   items: ChecklistItem[]
+  onAddSubItem: (itemId: string, title: string) => void
   onCanToggle: (item: ChecklistItem) => boolean
   onDeleteItem: (itemId: string) => Promise<void>
+  onRemoveSubItem: (itemId: string, subItemId: string) => void
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
+  onToggleSubItem: (itemId: string, subItemId: string) => void
   onUpdateItem: (
     itemId: string,
     patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
@@ -834,111 +917,226 @@ function DraggableTaskList({
   return (
     <div className="task-list">
       {items.map((item) => {
+        const subItems = item.subItems ?? []
+        const hasSubItems = subItems.length > 0
         const allowToggle = onCanToggle(item)
         const overdue = Boolean(
           item.dueDate && !item.done && item.dueDate < todayDateOnly,
         )
         const classes = ['task-row']
         if (item.done) classes.push('done')
+        if (hasSubItems) classes.push('has-sub-items')
         if (draggingId === item.id) classes.push('dragging')
         if (dropTargetId === item.id) classes.push('drop-target')
+        const subDoneCount = subItems.filter((sub) => sub.done).length
         return (
-          <div
-            key={item.id}
-            className={classes.join(' ')}
-            draggable={canReorder}
-            onDragStart={(event) => handleDragStart(event, item.id)}
-            onDragOver={(event) => handleDragOver(event, item.id)}
-            onDragLeave={handleDragLeave}
-            onDrop={(event) => handleDrop(event, item.id)}
-            onDragEnd={handleDragEnd}
-          >
-            {canReorder ? (
-              <span
-                className="drag-handle"
-                aria-hidden="true"
-                title="Drag to reorder"
-              >
-                <GripVertical size={14} />
-              </span>
-            ) : null}
-            <input
-              checked={item.done}
-              disabled={!allowToggle}
-              onChange={() => void onToggle(checklistId, item.id)}
-              type="checkbox"
-            />
-            <span className="task-row-body">
-              <span className="task-row-title">
-                {overdue ? (
-                  <span
-                    className="overdue-dot"
-                    aria-label="Overdue"
-                    title="Overdue"
-                  />
-                ) : null}
-                {item.label}
-              </span>
-              {canEdit ? (
-                <span className="task-row-inline-controls">
-                  <input
-                    aria-label="Due date"
-                    className="item-date-input"
-                    title="Item due date (optional)"
-                    type="date"
-                    value={item.dueDate ?? ''}
-                    onChange={(e) => {
-                      void onUpdateItem(item.id, {
-                        dueDate: e.target.value === '' ? null : e.target.value,
-                      })
-                    }}
-                  />
-                  <select
-                    aria-label="Assignee"
-                    className="item-assignee-select"
-                    title="Assign to (optional)"
-                    value={item.assigneeId ?? ''}
-                    onChange={(e) => {
-                      void onUpdateItem(item.id, {
-                        assigneeId: e.target.value === '' ? null : e.target.value,
-                      })
-                    }}
-                  >
-                    <option value="">Inherits</option>
-                    {employees.map((emp) => (
-                      <option key={emp.id} value={emp.id}>
-                        {emp.name.split(' ')[0]}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    aria-label="Delete item"
-                    className="item-delete-btn"
-                    title="Delete item"
-                    onClick={() => void onDeleteItem(item.id)}
-                  >
-                    ×
-                  </button>
+          <div key={item.id} className="task-item">
+            <div
+              className={classes.join(' ')}
+              draggable={canReorder}
+              onDragStart={(event) => handleDragStart(event, item.id)}
+              onDragOver={(event) => handleDragOver(event, item.id)}
+              onDragLeave={handleDragLeave}
+              onDrop={(event) => handleDrop(event, item.id)}
+              onDragEnd={handleDragEnd}
+            >
+              {canReorder ? (
+                <span
+                  className="drag-handle"
+                  aria-hidden="true"
+                  title="Drag to reorder"
+                >
+                  <GripVertical size={14} />
                 </span>
-              ) : (
-                item.dueDate || item.assigneeId ? (
-                  <span className="task-row-chips">
-                    {item.dueDate ? (
-                      <span className="task-chip">
-                        Due {shortDate.format(new Date(`${item.dueDate}T12:00:00`))}
-                      </span>
-                    ) : null}
-                    {item.assigneeId ? (
-                      <span className="task-chip">{firstName(employees, item.assigneeId)}</span>
-                    ) : null}
+              ) : null}
+              <input
+                checked={item.done}
+                disabled={!allowToggle}
+                onChange={() => void onToggle(checklistId, item.id)}
+                title={hasSubItems ? 'Checking this checks every sub-step' : undefined}
+                type="checkbox"
+              />
+              <span className="task-row-body">
+                <span className="task-row-title">
+                  {overdue ? (
+                    <span
+                      className="overdue-dot"
+                      aria-label="Overdue"
+                      title="Overdue"
+                    />
+                  ) : null}
+                  {item.label}
+                  {hasSubItems ? (
+                    <span className="sub-item-count">
+                      {subDoneCount}/{subItems.length}
+                    </span>
+                  ) : null}
+                </span>
+                {canEdit ? (
+                  <span className="task-row-inline-controls">
+                    <input
+                      aria-label="Due date"
+                      className="item-date-input"
+                      title="Item due date (optional)"
+                      type="date"
+                      value={item.dueDate ?? ''}
+                      onChange={(e) => {
+                        void onUpdateItem(item.id, {
+                          dueDate: e.target.value === '' ? null : e.target.value,
+                        })
+                      }}
+                    />
+                    <select
+                      aria-label="Assignee"
+                      className="item-assignee-select"
+                      title="Assign to (optional)"
+                      value={item.assigneeId ?? ''}
+                      onChange={(e) => {
+                        void onUpdateItem(item.id, {
+                          assigneeId: e.target.value === '' ? null : e.target.value,
+                        })
+                      }}
+                    >
+                      <option value="">Inherits</option>
+                      {employees.map((emp) => (
+                        <option key={emp.id} value={emp.id}>
+                          {emp.name.split(' ')[0]}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      aria-label="Delete item"
+                      className="item-delete-btn"
+                      title="Delete item"
+                      onClick={() => void onDeleteItem(item.id)}
+                    >
+                      ×
+                    </button>
                   </span>
-                ) : null
-              )}
-            </span>
+                ) : (
+                  item.dueDate || item.assigneeId ? (
+                    <span className="task-row-chips">
+                      {item.dueDate ? (
+                        <span className="task-chip">
+                          Due {shortDate.format(new Date(`${item.dueDate}T12:00:00`))}
+                        </span>
+                      ) : null}
+                      {item.assigneeId ? (
+                        <span className="task-chip">{firstName(employees, item.assigneeId)}</span>
+                      ) : null}
+                    </span>
+                  ) : null
+                )}
+              </span>
+            </div>
+            {(hasSubItems || canEdit) ? (
+              <div className="sub-item-list">
+                {subItems.map((sub) => (
+                  <div
+                    key={sub.id}
+                    className={sub.done ? 'sub-item-row done' : 'sub-item-row'}
+                  >
+                    <input
+                      checked={sub.done}
+                      disabled={!allowToggle}
+                      onChange={() => onToggleSubItem(item.id, sub.id)}
+                      type="checkbox"
+                    />
+                    <span className="sub-item-title">{sub.title}</span>
+                    {canEdit ? (
+                      <button
+                        type="button"
+                        aria-label="Delete sub-step"
+                        className="item-delete-btn sub-item-delete"
+                        title="Delete sub-step"
+                        onClick={() => onRemoveSubItem(item.id, sub.id)}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+                {canEdit ? (
+                  <SubItemAddRow onAdd={(title) => onAddSubItem(item.id, title)} />
+                ) : null}
+              </div>
+            ) : null}
           </div>
         )
       })}
+    </div>
+  )
+}
+
+/**
+ * Inline "+ add sub-step" affordance, rendered under a checklist item. Starts
+ * as a compact link; expands into a tiny input on click. Visible only to users
+ * who can edit the checklist.
+ */
+function SubItemAddRow({ onAdd }: { onAdd: (title: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState('')
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  const submit = () => {
+    const value = draft.trim()
+    if (!value) return
+    onAdd(value)
+    setDraft('')
+    inputRef.current?.focus()
+  }
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      submit()
+    }
+    if (event.key === 'Escape') {
+      setDraft('')
+      setOpen(false)
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="sub-item-add-link"
+        onClick={() => setOpen(true)}
+      >
+        <Plus size={12} />
+        add sub-step
+      </button>
+    )
+  }
+
+  return (
+    <div className="sub-item-add-row">
+      <input
+        ref={inputRef}
+        autoFocus
+        className="sub-item-add-input"
+        aria-label="Add a sub-step"
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={handleKeyDown}
+        onBlur={() => {
+          if (!draft.trim()) setOpen(false)
+        }}
+        placeholder="Sub-step..."
+        type="text"
+        value={draft}
+      />
+      <button
+        type="button"
+        aria-label="Add sub-step"
+        className="inline-add-btn"
+        disabled={draft.trim().length === 0}
+        onClick={submit}
+        title="Add sub-step (Enter)"
+      >
+        <Plus size={12} />
+      </button>
     </div>
   )
 }
@@ -1054,6 +1252,76 @@ function ChecklistBulkAdd({
 }
 
 /**
+ * "Specific months" scheduling editor: 12 month checkboxes (Jan–Dec) plus a
+ * "Due day of month" number input (1–28). Used by both the create form and the
+ * template editor when frequency is `specific-months`.
+ */
+function SpecificMonthsPicker({
+  scheduledMonths,
+  dueDayOfMonth,
+  onChangeMonths,
+  onChangeDueDay,
+}: {
+  scheduledMonths: number[]
+  dueDayOfMonth: number | undefined
+  onChangeMonths: (months: number[]) => void
+  onChangeDueDay: (day: number | undefined) => void
+}) {
+  const toggleMonth = (month: number) => {
+    const set = new Set(scheduledMonths)
+    if (set.has(month)) {
+      set.delete(month)
+    } else {
+      set.add(month)
+    }
+    onChangeMonths([...set].sort((a, b) => a - b))
+  }
+
+  return (
+    <div className="specific-months">
+      <span className="specific-months-label">Which months</span>
+      <div className="specific-months-grid">
+        {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => (
+          <label key={month} className="specific-months-month">
+            <input
+              type="checkbox"
+              checked={scheduledMonths.includes(month)}
+              onChange={() => toggleMonth(month)}
+            />
+            <span>{monthShortNames[month]}</span>
+          </label>
+        ))}
+      </div>
+      <label className="specific-months-due-day">
+        <span>Due day of month</span>
+        <input
+          className="compact-input"
+          type="number"
+          min={1}
+          max={MAX_DUE_DAY_OF_MONTH}
+          value={dueDayOfMonth ?? ''}
+          placeholder="Last day"
+          onChange={(event) => {
+            const raw = event.target.value
+            if (raw === '') {
+              onChangeDueDay(undefined)
+              return
+            }
+            const parsed = Number(raw)
+            if (!Number.isFinite(parsed)) return
+            const clamped = Math.min(MAX_DUE_DAY_OF_MONTH, Math.max(1, Math.round(parsed)))
+            onChangeDueDay(clamped)
+          }}
+        />
+        <small className="new-task-hint">
+          1–{MAX_DUE_DAY_OF_MONTH}. Leave blank for the last day of the month.
+        </small>
+      </label>
+    </div>
+  )
+}
+
+/**
  * The unified create form. Used for BOTH one-time and repeating tasks.
  * The only differences are:
  *   - "How often" picker is rendered only in repeating mode
@@ -1112,9 +1380,14 @@ function NewTaskForm({
   const [assigneeId, setAssigneeId] = useState(defaultAssigneeId)
   const [dueDate, setDueDate] = useState(lastDayOfCurrentMonth())
   const [frequency, setFrequency] = useState<ChecklistFrequency>('monthly')
+  const [scheduledMonths, setScheduledMonths] = useState<number[]>([])
+  const [dueDayOfMonth, setDueDayOfMonth] = useState<number | undefined>(undefined)
   const [itemDraft, setItemDraft] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  // Specific-months mode hides the next-due-date picker (it isn't used) and
+  // shows the 12-month checkboxes instead.
+  const isSpecificMonths = mode === 'repeating' && frequency === 'specific-months'
   // Repeating mode: default ON. When checked, a checkable Stage-1 instance is
   // created immediately on save so the user can start right away, independent
   // of the recurrence schedule.
@@ -1169,8 +1442,14 @@ function NewTaskForm({
       setError('Pick who does this.')
       return
     }
-    if (!dueDate) {
+    // Specific-months templates don't use a fixed due date; they need at
+    // least one designated month instead.
+    if (!isSpecificMonths && !dueDate) {
       setError('Pick a due date.')
+      return
+    }
+    if (isSpecificMonths && scheduledMonths.length === 0) {
+      setError('Pick at least one month.')
       return
     }
     if (items.length === 0) {
@@ -1217,13 +1496,23 @@ function NewTaskForm({
         clientId,
         assigneeId,
         frequency,
-        nextDueDate: dueDate,
+        // Specific-months templates have no fixed next-due date — the
+        // designated months drive generation instead.
+        nextDueDate: isSpecificMonths ? '' : dueDate,
         active: true,
         viewerIds: [],
         editorIds: [],
         stages: [firstStage, ...extraStages],
+        ...(isSpecificMonths
+          ? {
+              scheduledMonths,
+              ...(dueDayOfMonth !== undefined ? { dueDayOfMonth } : {}),
+            }
+          : {}),
       },
-      startFirstNow,
+      // "Start the first one now" is not offered for specific-months — those
+      // generate automatically when a designated month arrives.
+      isSpecificMonths ? false : startFirstNow,
     )
     setTitle('')
     setItemDraft('')
@@ -1278,15 +1567,17 @@ function NewTaskForm({
           </select>
         </label>
 
-        <label className="new-task-field">
-          <span>Due</span>
-          <input
-            className="input"
-            type="date"
-            value={dueDate}
-            onChange={(event) => setDueDate(event.target.value)}
-          />
-        </label>
+        {isSpecificMonths ? null : (
+          <label className="new-task-field">
+            <span>Due</span>
+            <input
+              className="input"
+              type="date"
+              value={dueDate}
+              onChange={(event) => setDueDate(event.target.value)}
+            />
+          </label>
+        )}
 
         {mode === 'repeating' ? (
           <label className="new-task-field">
@@ -1310,6 +1601,15 @@ function NewTaskForm({
           </label>
         ) : null}
       </div>
+
+      {isSpecificMonths ? (
+        <SpecificMonthsPicker
+          scheduledMonths={scheduledMonths}
+          dueDayOfMonth={dueDayOfMonth}
+          onChangeMonths={setScheduledMonths}
+          onChangeDueDay={setDueDayOfMonth}
+        />
+      ) : null}
 
       <label className="new-task-field">
         <span>Steps</span>
@@ -1418,7 +1718,7 @@ function NewTaskForm({
         </div>
       ) : null}
 
-      {mode === 'repeating' ? (
+      {mode === 'repeating' && !isSpecificMonths ? (
         <label className="start-first-now-row">
           <input
             type="checkbox"
@@ -1555,6 +1855,21 @@ type RepeatingTasksManagerProps = {
   onDeleteTemplate: (templateId: string) => void
   /** Optional: "Duplicate" a regular repeating task. Omitted for standard templates. */
   onDuplicate?: (templateId: string) => void
+  /** Sub-bullet editing on template items (flows into generated checklists). */
+  onAddSubItem: (templateId: string, stageId: string, itemId: string, title: string) => void
+  onUpdateSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => void
+  onRemoveSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+  ) => void
   /** Wave 2: materialize a Stage-1 instance on demand ("Generate a task now"). */
   onGenerateNow?: (templateId: string, opts?: { dueDate?: string }) => Promise<void>
   /** Wave 2: present standard templates differently (no client / no recurrence). */
@@ -1641,6 +1956,7 @@ type RepeatingTaskRowProps = Omit<RepeatingTasksManagerProps, 'templates'> & {
 
 function RepeatingTaskRow(props: RepeatingTaskRowProps) {
   const { template, open, onToggleOpen } = props
+  const isSpecificMonths = template.frequency === 'specific-months'
   const dueLabel = template.nextDueDate
     ? shortDate.format(new Date(`${template.nextDueDate}T12:00:00`))
     : '—'
@@ -1648,7 +1964,9 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
   // Standard templates are blueprints — they never generate on their own.
   const explainerLine = props.standardMode
     ? 'A reusable blueprint — it never generates a checklist on its own. Use "Apply to client" to put it to work.'
-    : `Generates a checklist ${frequencyCadence(template.frequency)} — next on ${dueLabel}.`
+    : isSpecificMonths
+      ? specificMonthsSummary(template)
+      : `Generates a checklist ${frequencyCadence(template.frequency)} — next on ${dueLabel}.`
 
   return (
     <article className={open ? 'repeating-task-row open' : 'repeating-task-row'}>
@@ -1671,7 +1989,17 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
           How often: {getChecklistFrequencyLabel(template.frequency)}
         </span>
         <span className="repeating-task-meta">
-          {props.standardMode ? '' : `Next due: ${dueLabel}`}
+          {props.standardMode
+            ? ''
+            : isSpecificMonths
+              ? `Months: ${
+                  (template.scheduledMonths ?? [])
+                    .filter((m) => m >= 1 && m <= 12)
+                    .sort((a, b) => a - b)
+                    .map((m) => monthShortNames[m])
+                    .join(', ') || 'none yet'
+                }`
+              : `Next due: ${dueLabel}`}
         </span>
         <span
           className={
@@ -1813,12 +2141,19 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
           <span>How often</span>
           <select
             className="input"
-            onChange={(event) =>
+            onChange={(event) => {
+              const nextFrequency = event.target.value as ChecklistFrequency
               props.onUpdateTemplate(template.id, (current) => ({
                 ...current,
-                frequency: event.target.value as ChecklistFrequency,
+                frequency: nextFrequency,
+                // Switching INTO specific-months clears the unused next-due
+                // date; switching OUT of it restores a sensible default.
+                nextDueDate:
+                  nextFrequency === 'specific-months'
+                    ? ''
+                    : current.nextDueDate || lastDayOfCurrentMonth(),
               }))
-            }
+            }}
             value={template.frequency}
           >
             {checklistFrequencies.map((option) => (
@@ -1828,20 +2163,22 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
             ))}
           </select>
         </label>
-        <label className="field">
-          <span>Next due</span>
-          <input
-            className="input"
-            onChange={(event) =>
-              props.onUpdateTemplate(template.id, (current) => ({
-                ...current,
-                nextDueDate: event.target.value,
-              }))
-            }
-            type="date"
-            value={template.nextDueDate}
-          />
-        </label>
+        {template.frequency === 'specific-months' ? null : (
+          <label className="field">
+            <span>Next due</span>
+            <input
+              className="input"
+              onChange={(event) =>
+                props.onUpdateTemplate(template.id, (current) => ({
+                  ...current,
+                  nextDueDate: event.target.value,
+                }))
+              }
+              type="date"
+              value={template.nextDueDate}
+            />
+          </label>
+        )}
         <label className="repeating-task-on-off-row">
           <input
             checked={template.active}
@@ -1856,6 +2193,29 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
           <span>{template.active ? 'On' : 'Off'}</span>
         </label>
       </div>
+      {template.frequency === 'specific-months' ? (
+        <SpecificMonthsPicker
+          scheduledMonths={template.scheduledMonths ?? []}
+          dueDayOfMonth={template.dueDayOfMonth}
+          onChangeMonths={(months) =>
+            props.onUpdateTemplate(template.id, (current) => ({
+              ...current,
+              scheduledMonths: months,
+            }))
+          }
+          onChangeDueDay={(day) =>
+            props.onUpdateTemplate(template.id, (current) => {
+              const next = { ...current }
+              if (day === undefined) {
+                delete next.dueDayOfMonth
+              } else {
+                next.dueDayOfMonth = day
+              }
+              return next
+            })
+          }
+        />
+      ) : null}
       <StagesAccordion {...props} stages={stages} />
       <button
         className="secondary-action"
@@ -2042,8 +2402,14 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
                   <DraggableTemplateItems
                     employees={props.employees}
                     items={stage.items}
+                    onAddSubItem={(itemId, title) =>
+                      props.onAddSubItem(template.id, stage.id, itemId, title)
+                    }
                     onDeleteItem={(itemId) =>
                       props.onDeleteItem(template.id, stage.id, itemId)
+                    }
+                    onRemoveSubItem={(itemId, subItemId) =>
+                      props.onRemoveSubItem(template.id, stage.id, itemId, subItemId)
                     }
                     onReorderItems={(orderedIds) =>
                       props.onReorderItems(template.id, stage.id, orderedIds)
@@ -2056,6 +2422,9 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
                     }
                     onUpdateItem={(itemId, label) =>
                       props.onUpdateItem(template.id, stage.id, itemId, label)
+                    }
+                    onUpdateSubItem={(itemId, subItemId, title) =>
+                      props.onUpdateSubItem(template.id, stage.id, itemId, subItemId, title)
                     }
                   />
                   <InlineAddItemRow
@@ -2223,19 +2592,25 @@ function StageScheduleControl({
 function DraggableTemplateItems({
   employees,
   items,
+  onAddSubItem,
   onDeleteItem,
+  onRemoveSubItem,
   onReorderItems,
   onSetItemAssignee,
   onSetItemDueDate,
   onUpdateItem,
+  onUpdateSubItem,
 }: {
   employees: Employee[]
   items: ChecklistTemplateItem[]
+  onAddSubItem: (itemId: string, title: string) => void
   onDeleteItem: (itemId: string) => void
+  onRemoveSubItem: (itemId: string, subItemId: string) => void
   onReorderItems: (orderedIds: string[]) => void
   onSetItemAssignee: (itemId: string, assigneeId: string) => void
   onSetItemDueDate: (itemId: string, dueDate: string) => void
   onUpdateItem: (itemId: string, label: string) => void
+  onUpdateSubItem: (itemId: string, subItemId: string, title: string) => void
 }) {
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
@@ -2290,52 +2665,77 @@ function DraggableTemplateItems({
         const classes = ['template-item-row']
         if (draggingId === item.id) classes.push('dragging')
         if (dropTargetId === item.id) classes.push('drop-target')
+        const subItems = item.subItems ?? []
         return (
-          <div
-            key={item.id}
-            className={classes.join(' ')}
-            draggable
-            onDragStart={(event) => handleDragStart(event, item.id)}
-            onDragOver={(event) => handleDragOver(event, item.id)}
-            onDragLeave={handleDragLeave}
-            onDrop={(event) => handleDrop(event, item.id)}
-            onDragEnd={handleDragEnd}
-          >
-            <span className="drag-handle" aria-hidden="true">
-              <GripVertical size={14} />
-            </span>
-            <input
-              className="input"
-              onChange={(event) => onUpdateItem(item.id, event.target.value)}
-              value={item.label}
-            />
-            <input
-              aria-label="Item due date"
-              className="compact-input"
-              onChange={(event) => onSetItemDueDate(item.id, event.target.value)}
-              type="date"
-              value={item.dueDate ?? ''}
-            />
-            <select
-              aria-label="Item assignee"
-              className="compact-input"
-              onChange={(event) => onSetItemAssignee(item.id, event.target.value)}
-              value={item.assigneeId ?? ''}
+          <div key={item.id} className="template-item">
+            <div
+              className={classes.join(' ')}
+              draggable
+              onDragStart={(event) => handleDragStart(event, item.id)}
+              onDragOver={(event) => handleDragOver(event, item.id)}
+              onDragLeave={handleDragLeave}
+              onDrop={(event) => handleDrop(event, item.id)}
+              onDragEnd={handleDragEnd}
             >
-              <option value="">Inherits</option>
-              {employees.map((employee) => (
-                <option key={employee.id} value={employee.id}>
-                  {employee.name}
-                </option>
+              <span className="drag-handle" aria-hidden="true">
+                <GripVertical size={14} />
+              </span>
+              <input
+                className="input"
+                onChange={(event) => onUpdateItem(item.id, event.target.value)}
+                value={item.label}
+              />
+              <input
+                aria-label="Item due date"
+                className="compact-input"
+                onChange={(event) => onSetItemDueDate(item.id, event.target.value)}
+                type="date"
+                value={item.dueDate ?? ''}
+              />
+              <select
+                aria-label="Item assignee"
+                className="compact-input"
+                onChange={(event) => onSetItemAssignee(item.id, event.target.value)}
+                value={item.assigneeId ?? ''}
+              >
+                <option value="">Inherits</option>
+                {employees.map((employee) => (
+                  <option key={employee.id} value={employee.id}>
+                    {employee.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="secondary-action danger"
+                onClick={() => onDeleteItem(item.id)}
+                type="button"
+              >
+                Remove
+              </button>
+            </div>
+            <div className="sub-item-list template-sub-item-list">
+              {subItems.map((sub) => (
+                <div key={sub.id} className="sub-item-row template-sub-item-row">
+                  <span className="sub-item-bullet" aria-hidden="true" />
+                  <input
+                    aria-label="Sub-step"
+                    className="input sub-item-edit-input"
+                    onChange={(event) => onUpdateSubItem(item.id, sub.id, event.target.value)}
+                    value={sub.title}
+                  />
+                  <button
+                    type="button"
+                    aria-label="Delete sub-step"
+                    className="item-delete-btn sub-item-delete"
+                    title="Delete sub-step"
+                    onClick={() => onRemoveSubItem(item.id, sub.id)}
+                  >
+                    ×
+                  </button>
+                </div>
               ))}
-            </select>
-            <button
-              className="secondary-action danger"
-              onClick={() => onDeleteItem(item.id)}
-              type="button"
-            >
-              Remove
-            </button>
+              <SubItemAddRow onAdd={(title) => onAddSubItem(item.id, title)} />
+            </div>
           </div>
         )
       })}

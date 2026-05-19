@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ensureRecurringChecklists, dateOffset } from '../lib/utils'
+import { ensureRecurringChecklists, dateOffset, isChecklistItemDone } from '../lib/utils'
 import type { AppData, ChecklistTemplate } from '../lib/types'
 
 /**
@@ -110,5 +110,130 @@ describe('ensureRecurringChecklists', () => {
     expect(updated).toBeDefined()
     // After catch-up materialization the next due date is rolled into the future.
     expect(updated!.nextDueDate > today).toBe(true)
+  })
+})
+
+describe('ensureRecurringChecklists — specific-months scheduling', () => {
+  // Anchor the tests to the real clock so they stay deterministic regardless of
+  // when the suite runs. The CURRENT calendar month has, by definition, already
+  // started; a month several months in the future has not.
+  const now = new Date()
+  const currentYear = now.getFullYear()
+  const currentMonth = now.getMonth() + 1 // 1-12
+  // A month that has unambiguously NOT started yet this year. When the current
+  // month is late in the year we fall back to a small offset that is still in
+  // the future relative to "today"; if no such month exists (December) we skip
+  // the not-started assertion conditionally below.
+  const futureMonth = currentMonth <= 9 ? currentMonth + 3 : currentMonth - 9 + 1
+
+  function specificMonthsTemplate(
+    overrides: Partial<ChecklistTemplate>,
+  ): ChecklistTemplate {
+    return makeTemplate({
+      frequency: 'specific-months',
+      // Specific-months templates carry no fixed next-due date.
+      nextDueDate: '',
+      scheduledMonths: [currentMonth],
+      ...overrides,
+    })
+  }
+
+  it('generates an instance for a designated month that has already started', () => {
+    const data = makeData([specificMonthsTemplate({ scheduledMonths: [currentMonth] })])
+    const result = ensureRecurringChecklists(data)
+
+    expect(result.changed).toBe(true)
+    const generated = result.data.checklists.filter((c) => c.templateId === 'tmpl-1')
+    expect(generated).toHaveLength(1)
+    expect(generated[0].dueDate.slice(0, 7)).toBe(
+      `${currentYear}-${String(currentMonth).padStart(2, '0')}`,
+    )
+    expect(generated[0].items.map((i) => i.label)).toContain('Reconcile bank feed')
+    expect(generated[0].items.every((i) => i.done === false)).toBe(true)
+  })
+
+  it('does NOT generate for a designated month that has not started yet', () => {
+    // Only meaningful when a clearly-future month exists this year.
+    if (currentMonth > 9) return
+    const data = makeData([specificMonthsTemplate({ scheduledMonths: [futureMonth] })])
+    const result = ensureRecurringChecklists(data)
+
+    expect(result.data.checklists.filter((c) => c.templateId === 'tmpl-1')).toHaveLength(0)
+  })
+
+  it('does not double-generate when materialization runs twice', () => {
+    const data = makeData([specificMonthsTemplate({ scheduledMonths: [currentMonth] })])
+    const first = ensureRecurringChecklists(data)
+    expect(first.data.checklists.filter((c) => c.templateId === 'tmpl-1')).toHaveLength(1)
+
+    // Re-running over the already-materialized data must be idempotent.
+    const second = ensureRecurringChecklists(first.data)
+    expect(second.data.checklists.filter((c) => c.templateId === 'tmpl-1')).toHaveLength(1)
+  })
+
+  it('respects dueDayOfMonth when set', () => {
+    const data = makeData([
+      specificMonthsTemplate({ scheduledMonths: [currentMonth], dueDayOfMonth: 12 }),
+    ])
+    const result = ensureRecurringChecklists(data)
+
+    const generated = result.data.checklists.find((c) => c.templateId === 'tmpl-1')
+    expect(generated).toBeDefined()
+    expect(generated!.dueDate).toBe(
+      `${currentYear}-${String(currentMonth).padStart(2, '0')}-12`,
+    )
+  })
+
+  it('falls back to the last day of month when dueDayOfMonth is unset', () => {
+    const data = makeData([specificMonthsTemplate({ scheduledMonths: [currentMonth] })])
+    const result = ensureRecurringChecklists(data)
+
+    const generated = result.data.checklists.find((c) => c.templateId === 'tmpl-1')
+    expect(generated).toBeDefined()
+    const lastDay = new Date(currentYear, currentMonth, 0).getDate()
+    expect(generated!.dueDate).toBe(
+      `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
+    )
+  })
+
+  it('still never materializes a standard specific-months template', () => {
+    const data = makeData([
+      specificMonthsTemplate({ isStandard: true, scheduledMonths: [currentMonth] }),
+    ])
+    const result = ensureRecurringChecklists(data)
+
+    expect(result.data.checklists.filter((c) => c.templateId === 'tmpl-1')).toHaveLength(0)
+  })
+})
+
+describe('isChecklistItemDone — sub-item roll-up', () => {
+  it('an item with no sub-items keeps its own done flag', () => {
+    expect(isChecklistItemDone({ done: true })).toBe(true)
+    expect(isChecklistItemDone({ done: false })).toBe(false)
+    expect(isChecklistItemDone({ done: true, subItems: [] })).toBe(true)
+  })
+
+  it('an item with sub-items is done only when every sub-item is done', () => {
+    expect(
+      isChecklistItemDone({
+        done: false,
+        subItems: [
+          { done: true },
+          { done: true },
+        ],
+      }),
+    ).toBe(true)
+  })
+
+  it('an item with any incomplete sub-item is not done', () => {
+    expect(
+      isChecklistItemDone({
+        done: true,
+        subItems: [
+          { done: true },
+          { done: false },
+        ],
+      }),
+    ).toBe(false)
   })
 })

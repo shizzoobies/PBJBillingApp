@@ -28,7 +28,28 @@ export const checklistFrequencies: ChecklistFrequency[] = [
   'monthly',
   'quarterly',
   'annually',
+  'specific-months',
 ]
+
+/** Short month names indexed 1–12 (index 0 unused). */
+export const monthShortNames = [
+  '',
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+]
+
+/** Largest day-of-month a specific-months template may use (caps short months). */
+export const MAX_DUE_DAY_OF_MONTH = 28
 
 export function dateOffset(days: number) {
   const date = new Date()
@@ -91,7 +112,25 @@ export function advanceChecklistFrequency(dateString: string, frequency: Checkli
 }
 
 export function getChecklistFrequencyLabel(frequency: ChecklistFrequency) {
+  if (frequency === 'specific-months') {
+    return 'Specific months'
+  }
   return frequency.charAt(0).toUpperCase() + frequency.slice(1)
+}
+
+/**
+ * Roll-up completion for a checklist item: an item with sub-items is `done`
+ * exactly when every sub-item is done; an item with no sub-items keeps its
+ * own stored `done`. Pure — safe to call anywhere the derived state is needed.
+ */
+export function isChecklistItemDone(item: {
+  done: boolean
+  subItems?: { done: boolean }[]
+}): boolean {
+  if (Array.isArray(item.subItems) && item.subItems.length > 0) {
+    return item.subItems.every((sub) => sub.done)
+  }
+  return item.done
 }
 
 export function sortChecklists(checklists: Checklist[]) {
@@ -187,8 +226,36 @@ function buildChecklistFromStage(
       done: false,
       ...(item.dueDate ? { dueDate: item.dueDate } : {}),
       ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
+      ...(Array.isArray(item.subItems) && item.subItems.length > 0
+        ? {
+            subItems: item.subItems.map((sub) => ({
+              id: makeId('subitem'),
+              title: sub.title,
+              done: false,
+            })),
+          }
+        : {}),
     })),
   }
+}
+
+/**
+ * Day-of-month a specific-months template's checklist is due in `month` of
+ * `year`. Honors `dueDayOfMonth` (capped to 28); falls back to the actual last
+ * day of that month when unset. `month` is 1–12.
+ */
+export function resolveSpecificMonthsDueDate(
+  template: Pick<ChecklistTemplate, 'dueDayOfMonth'>,
+  year: number,
+  month: number,
+): string {
+  const day =
+    typeof template.dueDayOfMonth === 'number' &&
+    template.dueDayOfMonth >= 1 &&
+    template.dueDayOfMonth <= 28
+      ? template.dueDayOfMonth
+      : new Date(year, month, 0).getDate()
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
 export function ensureRecurringChecklists(data: AppData) {
@@ -239,10 +306,47 @@ export function ensureRecurringChecklists(data: AppData) {
   )
   const checklists = [...checklistsBackfilled]
 
+  // Year-month instance keys (`${templateId}:${YYYY-MM}`) for specific-months
+  // templates. Derived from each existing checklist's due date so re-running
+  // materialization never double-generates a designated month.
+  const existingMonthKeys = new Set(
+    checklistsBackfilled
+      .filter((checklist) => checklist.templateId && checklist.dueDate)
+      .map((checklist) => `${checklist.templateId}:${checklist.dueDate.slice(0, 7)}`),
+  )
+
+  const todayDate = new Date()
+  const currentYear = todayDate.getFullYear()
+
   for (const template of templates) {
     const stages = template.stages ?? []
     // Standard templates are blueprints only — they never materialize.
     if (template.isStandard || !template.active || stages.length === 0 || stages[0].items.length === 0) {
+      continue
+    }
+
+    // Specific-months mode: ignore nextDueDate advance logic. For each
+    // designated month of the current year that has already started, generate
+    // a Stage-1 instance unless one already exists for that template+month.
+    if (template.frequency === 'specific-months') {
+      const months = Array.isArray(template.scheduledMonths) ? template.scheduledMonths : []
+      for (const month of months) {
+        if (!Number.isInteger(month) || month < 1 || month > 12) continue
+        // Has this month started? (today on or after the 1st of that month.)
+        const monthStart = new Date(currentYear, month - 1, 1)
+        if (todayDate < monthStart) continue
+        const monthKey = `${template.id}:${currentYear}-${String(month).padStart(2, '0')}`
+        if (existingMonthKeys.has(monthKey)) continue
+        const stageOne = stages[0]
+        const stageOneDue = resolveSpecificMonthsDueDate(template, currentYear, month)
+        const caseId = makeId('case')
+        checklists.push(
+          buildChecklistFromStage(template, stageOne, 0, stages.length, caseId, stageOneDue),
+        )
+        existingMonthKeys.add(monthKey)
+        existingKeys.add(`${template.id}:${stageOneDue}:0`)
+        changed = true
+      }
       continue
     }
 

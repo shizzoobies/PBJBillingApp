@@ -52,6 +52,12 @@ export type AppContextValue = {
   lockTimesheet: (userId: string, period: string) => Promise<void>
   unlockTimesheet: (userId: string, period: string) => Promise<void>
   toggleChecklistItem: (checklistId: string, itemId: string) => Promise<void>
+  /** Toggle one sub-item of a live-checklist item (recomputes parent done). */
+  toggleSubItem: (checklistId: string, itemId: string, subItemId: string) => Promise<void>
+  /** Add a sub-item under a live-checklist item. */
+  addSubItem: (checklistId: string, itemId: string, title: string) => Promise<void>
+  /** Remove a sub-item from a live-checklist item. */
+  removeSubItem: (checklistId: string, itemId: string, subItemId: string) => Promise<void>
   setChecklistViewers: (
     checklistId: string,
     viewerIds: string[],
@@ -98,6 +104,28 @@ export type AppContextValue = {
     labels: string[],
   ) => void
   removeChecklistTemplateItem: (templateId: string, stageId: string, itemId: string) => void
+  /** Add a sub-item under a template item (flows into generated checklists). */
+  addChecklistTemplateSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    title: string,
+  ) => void
+  /** Rename a template item's sub-item. */
+  updateChecklistTemplateSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => void
+  /** Remove a sub-item from a template item. */
+  removeChecklistTemplateSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+  ) => void
   addTemplateStage: (templateId: string) => void
   removeTemplateStage: (templateId: string, stageId: string) => void
   patchTemplateStage: (

@@ -137,13 +137,17 @@ create table if not exists checklist_items (
 
 alter table checklist_items add column if not exists due_date date;
 alter table checklist_items add column if not exists assignee_id text;
+-- Sub-bullets: one level of nested sub-items, stored as a JSONB array
+-- ({ id, title, done }[]) on the item row. The parent item's `done` column is
+-- kept in sync as the roll-up (true when every sub-item is done).
+alter table checklist_items add column if not exists sub_items jsonb not null default '[]'::jsonb;
 
 create table if not exists checklist_templates (
   id text primary key,
   title text not null,
   client_id text not null references clients(id) on delete cascade,
   assignee_id text not null references users(id) on delete restrict,
-  frequency text not null check (frequency in ('daily', 'weekly', 'monthly', 'quarterly', 'annually')),
+  frequency text not null check (frequency in ('daily', 'weekly', 'monthly', 'quarterly', 'annually', 'specific-months')),
   next_due_date date not null,
   active boolean not null default true,
   viewer_ids text[] not null default '{}',
@@ -158,6 +162,19 @@ create table if not exists checklist_templates (
 -- the API layer).
 alter table checklist_templates add column if not exists is_standard boolean not null default false;
 alter table checklist_templates alter column client_id drop not null;
+
+-- Specific-months scheduling: a template can target designated months instead
+-- of a fixed recurring cadence. scheduled_months holds the month numbers 1-12;
+-- due_day_of_month (1-28) is the due day in each designated month. A
+-- specific-months template has no fixed next_due_date, so that column is made
+-- nullable, and the frequency CHECK is widened to allow 'specific-months'.
+alter table checklist_templates add column if not exists scheduled_months int[];
+alter table checklist_templates add column if not exists due_day_of_month int;
+alter table checklist_templates alter column next_due_date drop not null;
+alter table checklist_templates drop constraint if exists checklist_templates_frequency_check;
+alter table checklist_templates
+  add constraint checklist_templates_frequency_check
+  check (frequency in ('daily', 'weekly', 'monthly', 'quarterly', 'annually', 'specific-months'));
 
 create table if not exists checklist_template_items (
   id text primary key,
@@ -174,6 +191,9 @@ create table if not exists checklist_template_items (
 alter table checklist_template_items add column if not exists due_date date;
 alter table checklist_template_items add column if not exists assignee_id text;
 alter table checklist_template_items add column if not exists stage_id text;
+-- Sub-bullets on template items, stored as a JSONB array ({ id, title }[]) so
+-- sub-steps defined in a template flow into generated checklists.
+alter table checklist_template_items add column if not exists sub_items jsonb not null default '[]'::jsonb;
 
 -- Phase 3: workflow stages on templates
 create table if not exists checklist_template_stages (

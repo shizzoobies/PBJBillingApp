@@ -284,6 +284,52 @@ function resolveStageDueDate(stage, baseDate) {
   return offset ? addDays(baseDate, offset) : baseDate
 }
 
+/**
+ * Day-of-month a specific-months template's checklist is due in `month` of
+ * `year`. Honors `dueDayOfMonth` (capped to 28); falls back to the actual last
+ * day of that month when unset. `month` is 1–12.
+ */
+function resolveSpecificMonthsDueDate(template, year, month) {
+  const day =
+    typeof template.dueDayOfMonth === 'number' &&
+    template.dueDayOfMonth >= 1 &&
+    template.dueDayOfMonth <= 28
+      ? template.dueDayOfMonth
+      : new Date(year, month, 0).getDate()
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+/**
+ * Normalize a raw sub-items value (JSONB column or app-shaped array) into a
+ * clean `{ id, title, done }[]`. Drops malformed entries. `withDone` controls
+ * whether `done` is included (live checklists carry it; template items don't).
+ */
+function normalizeSubItems(raw, { withDone = true } = {}) {
+  const list = Array.isArray(raw) ? raw : []
+  return list
+    .filter((sub) => sub && typeof sub.title === 'string' && sub.title.trim())
+    .map((sub) => {
+      const base = {
+        id: typeof sub.id === 'string' && sub.id ? sub.id : `subitem-${randomUUID().slice(0, 8)}`,
+        title: sub.title.trim(),
+      }
+      if (withDone) base.done = Boolean(sub.done)
+      return base
+    })
+}
+
+/**
+ * Roll-up completion for a checklist item: an item with sub-items is `done`
+ * exactly when every sub-item is done; an item with no sub-items keeps its own
+ * `done`. Mirrors `isChecklistItemDone` in src/lib/utils.ts.
+ */
+function rollUpItemDone(item) {
+  if (Array.isArray(item.subItems) && item.subItems.length > 0) {
+    return item.subItems.every((sub) => Boolean(sub.done))
+  }
+  return Boolean(item.done)
+}
+
 function buildChecklistFromStage({ template, stage, stageIndex, stageCount, caseId, dueDate }) {
   return {
     id: `check-${randomUUID().slice(0, 8)}`,
@@ -305,6 +351,15 @@ function buildChecklistFromStage({ template, stage, stageIndex, stageCount, case
       done: false,
       ...(item.dueDate ? { dueDate: item.dueDate } : {}),
       ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
+      ...(Array.isArray(item.subItems) && item.subItems.length > 0
+        ? {
+            subItems: item.subItems.map((sub) => ({
+              id: `subitem-${randomUUID().slice(0, 8)}`,
+              title: sub.title,
+              done: false,
+            })),
+          }
+        : {}),
     })),
   }
 }
@@ -422,16 +477,60 @@ function materializeRecurringChecklists(data) {
       .map((checklist) => `${checklist.templateId}:${checklist.dueDate}:${checklist.stageIndex ?? 0}`),
   )
 
+  // Year-month instance keys (`${templateId}:${YYYY-MM}`) for specific-months
+  // templates — keep re-runs idempotent per designated month.
+  const existingMonthKeys = new Set(
+    nextChecklists
+      .filter((checklist) => checklist.templateId && checklist.dueDate)
+      .map((checklist) => `${checklist.templateId}:${String(checklist.dueDate).slice(0, 7)}`),
+  )
+
+  const todayDate = new Date()
+  const currentYear = todayDate.getFullYear()
+
   for (const template of nextTemplates) {
     const stages = template.stages ?? []
-    // Standard templates are blueprints only — they never materialize.
+    // Standard templates are blueprints only — they never materialize. A
+    // specific-months template has no meaningful nextDueDate, so that guard is
+    // skipped for it (handled in its own branch below).
     if (
       template.isStandard ||
       !template.active ||
-      !template.nextDueDate ||
       stages.length === 0 ||
-      stages[0].items.length === 0
+      stages[0].items.length === 0 ||
+      (template.frequency !== 'specific-months' && !template.nextDueDate)
     ) {
+      continue
+    }
+
+    // Specific-months mode: ignore nextDueDate advance logic. For each
+    // designated month of the current year that has started, generate a
+    // Stage-1 instance unless one already exists for that template+month.
+    if (template.frequency === 'specific-months') {
+      const months = Array.isArray(template.scheduledMonths) ? template.scheduledMonths : []
+      for (const month of months) {
+        if (!Number.isInteger(month) || month < 1 || month > 12) continue
+        const monthStart = new Date(currentYear, month - 1, 1)
+        if (todayDate < monthStart) continue
+        const monthKey = `${template.id}:${currentYear}-${String(month).padStart(2, '0')}`
+        if (existingMonthKeys.has(monthKey)) continue
+        const stageOne = stages[0]
+        const stageOneDue = resolveSpecificMonthsDueDate(template, currentYear, month)
+        const caseId = `case-${randomUUID().slice(0, 8)}`
+        nextChecklists.push(
+          buildChecklistFromStage({
+            template,
+            stage: stageOne,
+            stageIndex: 0,
+            stageCount: stages.length,
+            caseId,
+            dueDate: stageOneDue,
+          }),
+        )
+        existingMonthKeys.add(monthKey)
+        existingKeys.add(`${template.id}:${stageOneDue}:0`)
+        changed = true
+      }
       continue
     }
 
@@ -821,6 +920,12 @@ export class AppDataStore {
 
       await this.pool.query(`alter table checklist_items add column if not exists due_date date`)
       await this.pool.query(`alter table checklist_items add column if not exists assignee_id text`)
+      // Sub-bullets: one level of nested sub-items, stored as a JSONB array
+      // ({ id, title, done }[]) directly on the item row. Least-invasive
+      // choice given the existing schema; mirrors the `payload jsonb` pattern.
+      await this.pool.query(
+        `alter table checklist_items add column if not exists sub_items jsonb not null default '[]'::jsonb`,
+      )
 
       await this.pool.query(`
         create table if not exists checklist_templates (
@@ -860,6 +965,32 @@ export class AppDataStore {
         alter table checklist_templates alter column client_id drop not null
       `)
 
+      // Specific-months scheduling: a template can target designated months
+      // instead of a fixed recurring cadence. The `frequency` CHECK constraint
+      // predates the 'specific-months' value, so drop it and re-add it widened.
+      await this.pool.query(`
+        alter table checklist_templates
+          add column if not exists scheduled_months int[]
+      `)
+      await this.pool.query(`
+        alter table checklist_templates
+          add column if not exists due_day_of_month int
+      `)
+      // A specific-months template has no fixed next-due date, so next_due_date
+      // must be nullable.
+      await this.pool.query(`
+        alter table checklist_templates alter column next_due_date drop not null
+      `)
+      await this.pool.query(`
+        alter table checklist_templates
+          drop constraint if exists checklist_templates_frequency_check
+      `)
+      await this.pool.query(`
+        alter table checklist_templates
+          add constraint checklist_templates_frequency_check
+          check (frequency in ('daily', 'weekly', 'monthly', 'quarterly', 'annually', 'specific-months'))
+      `)
+
       await this.pool.query(`
         create table if not exists checklist_template_items (
           id text primary key,
@@ -876,6 +1007,11 @@ export class AppDataStore {
       await this.pool.query(`alter table checklist_template_items add column if not exists due_date date`)
       await this.pool.query(`alter table checklist_template_items add column if not exists assignee_id text`)
       await this.pool.query(`alter table checklist_template_items add column if not exists stage_id text`)
+      // Sub-bullets on template items, stored as a JSONB array ({ id, title }[])
+      // so sub-steps defined in a template flow into generated checklists.
+      await this.pool.query(
+        `alter table checklist_template_items add column if not exists sub_items jsonb not null default '[]'::jsonb`,
+      )
 
       // Phase 3: workflow stages on templates.
       await this.pool.query(`
@@ -1205,17 +1341,18 @@ export class AppDataStore {
             order by due_date asc, id asc
           `),
           this.pool.query(`
-            select id, checklist_id, label, done, sort_order, due_date, assignee_id
+            select id, checklist_id, label, done, sort_order, due_date, assignee_id, sub_items
             from checklist_items
             order by checklist_id asc, sort_order asc, id asc
           `),
           this.pool.query(`
-            select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard
+            select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
+                   scheduled_months, due_day_of_month
             from checklist_templates
             order by title asc
           `),
           this.pool.query(`
-            select id, template_id, label, sort_order, due_date, assignee_id, stage_id
+            select id, template_id, label, sort_order, due_date, assignee_id, stage_id, sub_items
             from checklist_template_items
             order by template_id asc, sort_order asc, id asc
           `),
@@ -1241,6 +1378,7 @@ export class AppDataStore {
       const itemsByChecklist = new Map()
       for (const row of checklistItemsResult.rows) {
         const existing = itemsByChecklist.get(row.checklist_id) ?? []
+        const subItems = normalizeSubItems(row.sub_items, { withDone: true })
         const item = {
           id: row.id,
           label: row.label,
@@ -1251,6 +1389,12 @@ export class AppDataStore {
         }
         if (row.assignee_id) {
           item.assigneeId = row.assignee_id
+        }
+        if (subItems.length > 0) {
+          item.subItems = subItems
+          // `done` is derived for items with sub-items — keep it in sync on read
+          // so a hand-edited DB row can't desync the roll-up.
+          item.done = subItems.every((sub) => sub.done)
         }
         existing.push(item)
         itemsByChecklist.set(row.checklist_id, existing)
@@ -1268,6 +1412,10 @@ export class AppDataStore {
         }
         if (row.assignee_id) {
           item.assigneeId = row.assignee_id
+        }
+        const subItems = normalizeSubItems(row.sub_items, { withDone: false })
+        if (subItems.length > 0) {
+          item.subItems = subItems
         }
         const allForTemplate = templateItemsByTemplate.get(row.template_id) ?? []
         allForTemplate.push(item)
@@ -1376,11 +1524,18 @@ export class AppDataStore {
           clientId: row.client_id ?? '',
           assigneeId: row.assignee_id,
           frequency: row.frequency,
-          nextDueDate: row.next_due_date.toISOString().slice(0, 10),
+          nextDueDate: row.next_due_date ? row.next_due_date.toISOString().slice(0, 10) : '',
           active: row.active,
           isStandard: Boolean(row.is_standard),
           viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
           editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
+          // Specific-months scheduling fields (only meaningful for that frequency).
+          scheduledMonths: Array.isArray(row.scheduled_months)
+            ? row.scheduled_months.filter((m) => Number.isInteger(m) && m >= 1 && m <= 12)
+            : [],
+          ...(typeof row.due_day_of_month === 'number'
+            ? { dueDayOfMonth: row.due_day_of_month }
+            : {}),
           stages: stagesByTemplate.get(row.id) ?? [],
           items: templateItemsByTemplate.get(row.id) ?? [],
         })),
@@ -1586,8 +1741,8 @@ export class AppDataStore {
         for (const template of data.checklistTemplates ?? []) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
             `,
             [
               template.id,
@@ -1596,11 +1751,16 @@ export class AppDataStore {
               template.clientId ? template.clientId : null,
               template.assigneeId,
               template.frequency,
-              template.nextDueDate,
+              // Specific-months templates have no next-due date.
+              template.nextDueDate ? template.nextDueDate : null,
               template.active,
               Boolean(template.isStandard),
               Array.isArray(template.viewerIds) ? template.viewerIds : [],
               Array.isArray(template.editorIds) ? template.editorIds : [],
+              Array.isArray(template.scheduledMonths)
+                ? template.scheduledMonths.filter((m) => Number.isInteger(m) && m >= 1 && m <= 12)
+                : [],
+              typeof template.dueDayOfMonth === 'number' ? template.dueDayOfMonth : null,
             ],
           )
 
@@ -1630,10 +1790,19 @@ export class AppDataStore {
             for (const [index, item] of (stage.items ?? []).entries()) {
               await client.query(
                 `
-                  insert into checklist_template_items (id, template_id, label, sort_order, due_date, assignee_id, stage_id, updated_at)
-                  values ($1, $2, $3, $4, $5, $6, $7, now())
+                  insert into checklist_template_items (id, template_id, label, sort_order, due_date, assignee_id, stage_id, sub_items, updated_at)
+                  values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now())
                 `,
-                [item.id, template.id, item.label, index, item.dueDate ?? null, item.assigneeId ?? null, stage.id],
+                [
+                  item.id,
+                  template.id,
+                  item.label,
+                  index,
+                  item.dueDate ?? null,
+                  item.assigneeId ?? null,
+                  stage.id,
+                  JSON.stringify(normalizeSubItems(item.subItems, { withDone: false })),
+                ],
               )
             }
           }
@@ -1663,12 +1832,24 @@ export class AppDataStore {
           )
 
           for (const [index, item] of checklist.items.entries()) {
+            const subItems = normalizeSubItems(item.subItems, { withDone: true })
+            // `done` is derived for items with sub-items — persist the roll-up.
+            const itemDone = subItems.length > 0 ? subItems.every((sub) => sub.done) : Boolean(item.done)
             await client.query(
               `
-                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, assignee_id, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, now())
+                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, assignee_id, sub_items, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now())
               `,
-              [item.id, checklist.id, item.label, item.done, index, item.dueDate ?? null, item.assigneeId ?? null],
+              [
+                item.id,
+                checklist.id,
+                item.label,
+                itemDone,
+                index,
+                item.dueDate ?? null,
+                item.assigneeId ?? null,
+                JSON.stringify(subItems),
+              ],
             )
           }
         }
@@ -2076,14 +2257,19 @@ export class AppDataStore {
       stageId: checklist.stageId ?? null,
       stageIndex: typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0,
       stageCount: typeof checklist.stageCount === 'number' ? checklist.stageCount : 1,
-      items: checklist.items.map((item, index) => ({
-        ...item,
-        id: item.id ?? `item-${randomUUID().slice(0, 8)}`,
-        done: Boolean(item.done),
-        sortOrder: index,
-        dueDate: item.dueDate ?? null,
-        assigneeId: item.assigneeId ?? null,
-      })),
+      items: checklist.items.map((item, index) => {
+        const subItems = normalizeSubItems(item.subItems, { withDone: true })
+        return {
+          ...item,
+          id: item.id ?? `item-${randomUUID().slice(0, 8)}`,
+          // `done` is derived for items with sub-items.
+          done: subItems.length > 0 ? subItems.every((sub) => sub.done) : Boolean(item.done),
+          sortOrder: index,
+          dueDate: item.dueDate ?? null,
+          assigneeId: item.assigneeId ?? null,
+          subItems,
+        }
+      }),
     }
     if (!nextChecklist.caseId) {
       nextChecklist.caseId = nextChecklist.id
@@ -2119,10 +2305,19 @@ export class AppDataStore {
         for (const item of nextChecklist.items) {
           await client.query(
             `
-              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, assignee_id, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, now())
+              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, assignee_id, sub_items, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now())
             `,
-            [item.id, nextChecklist.id, item.label, item.done, item.sortOrder, item.dueDate ?? null, item.assigneeId ?? null],
+            [
+              item.id,
+              nextChecklist.id,
+              item.label,
+              item.done,
+              item.sortOrder,
+              item.dueDate ?? null,
+              item.assigneeId ?? null,
+              JSON.stringify(Array.isArray(item.subItems) ? item.subItems : []),
+            ],
           )
         }
 
@@ -2152,22 +2347,57 @@ export class AppDataStore {
     return data.checklists[0]
   }
 
-  async toggleChecklistItem(checklistId, itemId) {
+  /**
+   * Toggle a checklist item, or a sub-item when `subItemId` is given.
+   *
+   * - No `subItemId`: toggle the item. If the item has sub-items, all of them
+   *   are set to the new value (check parent → all subs checked; uncheck → all
+   *   unchecked) and the parent `done` is recomputed as the roll-up. Items with
+   *   no sub-items toggle exactly as before.
+   * - With `subItemId`: toggle that sub-item, then recompute the parent `done`.
+   *
+   * The parent's stored `done` is always kept in sync so every existing
+   * `item.done` reader (progress, Gantt, stage hand-off) works unchanged.
+   */
+  async toggleChecklistItem(checklistId, itemId, subItemId) {
     if (this.pool) {
-      const result = await this.pool.query(
-        `
-          update checklist_items
-          set done = not done,
-              updated_at = now()
-          where checklist_id = $1 and id = $2
-          returning checklist_id
-        `,
+      // Read-modify-write: sub-item roll-up can't be expressed as a single SQL
+      // update, so load the item, mutate the JSONB, and persist atomically.
+      const itemResult = await this.pool.query(
+        `select id, done, sub_items from checklist_items where checklist_id = $1 and id = $2`,
         [checklistId, itemId],
       )
-
-      if (!result.rowCount) {
+      if (!itemResult.rowCount) {
         return null
       }
+      const row = itemResult.rows[0]
+      const subItems = normalizeSubItems(row.sub_items, { withDone: true })
+      let nextDone
+      let nextSubItems = subItems
+
+      if (subItemId) {
+        if (subItems.length === 0) return null
+        const target = subItems.find((sub) => sub.id === subItemId)
+        if (!target) return null
+        nextSubItems = subItems.map((sub) =>
+          sub.id === subItemId ? { ...sub, done: !sub.done } : sub,
+        )
+        nextDone = nextSubItems.every((sub) => sub.done)
+      } else if (subItems.length > 0) {
+        // Toggling a parent with sub-items cascades to every sub-item.
+        const cascadeValue = !subItems.every((sub) => sub.done)
+        nextSubItems = subItems.map((sub) => ({ ...sub, done: cascadeValue }))
+        nextDone = cascadeValue
+      } else {
+        nextDone = !row.done
+      }
+
+      await this.pool.query(
+        `update checklist_items
+         set done = $3, sub_items = $4::jsonb, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+        [checklistId, itemId, nextDone, JSON.stringify(nextSubItems)],
+      )
 
       const data = await this.read()
       const updated = data.checklists.find((checklist) => checklist.id === checklistId) ?? null
@@ -2177,23 +2407,48 @@ export class AppDataStore {
 
     const data = await readJson(localDataPath)
     let updatedChecklist = null
+    let itemUpdated = false
 
     data.checklists = data.checklists.map((checklist) => {
       if (checklist.id !== checklistId) {
         return checklist
       }
 
-      let itemUpdated = false
       const items = checklist.items.map((item) => {
         if (item.id !== itemId) {
           return item
         }
 
-        itemUpdated = true
-        return {
-          ...item,
-          done: !item.done,
+        const subItems = normalizeSubItems(item.subItems, { withDone: true })
+
+        if (subItemId) {
+          // Toggle one sub-item, then recompute the parent roll-up.
+          if (subItems.length === 0) return item
+          if (!subItems.some((sub) => sub.id === subItemId)) return item
+          const nextSubItems = subItems.map((sub) =>
+            sub.id === subItemId ? { ...sub, done: !sub.done } : sub,
+          )
+          itemUpdated = true
+          return {
+            ...item,
+            subItems: nextSubItems,
+            done: nextSubItems.every((sub) => sub.done),
+          }
         }
+
+        if (subItems.length > 0) {
+          // Toggling the parent cascades to every sub-item.
+          const cascadeValue = !subItems.every((sub) => sub.done)
+          itemUpdated = true
+          return {
+            ...item,
+            subItems: subItems.map((sub) => ({ ...sub, done: cascadeValue })),
+            done: cascadeValue,
+          }
+        }
+
+        itemUpdated = true
+        return { ...item, done: !item.done }
       })
 
       if (!itemUpdated) {
@@ -2591,6 +2846,117 @@ export class AppDataStore {
     if (!itemFound || !updatedChecklist) {
       return null
     }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  /**
+   * Add a sub-item (one nested level) under a checklist item. The new sub-item
+   * starts `done: false`, which makes a previously-complete parent incomplete —
+   * so the parent `done` roll-up is recomputed and persisted. Returns the
+   * updated checklist or null when the item is not found.
+   */
+  async addChecklistSubItem(checklistId, itemId, title) {
+    const trimmed = typeof title === 'string' ? title.trim() : ''
+    if (!trimmed) return null
+
+    if (this.pool) {
+      const itemResult = await this.pool.query(
+        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
+        [checklistId, itemId],
+      )
+      if (!itemResult.rowCount) return null
+      const subItems = normalizeSubItems(itemResult.rows[0].sub_items, { withDone: true })
+      const nextSubItems = [
+        ...subItems,
+        { id: `subitem-${randomUUID().slice(0, 8)}`, title: trimmed, done: false },
+      ]
+      await this.pool.query(
+        `update checklist_items
+         set sub_items = $3::jsonb, done = $4, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+        [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
+      )
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    let itemFound = false
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) return checklist
+      const items = checklist.items.map((item) => {
+        if (item.id !== itemId) return item
+        itemFound = true
+        const subItems = normalizeSubItems(item.subItems, { withDone: true })
+        const nextSubItems = [
+          ...subItems,
+          { id: `subitem-${randomUUID().slice(0, 8)}`, title: trimmed, done: false },
+        ]
+        return { ...item, subItems: nextSubItems, done: nextSubItems.every((sub) => sub.done) }
+      })
+      updatedChecklist = { ...checklist, items }
+      return updatedChecklist
+    })
+    if (!itemFound || !updatedChecklist) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  /**
+   * Remove a sub-item from a checklist item, then recompute the parent `done`
+   * roll-up (removing the last incomplete sub-item can complete the parent;
+   * removing every sub-item makes the parent a flat item again). Returns the
+   * updated checklist or null when the item / sub-item is not found.
+   */
+  async removeChecklistSubItem(checklistId, itemId, subItemId) {
+    if (this.pool) {
+      const itemResult = await this.pool.query(
+        `select done, sub_items from checklist_items where checklist_id = $1 and id = $2`,
+        [checklistId, itemId],
+      )
+      if (!itemResult.rowCount) return null
+      const subItems = normalizeSubItems(itemResult.rows[0].sub_items, { withDone: true })
+      if (!subItems.some((sub) => sub.id === subItemId)) return null
+      const nextSubItems = subItems.filter((sub) => sub.id !== subItemId)
+      // With sub-items the parent is the roll-up; with none left, keep its
+      // current stored `done`.
+      const nextDone =
+        nextSubItems.length > 0
+          ? nextSubItems.every((sub) => sub.done)
+          : Boolean(itemResult.rows[0].done)
+      await this.pool.query(
+        `update checklist_items
+         set sub_items = $3::jsonb, done = $4, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+        [checklistId, itemId, JSON.stringify(nextSubItems), nextDone],
+      )
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    let subItemFound = false
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) return checklist
+      const items = checklist.items.map((item) => {
+        if (item.id !== itemId) return item
+        const subItems = normalizeSubItems(item.subItems, { withDone: true })
+        if (!subItems.some((sub) => sub.id === subItemId)) return item
+        subItemFound = true
+        const nextSubItems = subItems.filter((sub) => sub.id !== subItemId)
+        const nextDone =
+          nextSubItems.length > 0
+            ? nextSubItems.every((sub) => sub.done)
+            : Boolean(item.done)
+        return { ...item, subItems: nextSubItems, done: nextDone }
+      })
+      updatedChecklist = { ...checklist, items }
+      return updatedChecklist
+    })
+    if (!subItemFound || !updatedChecklist) return null
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return updatedChecklist
   }

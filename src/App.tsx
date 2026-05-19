@@ -12,6 +12,7 @@ import { AppContext, useAppContext, type AppContextValue } from './AppContext'
 import { AppLayout } from './components/AppLayout'
 import { SignInScreen } from './components/SignInScreen'
 import {
+  addChecklistSubItemRequest,
   appendChecklistItemsRequest,
   applyTemplateToClientRequest,
   approveTimeEntriesBatchRequest,
@@ -19,16 +20,17 @@ import {
   createChecklistRequest,
   createStandardTemplateRequest,
   createTimeEntry,
-  generateChecklistFromTemplateRequest,
   deleteChecklistItemRequest,
   deleteTimeEntryRequest,
   fetchAppData,
   fetchFirmSettings,
   fetchPublicFirmSettings,
   fetchSession,
+  generateChecklistFromTemplateRequest,
   lockTimesheetRequest,
   logoutSession,
   rejectTimeEntryRequest,
+  removeChecklistSubItemRequest,
   reorderChecklistItemsRequest,
   saveAppData,
   setChecklistViewersRequest,
@@ -649,6 +651,78 @@ function App() {
     }
   }
 
+  // Sub-item mutations on live checklists go through dedicated endpoints
+  // (consistent with the other live-checklist item endpoints) and merge the
+  // server-confirmed checklist back in. Each early-returns in preview mode.
+  const toggleSubItem = async (checklistId: string, itemId: string, subItemId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updatedChecklist = await toggleChecklistItemRequest(checklistId, itemId, subItemId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updatedChecklist : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  const addSubItem = async (checklistId: string, itemId: string, title: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updatedChecklist = await addChecklistSubItemRequest(checklistId, itemId, title)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updatedChecklist : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  const removeSubItem = async (checklistId: string, itemId: string, subItemId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updatedChecklist = await removeChecklistSubItemRequest(checklistId, itemId, subItemId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updatedChecklist : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
   const setChecklistViewers = async (
     checklistId: string,
     viewerIds: string[],
@@ -773,6 +847,74 @@ function App() {
     mutateStage(templateId, stageId, (stage) => ({
       ...stage,
       items: stage.items.filter((item) => item.id !== itemId),
+    }))
+  }
+
+  // Template-item sub-items. Edited through the template-save path (like every
+  // other template-item edit), so they go via mutateStage / updateWorkspaceData
+  // — which already early-returns in preview mode.
+  const addChecklistTemplateSubItem = (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    title: string,
+  ) => {
+    const trimmed = title.trim()
+    if (!trimmed) return
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              subItems: [
+                ...(item.subItems ?? []),
+                { id: makeId('subitem'), title: trimmed },
+              ],
+            }
+          : item,
+      ),
+    }))
+  }
+
+  const updateChecklistTemplateSubItem = (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => {
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              subItems: (item.subItems ?? []).map((sub) =>
+                sub.id === subItemId ? { ...sub, title } : sub,
+              ),
+            }
+          : item,
+      ),
+    }))
+  }
+
+  const removeChecklistTemplateSubItem = (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+  ) => {
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              subItems: (item.subItems ?? []).filter((sub) => sub.id !== subItemId),
+            }
+          : item,
+      ),
     }))
   }
 
@@ -1297,6 +1439,9 @@ function App() {
     lockTimesheet,
     unlockTimesheet,
     toggleChecklistItem,
+    toggleSubItem,
+    addSubItem,
+    removeSubItem,
     setChecklistViewers,
     setTemplateViewers,
     addChecklistTemplate,
@@ -1309,6 +1454,9 @@ function App() {
     reorderChecklistTemplateItems,
     bulkAddChecklistTemplateItems,
     removeChecklistTemplateItem,
+    addChecklistTemplateSubItem,
+    updateChecklistTemplateSubItem,
+    removeChecklistTemplateSubItem,
     addTemplateStage,
     removeTemplateStage,
     patchTemplateStage,

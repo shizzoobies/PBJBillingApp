@@ -1,6 +1,12 @@
 export type Role = 'employee' | 'owner'
 export type BillingMode = 'hourly' | 'subscription'
-export type ChecklistFrequency = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'annually'
+export type ChecklistFrequency =
+  | 'daily'
+  | 'weekly'
+  | 'monthly'
+  | 'quarterly'
+  | 'annually'
+  | 'specific-months'
 
 export type Employee = {
   id: string
@@ -89,12 +95,38 @@ export type TimesheetLock = {
   lockedAt: string
 }
 
+/**
+ * A nested checklist sub-item. Sub-items nest exactly one level under a
+ * parent `ChecklistItem` / `ChecklistTemplateItem` — no deeper nesting. A
+ * sub-item is deliberately simple: it carries no per-sub-item assignee or due
+ * date (the parent item carries those).
+ */
+export type SubChecklistItem = {
+  id: string
+  title: string
+  done: boolean
+}
+
+/** A nested sub-item on a template item. Template sub-items have no `done`. */
+export type SubChecklistTemplateItem = {
+  id: string
+  title: string
+}
+
 export type ChecklistItem = {
   id: string
   label: string
+  /**
+   * For items WITH sub-items this is DERIVED — `true` exactly when every
+   * sub-item is done. It is kept in sync on every sub-item change so all
+   * existing `item.done` readers (progress ratios, stage hand-off) work
+   * unchanged. Items with no sub-items behave exactly as before.
+   */
   done: boolean
   dueDate?: string
   assigneeId?: string
+  /** One level of nested sub-items. Empty/undefined when the item is flat. */
+  subItems?: SubChecklistItem[]
 }
 
 export type ChecklistTemplateItem = {
@@ -102,6 +134,8 @@ export type ChecklistTemplateItem = {
   label: string
   dueDate?: string
   assigneeId?: string
+  /** Sub-items defined in the template; copied with fresh ids on materialize. */
+  subItems?: SubChecklistTemplateItem[]
 }
 
 export type TemplateStage = {
@@ -134,6 +168,18 @@ export type ChecklistTemplate = {
   frequency: ChecklistFrequency
   nextDueDate: string
   active: boolean
+  /**
+   * Only meaningful when `frequency === 'specific-months'`: the designated
+   * month numbers (1–12) the checklist runs in. `nextDueDate` advance logic is
+   * ignored in that mode.
+   */
+  scheduledMonths?: number[]
+  /**
+   * Only meaningful when `frequency === 'specific-months'`: the day of month
+   * (1–28; capped to avoid invalid dates in short months) the checklist is due
+   * in each designated month. Defaults to the last day of month when unset.
+   */
+  dueDayOfMonth?: number
   /**
    * A standard template is client-agnostic — it has no client, never
    * materializes checklists on its own, and exists purely as a reusable

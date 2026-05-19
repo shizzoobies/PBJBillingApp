@@ -266,16 +266,68 @@ export async function unlockTimesheetRequest(userId: string, period: string) {
   return (await response.json()) as { ok: boolean; removed: boolean }
 }
 
-export async function toggleChecklistItemRequest(checklistId: string, itemId: string) {
+export async function toggleChecklistItemRequest(
+  checklistId: string,
+  itemId: string,
+  subItemId?: string,
+) {
   const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}/toggle`, {
     credentials: 'same-origin',
     method: 'POST',
+    ...(subItemId
+      ? {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subItemId }),
+        }
+      : {}),
   })
 
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to update checklist item (${response.status})`)
   }
 
+  return (await response.json()) as Checklist
+}
+
+/** Add a sub-item (one nested level) under a live-checklist item. */
+export async function addChecklistSubItemRequest(
+  checklistId: string,
+  itemId: string,
+  title: string,
+) {
+  const response = await apiFetch(
+    `/api/checklists/${checklistId}/items/${itemId}/sub-items`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to add sub-item (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
+/** Remove a sub-item from a live-checklist item. */
+export async function removeChecklistSubItemRequest(
+  checklistId: string,
+  itemId: string,
+  subItemId: string,
+) {
+  const response = await apiFetch(
+    `/api/checklists/${checklistId}/items/${itemId}/sub-items/${subItemId}`,
+    {
+      credentials: 'same-origin',
+      method: 'DELETE',
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to remove sub-item (${response.status})`)
+  }
   return (await response.json()) as Checklist
 }
 
