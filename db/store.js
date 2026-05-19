@@ -249,6 +249,7 @@ function ensureTemplateStages(template) {
       name: stage.name || `Stage ${index + 1}`,
       assigneeId: stage.assigneeId || template.assigneeId,
       offsetDays: Number.isFinite(Number(stage.offsetDays)) ? Number(stage.offsetDays) : 0,
+      ...(stage.dueDate ? { dueDate: stage.dueDate } : {}),
       viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
       editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
       items: Array.isArray(stage.items) ? stage.items.map((item) => ({ ...item })) : [],
@@ -267,6 +268,20 @@ function ensureTemplateStages(template) {
     items: flatItems,
   }
   return { ...template, viewerIds, editorIds, stages: [stage] }
+}
+
+/**
+ * Resolve a stage's due date. An explicit `stage.dueDate` always wins over the
+ * `offsetDays` calculation. Otherwise the due date is `baseDate` shifted by the
+ * stage's `offsetDays`. Note: per-stage *repeat cadence* is not supported — the
+ * template repeats as a whole; only the due date can be per-stage.
+ */
+function resolveStageDueDate(stage, baseDate) {
+  if (stage && stage.dueDate) {
+    return stage.dueDate
+  }
+  const offset = Number(stage && stage.offsetDays) || 0
+  return offset ? addDays(baseDate, offset) : baseDate
 }
 
 function buildChecklistFromStage({ template, stage, stageIndex, stageCount, caseId, dueDate }) {
@@ -409,7 +424,14 @@ function materializeRecurringChecklists(data) {
 
   for (const template of nextTemplates) {
     const stages = template.stages ?? []
-    if (!template.active || !template.nextDueDate || stages.length === 0 || stages[0].items.length === 0) {
+    // Standard templates are blueprints only — they never materialize.
+    if (
+      template.isStandard ||
+      !template.active ||
+      !template.nextDueDate ||
+      stages.length === 0 ||
+      stages[0].items.length === 0
+    ) {
       continue
     }
 
@@ -419,9 +441,7 @@ function materializeRecurringChecklists(data) {
 
       if (!existingKeys.has(instanceKey)) {
         const stageOne = stages[0]
-        const stageOneDue = stageOne.offsetDays
-          ? addDays(template.nextDueDate, Number(stageOne.offsetDays))
-          : template.nextDueDate
+        const stageOneDue = resolveStageDueDate(stageOne, template.nextDueDate)
         const caseId = `case-${randomUUID().slice(0, 8)}`
         nextChecklists.push(
           buildChecklistFromStage({
@@ -485,10 +505,8 @@ function buildSpawnedNextStageChecklist({ template, justCompletedChecklist }) {
   if (nextStageIndex >= stages.length) return null
   const nextStage = stages[nextStageIndex]
   if (!nextStage || (nextStage.items ?? []).length === 0) return null
-  const offset = Number(nextStage.offsetDays) || 0
-  const dueDate = offset
-    ? addDays(justCompletedChecklist.dueDate, offset)
-    : justCompletedChecklist.dueDate
+  // An explicit per-stage dueDate wins over the offsetDays calculation.
+  const dueDate = resolveStageDueDate(nextStage, justCompletedChecklist.dueDate)
   return buildChecklistFromStage({
     template,
     stage: nextStage,
@@ -730,6 +748,37 @@ export class AppDataStore {
       `)
       await this.pool.query(`alter table time_entries add column if not exists task_id text`)
 
+      // Time approval workflow. Detect whether the column already exists BEFORE
+      // adding it: if this is the first deploy of the feature, every existing
+      // entry is backfilled to 'approved' so there's no pending backlog. On
+      // subsequent restarts the column exists and we skip the backfill.
+      const approvalColumnExists = await this.pool.query(`
+        select 1 from information_schema.columns
+        where table_name = 'time_entries' and column_name = 'approval_status'
+      `)
+      await this.pool.query(
+        `alter table time_entries add column if not exists approval_status text not null default 'pending'`,
+      )
+      await this.pool.query(`alter table time_entries add column if not exists approval_note text`)
+      await this.pool.query(`alter table time_entries add column if not exists approved_by text`)
+      await this.pool.query(`alter table time_entries add column if not exists approved_at timestamptz`)
+      if (approvalColumnExists.rowCount === 0) {
+        await this.pool.query(`update time_entries set approval_status = 'approved'`)
+        console.log('[migrate] backfilled existing time entries to approval_status = approved')
+      }
+
+      // Month-end timesheet locks: one per employee per 'YYYY-MM' period.
+      await this.pool.query(`
+        create table if not exists timesheet_locks (
+          id text primary key,
+          user_id text not null,
+          period text not null,
+          locked_by text not null,
+          locked_at timestamptz not null default now(),
+          unique (user_id, period)
+        )
+      `)
+
       await this.pool.query(`
         create table if not exists checklists (
           id text primary key,
@@ -799,6 +848,18 @@ export class AppDataStore {
           add column if not exists editor_ids text[] not null default '{}'
       `)
 
+      // Wave 2: standard (client-agnostic) templates. is_standard rows are
+      // reusable blueprints with no client; client_id is relaxed to nullable
+      // so standard rows can omit it. Non-standard templates still require a
+      // client (enforced in the API layer).
+      await this.pool.query(`
+        alter table checklist_templates
+          add column if not exists is_standard boolean not null default false
+      `)
+      await this.pool.query(`
+        alter table checklist_templates alter column client_id drop not null
+      `)
+
       await this.pool.query(`
         create table if not exists checklist_template_items (
           id text primary key,
@@ -833,6 +894,8 @@ export class AppDataStore {
       await this.pool.query(`
         create index if not exists checklist_template_stages_template_idx on checklist_template_stages(template_id)
       `)
+      // Wave 2: per-stage explicit due date (overrides offset_days when set).
+      await this.pool.query(`alter table checklist_template_stages add column if not exists due_date date`)
       await this.pool.query(`alter table checklists add column if not exists case_id text`)
       await this.pool.query(`alter table checklists add column if not exists stage_id text`)
       await this.pool.query(`alter table checklists add column if not exists stage_index int`)
@@ -1101,6 +1164,7 @@ export class AppDataStore {
         checklistTemplatesResult,
         checklistTemplateItemsResult,
         checklistTemplateStagesResult,
+        timesheetLocksResult,
       ] =
         await Promise.all([
           this.pool.query(`
@@ -1129,7 +1193,8 @@ export class AppDataStore {
             order by client_id asc, user_id asc
           `),
           this.pool.query(`
-            select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id
+            select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
+                   approval_status, approval_note, approved_by, approved_at
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -1145,7 +1210,7 @@ export class AppDataStore {
             order by checklist_id asc, sort_order asc, id asc
           `),
           this.pool.query(`
-            select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids
+            select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard
             from checklist_templates
             order by title asc
           `),
@@ -1155,9 +1220,14 @@ export class AppDataStore {
             order by template_id asc, sort_order asc, id asc
           `),
           this.pool.query(`
-            select id, template_id, name, assignee_id, offset_days, position, viewer_ids, editor_ids
+            select id, template_id, name, assignee_id, offset_days, due_date, position, viewer_ids, editor_ids
             from checklist_template_stages
             order by template_id asc, position asc, id asc
+          `),
+          this.pool.query(`
+            select id, user_id, period, locked_by, locked_at
+            from timesheet_locks
+            order by period desc, user_id asc
           `),
         ])
 
@@ -1221,6 +1291,9 @@ export class AppDataStore {
           editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
           items: templateItemsByStage.get(row.id) ?? [],
         }
+        if (row.due_date) {
+          stage.dueDate = row.due_date.toISOString().slice(0, 10)
+        }
         const list = stagesByTemplate.get(row.template_id) ?? []
         list.push(stage)
         stagesByTemplate.set(row.template_id, list)
@@ -1276,6 +1349,10 @@ export class AppDataStore {
           description: row.description,
           billable: row.billable,
           taskId: row.task_id ?? null,
+          approvalStatus: row.approval_status ?? 'approved',
+          approvalNote: row.approval_note ?? undefined,
+          approvedBy: row.approved_by ?? undefined,
+          approvedAt: row.approved_at ? row.approved_at.toISOString() : undefined,
         })),
         checklists: checklistsResult.rows.map((row) => ({
           id: row.id,
@@ -1296,15 +1373,23 @@ export class AppDataStore {
         checklistTemplates: checklistTemplatesResult.rows.map((row) => ({
           id: row.id,
           title: row.title,
-          clientId: row.client_id,
+          clientId: row.client_id ?? '',
           assigneeId: row.assignee_id,
           frequency: row.frequency,
           nextDueDate: row.next_due_date.toISOString().slice(0, 10),
           active: row.active,
+          isStandard: Boolean(row.is_standard),
           viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
           editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
           stages: stagesByTemplate.get(row.id) ?? [],
           items: templateItemsByTemplate.get(row.id) ?? [],
+        })),
+        timesheetLocks: timesheetLocksResult.rows.map((row) => ({
+          id: row.id,
+          userId: row.user_id,
+          period: row.period,
+          lockedBy: row.locked_by,
+          lockedAt: row.locked_at ? row.locked_at.toISOString() : nowIso(),
         })),
       }
 
@@ -1333,8 +1418,26 @@ export class AppDataStore {
       data.clients = data.clients.map(normalizeClientProfile)
     }
     data.firmSettings = { ...DEFAULT_FIRM_SETTINGS, ...(data.firmSettings || {}) }
+
+    // Backfill the approval workflow for legacy file-fallback data. An entry
+    // with no `approvalStatus` predates the feature, so it's treated as
+    // 'approved' — no giant pending backlog on first run. Persisted below if
+    // anything changed so the backfill happens exactly once.
+    let backfilled = false
+    if (Array.isArray(data.timeEntries)) {
+      data.timeEntries = data.timeEntries.map((entry) => {
+        if (entry && typeof entry.approvalStatus === 'string') return entry
+        backfilled = true
+        return { ...entry, approvalStatus: 'approved' }
+      })
+    }
+    if (!Array.isArray(data.timesheetLocks)) {
+      data.timesheetLocks = []
+      backfilled = true
+    }
+
     const materialized = materializeRecurringChecklists(data)
-    if (materialized.changed) {
+    if (materialized.changed || backfilled) {
       await writeFile(localDataPath, JSON.stringify(materialized.data, null, 2))
       return materialized.data
     }
@@ -1354,6 +1457,7 @@ export class AppDataStore {
         await client.query('delete from checklist_template_stages')
         await client.query('delete from checklist_templates')
         await client.query('delete from time_entries')
+        await client.query('delete from timesheet_locks')
         await client.query('delete from client_assignments')
         await client.query('delete from invoice_drafts')
         await client.query('delete from clients')
@@ -1447,8 +1551,9 @@ export class AppDataStore {
         for (const entry of data.timeEntries) {
           await client.query(
             `
-              insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+              insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
+                                        approval_status, approval_note, approved_by, approved_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
             `,
             [
               entry.id,
@@ -1456,28 +1561,44 @@ export class AppDataStore {
               entry.clientId,
               entry.date,
               entry.minutes,
-              entry.category,
+              entry.category ?? 'General',
               entry.description,
               entry.billable,
               entry.taskId ?? null,
+              entry.approvalStatus ?? 'approved',
+              entry.approvalNote ?? null,
+              entry.approvedBy ?? null,
+              entry.approvedAt ?? null,
             ],
+          )
+        }
+
+        for (const lock of data.timesheetLocks ?? []) {
+          await client.query(
+            `
+              insert into timesheet_locks (id, user_id, period, locked_by, locked_at)
+              values ($1, $2, $3, $4, $5)
+            `,
+            [lock.id, lock.userId, lock.period, lock.lockedBy, lock.lockedAt ?? nowIso()],
           )
         }
 
         for (const template of data.checklistTemplates ?? []) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
             `,
             [
               template.id,
               template.title,
-              template.clientId,
+              // Standard templates are client-agnostic — client_id may be empty.
+              template.clientId ? template.clientId : null,
               template.assigneeId,
               template.frequency,
               template.nextDueDate,
               template.active,
+              Boolean(template.isStandard),
               Array.isArray(template.viewerIds) ? template.viewerIds : [],
               Array.isArray(template.editorIds) ? template.editorIds : [],
             ],
@@ -1490,8 +1611,8 @@ export class AppDataStore {
           for (const [stageIdx, stage] of migratedTemplate.stages.entries()) {
             await client.query(
               `
-                insert into checklist_template_stages (id, template_id, name, assignee_id, offset_days, position, viewer_ids, editor_ids, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, now())
+                insert into checklist_template_stages (id, template_id, name, assignee_id, offset_days, due_date, position, viewer_ids, editor_ids, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
               `,
               [
                 stage.id,
@@ -1499,6 +1620,7 @@ export class AppDataStore {
                 stage.name,
                 stage.assigneeId || null,
                 Number(stage.offsetDays) || 0,
+                stage.dueDate || null,
                 stageIdx,
                 Array.isArray(stage.viewerIds) ? stage.viewerIds : [],
                 Array.isArray(stage.editorIds) ? stage.editorIds : [],
@@ -1566,17 +1688,19 @@ export class AppDataStore {
   }
 
   async createTimeEntry(entry) {
+    // New entries always enter the approval workflow as 'pending'.
     const nextEntry = {
       ...entry,
       id: entry.id ?? `time-${randomUUID().slice(0, 8)}`,
       taskId: entry.taskId ?? null,
+      approvalStatus: 'pending',
     }
 
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
         `,
         [
           nextEntry.id,
@@ -1584,10 +1708,11 @@ export class AppDataStore {
           nextEntry.clientId,
           nextEntry.date,
           nextEntry.minutes,
-          nextEntry.category,
+          nextEntry.category ?? 'General',
           nextEntry.description,
           nextEntry.billable,
           nextEntry.taskId,
+          nextEntry.approvalStatus,
         ],
       )
 
@@ -1598,6 +1723,258 @@ export class AppDataStore {
     data.timeEntries = [nextEntry, ...data.timeEntries]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return nextEntry
+  }
+
+  /**
+   * Look up a time entry by id from whichever backend is active.
+   * Returns the app-shaped entry (camelCase) or null.
+   */
+  async getTimeEntry(entryId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
+                approval_status, approval_note, approved_by, approved_at
+         from time_entries where id = $1`,
+        [entryId],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return {
+        id: row.id,
+        employeeId: row.user_id,
+        clientId: row.client_id,
+        date: row.entry_date.toISOString().slice(0, 10),
+        minutes: row.minutes,
+        category: row.category,
+        description: row.description,
+        billable: row.billable,
+        taskId: row.task_id ?? null,
+        approvalStatus: row.approval_status ?? 'approved',
+        approvalNote: row.approval_note ?? undefined,
+        approvedBy: row.approved_by ?? undefined,
+        approvedAt: row.approved_at ? row.approved_at.toISOString() : undefined,
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    return (data.timeEntries ?? []).find((entry) => entry.id === entryId) ?? null
+  }
+
+  /**
+   * Update mutable fields on a time entry. `patch` may carry minutes,
+   * description, billable, taskId, category, and the approval-workflow fields
+   * (approvalStatus, approvalNote, approvedBy, approvedAt). Returns the updated
+   * app-shaped entry or null when the entry doesn't exist.
+   */
+  async updateTimeEntry(entryId, patch) {
+    if (this.pool) {
+      const setClauses = []
+      const params = [entryId]
+      const map = {
+        minutes: 'minutes',
+        description: 'description',
+        billable: 'billable',
+        taskId: 'task_id',
+        category: 'category',
+        date: 'entry_date',
+        approvalStatus: 'approval_status',
+        approvalNote: 'approval_note',
+        approvedBy: 'approved_by',
+        approvedAt: 'approved_at',
+      }
+      for (const [appKey, dbCol] of Object.entries(map)) {
+        if (patch && Object.prototype.hasOwnProperty.call(patch, appKey)) {
+          let value = patch[appKey]
+          if ((appKey === 'taskId' || appKey === 'approvalNote' || appKey === 'approvedBy' ||
+               appKey === 'approvedAt') && (value === '' || value === undefined)) {
+            value = null
+          }
+          params.push(value)
+          setClauses.push(`${dbCol} = $${params.length}`)
+        }
+      }
+      if (setClauses.length === 0) return this.getTimeEntry(entryId)
+      setClauses.push('updated_at = now()')
+      const result = await this.pool.query(
+        `update time_entries set ${setClauses.join(', ')} where id = $1 returning id`,
+        params,
+      )
+      if (!result.rowCount) return null
+      return this.getTimeEntry(entryId)
+    }
+
+    const data = await readJson(localDataPath)
+    let updated = null
+    data.timeEntries = (data.timeEntries ?? []).map((entry) => {
+      if (entry.id !== entryId) return entry
+      const next = { ...entry }
+      for (const key of [
+        'minutes', 'description', 'billable', 'taskId', 'category', 'date',
+        'approvalStatus', 'approvalNote', 'approvedBy', 'approvedAt',
+      ]) {
+        if (patch && Object.prototype.hasOwnProperty.call(patch, key)) {
+          const value = patch[key]
+          if ((key === 'approvalNote' || key === 'approvedBy' || key === 'approvedAt') &&
+              (value === '' || value === undefined || value === null)) {
+            delete next[key]
+          } else if (key === 'taskId') {
+            next[key] = value || null
+          } else {
+            next[key] = value
+          }
+        }
+      }
+      updated = next
+      return next
+    })
+    if (!updated) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updated
+  }
+
+  async deleteTimeEntry(entryId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `delete from time_entries where id = $1 returning id`,
+        [entryId],
+      )
+      return result.rowCount > 0
+    }
+
+    const data = await readJson(localDataPath)
+    const before = (data.timeEntries ?? []).length
+    data.timeEntries = (data.timeEntries ?? []).filter((entry) => entry.id !== entryId)
+    if (data.timeEntries.length === before) return false
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return true
+  }
+
+  /** Approve a batch of time entries. Returns the count actually updated. */
+  async approveTimeEntries(entryIds, approverId) {
+    const ids = Array.isArray(entryIds) ? entryIds.filter((id) => typeof id === 'string') : []
+    if (ids.length === 0) return 0
+    const approvedAt = nowIso()
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update time_entries
+         set approval_status = 'approved', approved_by = $2, approved_at = $3,
+             approval_note = null, updated_at = now()
+         where id = any($1::text[])`,
+        [ids, approverId, approvedAt],
+      )
+      return result.rowCount
+    }
+
+    const data = await readJson(localDataPath)
+    let count = 0
+    const idSet = new Set(ids)
+    data.timeEntries = (data.timeEntries ?? []).map((entry) => {
+      if (!idSet.has(entry.id)) return entry
+      count += 1
+      const next = { ...entry, approvalStatus: 'approved', approvedBy: approverId, approvedAt }
+      delete next.approvalNote
+      return next
+    })
+    if (count > 0) {
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    return count
+  }
+
+  /** Create a timesheet lock and auto-approve that user's pending entries. */
+  async lockTimesheet(userId, period, lockedBy) {
+    const lockedAt = nowIso()
+    const id = `lock-${randomUUID().slice(0, 8)}`
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into timesheet_locks (id, user_id, period, locked_by, locked_at)
+         values ($1, $2, $3, $4, $5)
+         on conflict (user_id, period) do nothing`,
+        [id, userId, period, lockedBy, lockedAt],
+      )
+      // Locking signs off the month: auto-approve still-pending entries.
+      await this.pool.query(
+        `update time_entries
+         set approval_status = 'approved', approved_by = $3, approved_at = $4, updated_at = now()
+         where user_id = $1 and approval_status = 'pending'
+           and to_char(entry_date, 'YYYY-MM') = $2`,
+        [userId, period, lockedBy, lockedAt],
+      )
+      const result = await this.pool.query(
+        `select id, user_id, period, locked_by, locked_at from timesheet_locks
+         where user_id = $1 and period = $2`,
+        [userId, period],
+      )
+      const row = result.rows[0]
+      return row
+        ? {
+            id: row.id,
+            userId: row.user_id,
+            period: row.period,
+            lockedBy: row.locked_by,
+            lockedAt: row.locked_at ? row.locked_at.toISOString() : lockedAt,
+          }
+        : null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.timesheetLocks)) data.timesheetLocks = []
+    let lock = data.timesheetLocks.find((l) => l.userId === userId && l.period === period)
+    if (!lock) {
+      lock = { id, userId, period, lockedBy, lockedAt }
+      data.timesheetLocks.push(lock)
+    }
+    data.timeEntries = (data.timeEntries ?? []).map((entry) => {
+      if (
+        entry.employeeId === userId &&
+        entry.approvalStatus === 'pending' &&
+        typeof entry.date === 'string' &&
+        entry.date.slice(0, 7) === period
+      ) {
+        return { ...entry, approvalStatus: 'approved', approvedBy: lockedBy, approvedAt: lockedAt }
+      }
+      return entry
+    })
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return lock
+  }
+
+  /** Remove a timesheet lock. Returns true when a lock was removed. */
+  async unlockTimesheet(userId, period) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `delete from timesheet_locks where user_id = $1 and period = $2 returning id`,
+        [userId, period],
+      )
+      return result.rowCount > 0
+    }
+
+    const data = await readJson(localDataPath)
+    const before = (data.timesheetLocks ?? []).length
+    data.timesheetLocks = (data.timesheetLocks ?? []).filter(
+      (l) => !(l.userId === userId && l.period === period),
+    )
+    if (data.timesheetLocks.length === before) return false
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return true
+  }
+
+  /** True when the given user's timesheet is locked for the given 'YYYY-MM'. */
+  async isTimesheetLocked(userId, period) {
+    if (!userId || !period) return false
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select 1 from timesheet_locks where user_id = $1 and period = $2`,
+        [userId, period],
+      )
+      return result.rowCount > 0
+    }
+    const data = await readJson(localDataPath)
+    return (data.timesheetLocks ?? []).some(
+      (l) => l.userId === userId && l.period === period,
+    )
   }
 
   /**
@@ -2935,6 +3312,15 @@ export class AppDataStore {
       if (typeof patch?.name === 'string' && patch.name.trim()) next.name = patch.name.trim()
       if (typeof patch?.assigneeId === 'string' && patch.assigneeId) next.assigneeId = patch.assigneeId
       if (Number.isFinite(Number(patch?.offsetDays))) next.offsetDays = Number(patch.offsetDays)
+      // Per-stage explicit due date. An empty string / null clears it (falls
+      // back to the offsetDays calculation); a yyyy-mm-dd string sets it.
+      if (patch && Object.prototype.hasOwnProperty.call(patch, 'dueDate')) {
+        if (typeof patch.dueDate === 'string' && patch.dueDate.trim()) {
+          next.dueDate = patch.dueDate.trim()
+        } else {
+          delete next.dueDate
+        }
+      }
       if (Array.isArray(patch?.viewerIds)) {
         next.viewerIds = [...new Set(patch.viewerIds.filter((id) => typeof id === 'string'))]
       }
@@ -2971,6 +3357,157 @@ export class AppDataStore {
     const nextData = { ...data, checklistTemplates: nextTemplates }
     await this._persistTemplate(nextData, source)
     return nextTemplates.find((t) => t.id === templateId)
+  }
+
+  // ---- Wave 2: standard templates + apply/copy + on-demand materialization ----
+
+  /**
+   * Create a standard (client-agnostic) template. A standard template is a
+   * reusable blueprint: it has no client, is_standard = true, and never
+   * materializes checklists on its own. Owner-only — caller enforces auth.
+   */
+  async createStandardTemplate(input) {
+    const data = await this.read()
+    const stagesInput = Array.isArray(input?.stages) ? input.stages : []
+    const stages = stagesInput.map((stage, index) => ({
+      id: `stage-${randomUUID().slice(0, 8)}`,
+      name: typeof stage?.name === 'string' && stage.name.trim() ? stage.name.trim() : `Stage ${index + 1}`,
+      assigneeId: typeof stage?.assigneeId === 'string' ? stage.assigneeId : '',
+      offsetDays: Number.isFinite(Number(stage?.offsetDays)) ? Number(stage.offsetDays) : 0,
+      ...(typeof stage?.dueDate === 'string' && stage.dueDate.trim()
+        ? { dueDate: stage.dueDate.trim() }
+        : {}),
+      viewerIds: Array.isArray(stage?.viewerIds) ? [...stage.viewerIds] : [],
+      editorIds: Array.isArray(stage?.editorIds) ? [...stage.editorIds] : [],
+      items: Array.isArray(stage?.items)
+        ? stage.items
+            .filter((item) => typeof item?.label === 'string' && item.label.trim())
+            .map((item) => ({
+              id: `template-item-${randomUUID().slice(0, 8)}`,
+              label: item.label.trim(),
+              ...(item.dueDate ? { dueDate: item.dueDate } : {}),
+              ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
+            }))
+        : [],
+    }))
+
+    const template = {
+      id: `template-${randomUUID().slice(0, 8)}`,
+      title: typeof input?.title === 'string' && input.title.trim() ? input.title.trim() : 'Standard template',
+      clientId: '',
+      assigneeId: typeof input?.assigneeId === 'string' ? input.assigneeId : '',
+      frequency: typeof input?.frequency === 'string' ? input.frequency : 'monthly',
+      nextDueDate: typeof input?.nextDueDate === 'string' && input.nextDueDate
+        ? input.nextDueDate
+        : formatDateOnly(new Date()),
+      active: false,
+      isStandard: true,
+      viewerIds: [],
+      editorIds: [],
+      stages: stages.length > 0
+        ? stages
+        : [
+            {
+              id: `stage-${randomUUID().slice(0, 8)}`,
+              name: 'Stage 1',
+              assigneeId: typeof input?.assigneeId === 'string' ? input.assigneeId : '',
+              offsetDays: 0,
+              viewerIds: [],
+              editorIds: [],
+              items: [],
+            },
+          ],
+    }
+
+    const nextData = {
+      ...data,
+      checklistTemplates: [...(data.checklistTemplates ?? []), template],
+    }
+    await this.write(nextData)
+    return template
+  }
+
+  /**
+   * Copy a source template (standard OR regular) onto a client, producing a
+   * NEW regular client-bound template. Fresh ids are generated for the new
+   * template and every stage/item. The copy's isStandard is always false.
+   * Owner-only — caller enforces auth.
+   */
+  async copyTemplateToClient(sourceTemplateId, { clientId, firstDueDate, frequency } = {}) {
+    const data = await this.read()
+    const source = (data.checklistTemplates ?? []).find((t) => t.id === sourceTemplateId)
+    if (!source) return null
+
+    const migrated = ensureTemplateStages(source)
+    const copy = {
+      id: `template-${randomUUID().slice(0, 8)}`,
+      title: source.title,
+      clientId,
+      assigneeId: source.assigneeId || '',
+      frequency: typeof frequency === 'string' && frequency ? frequency : source.frequency,
+      nextDueDate: typeof firstDueDate === 'string' && firstDueDate
+        ? firstDueDate
+        : source.nextDueDate || formatDateOnly(new Date()),
+      active: true,
+      isStandard: false,
+      viewerIds: Array.isArray(source.viewerIds) ? [...source.viewerIds] : [],
+      editorIds: Array.isArray(source.editorIds) ? [...source.editorIds] : [],
+      stages: (migrated.stages ?? []).map((stage) => ({
+        id: `stage-${randomUUID().slice(0, 8)}`,
+        name: stage.name,
+        assigneeId: stage.assigneeId || source.assigneeId || '',
+        offsetDays: Number(stage.offsetDays) || 0,
+        ...(stage.dueDate ? { dueDate: stage.dueDate } : {}),
+        viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
+        editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
+        items: (stage.items ?? []).map((item) => ({
+          id: `template-item-${randomUUID().slice(0, 8)}`,
+          label: item.label,
+          ...(item.dueDate ? { dueDate: item.dueDate } : {}),
+          ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
+        })),
+      })),
+    }
+
+    const nextData = {
+      ...data,
+      checklistTemplates: [...(data.checklistTemplates ?? []), copy],
+    }
+    await this.write(nextData)
+    return copy
+  }
+
+  /**
+   * Materialize a Stage-1 checklist instance from a template on demand —
+   * powers "Generate a task now" and the "Start the first one now" option.
+   * `dueDate` defaults to the template's nextDueDate. Returns the created
+   * checklist, or null if the template has no items in stage 1.
+   * Owner-only — caller enforces auth.
+   */
+  async generateChecklistFromTemplate(templateId, { dueDate } = {}) {
+    const data = await this.read()
+    const rawTemplate = (data.checklistTemplates ?? []).find((t) => t.id === templateId)
+    if (!rawTemplate) return null
+    const template = ensureTemplateStages(rawTemplate)
+    const stages = template.stages ?? []
+    if (stages.length === 0 || (stages[0].items ?? []).length === 0) return null
+    const stageOne = stages[0]
+    const baseDate = typeof dueDate === 'string' && dueDate
+      ? dueDate
+      : template.nextDueDate || formatDateOnly(new Date())
+    const stageOneDue = resolveStageDueDate(stageOne, baseDate)
+    const caseId = `case-${randomUUID().slice(0, 8)}`
+    const checklist = buildChecklistFromStage({
+      template,
+      stage: stageOne,
+      stageIndex: 0,
+      stageCount: stages.length,
+      caseId,
+      dueDate: stageOneDue,
+    })
+    const created = await this.createChecklist(checklist)
+    await this.grantClientVisibility(created.clientId, created.assigneeId)
+    return created
   }
 
   /**

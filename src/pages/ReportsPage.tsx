@@ -3,11 +3,12 @@ import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
 import type {
-  CategoryReportRow,
+  Checklist,
   Client,
   ClientReportRow,
   Employee,
   EmployeeReportRow,
+  TaskReportRow,
 } from '../lib/types'
 import {
   clientName,
@@ -84,19 +85,28 @@ export function ReportsPage() {
     })
     .sort((left, right) => right.minutes - left.minutes)
 
-  const categoryTotals = new Map<string, CategoryReportRow>()
+  // Hours by task: sum minutes grouped by the linked checklist. Entries with
+  // no task fall under a synthetic "Unassigned" bucket (taskId === null).
+  const taskTotals = new Map<string, TaskReportRow>()
   for (const entry of billingPeriodEntries) {
-    const existing = categoryTotals.get(entry.category) ?? {
-      category: entry.category,
+    const taskId = entry.taskId ?? null
+    const key = taskId ?? '__unassigned__'
+    const taskTitle = taskId
+      ? data.checklists.find((checklist: Checklist) => checklist.id === taskId)?.title ??
+        'Unassigned'
+      : 'Unassigned'
+    const existing = taskTotals.get(key) ?? {
+      taskId,
+      taskTitle,
       minutes: 0,
       entryCount: 0,
     }
     existing.minutes += entry.minutes
     existing.entryCount += 1
-    categoryTotals.set(entry.category, existing)
+    taskTotals.set(key, existing)
   }
 
-  const categoryReportRows: CategoryReportRow[] = [...categoryTotals.values()].sort(
+  const taskReportRows: TaskReportRow[] = [...taskTotals.values()].sort(
     (left, right) => right.minutes - left.minutes,
   )
 
@@ -117,7 +127,7 @@ export function ReportsPage() {
         activeClientCount={activeClientCount}
         billingPeriod={billingPeriod}
         billingPeriodLabel={billingPeriodLabel}
-        categoryRows={categoryReportRows}
+        taskRows={taskReportRows}
         clientRows={clientReportRows}
         clients={data.clients}
         employeeRows={employeeReportRows}
@@ -135,7 +145,7 @@ function ReportsOverview({
   activeClientCount,
   billingPeriod,
   billingPeriodLabel,
-  categoryRows,
+  taskRows,
   clientRows,
   clients,
   employeeRows,
@@ -148,7 +158,7 @@ function ReportsOverview({
   activeClientCount: number
   billingPeriod: string
   billingPeriodLabel: string
-  categoryRows: CategoryReportRow[]
+  taskRows: TaskReportRow[]
   clientRows: ClientReportRow[]
   clients: Client[]
   employeeRows: EmployeeReportRow[]
@@ -197,11 +207,11 @@ function ReportsOverview({
       ]),
     )
 
-  const exportCategories = () =>
+  const exportTasks = () =>
     downloadCsv(
-      `category-report-${periodSlug}.csv`,
-      ['Category', 'Hours', 'Entries'],
-      categoryRows.map((row) => [row.category, (row.minutes / 60).toFixed(2), row.entryCount]),
+      `task-report-${periodSlug}.csv`,
+      ['Task', 'Hours', 'Entries'],
+      taskRows.map((row) => [row.taskTitle, (row.minutes / 60).toFixed(2), row.entryCount]),
     )
 
   return (
@@ -294,24 +304,24 @@ function ReportsOverview({
         <div className="section-heading">
           <div>
             <p className="section-kicker">Work mix</p>
-            <h2>Category breakdown</h2>
+            <h2>Hours by task</h2>
           </div>
-          <button type="button" className="ghost-action no-print" onClick={exportCategories}>
+          <button type="button" className="ghost-action no-print" onClick={exportTasks}>
             <Download size={14} />
             Download CSV
           </button>
         </div>
         <div className="report-stack">
-          {categoryRows.length === 0 ? (
+          {taskRows.length === 0 ? (
             <p className="empty-state">No time entries have been logged for this billing month yet.</p>
           ) : (
-            categoryRows.map((row) => {
+            taskRows.map((row) => {
               const width =
                 ownerTrackedMinutes === 0 ? 0 : (row.minutes / ownerTrackedMinutes) * 100
               return (
-                <div className="category-row" key={row.category}>
+                <div className="category-row" key={row.taskId ?? '__unassigned__'}>
                   <div className="category-row-header">
-                    <strong>{row.category}</strong>
+                    <strong>{row.taskTitle}</strong>
                     <span>
                       {formatHours(row.minutes)} · {row.entryCount} entries
                     </span>

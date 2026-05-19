@@ -75,19 +75,27 @@ function buildDisplayInvoice(
     (line) => line.label !== 'Billable hours' && line.label !== 'Hourly overage',
   )
 
+  // Work-type categorization is retired; fall back to a generic label so
+  // existing invoice grouping keeps working for legacy and new entries alike.
+  const entryCategory = (entry: TimeEntry) => entry.category ?? 'Bookkeeping services'
+
   const entryLines: DisplayLine[] = clientEntries
     .slice()
-    .sort((a, b) => (a.date === b.date ? a.category.localeCompare(b.category) : a.date.localeCompare(b.date)))
+    .sort((a, b) =>
+      a.date === b.date
+        ? entryCategory(a).localeCompare(entryCategory(b))
+        : a.date.localeCompare(b.date),
+    )
     .map((entry) => {
       const amount = entry.billable ? (entry.minutes / 60) * client.hourlyRate : 0
       const detail = entry.billable
         ? `${formatHours(entry.minutes)} at ${currency.format(client.hourlyRate)}/hr · ${formatEntryDate(entry.date)}`
         : `${formatHours(entry.minutes)} · ${formatEntryDate(entry.date)} · internal`
       return {
-        label: entry.category,
+        label: entryCategory(entry),
         detail: entry.description ? `${detail} · ${entry.description}` : detail,
         amount,
-        groupKey: entry.category,
+        groupKey: entryCategory(entry),
       }
     })
 

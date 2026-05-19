@@ -13,20 +13,30 @@ import { AppLayout } from './components/AppLayout'
 import { SignInScreen } from './components/SignInScreen'
 import {
   appendChecklistItemsRequest,
+  applyTemplateToClientRequest,
+  approveTimeEntriesBatchRequest,
+  approveTimeEntryRequest,
   createChecklistRequest,
+  createStandardTemplateRequest,
   createTimeEntry,
+  generateChecklistFromTemplateRequest,
   deleteChecklistItemRequest,
+  deleteTimeEntryRequest,
   fetchAppData,
   fetchFirmSettings,
   fetchPublicFirmSettings,
   fetchSession,
+  lockTimesheetRequest,
   logoutSession,
+  rejectTimeEntryRequest,
   reorderChecklistItemsRequest,
   saveAppData,
   setChecklistViewersRequest,
   setTemplateViewersRequest,
   toggleChecklistItemRequest,
+  unlockTimesheetRequest,
   updateChecklistItemRequest,
+  updateTimeEntryRequest,
 } from './lib/api'
 import { createSeedData } from './lib/seed'
 import {
@@ -67,6 +77,7 @@ import { ReportsPage } from './pages/ReportsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { TeamPage } from './pages/TeamPage'
 import { TimePage } from './pages/TimePage'
+import { TimeApprovalsPage } from './pages/TimeApprovalsPage'
 import { SecurityPage } from './pages/SecurityPage'
 import { TwoFactorPage } from './pages/TwoFactorPage'
 import { TwoFactorSetupPage } from './pages/TwoFactorSetupPage'
@@ -319,7 +330,7 @@ function App() {
     setData(updater)
   }
 
-  const logTime = async (entry: Omit<TimeEntry, 'id'>) => {
+  const logTime = async (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => {
     try {
       setDataSyncState('saving')
       const newEntry = await createTimeEntry(entry)
@@ -338,6 +349,7 @@ function App() {
       }
 
       setDataSyncState('error')
+      throw error
     }
   }
 
@@ -351,11 +363,215 @@ function App() {
       clientId: timer.clientId,
       date: new Date().toISOString().slice(0, 10),
       minutes: Math.max(1, Math.round((Date.now() - timer.startedAt) / 60000)),
-      category: timer.category,
       description: timer.description,
       billable: true,
+      taskId: timer.taskId ?? null,
     })
     setTimer(null)
+  }
+
+  const updateTimeEntry = async (
+    entryId: string,
+    patch: {
+      minutes?: number
+      description?: string
+      billable?: boolean
+      taskId?: string | null
+      date?: string
+    },
+  ) => {
+    try {
+      setDataSyncState('saving')
+      const updated = await updateTimeEntryRequest(entryId, patch)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        timeEntries: current.timeEntries.map((entry) =>
+          entry.id === entryId ? updated : entry,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  const deleteTimeEntry = async (entryId: string) => {
+    try {
+      setDataSyncState('saving')
+      await deleteTimeEntryRequest(entryId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        timeEntries: current.timeEntries.filter((entry) => entry.id !== entryId),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  const approveTimeEntry = async (entryId: string) => {
+    try {
+      setDataSyncState('saving')
+      const updated = await approveTimeEntryRequest(entryId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        timeEntries: current.timeEntries.map((entry) =>
+          entry.id === entryId ? updated : entry,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  const rejectTimeEntry = async (entryId: string, note: string) => {
+    try {
+      setDataSyncState('saving')
+      const updated = await rejectTimeEntryRequest(entryId, note)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        timeEntries: current.timeEntries.map((entry) =>
+          entry.id === entryId ? updated : entry,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  const approveTimeEntriesBatch = async (entryIds: string[]) => {
+    if (entryIds.length === 0) return
+    try {
+      setDataSyncState('saving')
+      await approveTimeEntriesBatchRequest(entryIds)
+      // Re-fetch is heavy; apply optimistic local approval instead.
+      const ids = new Set(entryIds)
+      const stamp = new Date().toISOString()
+      applyServerDataUpdate((current) => ({
+        ...current,
+        timeEntries: current.timeEntries.map((entry) =>
+          ids.has(entry.id)
+            ? {
+                ...entry,
+                approvalStatus: 'approved' as const,
+                approvedBy: sessionUser?.id,
+                approvedAt: stamp,
+                approvalNote: undefined,
+              }
+            : entry,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  const lockTimesheet = async (userId: string, period: string) => {
+    try {
+      setDataSyncState('saving')
+      const result = await lockTimesheetRequest(userId, period)
+      const stamp = new Date().toISOString()
+      applyServerDataUpdate((current) => {
+        const withoutDup = (current.timesheetLocks ?? []).filter(
+          (lock) => !(lock.userId === userId && lock.period === period),
+        )
+        const lock = result.lock ?? {
+          id: `lock-${userId}-${period}`,
+          userId,
+          period,
+          lockedBy: sessionUser?.id ?? '',
+          lockedAt: stamp,
+        }
+        return {
+          ...current,
+          timesheetLocks: [...withoutDup, lock],
+          // Locking auto-approves that user's pending entries for the period.
+          timeEntries: current.timeEntries.map((entry) =>
+            entry.employeeId === userId &&
+            entry.approvalStatus === 'pending' &&
+            entry.date.slice(0, 7) === period
+              ? {
+                  ...entry,
+                  approvalStatus: 'approved' as const,
+                  approvedBy: sessionUser?.id,
+                  approvedAt: stamp,
+                }
+              : entry,
+          ),
+        }
+      })
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  const unlockTimesheet = async (userId: string, period: string) => {
+    try {
+      setDataSyncState('saving')
+      await unlockTimesheetRequest(userId, period)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        timesheetLocks: (current.timesheetLocks ?? []).filter(
+          (lock) => !(lock.userId === userId && lock.period === period),
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
   }
 
   const toggleChecklistItem = async (checklistId: string, itemId: string) => {
@@ -682,12 +898,13 @@ function App() {
         checklists: [...current.checklists, created],
       }))
       setDataSyncState('synced')
+      return created
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setSessionUser(null)
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
-        return
+        return null
       }
       setDataSyncState('error')
       throw error
@@ -769,6 +986,81 @@ function App() {
         checklistTemplates: [...current.checklistTemplates, draft],
       }
     })
+  }
+
+  // Wave 2: standard templates + apply/copy + on-demand generate. These hit
+  // dedicated owner-only endpoints (not PUT /api/app-data) and merge the
+  // server-confirmed result back in via applyServerDataUpdate.
+  const createStandardTemplate = async (
+    payload: Omit<ChecklistTemplate, 'id' | 'clientId' | 'isStandard'>,
+  ) => {
+    try {
+      setDataSyncState('saving')
+      const created = await createStandardTemplateRequest(payload)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklistTemplates: [...current.checklistTemplates, created],
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  const applyTemplateToClient = async (
+    templateId: string,
+    payload: { clientId: string; firstDueDate?: string; frequency?: string },
+  ) => {
+    try {
+      setDataSyncState('saving')
+      const created = await applyTemplateToClientRequest(templateId, payload)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklistTemplates: [...current.checklistTemplates, created],
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  const generateChecklistFromTemplate = async (
+    templateId: string,
+    payload: { dueDate?: string } = {},
+  ) => {
+    try {
+      setDataSyncState('saving')
+      const created = await generateChecklistFromTemplateRequest(templateId, payload)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: [...current.checklists, created],
+      }))
+      setDataSyncState('synced')
+      return created
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return null
+      }
+      setDataSyncState('error')
+      throw error
+    }
   }
 
   const updateClientPlan = (clientId: string, billingMode: BillingMode, planId: string | null) => {
@@ -925,6 +1217,13 @@ function App() {
     startTimer,
     stopTimer,
     logTime,
+    updateTimeEntry,
+    deleteTimeEntry,
+    approveTimeEntry,
+    rejectTimeEntry,
+    approveTimeEntriesBatch,
+    lockTimesheet,
+    unlockTimesheet,
     toggleChecklistItem,
     setChecklistViewers,
     setTemplateViewers,
@@ -943,6 +1242,9 @@ function App() {
     patchTemplateStage,
     reorderTemplateStages,
     duplicateChecklistTemplate,
+    createStandardTemplate,
+    applyTemplateToClient,
+    generateChecklistFromTemplate,
     reorderChecklistItems,
     bulkAddChecklistItems,
     createChecklist,
@@ -988,6 +1290,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   const navigate = useNavigate()
   useEffect(() => {
     const ownerOnly = [
+      '/time-approvals',
       '/reports',
       '/productivity',
       '/gantt',
@@ -1013,6 +1316,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/time" element={<TimePage />} />
+        <Route
+          path="/time-approvals"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <TimeApprovalsPage />
+            </OwnerOnly>
+          }
+        />
         <Route path="/checklists" element={<ChecklistsPage />} />
         <Route path="/clients" element={<ClientsPage />} />
         <Route

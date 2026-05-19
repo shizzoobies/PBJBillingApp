@@ -267,6 +267,8 @@ function scopeAppDataForSession(session, data) {
     if (!plan.clientId) return true // global plans are not gated
     return allowedClientIds.has(plan.clientId)
   })
+  // A bookkeeper only needs to know about locks on their own timesheet.
+  const timesheetLocks = (data.timesheetLocks ?? []).filter((lock) => lock.userId === me)
 
   return {
     ...data,
@@ -275,6 +277,7 @@ function scopeAppDataForSession(session, data) {
     checklistTemplates,
     timeEntries,
     plans,
+    timesheetLocks,
   }
 }
 
@@ -638,16 +641,33 @@ const server = createServer(async (request, response) => {
         const clientId = typeof payload?.clientId === 'string' ? payload.clientId : ''
         const date = typeof payload?.date === 'string' ? payload.date : ''
         const minutes = typeof payload?.minutes === 'number' ? payload.minutes : Number(payload?.minutes)
-        const category = typeof payload?.category === 'string' ? payload.category : ''
+        // Legacy "work type" — the UI no longer surfaces it. We keep the DB
+        // column populated so the not-null constraint is satisfied.
+        const category =
+          typeof payload?.category === 'string' && payload.category.trim()
+            ? payload.category
+            : 'General'
         const description = typeof payload?.description === 'string' ? payload.description : ''
         const billable = Boolean(payload?.billable)
         const taskIdRaw = payload?.taskId
         const taskId =
           typeof taskIdRaw === 'string' && taskIdRaw.trim() ? taskIdRaw.trim() : null
 
-        if (!employeeId || !clientId || !date || Number.isNaN(minutes) || minutes <= 0 || !category) {
+        if (!employeeId || !clientId || !date || Number.isNaN(minutes) || minutes <= 0) {
           sendJson(response, 400, { error: 'Invalid time entry payload' })
           return
+        }
+
+        // Month-end lock enforcement: a bookkeeper cannot log time dated within
+        // a locked period. Owners are exempt (they're the approver/adjuster).
+        if (session.user.role !== 'owner') {
+          const period = String(date).slice(0, 7)
+          if (await appDataStore.isTimesheetLocked(employeeId, period)) {
+            sendJson(response, 423, {
+              error: 'This timesheet month is locked. Contact an owner to make changes.',
+            })
+            return
+          }
         }
 
         // Visibility scoping: a non-owner can only log time against clients
@@ -694,6 +714,232 @@ const server = createServer(async (request, response) => {
       }
 
       sendJson(response, 405, { error: 'Method not allowed' })
+      return
+    }
+
+    // Batch approve — owner only. Defined before the :id routes so the literal
+    // path isn't shadowed by the parameterized matcher.
+    if (normalizedPath === '/api/time-entries/approve-batch') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can approve time entries' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const entryIds = Array.isArray(payload?.entryIds)
+        ? payload.entryIds.filter((id) => typeof id === 'string')
+        : []
+      if (entryIds.length === 0) {
+        sendJson(response, 400, { error: 'entryIds is required' })
+        return
+      }
+      const updated = await appDataStore.approveTimeEntries(entryIds, session.user.id)
+      await appDataStore.recordActivity(
+        session.user.id,
+        'time_entries_batch_approved',
+        `${updated} entr${updated === 1 ? 'y' : 'ies'}`,
+      )
+      sendJson(response, 200, { ok: true, approved: updated })
+      return
+    }
+
+    // Approve / reject / edit / delete a single time entry.
+    const timeEntryActionMatch = normalizedPath.match(
+      /^\/api\/time-entries\/([^/]+)(?:\/(approve|reject))?$/,
+    )
+    if (timeEntryActionMatch) {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+
+      const entryId = timeEntryActionMatch[1]
+      const action = timeEntryActionMatch[2]
+      const entry = await appDataStore.getTimeEntry(entryId)
+      if (!entry) {
+        sendJson(response, 404, { error: 'Time entry not found' })
+        return
+      }
+
+      // ---- Approve ----
+      if (action === 'approve') {
+        if (request.method !== 'POST') {
+          sendJson(response, 405, { error: 'Method not allowed' })
+          return
+        }
+        if (session.user.role !== 'owner') {
+          sendJson(response, 403, { error: 'Only owners can approve time entries' })
+          return
+        }
+        const updated = await appDataStore.updateTimeEntry(entryId, {
+          approvalStatus: 'approved',
+          approvedBy: session.user.id,
+          approvedAt: new Date().toISOString(),
+          approvalNote: null,
+        })
+        await appDataStore.recordActivity(session.user.id, 'time_entry_approved', entryId)
+        sendJson(response, 200, updated)
+        return
+      }
+
+      // ---- Reject ----
+      if (action === 'reject') {
+        if (request.method !== 'POST') {
+          sendJson(response, 405, { error: 'Method not allowed' })
+          return
+        }
+        if (session.user.role !== 'owner') {
+          sendJson(response, 403, { error: 'Only owners can reject time entries' })
+          return
+        }
+        const payload = await readJsonBody(request)
+        const note = typeof payload?.note === 'string' ? payload.note.trim() : ''
+        if (!note) {
+          sendJson(response, 400, { error: 'A rejection note is required' })
+          return
+        }
+        const updated = await appDataStore.updateTimeEntry(entryId, {
+          approvalStatus: 'rejected',
+          approvalNote: note,
+          approvedBy: session.user.id,
+          approvedAt: new Date().toISOString(),
+        })
+        await appDataStore.recordActivity(session.user.id, 'time_entry_rejected', entryId)
+        sendJson(response, 200, updated)
+        return
+      }
+
+      // ---- Edit (PATCH) ----
+      if (request.method === 'PATCH') {
+        const isOwner = session.user.role === 'owner'
+        if (!isOwner && entry.employeeId !== session.user.id) {
+          sendJson(response, 403, { error: 'You can only edit your own time entries' })
+          return
+        }
+        const payload = await readJsonBody(request)
+        const patch = {}
+        if (typeof payload?.minutes === 'number' || typeof payload?.minutes === 'string') {
+          const m = Number(payload.minutes)
+          if (Number.isNaN(m) || m <= 0) {
+            sendJson(response, 400, { error: 'Invalid minutes' })
+            return
+          }
+          patch.minutes = Math.round(m)
+        }
+        if (typeof payload?.description === 'string') patch.description = payload.description
+        if (typeof payload?.billable === 'boolean') patch.billable = payload.billable
+        if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'taskId')) {
+          patch.taskId =
+            typeof payload.taskId === 'string' && payload.taskId.trim()
+              ? payload.taskId.trim()
+              : null
+        }
+        if (typeof payload?.date === 'string' && payload.date) patch.date = payload.date
+
+        // Lock enforcement: bookkeepers cannot edit entries in a locked month.
+        // Owners are exempt. Check both the current and any new date.
+        if (!isOwner) {
+          const periods = new Set([String(entry.date).slice(0, 7)])
+          if (patch.date) periods.add(String(patch.date).slice(0, 7))
+          for (const period of periods) {
+            if (await appDataStore.isTimesheetLocked(entry.employeeId, period)) {
+              sendJson(response, 423, {
+                error: 'This timesheet month is locked. Contact an owner to make changes.',
+              })
+              return
+            }
+          }
+        }
+
+        // Editing a rejected entry resubmits it: status flips back to pending.
+        if (entry.approvalStatus === 'rejected') {
+          patch.approvalStatus = 'pending'
+          patch.approvalNote = null
+          patch.approvedBy = null
+          patch.approvedAt = null
+        }
+
+        const updated = await appDataStore.updateTimeEntry(entryId, patch)
+        sendJson(response, 200, updated)
+        return
+      }
+
+      // ---- Delete ----
+      if (request.method === 'DELETE') {
+        const isOwner = session.user.role === 'owner'
+        if (!isOwner && entry.employeeId !== session.user.id) {
+          sendJson(response, 403, { error: 'You can only delete your own time entries' })
+          return
+        }
+        if (!isOwner) {
+          const period = String(entry.date).slice(0, 7)
+          if (await appDataStore.isTimesheetLocked(entry.employeeId, period)) {
+            sendJson(response, 423, {
+              error: 'This timesheet month is locked. Contact an owner to make changes.',
+            })
+            return
+          }
+        }
+        const removed = await appDataStore.deleteTimeEntry(entryId)
+        if (!removed) {
+          sendJson(response, 404, { error: 'Time entry not found' })
+          return
+        }
+        sendJson(response, 200, { ok: true })
+        return
+      }
+
+      sendJson(response, 405, { error: 'Method not allowed' })
+      return
+    }
+
+    // Month-end timesheet lock / unlock — owner only.
+    if (normalizedPath === '/api/timesheets/lock' || normalizedPath === '/api/timesheets/unlock') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can manage timesheet locks' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const userId = typeof payload?.userId === 'string' ? payload.userId : ''
+      const period = typeof payload?.period === 'string' ? payload.period.trim() : ''
+      if (!userId || !/^\d{4}-\d{2}$/.test(period)) {
+        sendJson(response, 400, { error: 'userId and a YYYY-MM period are required' })
+        return
+      }
+
+      if (normalizedPath === '/api/timesheets/lock') {
+        const lock = await appDataStore.lockTimesheet(userId, period, session.user.id)
+        await appDataStore.recordActivity(
+          session.user.id,
+          'timesheet_locked',
+          `${userId} · ${period}`,
+        )
+        sendJson(response, 200, { ok: true, lock })
+        return
+      }
+
+      const removed = await appDataStore.unlockTimesheet(userId, period)
+      await appDataStore.recordActivity(
+        session.user.id,
+        'timesheet_unlocked',
+        `${userId} · ${period}`,
+      )
+      sendJson(response, 200, { ok: true, removed })
       return
     }
 
@@ -1615,6 +1861,142 @@ const server = createServer(async (request, response) => {
       }
 
       sendJson(response, 405, { error: 'Method not allowed' })
+      return
+    }
+
+    // ---- Wave 2: standard templates, apply/copy to client, on-demand generate ----
+
+    // POST /api/checklist-templates/standard — create a standard (client-agnostic)
+    // reusable blueprint template. Owner only. Declared before the parameterized
+    // routes below so the literal `standard` segment isn't read as a template id.
+    if (normalizedPath === '/api/checklist-templates/standard' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can create standard templates' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const template = await appDataStore.createStandardTemplate(payload ?? {})
+      await appDataStore.recordActivity(
+        session.user.id,
+        'standard_template_created',
+        template.title,
+      )
+      sendJson(response, 201, template)
+      return
+    }
+
+    // POST /api/checklist-templates/:id/apply-to-client — copy a standard OR
+    // regular template onto a client, producing a NEW regular client-bound
+    // template. Owner only. Body: { clientId, firstDueDate?, frequency? }.
+    const applyToClientMatch = normalizedPath.match(
+      /^\/api\/checklist-templates\/([^/]+)\/apply-to-client$/,
+    )
+    if (applyToClientMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can apply templates to clients' })
+        return
+      }
+      const sourceId = applyToClientMatch[1]
+      const payload = await readJsonBody(request)
+      const clientId = typeof payload?.clientId === 'string' ? payload.clientId : ''
+      const firstDueDate =
+        typeof payload?.firstDueDate === 'string' ? payload.firstDueDate : undefined
+      const frequency = typeof payload?.frequency === 'string' ? payload.frequency : undefined
+      if (!clientId) {
+        sendJson(response, 400, { error: 'A target client is required' })
+        return
+      }
+      const data = await appDataStore.read()
+      const source = (data.checklistTemplates ?? []).find((t) => t.id === sourceId)
+      if (!source) {
+        sendJson(response, 404, { error: 'Template not found' })
+        return
+      }
+      if (!data.clients.some((client) => client.id === clientId)) {
+        sendJson(response, 400, { error: 'Invalid target client' })
+        return
+      }
+      const copy = await appDataStore.copyTemplateToClient(sourceId, {
+        clientId,
+        firstDueDate,
+        frequency,
+      })
+      if (!copy) {
+        sendJson(response, 404, { error: 'Template not found' })
+        return
+      }
+      // Auto-grant: the copied template's assignee(s) gain client visibility.
+      if (copy.assigneeId) {
+        await appDataStore.grantClientVisibility(copy.clientId, copy.assigneeId)
+      }
+      for (const stage of copy.stages ?? []) {
+        if (stage.assigneeId) {
+          await appDataStore.grantClientVisibility(copy.clientId, stage.assigneeId)
+        }
+      }
+      // A standard source is "applied"; a client-bound source is "copied".
+      await appDataStore.recordActivity(
+        session.user.id,
+        source.isStandard ? 'template_applied_to_client' : 'template_copied_to_client',
+        copy.title,
+      )
+      sendJson(response, 201, copy)
+      return
+    }
+
+    // POST /api/checklist-templates/:id/generate — materialize a Stage-1
+    // checklist instance from a template on demand ("Generate a task now" /
+    // "Start the first one now"). Owner only. Body: { dueDate? }.
+    const templateGenerateMatch = normalizedPath.match(
+      /^\/api\/checklist-templates\/([^/]+)\/generate$/,
+    )
+    if (templateGenerateMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can generate tasks' })
+        return
+      }
+      const templateId = templateGenerateMatch[1]
+      const payload = await readJsonBody(request)
+      const dueDate = typeof payload?.dueDate === 'string' ? payload.dueDate : undefined
+      const data = await appDataStore.read()
+      const template = (data.checklistTemplates ?? []).find((t) => t.id === templateId)
+      if (!template) {
+        sendJson(response, 404, { error: 'Template not found' })
+        return
+      }
+      if (template.isStandard) {
+        sendJson(response, 400, {
+          error: 'Standard templates cannot generate tasks — apply to a client first',
+        })
+        return
+      }
+      const checklist = await appDataStore.generateChecklistFromTemplate(templateId, { dueDate })
+      if (!checklist) {
+        sendJson(response, 400, {
+          error: 'This template has no checklist items in its first step yet',
+        })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'checklist_created',
+        checklist.title,
+      )
+      if (checklist.assigneeId && checklist.assigneeId !== session.user.id) {
+        await notify(appDataStore, checklist.assigneeId, 'task_assigned', {
+          checklistId: checklist.id,
+          message: `New task: ${checklist.title}`,
+          link: `/checklists?focus=${checklist.id}`,
+          appPublicUrl: getPublicAppUrl(request),
+        })
+      }
+      sendJson(response, 201, checklist)
       return
     }
 

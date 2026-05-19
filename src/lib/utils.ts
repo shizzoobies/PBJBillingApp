@@ -123,6 +123,7 @@ export function ensureTemplateStages(template: ChecklistTemplate): ChecklistTemp
       name: stage.name || `Stage ${index + 1}`,
       assigneeId: stage.assigneeId || template.assigneeId,
       offsetDays: Number.isFinite(stage.offsetDays) ? Number(stage.offsetDays) : 0,
+      ...(stage.dueDate ? { dueDate: stage.dueDate } : {}),
       viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
       editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
       items: Array.isArray(stage.items) ? stage.items.map((item) => ({ ...item })) : [],
@@ -141,6 +142,20 @@ export function ensureTemplateStages(template: ChecklistTemplate): ChecklistTemp
     items: flatItems,
   }
   return { ...template, viewerIds, editorIds, stages: [stage] }
+}
+
+/**
+ * Resolve a stage's due date. An explicit `stage.dueDate` always wins over the
+ * `offsetDays` calculation. Otherwise the due date is `baseDate` shifted by the
+ * stage's `offsetDays`. Note: per-stage *repeat cadence* is not supported — the
+ * template repeats as a whole; only the due date can be per-stage.
+ */
+export function resolveStageDueDate(stage: TemplateStage, baseDate: string): string {
+  if (stage.dueDate) {
+    return stage.dueDate
+  }
+  const offset = Number(stage.offsetDays) || 0
+  return offset ? addDays(baseDate, offset) : baseDate
 }
 
 function buildChecklistFromStage(
@@ -226,7 +241,8 @@ export function ensureRecurringChecklists(data: AppData) {
 
   for (const template of templates) {
     const stages = template.stages ?? []
-    if (!template.active || stages.length === 0 || stages[0].items.length === 0) {
+    // Standard templates are blueprints only — they never materialize.
+    if (template.isStandard || !template.active || stages.length === 0 || stages[0].items.length === 0) {
       continue
     }
 
@@ -235,9 +251,7 @@ export function ensureRecurringChecklists(data: AppData) {
       const instanceKey = `${template.id}:${template.nextDueDate}:0`
       if (!existingKeys.has(instanceKey)) {
         const stageOne = stages[0]
-        const stageOneDue = stageOne.offsetDays
-          ? addDays(template.nextDueDate, stageOne.offsetDays)
-          : template.nextDueDate
+        const stageOneDue = resolveStageDueDate(stageOne, template.nextDueDate)
         const caseId = makeId('case')
         checklists.push(
           buildChecklistFromStage(
@@ -473,6 +487,12 @@ export function describeActivityAction(action: string): string {
       return 'edited template stage'
     case 'template_stages_reordered':
       return 'reordered template stages'
+    case 'standard_template_created':
+      return 'created standard template'
+    case 'template_applied_to_client':
+      return 'applied template to client'
+    case 'template_copied_to_client':
+      return 'copied template to client'
     case 'totp_enabled':
       return 'enabled two-factor authentication'
     case 'totp_disabled':

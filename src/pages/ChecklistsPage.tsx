@@ -37,6 +37,7 @@ import {
 } from '../lib/utils'
 
 type Group = 'today' | 'week' | 'later' | 'completed'
+type GroupByMode = 'status' | 'client'
 type CreateMode = 'one-time' | 'repeating' | null
 
 function parseBulkLines(value: string): string[] {
@@ -74,6 +75,22 @@ function firstName(employees: Employee[], employeeId: string) {
   return employee.name.split(' ')[0]
 }
 
+/** "every month", "every week" etc. — used in plain-language template copy. */
+function frequencyCadence(frequency: ChecklistFrequency): string {
+  switch (frequency) {
+    case 'daily':
+      return 'every day'
+    case 'weekly':
+      return 'every week'
+    case 'quarterly':
+      return 'every quarter'
+    case 'annually':
+      return 'every year'
+    default:
+      return 'every month'
+  }
+}
+
 export function ChecklistsPage() {
   const {
     activeEmployeeId,
@@ -95,6 +112,9 @@ export function ChecklistsPage() {
     reorderChecklistTemplateItems,
     bulkAddChecklistTemplateItems,
     duplicateChecklistTemplate,
+    createStandardTemplate,
+    applyTemplateToClient,
+    generateChecklistFromTemplate,
     addTemplateStage,
     removeTemplateStage,
     patchTemplateStage,
@@ -105,6 +125,17 @@ export function ChecklistsPage() {
     updateChecklistItem,
     deleteChecklistItem,
   } = useAppContext()
+
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // Point the in-progress list at a freshly-created/generated checklist. Setting
+  // `?focus=<id>` both scrolls to the card and auto-expands its (possibly
+  // collapsed) group, so the user always sees the new checkable task.
+  const focusChecklist = (checklistId: string) => {
+    const next = new URLSearchParams(searchParams)
+    next.set('focus', checklistId)
+    setSearchParams(next, { replace: true })
+  }
 
   // The unified "+ New" dropdown. Mode controls whether the create form is in
   // one-time or repeating shape; both paths render the SAME NewTaskForm.
@@ -131,12 +162,49 @@ export function ChecklistsPage() {
     dueDate: string
     items: Array<{ label: string }>
   }) => {
-    await createChecklist(payload)
+    const created = await createChecklist(payload)
+    if (created) focusChecklist(created.id)
     setCreateMode(null)
   }
 
-  const handleCreateRepeating = (template: Omit<ChecklistTemplate, 'id'>) => {
+  // "Generate a task now" on a template row — materializes a Stage-1 instance
+  // and focuses it so its group auto-expands.
+  const handleGenerateNow = async (templateId: string, opts?: { dueDate?: string }) => {
+    const created = await generateChecklistFromTemplate(templateId, opts)
+    if (created) focusChecklist(created.id)
+  }
+
+  const handleCreateRepeating = async (
+    template: Omit<ChecklistTemplate, 'id'>,
+    startFirstNow: boolean,
+  ) => {
     addChecklistTemplate(template)
+    // "Start the first one now": independently of the future recurrence
+    // schedule, immediately create a checkable Stage-1 instance dated today or
+    // the template's first due date (whichever is sooner) so the user has
+    // something to check off right away. This goes through the dedicated
+    // /api/checklists endpoint, so it doesn't depend on the template having
+    // been persisted server-side yet.
+    if (startFirstNow) {
+      const stageOne = template.stages[0]
+      if (stageOne && stageOne.items.length > 0) {
+        const today = new Date().toISOString().slice(0, 10)
+        const firstDue = template.nextDueDate < today ? template.nextDueDate : today
+        try {
+          const created = await createChecklist({
+            title: template.title,
+            clientId: template.clientId,
+            assigneeId: stageOne.assigneeId || template.assigneeId,
+            dueDate: firstDue,
+            items: stageOne.items.map((item) => ({ label: item.label })),
+          })
+          if (created) focusChecklist(created.id)
+        } catch {
+          // Template still created; the instance can be generated later via
+          // "Generate a task now".
+        }
+      }
+    }
     setCreateMode(null)
   }
 
@@ -228,10 +296,36 @@ export function ChecklistsPage() {
           employees={data.employees}
           onAddItem={addChecklistTemplateItem}
           onAddStage={addTemplateStage}
+          onApplyToClient={applyTemplateToClient}
           onBulkAddItems={bulkAddChecklistTemplateItems}
           onDeleteItem={removeChecklistTemplateItem}
           onDeleteTemplate={deleteChecklistTemplate}
           onDuplicate={duplicateChecklistTemplate}
+          onGenerateNow={handleGenerateNow}
+          onPatchStage={patchTemplateStage}
+          onRemoveStage={removeTemplateStage}
+          onReorderItems={reorderChecklistTemplateItems}
+          onReorderStages={reorderTemplateStages}
+          onSetItemAssignee={setChecklistTemplateItemAssignee}
+          onSetItemDueDate={setChecklistTemplateItemDueDate}
+          onSetViewers={setTemplateViewers}
+          onUpdateItem={updateChecklistTemplateItem}
+          onUpdateTemplate={updateChecklistTemplate}
+          templates={data.checklistTemplates}
+        />
+      ) : null}
+
+      {ownerMode ? (
+        <StandardTemplatesManager
+          clients={data.clients}
+          employees={data.employees}
+          onAddItem={addChecklistTemplateItem}
+          onAddStage={addTemplateStage}
+          onApplyToClient={applyTemplateToClient}
+          onBulkAddItems={bulkAddChecklistTemplateItems}
+          onCreateStandard={createStandardTemplate}
+          onDeleteItem={removeChecklistTemplateItem}
+          onDeleteTemplate={deleteChecklistTemplate}
           onPatchStage={patchTemplateStage}
           onRemoveStage={removeTemplateStage}
           onReorderItems={reorderChecklistTemplateItems}
@@ -291,6 +385,19 @@ function ChecklistInProgressSection({
   const focusId = searchParams.get('focus')
   const focusRef = useRef<HTMLElement | null>(null)
 
+  // Group-by choice is persisted in a URL search param (?group=client), the
+  // same pattern FilterBar uses with useSearchParams.
+  const groupBy: GroupByMode = searchParams.get('group') === 'client' ? 'client' : 'status'
+  const setGroupBy = (next: GroupByMode) => {
+    const params = new URLSearchParams(searchParams)
+    if (next === 'client') {
+      params.set('group', 'client')
+    } else {
+      params.delete('group')
+    }
+    setSearchParams(params, { replace: true })
+  }
+
   useEffect(() => {
     if (!focusId) return
     if (focusRef.current) {
@@ -316,14 +423,15 @@ function ChecklistInProgressSection({
     })
   }, [checklists, assignee, client, status, todayDateOnly])
 
-  const grouped: Record<Group, Checklist[]> = {
+  // Status grouping (current behavior, unchanged).
+  const groupedByStatus: Record<Group, Checklist[]> = {
     today: [],
     week: [],
     later: [],
     completed: [],
   }
   for (const checklist of filtered) {
-    grouped[groupChecklist(checklist, todayDateOnly)].push(checklist)
+    groupedByStatus[groupChecklist(checklist, todayDateOnly)].push(checklist)
   }
 
   const groupConfig: Array<{ key: Group; label: string; defaultOpen: boolean }> = [
@@ -333,10 +441,68 @@ function ChecklistInProgressSection({
     { key: 'completed', label: 'Completed', defaultOpen: false },
   ]
 
+  // Client grouping: each client is a collapsible section, sorted alphabetically;
+  // checklists within a client sorted by due date.
+  const clientGroups = useMemo(() => {
+    const byClient = new Map<string, Checklist[]>()
+    for (const checklist of filtered) {
+      const list = byClient.get(checklist.clientId) ?? []
+      list.push(checklist)
+      byClient.set(checklist.clientId, list)
+    }
+    return [...byClient.entries()]
+      .map(([clientId, list]) => ({
+        clientId,
+        label: clientName(clients, clientId),
+        checklists: [...list].sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label))
+  }, [filtered, clients])
+
+  const renderCard = (checklist: Checklist) => (
+    <ChecklistCard
+      key={checklist.id}
+      activeEmployeeId={activeEmployeeId}
+      checklist={checklist}
+      clients={clients}
+      employees={employees}
+      focused={checklist.id === focusId}
+      focusRef={checklist.id === focusId ? focusRef : null}
+      onBulkAddItems={onBulkAddItems}
+      onDeleteItem={onDeleteItem}
+      onReorderItems={onReorderItems}
+      onSetViewers={onSetViewers}
+      onToggle={onToggle}
+      onUpdateItem={onUpdateItem}
+      ownerMode={ownerMode}
+      role={role}
+      timeEntries={timeEntries}
+    />
+  )
+
   return (
     <div className="checklist-in-progress">
       <div className="subsection-heading">
         <h3>In progress</h3>
+        <div className="group-by-toggle" role="group" aria-label="Group by">
+          <span className="group-by-label">Group by:</span>
+          <button
+            type="button"
+            className={groupBy === 'status' ? 'group-by-btn active' : 'group-by-btn'}
+            aria-pressed={groupBy === 'status'}
+            onClick={() => setGroupBy('status')}
+          >
+            Status
+          </button>
+          <button
+            type="button"
+            className={groupBy === 'client' ? 'group-by-btn active' : 'group-by-btn'}
+            aria-pressed={groupBy === 'client'}
+            onClick={() => setGroupBy('client')}
+          >
+            Client
+          </button>
+        </div>
       </div>
       <FilterBar employees={employees} clients={clients} />
       <div className="checklist-stack">
@@ -345,37 +511,36 @@ function ChecklistInProgressSection({
         ) : filtered.length === 0 ? (
           <p className="empty-state">No tasks match your filters.</p>
         ) : null}
-        {groupConfig.map((group) =>
-          grouped[group.key].length === 0 ? null : (
-            <ChecklistGroup
-              key={group.key}
-              defaultOpen={group.defaultOpen}
-              label={group.label}
-              count={grouped[group.key].length}
-            >
-              {grouped[group.key].map((checklist) => (
-                <ChecklistCard
-                  key={checklist.id}
-                  activeEmployeeId={activeEmployeeId}
-                  checklist={checklist}
-                  clients={clients}
-                  employees={employees}
-                  focused={checklist.id === focusId}
-                  focusRef={checklist.id === focusId ? focusRef : null}
-                  onBulkAddItems={onBulkAddItems}
-                  onDeleteItem={onDeleteItem}
-                  onReorderItems={onReorderItems}
-                  onSetViewers={onSetViewers}
-                  onToggle={onToggle}
-                  onUpdateItem={onUpdateItem}
-                  ownerMode={ownerMode}
-                  role={role}
-                  timeEntries={timeEntries}
-                />
-              ))}
-            </ChecklistGroup>
-          ),
-        )}
+        {groupBy === 'status'
+          ? groupConfig.map((group) =>
+              groupedByStatus[group.key].length === 0 ? null : (
+                <ChecklistGroup
+                  key={group.key}
+                  defaultOpen={group.defaultOpen}
+                  label={group.label}
+                  count={groupedByStatus[group.key].length}
+                  focusInside={
+                    Boolean(focusId) &&
+                    groupedByStatus[group.key].some((c) => c.id === focusId)
+                  }
+                >
+                  {groupedByStatus[group.key].map(renderCard)}
+                </ChecklistGroup>
+              ),
+            )
+          : clientGroups.map((group) => (
+              <ChecklistGroup
+                key={group.clientId}
+                defaultOpen
+                label={group.label}
+                count={group.checklists.length}
+                focusInside={
+                  Boolean(focusId) && group.checklists.some((c) => c.id === focusId)
+                }
+              >
+                {group.checklists.map(renderCard)}
+              </ChecklistGroup>
+            ))}
       </div>
     </div>
   )
@@ -386,19 +551,32 @@ function ChecklistGroup({
   label,
   count,
   children,
+  focusInside = false,
 }: {
   defaultOpen: boolean
   label: string
   count: number
   children: React.ReactNode
+  /**
+   * When the `?focus=` checklist lands inside this group, auto-expand it so a
+   * just-created one-time task or just-generated instance is visible even if
+   * it landed in a collapsed group ("Later" / "Completed").
+   */
+  focusInside?: boolean
 }) {
-  const [open, setOpen] = useState(defaultOpen)
+  const [userOpen, setUserOpen] = useState(defaultOpen)
+  // Auto-expand when the `?focus=` checklist lands inside this group, so a
+  // just-created one-time task or just-generated instance is visible even if
+  // it landed in a collapsed group. `focusInside` is transient (the focus URL
+  // param self-clears after ~1.5s), so it simply forces the group open while
+  // active — derived during render, no effect or ref mutation needed.
+  const open = userOpen || focusInside
   return (
     <div className="checklist-group">
       <button
         type="button"
         className="checklist-group-header"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setUserOpen((value) => !value)}
         aria-expanded={open}
       >
         {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
@@ -906,7 +1084,10 @@ function NewTaskForm({
     dueDate: string
     items: Array<{ label: string }>
   }) => Promise<void>
-  onCreateRepeating: (template: Omit<ChecklistTemplate, 'id'>) => void
+  onCreateRepeating: (
+    template: Omit<ChecklistTemplate, 'id'>,
+    startFirstNow: boolean,
+  ) => void
 }) {
   // Owners can pick any employee. Non-owners are filtered out at the panel
   // level today (server only permits owners to create), but keep this guard
@@ -934,6 +1115,10 @@ function NewTaskForm({
   const [itemDraft, setItemDraft] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  // Repeating mode: default ON. When checked, a checkable Stage-1 instance is
+  // created immediately on save so the user can start right away, independent
+  // of the recurrence schedule.
+  const [startFirstNow, setStartFirstNow] = useState(true)
 
   // Hand-off (multi-stage) toggle. Only available in repeating mode.
   // When enabled, we render an editor for additional stages.
@@ -1026,17 +1211,20 @@ function NewTaskForm({
       editorIds: [],
       items: items.map((item) => ({ id: makeId('template-item'), label: item.label })),
     }
-    onCreateRepeating({
-      title: trimmedTitle,
-      clientId,
-      assigneeId,
-      frequency,
-      nextDueDate: dueDate,
-      active: true,
-      viewerIds: [],
-      editorIds: [],
-      stages: [firstStage, ...extraStages],
-    })
+    onCreateRepeating(
+      {
+        title: trimmedTitle,
+        clientId,
+        assigneeId,
+        frequency,
+        nextDueDate: dueDate,
+        active: true,
+        viewerIds: [],
+        editorIds: [],
+        stages: [firstStage, ...extraStages],
+      },
+      startFirstNow,
+    )
     setTitle('')
     setItemDraft('')
     setExtraStages([])
@@ -1149,9 +1337,17 @@ function NewTaskForm({
           ) : (
             <div className="hand-off-stages">
               {extraStages.map((stage, index) => (
-                <div key={stage.id} className="hand-off-stage-row">
+                <div key={stage.id} className="hand-off-stage-row stage-card">
                   <div className="hand-off-stage-header">
-                    <strong>Step {index + 2}</strong>
+                    <span className="stage-index-pill">Step {index + 2}</span>
+                    <input
+                      className="input stage-name-input"
+                      value={stage.name}
+                      aria-label="Step name"
+                      onChange={(event) =>
+                        updateExtraStage(stage.id, { name: event.target.value })
+                      }
+                    />
                     <button
                       type="button"
                       className="item-delete-btn"
@@ -1163,16 +1359,6 @@ function NewTaskForm({
                     </button>
                   </div>
                   <div className="hand-off-stage-fields">
-                    <label className="new-task-field">
-                      <span>Name</span>
-                      <input
-                        className="input"
-                        value={stage.name}
-                        onChange={(event) =>
-                          updateExtraStage(stage.id, { name: event.target.value })
-                        }
-                      />
-                    </label>
                     <label className="new-task-field">
                       <span>Who picks it up</span>
                       <select
@@ -1189,21 +1375,36 @@ function NewTaskForm({
                         ))}
                       </select>
                     </label>
-                    <label className="new-task-field">
-                      <span>Days after previous step</span>
-                      <input
-                        className="input"
-                        type="number"
-                        min={0}
-                        value={stage.offsetDays}
-                        onChange={(event) =>
-                          updateExtraStage(stage.id, {
-                            offsetDays: Number(event.target.value) || 0,
-                          })
-                        }
-                      />
-                    </label>
                   </div>
+                  <StageScheduleControl
+                    offsetDays={stage.offsetDays}
+                    dueDate={stage.dueDate}
+                    isFirstStage={false}
+                    onChangeOffset={(value) =>
+                      updateExtraStage(stage.id, { offsetDays: value })
+                    }
+                    onChangeDueDate={(value) => {
+                      const next: Partial<TemplateStage> = { dueDate: value }
+                      updateExtraStage(stage.id, next)
+                    }}
+                  />
+                  <label className="new-task-field">
+                    <span>Steps for this hand-off</span>
+                    <textarea
+                      className="input new-task-steps"
+                      placeholder={'One per line. Lines starting with # are ignored.'}
+                      rows={4}
+                      value={stage.items.map((item) => item.label).join('\n')}
+                      onChange={(event) =>
+                        updateExtraStage(stage.id, {
+                          items: parseBulkLines(event.target.value).map((label) => ({
+                            id: makeId('template-item'),
+                            label,
+                          })),
+                        })
+                      }
+                    />
+                  </label>
                 </div>
               ))}
               <button type="button" className="link-action" onClick={addHandOffStage}>
@@ -1215,6 +1416,17 @@ function NewTaskForm({
             Use this if a different person picks up after the first person finishes.
           </small>
         </div>
+      ) : null}
+
+      {mode === 'repeating' ? (
+        <label className="start-first-now-row">
+          <input
+            type="checkbox"
+            checked={startFirstNow}
+            onChange={(event) => setStartFirstNow(event.target.checked)}
+          />
+          <span>Create the first checklist now so you can start right away.</span>
+        </label>
       ) : null}
 
       {error ? <p className="auth-error">{error}</p> : null}
@@ -1237,15 +1449,116 @@ function NewTaskForm({
   )
 }
 
+/**
+ * Inline "pick a client → apply" control. Used by both the regular
+ * "Copy to client" action and the standard-template "Apply to client" action.
+ * Opens a small client picker; on confirm, calls `onApply` and resets.
+ */
+function ApplyToClientControl({
+  clients,
+  label,
+  title,
+  onApply,
+}: {
+  clients: Client[]
+  label: string
+  title: string
+  onApply: (clientId: string) => Promise<void>
+}) {
+  const sortedClients = useMemo(
+    () => [...clients].sort((a, b) => a.name.localeCompare(b.name)),
+    [clients],
+  )
+  const [open, setOpen] = useState(false)
+  const [clientId, setClientId] = useState(sortedClients[0]?.id ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const handleApply = async () => {
+    if (!clientId || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await onApply(clientId)
+      setOpen(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not copy template.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="secondary-action"
+        title={title}
+        onClick={() => setOpen(true)}
+      >
+        <Copy size={14} />
+        {label}
+      </button>
+    )
+  }
+
+  return (
+    <div className="apply-to-client">
+      <select
+        className="compact-input"
+        aria-label="Target client"
+        value={clientId}
+        onChange={(event) => setClientId(event.target.value)}
+      >
+        {sortedClients.map((client) => (
+          <option key={client.id} value={client.id}>
+            {client.name}
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        className="primary-action"
+        disabled={busy || !clientId}
+        onClick={handleApply}
+      >
+        {busy ? 'Copying...' : label}
+      </button>
+      <button
+        type="button"
+        className="secondary-action"
+        disabled={busy}
+        onClick={() => {
+          setOpen(false)
+          setError('')
+        }}
+      >
+        Cancel
+      </button>
+      {error ? <span className="apply-to-client-error">{error}</span> : null}
+    </div>
+  )
+}
+
 type RepeatingTasksManagerProps = {
   clients: Client[]
   employees: Employee[]
   onAddItem: (templateId: string, stageId: string) => void
   onAddStage: (templateId: string) => void
+  /** Wave 2: copy a standard OR regular template onto a (possibly different) client. */
+  onApplyToClient: (
+    templateId: string,
+    payload: { clientId: string; firstDueDate?: string; frequency?: string },
+  ) => Promise<void>
   onBulkAddItems: (templateId: string, stageId: string, labels: string[]) => void
   onDeleteItem: (templateId: string, stageId: string, itemId: string) => void
   onDeleteTemplate: (templateId: string) => void
-  onDuplicate: (templateId: string) => void
+  /** Optional: "Duplicate" a regular repeating task. Omitted for standard templates. */
+  onDuplicate?: (templateId: string) => void
+  /** Wave 2: materialize a Stage-1 instance on demand ("Generate a task now"). */
+  onGenerateNow?: (templateId: string, opts?: { dueDate?: string }) => Promise<void>
+  /** Wave 2: present standard templates differently (no client / no recurrence). */
+  standardMode?: boolean
   onPatchStage: (
     templateId: string,
     stageId: string,
@@ -1291,6 +1604,10 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
     setOpenId((current) => (current === templateId ? null : templateId))
   }
 
+  // Client-bound repeating tasks only — standard (client-agnostic) templates
+  // live in their own section.
+  const regularTemplates = props.templates.filter((template) => !template.isStandard)
+
   return (
     <section className="panel">
       <div className="section-heading">
@@ -1299,32 +1616,16 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
         </div>
       </div>
       <div className="repeating-task-list">
-        {props.templates.length === 0 ? (
+        {regularTemplates.length === 0 ? (
           <p className="empty-state">No repeating tasks yet. Hit + New to add one.</p>
         ) : null}
-        {props.templates.map((template) => (
+        {regularTemplates.map((template) => (
           <RepeatingTaskRow
             key={template.id}
+            {...props}
             template={template}
-            clients={props.clients}
-            employees={props.employees}
             open={openId === template.id}
             onToggleOpen={() => toggleOpen(template.id)}
-            onAddItem={props.onAddItem}
-            onAddStage={props.onAddStage}
-            onBulkAddItems={props.onBulkAddItems}
-            onDeleteItem={props.onDeleteItem}
-            onDeleteTemplate={props.onDeleteTemplate}
-            onDuplicate={props.onDuplicate}
-            onPatchStage={props.onPatchStage}
-            onRemoveStage={props.onRemoveStage}
-            onReorderItems={props.onReorderItems}
-            onReorderStages={props.onReorderStages}
-            onSetItemAssignee={props.onSetItemAssignee}
-            onSetItemDueDate={props.onSetItemDueDate}
-            onSetViewers={props.onSetViewers}
-            onUpdateItem={props.onUpdateItem}
-            onUpdateTemplate={props.onUpdateTemplate}
           />
         ))}
       </div>
@@ -1343,6 +1644,11 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
   const dueLabel = template.nextDueDate
     ? shortDate.format(new Date(`${template.nextDueDate}T12:00:00`))
     : '—'
+  // Plain-language reminder that a repeating task is a recipe, not a checklist.
+  // Standard templates are blueprints — they never generate on their own.
+  const explainerLine = props.standardMode
+    ? 'A reusable blueprint — it never generates a checklist on its own. Use "Apply to client" to put it to work.'
+    : `Generates a checklist ${frequencyCadence(template.frequency)} — next on ${dueLabel}.`
 
   return (
     <article className={open ? 'repeating-task-row open' : 'repeating-task-row'}>
@@ -1354,7 +1660,9 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
       >
         <span className="repeating-task-title">{template.title}</span>
         <span className="repeating-task-meta">
-          {clientName(props.clients, template.clientId)}
+          {props.standardMode
+            ? 'Standard template'
+            : clientName(props.clients, template.clientId)}
         </span>
         <span className="repeating-task-meta">
           Who: {employeeName(props.employees, template.assigneeId)}
@@ -1362,7 +1670,9 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
         <span className="repeating-task-meta">
           How often: {getChecklistFrequencyLabel(template.frequency)}
         </span>
-        <span className="repeating-task-meta">Next due: {dueLabel}</span>
+        <span className="repeating-task-meta">
+          {props.standardMode ? '' : `Next due: ${dueLabel}`}
+        </span>
         <span
           className={
             template.active
@@ -1376,6 +1686,7 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
           {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
         </span>
       </button>
+      <p className="repeating-task-explainer">{explainerLine}</p>
       {open ? <TemplateEditor {...props} /> : null}
     </article>
   )
@@ -1387,15 +1698,55 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
   return (
     <div className="repeating-task-body">
       <div className="template-card-actions">
-        <button
-          className="secondary-action"
-          onClick={() => props.onDuplicate(template.id)}
-          type="button"
-          title="Create a new repeating task pre-filled from this one"
-        >
-          <Copy size={14} />
-          Duplicate
-        </button>
+        {props.standardMode ? (
+          <ApplyToClientControl
+            clients={props.clients}
+            label="Apply to client"
+            title="Create a real, client-bound repeating task copied from this standard template"
+            onApply={(clientId) =>
+              props.onApplyToClient(template.id, {
+                clientId,
+                frequency: template.frequency,
+              })
+            }
+          />
+        ) : (
+          <>
+            {props.onGenerateNow ? (
+              <button
+                className="primary-action"
+                onClick={() => void props.onGenerateNow?.(template.id)}
+                type="button"
+                title="Create a checkable checklist from this template right now, without waiting for the schedule"
+              >
+                <Plus size={14} />
+                Generate a checklist now
+              </button>
+            ) : null}
+            <ApplyToClientControl
+              clients={props.clients}
+              label="Copy to client"
+              title="Duplicate this repeating task onto another client"
+              onApply={(clientId) =>
+                props.onApplyToClient(template.id, {
+                  clientId,
+                  frequency: template.frequency,
+                })
+              }
+            />
+          </>
+        )}
+        {props.onDuplicate ? (
+          <button
+            className="secondary-action"
+            onClick={() => props.onDuplicate?.(template.id)}
+            type="button"
+            title="Create a new repeating task pre-filled from this one"
+          >
+            <Copy size={14} />
+            Duplicate
+          </button>
+        ) : null}
         <button
           className="secondary-action danger"
           onClick={() => props.onDeleteTemplate(template.id)}
@@ -1418,25 +1769,27 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
             value={template.title}
           />
         </label>
-        <label className="field">
-          <span>Client</span>
-          <select
-            className="input"
-            onChange={(event) =>
-              props.onUpdateTemplate(template.id, (current) => ({
-                ...current,
-                clientId: event.target.value,
-              }))
-            }
-            value={template.clientId}
-          >
-            {props.clients.map((client) => (
-              <option key={client.id} value={client.id}>
-                {client.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        {props.standardMode ? null : (
+          <label className="field">
+            <span>Client</span>
+            <select
+              className="input"
+              onChange={(event) =>
+                props.onUpdateTemplate(template.id, (current) => ({
+                  ...current,
+                  clientId: event.target.value,
+                }))
+              }
+              value={template.clientId}
+            >
+              {props.clients.map((client) => (
+                <option key={client.id} value={client.id}>
+                  {client.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="field">
           <span>Who does this</span>
           <select
@@ -1665,52 +2018,54 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
                     ))}
                   </select>
                 </label>
-                <label className="field">
-                  <span>
-                    {index === 0
-                      ? 'Days after the task is due'
-                      : 'Days after previous step'}
-                  </span>
-                  <input
-                    className="input"
-                    type="number"
-                    min={0}
-                    value={stage.offsetDays}
-                    onChange={(event) =>
-                      props.onPatchStage(template.id, stage.id, {
-                        offsetDays: Number(event.target.value) || 0,
-                      })
+              </div>
+              <StageScheduleControl
+                offsetDays={stage.offsetDays}
+                dueDate={stage.dueDate}
+                isFirstStage={index === 0}
+                onChangeOffset={(value) =>
+                  props.onPatchStage(template.id, stage.id, { offsetDays: value })
+                }
+                onChangeDueDate={(value) =>
+                  props.onPatchStage(template.id, stage.id, { dueDate: value ?? '' })
+                }
+              />
+              <StageStepsBox
+                items={stage.items}
+                onBulkAdd={(labels) =>
+                  props.onBulkAddItems(template.id, stage.id, labels)
+                }
+              />
+              {stage.items.length > 0 ? (
+                <details className="stage-fine-tune">
+                  <summary>Fine-tune items (reorder, dates, assignees)</summary>
+                  <DraggableTemplateItems
+                    employees={props.employees}
+                    items={stage.items}
+                    onDeleteItem={(itemId) =>
+                      props.onDeleteItem(template.id, stage.id, itemId)
+                    }
+                    onReorderItems={(orderedIds) =>
+                      props.onReorderItems(template.id, stage.id, orderedIds)
+                    }
+                    onSetItemAssignee={(itemId, assigneeId) =>
+                      props.onSetItemAssignee(template.id, stage.id, itemId, assigneeId)
+                    }
+                    onSetItemDueDate={(itemId, dueDate) =>
+                      props.onSetItemDueDate(template.id, stage.id, itemId, dueDate)
+                    }
+                    onUpdateItem={(itemId, label) =>
+                      props.onUpdateItem(template.id, stage.id, itemId, label)
                     }
                   />
-                </label>
-              </div>
-              <DraggableTemplateItems
-                employees={props.employees}
-                items={stage.items}
-                onDeleteItem={(itemId) => props.onDeleteItem(template.id, stage.id, itemId)}
-                onReorderItems={(orderedIds) =>
-                  props.onReorderItems(template.id, stage.id, orderedIds)
-                }
-                onSetItemAssignee={(itemId, assigneeId) =>
-                  props.onSetItemAssignee(template.id, stage.id, itemId, assigneeId)
-                }
-                onSetItemDueDate={(itemId, dueDate) =>
-                  props.onSetItemDueDate(template.id, stage.id, itemId, dueDate)
-                }
-                onUpdateItem={(itemId, label) =>
-                  props.onUpdateItem(template.id, stage.id, itemId, label)
-                }
-              />
-              <InlineAddItemRow
-                onAdd={(label) =>
-                  props.onBulkAddItems(template.id, stage.id, [label])
-                }
-                placeholder="Add an item..."
-              />
-              <ChecklistBulkAdd
-                label="Paste a list"
-                onAdd={(labels) => props.onBulkAddItems(template.id, stage.id, labels)}
-              />
+                  <InlineAddItemRow
+                    onAdd={(label) =>
+                      props.onBulkAddItems(template.id, stage.id, [label])
+                    }
+                    placeholder="Add an item..."
+                  />
+                </details>
+              ) : null}
               <SharingControl
                 assigneeId={stage.assigneeId}
                 editorIds={stage.editorIds ?? []}
@@ -1728,6 +2083,139 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
           </div>
         )
       })}
+    </div>
+  )
+}
+
+/**
+ * Prominent multi-line "Steps" box for a hand-off step. Type checklist items
+ * one per line (`#`-prefixed lines are comments and skipped) and add them in
+ * bulk — no per-item add/fill/repeat dance. Per-item fine-tuning (dates,
+ * assignees, reorder) lives in the collapsible section below the box.
+ */
+function StageStepsBox({
+  items,
+  onBulkAdd,
+}: {
+  items: ChecklistTemplateItem[]
+  onBulkAdd: (labels: string[]) => void
+}) {
+  const [draft, setDraft] = useState('')
+  const lines = useMemo(() => parseBulkLines(draft), [draft])
+
+  const handleAdd = () => {
+    if (lines.length === 0) return
+    onBulkAdd(lines)
+    setDraft('')
+  }
+
+  return (
+    <div className="stage-steps-box">
+      <span className="stage-steps-box-label">Steps</span>
+      {items.length > 0 ? (
+        <ul className="stage-steps-existing">
+          {items.map((item) => (
+            <li key={item.id}>{item.label}</li>
+          ))}
+        </ul>
+      ) : (
+        <p className="stage-steps-empty">No steps yet — type them below, one per line.</p>
+      )}
+      <textarea
+        className="input stage-steps-textarea"
+        placeholder={'One step per line. Example:\nReconcile bank feed\nReview payroll clearing\n# lines starting with # are ignored'}
+        rows={4}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+      />
+      <div className="stage-steps-box-footer">
+        <span className="bulk-add-preview">
+          {lines.length === 0
+            ? 'Type one step per line'
+            : `Will add ${lines.length} step${lines.length === 1 ? '' : 's'}`}
+        </span>
+        <button
+          type="button"
+          className="secondary-action"
+          disabled={lines.length === 0}
+          onClick={handleAdd}
+        >
+          <Plus size={14} />
+          Add steps
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Per-stage due-date control. A stage either inherits its due date from the
+ * offset ("N days after previous step") or pins an explicit fixed date.
+ * Picking "Specific date" reveals a date input. Independent *repeat cadence*
+ * per stage is intentionally not offered — the template repeats as a whole.
+ */
+function StageScheduleControl({
+  offsetDays,
+  dueDate,
+  isFirstStage,
+  onChangeOffset,
+  onChangeDueDate,
+}: {
+  offsetDays: number
+  dueDate?: string
+  isFirstStage: boolean
+  onChangeOffset: (value: number) => void
+  onChangeDueDate: (value: string | undefined) => void
+}) {
+  const mode: 'offset' | 'date' = dueDate ? 'date' : 'offset'
+  const offsetLabel = isFirstStage
+    ? 'days after the task is due'
+    : 'days after previous step'
+  return (
+    <div className="stage-schedule">
+      <span className="stage-schedule-title">Due</span>
+      <div className="stage-schedule-options">
+        <label className="stage-schedule-radio">
+          <input
+            type="radio"
+            checked={mode === 'offset'}
+            onChange={() => onChangeDueDate(undefined)}
+          />
+          <span>
+            <input
+              className="compact-input stage-schedule-offset"
+              type="number"
+              min={0}
+              value={offsetDays}
+              disabled={mode !== 'offset'}
+              onChange={(event) => onChangeOffset(Number(event.target.value) || 0)}
+            />{' '}
+            {offsetLabel}
+          </span>
+        </label>
+        <label className="stage-schedule-radio">
+          <input
+            type="radio"
+            checked={mode === 'date'}
+            onChange={() =>
+              onChangeDueDate(dueDate || new Date().toISOString().slice(0, 10))
+            }
+          />
+          <span>
+            Specific date
+            {mode === 'date' ? (
+              <input
+                className="compact-input stage-schedule-date"
+                type="date"
+                value={dueDate ?? ''}
+                onChange={(event) =>
+                  onChangeDueDate(event.target.value || undefined)
+                }
+              />
+            ) : null}
+          </span>
+        </label>
+      </div>
     </div>
   )
 }
@@ -1852,5 +2340,249 @@ function DraggableTemplateItems({
         )
       })}
     </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Wave 2 C5: standard (client-agnostic) templates                            */
+/* -------------------------------------------------------------------------- */
+
+type StandardTemplatesManagerProps = Omit<
+  RepeatingTasksManagerProps,
+  'templates' | 'onDuplicate' | 'onGenerateNow' | 'standardMode'
+> & {
+  /** Create a new standard (client-agnostic) blueprint template. */
+  onCreateStandard: (
+    payload: Omit<ChecklistTemplate, 'id' | 'clientId' | 'isStandard'>,
+  ) => Promise<void>
+  templates: ChecklistTemplate[]
+}
+
+/**
+ * Owner-only library of reusable, client-agnostic templates. A standard
+ * template never materializes a checklist on its own — it is a blueprint that
+ * gets copied onto a client via "Apply to client".
+ */
+function StandardTemplatesManager(props: StandardTemplatesManagerProps) {
+  const [openId, setOpenId] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+
+  const standardTemplates = props.templates.filter((template) => template.isStandard)
+
+  const toggleOpen = (templateId: string) => {
+    setOpenId((current) => (current === templateId ? null : templateId))
+  }
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <h2>Standard templates</h2>
+          <p className="section-subtext">
+            Reusable, client-agnostic blueprints. Apply one to a client to turn
+            it into a real repeating task.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="primary-action"
+          onClick={() => setCreating((value) => !value)}
+        >
+          <Plus size={14} />
+          {creating ? 'Close' : 'New standard template'}
+        </button>
+      </div>
+
+      {creating ? (
+        <StandardTemplateForm
+          employees={props.employees}
+          onCancel={() => setCreating(false)}
+          onCreate={async (payload) => {
+            await props.onCreateStandard(payload)
+            setCreating(false)
+          }}
+        />
+      ) : null}
+
+      <div className="repeating-task-list">
+        {standardTemplates.length === 0 ? (
+          <p className="empty-state">
+            No standard templates yet. Create one to reuse across clients.
+          </p>
+        ) : null}
+        {standardTemplates.map((template) => (
+          <RepeatingTaskRow
+            key={template.id}
+            {...props}
+            standardMode
+            template={template}
+            open={openId === template.id}
+            onToggleOpen={() => toggleOpen(template.id)}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+/**
+ * Create-a-standard-template form. Same shape as a repeating task minus the
+ * client field — a standard template carries title, who, frequency and steps,
+ * but is not bound to any client.
+ */
+function StandardTemplateForm({
+  employees,
+  onCancel,
+  onCreate,
+}: {
+  employees: Employee[]
+  onCancel: () => void
+  onCreate: (
+    payload: Omit<ChecklistTemplate, 'id' | 'clientId' | 'isStandard'>,
+  ) => Promise<void>
+}) {
+  const [title, setTitle] = useState('')
+  const [assigneeId, setAssigneeId] = useState(employees[0]?.id ?? '')
+  const [frequency, setFrequency] = useState<ChecklistFrequency>('monthly')
+  const [itemDraft, setItemDraft] = useState('')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (submitting) return
+
+    const trimmedTitle = title.trim()
+    const items = parseBulkLines(itemDraft)
+
+    if (!trimmedTitle) {
+      setError('Give the template a title.')
+      return
+    }
+    if (!assigneeId) {
+      setError('Pick who does this.')
+      return
+    }
+    if (items.length === 0) {
+      setError('Add at least one step — one per line.')
+      return
+    }
+
+    setError('')
+    const firstStage: TemplateStage = {
+      id: makeId('stage'),
+      name: 'Step 1',
+      assigneeId,
+      offsetDays: 0,
+      viewerIds: [],
+      editorIds: [],
+      items: items.map((label) => ({ id: makeId('template-item'), label })),
+    }
+
+    setSubmitting(true)
+    try {
+      await onCreate({
+        title: trimmedTitle,
+        assigneeId,
+        frequency,
+        // Standard templates never materialize, so the next-due date is only a
+        // default the client-bound copies inherit. End of month is sensible.
+        nextDueDate: lastDayOfCurrentMonth(),
+        active: true,
+        viewerIds: [],
+        editorIds: [],
+        stages: [firstStage],
+      })
+      setTitle('')
+      setItemDraft('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create template.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <form className="new-task-form" onSubmit={handleSubmit}>
+      <div className="new-task-form-mode-pill">New standard template</div>
+
+      <label className="new-task-field">
+        <span>Title</span>
+        <input
+          className="input"
+          placeholder="e.g. Monthly close checklist"
+          onChange={(event) => setTitle(event.target.value)}
+          value={title}
+          autoFocus
+        />
+      </label>
+
+      <div className="new-task-field-row">
+        <label className="new-task-field">
+          <span>Who does this</span>
+          <select
+            className="input"
+            value={assigneeId}
+            onChange={(event) => setAssigneeId(event.target.value)}
+          >
+            {employees.map((employee) => (
+              <option key={employee.id} value={employee.id}>
+                {employee.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="new-task-field">
+          <span>How often</span>
+          <select
+            className="input"
+            value={frequency}
+            onChange={(event) =>
+              setFrequency(event.target.value as ChecklistFrequency)
+            }
+          >
+            {checklistFrequencies.map((option) => (
+              <option key={option} value={option}>
+                {getChecklistFrequencyLabel(option)}
+              </option>
+            ))}
+          </select>
+          <small className="new-task-hint">
+            Copies applied to a client inherit this as their default cadence.
+          </small>
+        </label>
+      </div>
+
+      <label className="new-task-field">
+        <span>Steps</span>
+        <textarea
+          className="input new-task-steps"
+          placeholder={
+            'One per line. Example:\nReconcile bank feed\nReview payroll clearing\nSend month-end report'
+          }
+          rows={5}
+          value={itemDraft}
+          onChange={(event) => setItemDraft(event.target.value)}
+        />
+      </label>
+
+      {error ? <p className="auth-error">{error}</p> : null}
+
+      <div className="form-row-actions">
+        <button
+          type="button"
+          className="secondary-action"
+          onClick={onCancel}
+          disabled={submitting}
+        >
+          Cancel
+        </button>
+        <button className="primary-action" type="submit" disabled={submitting}>
+          <Plus size={16} />
+          {submitting ? 'Saving...' : 'Create standard template'}
+        </button>
+      </div>
+    </form>
   )
 }

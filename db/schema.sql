@@ -92,6 +92,23 @@ create table if not exists time_entries (
 
 alter table time_entries add column if not exists task_id text;
 
+-- Time approval workflow. New entries default to 'pending'; existing rows are
+-- backfilled to 'approved' once, in initialize() (see store.js).
+alter table time_entries add column if not exists approval_status text not null default 'pending';
+alter table time_entries add column if not exists approval_note text;
+alter table time_entries add column if not exists approved_by text;
+alter table time_entries add column if not exists approved_at timestamptz;
+
+-- Month-end timesheet locks: one per employee per 'YYYY-MM' period.
+create table if not exists timesheet_locks (
+  id text primary key,
+  user_id text not null,
+  period text not null,
+  locked_by text not null,
+  locked_at timestamptz not null default now(),
+  unique (user_id, period)
+);
+
 create table if not exists checklists (
   id text primary key,
   title text not null,
@@ -135,6 +152,13 @@ create table if not exists checklist_templates (
   updated_at timestamptz not null default now()
 );
 
+-- Wave 2: standard (client-agnostic, reusable) templates. A standard template
+-- has is_standard = true and no client. client_id is made nullable so standard
+-- rows can omit it; non-standard templates still require a client (enforced in
+-- the API layer).
+alter table checklist_templates add column if not exists is_standard boolean not null default false;
+alter table checklist_templates alter column client_id drop not null;
+
 create table if not exists checklist_template_items (
   id text primary key,
   template_id text not null references checklist_templates(id) on delete cascade,
@@ -164,6 +188,10 @@ create table if not exists checklist_template_stages (
   updated_at timestamptz not null default now()
 );
 create index if not exists checklist_template_stages_template_idx on checklist_template_stages(template_id);
+
+-- Wave 2: per-stage explicit due date. When set, the materialized instance for
+-- this stage uses it directly instead of the offset_days calculation.
+alter table checklist_template_stages add column if not exists due_date date;
 
 alter table checklists add column if not exists case_id text;
 alter table checklists add column if not exists stage_id text;

@@ -12,6 +12,7 @@ import {
   type TeamMember,
   type TeamSession,
   type TimeEntry,
+  type TimesheetLock,
   type TotpSetupInit,
   type TotpStatus,
 } from './types'
@@ -112,7 +113,7 @@ export async function logoutSession() {
   }
 }
 
-export async function createTimeEntry(entry: Omit<TimeEntry, 'id'>) {
+export async function createTimeEntry(entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) {
   const response = await fetch('/api/time-entries', {
     credentials: 'same-origin',
     method: 'POST',
@@ -127,6 +128,113 @@ export async function createTimeEntry(entry: Omit<TimeEntry, 'id'>) {
   }
 
   return (await response.json()) as TimeEntry
+}
+
+export async function updateTimeEntryRequest(
+  entryId: string,
+  patch: {
+    minutes?: number
+    description?: string
+    billable?: boolean
+    taskId?: string | null
+    date?: string
+  },
+) {
+  const response = await fetch(`/api/time-entries/${encodeURIComponent(entryId)}`, {
+    credentials: 'same-origin',
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to update time entry (${response.status})`)
+  }
+  return (await response.json()) as TimeEntry
+}
+
+export async function deleteTimeEntryRequest(entryId: string) {
+  const response = await fetch(`/api/time-entries/${encodeURIComponent(entryId)}`, {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok && response.status !== 204) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to delete time entry (${response.status})`)
+  }
+}
+
+/** Owner-only: approve a single pending/rejected time entry. */
+export async function approveTimeEntryRequest(entryId: string) {
+  const response = await fetch(`/api/time-entries/${encodeURIComponent(entryId)}/approve`, {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to approve entry (${response.status})`)
+  }
+  return (await response.json()) as TimeEntry
+}
+
+/** Owner-only: reject a time entry. A note is required. */
+export async function rejectTimeEntryRequest(entryId: string, note: string) {
+  const response = await fetch(`/api/time-entries/${encodeURIComponent(entryId)}/reject`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to reject entry (${response.status})`)
+  }
+  return (await response.json()) as TimeEntry
+}
+
+/** Owner-only: approve a batch of entries (e.g. "approve all for employee"). */
+export async function approveTimeEntriesBatchRequest(entryIds: string[]) {
+  const response = await fetch('/api/time-entries/approve-batch', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entryIds }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to approve entries (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; approved: number }
+}
+
+/** Owner-only: lock a month for an employee (auto-approves pending entries). */
+export async function lockTimesheetRequest(userId: string, period: string) {
+  const response = await fetch('/api/timesheets/lock', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, period }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to lock timesheet (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; lock: TimesheetLock | null }
+}
+
+/** Owner-only: unlock a previously locked month for an employee. */
+export async function unlockTimesheetRequest(userId: string, period: string) {
+  const response = await fetch('/api/timesheets/unlock', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, period }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to unlock timesheet (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; removed: boolean }
 }
 
 export async function toggleChecklistItemRequest(checklistId: string, itemId: string) {
@@ -532,6 +640,83 @@ export async function setTemplateViewersRequest(
   }
 
   return (await response.json()) as ChecklistTemplate
+}
+
+// ---- Wave 2: standard templates, apply/copy to client, on-demand generate ----
+
+/** Owner-only: create a standard (client-agnostic) reusable blueprint template. */
+export async function createStandardTemplateRequest(
+  payload: Omit<ChecklistTemplate, 'id' | 'clientId' | 'isStandard'> &
+    Partial<Pick<ChecklistTemplate, 'clientId' | 'isStandard'>>,
+) {
+  const response = await fetch('/api/checklist-templates/standard', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to create standard template (${response.status})`,
+    )
+  }
+  return (await response.json()) as ChecklistTemplate
+}
+
+/**
+ * Owner-only: copy a standard OR regular template onto a client, producing a
+ * new regular client-bound template.
+ */
+export async function applyTemplateToClientRequest(
+  templateId: string,
+  payload: { clientId: string; firstDueDate?: string; frequency?: string },
+) {
+  const response = await fetch(
+    `/api/checklist-templates/${encodeURIComponent(templateId)}/apply-to-client`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to apply template to client (${response.status})`,
+    )
+  }
+  return (await response.json()) as ChecklistTemplate
+}
+
+/**
+ * Owner-only: materialize a Stage-1 checklist instance from a template on
+ * demand ("Generate a task now" / "Start the first one now").
+ */
+export async function generateChecklistFromTemplateRequest(
+  templateId: string,
+  payload: { dueDate?: string } = {},
+) {
+  const response = await fetch(
+    `/api/checklist-templates/${encodeURIComponent(templateId)}/generate`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to generate task (${response.status})`,
+    )
+  }
+  return (await response.json()) as Checklist
 }
 
 // ---- Phase 5: notifications ----

@@ -115,9 +115,9 @@ export function createSeedData(): AppData {
         clientId: 'client-northstar',
         date: dateOffset(-1),
         minutes: 135,
-        category: 'Bookkeeping',
         description: 'Reconciled operating account and reviewed uncategorized feed items.',
         billable: true,
+        approvalStatus: 'approved',
       },
       {
         id: 'time-2',
@@ -125,9 +125,9 @@ export function createSeedData(): AppData {
         clientId: 'client-riverbend',
         date: dateOffset(-2),
         minutes: 75,
-        category: 'Payroll',
         description: 'Checked payroll register against wage expense and benefits deductions.',
         billable: true,
+        approvalStatus: 'approved',
       },
       {
         id: 'time-3',
@@ -135,9 +135,9 @@ export function createSeedData(): AppData {
         clientId: 'client-clover',
         date: dateOffset(-3),
         minutes: 110,
-        category: 'Cleanup',
         description: 'Reviewed dental supply vendor splits and added supporting notes.',
         billable: true,
+        approvalStatus: 'approved',
       },
       {
         id: 'time-4',
@@ -145,9 +145,9 @@ export function createSeedData(): AppData {
         clientId: 'client-riverbend',
         date: dateOffset(-4),
         minutes: 35,
-        category: 'Admin',
         description: 'Internal checklist prep for month-end meeting.',
         billable: false,
+        approvalStatus: 'approved',
       },
     ],
     checklistTemplates: [
@@ -316,5 +316,6 @@ export function createSeedData(): AppData {
       },
     ],
     checklists: [],
+    timesheetLocks: [],
   }
 }

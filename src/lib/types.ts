@@ -48,17 +48,45 @@ export type SubscriptionPlan = {
   notes: string
 }
 
+export type TimeApprovalStatus = 'pending' | 'approved' | 'rejected'
+
 export type TimeEntry = {
   id: string
   employeeId: string
   clientId: string
   date: string
   minutes: number
-  category: string
+  /**
+   * @deprecated Legacy "work type" categorization. Retained for backwards-compat
+   * reads only — the DB `category`/`work_type` column is kept (not dropped), but
+   * the UI no longer surfaces it. New writes default it server-side.
+   */
+  category?: string
   description: string
   billable: boolean
-  /** Optional link to a checklist (task) this entry was logged against. */
+  /**
+   * Primary categorization: a checklist (task) this entry was logged against.
+   * Still optional — admin/internal time may have no task.
+   */
   taskId?: string | null
+  /** Approval lifecycle. New entries start `pending`; legacy data is `approved`. */
+  approvalStatus: TimeApprovalStatus
+  /** Rejection reason — set when status is `rejected`. */
+  approvalNote?: string
+  /** User id of the owner who approved/rejected the entry. */
+  approvedBy?: string
+  /** ISO timestamp of the approve/reject action. */
+  approvedAt?: string
+}
+
+/** A per-employee, per-month timesheet lock. Locking signs off the month. */
+export type TimesheetLock = {
+  id: string
+  userId: string
+  /** Period in `YYYY-MM` form. */
+  period: string
+  lockedBy: string
+  lockedAt: string
 }
 
 export type ChecklistItem = {
@@ -80,7 +108,19 @@ export type TemplateStage = {
   id: string
   name: string
   assigneeId: string
+  /**
+   * Days after the previous stage's due date. Used only when `dueDate` is not
+   * set — an explicit `dueDate` always wins. Note: independent *repeat cadence*
+   * per stage is NOT supported; the template repeats as a whole and only the
+   * due date can be pinned per stage.
+   */
   offsetDays: number
+  /**
+   * Optional explicit fixed due date (ISO yyyy-mm-dd). When set, the
+   * materialized instance for this stage uses it directly instead of the
+   * `offsetDays` calculation.
+   */
+  dueDate?: string
   viewerIds: string[]
   editorIds: string[]
   items: ChecklistTemplateItem[]
@@ -94,6 +134,12 @@ export type ChecklistTemplate = {
   frequency: ChecklistFrequency
   nextDueDate: string
   active: boolean
+  /**
+   * A standard template is client-agnostic — it has no client, never
+   * materializes checklists on its own, and exists purely as a reusable
+   * blueprint that can be applied/copied onto a client.
+   */
+  isStandard?: boolean
   viewerIds: string[]
   editorIds: string[]
   stages: TemplateStage[]
@@ -160,6 +206,7 @@ export type AppData = {
   timeEntries: TimeEntry[]
   checklistTemplates: ChecklistTemplate[]
   checklists: Checklist[]
+  timesheetLocks: TimesheetLock[]
   firmSettings?: FirmSettings
 }
 
@@ -167,8 +214,9 @@ export type TimerState = {
   employeeId: string
   clientId: string
   description: string
-  category: string
   startedAt: number
+  /** Optional task this timed work is attached to. */
+  taskId?: string | null
 }
 
 export type InvoiceLine = {
@@ -207,8 +255,10 @@ export type ClientReportRow = {
   invoiceTotal: number
 }
 
-export type CategoryReportRow = {
-  category: string
+export type TaskReportRow = {
+  /** Linked checklist id, or `null` for entries with no task ("Unassigned"). */
+  taskId: string | null
+  taskTitle: string
   minutes: number
   entryCount: number
 }

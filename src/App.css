@@ -2830,6 +2830,169 @@ td strong {
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
 }
 
+/* Wave 2: "start the first one now" checkbox row */
+.start-first-now-row {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+  background: #eef2fb;
+  border: 1px solid #d8e0ee;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.start-first-now-row input {
+  margin-top: 2px;
+}
+
+/* Wave 2 C1/C2: in-progress section + group-by toggle */
+.checklist-in-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.group-by-toggle {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+.group-by-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  margin-right: 2px;
+}
+.group-by-btn {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 12px;
+}
+.group-by-btn:hover {
+  border-color: var(--line-strong);
+}
+.group-by-btn.active {
+  background: var(--plum);
+  border-color: var(--plum);
+  color: #fff;
+}
+
+/* Wave 2 C3-editor: prominent per-stage "steps box" */
+.stage-steps-box {
+  background: #f5f7fb;
+  border: 1px solid #d8e0ee;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+}
+.stage-steps-box-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.stage-steps-existing {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.stage-steps-existing li {
+  font-size: 13px;
+  color: var(--ink);
+}
+.stage-steps-empty {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+.stage-steps-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  min-height: 90px;
+}
+.stage-steps-box-footer {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Wave 2: collapsible per-item fine-tuning */
+.stage-fine-tune {
+  font-size: 13px;
+}
+.stage-fine-tune > summary {
+  color: #1c4587;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Wave 2 C4: per-stage due-date control */
+.stage-schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.stage-schedule-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.stage-schedule-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.stage-schedule-radio {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+}
+.stage-schedule-offset {
+  width: 64px;
+}
+.stage-schedule-date {
+  margin-left: 6px;
+}
+
+/* Wave 2 C5: apply/copy template to a client */
+.apply-to-client {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.apply-to-client-error {
+  color: var(--red);
+  font-size: 12px;
+}
+.repeating-task-explainer {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+  padding: 0 14px 8px;
+}
+.repeating-task-row.open .repeating-task-explainer {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+.section-subtext {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 2px 0 0;
+}
+
 /* Compact repeating task rows */
 .repeating-task-list {
   display: flex;
@@ -3778,5 +3941,153 @@ td strong {
   .reports-layout h1 {
     margin-top: 0;
   }
+}
+
+/* ---- Time approval workflow + timesheet locks ---- */
+
+.time-status-pill {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 760;
+  padding: 2px 9px;
+}
+.time-status-pending {
+  background: rgba(211, 155, 42, 0.16);
+  border: 1px solid var(--gold);
+  color: var(--gold);
+}
+.time-status-approved {
+  background: rgba(35, 116, 90, 0.14);
+  border: 1px solid var(--green);
+  color: var(--green);
+}
+.time-status-rejected {
+  background: rgba(173, 48, 66, 0.14);
+  border: 1px solid var(--red);
+  color: var(--red);
+}
+
+.entry-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.entry-reject-note {
+  color: var(--red);
+  margin-top: 5px;
+}
+
+.entry-row-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.link-action {
+  background: none;
+  border: none;
+  color: var(--berry);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0;
+}
+.link-action:hover {
+  text-decoration: underline;
+}
+.link-action.danger {
+  color: var(--red);
+}
+.link-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.entry-row-editing {
+  display: block;
+}
+.entry-edit-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.lock-banner {
+  background: rgba(211, 155, 42, 0.12);
+  border: 1px solid var(--gold);
+  border-radius: 8px;
+  display: grid;
+  gap: 3px;
+  margin-bottom: 14px;
+  padding: 11px 13px;
+}
+.lock-banner strong {
+  color: var(--gold);
+  font-size: 13px;
+}
+.lock-banner span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.approval-groups {
+  display: grid;
+  gap: 16px;
+}
+.approval-group {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.approval-group-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.approval-group-header strong {
+  color: var(--plum);
+  font-size: 14px;
+}
+.approval-rows {
+  display: grid;
+  gap: 8px;
+}
+.approval-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 11px 12px;
+}
+.approval-row-main {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+.approval-row-facts {
+  display: grid;
+  gap: 3px;
+}
+.approval-row-facts strong {
+  color: var(--plum);
+}
+.approval-row-facts span,
+.approval-row-facts small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.approval-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.approval-reject-form {
+  display: grid;
+  gap: 8px;
+  width: 100%;
 }
 

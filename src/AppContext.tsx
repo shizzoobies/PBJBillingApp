@@ -34,7 +34,23 @@ export type AppContextValue = {
   timerElapsed: string
   startTimer: (timer: TimerState) => void
   stopTimer: () => Promise<void>
-  logTime: (entry: Omit<TimeEntry, 'id'>) => Promise<void>
+  logTime: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
+  updateTimeEntry: (
+    entryId: string,
+    patch: {
+      minutes?: number
+      description?: string
+      billable?: boolean
+      taskId?: string | null
+      date?: string
+    },
+  ) => Promise<void>
+  deleteTimeEntry: (entryId: string) => Promise<void>
+  approveTimeEntry: (entryId: string) => Promise<void>
+  rejectTimeEntry: (entryId: string, note: string) => Promise<void>
+  approveTimeEntriesBatch: (entryIds: string[]) => Promise<void>
+  lockTimesheet: (userId: string, period: string) => Promise<void>
+  unlockTimesheet: (userId: string, period: string) => Promise<void>
   toggleChecklistItem: (checklistId: string, itemId: string) => Promise<void>
   setChecklistViewers: (
     checklistId: string,
@@ -91,6 +107,20 @@ export type AppContextValue = {
   ) => void
   reorderTemplateStages: (templateId: string, orderedStageIds: string[]) => void
   duplicateChecklistTemplate: (templateId: string) => void
+  /** Wave 2: create a standard (client-agnostic) reusable blueprint template. */
+  createStandardTemplate: (
+    payload: Omit<ChecklistTemplate, 'id' | 'clientId' | 'isStandard'>,
+  ) => Promise<void>
+  /** Wave 2: copy a standard OR regular template onto a client. */
+  applyTemplateToClient: (
+    templateId: string,
+    payload: { clientId: string; firstDueDate?: string; frequency?: string },
+  ) => Promise<void>
+  /** Wave 2: materialize a Stage-1 checklist instance from a template on demand. */
+  generateChecklistFromTemplate: (
+    templateId: string,
+    payload?: { dueDate?: string },
+  ) => Promise<Checklist | null>
   reorderChecklistItems: (checklistId: string, orderedIds: string[]) => void
   bulkAddChecklistItems: (checklistId: string, labels: string[]) => void
   createChecklist: (payload: {
@@ -99,7 +129,7 @@ export type AppContextValue = {
     assigneeId: string
     dueDate: string
     items: Array<{ label: string }>
-  }) => Promise<void>
+  }) => Promise<Checklist | null>
   updateChecklistItem: (
     checklistId: string,
     itemId: string,
