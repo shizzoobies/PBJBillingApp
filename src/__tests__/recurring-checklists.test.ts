@@ -111,6 +111,57 @@ describe('ensureRecurringChecklists', () => {
     // After catch-up materialization the next due date is rolled into the future.
     expect(updated!.nextDueDate > today).toBe(true)
   })
+
+  it('copies template sub-items AND sub-sub-items with fresh ids and done:false', () => {
+    // A template item with one sub-item that itself has two sub-sub-items.
+    const data = makeData([
+      makeTemplate({
+        nextDueDate: dateOffset(-5),
+        stages: [
+          {
+            id: 'stage-1',
+            name: 'Stage 1',
+            assigneeId: 'emp-1',
+            offsetDays: 0,
+            viewerIds: [],
+            editorIds: [],
+            items: [
+              {
+                id: 'ti-1',
+                label: 'Reconcile bank feed',
+                subItems: [
+                  {
+                    id: 'tsi-1',
+                    title: 'Match deposits',
+                    subItems: [
+                      { id: 'tssi-1', title: 'Pull statement' },
+                      { id: 'tssi-2', title: 'Tick each line' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    ])
+    const result = ensureRecurringChecklists(data)
+    const generated = result.data.checklists.find((c) => c.templateId === 'tmpl-1')
+    expect(generated).toBeDefined()
+
+    const item = generated!.items[0]
+    expect(item.subItems).toHaveLength(1)
+    const sub = item.subItems![0]
+    expect(sub.title).toBe('Match deposits')
+    // Fresh id — must not reuse the template's.
+    expect(sub.id).not.toBe('tsi-1')
+
+    const subSubItems = sub.subItems ?? []
+    expect(subSubItems.map((s) => s.title)).toEqual(['Pull statement', 'Tick each line'])
+    // Sub-sub-items copy with fresh ids and start unchecked.
+    expect(subSubItems.every((s) => s.id !== 'tssi-1' && s.id !== 'tssi-2')).toBe(true)
+    expect(subSubItems.every((s) => s.done === false)).toBe(true)
+  })
 })
 
 describe('ensureRecurringChecklists — specific-months scheduling', () => {
@@ -235,5 +286,52 @@ describe('isChecklistItemDone — sub-item roll-up', () => {
         ],
       }),
     ).toBe(false)
+  })
+})
+
+describe('isChecklistItemDone — three-level (sub-sub-item) roll-up', () => {
+  it('a sub-item with sub-sub-items is done only when every sub-sub-item is done', () => {
+    // The sub-item carries done:false, but its roll-up should win.
+    expect(
+      isChecklistItemDone({
+        done: false,
+        subItems: [{ done: true }, { done: true }],
+      }),
+    ).toBe(true)
+  })
+
+  it('checking every sub-sub-item completes its sub-item and then the top item', () => {
+    // Top item → two sub-items, each with two sub-sub-items, all done.
+    const item = {
+      done: false,
+      subItems: [
+        { done: false, subItems: [{ done: true }, { done: true }] },
+        { done: false, subItems: [{ done: true }, { done: true }] },
+      ],
+    }
+    // Each sub-item rolls up to done...
+    expect(isChecklistItemDone(item.subItems[0])).toBe(true)
+    expect(isChecklistItemDone(item.subItems[1])).toBe(true)
+    // ...and so the whole item rolls up to done.
+    expect(isChecklistItemDone(item)).toBe(true)
+  })
+
+  it('a single incomplete sub-sub-item keeps its sub-item and the top item incomplete', () => {
+    const item = {
+      done: true,
+      subItems: [
+        { done: true, subItems: [{ done: true }, { done: false }] },
+        { done: true, subItems: [{ done: true }, { done: true }] },
+      ],
+    }
+    // The first sub-item has an incomplete sub-sub-item, so it is not done...
+    expect(isChecklistItemDone(item.subItems[0])).toBe(false)
+    // ...which keeps the top item incomplete even though its other branch is done.
+    expect(isChecklistItemDone(item)).toBe(false)
+  })
+
+  it('a sub-item with an empty sub-sub-item list keeps its own done flag', () => {
+    expect(isChecklistItemDone({ done: true, subItems: [] })).toBe(true)
+    expect(isChecklistItemDone({ done: false, subItems: [] })).toBe(false)
   })
 })

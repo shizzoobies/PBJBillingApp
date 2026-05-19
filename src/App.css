@@ -1251,6 +1251,48 @@ textarea.input {
   font-style: italic;
 }
 
+/* A sub-item plus its (optional) sub-sub-item column, stacked. */
+.sub-item-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The deepest level: sub-sub-items, indented once more under their sub-item
+   and rendered slightly smaller/quieter so three levels read as a hierarchy. */
+.sub-sub-item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 18px;
+  padding-left: 9px;
+  border-left: 1px solid var(--line);
+}
+
+.sub-sub-item-list .sub-item-row {
+  min-height: 24px;
+}
+
+.sub-sub-item-list .sub-item-row input[type='checkbox'] {
+  height: 12px;
+  width: 12px;
+}
+
+.sub-sub-item-list .sub-item-title {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.sub-sub-item-list .sub-item-row.done .sub-item-title {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+/* Template-editor sub-sub-items sit a touch tighter than live ones. */
+.sub-sub-item-list.template-sub-item-list {
+  margin-left: 16px;
+}
+
 /* --- Specific-months scheduling editor --- */
 .specific-months {
   background: var(--soft);

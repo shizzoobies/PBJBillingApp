@@ -142,6 +142,9 @@ export function ChecklistsPage() {
     toggleSubItem,
     addSubItem,
     removeSubItem,
+    toggleSubSubItem,
+    addSubSubItem,
+    removeSubSubItem,
     setChecklistViewers,
     setTemplateViewers,
     addChecklistTemplate,
@@ -157,6 +160,9 @@ export function ChecklistsPage() {
     addChecklistTemplateSubItem,
     updateChecklistTemplateSubItem,
     removeChecklistTemplateSubItem,
+    addChecklistTemplateSubSubItem,
+    updateChecklistTemplateSubSubItem,
+    removeChecklistTemplateSubSubItem,
     duplicateChecklistTemplate,
     createStandardTemplate,
     applyTemplateToClient,
@@ -325,13 +331,16 @@ export function ChecklistsPage() {
           clients={data.clients}
           employees={data.employees}
           onAddSubItem={addSubItem}
+          onAddSubSubItem={addSubSubItem}
           onBulkAddItems={bulkAddChecklistItems}
           onDeleteItem={deleteChecklistItem}
           onRemoveSubItem={removeSubItem}
+          onRemoveSubSubItem={removeSubSubItem}
           onReorderItems={reorderChecklistItems}
           onSetViewers={setChecklistViewers}
           onToggle={toggleChecklistItem}
           onToggleSubItem={toggleSubItem}
+          onToggleSubSubItem={toggleSubSubItem}
           onUpdateItem={updateChecklistItem}
           ownerMode={ownerMode}
           role={role}
@@ -346,6 +355,7 @@ export function ChecklistsPage() {
           onAddItem={addChecklistTemplateItem}
           onAddStage={addTemplateStage}
           onAddSubItem={addChecklistTemplateSubItem}
+          onAddSubSubItem={addChecklistTemplateSubSubItem}
           onApplyToClient={applyTemplateToClient}
           onBulkAddItems={bulkAddChecklistTemplateItems}
           onDeleteItem={removeChecklistTemplateItem}
@@ -354,6 +364,7 @@ export function ChecklistsPage() {
           onGenerateNow={handleGenerateNow}
           onPatchStage={patchTemplateStage}
           onRemoveSubItem={removeChecklistTemplateSubItem}
+          onRemoveSubSubItem={removeChecklistTemplateSubSubItem}
           onRemoveStage={removeTemplateStage}
           onReorderItems={reorderChecklistTemplateItems}
           onReorderStages={reorderTemplateStages}
@@ -362,6 +373,7 @@ export function ChecklistsPage() {
           onSetViewers={setTemplateViewers}
           onUpdateItem={updateChecklistTemplateItem}
           onUpdateSubItem={updateChecklistTemplateSubItem}
+          onUpdateSubSubItem={updateChecklistTemplateSubSubItem}
           onUpdateTemplate={updateChecklistTemplate}
           templates={data.checklistTemplates}
         />
@@ -374,6 +386,7 @@ export function ChecklistsPage() {
           onAddItem={addChecklistTemplateItem}
           onAddStage={addTemplateStage}
           onAddSubItem={addChecklistTemplateSubItem}
+          onAddSubSubItem={addChecklistTemplateSubSubItem}
           onApplyToClient={applyTemplateToClient}
           onBulkAddItems={bulkAddChecklistTemplateItems}
           onCreateStandard={createStandardTemplate}
@@ -382,6 +395,7 @@ export function ChecklistsPage() {
           onPatchStage={patchTemplateStage}
           onRemoveStage={removeTemplateStage}
           onRemoveSubItem={removeChecklistTemplateSubItem}
+          onRemoveSubSubItem={removeChecklistTemplateSubSubItem}
           onReorderItems={reorderChecklistTemplateItems}
           onReorderStages={reorderTemplateStages}
           onSetItemAssignee={setChecklistTemplateItemAssignee}
@@ -389,6 +403,7 @@ export function ChecklistsPage() {
           onSetViewers={setTemplateViewers}
           onUpdateItem={updateChecklistTemplateItem}
           onUpdateSubItem={updateChecklistTemplateSubItem}
+          onUpdateSubSubItem={updateChecklistTemplateSubSubItem}
           onUpdateTemplate={updateChecklistTemplate}
           templates={data.checklistTemplates}
         />
@@ -403,13 +418,16 @@ function ChecklistInProgressSection({
   clients,
   employees,
   onAddSubItem,
+  onAddSubSubItem,
   onBulkAddItems,
   onDeleteItem,
   onRemoveSubItem,
+  onRemoveSubSubItem,
   onReorderItems,
   onSetViewers,
   onToggle,
   onToggleSubItem,
+  onToggleSubSubItem,
   onUpdateItem,
   ownerMode,
   role,
@@ -420,9 +438,21 @@ function ChecklistInProgressSection({
   clients: Client[]
   employees: Employee[]
   onAddSubItem: (checklistId: string, itemId: string, title: string) => void
+  onAddSubSubItem: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => void
   onBulkAddItems: (checklistId: string, labels: string[]) => void
   onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
   onRemoveSubItem: (checklistId: string, itemId: string, subItemId: string) => void
+  onRemoveSubSubItem: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => void
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
   onSetViewers: (
     checklistId: string,
@@ -431,6 +461,12 @@ function ChecklistInProgressSection({
   ) => Promise<void> | void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
   onToggleSubItem: (checklistId: string, itemId: string, subItemId: string) => void
+  onToggleSubSubItem: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => void
   onUpdateItem: (
     checklistId: string,
     itemId: string,
@@ -530,13 +566,16 @@ function ChecklistInProgressSection({
       focused={checklist.id === focusId}
       focusRef={checklist.id === focusId ? focusRef : null}
       onAddSubItem={onAddSubItem}
+      onAddSubSubItem={onAddSubSubItem}
       onBulkAddItems={onBulkAddItems}
       onDeleteItem={onDeleteItem}
       onRemoveSubItem={onRemoveSubItem}
+      onRemoveSubSubItem={onRemoveSubSubItem}
       onReorderItems={onReorderItems}
       onSetViewers={onSetViewers}
       onToggle={onToggle}
       onToggleSubItem={onToggleSubItem}
+      onToggleSubSubItem={onToggleSubSubItem}
       onUpdateItem={onUpdateItem}
       ownerMode={ownerMode}
       role={role}
@@ -660,13 +699,16 @@ function ChecklistCard({
   focused,
   focusRef,
   onAddSubItem,
+  onAddSubSubItem,
   onBulkAddItems,
   onDeleteItem,
   onRemoveSubItem,
+  onRemoveSubSubItem,
   onReorderItems,
   onSetViewers,
   onToggle,
   onToggleSubItem,
+  onToggleSubSubItem,
   onUpdateItem,
   ownerMode,
   role,
@@ -679,9 +721,21 @@ function ChecklistCard({
   focused: boolean
   focusRef: React.MutableRefObject<HTMLElement | null> | null
   onAddSubItem: (checklistId: string, itemId: string, title: string) => void
+  onAddSubSubItem: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => void
   onBulkAddItems: (checklistId: string, labels: string[]) => void
   onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
   onRemoveSubItem: (checklistId: string, itemId: string, subItemId: string) => void
+  onRemoveSubSubItem: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => void
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
   onSetViewers: (
     checklistId: string,
@@ -690,6 +744,12 @@ function ChecklistCard({
   ) => Promise<void> | void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
   onToggleSubItem: (checklistId: string, itemId: string, subItemId: string) => void
+  onToggleSubSubItem: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => void
   onUpdateItem: (
     checklistId: string,
     itemId: string,
@@ -792,15 +852,24 @@ function ChecklistCard({
         employees={employees}
         items={checklist.items}
         onAddSubItem={(itemId, title) => onAddSubItem(checklist.id, itemId, title)}
+        onAddSubSubItem={(itemId, subItemId, title) =>
+          onAddSubSubItem(checklist.id, itemId, subItemId, title)
+        }
         onCanToggle={canToggleItem}
         onDeleteItem={(itemId) => onDeleteItem(checklist.id, itemId)}
         onRemoveSubItem={(itemId, subItemId) =>
           onRemoveSubItem(checklist.id, itemId, subItemId)
         }
+        onRemoveSubSubItem={(itemId, subItemId, subSubItemId) =>
+          onRemoveSubSubItem(checklist.id, itemId, subItemId, subSubItemId)
+        }
         onReorderItems={onReorderItems}
         onToggle={onToggle}
         onToggleSubItem={(itemId, subItemId) =>
           onToggleSubItem(checklist.id, itemId, subItemId)
+        }
+        onToggleSubSubItem={(itemId, subItemId, subSubItemId) =>
+          onToggleSubSubItem(checklist.id, itemId, subItemId, subSubItemId)
         }
         onUpdateItem={(itemId, patch) => onUpdateItem(checklist.id, itemId, patch)}
         todayDateOnly={todayDateOnly}
@@ -839,12 +908,15 @@ function DraggableTaskList({
   employees,
   items,
   onAddSubItem,
+  onAddSubSubItem,
   onCanToggle,
   onDeleteItem,
   onRemoveSubItem,
+  onRemoveSubSubItem,
   onReorderItems,
   onToggle,
   onToggleSubItem,
+  onToggleSubSubItem,
   onUpdateItem,
   todayDateOnly,
 }: {
@@ -854,12 +926,15 @@ function DraggableTaskList({
   employees: Employee[]
   items: ChecklistItem[]
   onAddSubItem: (itemId: string, title: string) => void
+  onAddSubSubItem: (itemId: string, subItemId: string, title: string) => void
   onCanToggle: (item: ChecklistItem) => boolean
   onDeleteItem: (itemId: string) => Promise<void>
   onRemoveSubItem: (itemId: string, subItemId: string) => void
+  onRemoveSubSubItem: (itemId: string, subItemId: string, subSubItemId: string) => void
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
   onToggleSubItem: (itemId: string, subItemId: string) => void
+  onToggleSubSubItem: (itemId: string, subItemId: string, subSubItemId: string) => void
   onUpdateItem: (
     itemId: string,
     patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
@@ -1032,31 +1107,85 @@ function DraggableTaskList({
             </div>
             {(hasSubItems || canEdit) ? (
               <div className="sub-item-list">
-                {subItems.map((sub) => (
-                  <div
-                    key={sub.id}
-                    className={sub.done ? 'sub-item-row done' : 'sub-item-row'}
-                  >
-                    <input
-                      checked={sub.done}
-                      disabled={!allowToggle}
-                      onChange={() => onToggleSubItem(item.id, sub.id)}
-                      type="checkbox"
-                    />
-                    <span className="sub-item-title">{sub.title}</span>
-                    {canEdit ? (
-                      <button
-                        type="button"
-                        aria-label="Delete sub-step"
-                        className="item-delete-btn sub-item-delete"
-                        title="Delete sub-step"
-                        onClick={() => onRemoveSubItem(item.id, sub.id)}
-                      >
-                        ×
-                      </button>
-                    ) : null}
-                  </div>
-                ))}
+                {subItems.map((sub) => {
+                  const subSubItems = sub.subItems ?? []
+                  const hasSubSubItems = subSubItems.length > 0
+                  const subSubDoneCount = subSubItems.filter((s) => s.done).length
+                  return (
+                    <div key={sub.id} className="sub-item-group">
+                      <div className={sub.done ? 'sub-item-row done' : 'sub-item-row'}>
+                        <input
+                          checked={sub.done}
+                          disabled={!allowToggle}
+                          onChange={() => onToggleSubItem(item.id, sub.id)}
+                          title={
+                            hasSubSubItems
+                              ? 'Checking this checks every sub-step'
+                              : undefined
+                          }
+                          type="checkbox"
+                        />
+                        <span className="sub-item-title">{sub.title}</span>
+                        {hasSubSubItems ? (
+                          <span className="sub-item-count">
+                            {subSubDoneCount}/{subSubItems.length}
+                          </span>
+                        ) : null}
+                        {canEdit ? (
+                          <button
+                            type="button"
+                            aria-label="Delete sub-step"
+                            className="item-delete-btn sub-item-delete"
+                            title="Delete sub-step"
+                            onClick={() => onRemoveSubItem(item.id, sub.id)}
+                          >
+                            ×
+                          </button>
+                        ) : null}
+                      </div>
+                      {(hasSubSubItems || canEdit) ? (
+                        <div className="sub-sub-item-list">
+                          {subSubItems.map((subSub) => (
+                            <div
+                              key={subSub.id}
+                              className={
+                                subSub.done ? 'sub-item-row done' : 'sub-item-row'
+                              }
+                            >
+                              <input
+                                checked={subSub.done}
+                                disabled={!allowToggle}
+                                onChange={() =>
+                                  onToggleSubSubItem(item.id, sub.id, subSub.id)
+                                }
+                                type="checkbox"
+                              />
+                              <span className="sub-item-title">{subSub.title}</span>
+                              {canEdit ? (
+                                <button
+                                  type="button"
+                                  aria-label="Delete sub-step"
+                                  className="item-delete-btn sub-item-delete"
+                                  title="Delete sub-step"
+                                  onClick={() =>
+                                    onRemoveSubSubItem(item.id, sub.id, subSub.id)
+                                  }
+                                >
+                                  ×
+                                </button>
+                              ) : null}
+                            </div>
+                          ))}
+                          {canEdit ? (
+                            <SubItemAddRow
+                              onAdd={(title) => onAddSubSubItem(item.id, sub.id, title)}
+                            />
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                })}
                 {canEdit ? (
                   <SubItemAddRow onAdd={(title) => onAddSubItem(item.id, title)} />
                 ) : null}
@@ -1870,6 +1999,29 @@ type RepeatingTasksManagerProps = {
     itemId: string,
     subItemId: string,
   ) => void
+  /** Sub-sub-bullet editing on template items (the deepest template level). */
+  onAddSubSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => void
+  onUpdateSubSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+    title: string,
+  ) => void
+  onRemoveSubSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => void
   /** Wave 2: materialize a Stage-1 instance on demand ("Generate a task now"). */
   onGenerateNow?: (templateId: string, opts?: { dueDate?: string }) => Promise<void>
   /** Wave 2: present standard templates differently (no client / no recurrence). */
@@ -2405,11 +2557,23 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
                     onAddSubItem={(itemId, title) =>
                       props.onAddSubItem(template.id, stage.id, itemId, title)
                     }
+                    onAddSubSubItem={(itemId, subItemId, title) =>
+                      props.onAddSubSubItem(template.id, stage.id, itemId, subItemId, title)
+                    }
                     onDeleteItem={(itemId) =>
                       props.onDeleteItem(template.id, stage.id, itemId)
                     }
                     onRemoveSubItem={(itemId, subItemId) =>
                       props.onRemoveSubItem(template.id, stage.id, itemId, subItemId)
+                    }
+                    onRemoveSubSubItem={(itemId, subItemId, subSubItemId) =>
+                      props.onRemoveSubSubItem(
+                        template.id,
+                        stage.id,
+                        itemId,
+                        subItemId,
+                        subSubItemId,
+                      )
                     }
                     onReorderItems={(orderedIds) =>
                       props.onReorderItems(template.id, stage.id, orderedIds)
@@ -2425,6 +2589,16 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
                     }
                     onUpdateSubItem={(itemId, subItemId, title) =>
                       props.onUpdateSubItem(template.id, stage.id, itemId, subItemId, title)
+                    }
+                    onUpdateSubSubItem={(itemId, subItemId, subSubItemId, title) =>
+                      props.onUpdateSubSubItem(
+                        template.id,
+                        stage.id,
+                        itemId,
+                        subItemId,
+                        subSubItemId,
+                        title,
+                      )
                     }
                   />
                   <InlineAddItemRow
@@ -2593,24 +2767,35 @@ function DraggableTemplateItems({
   employees,
   items,
   onAddSubItem,
+  onAddSubSubItem,
   onDeleteItem,
   onRemoveSubItem,
+  onRemoveSubSubItem,
   onReorderItems,
   onSetItemAssignee,
   onSetItemDueDate,
   onUpdateItem,
   onUpdateSubItem,
+  onUpdateSubSubItem,
 }: {
   employees: Employee[]
   items: ChecklistTemplateItem[]
   onAddSubItem: (itemId: string, title: string) => void
+  onAddSubSubItem: (itemId: string, subItemId: string, title: string) => void
   onDeleteItem: (itemId: string) => void
   onRemoveSubItem: (itemId: string, subItemId: string) => void
+  onRemoveSubSubItem: (itemId: string, subItemId: string, subSubItemId: string) => void
   onReorderItems: (orderedIds: string[]) => void
   onSetItemAssignee: (itemId: string, assigneeId: string) => void
   onSetItemDueDate: (itemId: string, dueDate: string) => void
   onUpdateItem: (itemId: string, label: string) => void
   onUpdateSubItem: (itemId: string, subItemId: string, title: string) => void
+  onUpdateSubSubItem: (
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+    title: string,
+  ) => void
 }) {
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
@@ -2714,26 +2899,70 @@ function DraggableTemplateItems({
               </button>
             </div>
             <div className="sub-item-list template-sub-item-list">
-              {subItems.map((sub) => (
-                <div key={sub.id} className="sub-item-row template-sub-item-row">
-                  <span className="sub-item-bullet" aria-hidden="true" />
-                  <input
-                    aria-label="Sub-step"
-                    className="input sub-item-edit-input"
-                    onChange={(event) => onUpdateSubItem(item.id, sub.id, event.target.value)}
-                    value={sub.title}
-                  />
-                  <button
-                    type="button"
-                    aria-label="Delete sub-step"
-                    className="item-delete-btn sub-item-delete"
-                    title="Delete sub-step"
-                    onClick={() => onRemoveSubItem(item.id, sub.id)}
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
+              {subItems.map((sub) => {
+                const subSubItems = sub.subItems ?? []
+                return (
+                  <div key={sub.id} className="sub-item-group">
+                    <div className="sub-item-row template-sub-item-row">
+                      <span className="sub-item-bullet" aria-hidden="true" />
+                      <input
+                        aria-label="Sub-step"
+                        className="input sub-item-edit-input"
+                        onChange={(event) =>
+                          onUpdateSubItem(item.id, sub.id, event.target.value)
+                        }
+                        value={sub.title}
+                      />
+                      <button
+                        type="button"
+                        aria-label="Delete sub-step"
+                        className="item-delete-btn sub-item-delete"
+                        title="Delete sub-step"
+                        onClick={() => onRemoveSubItem(item.id, sub.id)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="sub-sub-item-list template-sub-item-list">
+                      {subSubItems.map((subSub) => (
+                        <div
+                          key={subSub.id}
+                          className="sub-item-row template-sub-item-row"
+                        >
+                          <span className="sub-item-bullet" aria-hidden="true" />
+                          <input
+                            aria-label="Sub-step"
+                            className="input sub-item-edit-input"
+                            onChange={(event) =>
+                              onUpdateSubSubItem(
+                                item.id,
+                                sub.id,
+                                subSub.id,
+                                event.target.value,
+                              )
+                            }
+                            value={subSub.title}
+                          />
+                          <button
+                            type="button"
+                            aria-label="Delete sub-step"
+                            className="item-delete-btn sub-item-delete"
+                            title="Delete sub-step"
+                            onClick={() =>
+                              onRemoveSubSubItem(item.id, sub.id, subSub.id)
+                            }
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                      <SubItemAddRow
+                        onAdd={(title) => onAddSubSubItem(item.id, sub.id, title)}
+                      />
+                    </div>
+                  </div>
+                )
+              })}
               <SubItemAddRow onAdd={(title) => onAddSubItem(item.id, title)} />
             </div>
           </div>

@@ -270,14 +270,23 @@ export async function toggleChecklistItemRequest(
   checklistId: string,
   itemId: string,
   subItemId?: string,
+  subSubItemId?: string,
 ) {
+  // A sub-sub-item toggle must carry its parent `subItemId` too so the server
+  // can locate it; a sub-item toggle carries just `subItemId`.
+  const body =
+    subItemId && subSubItemId
+      ? { subItemId, subSubItemId }
+      : subItemId
+        ? { subItemId }
+        : null
   const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}/toggle`, {
     credentials: 'same-origin',
     method: 'POST',
-    ...(subItemId
+    ...(body
       ? {
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subItemId }),
+          body: JSON.stringify(body),
         }
       : {}),
   })
@@ -327,6 +336,56 @@ export async function removeChecklistSubItemRequest(
   if (!response.ok) {
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to remove sub-item (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
+/** Add a sub-sub-item (the deepest level) under a sub-item of a live checklist. */
+export async function addChecklistSubSubItemRequest(
+  checklistId: string,
+  itemId: string,
+  subItemId: string,
+  title: string,
+) {
+  const response = await apiFetch(
+    `/api/checklists/${checklistId}/items/${itemId}/sub-items/${subItemId}/sub-items`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to add sub-sub-item (${response.status})`,
+    )
+  }
+  return (await response.json()) as Checklist
+}
+
+/** Remove a sub-sub-item from a sub-item of a live checklist. */
+export async function removeChecklistSubSubItemRequest(
+  checklistId: string,
+  itemId: string,
+  subItemId: string,
+  subSubItemId: string,
+) {
+  const response = await apiFetch(
+    `/api/checklists/${checklistId}/items/${itemId}/sub-items/${subItemId}/sub-items/${subSubItemId}`,
+    {
+      credentials: 'same-origin',
+      method: 'DELETE',
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to remove sub-sub-item (${response.status})`,
+    )
   }
   return (await response.json()) as Checklist
 }

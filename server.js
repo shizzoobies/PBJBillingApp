@@ -1154,24 +1154,44 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      // Optional `subItemId`: when present, toggle that sub-item and let the
-      // store recompute the parent `done`. Sub-items inherit the parent item's
-      // permission context (checked above), so no extra auth is needed.
+      // Optional `subItemId` / `subSubItemId`: when present, toggle that
+      // sub-item or sub-sub-item and let the store recompute the parent
+      // roll-ups. Nested items inherit the parent item's permission context
+      // (checked above), so no extra auth is needed.
       let toggleSubItemId
+      let toggleSubSubItemId
       try {
         const body = await readJsonBody(request)
         if (body && typeof body.subItemId === 'string' && body.subItemId.trim()) {
           toggleSubItemId = body.subItemId.trim()
         }
+        if (body && typeof body.subSubItemId === 'string' && body.subSubItemId.trim()) {
+          toggleSubSubItemId = body.subSubItemId.trim()
+        }
       } catch {
         // No body — plain item toggle.
       }
+      let targetSub
       if (toggleSubItemId) {
-        const targetSub = Array.isArray(targetItem.subItems)
+        targetSub = Array.isArray(targetItem.subItems)
           ? targetItem.subItems.find((sub) => sub.id === toggleSubItemId)
           : undefined
         if (!targetSub) {
           sendJson(response, 404, { error: 'Sub-item not found' })
+          return
+        }
+      }
+      if (toggleSubSubItemId) {
+        // A sub-sub-item can only be toggled within a known sub-item.
+        if (!toggleSubItemId) {
+          sendJson(response, 400, { error: 'subItemId is required to toggle a sub-sub-item' })
+          return
+        }
+        const targetSubSub = Array.isArray(targetSub?.subItems)
+          ? targetSub.subItems.find((subSub) => subSub.id === toggleSubSubItemId)
+          : undefined
+        if (!targetSubSub) {
+          sendJson(response, 404, { error: 'Sub-sub-item not found' })
           return
         }
       }
@@ -1180,6 +1200,7 @@ const server = createServer(async (request, response) => {
         checklistId,
         itemId,
         toggleSubItemId,
+        toggleSubSubItemId,
       )
       if (!toggleResult || !toggleResult.checklist) {
         sendJson(response, 404, { error: 'Checklist item not found' })
@@ -1259,6 +1280,108 @@ const server = createServer(async (request, response) => {
       }
 
       sendJson(response, 200, updatedChecklist)
+      return
+    }
+
+    // POST   /api/checklists/:id/items/:itemId/sub-items/:subItemId/sub-items                — add a sub-sub-item
+    // DELETE /api/checklists/:id/items/:itemId/sub-items/:subItemId/sub-items/:subSubItemId  — remove a sub-sub-item
+    // Sub-sub-items inherit the parent item's permission context (owner /
+    // primary assignee / editor / per-item assignee), exactly like sub-items.
+    // Matched BEFORE the sub-item route below since this is the deeper path.
+    const checklistSubSubItemMatch = normalizedPath.match(
+      /^\/api\/checklists\/([^/]+)\/items\/([^/]+)\/sub-items\/([^/]+)\/sub-items(?:\/([^/]+))?$/,
+    )
+    if (checklistSubSubItemMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+
+      const checklistId = checklistSubSubItemMatch[1]
+      const itemId = checklistSubSubItemMatch[2]
+      const subItemId = checklistSubSubItemMatch[3]
+      const subSubItemId = checklistSubSubItemMatch[4] // undefined for the collection route
+
+      const data = await appDataStore.read()
+      const checklist = data.checklists.find((entry) => entry.id === checklistId)
+      if (!checklist) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+      const targetItem = checklist.items.find((item) => item.id === itemId)
+      if (!targetItem) {
+        sendJson(response, 404, { error: 'Checklist item not found' })
+        return
+      }
+      const targetSub = Array.isArray(targetItem.subItems)
+        ? targetItem.subItems.find((sub) => sub.id === subItemId)
+        : undefined
+      if (!targetSub) {
+        sendJson(response, 404, { error: 'Sub-item not found' })
+        return
+      }
+
+      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+      const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
+      const canEdit = itemAssigneeId
+        ? session.user.role === 'owner' ||
+          itemAssigneeId === session.user.id ||
+          editorIds.includes(session.user.id)
+        : session.user.role === 'owner' ||
+          checklist.assigneeId === session.user.id ||
+          editorIds.includes(session.user.id)
+      if (!canEdit) {
+        sendJson(response, 403, { error: 'You can only update your assigned checklists' })
+        return
+      }
+
+      // --- POST: add a sub-sub-item ---
+      if (!subSubItemId && request.method === 'POST') {
+        const payload = await readJsonBody(request)
+        const title = typeof payload?.title === 'string' ? payload.title.trim() : ''
+        if (!title) {
+          sendJson(response, 400, { error: 'Sub-sub-item title is required' })
+          return
+        }
+        const updated = await appDataStore.addChecklistSubSubItem(
+          checklistId,
+          itemId,
+          subItemId,
+          title,
+        )
+        if (!updated) {
+          sendJson(response, 404, { error: 'Sub-item not found' })
+          return
+        }
+        await appDataStore.recordActivity(
+          session.user.id,
+          'checklist_item_edited',
+          `${checklist.title}: ${targetItem.label}`,
+        )
+        sendJson(response, 200, updated)
+        return
+      }
+
+      // --- DELETE: remove a sub-sub-item ---
+      if (subSubItemId && request.method === 'DELETE') {
+        const updated = await appDataStore.removeChecklistSubSubItem(
+          checklistId,
+          itemId,
+          subItemId,
+          subSubItemId,
+        )
+        if (!updated) {
+          sendJson(response, 404, { error: 'Sub-sub-item not found' })
+          return
+        }
+        await appDataStore.recordActivity(
+          session.user.id,
+          'checklist_item_edited',
+          `${checklist.title}: ${targetItem.label}`,
+        )
+        sendJson(response, 200, updated)
+        return
+      }
+
+      sendJson(response, 405, { error: 'Method not allowed' })
       return
     }
 

@@ -303,9 +303,33 @@ function resolveSpecificMonthsDueDate(template, year, month) {
 }
 
 /**
+ * Normalize a raw sub-sub-items value (deepest level) into a clean
+ * `{ id, title, done }[]`. Drops malformed entries. Sub-sub-items never nest
+ * further. `withDone` controls whether `done` is included.
+ */
+function normalizeSubSubItems(raw, { withDone = true } = {}) {
+  const list = Array.isArray(raw) ? raw : []
+  return list
+    .filter((sub) => sub && typeof sub.title === 'string' && sub.title.trim())
+    .map((sub) => {
+      const base = {
+        id:
+          typeof sub.id === 'string' && sub.id
+            ? sub.id
+            : `subsubitem-${randomUUID().slice(0, 8)}`,
+        title: sub.title.trim(),
+      }
+      if (withDone) base.done = Boolean(sub.done)
+      return base
+    })
+}
+
+/**
  * Normalize a raw sub-items value (JSONB column or app-shaped array) into a
- * clean `{ id, title, done }[]`. Drops malformed entries. `withDone` controls
- * whether `done` is included (live checklists carry it; template items don't).
+ * clean `{ id, title, done, subItems? }[]`. Drops malformed entries. Recurses
+ * one level deeper to normalize any sub-sub-items. `withDone` controls whether
+ * `done` is included (live checklists carry it; template items don't). For a
+ * sub-item that has sub-sub-items `done` is derived from those.
  */
 function normalizeSubItems(raw, { withDone = true } = {}) {
   const list = Array.isArray(raw) ? raw : []
@@ -316,21 +340,101 @@ function normalizeSubItems(raw, { withDone = true } = {}) {
         id: typeof sub.id === 'string' && sub.id ? sub.id : `subitem-${randomUUID().slice(0, 8)}`,
         title: sub.title.trim(),
       }
-      if (withDone) base.done = Boolean(sub.done)
+      const subSubItems = normalizeSubSubItems(sub.subItems, { withDone })
+      if (subSubItems.length > 0) {
+        base.subItems = subSubItems
+      }
+      if (withDone) {
+        // A sub-item with sub-sub-items is the roll-up of those; otherwise it
+        // keeps its own stored `done`.
+        base.done =
+          subSubItems.length > 0
+            ? subSubItems.every((subSub) => Boolean(subSub.done))
+            : Boolean(sub.done)
+      }
       return base
     })
 }
 
 /**
- * Roll-up completion for a checklist item: an item with sub-items is `done`
- * exactly when every sub-item is done; an item with no sub-items keeps its own
- * `done`. Mirrors `isChecklistItemDone` in src/lib/utils.ts.
+ * Roll-up completion for a checklist node, recursing up to three levels
+ * (item → sub-item → sub-sub-item): a node with children is `done` exactly
+ * when every child is `done`; a node with no children keeps its own `done`.
+ * Mirrors `isChecklistItemDone` in src/lib/utils.ts.
  */
 function rollUpItemDone(item) {
   if (Array.isArray(item.subItems) && item.subItems.length > 0) {
-    return item.subItems.every((sub) => Boolean(sub.done))
+    return item.subItems.every((sub) => rollUpItemDone(sub))
   }
   return Boolean(item.done)
+}
+
+/**
+ * Set every sub-sub-item under a sub-item to `value`. Returns a new sub-item.
+ */
+function cascadeSubItem(sub, value) {
+  const subSubItems = normalizeSubSubItems(sub.subItems, { withDone: true })
+  const next = { ...sub, done: value }
+  if (subSubItems.length > 0) {
+    next.subItems = subSubItems.map((subSub) => ({ ...subSub, done: value }))
+  }
+  return next
+}
+
+/**
+ * Pure toggle of a checklist item's `done`/`subItems`, recursing the three
+ * levels. Given the item's current `subItems` and `done`, plus which depth is
+ * being toggled, returns the next `{ subItems, done }` — or `null` when the
+ * referenced sub-item / sub-sub-item does not exist.
+ *
+ * - `subSubItemId`: flip that sub-sub-item; recompute its sub-item, then the
+ *   top item.
+ * - `subItemId` only: flip that sub-item, cascading down to all its
+ *   sub-sub-items; recompute the top item.
+ * - neither: flip the top item, cascading all the way down.
+ */
+function applyItemToggle(rawSubItems, itemDone, { subItemId, subSubItemId } = {}) {
+  const subItems = normalizeSubItems(rawSubItems, { withDone: true })
+
+  if (subSubItemId) {
+    if (!subItemId) return null
+    const parent = subItems.find((sub) => sub.id === subItemId)
+    if (!parent) return null
+    const parentSubSubItems = normalizeSubSubItems(parent.subItems, { withDone: true })
+    if (!parentSubSubItems.some((subSub) => subSub.id === subSubItemId)) return null
+    const nextSubItems = subItems.map((sub) => {
+      if (sub.id !== subItemId) return sub
+      const nextSubSubItems = parentSubSubItems.map((subSub) =>
+        subSub.id === subSubItemId ? { ...subSub, done: !subSub.done } : subSub,
+      )
+      return {
+        ...sub,
+        subItems: nextSubSubItems,
+        done: nextSubSubItems.every((subSub) => subSub.done),
+      }
+    })
+    return { subItems: nextSubItems, done: nextSubItems.every((sub) => sub.done) }
+  }
+
+  if (subItemId) {
+    const target = subItems.find((sub) => sub.id === subItemId)
+    if (!target) return null
+    // Toggling a sub-item flips it and cascades to every sub-sub-item.
+    const cascadeValue = !rollUpItemDone(target)
+    const nextSubItems = subItems.map((sub) =>
+      sub.id === subItemId ? cascadeSubItem(sub, cascadeValue) : sub,
+    )
+    return { subItems: nextSubItems, done: nextSubItems.every((sub) => sub.done) }
+  }
+
+  if (subItems.length > 0) {
+    // Toggling the top item cascades to every sub-item and sub-sub-item.
+    const cascadeValue = !subItems.every((sub) => rollUpItemDone(sub))
+    const nextSubItems = subItems.map((sub) => cascadeSubItem(sub, cascadeValue))
+    return { subItems: nextSubItems, done: cascadeValue }
+  }
+
+  return { subItems, done: !itemDone }
 }
 
 function buildChecklistFromStage({ template, stage, stageIndex, stageCount, caseId, dueDate }) {
@@ -360,6 +464,15 @@ function buildChecklistFromStage({ template, stage, stageIndex, stageCount, case
               id: `subitem-${randomUUID().slice(0, 8)}`,
               title: sub.title,
               done: false,
+              ...(Array.isArray(sub.subItems) && sub.subItems.length > 0
+                ? {
+                    subItems: sub.subItems.map((subSub) => ({
+                      id: `subsubitem-${randomUUID().slice(0, 8)}`,
+                      title: subSub.title,
+                      done: false,
+                    })),
+                  }
+                : {}),
             })),
           }
         : {}),
@@ -1403,9 +1516,10 @@ export class AppDataStore {
         }
         if (subItems.length > 0) {
           item.subItems = subItems
-          // `done` is derived for items with sub-items — keep it in sync on read
-          // so a hand-edited DB row can't desync the roll-up.
-          item.done = subItems.every((sub) => sub.done)
+          // `done` is derived for items with sub-items (which may themselves be
+          // derived from sub-sub-items) — keep it in sync on read so a
+          // hand-edited DB row can't desync the roll-up.
+          item.done = rollUpItemDone(item)
         }
         existing.push(item)
         itemsByChecklist.set(row.checklist_id, existing)
@@ -1855,8 +1969,10 @@ export class AppDataStore {
 
           for (const [index, item] of checklist.items.entries()) {
             const subItems = normalizeSubItems(item.subItems, { withDone: true })
-            // `done` is derived for items with sub-items — persist the roll-up.
-            const itemDone = subItems.length > 0 ? subItems.every((sub) => sub.done) : Boolean(item.done)
+            // `done` is derived for items with sub-items (recursing through any
+            // sub-sub-items) — persist the roll-up.
+            const itemDone =
+              subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
             await client.query(
               `
                 insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, assignee_id, sub_items, updated_at)
@@ -2297,8 +2413,8 @@ export class AppDataStore {
         return {
           ...item,
           id: item.id ?? `item-${randomUUID().slice(0, 8)}`,
-          // `done` is derived for items with sub-items.
-          done: subItems.length > 0 ? subItems.every((sub) => sub.done) : Boolean(item.done),
+          // `done` is derived for items with sub-items (recursing sub-sub-items).
+          done: subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done),
           sortOrder: index,
           dueDate: item.dueDate ?? null,
           assigneeId: item.assigneeId ?? null,
@@ -2385,19 +2501,22 @@ export class AppDataStore {
   /**
    * Toggle a checklist item, or a sub-item when `subItemId` is given.
    *
-   * - No `subItemId`: toggle the item. If the item has sub-items, all of them
-   *   are set to the new value (check parent → all subs checked; uncheck → all
-   *   unchecked) and the parent `done` is recomputed as the roll-up. Items with
-   *   no sub-items toggle exactly as before.
-   * - With `subItemId`: toggle that sub-item, then recompute the parent `done`.
+   * - No `subItemId`/`subSubItemId`: toggle the item. If it has sub-items, all
+   *   of them — and their sub-sub-items — are set to the new value and the
+   *   item `done` is recomputed as the roll-up. Items with no sub-items toggle
+   *   exactly as before.
+   * - `subItemId` only: toggle that sub-item, cascading down to all its
+   *   sub-sub-items, then recompute the top item.
+   * - `subSubItemId` (with `subItemId`): toggle that sub-sub-item, recompute
+   *   its parent sub-item, then the top item.
    *
-   * The parent's stored `done` is always kept in sync so every existing
+   * Stored `done` flags are kept in sync at every level so every existing
    * `item.done` reader (progress, Gantt, stage hand-off) works unchanged.
    */
-  async toggleChecklistItem(checklistId, itemId, subItemId) {
+  async toggleChecklistItem(checklistId, itemId, subItemId, subSubItemId) {
     if (this.pool) {
-      // Read-modify-write: sub-item roll-up can't be expressed as a single SQL
-      // update, so load the item, mutate the JSONB, and persist atomically.
+      // Read-modify-write: roll-up can't be expressed as a single SQL update,
+      // so load the item, mutate the JSONB, and persist atomically.
       const itemResult = await this.pool.query(
         `select id, done, sub_items from checklist_items where checklist_id = $1 and id = $2`,
         [checklistId, itemId],
@@ -2406,32 +2525,14 @@ export class AppDataStore {
         return null
       }
       const row = itemResult.rows[0]
-      const subItems = normalizeSubItems(row.sub_items, { withDone: true })
-      let nextDone
-      let nextSubItems = subItems
-
-      if (subItemId) {
-        if (subItems.length === 0) return null
-        const target = subItems.find((sub) => sub.id === subItemId)
-        if (!target) return null
-        nextSubItems = subItems.map((sub) =>
-          sub.id === subItemId ? { ...sub, done: !sub.done } : sub,
-        )
-        nextDone = nextSubItems.every((sub) => sub.done)
-      } else if (subItems.length > 0) {
-        // Toggling a parent with sub-items cascades to every sub-item.
-        const cascadeValue = !subItems.every((sub) => sub.done)
-        nextSubItems = subItems.map((sub) => ({ ...sub, done: cascadeValue }))
-        nextDone = cascadeValue
-      } else {
-        nextDone = !row.done
-      }
+      const toggled = applyItemToggle(row.sub_items, row.done, { subItemId, subSubItemId })
+      if (!toggled) return null
 
       await this.pool.query(
         `update checklist_items
          set done = $3, sub_items = $4::jsonb, updated_at = now()
          where checklist_id = $1 and id = $2`,
-        [checklistId, itemId, nextDone, JSON.stringify(nextSubItems)],
+        [checklistId, itemId, toggled.done, JSON.stringify(toggled.subItems)],
       )
 
       const data = await this.read()
@@ -2454,36 +2555,13 @@ export class AppDataStore {
           return item
         }
 
-        const subItems = normalizeSubItems(item.subItems, { withDone: true })
-
-        if (subItemId) {
-          // Toggle one sub-item, then recompute the parent roll-up.
-          if (subItems.length === 0) return item
-          if (!subItems.some((sub) => sub.id === subItemId)) return item
-          const nextSubItems = subItems.map((sub) =>
-            sub.id === subItemId ? { ...sub, done: !sub.done } : sub,
-          )
-          itemUpdated = true
-          return {
-            ...item,
-            subItems: nextSubItems,
-            done: nextSubItems.every((sub) => sub.done),
-          }
-        }
-
-        if (subItems.length > 0) {
-          // Toggling the parent cascades to every sub-item.
-          const cascadeValue = !subItems.every((sub) => sub.done)
-          itemUpdated = true
-          return {
-            ...item,
-            subItems: subItems.map((sub) => ({ ...sub, done: cascadeValue })),
-            done: cascadeValue,
-          }
-        }
-
+        const toggled = applyItemToggle(item.subItems, item.done, { subItemId, subSubItemId })
+        if (!toggled) return item
         itemUpdated = true
-        return { ...item, done: !item.done }
+        // Keep flat items flat: only attach `subItems` when there are some.
+        return toggled.subItems.length > 0
+          ? { ...item, subItems: toggled.subItems, done: toggled.done }
+          : { ...item, done: toggled.done }
       })
 
       if (!itemUpdated) {
@@ -2992,6 +3070,165 @@ export class AppDataStore {
       return updatedChecklist
     })
     if (!subItemFound || !updatedChecklist) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  /**
+   * Add a sub-sub-item (the deepest level) under a sub-item of a checklist
+   * item. The new sub-sub-item starts `done: false`, which can make a
+   * previously-complete sub-item — and the top item — incomplete, so both
+   * `done` roll-ups are recomputed and persisted. Returns the updated
+   * checklist or null when the item / sub-item is not found.
+   */
+  async addChecklistSubSubItem(checklistId, itemId, subItemId, title) {
+    const trimmed = typeof title === 'string' ? title.trim() : ''
+    if (!trimmed) return null
+
+    if (this.pool) {
+      const itemResult = await this.pool.query(
+        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
+        [checklistId, itemId],
+      )
+      if (!itemResult.rowCount) return null
+      const subItems = normalizeSubItems(itemResult.rows[0].sub_items, { withDone: true })
+      if (!subItems.some((sub) => sub.id === subItemId)) return null
+      const nextSubItems = subItems.map((sub) => {
+        if (sub.id !== subItemId) return sub
+        const subSubItems = normalizeSubSubItems(sub.subItems, { withDone: true })
+        const nextSubSubItems = [
+          ...subSubItems,
+          { id: `subsubitem-${randomUUID().slice(0, 8)}`, title: trimmed, done: false },
+        ]
+        return {
+          ...sub,
+          subItems: nextSubSubItems,
+          done: nextSubSubItems.every((subSub) => subSub.done),
+        }
+      })
+      await this.pool.query(
+        `update checklist_items
+         set sub_items = $3::jsonb, done = $4, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+        [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
+      )
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    let subItemFound = false
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) return checklist
+      const items = checklist.items.map((item) => {
+        if (item.id !== itemId) return item
+        const subItems = normalizeSubItems(item.subItems, { withDone: true })
+        if (!subItems.some((sub) => sub.id === subItemId)) return item
+        subItemFound = true
+        const nextSubItems = subItems.map((sub) => {
+          if (sub.id !== subItemId) return sub
+          const subSubItems = normalizeSubSubItems(sub.subItems, { withDone: true })
+          const nextSubSubItems = [
+            ...subSubItems,
+            { id: `subsubitem-${randomUUID().slice(0, 8)}`, title: trimmed, done: false },
+          ]
+          return {
+            ...sub,
+            subItems: nextSubSubItems,
+            done: nextSubSubItems.every((subSub) => subSub.done),
+          }
+        })
+        return { ...item, subItems: nextSubItems, done: nextSubItems.every((sub) => sub.done) }
+      })
+      updatedChecklist = { ...checklist, items }
+      return updatedChecklist
+    })
+    if (!subItemFound || !updatedChecklist) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  /**
+   * Remove a sub-sub-item from a sub-item, then recompute the sub-item's `done`
+   * roll-up and the top item's `done` (removing the last incomplete
+   * sub-sub-item can complete the sub-item; removing all of them makes the
+   * sub-item a flat sub-item again). Returns the updated checklist or null when
+   * the item / sub-item / sub-sub-item is not found.
+   */
+  async removeChecklistSubSubItem(checklistId, itemId, subItemId, subSubItemId) {
+    if (this.pool) {
+      const itemResult = await this.pool.query(
+        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
+        [checklistId, itemId],
+      )
+      if (!itemResult.rowCount) return null
+      const subItems = normalizeSubItems(itemResult.rows[0].sub_items, { withDone: true })
+      const parent = subItems.find((sub) => sub.id === subItemId)
+      if (!parent) return null
+      const parentSubSubItems = normalizeSubSubItems(parent.subItems, { withDone: true })
+      if (!parentSubSubItems.some((subSub) => subSub.id === subSubItemId)) return null
+      const nextSubItems = subItems.map((sub) => {
+        if (sub.id !== subItemId) return sub
+        const nextSubSubItems = parentSubSubItems.filter((subSub) => subSub.id !== subSubItemId)
+        // With sub-sub-items the sub-item is the roll-up; with none left, keep
+        // its current stored `done`.
+        const nextDone =
+          nextSubSubItems.length > 0
+            ? nextSubSubItems.every((subSub) => subSub.done)
+            : Boolean(sub.done)
+        const nextSub = { ...sub, done: nextDone }
+        if (nextSubSubItems.length > 0) {
+          nextSub.subItems = nextSubSubItems
+        } else {
+          delete nextSub.subItems
+        }
+        return nextSub
+      })
+      await this.pool.query(
+        `update checklist_items
+         set sub_items = $3::jsonb, done = $4, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+        [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
+      )
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    let subSubItemFound = false
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) return checklist
+      const items = checklist.items.map((item) => {
+        if (item.id !== itemId) return item
+        const subItems = normalizeSubItems(item.subItems, { withDone: true })
+        const parent = subItems.find((sub) => sub.id === subItemId)
+        if (!parent) return item
+        const parentSubSubItems = normalizeSubSubItems(parent.subItems, { withDone: true })
+        if (!parentSubSubItems.some((subSub) => subSub.id === subSubItemId)) return item
+        subSubItemFound = true
+        const nextSubItems = subItems.map((sub) => {
+          if (sub.id !== subItemId) return sub
+          const nextSubSubItems = parentSubSubItems.filter((subSub) => subSub.id !== subSubItemId)
+          const nextDone =
+            nextSubSubItems.length > 0
+              ? nextSubSubItems.every((subSub) => subSub.done)
+              : Boolean(sub.done)
+          const nextSub = { ...sub, done: nextDone }
+          if (nextSubSubItems.length > 0) {
+            nextSub.subItems = nextSubSubItems
+          } else {
+            delete nextSub.subItems
+          }
+          return nextSub
+        })
+        return { ...item, subItems: nextSubItems, done: nextSubItems.every((sub) => sub.done) }
+      })
+      updatedChecklist = { ...checklist, items }
+      return updatedChecklist
+    })
+    if (!subSubItemFound || !updatedChecklist) return null
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return updatedChecklist
   }

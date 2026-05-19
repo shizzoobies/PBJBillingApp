@@ -119,16 +119,18 @@ export function getChecklistFrequencyLabel(frequency: ChecklistFrequency) {
 }
 
 /**
- * Roll-up completion for a checklist item: an item with sub-items is `done`
- * exactly when every sub-item is done; an item with no sub-items keeps its
- * own stored `done`. Pure — safe to call anywhere the derived state is needed.
+ * Roll-up completion, recursing up to three levels (item → sub-item →
+ * sub-sub-item). A node with children is `done` exactly when every child is
+ * `done` (children are themselves evaluated by the same rule); a node with no
+ * children keeps its own stored `done`. Pure — safe to call anywhere the
+ * derived state is needed.
  */
 export function isChecklistItemDone(item: {
   done: boolean
-  subItems?: { done: boolean }[]
+  subItems?: { done: boolean; subItems?: { done: boolean }[] }[]
 }): boolean {
   if (Array.isArray(item.subItems) && item.subItems.length > 0) {
-    return item.subItems.every((sub) => sub.done)
+    return item.subItems.every((sub) => isChecklistItemDone(sub))
   }
   return item.done
 }
@@ -232,6 +234,15 @@ function buildChecklistFromStage(
               id: makeId('subitem'),
               title: sub.title,
               done: false,
+              ...(Array.isArray(sub.subItems) && sub.subItems.length > 0
+                ? {
+                    subItems: sub.subItems.map((subSub) => ({
+                      id: makeId('subsubitem'),
+                      title: subSub.title,
+                      done: false,
+                    })),
+                  }
+                : {}),
             })),
           }
         : {}),

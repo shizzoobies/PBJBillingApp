@@ -13,6 +13,7 @@ import { AppLayout } from './components/AppLayout'
 import { SignInScreen } from './components/SignInScreen'
 import {
   addChecklistSubItemRequest,
+  addChecklistSubSubItemRequest,
   appendChecklistItemsRequest,
   applyTemplateToClientRequest,
   approveTimeEntriesBatchRequest,
@@ -31,6 +32,7 @@ import {
   logoutSession,
   rejectTimeEntryRequest,
   removeChecklistSubItemRequest,
+  removeChecklistSubSubItemRequest,
   reorderChecklistItemsRequest,
   saveAppData,
   setChecklistViewersRequest,
@@ -724,6 +726,108 @@ function App() {
     }
   }
 
+  // Sub-sub-item mutations on live checklists — the deepest level. Same dedicated
+  // endpoints / server-confirmed merge as sub-items, just one level deeper.
+  // Each early-returns in preview mode.
+  const toggleSubSubItem = async (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updatedChecklist = await toggleChecklistItemRequest(
+        checklistId,
+        itemId,
+        subItemId,
+        subSubItemId,
+      )
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updatedChecklist : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  const addSubSubItem = async (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updatedChecklist = await addChecklistSubSubItemRequest(
+        checklistId,
+        itemId,
+        subItemId,
+        title,
+      )
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updatedChecklist : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  const removeSubSubItem = async (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updatedChecklist = await removeChecklistSubSubItemRequest(
+        checklistId,
+        itemId,
+        subItemId,
+        subSubItemId,
+      )
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updatedChecklist : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
   const setChecklistViewers = async (
     checklistId: string,
     viewerIds: string[],
@@ -913,6 +1017,100 @@ function App() {
           ? {
               ...item,
               subItems: (item.subItems ?? []).filter((sub) => sub.id !== subItemId),
+            }
+          : item,
+      ),
+    }))
+  }
+
+  // Template sub-sub-items — the deepest template level. Edited through the
+  // same template-save path as every other template-item edit (mutateStage),
+  // which already early-returns in preview mode.
+  const addChecklistTemplateSubSubItem = (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => {
+    const trimmed = title.trim()
+    if (!trimmed) return
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              subItems: (item.subItems ?? []).map((sub) =>
+                sub.id === subItemId
+                  ? {
+                      ...sub,
+                      subItems: [
+                        ...(sub.subItems ?? []),
+                        { id: makeId('subsubitem'), title: trimmed },
+                      ],
+                    }
+                  : sub,
+              ),
+            }
+          : item,
+      ),
+    }))
+  }
+
+  const updateChecklistTemplateSubSubItem = (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+    title: string,
+  ) => {
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              subItems: (item.subItems ?? []).map((sub) =>
+                sub.id === subItemId
+                  ? {
+                      ...sub,
+                      subItems: (sub.subItems ?? []).map((subSub) =>
+                        subSub.id === subSubItemId ? { ...subSub, title } : subSub,
+                      ),
+                    }
+                  : sub,
+              ),
+            }
+          : item,
+      ),
+    }))
+  }
+
+  const removeChecklistTemplateSubSubItem = (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => {
+    mutateStage(templateId, stageId, (stage) => ({
+      ...stage,
+      items: stage.items.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              subItems: (item.subItems ?? []).map((sub) =>
+                sub.id === subItemId
+                  ? {
+                      ...sub,
+                      subItems: (sub.subItems ?? []).filter(
+                        (subSub) => subSub.id !== subSubItemId,
+                      ),
+                    }
+                  : sub,
+              ),
             }
           : item,
       ),
@@ -1443,6 +1641,9 @@ function App() {
     toggleSubItem,
     addSubItem,
     removeSubItem,
+    toggleSubSubItem,
+    addSubSubItem,
+    removeSubSubItem,
     setChecklistViewers,
     setTemplateViewers,
     addChecklistTemplate,
@@ -1458,6 +1659,9 @@ function App() {
     addChecklistTemplateSubItem,
     updateChecklistTemplateSubItem,
     removeChecklistTemplateSubItem,
+    addChecklistTemplateSubSubItem,
+    updateChecklistTemplateSubSubItem,
+    removeChecklistTemplateSubSubItem,
     addTemplateStage,
     removeTemplateStage,
     patchTemplateStage,

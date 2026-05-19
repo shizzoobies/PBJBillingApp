@@ -58,6 +58,27 @@ export type AppContextValue = {
   addSubItem: (checklistId: string, itemId: string, title: string) => Promise<void>
   /** Remove a sub-item from a live-checklist item. */
   removeSubItem: (checklistId: string, itemId: string, subItemId: string) => Promise<void>
+  /** Toggle one sub-sub-item (recomputes its sub-item, then the top item). */
+  toggleSubSubItem: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => Promise<void>
+  /** Add a sub-sub-item under a sub-item of a live-checklist item. */
+  addSubSubItem: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => Promise<void>
+  /** Remove a sub-sub-item from a sub-item of a live-checklist item. */
+  removeSubSubItem: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+  ) => Promise<void>
   setChecklistViewers: (
     checklistId: string,
     viewerIds: string[],
@@ -125,6 +146,31 @@ export type AppContextValue = {
     stageId: string,
     itemId: string,
     subItemId: string,
+  ) => void
+  /** Add a sub-sub-item under a template item's sub-item (flows into generated checklists). */
+  addChecklistTemplateSubSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    title: string,
+  ) => void
+  /** Rename a template item's sub-sub-item. */
+  updateChecklistTemplateSubSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
+    title: string,
+  ) => void
+  /** Remove a sub-sub-item from a template item's sub-item. */
+  removeChecklistTemplateSubSubItem: (
+    templateId: string,
+    stageId: string,
+    itemId: string,
+    subItemId: string,
+    subSubItemId: string,
   ) => void
   addTemplateStage: (templateId: string) => void
   removeTemplateStage: (templateId: string, stageId: string) => void

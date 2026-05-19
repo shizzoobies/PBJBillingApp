@@ -104,21 +104,47 @@ export type TimesheetLock = {
 }
 
 /**
- * A nested checklist sub-item. Sub-items nest exactly one level under a
- * parent `ChecklistItem` / `ChecklistTemplateItem` — no deeper nesting. A
- * sub-item is deliberately simple: it carries no per-sub-item assignee or due
- * date (the parent item carries those).
+ * The deepest checklist node — a sub-sub-item, nested under a `SubChecklistItem`.
+ * Three levels total (item → sub-item → sub-sub-item); nothing nests under this.
+ */
+export type SubSubChecklistItem = {
+  id: string
+  title: string
+  done: boolean
+}
+
+/** A sub-sub-item on a template item. Template nodes have no `done`. */
+export type SubSubChecklistTemplateItem = {
+  id: string
+  title: string
+}
+
+/**
+ * A nested checklist sub-item. Sub-items nest one level under a parent
+ * `ChecklistItem` / `ChecklistTemplateItem` and may themselves carry one
+ * deeper level of `subItems` (sub-sub-items) — three levels total, no further.
+ * A sub-item carries no per-sub-item assignee or due date (the parent item
+ * carries those).
  */
 export type SubChecklistItem = {
   id: string
   title: string
+  /**
+   * For sub-items WITH sub-sub-items this is DERIVED — `true` exactly when
+   * every sub-sub-item is done. Kept in sync on every change so the top item's
+   * roll-up still works. Sub-items with no sub-sub-items behave as before.
+   */
   done: boolean
+  /** One deeper level of nested sub-sub-items. Empty/undefined when flat. */
+  subItems?: SubSubChecklistItem[]
 }
 
 /** A nested sub-item on a template item. Template sub-items have no `done`. */
 export type SubChecklistTemplateItem = {
   id: string
   title: string
+  /** Sub-sub-items defined in the template; copied with fresh ids on materialize. */
+  subItems?: SubSubChecklistTemplateItem[]
 }
 
 export type ChecklistItem = {
