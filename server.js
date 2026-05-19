@@ -1059,6 +1059,10 @@ const server = createServer(async (request, response) => {
                 id: typeof item?.id === 'string' ? item.id : undefined,
                 label: typeof item?.label === 'string' ? item.label.trim() : '',
                 done: Boolean(item?.done),
+                // Nested sub-steps / sub-sub-steps from the outliner-style
+                // create form. `appDataStore.createChecklist` normalizes these
+                // (fresh ids, roll-up done) — we just pass the raw tree through.
+                ...(Array.isArray(item?.subItems) ? { subItems: item.subItems } : {}),
               }))
               .filter((item) => item.label)
           : []

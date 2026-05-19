@@ -51,6 +51,7 @@ import {
   type AuthState,
   type BillingMode,
   type ChecklistTemplate,
+  type ChecklistTemplateItem,
   type Client,
   type DataSyncState,
   type FirmSettings,
@@ -1284,7 +1285,8 @@ function App() {
     clientId: string
     assigneeId: string
     dueDate: string
-    items: Array<{ label: string }>
+    /** Items may carry a nested `subItems` tree built in the outliner. */
+    items: Array<Pick<ChecklistTemplateItem, 'label' | 'subItems'>>
   }) => {
     if (previewActiveRef.current) return null
     try {

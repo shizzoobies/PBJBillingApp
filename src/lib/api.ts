@@ -4,6 +4,7 @@
   type AppData,
   type Checklist,
   type ChecklistTemplate,
+  type ChecklistTemplateItem,
   type Client,
   type FirmSettings,
   type NotificationEntry,
@@ -566,7 +567,12 @@ export async function createChecklistRequest(payload: {
   clientId: string
   assigneeId: string
   dueDate: string
-  items: Array<{ label: string }>
+  /**
+   * Checklist items. May carry a nested `subItems` tree (sub-steps and
+   * sub-sub-steps) built in the outliner-style create form — the server
+   * normalizes the tree (fresh ids, roll-up done) on persist.
+   */
+  items: Array<Pick<ChecklistTemplateItem, 'label' | 'subItems'>>
 }) {
   const response = await apiFetch('/api/checklists', {
     credentials: 'same-origin',

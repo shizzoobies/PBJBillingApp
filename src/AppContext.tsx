@@ -4,6 +4,7 @@ import type {
   BillingMode,
   Checklist,
   ChecklistTemplate,
+  ChecklistTemplateItem,
   Client,
   FirmSettings,
   Role,
@@ -202,7 +203,8 @@ export type AppContextValue = {
     clientId: string
     assigneeId: string
     dueDate: string
-    items: Array<{ label: string }>
+    /** Items may carry a nested `subItems` tree built in the outliner. */
+    items: Array<Pick<ChecklistTemplateItem, 'label' | 'subItems'>>
   }) => Promise<Checklist | null>
   updateChecklistItem: (
     checklistId: string,

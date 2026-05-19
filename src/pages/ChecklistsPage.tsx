@@ -10,6 +10,7 @@ import {
 } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { FilterBar } from '../components/FilterBar'
 import { useFilters } from '../components/useFilters'
 import { SharingControl } from '../components/SharingControl'
@@ -25,6 +26,7 @@ import type {
   TemplateStage,
   TimeEntry,
 } from '../lib/types'
+import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import {
   checklistFrequencies,
   clientName,
@@ -212,7 +214,7 @@ export function ChecklistsPage() {
     clientId: string
     assigneeId: string
     dueDate: string
-    items: Array<{ label: string }>
+    items: Array<Pick<ChecklistTemplateItem, 'label' | 'subItems'>>
   }) => {
     const created = await createChecklist(payload)
     if (created) focusChecklist(created.id)
@@ -1199,11 +1201,19 @@ function DraggableTaskList({
 }
 
 /**
- * Inline "+ add sub-step" affordance, rendered under a checklist item. Starts
- * as a compact link; expands into a tiny input on click. Visible only to users
- * who can edit the checklist.
+ * Inline "+ Add sub-step" affordance, rendered under a checklist item. Starts
+ * as a clearly-labeled control; expands into a tiny input on click. Visible
+ * only to users who can edit the checklist. The `label` defaults to a clear
+ * "Add sub-step" so the affordance is discoverable (the client asked for the
+ * scattered sub-step controls to be obvious).
  */
-function SubItemAddRow({ onAdd }: { onAdd: (title: string) => void }) {
+function SubItemAddRow({
+  onAdd,
+  label = 'Add sub-step',
+}: {
+  onAdd: (title: string) => void
+  label?: string
+}) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState('')
   const inputRef = useRef<HTMLInputElement | null>(null)
@@ -1235,7 +1245,7 @@ function SubItemAddRow({ onAdd }: { onAdd: (title: string) => void }) {
         onClick={() => setOpen(true)}
       >
         <Plus size={12} />
-        add sub-step
+        {label}
       </button>
     )
   }
@@ -1479,7 +1489,7 @@ function NewTaskForm({
     clientId: string
     assigneeId: string
     dueDate: string
-    items: Array<{ label: string }>
+    items: Array<Pick<ChecklistTemplateItem, 'label' | 'subItems'>>
   }) => Promise<void>
   onCreateRepeating: (
     template: Omit<ChecklistTemplate, 'id'>,
@@ -1511,7 +1521,8 @@ function NewTaskForm({
   const [frequency, setFrequency] = useState<ChecklistFrequency>('monthly')
   const [scheduledMonths, setScheduledMonths] = useState<number[]>([])
   const [dueDayOfMonth, setDueDayOfMonth] = useState<number | undefined>(undefined)
-  const [itemDraft, setItemDraft] = useState('')
+  // The first stage's steps as a nested outliner tree (item → sub → sub-sub).
+  const [itemTree, setItemTree] = useState<ChecklistTemplateItem[]>([])
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   // Specific-months mode hides the next-due-date picker (it isn't used) and
@@ -1557,7 +1568,8 @@ function NewTaskForm({
     if (submitting) return
 
     const trimmedTitle = title.trim()
-    const items = parseBulkLines(itemDraft).map((label) => ({ label }))
+    // The outliner can leave blank rows mid-edit — drop empties at every level.
+    const items = pruneEmptyOutlineItems(itemTree)
 
     if (!trimmedTitle) {
       setError('Give the task a title.')
@@ -1582,7 +1594,7 @@ function NewTaskForm({
       return
     }
     if (items.length === 0) {
-      setError('Add at least one step — one per line.')
+      setError('Add at least one step.')
       return
     }
 
@@ -1599,7 +1611,7 @@ function NewTaskForm({
           items,
         })
         setTitle('')
-        setItemDraft('')
+        setItemTree([])
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not create task.')
       } finally {
@@ -1609,7 +1621,8 @@ function NewTaskForm({
     }
 
     // Repeating mode: build a ChecklistTemplate. The first stage is the
-    // user's main step list; any extra hand-off stages are appended.
+    // user's main step list (nested outliner tree); extra hand-off stages
+    // are appended.
     const firstStage: TemplateStage = {
       id: makeId('stage'),
       name: 'Step 1',
@@ -1617,7 +1630,7 @@ function NewTaskForm({
       offsetDays: 0,
       viewerIds: [],
       editorIds: [],
-      items: items.map((item) => ({ id: makeId('template-item'), label: item.label })),
+      items,
     }
     onCreateRepeating(
       {
@@ -1644,7 +1657,7 @@ function NewTaskForm({
       isSpecificMonths ? false : startFirstNow,
     )
     setTitle('')
-    setItemDraft('')
+    setItemTree([])
     setExtraStages([])
   }
 
@@ -1740,18 +1753,15 @@ function NewTaskForm({
         />
       ) : null}
 
-      <label className="new-task-field">
+      <div className="new-task-field">
         <span>Steps</span>
-        <textarea
-          className="input new-task-steps"
-          placeholder={
-            'One per line. Example:\nReconcile bank feed\nReview payroll clearing\nSend month-end report'
-          }
-          rows={5}
-          value={itemDraft}
-          onChange={(event) => setItemDraft(event.target.value)}
+        <ChecklistOutliner
+          items={itemTree}
+          onChange={setItemTree}
+          ariaLabel="Task steps"
+          addPlaceholder="Add a step, then press Enter"
         />
-      </label>
+      </div>
 
       {showHandOffControls ? (
         <div className="hand-off-block">
@@ -1817,23 +1827,15 @@ function NewTaskForm({
                       updateExtraStage(stage.id, next)
                     }}
                   />
-                  <label className="new-task-field">
+                  <div className="new-task-field">
                     <span>Steps for this hand-off</span>
-                    <textarea
-                      className="input new-task-steps"
-                      placeholder={'One per line. Lines starting with # are ignored.'}
-                      rows={4}
-                      value={stage.items.map((item) => item.label).join('\n')}
-                      onChange={(event) =>
-                        updateExtraStage(stage.id, {
-                          items: parseBulkLines(event.target.value).map((label) => ({
-                            id: makeId('template-item'),
-                            label,
-                          })),
-                        })
-                      }
+                    <ChecklistOutliner
+                      items={stage.items}
+                      onChange={(items) => updateExtraStage(stage.id, { items })}
+                      ariaLabel={`Steps for ${stage.name}`}
+                      addPlaceholder="Add a step, then press Enter"
                     />
-                  </label>
+                  </div>
                 </div>
               ))}
               <button type="button" className="link-action" onClick={addHandOffStage}>
@@ -2542,12 +2544,22 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
                   props.onPatchStage(template.id, stage.id, { dueDate: value ?? '' })
                 }
               />
-              <StageStepsBox
-                items={stage.items}
-                onBulkAdd={(labels) =>
-                  props.onBulkAddItems(template.id, stage.id, labels)
-                }
-              />
+              <div className="stage-steps-outline">
+                <span className="stage-steps-box-label">Steps</span>
+                <ChecklistOutliner
+                  items={stage.items}
+                  onChange={(items) =>
+                    props.onUpdateTemplate(template.id, (current) => ({
+                      ...current,
+                      stages: (current.stages ?? []).map((s) =>
+                        s.id === stage.id ? { ...s, items } : s,
+                      ),
+                    }))
+                  }
+                  ariaLabel={`Steps for ${stage.name}`}
+                  addPlaceholder="Add a step, then press Enter"
+                />
+              </div>
               {stage.items.length > 0 ? (
                 <details className="stage-fine-tune">
                   <summary>Fine-tune items (reorder, dates, assignees)</summary>
@@ -2626,67 +2638,6 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
           </div>
         )
       })}
-    </div>
-  )
-}
-
-/**
- * Prominent multi-line "Steps" box for a hand-off step. Type checklist items
- * one per line (`#`-prefixed lines are comments and skipped) and add them in
- * bulk — no per-item add/fill/repeat dance. Per-item fine-tuning (dates,
- * assignees, reorder) lives in the collapsible section below the box.
- */
-function StageStepsBox({
-  items,
-  onBulkAdd,
-}: {
-  items: ChecklistTemplateItem[]
-  onBulkAdd: (labels: string[]) => void
-}) {
-  const [draft, setDraft] = useState('')
-  const lines = useMemo(() => parseBulkLines(draft), [draft])
-
-  const handleAdd = () => {
-    if (lines.length === 0) return
-    onBulkAdd(lines)
-    setDraft('')
-  }
-
-  return (
-    <div className="stage-steps-box">
-      <span className="stage-steps-box-label">Steps</span>
-      {items.length > 0 ? (
-        <ul className="stage-steps-existing">
-          {items.map((item) => (
-            <li key={item.id}>{item.label}</li>
-          ))}
-        </ul>
-      ) : (
-        <p className="stage-steps-empty">No steps yet — type them below, one per line.</p>
-      )}
-      <textarea
-        className="input stage-steps-textarea"
-        placeholder={'One step per line. Example:\nReconcile bank feed\nReview payroll clearing\n# lines starting with # are ignored'}
-        rows={4}
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-      />
-      <div className="stage-steps-box-footer">
-        <span className="bulk-add-preview">
-          {lines.length === 0
-            ? 'Type one step per line'
-            : `Will add ${lines.length} step${lines.length === 1 ? '' : 's'}`}
-        </span>
-        <button
-          type="button"
-          className="secondary-action"
-          disabled={lines.length === 0}
-          onClick={handleAdd}
-        >
-          <Plus size={14} />
-          Add steps
-        </button>
-      </div>
     </div>
   )
 }
@@ -3073,7 +3024,8 @@ function StandardTemplateForm({
   const [title, setTitle] = useState('')
   const [assigneeId, setAssigneeId] = useState(employees[0]?.id ?? '')
   const [frequency, setFrequency] = useState<ChecklistFrequency>('monthly')
-  const [itemDraft, setItemDraft] = useState('')
+  // The template's steps as a nested outliner tree (item → sub → sub-sub).
+  const [itemTree, setItemTree] = useState<ChecklistTemplateItem[]>([])
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -3082,7 +3034,8 @@ function StandardTemplateForm({
     if (submitting) return
 
     const trimmedTitle = title.trim()
-    const items = parseBulkLines(itemDraft)
+    // The outliner can leave blank rows mid-edit — drop empties at every level.
+    const items = pruneEmptyOutlineItems(itemTree)
 
     if (!trimmedTitle) {
       setError('Give the template a title.')
@@ -3093,7 +3046,7 @@ function StandardTemplateForm({
       return
     }
     if (items.length === 0) {
-      setError('Add at least one step — one per line.')
+      setError('Add at least one step.')
       return
     }
 
@@ -3105,7 +3058,7 @@ function StandardTemplateForm({
       offsetDays: 0,
       viewerIds: [],
       editorIds: [],
-      items: items.map((label) => ({ id: makeId('template-item'), label })),
+      items,
     }
 
     setSubmitting(true)
@@ -3123,7 +3076,7 @@ function StandardTemplateForm({
         stages: [firstStage],
       })
       setTitle('')
-      setItemDraft('')
+      setItemTree([])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create template.')
     } finally {
@@ -3183,18 +3136,15 @@ function StandardTemplateForm({
         </label>
       </div>
 
-      <label className="new-task-field">
+      <div className="new-task-field">
         <span>Steps</span>
-        <textarea
-          className="input new-task-steps"
-          placeholder={
-            'One per line. Example:\nReconcile bank feed\nReview payroll clearing\nSend month-end report'
-          }
-          rows={5}
-          value={itemDraft}
-          onChange={(event) => setItemDraft(event.target.value)}
+        <ChecklistOutliner
+          items={itemTree}
+          onChange={setItemTree}
+          ariaLabel="Template steps"
+          addPlaceholder="Add a step, then press Enter"
         />
-      </label>
+      </div>
 
       {error ? <p className="auth-error">{error}</p> : null}
 
