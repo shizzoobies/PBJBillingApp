@@ -56,7 +56,9 @@ export function AppLayout() {
     0,
   )
 
-  const roleLabel = ownerMode ? 'Owner access' : sessionUser?.staffRole ?? 'Employee access'
+  const roleLabel = ownerMode
+    ? 'Owner access'
+    : effectiveUser?.staffRole ?? 'Employee access'
 
   return (
     <div className="app-shell">

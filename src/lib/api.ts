@@ -1,4 +1,4 @@
-import {
+﻿import {
   ApiError,
   type ActivityEntry,
   type AppData,
@@ -17,8 +17,34 @@ import {
   type TotpStatus,
 } from './types'
 
+/**
+ * Module-level preview state. `AppContext` calls `setPreviewModeActive`
+ * whenever `previewMode` changes so that the central fetch wrapper can tag
+ * every outgoing request with `X-Preview-Mode: 1`. The server rejects any
+ * write verb carrying that header — a server-side guarantee that preview
+ * mode stays strictly read-only even if a client-side guard is missed.
+ */
+let previewModeActive = false
+
+export function setPreviewModeActive(active: boolean) {
+  previewModeActive = active
+}
+
+/**
+ * Central fetch wrapper. Identical to `fetch` except it injects the
+ * `X-Preview-Mode` header while an owner is previewing another user.
+ */
+function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  if (!previewModeActive) {
+    return fetch(input, init)
+  }
+  const headers = new Headers(init.headers)
+  headers.set('X-Preview-Mode', '1')
+  return fetch(input, { ...init, headers })
+}
+
 export async function fetchFirmSettings(signal?: AbortSignal) {
-  const response = await fetch('/api/firm-settings', { credentials: 'same-origin', signal })
+  const response = await apiFetch('/api/firm-settings', { credentials: 'same-origin', signal })
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to load firm settings (${response.status})`)
   }
@@ -26,7 +52,7 @@ export async function fetchFirmSettings(signal?: AbortSignal) {
 }
 
 export async function updateFirmSettingsRequest(patch: Partial<FirmSettings>) {
-  const response = await fetch('/api/firm-settings', {
+  const response = await apiFetch('/api/firm-settings', {
     credentials: 'same-origin',
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -39,7 +65,7 @@ export async function updateFirmSettingsRequest(patch: Partial<FirmSettings>) {
 }
 
 export async function fetchPublicFirmSettings(signal?: AbortSignal) {
-  const response = await fetch('/api/firm-settings/public', {
+  const response = await apiFetch('/api/firm-settings/public', {
     credentials: 'same-origin',
     signal,
   })
@@ -49,8 +75,11 @@ export async function fetchPublicFirmSettings(signal?: AbortSignal) {
   return (await response.json()) as PublicFirmSettings
 }
 
-export async function fetchAppData(signal: AbortSignal) {
-  const response = await fetch('/api/app-data', { credentials: 'same-origin', signal })
+export async function fetchAppData(signal: AbortSignal, previewAs?: string | null) {
+  const url = previewAs
+    ? `/api/app-data?previewAs=${encodeURIComponent(previewAs)}`
+    : '/api/app-data'
+  const response = await apiFetch(url, { credentials: 'same-origin', signal })
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to load app data (${response.status})`)
   }
@@ -59,7 +88,7 @@ export async function fetchAppData(signal: AbortSignal) {
 }
 
 export async function saveAppData(data: AppData) {
-  const response = await fetch('/api/app-data', {
+  const response = await apiFetch('/api/app-data', {
     credentials: 'same-origin',
     method: 'PUT',
     headers: {
@@ -74,7 +103,7 @@ export async function saveAppData(data: AppData) {
 }
 
 export async function fetchSession(signal: AbortSignal) {
-  const response = await fetch('/api/session', { credentials: 'same-origin', signal })
+  const response = await apiFetch('/api/session', { credentials: 'same-origin', signal })
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to load session (${response.status})`)
   }
@@ -88,7 +117,7 @@ export async function fetchSession(signal: AbortSignal) {
  * registered or whether the role hint matched.
  */
 export async function requestSignInLink(email: string, role: 'staff' | 'owner') {
-  const response = await fetch('/api/auth/request-link', {
+  const response = await apiFetch('/api/auth/request-link', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -103,7 +132,7 @@ export async function requestSignInLink(email: string, role: 'staff' | 'owner') 
 }
 
 export async function logoutSession() {
-  const response = await fetch('/api/logout', {
+  const response = await apiFetch('/api/logout', {
     credentials: 'same-origin',
     method: 'POST',
   })
@@ -114,7 +143,7 @@ export async function logoutSession() {
 }
 
 export async function createTimeEntry(entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) {
-  const response = await fetch('/api/time-entries', {
+  const response = await apiFetch('/api/time-entries', {
     credentials: 'same-origin',
     method: 'POST',
     headers: {
@@ -140,7 +169,7 @@ export async function updateTimeEntryRequest(
     date?: string
   },
 ) {
-  const response = await fetch(`/api/time-entries/${encodeURIComponent(entryId)}`, {
+  const response = await apiFetch(`/api/time-entries/${encodeURIComponent(entryId)}`, {
     credentials: 'same-origin',
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -154,7 +183,7 @@ export async function updateTimeEntryRequest(
 }
 
 export async function deleteTimeEntryRequest(entryId: string) {
-  const response = await fetch(`/api/time-entries/${encodeURIComponent(entryId)}`, {
+  const response = await apiFetch(`/api/time-entries/${encodeURIComponent(entryId)}`, {
     credentials: 'same-origin',
     method: 'DELETE',
   })
@@ -166,7 +195,7 @@ export async function deleteTimeEntryRequest(entryId: string) {
 
 /** Owner-only: approve a single pending/rejected time entry. */
 export async function approveTimeEntryRequest(entryId: string) {
-  const response = await fetch(`/api/time-entries/${encodeURIComponent(entryId)}/approve`, {
+  const response = await apiFetch(`/api/time-entries/${encodeURIComponent(entryId)}/approve`, {
     credentials: 'same-origin',
     method: 'POST',
   })
@@ -179,7 +208,7 @@ export async function approveTimeEntryRequest(entryId: string) {
 
 /** Owner-only: reject a time entry. A note is required. */
 export async function rejectTimeEntryRequest(entryId: string, note: string) {
-  const response = await fetch(`/api/time-entries/${encodeURIComponent(entryId)}/reject`, {
+  const response = await apiFetch(`/api/time-entries/${encodeURIComponent(entryId)}/reject`, {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -194,7 +223,7 @@ export async function rejectTimeEntryRequest(entryId: string, note: string) {
 
 /** Owner-only: approve a batch of entries (e.g. "approve all for employee"). */
 export async function approveTimeEntriesBatchRequest(entryIds: string[]) {
-  const response = await fetch('/api/time-entries/approve-batch', {
+  const response = await apiFetch('/api/time-entries/approve-batch', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -209,7 +238,7 @@ export async function approveTimeEntriesBatchRequest(entryIds: string[]) {
 
 /** Owner-only: lock a month for an employee (auto-approves pending entries). */
 export async function lockTimesheetRequest(userId: string, period: string) {
-  const response = await fetch('/api/timesheets/lock', {
+  const response = await apiFetch('/api/timesheets/lock', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -224,7 +253,7 @@ export async function lockTimesheetRequest(userId: string, period: string) {
 
 /** Owner-only: unlock a previously locked month for an employee. */
 export async function unlockTimesheetRequest(userId: string, period: string) {
-  const response = await fetch('/api/timesheets/unlock', {
+  const response = await apiFetch('/api/timesheets/unlock', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -238,7 +267,7 @@ export async function unlockTimesheetRequest(userId: string, period: string) {
 }
 
 export async function toggleChecklistItemRequest(checklistId: string, itemId: string) {
-  const response = await fetch(`/api/checklists/${checklistId}/items/${itemId}/toggle`, {
+  const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}/toggle`, {
     credentials: 'same-origin',
     method: 'POST',
   })
@@ -255,7 +284,7 @@ export async function setChecklistViewersRequest(
   viewerIds: string[],
   editorIds: string[],
 ) {
-  const response = await fetch(`/api/checklists/${checklistId}/viewers`, {
+  const response = await apiFetch(`/api/checklists/${checklistId}/viewers`, {
     credentials: 'same-origin',
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -270,7 +299,7 @@ export async function setChecklistViewersRequest(
 }
 
 export async function fetchTeam(signal?: AbortSignal) {
-  const response = await fetch('/api/team', { credentials: 'same-origin', signal })
+  const response = await apiFetch('/api/team', { credentials: 'same-origin', signal })
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to load team (${response.status})`)
   }
@@ -278,7 +307,7 @@ export async function fetchTeam(signal?: AbortSignal) {
 }
 
 export async function inviteTeamMember(payload: { name: string; email: string; role: string }) {
-  const response = await fetch('/api/team/invite', {
+  const response = await apiFetch('/api/team/invite', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -293,7 +322,7 @@ export async function inviteTeamMember(payload: { name: string; email: string; r
 
 /** Owner-only: resend a one-time email sign-in link to a team member. */
 export async function resendTeamSignInLink(userId: string) {
-  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/resend-link`, {
+  const response = await apiFetch(`/api/team/${encodeURIComponent(userId)}/resend-link`, {
     credentials: 'same-origin',
     method: 'POST',
   })
@@ -309,7 +338,7 @@ export async function resendTeamSignInLink(userId: string) {
 
 /** Owner-only: list a team member's active (non-revoked) sessions. */
 export async function fetchTeamSessions(userId: string, signal?: AbortSignal) {
-  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/sessions`, {
+  const response = await apiFetch(`/api/team/${encodeURIComponent(userId)}/sessions`, {
     credentials: 'same-origin',
     signal,
   })
@@ -321,7 +350,7 @@ export async function fetchTeamSessions(userId: string, signal?: AbortSignal) {
 
 /** Owner-only: revoke one specific session for a team member. */
 export async function revokeTeamSession(userId: string, sessionId: string) {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/team/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}/revoke`,
     { credentials: 'same-origin', method: 'POST' },
   )
@@ -333,7 +362,7 @@ export async function revokeTeamSession(userId: string, sessionId: string) {
 
 /** Owner-only: revoke every active session for a team member at once. */
 export async function revokeAllTeamSessions(userId: string) {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/team/${encodeURIComponent(userId)}/sessions/revoke-all`,
     { credentials: 'same-origin', method: 'POST' },
   )
@@ -344,7 +373,7 @@ export async function revokeAllTeamSessions(userId: string) {
 }
 
 export async function deleteTeamMember(userId: string) {
-  const response = await fetch(`/api/team/${encodeURIComponent(userId)}`, {
+  const response = await apiFetch(`/api/team/${encodeURIComponent(userId)}`, {
     credentials: 'same-origin',
     method: 'DELETE',
   })
@@ -362,7 +391,7 @@ export type AuthStatus = {
 }
 
 export async function fetchAuthStatus(signal?: AbortSignal) {
-  const response = await fetch('/api/auth/status', { credentials: 'same-origin', signal })
+  const response = await apiFetch('/api/auth/status', { credentials: 'same-origin', signal })
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to load auth status (${response.status})`)
   }
@@ -370,7 +399,7 @@ export async function fetchAuthStatus(signal?: AbortSignal) {
 }
 
 export async function fetchGlobalActivity(limit = 15, signal?: AbortSignal) {
-  const response = await fetch(`/api/activity?limit=${limit}`, {
+  const response = await apiFetch(`/api/activity?limit=${limit}`, {
     credentials: 'same-origin',
     signal,
   })
@@ -387,7 +416,7 @@ export async function fetchActivityRange(
   signal?: AbortSignal,
 ) {
   const params = new URLSearchParams({ from: fromIso, to: toIso, limit: String(limit) })
-  const response = await fetch(`/api/activity/range?${params.toString()}`, {
+  const response = await apiFetch(`/api/activity/range?${params.toString()}`, {
     credentials: 'same-origin',
     signal,
   })
@@ -398,7 +427,7 @@ export async function fetchActivityRange(
 }
 
 export async function fetchTeamActivity(userId: string, limit = 20) {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/team/${encodeURIComponent(userId)}/activity?limit=${limit}`,
     { credentials: 'same-origin' },
   )
@@ -409,7 +438,7 @@ export async function fetchTeamActivity(userId: string, limit = 20) {
 }
 
 export async function reorderChecklistItemsRequest(checklistId: string, itemIds: string[]) {
-  const response = await fetch(`/api/checklists/${checklistId}/items/reorder`, {
+  const response = await apiFetch(`/api/checklists/${checklistId}/items/reorder`, {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -428,7 +457,7 @@ export async function createChecklistRequest(payload: {
   dueDate: string
   items: Array<{ label: string }>
 }) {
-  const response = await fetch('/api/checklists', {
+  const response = await apiFetch('/api/checklists', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -445,7 +474,7 @@ export async function createChecklistRequest(payload: {
 }
 
 export async function appendChecklistItemsRequest(checklistId: string, titles: string[]) {
-  const response = await fetch(`/api/checklists/${checklistId}/items`, {
+  const response = await apiFetch(`/api/checklists/${checklistId}/items`, {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -462,7 +491,7 @@ export async function updateChecklistItemRequest(
   itemId: string,
   patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
 ) {
-  const response = await fetch(`/api/checklists/${checklistId}/items/${itemId}`, {
+  const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}`, {
     credentials: 'same-origin',
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -475,7 +504,7 @@ export async function updateChecklistItemRequest(
 }
 
 export async function deleteChecklistItemRequest(checklistId: string, itemId: string) {
-  const response = await fetch(`/api/checklists/${checklistId}/items/${itemId}`, {
+  const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}`, {
     credentials: 'same-origin',
     method: 'DELETE',
   })
@@ -486,7 +515,7 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
 }
 
 export async function setClientAssignedTeamRequest(clientId: string, bookkeeperIds: string[]) {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/clients/${encodeURIComponent(clientId)}/assigned-team`,
     {
       credentials: 'same-origin',
@@ -506,7 +535,7 @@ export async function setClientAssignedTeamRequest(clientId: string, bookkeeperI
 }
 
 export async function recordClientProfileActivity(clientId: string) {
-  const response = await fetch(`/api/clients/${encodeURIComponent(clientId)}/activity`, {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/activity`, {
     credentials: 'same-origin',
     method: 'POST',
   })
@@ -538,7 +567,7 @@ export type CaseDetail = {
 }
 
 export async function fetchCase(caseId: string, signal?: AbortSignal) {
-  const response = await fetch(`/api/cases/${encodeURIComponent(caseId)}`, {
+  const response = await apiFetch(`/api/cases/${encodeURIComponent(caseId)}`, {
     credentials: 'same-origin',
     signal,
   })
@@ -558,7 +587,7 @@ export async function addTemplateStageRequest(
     editorIds?: string[]
   },
 ) {
-  const response = await fetch(`/api/checklist-templates/${templateId}/stages`, {
+  const response = await apiFetch(`/api/checklist-templates/${templateId}/stages`, {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -581,7 +610,7 @@ export async function patchTemplateStageRequest(
     editorIds?: string[]
   },
 ) {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/checklist-templates/${templateId}/stages/${encodeURIComponent(stageId)}`,
     {
       credentials: 'same-origin',
@@ -597,7 +626,7 @@ export async function patchTemplateStageRequest(
 }
 
 export async function deleteTemplateStageRequest(templateId: string, stageId: string) {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/checklist-templates/${templateId}/stages/${encodeURIComponent(stageId)}`,
     {
       credentials: 'same-origin',
@@ -611,7 +640,7 @@ export async function deleteTemplateStageRequest(templateId: string, stageId: st
 }
 
 export async function reorderTemplateStagesRequest(templateId: string, stageIds: string[]) {
-  const response = await fetch(`/api/checklist-templates/${templateId}/stages/reorder`, {
+  const response = await apiFetch(`/api/checklist-templates/${templateId}/stages/reorder`, {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -628,7 +657,7 @@ export async function setTemplateViewersRequest(
   viewerIds: string[],
   editorIds: string[],
 ) {
-  const response = await fetch(`/api/checklist-templates/${templateId}/viewers`, {
+  const response = await apiFetch(`/api/checklist-templates/${templateId}/viewers`, {
     credentials: 'same-origin',
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -649,7 +678,7 @@ export async function createStandardTemplateRequest(
   payload: Omit<ChecklistTemplate, 'id' | 'clientId' | 'isStandard'> &
     Partial<Pick<ChecklistTemplate, 'clientId' | 'isStandard'>>,
 ) {
-  const response = await fetch('/api/checklist-templates/standard', {
+  const response = await apiFetch('/api/checklist-templates/standard', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -673,7 +702,7 @@ export async function applyTemplateToClientRequest(
   templateId: string,
   payload: { clientId: string; firstDueDate?: string; frequency?: string },
 ) {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/checklist-templates/${encodeURIComponent(templateId)}/apply-to-client`,
     {
       credentials: 'same-origin',
@@ -700,7 +729,7 @@ export async function generateChecklistFromTemplateRequest(
   templateId: string,
   payload: { dueDate?: string } = {},
 ) {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/checklist-templates/${encodeURIComponent(templateId)}/generate`,
     {
       credentials: 'same-origin',
@@ -728,7 +757,7 @@ export async function fetchNotifications(
   const params = new URLSearchParams()
   if (unreadOnly) params.set('unreadOnly', 'true')
   if (limit) params.set('limit', String(limit))
-  const response = await fetch(`/api/notifications?${params.toString()}`, {
+  const response = await apiFetch(`/api/notifications?${params.toString()}`, {
     credentials: 'same-origin',
     signal,
   })
@@ -739,7 +768,7 @@ export async function fetchNotifications(
 }
 
 export async function fetchUnreadNotificationCount(signal?: AbortSignal) {
-  const response = await fetch('/api/notifications/unread-count', {
+  const response = await apiFetch('/api/notifications/unread-count', {
     credentials: 'same-origin',
     signal,
   })
@@ -750,7 +779,7 @@ export async function fetchUnreadNotificationCount(signal?: AbortSignal) {
 }
 
 export async function markNotificationReadRequest(notificationId: string) {
-  const response = await fetch(
+  const response = await apiFetch(
     `/api/notifications/${encodeURIComponent(notificationId)}/read`,
     { credentials: 'same-origin', method: 'POST' },
   )
@@ -761,7 +790,7 @@ export async function markNotificationReadRequest(notificationId: string) {
 }
 
 export async function markAllNotificationsReadRequest() {
-  const response = await fetch('/api/notifications/read-all', {
+  const response = await apiFetch('/api/notifications/read-all', {
     credentials: 'same-origin',
     method: 'POST',
   })
@@ -774,7 +803,7 @@ export async function markAllNotificationsReadRequest() {
 // ---- TOTP two-factor authentication ----
 
 export async function fetchTotpStatus(signal?: AbortSignal) {
-  const response = await fetch('/api/auth/totp/status', { credentials: 'same-origin', signal })
+  const response = await apiFetch('/api/auth/totp/status', { credentials: 'same-origin', signal })
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to load 2FA status (${response.status})`)
   }
@@ -782,7 +811,7 @@ export async function fetchTotpStatus(signal?: AbortSignal) {
 }
 
 export async function totpSetupInit() {
-  const response = await fetch('/api/auth/totp/setup-init', {
+  const response = await apiFetch('/api/auth/totp/setup-init', {
     credentials: 'same-origin',
     method: 'POST',
   })
@@ -794,7 +823,7 @@ export async function totpSetupInit() {
 }
 
 export async function totpSetupVerify(code: string) {
-  const response = await fetch('/api/auth/totp/setup-verify', {
+  const response = await apiFetch('/api/auth/totp/setup-verify', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -812,7 +841,7 @@ export async function totpSetupVerify(code: string) {
 }
 
 export async function totpSetupComplete() {
-  const response = await fetch('/api/auth/totp/setup-complete', {
+  const response = await apiFetch('/api/auth/totp/setup-complete', {
     credentials: 'same-origin',
     method: 'POST',
   })
@@ -824,7 +853,7 @@ export async function totpSetupComplete() {
 }
 
 export async function totpVerifyChallenge(code: string) {
-  const response = await fetch('/api/auth/totp/verify', {
+  const response = await apiFetch('/api/auth/totp/verify', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -838,7 +867,7 @@ export async function totpVerifyChallenge(code: string) {
 }
 
 export async function totpVerifyBackupChallenge(code: string) {
-  const response = await fetch('/api/auth/totp/verify-backup', {
+  const response = await apiFetch('/api/auth/totp/verify-backup', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -859,7 +888,7 @@ export async function totpVerifyBackupChallenge(code: string) {
 }
 
 export async function totpDisable(code: string) {
-  const response = await fetch('/api/auth/totp/disable', {
+  const response = await apiFetch('/api/auth/totp/disable', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -873,7 +902,7 @@ export async function totpDisable(code: string) {
 }
 
 export async function totpRegenerateBackups(code: string) {
-  const response = await fetch('/api/auth/totp/regenerate-backups', {
+  const response = await apiFetch('/api/auth/totp/regenerate-backups', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -890,7 +919,7 @@ export async function totpRegenerateBackups(code: string) {
 }
 
 export async function teamTotpReset(userId: string) {
-  const response = await fetch(`/api/team/${encodeURIComponent(userId)}/totp/reset`, {
+  const response = await apiFetch(`/api/team/${encodeURIComponent(userId)}/totp/reset`, {
     credentials: 'same-origin',
     method: 'POST',
   })

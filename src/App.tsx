@@ -8,7 +8,7 @@ import {
   useNavigate,
 } from 'react-router-dom'
 import './App.css'
-import { AppContext, type AppContextValue } from './AppContext'
+import { AppContext, useAppContext, type AppContextValue } from './AppContext'
 import { AppLayout } from './components/AppLayout'
 import { SignInScreen } from './components/SignInScreen'
 import {
@@ -32,6 +32,7 @@ import {
   reorderChecklistItemsRequest,
   saveAppData,
   setChecklistViewersRequest,
+  setPreviewModeActive,
   setTemplateViewersRequest,
   toggleChecklistItemRequest,
   unlockTimesheetRequest,
@@ -89,8 +90,12 @@ function OwnerOnly({
   ownerMode: boolean
   children: React.ReactElement
 }) {
+  const { previewMode } = useAppContext()
   if (!ownerMode) {
-    return <Navigate to="/time" replace />
+    // `ownerMode` is the EFFECTIVE role authority, so a non-owner — or an
+    // owner previewing a non-owner — bounces off owner-only routes. While
+    // previewing, send them to /dashboard (the faithful landing page).
+    return <Navigate to={previewMode ? '/dashboard' : '/time'} replace />
   }
   return children
 }
@@ -116,6 +121,22 @@ function App() {
   })
   const skipAutosaveRef = useRef(0)
   const role = sessionUser?.role ?? 'employee'
+
+  // Preview mode: an owner is viewing the app AS another user. It is strictly
+  // read-only. `previewActiveRef` mirrors it into a ref so the mutation
+  // helpers below (which run in event handlers / async callbacks, never
+  // during render) can early-out without being re-created each render.
+  const previewActive =
+    previewUserId !== null && role === 'owner' && Boolean(sessionUser)
+  const previewActiveRef = useRef(previewActive)
+
+  // Mirror preview state into the ref AND into api.ts's central fetch wrapper
+  // so every request carries the `X-Preview-Mode` header while previewing —
+  // the server-side read-only guard.
+  useEffect(() => {
+    previewActiveRef.current = previewActive
+    setPreviewModeActive(previewActive)
+  }, [previewActive])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -197,16 +218,27 @@ function App() {
     document.documentElement.style.setProperty('--plum', color)
   }, [publicFirmSettings.brandColor])
 
+  // Load app data on session change AND whenever preview state changes.
+  // Entering preview refetches with `?previewAs=<id>` so the whole app
+  // reflects the previewed person's scoped dataset; exiting refetches as the
+  // owner. The owner-only guard for `previewAs` lives server-side.
   useEffect(() => {
     if (!sessionUser) {
       return
     }
 
     const controller = new AbortController()
+    // Owners are the only ones who can preview; for everyone else the param
+    // is omitted (and would be ignored server-side anyway).
+    const previewAs =
+      previewUserId && sessionUser.role === 'owner' ? previewUserId : null
 
     const load = async () => {
       try {
-        const remoteData = ensureRecurringChecklists(await fetchAppData(controller.signal)).data
+        setDataSyncState('loading')
+        const remoteData = ensureRecurringChecklists(
+          await fetchAppData(controller.signal, previewAs),
+        ).data
         skipAutosaveRef.current += 1
         setData(remoteData)
         setServerPersistenceEnabled(true)
@@ -231,10 +263,16 @@ function App() {
     void load()
 
     return () => controller.abort()
-  }, [sessionUser])
+  }, [sessionUser, previewUserId])
 
   useEffect(() => {
     if (!serverPersistenceEnabled) {
+      return
+    }
+
+    // Preview mode is strictly read-only — never autosave the previewed
+    // person's scoped dataset back over the real workspace.
+    if (previewUserId && sessionUser?.role === 'owner') {
       return
     }
 
@@ -265,7 +303,7 @@ function App() {
     }, 250)
 
     return () => window.clearTimeout(timeoutId)
-  }, [data, serverPersistenceEnabled])
+  }, [data, serverPersistenceEnabled, previewUserId, sessionUser])
 
   useEffect(() => {
     if (!timer) {
@@ -322,6 +360,12 @@ function App() {
   }, [activeEmployeeId, data.timeEntries, role])
 
   const updateWorkspaceData = (updater: (current: AppData) => AppData) => {
+    // Preview mode is strictly read-only: every workspace-config mutator
+    // (templates, clients, plans, stages) routes through here, so a single
+    // early-return neutralizes all of them at once.
+    if (previewActiveRef.current) {
+      return
+    }
     setData((current) => ensureRecurringChecklists(updater(current)).data)
   }
 
@@ -331,6 +375,7 @@ function App() {
   }
 
   const logTime = async (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const newEntry = await createTimeEntry(entry)
@@ -354,7 +399,7 @@ function App() {
   }
 
   const stopTimer = async () => {
-    if (!timer) {
+    if (previewActiveRef.current || !timer) {
       return
     }
 
@@ -380,6 +425,7 @@ function App() {
       date?: string
     },
   ) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updated = await updateTimeEntryRequest(entryId, patch)
@@ -403,6 +449,7 @@ function App() {
   }
 
   const deleteTimeEntry = async (entryId: string) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       await deleteTimeEntryRequest(entryId)
@@ -424,6 +471,7 @@ function App() {
   }
 
   const approveTimeEntry = async (entryId: string) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updated = await approveTimeEntryRequest(entryId)
@@ -447,6 +495,7 @@ function App() {
   }
 
   const rejectTimeEntry = async (entryId: string, note: string) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updated = await rejectTimeEntryRequest(entryId, note)
@@ -470,7 +519,7 @@ function App() {
   }
 
   const approveTimeEntriesBatch = async (entryIds: string[]) => {
-    if (entryIds.length === 0) return
+    if (previewActiveRef.current || entryIds.length === 0) return
     try {
       setDataSyncState('saving')
       await approveTimeEntriesBatchRequest(entryIds)
@@ -505,6 +554,7 @@ function App() {
   }
 
   const lockTimesheet = async (userId: string, period: string) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const result = await lockTimesheetRequest(userId, period)
@@ -552,6 +602,7 @@ function App() {
   }
 
   const unlockTimesheet = async (userId: string, period: string) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       await unlockTimesheetRequest(userId, period)
@@ -575,6 +626,7 @@ function App() {
   }
 
   const toggleChecklistItem = async (checklistId: string, itemId: string) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updatedChecklist = await toggleChecklistItemRequest(checklistId, itemId)
@@ -602,6 +654,7 @@ function App() {
     viewerIds: string[],
     editorIds: string[],
   ) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updated = await setChecklistViewersRequest(checklistId, viewerIds, editorIds)
@@ -629,6 +682,7 @@ function App() {
     viewerIds: string[],
     editorIds: string[],
   ) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updated = await setTemplateViewersRequest(templateId, viewerIds, editorIds)
@@ -839,6 +893,7 @@ function App() {
   }
 
   const reorderChecklistItems = async (checklistId: string, orderedIds: string[]) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updated = await reorderChecklistItemsRequest(checklistId, orderedIds)
@@ -861,7 +916,7 @@ function App() {
   }
 
   const bulkAddChecklistItems = async (checklistId: string, labels: string[]) => {
-    if (labels.length === 0) return
+    if (previewActiveRef.current || labels.length === 0) return
     try {
       setDataSyncState('saving')
       const updated = await appendChecklistItemsRequest(checklistId, labels)
@@ -890,6 +945,7 @@ function App() {
     dueDate: string
     items: Array<{ label: string }>
   }) => {
+    if (previewActiveRef.current) return null
     try {
       setDataSyncState('saving')
       const created = await createChecklistRequest(payload)
@@ -916,6 +972,7 @@ function App() {
     itemId: string,
     patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
   ) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updated = await updateChecklistItemRequest(checklistId, itemId, patch)
@@ -938,6 +995,7 @@ function App() {
   }
 
   const deleteChecklistItem = async (checklistId: string, itemId: string) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updated = await deleteChecklistItemRequest(checklistId, itemId)
@@ -994,6 +1052,7 @@ function App() {
   const createStandardTemplate = async (
     payload: Omit<ChecklistTemplate, 'id' | 'clientId' | 'isStandard'>,
   ) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const created = await createStandardTemplateRequest(payload)
@@ -1018,6 +1077,7 @@ function App() {
     templateId: string,
     payload: { clientId: string; firstDueDate?: string; frequency?: string },
   ) => {
+    if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const created = await applyTemplateToClientRequest(templateId, payload)
@@ -1042,6 +1102,7 @@ function App() {
     templateId: string,
     payload: { dueDate?: string } = {},
   ) => {
+    if (previewActiveRef.current) return null
     try {
       setDataSyncState('saving')
       const created = await generateChecklistFromTemplateRequest(templateId, payload)
@@ -1122,8 +1183,7 @@ function App() {
     }
   }
 
-  const ownerMode = role === 'owner'
-  const previewMode = previewUserId !== null && ownerMode && Boolean(sessionUser)
+  const previewMode = previewActive
   const previewEmployee = previewMode
     ? data.employees.find((employee) => employee.id === previewUserId)
     : null
@@ -1137,6 +1197,14 @@ function App() {
           staffRole: previewEmployee.role,
         }
       : (sessionUser as SessionUser)
+  // While previewing, the whole app must behave as the previewed person:
+  // their role drives the sidebar, owner-only routing, and permission-gated
+  // controls; their id drives the per-user data memos below. `sessionUser`
+  // stays the real owner (account pill, 2FA banner, logout).
+  const effectiveRole = effectiveUser.role
+  const ownerMode = effectiveRole === 'owner'
+  const effectiveEmployeeId =
+    previewMode && previewEmployee ? previewEmployee.id : activeEmployeeId
   const syncMessage =
     dataSyncState === 'loading'
       ? 'Loading server-backed workspace data...'
@@ -1200,12 +1268,15 @@ function App() {
     data,
     sessionUser,
     effectiveUser,
-    role,
+    // `role`/`ownerMode`/`activeEmployeeId` are the EFFECTIVE values: while an
+    // owner previews a bookkeeper they reflect the bookkeeper, so the sidebar,
+    // routing, and permission-gated controls match what that person sees.
+    role: effectiveRole,
     ownerMode,
     previewUserId,
     setPreviewUserId,
     previewMode,
-    activeEmployeeId,
+    activeEmployeeId: effectiveEmployeeId,
     visibleChecklists,
     visibleClients,
     visibleClientIds,
@@ -1284,10 +1355,14 @@ function App() {
 }
 
 function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
-  // Sanitize: when an employee navigates (or refreshes) on an owner-only path,
-  // bounce them to /time. We do this in a hook so back/forward still works.
+  // Sanitize: when a non-owner navigates (or refreshes) on an owner-only path,
+  // bounce them off it. `ownerMode` is the EFFECTIVE role, so an owner who is
+  // previewing a bookkeeper is bounced too — a faithful preview must not
+  // expose pages the previewed person can't reach. While previewing we land
+  // them on /dashboard; a real bookkeeper keeps the existing /time landing.
   const location = useLocation()
   const navigate = useNavigate()
+  const { previewMode } = useAppContext()
   useEffect(() => {
     const ownerOnly = [
       '/time-approvals',
@@ -1301,9 +1376,9 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
       '/settings',
     ]
     if (!ownerMode && ownerOnly.some((path) => location.pathname.startsWith(path))) {
-      navigate('/time', { replace: true })
+      navigate(previewMode ? '/dashboard' : '/time', { replace: true })
     }
-  }, [location.pathname, navigate, ownerMode])
+  }, [location.pathname, navigate, ownerMode, previewMode])
 
   return (
     <Routes>

@@ -348,6 +348,21 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Preview mode is strictly read-only. The client tags every request with
+    // `X-Preview-Mode: 1` while an owner is previewing another user; any
+    // write verb carrying that header is rejected before it can mutate
+    // anything. This is the server-side belt to the client-side suspenders.
+    const method = request.method || 'GET'
+    if (
+      request.headers['x-preview-mode'] === '1' &&
+      method !== 'GET' &&
+      method !== 'HEAD' &&
+      method !== 'OPTIONS'
+    ) {
+      sendJson(response, 403, { error: 'Preview mode is read-only' })
+      return
+    }
+
     // Legacy persistent magic-link route — replaced by /api/auth/request-link
     // and /verify/:token. Bookkeepers may have bookmarked the old URL; bounce
     // them to the staff sign-in entry page so the owner URL stays unadvertised.
@@ -603,7 +618,31 @@ const server = createServer(async (request, response) => {
 
       if (request.method === 'GET') {
         const data = await appDataStore.read()
-        sendJson(response, 200, scopeAppDataForSession(session, data))
+        // Preview-as: an owner may request the dataset another user would see
+        // by passing `?previewAs=<userId>`. The param is honored ONLY when the
+        // real session user is an owner and the target user exists; otherwise
+        // it is silently ignored and the caller gets their own scoped data.
+        let scopingSession = session
+        const previewAs = requestUrl.searchParams.get('previewAs')
+        if (previewAs && session.user.role === 'owner') {
+          const target = (data.employees ?? []).find(
+            (employee) => employee.id === previewAs,
+          )
+          if (target) {
+            // scopeAppDataForSession only reads user.id and user.role, so a
+            // minimal synthetic user is enough to scope the dataset as the
+            // previewed person.
+            scopingSession = {
+              ...session,
+              user: {
+                ...session.user,
+                id: target.id,
+                role: target.role === 'Owner' ? 'owner' : 'employee',
+              },
+            }
+          }
+        }
+        sendJson(response, 200, scopeAppDataForSession(scopingSession, data))
         return
       }
 
