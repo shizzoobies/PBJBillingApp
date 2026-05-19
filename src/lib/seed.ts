@@ -118,6 +118,7 @@ export function createSeedData(): AppData {
         description: 'Reconciled operating account and reviewed uncategorized feed items.',
         billable: true,
         approvalStatus: 'approved',
+        entryMethod: 'timer',
       },
       {
         id: 'time-2',
@@ -128,6 +129,7 @@ export function createSeedData(): AppData {
         description: 'Checked payroll register against wage expense and benefits deductions.',
         billable: true,
         approvalStatus: 'approved',
+        entryMethod: 'timer',
       },
       {
         id: 'time-3',
@@ -138,6 +140,7 @@ export function createSeedData(): AppData {
         description: 'Reviewed dental supply vendor splits and added supporting notes.',
         billable: true,
         approvalStatus: 'approved',
+        entryMethod: 'timer',
       },
       {
         id: 'time-4',
@@ -148,6 +151,7 @@ export function createSeedData(): AppData {
         description: 'Internal checklist prep for month-end meeting.',
         billable: false,
         approvalStatus: 'approved',
+        entryMethod: 'timer',
       },
     ],
     checklistTemplates: [

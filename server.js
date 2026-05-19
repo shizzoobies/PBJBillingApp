@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import { AppDataStore } from './db/store.js'
 import { notify, sendLoginLinkEmail } from './lib/notify.js'
+import { normalizeTimeEntryMethod } from './lib/time-entry.js'
 import {
   generateBackupCodes,
   generateSecret,
@@ -691,9 +692,19 @@ const server = createServer(async (request, response) => {
         const taskIdRaw = payload?.taskId
         const taskId =
           typeof taskIdRaw === 'string' && taskIdRaw.trim() ? taskIdRaw.trim() : null
+        // Capture method: anything other than an explicit 'manual' is a timer
+        // entry. A manual entry must carry a non-empty reason; timer-stop and
+        // any non-manual creation ignore manualReason entirely.
+        const { entryMethod, manualReason, error: methodError } =
+          normalizeTimeEntryMethod(payload)
 
         if (!employeeId || !clientId || !date || Number.isNaN(minutes) || minutes <= 0) {
           sendJson(response, 400, { error: 'Invalid time entry payload' })
+          return
+        }
+
+        if (methodError) {
+          sendJson(response, 400, { error: methodError })
           return
         }
 
@@ -746,7 +757,46 @@ const server = createServer(async (request, response) => {
           description,
           billable,
           taskId,
+          entryMethod,
+          manualReason: entryMethod === 'manual' ? manualReason : undefined,
         })
+
+        // Manual entries are deliberately gated: log the submission and ping
+        // every owner so they know a non-timer entry is waiting for approval.
+        // Timer-stopped entries enter the approval queue silently, as before.
+        if (entryMethod === 'manual') {
+          const client = (allData.clients ?? []).find((c) => c.id === clientId)
+          const clientLabel = client?.name ?? 'a client'
+          const employee = (allData.employees ?? []).find((e) => e.id === employeeId)
+          const employeeLabel = employee?.name ?? 'An employee'
+          const hoursLabel = (minutes / 60).toFixed(2).replace(/\.?0+$/, '')
+
+          await appDataStore.recordActivity(
+            employeeId,
+            'time_entry_manual_submitted',
+            `${employeeLabel} · ${clientLabel}`,
+          )
+
+          try {
+            const members = await appDataStore.getTeamMembers()
+            const owners = members.filter((member) => member.role === 'owner')
+            for (const owner of owners) {
+              // The submitter, if an owner, does not notify themselves — but
+              // every other owner is still alerted.
+              if (owner.id === session.user.id) continue
+              await notify(appDataStore, owner.id, 'time_entry_manual', {
+                timeEntryId: entry.id,
+                employeeId,
+                clientId,
+                message: `Manual time entry from ${employeeLabel} needs approval — ${clientLabel}, ${hoursLabel}h on ${date}.`,
+                link: '/time-approvals',
+                appPublicUrl: getPublicAppUrl(request),
+              })
+            }
+          } catch (err) {
+            console.error('[notify] time_entry_manual dispatch failed:', err?.message || err)
+          }
+        }
 
         sendJson(response, 201, entry)
         return

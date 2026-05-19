@@ -288,17 +288,32 @@ function ApprovalRow({
             {entry.date} · {taskLabel} · {formatHours(entry.minutes)} ·{' '}
             {entry.billable ? 'Billable' : 'Internal'}
           </small>
+          {entry.entryMethod === 'manual' ? (
+            <div className="approval-manual-note">
+              <strong>Manual entry</strong>
+              <span>
+                {entry.manualReason
+                  ? `Reason: ${entry.manualReason}`
+                  : 'No reason was provided.'}
+              </span>
+            </div>
+          ) : null}
           {entry.approvalStatus === 'rejected' && entry.approvalNote ? (
             <small className="entry-reject-note">Rejected: {entry.approvalNote}</small>
           ) : null}
         </div>
-        <span className={`time-status-pill time-status-${entry.approvalStatus}`}>
-          {entry.approvalStatus === 'approved'
-            ? 'Approved'
-            : entry.approvalStatus === 'rejected'
-              ? 'Rejected'
-              : 'Pending'}
-        </span>
+        <div className="approval-row-pills">
+          {entry.entryMethod === 'manual' ? (
+            <span className="manual-badge">Manual</span>
+          ) : null}
+          <span className={`time-status-pill time-status-${entry.approvalStatus}`}>
+            {entry.approvalStatus === 'approved'
+              ? 'Approved'
+              : entry.approvalStatus === 'rejected'
+                ? 'Rejected'
+                : 'Pending'}
+          </span>
+        </div>
       </div>
 
       {entry.approvalStatus !== 'approved' ? (

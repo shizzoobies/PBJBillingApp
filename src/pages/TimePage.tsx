@@ -1,5 +1,5 @@
-import { Clock3, TimerReset } from 'lucide-react'
-import { useMemo, useState, type FormEvent } from 'react'
+import { Clock3, PencilLine, TimerReset } from 'lucide-react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import type {
   Checklist,
@@ -38,33 +38,74 @@ export function TimePage() {
       (lock) => lock.userId === activeEmployeeId && lock.period === currentPeriod,
     )
 
+  // Manual entry is deliberately gated and is read-only when the timesheet is
+  // locked or an owner is previewing — exactly like the timer inputs.
+  const inputsDisabled = lockedThisPeriod || previewMode
+  const [manualOpen, setManualOpen] = useState(false)
+
   return (
-    <section className="content-grid two-column" id="time">
-      <TimeCapture
-        activeEmployeeId={activeEmployeeId}
-        clients={visibleClients}
-        checklists={data.checklists}
-        employees={data.employees}
-        onLog={logTime}
-        onStartTimer={startTimer}
-        onStopTimer={stopTimer}
-        role={role}
-        timer={timer}
-        timerElapsed={timer ? timerElapsed : '0:00'}
-        locked={lockedThisPeriod}
-        previewMode={previewMode}
-        currentPeriod={currentPeriod}
-      />
-      <RecentTimeEntries
-        checklists={data.checklists}
-        clients={data.clients}
-        employees={data.employees}
-        entries={visibleEntries}
-        role={role}
-        locks={data.timesheetLocks ?? []}
-        onUpdate={updateTimeEntry}
-        onDelete={deleteTimeEntry}
-      />
+    <section className="content-grid" id="time">
+      <header className="page-header time-page-header">
+        <div>
+          <p className="section-kicker">Time tracking</p>
+          <h1>Time</h1>
+        </div>
+        <div className="page-header-actions">
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => setManualOpen(true)}
+            disabled={inputsDisabled}
+            title={
+              inputsDisabled
+                ? 'Manual entry is unavailable while this timesheet is locked or in preview.'
+                : undefined
+            }
+          >
+            <PencilLine size={16} />
+            Log time manually
+          </button>
+        </div>
+      </header>
+
+      <div className="content-grid two-column">
+        <TimeCapture
+          activeEmployeeId={activeEmployeeId}
+          clients={visibleClients}
+          checklists={data.checklists}
+          employees={data.employees}
+          onStartTimer={startTimer}
+          onStopTimer={stopTimer}
+          role={role}
+          timer={timer}
+          timerElapsed={timer ? timerElapsed : '0:00'}
+          locked={lockedThisPeriod}
+          previewMode={previewMode}
+          currentPeriod={currentPeriod}
+        />
+        <RecentTimeEntries
+          checklists={data.checklists}
+          clients={data.clients}
+          employees={data.employees}
+          entries={visibleEntries}
+          role={role}
+          locks={data.timesheetLocks ?? []}
+          onUpdate={updateTimeEntry}
+          onDelete={deleteTimeEntry}
+        />
+      </div>
+
+      {manualOpen ? (
+        <ManualEntryModal
+          activeEmployeeId={activeEmployeeId}
+          clients={visibleClients}
+          checklists={data.checklists}
+          employees={data.employees}
+          role={role}
+          onLog={logTime}
+          onClose={() => setManualOpen(false)}
+        />
+      ) : null}
     </section>
   )
 }
@@ -97,12 +138,21 @@ function StatusPill({ status }: { status: TimeEntry['approvalStatus'] }) {
   return <span className={`time-status-pill time-status-${status}`}>{label}</span>
 }
 
+/** Small badge marking an entry that was logged through the manual form. */
+function ManualBadge() {
+  return <span className="manual-badge">Manual</span>
+}
+
+/**
+ * The primary time-capture panel: the live timer. Manual logging has moved
+ * into its own gated modal (see `ManualEntryModal`) — the timer is the
+ * default, accurate flow.
+ */
 function TimeCapture({
   activeEmployeeId,
   clients,
   checklists,
   employees,
-  onLog,
   onStartTimer,
   onStopTimer,
   role,
@@ -116,7 +166,6 @@ function TimeCapture({
   clients: Client[]
   checklists: Checklist[]
   employees: Employee[]
-  onLog: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
   onStartTimer: (timer: TimerState) => void
   onStopTimer: () => Promise<void>
   role: Role
@@ -128,12 +177,9 @@ function TimeCapture({
 }) {
   const [clientId, setClientId] = useState(clients[0]?.id ?? '')
   const [employeeId, setEmployeeId] = useState(activeEmployeeId)
-  const [hours, setHours] = useState('1.25')
   const [description, setDescription] = useState('Reviewed transactions and added client notes.')
-  const [billable, setBillable] = useState(true)
   const [taskId, setTaskId] = useState<string>('')
-  const [submitError, setSubmitError] = useState('')
-  const [submitPending, setSubmitPending] = useState(false)
+  const [busy, setBusy] = useState(false)
   const effectiveClientId = clients.some((client) => client.id === clientId)
     ? clientId
     : clients[0]?.id ?? ''
@@ -147,39 +193,9 @@ function TimeCapture({
   // Reset taskId if the previously-chosen task isn't valid for the new client.
   const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
 
-  // Form is read-only when the timesheet is locked OR an owner is previewing
-  // this person — preview mode must never be able to log or time work.
+  // The timer panel is read-only when the timesheet is locked OR an owner is
+  // previewing this person — preview mode must never be able to time work.
   const inputsDisabled = locked || previewMode
-
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const numericHours = Number(hours)
-    if (!effectiveClientId || Number.isNaN(numericHours) || numericHours <= 0) {
-      return
-    }
-
-    setSubmitPending(true)
-    setSubmitError('')
-
-    try {
-      await onLog({
-        employeeId: effectiveEmployeeId,
-        clientId: effectiveClientId,
-        date: new Date().toISOString().slice(0, 10),
-        minutes: Math.round(numericHours * 60),
-        description,
-        billable,
-        taskId: effectiveTaskId || null,
-      })
-      setDescription('')
-      setHours('0.50')
-      setTaskId('')
-    } catch {
-      setSubmitError('Time entry could not be saved.')
-    } finally {
-      setSubmitPending(false)
-    }
-  }
 
   const handleStartTimer = () => {
     if (!effectiveClientId) {
@@ -195,18 +211,32 @@ function TimeCapture({
     })
   }
 
+  const handleStopTimer = async () => {
+    setBusy(true)
+    try {
+      await onStopTimer()
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <section className="panel">
       <div className="section-heading">
         <div>
           <p className="section-kicker">Assigned to me</p>
-          <h2>Log time</h2>
+          <h2>Live timer</h2>
         </div>
         <div className={timer ? 'timer-pill running' : 'timer-pill'}>
           <TimerReset size={16} />
           <span>{timer ? timerElapsed : '0:00'}</span>
         </div>
       </div>
+
+      <p className="panel-intro">
+        The timer is the most accurate way to log time. Pick a client and task, then start it
+        when you begin work.
+      </p>
 
       {locked ? (
         <div className="lock-banner">
@@ -217,7 +247,7 @@ function TimeCapture({
         </div>
       ) : null}
 
-      <form className="form-grid" onSubmit={handleSubmit}>
+      <div className="form-grid">
         {role === 'owner' && (
           <label className="field">
             <span>Employee</span>
@@ -225,6 +255,7 @@ function TimeCapture({
               className="input"
               onChange={(event) => setEmployeeId(event.target.value)}
               value={employeeId}
+              disabled={inputsDisabled || Boolean(timer)}
             >
               {employees
                 .filter((employee) => employee.role !== 'Owner')
@@ -245,7 +276,7 @@ function TimeCapture({
               setTaskId('')
             }}
             value={effectiveClientId}
-            disabled={inputsDisabled}
+            disabled={inputsDisabled || Boolean(timer)}
           >
             {clients.map((client) => (
               <option key={client.id} value={client.id}>
@@ -260,7 +291,7 @@ function TimeCapture({
             className="input"
             onChange={(event) => setTaskId(event.target.value)}
             value={effectiveTaskId}
-            disabled={inputsDisabled || eligibleTasks.length === 0}
+            disabled={inputsDisabled || Boolean(timer) || eligibleTasks.length === 0}
           >
             <option value="">(none / general)</option>
             {eligibleTasks.map((task) => (
@@ -270,18 +301,6 @@ function TimeCapture({
             ))}
           </select>
         </label>
-        <label className="field">
-          <span>Hours spent</span>
-          <input
-            className="input"
-            min="0.25"
-            onChange={(event) => setHours(event.target.value)}
-            step="0.25"
-            type="number"
-            value={hours}
-            disabled={inputsDisabled}
-          />
-        </label>
         <label className="field full-span">
           <span>What did you do?</span>
           <textarea
@@ -289,42 +308,24 @@ function TimeCapture({
             onChange={(event) => setDescription(event.target.value)}
             rows={4}
             value={description}
-            disabled={inputsDisabled}
+            disabled={inputsDisabled || Boolean(timer)}
           />
         </label>
-        <label className="check-row full-span">
-          <input
-            checked={billable}
-            onChange={(event) => setBillable(event.target.checked)}
-            type="checkbox"
-            disabled={inputsDisabled}
-          />
-          <span>Billable</span>
-        </label>
-        {submitError ? <p className="auth-error full-span">{submitError}</p> : null}
         <div className="button-row full-span">
-          <button
-            className="primary-action"
-            disabled={submitPending || inputsDisabled}
-            type="submit"
-          >
-            <Clock3 size={16} />
-            {submitPending ? 'Saving...' : 'Log time'}
-          </button>
           {timer ? (
             <button
-              className="secondary-action danger"
-              disabled={submitPending || inputsDisabled}
-              onClick={() => void onStopTimer()}
+              className="primary-action danger"
+              disabled={busy || inputsDisabled}
+              onClick={() => void handleStopTimer()}
               type="button"
             >
               <TimerReset size={16} />
-              Stop &amp; log
+              {busy ? 'Saving...' : 'Stop & log'}
             </button>
           ) : (
             <button
-              className="secondary-action"
-              disabled={submitPending || inputsDisabled}
+              className="primary-action"
+              disabled={busy || inputsDisabled || !effectiveClientId}
               onClick={handleStartTimer}
               type="button"
             >
@@ -333,8 +334,277 @@ function TimeCapture({
             </button>
           )}
         </div>
-      </form>
+      </div>
     </section>
+  )
+}
+
+/**
+ * The gated manual-entry modal. Two steps:
+ *   1. a confirmation nudging the user toward the timer;
+ *   2. the manual entry form, with a REQUIRED reason for entering manually.
+ * On submit the entry is created (pending approval, like every entry) and a
+ * short success confirmation is shown before the modal closes.
+ */
+function ManualEntryModal({
+  activeEmployeeId,
+  clients,
+  checklists,
+  employees,
+  role,
+  onLog,
+  onClose,
+}: {
+  activeEmployeeId: string
+  clients: Client[]
+  checklists: Checklist[]
+  employees: Employee[]
+  role: Role
+  onLog: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
+  onClose: () => void
+}) {
+  const [step, setStep] = useState<'confirm' | 'form'>('confirm')
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  const [employeeId, setEmployeeId] = useState(activeEmployeeId)
+  const [clientId, setClientId] = useState(clients[0]?.id ?? '')
+  const [hours, setHours] = useState('1.00')
+  const [description, setDescription] = useState('')
+  const [billable, setBillable] = useState(true)
+  const [taskId, setTaskId] = useState<string>('')
+  const [reason, setReason] = useState('')
+  const [submitError, setSubmitError] = useState('')
+  const [submitPending, setSubmitPending] = useState(false)
+  const [success, setSuccess] = useState(false)
+
+  // Close on Escape for keyboard parity with a native dialog.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const effectiveClientId = clients.some((client) => client.id === clientId)
+    ? clientId
+    : clients[0]?.id ?? ''
+  const effectiveEmployeeId = role === 'owner' ? employeeId : activeEmployeeId
+
+  const eligibleTasks = useMemo(
+    () => eligibleChecklistsFor(checklists, effectiveClientId, effectiveEmployeeId, role),
+    [checklists, effectiveClientId, effectiveEmployeeId, role],
+  )
+  const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const numericHours = Number(hours)
+    if (!effectiveClientId || Number.isNaN(numericHours) || numericHours <= 0) {
+      setSubmitError('Enter a valid client and number of hours.')
+      return
+    }
+    if (!reason.trim()) {
+      setSubmitError('A reason is required for manual entries.')
+      return
+    }
+    if (!date) {
+      setSubmitError('Choose a date for this entry.')
+      return
+    }
+
+    setSubmitPending(true)
+    setSubmitError('')
+
+    try {
+      await onLog({
+        employeeId: effectiveEmployeeId,
+        clientId: effectiveClientId,
+        date,
+        minutes: Math.round(numericHours * 60),
+        description,
+        billable,
+        taskId: effectiveTaskId || null,
+        entryMethod: 'manual',
+        manualReason: reason.trim(),
+      })
+      setSuccess(true)
+    } catch {
+      setSubmitError('Manual entry could not be saved.')
+    } finally {
+      setSubmitPending(false)
+    }
+  }
+
+  return (
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div
+        className="modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Log time manually"
+      >
+        {success ? (
+          <div className="modal-body">
+            <h2 className="modal-title">Manual entry submitted</h2>
+            <p className="modal-intro">
+              Manual entry submitted — an owner will review it.
+            </p>
+            <div className="button-row">
+              <button type="button" className="primary-action" onClick={onClose}>
+                Done
+              </button>
+            </div>
+          </div>
+        ) : step === 'confirm' ? (
+          <div className="modal-body">
+            <h2 className="modal-title">Enter time manually?</h2>
+            <p className="modal-intro">
+              Are you sure you want to enter time manually instead of using the timer? The
+              timer records time more accurately.
+            </p>
+            <div className="button-row">
+              <button type="button" className="secondary-action" onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary-action"
+                onClick={() => setStep('form')}
+              >
+                Yes, enter manually
+              </button>
+            </div>
+          </div>
+        ) : (
+          <form className="modal-body" onSubmit={handleSubmit}>
+            <h2 className="modal-title">Manual time entry</h2>
+            <p className="modal-intro">
+              This entry will be submitted for owner approval, like all time entries.
+            </p>
+            <div className="form-grid">
+              <label className="field">
+                <span>Date</span>
+                <input
+                  className="input"
+                  type="date"
+                  value={date}
+                  onChange={(event) => setDate(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>Hours</span>
+                <input
+                  className="input"
+                  min="0.25"
+                  step="0.25"
+                  type="number"
+                  value={hours}
+                  onChange={(event) => setHours(event.target.value)}
+                />
+              </label>
+              {role === 'owner' && (
+                <label className="field">
+                  <span>Employee</span>
+                  <select
+                    className="input"
+                    value={employeeId}
+                    onChange={(event) => setEmployeeId(event.target.value)}
+                  >
+                    {employees
+                      .filter((employee) => employee.role !== 'Owner')
+                      .map((employee) => (
+                        <option key={employee.id} value={employee.id}>
+                          {employee.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              )}
+              <label className="field">
+                <span>Client</span>
+                <select
+                  className="input"
+                  value={effectiveClientId}
+                  onChange={(event) => {
+                    setClientId(event.target.value)
+                    setTaskId('')
+                  }}
+                >
+                  {clients.map((client) => (
+                    <option key={client.id} value={client.id}>
+                      {client.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Task</span>
+                <select
+                  className="input"
+                  value={effectiveTaskId}
+                  onChange={(event) => setTaskId(event.target.value)}
+                  disabled={eligibleTasks.length === 0}
+                >
+                  <option value="">(none / general)</option>
+                  {eligibleTasks.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {task.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="check-row full-span">
+                <input
+                  checked={billable}
+                  onChange={(event) => setBillable(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Billable</span>
+              </label>
+              <label className="field full-span">
+                <span>Details</span>
+                <textarea
+                  className="input"
+                  rows={3}
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                />
+              </label>
+              <label className="field full-span">
+                <span>Why are you entering this manually instead of using the timer?</span>
+                <textarea
+                  className="input"
+                  rows={3}
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  placeholder="Required — e.g. forgot to start the timer."
+                />
+              </label>
+            </div>
+            {submitError ? <p className="auth-error">{submitError}</p> : null}
+            <div className="button-row">
+              <button type="button" className="secondary-action" onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="primary-action"
+                disabled={submitPending}
+              >
+                <Clock3 size={16} />
+                {submitPending ? 'Submitting...' : 'Submit for approval'}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -534,8 +804,12 @@ function TimeEntryRow({
         </small>
         <div className="entry-tags">
           <StatusPill status={entry.approvalStatus} />
+          {entry.entryMethod === 'manual' ? <ManualBadge /> : null}
           {taskTitle ? <span className="task-chip">Task: {taskTitle}</span> : null}
         </div>
+        {entry.entryMethod === 'manual' && entry.manualReason ? (
+          <small className="entry-manual-reason">Manual reason: {entry.manualReason}</small>
+        ) : null}
         {entry.approvalStatus === 'rejected' && entry.approvalNote ? (
           <small className="entry-reject-note">Rejected: {entry.approvalNote}</small>
         ) : null}

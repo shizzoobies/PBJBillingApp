@@ -83,6 +83,14 @@ export type TimeEntry = {
   approvedBy?: string
   /** ISO timestamp of the approve/reject action. */
   approvedAt?: string
+  /**
+   * How the entry was captured. Timer-stopped entries (and all legacy/seed
+   * data) are `timer`; only the deliberately-gated manual entry form sets
+   * `manual`. Defaults to `timer` when absent.
+   */
+  entryMethod: 'timer' | 'manual'
+  /** Required reason text — set only when `entryMethod` is `manual`. */
+  manualReason?: string
 }
 
 /** A per-employee, per-month timesheet lock. Locking signs off the month. */
@@ -374,6 +382,7 @@ export type NotificationEvent =
   | 'case_advanced'
   | 'case_completed'
   | 'invoice_ready'
+  | 'time_entry_manual'
 
 export type NotificationEntry = {
   id: string

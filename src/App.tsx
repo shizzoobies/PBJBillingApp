@@ -413,6 +413,7 @@ function App() {
       description: timer.description,
       billable: true,
       taskId: timer.taskId ?? null,
+      entryMethod: 'timer',
     })
     setTimer(null)
   }

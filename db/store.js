@@ -869,6 +869,14 @@ export class AppDataStore {
         console.log('[migrate] backfilled existing time entries to approval_status = approved')
       }
 
+      // Manual time entry: timer-stopped entries are 'timer'; the gated manual
+      // entry form sets 'manual' with a required reason. The not-null default
+      // backfills every existing row to 'timer'.
+      await this.pool.query(
+        `alter table time_entries add column if not exists entry_method text not null default 'timer'`,
+      )
+      await this.pool.query(`alter table time_entries add column if not exists manual_reason text`)
+
       // Month-end timesheet locks: one per employee per 'YYYY-MM' period.
       await this.pool.query(`
         create table if not exists timesheet_locks (
@@ -1333,7 +1341,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
-                   approval_status, approval_note, approved_by, approved_at
+                   approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -1504,6 +1512,8 @@ export class AppDataStore {
           approvalNote: row.approval_note ?? undefined,
           approvedBy: row.approved_by ?? undefined,
           approvedAt: row.approved_at ? row.approved_at.toISOString() : undefined,
+          entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
+          manualReason: row.manual_reason ?? undefined,
         })),
         checklists: checklistsResult.rows.map((row) => ({
           id: row.id,
@@ -1579,14 +1589,21 @@ export class AppDataStore {
 
     // Backfill the approval workflow for legacy file-fallback data. An entry
     // with no `approvalStatus` predates the feature, so it's treated as
-    // 'approved' — no giant pending backlog on first run. Persisted below if
-    // anything changed so the backfill happens exactly once.
+    // 'approved' — no giant pending backlog on first run. An entry with no
+    // `entryMethod` predates manual entry, so it reads as 'timer'. Persisted
+    // below if anything changed so the backfill happens exactly once.
     let backfilled = false
     if (Array.isArray(data.timeEntries)) {
       data.timeEntries = data.timeEntries.map((entry) => {
-        if (entry && typeof entry.approvalStatus === 'string') return entry
+        const needsApproval = !entry || typeof entry.approvalStatus !== 'string'
+        const needsMethod = !entry || typeof entry.entryMethod !== 'string'
+        if (!needsApproval && !needsMethod) return entry
         backfilled = true
-        return { ...entry, approvalStatus: 'approved' }
+        return {
+          ...entry,
+          ...(needsApproval ? { approvalStatus: 'approved' } : {}),
+          ...(needsMethod ? { entryMethod: 'timer' } : {}),
+        }
       })
     }
     if (!Array.isArray(data.timesheetLocks)) {
@@ -1710,8 +1727,8 @@ export class AppDataStore {
           await client.query(
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
-                                        approval_status, approval_note, approved_by, approved_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+                                        approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
             `,
             [
               entry.id,
@@ -1727,6 +1744,8 @@ export class AppDataStore {
               entry.approvalNote ?? null,
               entry.approvedBy ?? null,
               entry.approvedAt ?? null,
+              entry.entryMethod === 'manual' ? 'manual' : 'timer',
+              entry.entryMethod === 'manual' ? entry.manualReason ?? null : null,
             ],
           )
         }
@@ -1872,19 +1891,28 @@ export class AppDataStore {
   }
 
   async createTimeEntry(entry) {
-    // New entries always enter the approval workflow as 'pending'.
+    // New entries always enter the approval workflow as 'pending'. The capture
+    // method defaults to 'timer'; only an explicit 'manual' entry carries a
+    // reason — any non-manual entry drops manualReason entirely.
+    const entryMethod = entry.entryMethod === 'manual' ? 'manual' : 'timer'
+    const manualReason =
+      entryMethod === 'manual' && typeof entry.manualReason === 'string'
+        ? entry.manualReason
+        : undefined
     const nextEntry = {
       ...entry,
       id: entry.id ?? `time-${randomUUID().slice(0, 8)}`,
       taskId: entry.taskId ?? null,
       approvalStatus: 'pending',
+      entryMethod,
+      manualReason,
     }
 
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
         `,
         [
           nextEntry.id,
@@ -1897,6 +1925,8 @@ export class AppDataStore {
           nextEntry.billable,
           nextEntry.taskId,
           nextEntry.approvalStatus,
+          nextEntry.entryMethod,
+          nextEntry.manualReason ?? null,
         ],
       )
 
@@ -1917,7 +1947,7 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
-                approval_status, approval_note, approved_by, approved_at
+                approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason
          from time_entries where id = $1`,
         [entryId],
       )
@@ -1937,6 +1967,8 @@ export class AppDataStore {
         approvalNote: row.approval_note ?? undefined,
         approvedBy: row.approved_by ?? undefined,
         approvedAt: row.approved_at ? row.approved_at.toISOString() : undefined,
+        entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
+        manualReason: row.manual_reason ?? undefined,
       }
     }
 

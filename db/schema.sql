@@ -99,6 +99,12 @@ alter table time_entries add column if not exists approval_note text;
 alter table time_entries add column if not exists approved_by text;
 alter table time_entries add column if not exists approved_at timestamptz;
 
+-- Manual time entry: timer-stopped entries are 'timer'; the gated manual entry
+-- form sets 'manual' and records a required reason. Existing rows default to
+-- 'timer' so legacy data reads as timer-captured.
+alter table time_entries add column if not exists entry_method text not null default 'timer';
+alter table time_entries add column if not exists manual_reason text;
+
 -- Month-end timesheet locks: one per employee per 'YYYY-MM' period.
 create table if not exists timesheet_locks (
   id text primary key,
