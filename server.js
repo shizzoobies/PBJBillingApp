@@ -319,6 +319,25 @@ function decorateTeamMember(member) {
   return rest
 }
 
+/**
+ * True when a checklist node — or any of its nested sub-steps — carries real
+ * text. Mirrors the client's `pruneEmptyOutlineItems`: a blank top-level row is
+ * kept only when it still has a labelled descendant, so a user's typed
+ * sub-steps are never silently dropped just because the parent row was left
+ * blank. Recurses all three levels (item `label` → sub/sub-sub `title`).
+ */
+function checklistItemHasText(node) {
+  const text =
+    typeof node?.label === 'string'
+      ? node.label
+      : typeof node?.title === 'string'
+        ? node.title
+        : ''
+  if (text.trim()) return true
+  const children = Array.isArray(node?.subItems) ? node.subItems : []
+  return children.some(checklistItemHasText)
+}
+
 function renderVerifyErrorPage() {
   return `<!doctype html>
 <html lang="en">
@@ -1064,7 +1083,10 @@ const server = createServer(async (request, response) => {
                 // (fresh ids, roll-up done) — we just pass the raw tree through.
                 ...(Array.isArray(item?.subItems) ? { subItems: item.subItems } : {}),
               }))
-              .filter((item) => item.label)
+              // Keep a blank-label item when it still has labelled sub-steps —
+              // matches the client's prune so typed sub-steps are never dropped
+              // just because the parent row was left blank.
+              .filter(checklistItemHasText)
           : []
 
         if (!title || !clientId || !assigneeId || !dueDate || items.length === 0) {
