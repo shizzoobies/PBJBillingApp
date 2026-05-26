@@ -5059,7 +5059,7 @@ export class AppDataStore {
 
     if (this.pool) {
       const result = await this.pool.query(
-        `select id, name, email, role, staff_role from users where lower(email) = $1`,
+        `select id, name, email, role, staff_role, password_hash from users where lower(email) = $1`,
         [trimmed],
       )
       if (!result.rowCount) return null
@@ -5070,6 +5070,10 @@ export class AppDataStore {
         email: row.email,
         role: row.role,
         staffRole: row.staff_role,
+        // Carry the hash for password sign-in / change flows. Server-only —
+        // never leaks to the client; the only callers (signInWithPassword,
+        // applyOwnerBootstrapPassword) verify it then discard.
+        passwordHash: row.password_hash,
       }
     }
 
@@ -5084,6 +5088,7 @@ export class AppDataStore {
       email: user.email,
       role: user.role,
       staffRole: user.staffRole,
+      passwordHash: user.passwordHash,
     }
   }
 
