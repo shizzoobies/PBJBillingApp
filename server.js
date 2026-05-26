@@ -585,6 +585,45 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Set or change the caller's own password. The session cookie IS the
+    // authorization — anyone who can sign in (magic-link or password) gets
+    // to set their own password. Matches the standard "password reset via
+    // email" pattern other apps use: prove you can read the inbox, then set
+    // a new credential. No current-password check, so a user who signed in
+    // via magic link can establish their first password without already
+    // knowing one. Minimum 8 chars.
+    if (normalizedPath === '/api/auth/change-password' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      let payload
+      try {
+        payload = await readJsonBody(request)
+      } catch {
+        sendJson(response, 400, { error: 'Invalid request body' })
+        return
+      }
+      const newPassword = typeof payload?.newPassword === 'string' ? payload.newPassword : ''
+      if (newPassword.length < 8) {
+        sendJson(response, 400, { error: 'Password must be at least 8 characters' })
+        return
+      }
+      const ok = await appDataStore.setUserPassword(session.user.id, newPassword)
+      if (!ok) {
+        sendJson(response, 500, { error: 'Could not update password' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'password_changed', '')
+      sendJson(response, 200, { ok: true })
+      return
+    }
+
     // Email-gated sign-in: consume a link, set the session cookie, redirect.
     const verifyMatch = normalizedPath.match(/^\/verify\/([^/]+)$/)
     if (verifyMatch && request.method === 'GET') {

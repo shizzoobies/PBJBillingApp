@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { ChangePasswordCard } from '../components/ChangePasswordCard'
 import {
   fetchTotpStatus,
   totpDisable,
@@ -9,7 +10,7 @@ import {
 import { ApiError, type TotpStatus } from '../lib/types'
 
 export function SecurityPage() {
-  const { ownerMode } = useAppContext()
+  const { ownerMode, sessionUser } = useAppContext()
 
   // Owners manage 2FA from Settings.
   if (ownerMode) {
@@ -22,10 +23,12 @@ export function SecurityPage() {
         <div>
           <h1>Security</h1>
           <p className="muted-text">
-            Manage two-factor authentication for your account.
+            Set a password for backup sign-in and manage two-factor
+            authentication for your account.
           </p>
         </div>
       </header>
+      <ChangePasswordCard userEmail={sessionUser?.email ?? null} />
       <BookkeeperSecuritySection />
     </div>
   )

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { ChangePasswordCard } from '../components/ChangePasswordCard'
 import {
   fetchAuthStatus,
   fetchFirmSettings,
@@ -18,7 +19,7 @@ import {
 } from '../lib/types'
 
 export function SettingsPage() {
-  const { ownerMode, setFirmSettings } = useAppContext()
+  const { ownerMode, sessionUser, setFirmSettings } = useAppContext()
   const [settings, setSettings] = useState<FirmSettings | null>(null)
   const [loading, setLoading] = useState(true)
   const [savedFlash, setSavedFlash] = useState(false)
@@ -105,6 +106,7 @@ export function SettingsPage() {
       <BusinessSection settings={settings} onCommit={commit} />
       <AuthenticationSection />
       <SecuritySection />
+      <ChangePasswordCard userEmail={sessionUser?.email ?? null} />
     </section>
   )
 }

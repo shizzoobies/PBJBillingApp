@@ -5165,6 +5165,30 @@ export class AppDataStore {
   }
 
   /**
+   * Update a single user's password_hash from a new plain-text password.
+   * Authorization is the caller's responsibility — usually "session cookie
+   * belongs to userId" via the change-password endpoint. Returns true on
+   * success, false when no row matched.
+   */
+  async setUserPassword(userId, newPassword) {
+    if (!userId || typeof newPassword !== 'string' || !newPassword) return false
+    const newHash = hashPassword(newPassword)
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update users set password_hash = $1, updated_at = now() where id = $2`,
+        [newHash, userId],
+      )
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    const target = (authState.users ?? []).find((user) => user.id === userId)
+    if (!target) return false
+    target.passwordHash = newHash
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return true
+  }
+
+  /**
    * Email + password sign-in. Looks up by lowercase email, verifies via the
    * existing scrypt `verifyPassword`, then issues a full session via the
    * same `createUserSession` path the magic-link verify uses. Returns the

@@ -163,6 +163,29 @@ export async function signInWithPasswordRequest(email: string, password: string)
   return (await response.json()) as PasswordSignInResult
 }
 
+/**
+ * Set or change the caller's own password. Session cookie is the
+ * authorization. No current-password check — a magic-link sign-in counts
+ * as enough proof to set a fresh one, matching the "password reset via
+ * email" pattern. Server enforces a minimum length.
+ */
+export async function changePasswordRequest(newPassword: string) {
+  const response = await apiFetch('/api/auth/change-password', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newPassword }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to change password (${response.status})`,
+    )
+  }
+  return (await response.json()) as { ok: true }
+}
+
 export async function logoutSession() {
   const response = await apiFetch('/api/logout', {
     credentials: 'same-origin',
