@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { ApiError, type PublicFirmSettings } from '../lib/types'
-import { requestSignInLink } from '../lib/api'
+import { requestSignInLink, signInWithPasswordRequest } from '../lib/api'
 
 /**
  * Email-gated sign-in entry page. Shared shape for the two role-segmented
@@ -8,7 +8,15 @@ import { requestSignInLink } from '../lib/api'
  * server validates against. The two pages are intentionally indistinguishable
  * to anyone who lands on them — same UX, same copy patterns — so that a
  * bookkeeper who finds /owner cannot tell it from their normal page.
+ *
+ * The screen offers two auth methods via a tab toggle:
+ *  - Magic link (default for staff): one-time email link, no password.
+ *  - Password: bulletproof fallback that doesn't depend on email delivery.
+ *    Owner sign-in (`/owner`) defaults to this tab because the owner being
+ *    unable to recover when email breaks is a launch-blocking risk.
  */
+type AuthMethod = 'link' | 'password'
+
 export function SignInScreen({
   role,
   heading,
@@ -19,7 +27,13 @@ export function SignInScreen({
   firmSettings?: PublicFirmSettings
 }) {
   const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
+
+  // Owner sign-in defaults to the password tab — that's the path that
+  // doesn't depend on Resend / email delivery / inbox filtering.
+  const [method, setMethod] = useState<AuthMethod>(role === 'owner' ? 'password' : 'link')
+
   const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submittedEmail, setSubmittedEmail] = useState<string | null>(null)
   const [error, setError] = useState('')
@@ -32,6 +46,8 @@ export function SignInScreen({
     }, 1000)
     return () => window.clearInterval(id)
   }, [resendCooldown])
+
+  // ---------------- Magic-link path ----------------
 
   const sendLink = async (target: string) => {
     setSubmitting(true)
@@ -49,7 +65,7 @@ export function SignInScreen({
     }
   }
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  const handleLinkSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const trimmed = email.trim()
     if (!trimmed || submitting) return
@@ -61,49 +77,162 @@ export function SignInScreen({
     await sendLink(submittedEmail)
   }
 
+  // ---------------- Password path ----------------
+
+  const handlePasswordSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const trimmedEmail = email.trim()
+    if (!trimmedEmail || !password || submitting) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await signInWithPasswordRequest(trimmedEmail, password)
+      // The session cookie (or pending-2FA cookie) is already on the
+      // response — just route the browser per the server directive. A
+      // full reload ensures the App-level session check picks up the
+      // new cookie without any in-memory state staleness.
+      const target =
+        result.next === 'two-factor'
+          ? '/two-factor'
+          : result.next === 'two-factor-setup'
+            ? '/two-factor/setup'
+            : '/'
+      window.location.replace(target)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Sign-in failed.')
+      setSubmitting(false)
+    }
+  }
+
+  const switchMethod = (next: AuthMethod) => {
+    if (next === method) return
+    setMethod(next)
+    setError('')
+    setPassword('')
+    setSubmittedEmail(null)
+  }
+
+  // ---------------- Render ----------------
+
   return (
     <main className="auth-shell">
       <section className="auth-card">
         <p className="eyeline">{firmName}</p>
         <h1>{heading}</h1>
-        {submittedEmail ? (
-          <div className="auth-form" aria-live="polite">
-            <p className="auth-copy">
-              Check <strong>{submittedEmail}</strong> for a sign-in link. It expires in 15 minutes
-              and can only be used once.
-            </p>
-            <p className="auth-copy">
-              Didn&rsquo;t get it? Try again in a minute, then check your spam folder.
-            </p>
-            <button
-              className="primary-action auth-submit"
-              disabled={submitting || resendCooldown > 0}
-              onClick={handleResend}
-              type="button"
-            >
-              {resendCooldown > 0
-                ? `Resend link (${resendCooldown}s)`
-                : submitting
-                  ? 'Sending…'
-                  : 'Resend link'}
-            </button>
-            <button
-              className="auth-secondary"
-              onClick={() => {
-                setSubmittedEmail(null)
-                setError('')
-                setResendCooldown(0)
-              }}
-              type="button"
-            >
-              Use a different email
-            </button>
-            {error ? <p className="auth-error">{error}</p> : null}
-          </div>
+
+        <div
+          role="tablist"
+          aria-label="Sign-in method"
+          style={{
+            display: 'flex',
+            gap: 4,
+            marginBottom: 16,
+            borderBottom: '1px solid var(--border-subtle, #ddd)',
+          }}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={method === 'password'}
+            onClick={() => switchMethod('password')}
+            className="auth-secondary"
+            style={{
+              padding: '8px 12px',
+              borderBottom:
+                method === 'password' ? '2px solid var(--accent, #7d2a4d)' : '2px solid transparent',
+              fontWeight: method === 'password' ? 600 : 400,
+            }}
+          >
+            Password
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={method === 'link'}
+            onClick={() => switchMethod('link')}
+            className="auth-secondary"
+            style={{
+              padding: '8px 12px',
+              borderBottom:
+                method === 'link' ? '2px solid var(--accent, #7d2a4d)' : '2px solid transparent',
+              fontWeight: method === 'link' ? 600 : 400,
+            }}
+          >
+            Magic link
+          </button>
+        </div>
+
+        {method === 'link' ? (
+          submittedEmail ? (
+            <div className="auth-form" aria-live="polite">
+              <p className="auth-copy">
+                Check <strong>{submittedEmail}</strong> for a sign-in link. It expires in 15 minutes
+                and can only be used once.
+              </p>
+              <p className="auth-copy">
+                Didn&rsquo;t get it? Try again in a minute, then check your spam folder. If it
+                still doesn&rsquo;t arrive, switch to the <strong>Password</strong> tab above.
+              </p>
+              <button
+                className="primary-action auth-submit"
+                disabled={submitting || resendCooldown > 0}
+                onClick={handleResend}
+                type="button"
+              >
+                {resendCooldown > 0
+                  ? `Resend link (${resendCooldown}s)`
+                  : submitting
+                    ? 'Sending…'
+                    : 'Resend link'}
+              </button>
+              <button
+                className="auth-secondary"
+                onClick={() => {
+                  setSubmittedEmail(null)
+                  setError('')
+                  setResendCooldown(0)
+                }}
+                type="button"
+              >
+                Use a different email
+              </button>
+              {error ? <p className="auth-error">{error}</p> : null}
+            </div>
+          ) : (
+            <form className="auth-form" onSubmit={handleLinkSubmit}>
+              <p className="auth-copy">
+                Enter your work email and we&rsquo;ll send you a one-time sign-in link.
+              </p>
+              <label className="field">
+                <span>Email</span>
+                <input
+                  autoComplete="email"
+                  autoFocus
+                  className="input"
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="you@firm.com"
+                  required
+                  type="email"
+                  value={email}
+                />
+              </label>
+              {error ? <p className="auth-error">{error}</p> : null}
+              <button
+                className="primary-action auth-submit"
+                disabled={submitting || !email.trim()}
+                type="submit"
+              >
+                {submitting ? 'Sending…' : 'Send me a sign-in link'}
+              </button>
+            </form>
+          )
         ) : (
-          <form className="auth-form" onSubmit={handleSubmit}>
+          <form className="auth-form" onSubmit={handlePasswordSubmit}>
             <p className="auth-copy">
-              Enter your work email and we&rsquo;ll send you a one-time sign-in link.
+              Sign in with your email and password.
+              {role === 'owner'
+                ? ' This is the recovery-safe path — it works even if email delivery is down.'
+                : null}
             </p>
             <label className="field">
               <span>Email</span>
@@ -118,13 +247,25 @@ export function SignInScreen({
                 value={email}
               />
             </label>
+            <label className="field">
+              <span>Password</span>
+              <input
+                autoComplete="current-password"
+                className="input"
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="••••••••"
+                required
+                type="password"
+                value={password}
+              />
+            </label>
             {error ? <p className="auth-error">{error}</p> : null}
             <button
               className="primary-action auth-submit"
-              disabled={submitting || !email.trim()}
+              disabled={submitting || !email.trim() || !password}
               type="submit"
             >
-              {submitting ? 'Sending…' : 'Send me a sign-in link'}
+              {submitting ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
         )}

@@ -133,6 +133,36 @@ export async function requestSignInLink(email: string, role: 'staff' | 'owner') 
   return (await response.json()) as { ok: boolean; message: string }
 }
 
+/**
+ * Password sign-in. Returns the server's `next` directive so the caller
+ * can route to home / two-factor / two-factor-setup. The session cookie
+ * (or pending-2FA cookie) is set as a side effect — same-origin, no
+ * additional handling needed by the caller. Errors carry a real message
+ * (invalid creds, rate-limited, etc.) so the form can render it.
+ */
+export type PasswordSignInResult = {
+  next: 'home' | 'two-factor' | 'two-factor-setup'
+}
+
+export async function signInWithPasswordRequest(email: string, password: string) {
+  const response = await apiFetch('/api/auth/sign-in-with-password', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Sign-in failed (${response.status})`,
+    )
+  }
+
+  return (await response.json()) as PasswordSignInResult
+}
+
 export async function logoutSession() {
   const response = await apiFetch('/api/logout', {
     credentials: 'same-origin',

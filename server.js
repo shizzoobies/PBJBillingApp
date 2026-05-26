@@ -498,6 +498,93 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Password sign-in — the bulletproof path that doesn't depend on email
+    // delivery (Resend down, address typo, rate-limited, etc.). Mirrors the
+    // /verify/:token TOTP branching so a 2FA-enabled user still gets the
+    // challenge, and an owner without 2FA still hits the forced-setup flow.
+    // Returns JSON with a `next` directive (the React sign-in form acts on
+    // it) plus the appropriate Set-Cookie header.
+    if (normalizedPath === '/api/auth/sign-in-with-password' && request.method === 'POST') {
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+
+      // Origin guard mirrors /api/auth/request-link.
+      const origin = request.headers.origin
+      const expectedOrigin = process.env.APP_PUBLIC_URL
+        ? process.env.APP_PUBLIC_URL.replace(/\/$/, '')
+        : null
+      if (expectedOrigin && origin && origin.replace(/\/$/, '') !== expectedOrigin) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      let payload
+      try {
+        payload = await readJsonBody(request)
+      } catch {
+        sendJson(response, 400, { error: 'Invalid request body' })
+        return
+      }
+      const email = typeof payload?.email === 'string' ? payload.email.trim().toLowerCase() : ''
+      const password = typeof payload?.password === 'string' ? payload.password : ''
+      if (!email || !password) {
+        sendJson(response, 400, { error: 'Email and password are required' })
+        return
+      }
+
+      // Share the request-link rate limiter so a bad actor can't bypass the
+      // 3-attempts-per-5-min window by mixing the two endpoints.
+      if (isRateLimited(email)) {
+        sendJson(response, 429, {
+          error: 'Too many attempts. Wait a few minutes and try again.',
+        })
+        return
+      }
+
+      const ip = getClientIp(request)
+      const ua = getUserAgent(request)
+      const session = await appDataStore.signInWithPassword(email, password, ua, ip)
+      if (!session) {
+        // Common error so we don't leak whether the email exists.
+        sendJson(response, 401, { error: 'Invalid email or password' })
+        return
+      }
+
+      // Same TOTP gate as /verify/:token: 2FA-enabled users challenge first,
+      // owners without 2FA are routed to forced setup, everyone else gets a
+      // full session immediately.
+      const totpState = await appDataStore.getUserTotpState(session.user.id)
+      const isOwner = totpState?.role === 'owner'
+      if (totpState?.totpEnabled) {
+        // Discard the session we just created — TOTP challenge requires the
+        // user to clear 2FA before a full session is issued. We re-issue
+        // the pending cookie below; the unused session row will expire on
+        // its own and isn't a security concern (cookie was never sent).
+        await appDataStore.revokeUserSession(session.sessionId)
+        const pending = await appDataStore.createPendingTwoFactor(session.user.id, false)
+        await appDataStore.recordActivity(session.user.id, 'login_via_password', '')
+        appendSetCookie(response, buildPendingTwoFactorCookie(pending.token))
+        sendJson(response, 200, { next: 'two-factor' })
+        return
+      }
+      if (isOwner && !totpState?.totpEnabled) {
+        await appDataStore.revokeUserSession(session.sessionId)
+        const pending = await appDataStore.createPendingTwoFactor(session.user.id, true)
+        await appDataStore.recordActivity(session.user.id, 'login_via_password', '')
+        appendSetCookie(response, buildPendingTwoFactorCookie(pending.token))
+        sendJson(response, 200, { next: 'two-factor-setup' })
+        return
+      }
+
+      await appDataStore.recordActivity(session.user.id, 'login_via_password', '')
+      appendSetCookie(response, buildSessionCookie(session.sessionId))
+      sendJson(response, 200, { next: 'home' })
+      return
+    }
+
     // Email-gated sign-in: consume a link, set the session cookie, redirect.
     const verifyMatch = normalizedPath.match(/^\/verify\/([^/]+)$/)
     if (verifyMatch && request.method === 'GET') {
@@ -2987,6 +3074,11 @@ const server = createServer(async (request, response) => {
 })
 
 await appDataStore.initialize()
+// Bulletproof owner recovery: if `OWNER_BOOTSTRAP_PASSWORD` is set on the
+// environment, ensure the first owner's password hash matches it. Lets an
+// owner ALWAYS sign in via /owner → "Password" tab, even when email/Resend
+// is broken. Idempotent — same value across reboots is a no-op.
+await appDataStore.applyOwnerBootstrapPassword()
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`PBJ Strategic Accounting app listening on ${port}`)

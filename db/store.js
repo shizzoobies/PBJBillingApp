@@ -5165,6 +5165,82 @@ export class AppDataStore {
   }
 
   /**
+   * Email + password sign-in. Looks up by lowercase email, verifies via the
+   * existing scrypt `verifyPassword`, then issues a full session via the
+   * same `createUserSession` path the magic-link verify uses. Returns the
+   * session record on success; null when the user doesn't exist OR the
+   * password doesn't match — the caller can't tell the two apart so a
+   * common 401 is safe. The TOTP / forced-setup branching is handled by
+   * the server-side endpoint (mirrors the magic-link verify flow).
+   */
+  async signInWithPassword(email, password, userAgent = null, ipAddress = null) {
+    if (typeof email !== 'string' || !email.trim()) return null
+    if (typeof password !== 'string' || !password) return null
+    const user = await this.findUserByEmail(email)
+    if (!user) return null
+    // findUserByEmail returns camelCase in file mode and snake_case from
+    // the raw row in Postgres mode — accept either so this works in both.
+    const storedHash = user.passwordHash ?? user.password_hash
+    if (!storedHash || !verifyPassword(password, storedHash)) return null
+    return await this.createUserSession(user.id, userAgent, ipAddress)
+  }
+
+  /**
+   * Boot-time owner password bootstrap. If `OWNER_BOOTSTRAP_PASSWORD` is set
+   * in the environment, the first owner user's `password_hash` is reset to
+   * a fresh hash of that value. Idempotent: a no-op when the current hash
+   * already verifies the env value (so flipping the var off doesn't lock
+   * anyone out, and a redeploy with the same value is harmless). Never
+   * logs the password — only the user id on success.
+   *
+   * This is the bulletproof recovery path for the owner: set the var on
+   * Railway, redeploy, sign in with email + that password. Magic links
+   * stay untouched as a secondary auth method.
+   */
+  async applyOwnerBootstrapPassword() {
+    const password = process.env.OWNER_BOOTSTRAP_PASSWORD
+    if (typeof password !== 'string' || password.length === 0) return false
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, password_hash from users
+         where role = 'owner'
+         order by created_at asc, name asc
+         limit 1`,
+      )
+      if (!result.rowCount) {
+        console.log('[bootstrap] OWNER_BOOTSTRAP_PASSWORD is set but no owner user exists')
+        return false
+      }
+      const owner = result.rows[0]
+      if (owner.password_hash && verifyPassword(password, owner.password_hash)) {
+        console.log('[bootstrap] owner password already matches env var — no change')
+        return false
+      }
+      await this.pool.query(
+        `update users set password_hash = $1, updated_at = now() where id = $2`,
+        [hashPassword(password), owner.id],
+      )
+      console.log(`[bootstrap] owner password reset for user id ${owner.id}`)
+      return true
+    }
+
+    const authState = await readJson(localAuthPath)
+    const owner = (authState.users ?? []).find((user) => user.role === 'owner')
+    if (!owner) {
+      console.log('[bootstrap] OWNER_BOOTSTRAP_PASSWORD is set but no owner user exists')
+      return false
+    }
+    if (owner.passwordHash && verifyPassword(password, owner.passwordHash)) {
+      return false
+    }
+    owner.passwordHash = hashPassword(password)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    console.log(`[bootstrap] owner password reset for user id ${owner.id} (file mode)`)
+    return true
+  }
+
+  /**
    * Create a persistent user session. Returns { sessionId, user, lastSeenAt }.
    * Used by /verify/:token after a successful link consumption.
    */
