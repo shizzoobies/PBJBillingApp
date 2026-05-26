@@ -32,7 +32,10 @@ import {
   fetchPublicFirmSettings,
   fetchSession,
   generateChecklistFromTemplateRequest,
+  approveWeeklySubmissionRequest,
   lockTimesheetRequest,
+  rejectWeeklySubmissionRequest,
+  submitWeeklyTimesheetRequest,
   logoutSession,
   rejectTimeEntryRequest,
   removeChecklistSubItemRequest,
@@ -620,6 +623,126 @@ function App() {
         ...current,
         timesheetLocks: (current.timesheetLocks ?? []).filter(
           (lock) => !(lock.userId === userId && lock.period === period),
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  /**
+   * Submit the caller's own Sun-Sat week for owner review. The server keys
+   * off `session.user.id`, so this handler only needs the week-start
+   * date. The returned submission row is either upserted into
+   * `data.weeklySubmissions` (re-submit on the same week reuses the row id)
+   * or appended for a brand-new week.
+   */
+  const submitWeeklyTimesheet = async (weekStart: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const submission = await submitWeeklyTimesheetRequest(weekStart)
+      applyServerDataUpdate((current) => {
+        const list = current.weeklySubmissions ?? []
+        const existsAt = list.findIndex((entry) => entry.id === submission.id)
+        const next =
+          existsAt >= 0
+            ? list.map((entry, index) => (index === existsAt ? submission : entry))
+            : [submission, ...list]
+        return { ...current, weeklySubmissions: next }
+      })
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  /**
+   * Owner approves a weekly submission. Mirrors the server's two-part
+   * transaction locally: the submission flips to 'approved' AND every
+   * pending time entry in that user's Sun-Sat week becomes 'approved'
+   * (with the calling owner as approver) so the per-entry approval queue
+   * empties in the same render as the weekly sign-off.
+   */
+  const approveWeeklySubmission = async (submissionId: string) => {
+    if (previewActiveRef.current) return
+    const reviewerId = sessionUser?.id
+    if (!reviewerId) return
+    try {
+      setDataSyncState('saving')
+      const updated = await approveWeeklySubmissionRequest(submissionId)
+      const reviewedAt = updated.reviewedAt ?? new Date().toISOString()
+      const weekStartDate = new Date(`${updated.weekStart}T12:00:00`)
+      const weekEndDate = new Date(weekStartDate)
+      weekEndDate.setDate(weekEndDate.getDate() + 7)
+      const weekEnd = weekEndDate.toISOString().slice(0, 10)
+
+      applyServerDataUpdate((current) => ({
+        ...current,
+        weeklySubmissions: (current.weeklySubmissions ?? []).map((entry) =>
+          entry.id === submissionId ? updated : entry,
+        ),
+        timeEntries: current.timeEntries.map((entry) => {
+          if (
+            entry.employeeId === updated.userId &&
+            entry.approvalStatus === 'pending' &&
+            entry.date >= updated.weekStart &&
+            entry.date < weekEnd
+          ) {
+            return {
+              ...entry,
+              approvalStatus: 'approved',
+              approvedBy: reviewerId,
+              approvedAt: reviewedAt,
+            }
+          }
+          return entry
+        }),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  /**
+   * Owner rejects a weekly submission with a note. The submission row
+   * stays in `data.weeklySubmissions` with status='rejected' (so the
+   * submitter sees the rationale on their time page) — no time-entry
+   * mutations on this path, since the bookkeeper still owns those rows
+   * and may edit / resubmit.
+   */
+  const rejectWeeklySubmission = async (submissionId: string, note: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updated = await rejectWeeklySubmissionRequest(submissionId, note)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        weeklySubmissions: (current.weeklySubmissions ?? []).map((entry) =>
+          entry.id === submissionId ? updated : entry,
         ),
       }))
       setDataSyncState('synced')
@@ -1858,6 +1981,9 @@ function App() {
     approveTimeEntriesBatch,
     lockTimesheet,
     unlockTimesheet,
+    submitWeeklyTimesheet,
+    approveWeeklySubmission,
+    rejectWeeklySubmission,
     toggleChecklistItem,
     toggleSubItem,
     addSubItem,

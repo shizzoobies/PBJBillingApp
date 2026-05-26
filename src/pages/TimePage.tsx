@@ -1,4 +1,4 @@
-import { Clock3, PencilLine, TimerReset } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Clock3, PencilLine, TimerReset } from 'lucide-react'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import type {
@@ -9,8 +9,18 @@ import type {
   TimeEntry,
   TimerState,
   TimesheetLock,
+  WeeklySubmission,
 } from '../lib/types'
-import { clientName, currentBillingPeriod, employeeName, formatHours } from '../lib/utils'
+import {
+  clientName,
+  currentBillingPeriod,
+  currentWeekStart,
+  employeeName,
+  formatHours,
+  getWeekLabel,
+  shiftWeek,
+  weekRangeOf,
+} from '../lib/utils'
 
 export function TimePage() {
   const {
@@ -27,6 +37,7 @@ export function TimePage() {
     updateTimeEntry,
     deleteTimeEntry,
     previewMode,
+    submitWeeklyTimesheet,
   } = useAppContext()
 
   // The viewed period is the current month. A bookkeeper whose timesheet is
@@ -68,6 +79,17 @@ export function TimePage() {
         </div>
       </header>
 
+      {role !== 'owner' ? (
+        <WeeklySubmissionWidget
+          activeEmployeeId={activeEmployeeId}
+          entries={visibleEntries}
+          submissions={data.weeklySubmissions ?? []}
+          employees={data.employees}
+          previewMode={previewMode}
+          onSubmit={submitWeeklyTimesheet}
+        />
+      ) : null}
+
       <div className="content-grid two-column">
         <TimeCapture
           activeEmployeeId={activeEmployeeId}
@@ -106,6 +128,178 @@ export function TimePage() {
           onClose={() => setManualOpen(false)}
         />
       ) : null}
+    </section>
+  )
+}
+
+/**
+ * Weekly lock-for-review widget shown at the top of the time page for
+ * bookkeepers / accountants. Lets the user pick a Sun-Sat week (defaulting
+ * to the current week), shows the total hours logged that week, and the
+ * submission's current status (none / pending / approved / rejected with
+ * note). The "Submit week" button creates or upgrades the submission
+ * server-side via `submitWeeklyTimesheet`. Owners aren't shown this
+ * widget — they're the reviewers, not the submitters.
+ */
+function WeeklySubmissionWidget({
+  activeEmployeeId,
+  entries,
+  submissions,
+  employees,
+  previewMode,
+  onSubmit,
+}: {
+  activeEmployeeId: string
+  entries: TimeEntry[]
+  submissions: WeeklySubmission[]
+  employees: Employee[]
+  previewMode: boolean
+  onSubmit: (weekStart: string) => Promise<void>
+}) {
+  const [weekStart, setWeekStart] = useState(currentWeekStart)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  const { start, end } = weekRangeOf(weekStart)
+  const submission = submissions.find(
+    (entry) => entry.userId === activeEmployeeId && entry.weekStart === weekStart,
+  )
+
+  // Total minutes logged this user, this week.
+  const weekTotal = useMemo(() => {
+    return entries
+      .filter(
+        (entry) =>
+          entry.employeeId === activeEmployeeId &&
+          entry.date >= start &&
+          entry.date <= end,
+      )
+      .reduce((sum, entry) => sum + entry.minutes, 0)
+  }, [entries, activeEmployeeId, start, end])
+
+  // Approved weeks are sealed — submitter can't re-submit; an owner would
+  // need to unlock first (a future affordance). Pending blocks resubmit
+  // until status changes. Rejected re-allows submit so the user can
+  // resubmit after fixing whatever the owner flagged.
+  const canSubmit = !previewMode && (!submission || submission.status === 'rejected')
+  const buttonLabel =
+    submission?.status === 'rejected'
+      ? 'Resubmit this week'
+      : submission?.status === 'pending'
+        ? 'Awaiting review'
+        : submission?.status === 'approved'
+          ? 'Approved'
+          : 'Submit week for review'
+
+  const handleSubmit = async () => {
+    if (!canSubmit || submitting) return
+    setSubmitting(true)
+    setError('')
+    try {
+      await onSubmit(weekStart)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Submit failed')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const reviewer =
+    submission?.reviewedBy && submission.status !== 'pending'
+      ? employees.find((employee) => employee.id === submission.reviewedBy)?.name
+      : null
+
+  return (
+    <section
+      className="panel weekly-submission-widget"
+      style={{ display: 'grid', gap: 12 }}
+      aria-label="Weekly timesheet submission"
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+          flexWrap: 'wrap',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => setWeekStart(shiftWeek(weekStart, -1))}
+            title="Previous week"
+            aria-label="Previous week"
+          >
+            <ChevronLeft size={14} />
+          </button>
+          <div>
+            <p className="section-kicker" style={{ margin: 0 }}>
+              Weekly timesheet
+            </p>
+            <h2 style={{ margin: 0 }}>{getWeekLabel(weekStart)}</h2>
+          </div>
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => setWeekStart(shiftWeek(weekStart, 1))}
+            title="Next week"
+            aria-label="Next week"
+          >
+            <ChevronRight size={14} />
+          </button>
+          {weekStart !== currentWeekStart() ? (
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => setWeekStart(currentWeekStart())}
+              title="Jump to this week"
+            >
+              Today
+            </button>
+          ) : null}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span className="status-pill">{formatHours(weekTotal)} logged</span>
+          {submission?.status === 'pending' ? (
+            <span className="status-pill">Pending review</span>
+          ) : null}
+          {submission?.status === 'approved' ? (
+            <span className="status-pill">
+              Approved{reviewer ? ` by ${reviewer}` : ''}
+            </span>
+          ) : null}
+          {submission?.status === 'rejected' ? (
+            <span className="status-pill">Rejected{reviewer ? ` by ${reviewer}` : ''}</span>
+          ) : null}
+          <button
+            type="button"
+            className="primary-action"
+            disabled={!canSubmit || submitting}
+            onClick={handleSubmit}
+            title={
+              submission?.status === 'approved'
+                ? 'This week is already approved.'
+                : submission?.status === 'pending'
+                  ? 'Already submitted — an owner is reviewing.'
+                  : previewMode
+                    ? 'Cannot submit while previewing as another user.'
+                    : 'Lock this week and send it to an owner for review.'
+            }
+          >
+            {submitting ? 'Submitting…' : buttonLabel}
+          </button>
+        </div>
+      </div>
+
+      {submission?.status === 'rejected' && submission.reviewNote ? (
+        <p className="auth-error" style={{ margin: 0 }}>
+          <strong>Rejection note:</strong> {submission.reviewNote}
+        </p>
+      ) : null}
+      {error ? <p className="auth-error">{error}</p> : null}
     </section>
   )
 }

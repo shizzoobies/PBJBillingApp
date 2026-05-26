@@ -60,6 +60,16 @@ export type AppContextValue = {
   approveTimeEntriesBatch: (entryIds: string[]) => Promise<void>
   lockTimesheet: (userId: string, period: string) => Promise<void>
   unlockTimesheet: (userId: string, period: string) => Promise<void>
+  /**
+   * Bookkeeper / accountant submits their own Sun-Sat week for owner
+   * review. `weekStart` is the YYYY-MM-DD Sunday that anchors the week.
+   * Idempotent: re-submitting after a rejection upgrades the same row.
+   */
+  submitWeeklyTimesheet: (weekStart: string) => Promise<void>
+  /** Owner-only: approve a pending weekly submission. */
+  approveWeeklySubmission: (submissionId: string) => Promise<void>
+  /** Owner-only: reject a pending weekly submission with a written note. */
+  rejectWeeklySubmission: (submissionId: string, note: string) => Promise<void>
   toggleChecklistItem: (checklistId: string, itemId: string) => Promise<void>
   /** Toggle one sub-item of a live-checklist item (recomputes parent done). */
   toggleSubItem: (checklistId: string, itemId: string, subItemId: string) => Promise<void>

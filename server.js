@@ -274,6 +274,11 @@ function scopeAppDataForSession(session, data) {
   const plans = []
   // A bookkeeper only needs to know about locks on their own timesheet.
   const timesheetLocks = (data.timesheetLocks ?? []).filter((lock) => lock.userId === me)
+  // Same for weekly submissions — bookkeepers see their own queue;
+  // owners see everyone's via the unscoped return below.
+  const weeklySubmissions = (data.weeklySubmissions ?? []).filter(
+    (submission) => submission.userId === me,
+  )
 
   return {
     ...data,
@@ -283,6 +288,7 @@ function scopeAppDataForSession(session, data) {
     timeEntries,
     plans,
     timesheetLocks,
+    weeklySubmissions,
     // Recycle bin is owner-only — bookkeepers never see it. Empty array
     // (rather than undefined) so the client code can iterate without a
     // null check, and old front-ends still receive a present field.
@@ -1056,6 +1062,115 @@ const server = createServer(async (request, response) => {
         `${userId} · ${period}`,
       )
       sendJson(response, 200, { ok: true, removed })
+      return
+    }
+
+    // Weekly lock-for-review: the bookkeeper / accountant submits their
+    // own Sun-Sat week. The userId always comes from the session — users
+    // can never submit on behalf of someone else from this endpoint.
+    if (normalizedPath === '/api/timesheets/weekly-submissions') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const weekStart = typeof payload?.weekStart === 'string' ? payload.weekStart.trim() : ''
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
+        sendJson(response, 400, { error: 'weekStart must be a YYYY-MM-DD date' })
+        return
+      }
+      // Sanity: enforce that the date is actually a Sunday so a buggy
+      // client can't anchor the row mid-week. JS getDay(): Sun = 0.
+      const anchor = new Date(`${weekStart}T12:00:00`)
+      if (anchor.getDay() !== 0) {
+        sendJson(response, 400, { error: 'weekStart must be a Sunday' })
+        return
+      }
+      const submission = await appDataStore.submitWeeklyTimesheet(session.user.id, weekStart)
+      if (!submission) {
+        sendJson(response, 404, { error: 'Unable to record submission' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'weekly_timesheet_submitted',
+        `Week of ${weekStart}`,
+      )
+      sendJson(response, 200, submission)
+      return
+    }
+
+    // Owner-only weekly approve / reject.
+    const weeklyApproveMatch = normalizedPath.match(
+      /^\/api\/timesheets\/weekly-submissions\/([^/]+)\/approve$/,
+    )
+    if (weeklyApproveMatch) {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can approve weekly timesheets' })
+        return
+      }
+      const submission = await appDataStore.approveWeeklySubmission(
+        weeklyApproveMatch[1],
+        session.user.id,
+      )
+      if (!submission) {
+        sendJson(response, 404, { error: 'No pending submission with that id' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'weekly_timesheet_approved',
+        `${submission.userId} · ${submission.weekStart}`,
+      )
+      sendJson(response, 200, submission)
+      return
+    }
+
+    const weeklyRejectMatch = normalizedPath.match(
+      /^\/api\/timesheets\/weekly-submissions\/([^/]+)\/reject$/,
+    )
+    if (weeklyRejectMatch) {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can reject weekly timesheets' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const note = typeof payload?.note === 'string' ? payload.note : ''
+      const submission = await appDataStore.rejectWeeklySubmission(
+        weeklyRejectMatch[1],
+        session.user.id,
+        note,
+      )
+      if (!submission) {
+        sendJson(response, 404, { error: 'No pending submission with that id' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'weekly_timesheet_rejected',
+        `${submission.userId} · ${submission.weekStart}`,
+      )
+      sendJson(response, 200, submission)
       return
     }
 

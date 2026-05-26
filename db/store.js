@@ -1009,6 +1009,27 @@ export class AppDataStore {
         )
       `)
 
+      // Weekly lock-for-review submissions: a bookkeeper / accountant
+      // submits their Sun-Sat week and an owner approves or rejects it.
+      // Exactly one row per (user, week) — a resubmit after rejection
+      // upgrades the same row back to 'pending'. The owner approval path
+      // also flips every pending time entry in that week to 'approved'
+      // (the per-entry approval_status workflow predates this and stays
+      // intact for granular owner edits).
+      await this.pool.query(`
+        create table if not exists weekly_submissions (
+          id text primary key,
+          user_id text not null references users(id) on delete cascade,
+          week_start date not null,
+          submitted_at timestamptz not null default now(),
+          status text not null,
+          reviewed_by text,
+          reviewed_at timestamptz,
+          review_note text,
+          unique (user_id, week_start)
+        )
+      `)
+
       await this.pool.query(`
         create table if not exists checklists (
           id text primary key,
@@ -1432,6 +1453,7 @@ export class AppDataStore {
         checklistTemplateItemsResult,
         checklistTemplateStagesResult,
         timesheetLocksResult,
+        weeklySubmissionsResult,
       ] =
         await Promise.all([
           this.pool.query(`
@@ -1496,6 +1518,12 @@ export class AppDataStore {
             select id, user_id, period, locked_by, locked_at
             from timesheet_locks
             order by period desc, user_id asc
+          `),
+          this.pool.query(`
+            select id, user_id, week_start, submitted_at, status,
+                   reviewed_by, reviewed_at, review_note
+            from weekly_submissions
+            order by week_start desc, user_id asc
           `),
         ])
 
@@ -1686,6 +1714,16 @@ export class AppDataStore {
           lockedBy: row.locked_by,
           lockedAt: row.locked_at ? row.locked_at.toISOString() : nowIso(),
         })),
+        weeklySubmissions: weeklySubmissionsResult.rows.map((row) => ({
+          id: row.id,
+          userId: row.user_id,
+          weekStart: row.week_start.toISOString().slice(0, 10),
+          submittedAt: row.submitted_at ? row.submitted_at.toISOString() : nowIso(),
+          status: row.status,
+          ...(row.reviewed_by ? { reviewedBy: row.reviewed_by } : {}),
+          ...(row.reviewed_at ? { reviewedAt: row.reviewed_at.toISOString() } : {}),
+          ...(row.review_note ? { reviewNote: row.review_note } : {}),
+        })),
       }
 
       if (data.checklistTemplates.length === 0) {
@@ -1738,6 +1776,11 @@ export class AppDataStore {
       backfilled = true
     }
 
+    if (!Array.isArray(data.weeklySubmissions)) {
+      data.weeklySubmissions = []
+      backfilled = true
+    }
+
     // Recycle-bin backfill for legacy file-fallback data. Old saves never
     // carried a separate array, so partition the existing list by `deletedAt`
     // and keep both arrays from now on. New saves always write both arrays
@@ -1779,6 +1822,7 @@ export class AppDataStore {
         await client.query('delete from checklist_templates')
         await client.query('delete from time_entries')
         await client.query('delete from timesheet_locks')
+        await client.query('delete from weekly_submissions')
         await client.query('delete from client_assignments')
         await client.query('delete from invoice_drafts')
         await client.query('delete from clients')
@@ -1903,6 +1947,25 @@ export class AppDataStore {
               values ($1, $2, $3, $4, $5)
             `,
             [lock.id, lock.userId, lock.period, lock.lockedBy, lock.lockedAt ?? nowIso()],
+          )
+        }
+
+        for (const submission of data.weeklySubmissions ?? []) {
+          await client.query(
+            `
+              insert into weekly_submissions (id, user_id, week_start, submitted_at, status, reviewed_by, reviewed_at, review_note)
+              values ($1, $2, $3, $4, $5, $6, $7, $8)
+            `,
+            [
+              submission.id,
+              submission.userId,
+              submission.weekStart,
+              submission.submittedAt ?? nowIso(),
+              submission.status,
+              submission.reviewedBy ?? null,
+              submission.reviewedAt ?? null,
+              submission.reviewNote ?? null,
+            ],
           )
         }
 
@@ -2348,6 +2411,245 @@ export class AppDataStore {
     return (data.timesheetLocks ?? []).some(
       (l) => l.userId === userId && l.period === period,
     )
+  }
+
+  /**
+   * Bookkeeper / accountant submits their Sun-Sat week for owner review.
+   * Idempotent on the (user, weekStart) pair: a fresh submit creates a
+   * row, a re-submit after a rejection upgrades that same row back to
+   * 'pending' (clears reviewer fields + note). Re-submitting an already-
+   * pending row simply touches `submitted_at` — useful when the
+   * bookkeeper edits a previously-pending week and wants the owner to
+   * re-look. Approved submissions can't be re-submitted via this path;
+   * the owner has to unlock first (rejection path resets the state).
+   * Returns the resulting submission row, or null when the user is gone.
+   */
+  async submitWeeklyTimesheet(userId, weekStart) {
+    if (!userId || !weekStart) return null
+    const submittedAt = nowIso()
+    const id = `wsub-${randomUUID().slice(0, 8)}`
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `insert into weekly_submissions
+           (id, user_id, week_start, submitted_at, status, reviewed_by, reviewed_at, review_note)
+         values ($1, $2, $3, $4, 'pending', null, null, null)
+         on conflict (user_id, week_start) do update
+           set status = case when weekly_submissions.status = 'approved'
+                              then weekly_submissions.status
+                              else 'pending' end,
+               submitted_at = excluded.submitted_at,
+               reviewed_by = case when weekly_submissions.status = 'approved'
+                                   then weekly_submissions.reviewed_by
+                                   else null end,
+               reviewed_at = case when weekly_submissions.status = 'approved'
+                                   then weekly_submissions.reviewed_at
+                                   else null end,
+               review_note = case when weekly_submissions.status = 'approved'
+                                   then weekly_submissions.review_note
+                                   else null end
+         returning id, user_id, week_start, submitted_at, status, reviewed_by, reviewed_at, review_note`,
+        [id, userId, weekStart, submittedAt],
+      )
+      const row = result.rows[0]
+      if (!row) return null
+      return {
+        id: row.id,
+        userId: row.user_id,
+        weekStart: row.week_start.toISOString().slice(0, 10),
+        submittedAt: row.submitted_at ? row.submitted_at.toISOString() : submittedAt,
+        status: row.status,
+        ...(row.reviewed_by ? { reviewedBy: row.reviewed_by } : {}),
+        ...(row.reviewed_at ? { reviewedAt: row.reviewed_at.toISOString() } : {}),
+        ...(row.review_note ? { reviewNote: row.review_note } : {}),
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.weeklySubmissions)) data.weeklySubmissions = []
+    const existing = data.weeklySubmissions.find(
+      (s) => s.userId === userId && s.weekStart === weekStart,
+    )
+    let resulting
+    if (existing) {
+      if (existing.status === 'approved') {
+        // Already-approved weeks can't be re-submitted; return as-is.
+        resulting = existing
+      } else {
+        existing.status = 'pending'
+        existing.submittedAt = submittedAt
+        delete existing.reviewedBy
+        delete existing.reviewedAt
+        delete existing.reviewNote
+        resulting = existing
+      }
+    } else {
+      resulting = { id, userId, weekStart, submittedAt, status: 'pending' }
+      data.weeklySubmissions.push(resulting)
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return resulting
+  }
+
+  /**
+   * Owner approves a pending weekly submission. Atomically:
+   *  - flips the submission row to status='approved' with reviewer fields
+   *  - flips every still-pending time entry in that user's Sun-Sat week
+   *    to approval_status='approved' so the per-entry approval queue
+   *    drains in step with the weekly sign-off.
+   * Returns the updated submission, or null when the id doesn't match.
+   */
+  async approveWeeklySubmission(submissionId, ownerId) {
+    if (!submissionId || !ownerId) return null
+    const reviewedAt = nowIso()
+
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        const target = await client.query(
+          `select id, user_id, week_start
+           from weekly_submissions
+           where id = $1 and status = 'pending'
+           for update`,
+          [submissionId],
+        )
+        if (!target.rowCount) {
+          await client.query('rollback')
+          return null
+        }
+        const { user_id: userId, week_start: weekStart } = target.rows[0]
+
+        await client.query(
+          `update time_entries
+             set approval_status = 'approved',
+                 approved_by = $1,
+                 approved_at = $2,
+                 updated_at = now()
+             where user_id = $3
+               and approval_status = 'pending'
+               and entry_date >= $4
+               and entry_date < ($4::date + interval '7 days')`,
+          [ownerId, reviewedAt, userId, weekStart],
+        )
+
+        const updated = await client.query(
+          `update weekly_submissions
+             set status = 'approved',
+                 reviewed_by = $1,
+                 reviewed_at = $2,
+                 review_note = null
+             where id = $3
+             returning id, user_id, week_start, submitted_at, status, reviewed_by, reviewed_at, review_note`,
+          [ownerId, reviewedAt, submissionId],
+        )
+        await client.query('commit')
+        const row = updated.rows[0]
+        if (!row) return null
+        return {
+          id: row.id,
+          userId: row.user_id,
+          weekStart: row.week_start.toISOString().slice(0, 10),
+          submittedAt: row.submitted_at ? row.submitted_at.toISOString() : reviewedAt,
+          status: row.status,
+          reviewedBy: row.reviewed_by,
+          reviewedAt: row.reviewed_at ? row.reviewed_at.toISOString() : reviewedAt,
+        }
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const submissions = Array.isArray(data.weeklySubmissions) ? data.weeklySubmissions : []
+    const target = submissions.find((s) => s.id === submissionId && s.status === 'pending')
+    if (!target) return null
+    const userId = target.userId
+    const weekStart = target.weekStart
+    const weekEndDate = new Date(`${weekStart}T12:00:00`)
+    weekEndDate.setDate(weekEndDate.getDate() + 7)
+    const weekEnd = weekEndDate.toISOString().slice(0, 10)
+
+    data.timeEntries = (data.timeEntries ?? []).map((entry) => {
+      if (
+        entry.employeeId === userId &&
+        entry.approvalStatus === 'pending' &&
+        typeof entry.date === 'string' &&
+        entry.date >= weekStart &&
+        entry.date < weekEnd
+      ) {
+        return {
+          ...entry,
+          approvalStatus: 'approved',
+          approvedBy: ownerId,
+          approvedAt: reviewedAt,
+        }
+      }
+      return entry
+    })
+
+    target.status = 'approved'
+    target.reviewedBy = ownerId
+    target.reviewedAt = reviewedAt
+    delete target.reviewNote
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return target
+  }
+
+  /**
+   * Owner rejects a pending weekly submission with a note. The submission
+   * row keeps a history record (status='rejected' with the note); the
+   * bookkeeper can edit their entries again and call `submitWeeklyTimesheet`
+   * to upgrade the row back to 'pending' for another review pass.
+   * Returns the updated submission, or null when the id doesn't match.
+   */
+  async rejectWeeklySubmission(submissionId, ownerId, note) {
+    if (!submissionId || !ownerId) return null
+    const reviewedAt = nowIso()
+    const trimmedNote = typeof note === 'string' ? note.trim() : ''
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update weekly_submissions
+           set status = 'rejected',
+               reviewed_by = $1,
+               reviewed_at = $2,
+               review_note = $3
+           where id = $4 and status = 'pending'
+           returning id, user_id, week_start, submitted_at, status, reviewed_by, reviewed_at, review_note`,
+        [ownerId, reviewedAt, trimmedNote || null, submissionId],
+      )
+      const row = result.rows[0]
+      if (!row) return null
+      return {
+        id: row.id,
+        userId: row.user_id,
+        weekStart: row.week_start.toISOString().slice(0, 10),
+        submittedAt: row.submitted_at ? row.submitted_at.toISOString() : reviewedAt,
+        status: row.status,
+        reviewedBy: row.reviewed_by,
+        reviewedAt: row.reviewed_at ? row.reviewed_at.toISOString() : reviewedAt,
+        ...(row.review_note ? { reviewNote: row.review_note } : {}),
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const submissions = Array.isArray(data.weeklySubmissions) ? data.weeklySubmissions : []
+    const target = submissions.find((s) => s.id === submissionId && s.status === 'pending')
+    if (!target) return null
+    target.status = 'rejected'
+    target.reviewedBy = ownerId
+    target.reviewedAt = reviewedAt
+    if (trimmedNote) {
+      target.reviewNote = trimmedNote
+    } else {
+      delete target.reviewNote
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return target
   }
 
   /**

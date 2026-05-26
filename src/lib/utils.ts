@@ -61,6 +61,70 @@ export function currentBillingPeriod() {
   return new Date().toISOString().slice(0, 7)
 }
 
+/**
+ * Sunday-anchored "start of week" for a YYYY-MM-DD date. US convention:
+ * Sun = 0 ... Sat = 6, so subtracting `getDay()` lands on the Sunday that
+ * begins the week. Returns 'YYYY-MM-DD' (same shape as the input). The
+ * noon timestamp avoids DST midnight wobble.
+ */
+export function weekStartOf(dateString: string): string {
+  const date = new Date(`${dateString}T12:00:00`)
+  date.setDate(date.getDate() - date.getDay())
+  return date.toISOString().slice(0, 10)
+}
+
+/**
+ * Sun-Sat date range for a given date. Returns both ends as 'YYYY-MM-DD'.
+ * Useful for filtering time entries to a week and for the "Sun X – Sat Y"
+ * label shown on the time page submission widget.
+ */
+export function weekRangeOf(dateString: string): { start: string; end: string } {
+  const start = weekStartOf(dateString)
+  const endDate = new Date(`${start}T12:00:00`)
+  endDate.setDate(endDate.getDate() + 6)
+  return { start, end: endDate.toISOString().slice(0, 10) }
+}
+
+/** Today's week-start ('YYYY-MM-DD' Sunday) — small convenience wrapper. */
+export function currentWeekStart(): string {
+  return weekStartOf(new Date().toISOString().slice(0, 10))
+}
+
+/**
+ * Human label for a week-start date. "Jan 14 – 20, 2025" for same-month
+ * ranges, "Dec 29, 2024 – Jan 4, 2025" when the week crosses a year /
+ * month boundary. Tuned for tight headers on the time page widget.
+ */
+export function getWeekLabel(weekStart: string): string {
+  const { start, end } = weekRangeOf(weekStart)
+  const startDate = new Date(`${start}T12:00:00`)
+  const endDate = new Date(`${end}T12:00:00`)
+  const sameMonth =
+    startDate.getMonth() === endDate.getMonth() && startDate.getFullYear() === endDate.getFullYear()
+  if (sameMonth) {
+    const month = new Intl.DateTimeFormat('en-US', { month: 'short' }).format(startDate)
+    return `${month} ${startDate.getDate()} – ${endDate.getDate()}, ${startDate.getFullYear()}`
+  }
+  const startLabel = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(startDate)
+  const endLabel = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(endDate)
+  return `${startLabel} – ${endLabel}`
+}
+
+/** Add `weeks` to the given week-start. Negative values walk backwards. */
+export function shiftWeek(weekStart: string, weeks: number): string {
+  const date = new Date(`${weekStart}T12:00:00`)
+  date.setDate(date.getDate() + weeks * 7)
+  return date.toISOString().slice(0, 10)
+}
+
 export function getBillingPeriodLabel(period: string) {
   const [year, month] = period.split('-').map(Number)
   return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(

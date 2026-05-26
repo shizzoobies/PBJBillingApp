@@ -322,5 +322,6 @@ export function createSeedData(): AppData {
     checklists: [],
     recycledChecklists: [],
     timesheetLocks: [],
+    weeklySubmissions: [],
   }
 }

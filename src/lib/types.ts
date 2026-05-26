@@ -56,6 +56,30 @@ export type SubscriptionPlan = {
 
 export type TimeApprovalStatus = 'pending' | 'approved' | 'rejected'
 
+/**
+ * A bookkeeper / accountant locks their week for review by submitting a
+ * `WeeklySubmission`. The owner then approves (which auto-approves every
+ * pending time entry in that week) or rejects with a note. A re-submit
+ * after rejection upgrades the existing row back to `pending` — there's
+ * always exactly one row per `(userId, weekStart)`.
+ */
+export type WeeklySubmissionStatus = 'pending' | 'approved' | 'rejected'
+
+export type WeeklySubmission = {
+  id: string
+  userId: string
+  /** ISO date of the Sunday that anchors the week (US Sun-Sat work week). */
+  weekStart: string
+  /** ISO timestamp of the most recent submit (resets on resubmit). */
+  submittedAt: string
+  status: WeeklySubmissionStatus
+  /** Owner who approved or rejected, set when `status !== 'pending'`. */
+  reviewedBy?: string
+  reviewedAt?: string
+  /** Rejection rationale shown to the submitter. */
+  reviewNote?: string
+}
+
 export type TimeEntry = {
   id: string
   employeeId: string
@@ -299,6 +323,11 @@ export type AppData = {
    */
   recycledChecklists: Checklist[]
   timesheetLocks: TimesheetLock[]
+  /**
+   * Weekly lock-for-review submissions. Owners see every user's
+   * submissions; non-owners see only their own (server-scoped).
+   */
+  weeklySubmissions: WeeklySubmission[]
   firmSettings?: FirmSettings
 }
 

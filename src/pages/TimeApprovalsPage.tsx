@@ -1,8 +1,21 @@
 import { CheckCircle2, Lock, LockOpen, XCircle } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
-import type { Checklist, Client, Employee, TimeEntry } from '../lib/types'
-import { clientName, formatHours, getBillingPeriodLabel } from '../lib/utils'
+import type {
+  Checklist,
+  Client,
+  Employee,
+  TimeEntry,
+  WeeklySubmission,
+} from '../lib/types'
+import {
+  clientName,
+  employeeName,
+  formatHours,
+  getBillingPeriodLabel,
+  getWeekLabel,
+  weekRangeOf,
+} from '../lib/utils'
 
 type StatusFilter = 'pending' | 'rejected' | 'all'
 
@@ -26,6 +39,8 @@ export function TimeApprovalsPage() {
     approveTimeEntriesBatch,
     lockTimesheet,
     unlockTimesheet,
+    approveWeeklySubmission,
+    rejectWeeklySubmission,
   } = useAppContext()
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('pending')
@@ -47,6 +62,14 @@ export function TimeApprovalsPage() {
         </div>
       </header>
 
+      <WeeklyReviewSection
+        submissions={data.weeklySubmissions ?? []}
+        employees={data.employees}
+        entries={data.timeEntries}
+        onApprove={approveWeeklySubmission}
+        onReject={rejectWeeklySubmission}
+      />
+
       <ApprovalQueue
         employees={employees}
         clients={data.clients}
@@ -66,6 +89,181 @@ export function TimeApprovalsPage() {
         onLock={lockTimesheet}
         onUnlock={unlockTimesheet}
       />
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Weekly review — pending lock-for-review submissions, owner approves/rejects
+// ---------------------------------------------------------------------------
+
+/**
+ * Top-of-page section that surfaces every pending weekly submission so an
+ * owner can approve / reject in one place. Approving auto-approves all
+ * pending time entries in that user's Sun-Sat week (handled by the
+ * `approveWeeklySubmission` handler). Rejecting requires a note explaining
+ * the rationale — the submitter sees it on their time page.
+ */
+function WeeklyReviewSection({
+  submissions,
+  employees,
+  entries,
+  onApprove,
+  onReject,
+}: {
+  submissions: WeeklySubmission[]
+  employees: Employee[]
+  entries: TimeEntry[]
+  onApprove: (submissionId: string) => Promise<void>
+  onReject: (submissionId: string, note: string) => Promise<void>
+}) {
+  const [pendingId, setPendingId] = useState<string | null>(null)
+  // Map<submissionId, draftNote> — local state for each pending row's
+  // rejection-note textarea. Cleared on approve/reject success.
+  const [notes, setNotes] = useState<Record<string, string>>({})
+
+  const pending = useMemo(
+    () =>
+      submissions
+        .filter((submission) => submission.status === 'pending')
+        .slice()
+        .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt)),
+    [submissions],
+  )
+
+  const handleApprove = async (submissionId: string) => {
+    setPendingId(submissionId)
+    try {
+      await onApprove(submissionId)
+      setNotes((current) => {
+        const next = { ...current }
+        delete next[submissionId]
+        return next
+      })
+    } finally {
+      setPendingId(null)
+    }
+  }
+
+  const handleReject = async (submissionId: string) => {
+    const note = (notes[submissionId] ?? '').trim()
+    if (!note) {
+      window.alert('Add a short rejection note so the bookkeeper knows what to fix.')
+      return
+    }
+    setPendingId(submissionId)
+    try {
+      await onReject(submissionId, note)
+      setNotes((current) => {
+        const next = { ...current }
+        delete next[submissionId]
+        return next
+      })
+    } finally {
+      setPendingId(null)
+    }
+  }
+
+  return (
+    <section className="panel" aria-label="Weekly submissions">
+      <div className="section-heading">
+        <div>
+          <h2 style={{ margin: 0 }}>Weekly submissions</h2>
+          <p className="productivity-subtitle" style={{ margin: '4px 0 0 0' }}>
+            Approve a week to seal every pending time entry inside it. Rejecting unlocks
+            the week so the bookkeeper can edit and resubmit.
+          </p>
+        </div>
+        <span className="status-pill">{pending.length} pending</span>
+      </div>
+
+      {pending.length === 0 ? (
+        <p className="checklist-empty-hint">Nothing pending review.</p>
+      ) : (
+        <ul
+          style={{
+            listStyle: 'none',
+            padding: 0,
+            margin: 0,
+            display: 'grid',
+            gap: 12,
+          }}
+        >
+          {pending.map((submission) => {
+            const { start, end } = weekRangeOf(submission.weekStart)
+            const totalMinutes = entries
+              .filter(
+                (entry) =>
+                  entry.employeeId === submission.userId &&
+                  entry.date >= start &&
+                  entry.date <= end,
+              )
+              .reduce((sum, entry) => sum + entry.minutes, 0)
+            const inFlight = pendingId === submission.id
+            return (
+              <li
+                key={submission.id}
+                style={{
+                  padding: 12,
+                  borderTop: '1px solid var(--border-subtle, #eee)',
+                  display: 'grid',
+                  gap: 8,
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'baseline',
+                    gap: 12,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div>
+                    <strong>{employeeName(employees, submission.userId)}</strong>
+                    <span className="checklist-meta-line">
+                      {getWeekLabel(submission.weekStart)} ·{' '}
+                      {formatHours(totalMinutes)} logged · submitted{' '}
+                      {new Date(submission.submittedAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      type="button"
+                      className="primary-action"
+                      disabled={inFlight}
+                      onClick={() => void handleApprove(submission.id)}
+                      title="Approve this week and seal every pending entry in it"
+                    >
+                      <CheckCircle2 size={14} />
+                      Approve week
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-action danger"
+                      disabled={inFlight}
+                      onClick={() => void handleReject(submission.id)}
+                      title="Reject so the bookkeeper can edit and resubmit"
+                    >
+                      <XCircle size={14} />
+                      Reject
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  className="input"
+                  rows={2}
+                  placeholder="Rejection note (required to reject) — e.g. 'Missing description on Tue 1/16'"
+                  value={notes[submission.id] ?? ''}
+                  onChange={(event) =>
+                    setNotes((current) => ({ ...current, [submission.id]: event.target.value }))
+                  }
+                />
+              </li>
+            )
+          })}
+        </ul>
+      )}
     </section>
   )
 }

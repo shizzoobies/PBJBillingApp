@@ -16,6 +16,7 @@
   type TimesheetLock,
   type TotpSetupInit,
   type TotpStatus,
+  type WeeklySubmission,
 } from './types'
 
 /**
@@ -265,6 +266,69 @@ export async function unlockTimesheetRequest(userId: string, period: string) {
     throw new ApiError(response.status, message || `Failed to unlock timesheet (${response.status})`)
   }
   return (await response.json()) as { ok: boolean; removed: boolean }
+}
+
+/**
+ * Submit the caller's own Sun-Sat week for owner review. The server takes
+ * the userId from the session, so the body only carries `weekStart` (the
+ * Sunday that anchors the week, YYYY-MM-DD). Re-submitting an already
+ * pending or rejected week upgrades the same row back to pending.
+ */
+export async function submitWeeklyTimesheetRequest(weekStart: string) {
+  const response = await apiFetch('/api/timesheets/weekly-submissions', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ weekStart }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to submit weekly timesheet (${response.status})`,
+    )
+  }
+  return (await response.json()) as WeeklySubmission
+}
+
+/** Owner approves a pending weekly submission. */
+export async function approveWeeklySubmissionRequest(submissionId: string) {
+  const response = await apiFetch(
+    `/api/timesheets/weekly-submissions/${encodeURIComponent(submissionId)}/approve`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to approve weekly submission (${response.status})`,
+    )
+  }
+  return (await response.json()) as WeeklySubmission
+}
+
+/** Owner rejects a pending weekly submission with a note (the rationale). */
+export async function rejectWeeklySubmissionRequest(submissionId: string, note: string) {
+  const response = await apiFetch(
+    `/api/timesheets/weekly-submissions/${encodeURIComponent(submissionId)}/reject`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to reject weekly submission (${response.status})`,
+    )
+  }
+  return (await response.json()) as WeeklySubmission
 }
 
 export async function toggleChecklistItemRequest(
