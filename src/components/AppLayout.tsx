@@ -5,7 +5,7 @@ import {
   ListChecks,
   ShieldCheck,
 } from 'lucide-react'
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { formatHours, getBillingPeriodLabel, isInBillingPeriod } from '../lib/utils'
 import { NotificationBell } from './NotificationBell'
@@ -139,9 +139,6 @@ export function AppLayout() {
               <strong>{sessionUser.name}</strong>
               <span>{sessionUser.staffRole}</span>
             </div>
-            <Link className="logout-button" to={ownerMode ? '/settings' : '/security'}>
-              Security
-            </Link>
             <button className="logout-button" onClick={handleLogout} type="button">
               Log out
             </button>

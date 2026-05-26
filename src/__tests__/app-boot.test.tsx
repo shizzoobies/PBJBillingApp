@@ -37,7 +37,9 @@ describe('App boot', () => {
 
     // The session fetch resolves asynchronously, after which <App> swaps the
     // "Loading…" shell for the SignInScreen. `findBy*` retries until then.
-    const heading = await screen.findByRole('heading', { name: /staff sign-in/i })
+    // The sign-in heading is now neutral — single unified page for everyone,
+    // role detected from the DB on submit. Match the firm-name suffix.
+    const heading = await screen.findByRole('heading', { name: /^sign in to /i })
     expect(heading).toBeInTheDocument()
 
     // The sign-in form's email field should be present and interactive.

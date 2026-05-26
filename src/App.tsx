@@ -1922,28 +1922,17 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route
-            path="/owner"
-            element={
-              <SignInScreen
-                role="owner"
-                heading="Owner sign-in"
-                firmSettings={publicFirmSettings}
-              />
-            }
+            path="/sign-in"
+            element={<SignInScreen firmSettings={publicFirmSettings} />}
           />
-          <Route
-            path="/staff"
-            element={
-              <SignInScreen
-                role="staff"
-                heading="Staff sign-in"
-                firmSettings={publicFirmSettings}
-              />
-            }
-          />
+          {/* Legacy role-segmented URLs — kept for bookmarks but redirected
+              to the unified sign-in page. The DB already knows each user's
+              role, so the form doesn't need to ask which lane to use. */}
+          <Route path="/owner" element={<Navigate to="/sign-in" replace />} />
+          <Route path="/staff" element={<Navigate to="/sign-in" replace />} />
           <Route path="/two-factor" element={<TwoFactorPage />} />
           <Route path="/two-factor/setup" element={<TwoFactorSetupPage forced />} />
-          <Route path="*" element={<Navigate to="/staff" replace />} />
+          <Route path="*" element={<Navigate to="/sign-in" replace />} />
         </Routes>
       </BrowserRouter>
     )

@@ -5225,16 +5225,20 @@ export class AppDataStore {
   }
 
   /**
-   * Boot-time owner password bootstrap. If `OWNER_BOOTSTRAP_PASSWORD` is set
-   * in the environment, the first owner user's `password_hash` is reset to
-   * a fresh hash of that value. Idempotent: a no-op when the current hash
-   * already verifies the env value (so flipping the var off doesn't lock
-   * anyone out, and a redeploy with the same value is harmless). Never
-   * logs the password — only the user id on success.
+   * Boot-time owner password bootstrap — fresh-install recovery only.
    *
-   * This is the bulletproof recovery path for the owner: set the var on
-   * Railway, redeploy, sign in with email + that password. Magic links
-   * stay untouched as a secondary auth method.
+   * Applies `OWNER_BOOTSTRAP_PASSWORD` to the first owner's `password_hash`
+   * ONLY when the current password is the seed demo default (`pbj-demo`,
+   * or whatever AUTH_DEMO_PASSWORD overrides it to). Once any real
+   * password has been set — whether via the env var on a previous boot,
+   * the in-app "Set password" card, or anything else — this function is a
+   * no-op. That prevents a redeploy from clobbering a password the user
+   * has just changed inside the app (the bug that locked us out before).
+   *
+   * If you want to FORCE a reset (e.g. the owner forgot their password),
+   * keep the env var set and clear the row's password via a DB-side reset
+   * back to the demo hash; the next boot will then re-apply the env var.
+   * Day-to-day, set the env var, deploy once, sign in, change in-app, done.
    */
   async applyOwnerBootstrapPassword() {
     const password = process.env.OWNER_BOOTSTRAP_PASSWORD
@@ -5252,15 +5256,33 @@ export class AppDataStore {
         return false
       }
       const owner = result.rows[0]
-      if (owner.password_hash && verifyPassword(password, owner.password_hash)) {
-        console.log('[bootstrap] owner password already matches env var — no change')
+      if (!owner.password_hash) {
+        // No hash at all — apply the env value (fresh install edge case).
+        await this.pool.query(
+          `update users set password_hash = $1, updated_at = now() where id = $2`,
+          [hashPassword(password), owner.id],
+        )
+        console.log(`[bootstrap] owner password set for user id ${owner.id} (no prior hash)`)
+        return true
+      }
+      if (verifyPassword(password, owner.password_hash)) {
+        // Already the env value — silent no-op.
         return false
       }
+      if (!verifyPassword(demoPassword, owner.password_hash)) {
+        // Real, user-chosen password is already in place. Leave it alone.
+        console.log(
+          '[bootstrap] owner already has a non-default password; OWNER_BOOTSTRAP_PASSWORD ignored',
+        )
+        return false
+      }
+      // Demo seed password is still in place — this is the fresh-install
+      // / first-deploy case the bootstrap exists for.
       await this.pool.query(
         `update users set password_hash = $1, updated_at = now() where id = $2`,
         [hashPassword(password), owner.id],
       )
-      console.log(`[bootstrap] owner password reset for user id ${owner.id}`)
+      console.log(`[bootstrap] owner password seeded from env for user id ${owner.id}`)
       return true
     }
 
@@ -5270,12 +5292,24 @@ export class AppDataStore {
       console.log('[bootstrap] OWNER_BOOTSTRAP_PASSWORD is set but no owner user exists')
       return false
     }
-    if (owner.passwordHash && verifyPassword(password, owner.passwordHash)) {
+    if (!owner.passwordHash) {
+      owner.passwordHash = hashPassword(password)
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      console.log(`[bootstrap] owner password set for user id ${owner.id} (file mode, no prior)`)
+      return true
+    }
+    if (verifyPassword(password, owner.passwordHash)) {
+      return false
+    }
+    if (!verifyPassword(demoPassword, owner.passwordHash)) {
+      console.log(
+        '[bootstrap] owner already has a non-default password; OWNER_BOOTSTRAP_PASSWORD ignored (file mode)',
+      )
       return false
     }
     owner.passwordHash = hashPassword(password)
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    console.log(`[bootstrap] owner password reset for user id ${owner.id} (file mode)`)
+    console.log(`[bootstrap] owner password seeded from env for user id ${owner.id} (file mode)`)
     return true
   }
 

@@ -118,12 +118,18 @@ export async function fetchSession(signal: AbortSignal) {
  * same generic ok response so callers cannot infer whether the email is
  * registered or whether the role hint matched.
  */
-export async function requestSignInLink(email: string, role: 'staff' | 'owner') {
+/**
+ * Send a magic sign-in link to the given email. The server no longer
+ * cares about role — it looks the user up in the DB and sends to anyone
+ * with a real account. Response is always a generic "ok" (no enumeration
+ * of which addresses are registered).
+ */
+export async function requestSignInLink(email: string) {
   const response = await apiFetch('/api/auth/request-link', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, role }),
+    body: JSON.stringify({ email }),
   })
 
   if (!response.ok) {

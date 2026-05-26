@@ -454,7 +454,6 @@ const server = createServer(async (request, response) => {
         return
       }
       const email = typeof payload?.email === 'string' ? payload.email.trim().toLowerCase() : ''
-      const requestedRole = payload?.role === 'owner' ? 'owner' : 'staff'
 
       // Rate limit per email regardless of validity (silent — same response).
       if (email && isRateLimited(email)) {
@@ -465,14 +464,12 @@ const server = createServer(async (request, response) => {
       if (email) {
         try {
           const user = await appDataStore.findUserByEmail(email)
-          // Gate by role hint: owner endpoint must match an Owner user;
-          // staff endpoint must NOT match an Owner. Mismatches are silently
-          // ignored (same generic response).
-          const dbRoleOwner = user?.role === 'owner'
-          const roleMatches =
-            (requestedRole === 'owner' && dbRoleOwner) ||
-            (requestedRole === 'staff' && user && !dbRoleOwner)
-          if (user && roleMatches) {
+          // Unified sign-in: the role is already on the user row, so the
+          // request-link endpoint no longer cares which URL the form came
+          // from. Anyone with a real account gets a link; everyone else
+          // gets the same silent "ok" so the response doesn't leak
+          // whether the address exists.
+          if (user) {
             const ip = getClientIp(request)
             const { token } = await appDataStore.createLoginToken(user.id, ip)
             const baseUrl = getPublicAppUrl(request)

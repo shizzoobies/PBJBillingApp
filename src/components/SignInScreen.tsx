@@ -3,34 +3,30 @@ import { ApiError, type PublicFirmSettings } from '../lib/types'
 import { requestSignInLink, signInWithPasswordRequest } from '../lib/api'
 
 /**
- * Email-gated sign-in entry page. Shared shape for the two role-segmented
- * URLs (`/staff` and `/owner`); the `role` prop controls which lane the
- * server validates against. The two pages are intentionally indistinguishable
- * to anyone who lands on them — same UX, same copy patterns — so that a
- * bookkeeper who finds /owner cannot tell it from their normal page.
+ * Unified sign-in entry page. One URL (`/sign-in`) for everyone — the DB
+ * already knows each user's role, so the form doesn't have to ask. The
+ * post-sign-in routing (which sections of the app show up) is driven off
+ * the role on the user row.
  *
- * The screen offers two auth methods via a tab toggle:
- *  - Magic link (default for staff): one-time email link, no password.
- *  - Password: bulletproof fallback that doesn't depend on email delivery.
- *    Owner sign-in (`/owner`) defaults to this tab because the owner being
- *    unable to recover when email breaks is a launch-blocking risk.
+ * Two auth methods via a tab toggle:
+ *  - Password (default): bulletproof, doesn't depend on email delivery.
+ *  - Magic link: one-time email link for users who don't yet have a
+ *    password set, or as a backup when password is forgotten. Reusable
+ *    within its 15-min window (email scanners often pre-fetch URLs).
  */
 type AuthMethod = 'link' | 'password'
 
 export function SignInScreen({
-  role,
-  heading,
   firmSettings,
 }: {
-  role: 'staff' | 'owner'
-  heading: string
   firmSettings?: PublicFirmSettings
 }) {
   const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
+  const heading = `Sign in to ${firmName}`
 
-  // Owner sign-in defaults to the password tab — that's the path that
-  // doesn't depend on Resend / email delivery / inbox filtering.
-  const [method, setMethod] = useState<AuthMethod>(role === 'owner' ? 'password' : 'link')
+  // Default to password — that's the path that survives any email-pipeline
+  // failure. A user with no password yet can switch to the Magic link tab.
+  const [method, setMethod] = useState<AuthMethod>('password')
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -53,7 +49,7 @@ export function SignInScreen({
     setSubmitting(true)
     setError('')
     try {
-      await requestSignInLink(target, role)
+      await requestSignInLink(target)
       setSubmittedEmail(target)
       setResendCooldown(60)
     } catch (err) {
@@ -230,10 +226,10 @@ export function SignInScreen({
         ) : (
           <form className="auth-form" onSubmit={handlePasswordSubmit}>
             <p className="auth-copy">
-              Sign in with your email and password.
-              {role === 'owner'
-                ? ' This is the recovery-safe path — it works even if email delivery is down.'
-                : null}
+              Sign in with your email and password. This is the recovery-safe path — it
+              works even if email delivery is down. If you haven&rsquo;t set a password
+              yet, use the <strong>Magic link</strong> tab once, then set one inside the
+              app under Settings or Security.
             </p>
             <label className="field">
               <span>Email</span>
