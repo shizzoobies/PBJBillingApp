@@ -179,6 +179,8 @@ export function ChecklistsPage() {
     updateChecklistItem,
     deleteChecklistItem,
     deleteChecklist,
+    restoreChecklist,
+    emptyChecklistRecycleBin,
   } = useAppContext()
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -411,6 +413,139 @@ export function ChecklistsPage() {
           onUpdateTemplate={updateChecklistTemplate}
           templates={data.checklistTemplates}
         />
+      ) : null}
+
+      {ownerMode ? (
+        <RecycleBinSection
+          clients={data.clients}
+          employees={data.employees}
+          onEmptyBin={emptyChecklistRecycleBin}
+          onRestore={restoreChecklist}
+          recycledChecklists={data.recycledChecklists ?? []}
+        />
+      ) : null}
+    </section>
+  )
+}
+
+/**
+ * Owner-only recycle bin. Lists every soft-deleted checklist with a Restore
+ * action, plus a single "Empty bin" button that permanently purges them all.
+ * Collapsed by default so the bottom of the Checklists page stays clean; the
+ * pill in the header counts what's inside so an owner sees at a glance
+ * whether there's anything to clean up.
+ */
+function RecycleBinSection({
+  clients,
+  employees,
+  onEmptyBin,
+  onRestore,
+  recycledChecklists,
+}: {
+  clients: Client[]
+  employees: Employee[]
+  onEmptyBin: () => Promise<void>
+  onRestore: (checklistId: string) => Promise<void>
+  recycledChecklists: Checklist[]
+}) {
+  const [open, setOpen] = useState(false)
+  const count = recycledChecklists.length
+
+  const handleEmpty = () => {
+    if (count === 0) return
+    const confirmed = window.confirm(
+      `Empty the recycle bin?\n\n${count} task${count === 1 ? '' : 's'} will be permanently deleted. This cannot be undone. Time entries logged against them are kept either way.`,
+    )
+    if (confirmed) {
+      void onEmptyBin()
+    }
+  }
+
+  // Newest deletions first so the most recent cleanup is what the owner sees.
+  const sorted = [...recycledChecklists].sort((a, b) => {
+    const aTime = a.deletedAt ?? ''
+    const bTime = b.deletedAt ?? ''
+    return bTime.localeCompare(aTime)
+  })
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <button
+          type="button"
+          className="recycle-bin-toggle"
+          onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
+          style={{
+            background: 'transparent',
+            border: 0,
+            padding: 0,
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <h2 style={{ margin: 0 }}>Recycle bin</h2>
+          <span className="status-pill">{count}</span>
+        </button>
+        {open && count > 0 ? (
+          <button
+            type="button"
+            className="secondary-action danger"
+            onClick={handleEmpty}
+            title="Permanently delete every task in the bin"
+          >
+            Empty bin ({count})
+          </button>
+        ) : null}
+      </div>
+
+      {open ? (
+        count === 0 ? (
+          <p className="checklist-empty-hint">The recycle bin is empty.</p>
+        ) : (
+          <ul
+            className="recycle-bin-list"
+            style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}
+          >
+            {sorted.map((checklist) => (
+              <li
+                key={checklist.id}
+                className="recycle-bin-item"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  padding: '8px 0',
+                  borderTop: '1px solid var(--border-subtle, #eee)',
+                }}
+              >
+                <div>
+                  <strong>{checklist.title}</strong>
+                  <div className="checklist-meta-line">
+                    {clientName(clients, checklist.clientId)} ·{' '}
+                    {employeeName(employees, checklist.assigneeId)} ·{' '}
+                    Deleted{' '}
+                    {checklist.deletedAt
+                      ? shortDate.format(new Date(checklist.deletedAt))
+                      : 'recently'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => void onRestore(checklist.id)}
+                  title="Restore this task to the in-progress list"
+                >
+                  Restore
+                </button>
+              </li>
+            ))}
+          </ul>
+        )
       ) : null}
     </section>
   )
@@ -848,12 +983,12 @@ function ChecklistCard({
               className="secondary-action danger"
               title="Delete this task (owner only). Time entries are preserved."
               onClick={() => {
-                // A whole-checklist delete is destructive and not undoable, so
-                // confirm with the checklist title and call out that billing
-                // data survives — the common worry when cleaning up after a
-                // departing client / employee.
+                // Deletion moves the task to the owner-only recycle bin (it's
+                // recoverable until the bin is emptied). The confirm names the
+                // task and calls out that billing data survives — the common
+                // worry when cleaning up after a departing client / employee.
                 const confirmed = window.confirm(
-                  `Delete "${checklist.title}"?\n\nThis removes the task and every step under it. Any time entries already logged against it are preserved.`,
+                  `Move "${checklist.title}" to the recycle bin?\n\nIt will disappear from the in-progress list and any time entries logged against it stay intact. You can restore it (or empty the bin) from the Recycle bin section below.`,
                 )
                 if (confirmed) {
                   void onDeleteChecklist(checklist.id)

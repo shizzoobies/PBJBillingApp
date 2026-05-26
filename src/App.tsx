@@ -23,6 +23,8 @@ import {
   createTimeEntry,
   deleteChecklistItemRequest,
   deleteChecklistRequest,
+  emptyChecklistRecycleBinRequest,
+  restoreChecklistRequest,
   deleteTimeEntryRequest,
   fetchAppData,
   fetchFirmSettings,
@@ -1362,19 +1364,86 @@ function App() {
   }
 
   /**
-   * Owner-only whole-checklist delete. The server cascades item rows via the
-   * `checklist_items` FK and leaves any referencing time entries intact so
-   * billing history survives. Preview mode is blocked the same way the rest
-   * of the write surface is, and 401s flip the session to offline.
+   * Owner-only soft delete. The server stamps `deleted_at` on the row and
+   * `read()` sorts it into `recycledChecklists`; locally we mirror that by
+   * moving the checklist from the active list to the bin (with a deletedAt
+   * timestamp) so the UI updates without a refetch. Time entries that
+   * reference the checklist's items via `taskId` are preserved on the
+   * server so billing history survives. Preview mode is blocked the same
+   * way the rest of the write surface is, and 401s flip to offline.
    */
   const deleteChecklist = async (checklistId: string) => {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       await deleteChecklistRequest(checklistId)
+      const deletedAt = new Date().toISOString()
+      applyServerDataUpdate((current) => {
+        const target = current.checklists.find((checklist) => checklist.id === checklistId)
+        if (!target) return current
+        return {
+          ...current,
+          checklists: current.checklists.filter((checklist) => checklist.id !== checklistId),
+          recycledChecklists: [
+            { ...target, deletedAt },
+            ...(current.recycledChecklists ?? []),
+          ],
+        }
+      })
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  /**
+   * Owner-only restore from the recycle bin. The server clears `deleted_at`
+   * and returns the freshly-active Checklist; we drop it back into the
+   * active list and remove it from the bin in one local update.
+   */
+  const restoreChecklist = async (checklistId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const restored = await restoreChecklistRequest(checklistId)
       applyServerDataUpdate((current) => ({
         ...current,
-        checklists: current.checklists.filter((checklist) => checklist.id !== checklistId),
+        checklists: [...current.checklists, restored],
+        recycledChecklists: (current.recycledChecklists ?? []).filter(
+          (checklist) => checklist.id !== checklistId,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  /**
+   * Owner-only "empty the bin" — permanently deletes every recycled checklist
+   * server-side (the `checklist_items` FK cascade cleans up linked items).
+   * Locally we just clear the array; time entries are untouched.
+   */
+  const emptyChecklistRecycleBin = async () => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      await emptyChecklistRecycleBinRequest()
+      applyServerDataUpdate((current) => ({
+        ...current,
+        recycledChecklists: [],
       }))
       setDataSyncState('synced')
     } catch (error) {
@@ -1725,6 +1794,8 @@ function App() {
     updateChecklistItem,
     deleteChecklistItem,
     deleteChecklist,
+    restoreChecklist,
+    emptyChecklistRecycleBin,
     updateClientPlan,
     updateClient,
     deleteClient,

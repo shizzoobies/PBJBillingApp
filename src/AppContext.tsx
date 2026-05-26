@@ -221,12 +221,17 @@ export type AppContextValue = {
   ) => Promise<void>
   deleteChecklistItem: (checklistId: string, itemId: string) => Promise<void>
   /**
-   * Owner-only whole-checklist delete. Use when a one-time task should go
-   * away entirely (client removed, employee left, task created in error).
-   * Time entries that reference items via `taskId` are preserved on the
-   * server so billing history survives — they just become unlinked.
+   * Owner-only soft-delete: moves the checklist to `data.recycledChecklists`
+   * (the recycle bin) without losing data. Use when a one-time task should
+   * go away (client removed, employee left, task created in error). Time
+   * entries referencing the checklist's items via `taskId` are preserved
+   * on the server so billing history survives — they just become unlinked.
    */
   deleteChecklist: (checklistId: string) => Promise<void>
+  /** Owner-only: restore a recycled checklist back to the active list. */
+  restoreChecklist: (checklistId: string) => Promise<void>
+  /** Owner-only: permanently delete every recycled checklist. Not reversible. */
+  emptyChecklistRecycleBin: () => Promise<void>
   updateClientPlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
   updateClient: (clientId: string, patch: Partial<Client>) => void
   deleteClient: (clientId: string) => void

@@ -632,9 +632,9 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
 }
 
 /**
- * Delete an entire checklist. Owner-only on the server; the client also
- * gates the UI affordance. Returns `{ ok, removed }` from the server so
- * callers don't have to re-parse the URL to know which id was deleted.
+ * Soft-delete an entire checklist (move it to the owner's recycle bin).
+ * Owner-only on the server; the client also gates the UI affordance.
+ * Returns `{ ok, removed }` so callers don't have to re-parse the URL.
  */
 export async function deleteChecklistRequest(checklistId: string) {
   const response = await apiFetch(`/api/checklists/${encodeURIComponent(checklistId)}`, {
@@ -645,6 +645,40 @@ export async function deleteChecklistRequest(checklistId: string) {
     throw new ApiError(response.status, `Failed to delete checklist (${response.status})`)
   }
   return (await response.json()) as { ok: true; removed: string }
+}
+
+/**
+ * Restore a soft-deleted checklist from the recycle bin. Owner-only. The
+ * server returns the freshly-active Checklist so the client can drop it
+ * straight back into `data.checklists` without a full refetch.
+ */
+export async function restoreChecklistRequest(checklistId: string) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/restore`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+    },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to restore checklist (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
+/**
+ * Permanently delete every checklist in the owner's recycle bin. Owner-only.
+ * Returns the count of removed rows so the UI can confirm what happened.
+ */
+export async function emptyChecklistRecycleBinRequest() {
+  const response = await apiFetch('/api/checklists/recycle-bin', {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to empty recycle bin (${response.status})`)
+  }
+  return (await response.json()) as { ok: true; removed: number }
 }
 
 export async function setClientAssignedTeamRequest(clientId: string, bookkeeperIds: string[]) {

@@ -963,6 +963,13 @@ export class AppDataStore {
       `)
       await this.pool.query(`alter table time_entries add column if not exists task_id text`)
 
+      // Soft-delete column for the checklist recycle bin. Idempotent on every
+      // boot. A null `deleted_at` means an active checklist; a non-null value
+      // is the moment an owner sent it to the bin. Rows in the bin are
+      // preserved (with their cascade-linked items) until the owner empties
+      // the bin or restores them.
+      await this.pool.query(`alter table checklists add column if not exists deleted_at timestamptz`)
+
       // Time approval workflow. Detect whether the column already exists BEFORE
       // adding it: if this is the first deploy of the feature, every existing
       // entry is backfilled to 'approved' so there's no pending backlog. On
@@ -1460,7 +1467,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
-                   case_id, stage_id, stage_index, stage_count
+                   case_id, stage_id, stage_index, stage_count, deleted_at
             from checklists
             order by due_date asc, id asc
           `),
@@ -1572,6 +1579,26 @@ export class AppDataStore {
         stagesByTemplate.set(row.template_id, list)
       }
 
+      // Map every checklist row once, then partition into active vs recycled
+      // below. `deletedAt` is the only signal — a null timestamp means active.
+      const allChecklists = checklistsResult.rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        clientId: row.client_id,
+        assigneeId: row.assignee_id,
+        templateId: row.template_id,
+        frequency: row.frequency,
+        dueDate: row.due_date.toISOString().slice(0, 10),
+        viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
+        editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
+        caseId: row.case_id ?? row.id,
+        stageId: row.stage_id ?? null,
+        stageIndex: typeof row.stage_index === 'number' ? row.stage_index : 0,
+        stageCount: typeof row.stage_count === 'number' ? row.stage_count : 1,
+        items: itemsByChecklist.get(row.id) ?? [],
+        deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
+      }))
+
       const data = {
         employees: usersResult.rows.map((row) => ({
           id: row.id,
@@ -1629,22 +1656,8 @@ export class AppDataStore {
           entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
           manualReason: row.manual_reason ?? undefined,
         })),
-        checklists: checklistsResult.rows.map((row) => ({
-          id: row.id,
-          title: row.title,
-          clientId: row.client_id,
-          assigneeId: row.assignee_id,
-          templateId: row.template_id,
-          frequency: row.frequency,
-          dueDate: row.due_date.toISOString().slice(0, 10),
-          viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
-          editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
-          caseId: row.case_id ?? row.id,
-          stageId: row.stage_id ?? null,
-          stageIndex: typeof row.stage_index === 'number' ? row.stage_index : 0,
-          stageCount: typeof row.stage_count === 'number' ? row.stage_count : 1,
-          items: itemsByChecklist.get(row.id) ?? [],
-        })),
+        checklists: allChecklists.filter((checklist) => !checklist.deletedAt),
+        recycledChecklists: allChecklists.filter((checklist) => Boolean(checklist.deletedAt)),
         checklistTemplates: checklistTemplatesResult.rows.map((row) => ({
           id: row.id,
           title: row.title,
@@ -1722,6 +1735,25 @@ export class AppDataStore {
     }
     if (!Array.isArray(data.timesheetLocks)) {
       data.timesheetLocks = []
+      backfilled = true
+    }
+
+    // Recycle-bin backfill for legacy file-fallback data. Old saves never
+    // carried a separate array, so partition the existing list by `deletedAt`
+    // and keep both arrays from now on. New saves always write both arrays
+    // explicitly so this branch only fires once.
+    if (!Array.isArray(data.recycledChecklists)) {
+      const active = []
+      const recycled = []
+      for (const checklist of Array.isArray(data.checklists) ? data.checklists : []) {
+        if (checklist && checklist.deletedAt) {
+          recycled.push(checklist)
+        } else {
+          active.push(checklist)
+        }
+      }
+      data.checklists = active
+      data.recycledChecklists = recycled
       backfilled = true
     }
 
@@ -1944,11 +1976,19 @@ export class AppDataStore {
           }
         }
 
-        for (const checklist of data.checklists) {
+        // Re-insert active and recycled checklists in one pass — the bulk
+        // wipe above clears the table either way, so we'd lose the recycle
+        // bin on every autosave if we only wrote `data.checklists` back.
+        // `deletedAt` is the only distinguishing field on the row.
+        const checklistsToWrite = [
+          ...(Array.isArray(data.checklists) ? data.checklists : []),
+          ...(Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []),
+        ]
+        for (const checklist of checklistsToWrite) {
           await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, deleted_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
             `,
             [
               checklist.id,
@@ -1964,6 +2004,7 @@ export class AppDataStore {
               checklist.stageId ?? null,
               typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0,
               typeof checklist.stageCount === 'number' ? checklist.stageCount : 1,
+              checklist.deletedAt ?? null,
             ],
           )
 
@@ -2659,7 +2700,7 @@ export class AppDataStore {
           set viewer_ids = $2,
               editor_ids = $3,
               updated_at = now()
-          where id = $1
+          where id = $1 and deleted_at is null
           returning id
         `,
         [checklistId, safeViewerIds, safeEditorIds],
@@ -2805,7 +2846,7 @@ export class AppDataStore {
 
       // Verify checklist exists
       const checkResult = await this.pool.query(
-        `select id from checklists where id = $1`,
+        `select id from checklists where id = $1 and deleted_at is null`,
         [checklistId],
       )
       if (!checkResult.rowCount) {
@@ -2972,21 +3013,85 @@ export class AppDataStore {
    * dangling references that the UI already handles as "unknown task."
    * Returns the deleted checklist id, or `null` when no row matched.
    */
+  /**
+   * Soft-delete a checklist — move it to the recycle bin without losing data.
+   * Server-side this just stamps `deleted_at = now()`; `read()` then sorts the
+   * row into `data.recycledChecklists`. Items stay attached (the FK cascade
+   * only fires on a real DELETE, which happens when the bin is emptied), so
+   * a restore brings everything back exactly as it was. Returns the deleted
+   * row's id, `null` when no active row matched (already deleted or unknown).
+   */
   async deleteChecklist(checklistId) {
     if (this.pool) {
       const result = await this.pool.query(
-        `delete from checklists where id = $1 returning id`,
+        `update checklists set deleted_at = now() where id = $1 and deleted_at is null returning id`,
         [checklistId],
       )
       return result.rowCount ? checklistId : null
     }
 
     const data = await readJson(localDataPath)
-    const before = data.checklists.length
+    const target = data.checklists.find((checklist) => checklist.id === checklistId)
+    if (!target) return null
+    const deletedAt = nowIso()
     data.checklists = data.checklists.filter((checklist) => checklist.id !== checklistId)
-    if (data.checklists.length === before) return null
+    data.recycledChecklists = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
+    data.recycledChecklists.push({ ...target, deletedAt })
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return checklistId
+  }
+
+  /**
+   * Restore a soft-deleted checklist from the recycle bin. Clears `deleted_at`
+   * and returns the freshly-active checklist object so the caller can drop it
+   * straight back into the active list. Returns `null` when there's no
+   * matching recycled row (already restored, never deleted, or wrong id).
+   */
+  async restoreChecklist(checklistId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update checklists set deleted_at = null where id = $1 and deleted_at is not null returning id`,
+        [checklistId],
+      )
+      if (!result.rowCount) return null
+      const fresh = await this.read()
+      return fresh.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    const recycled = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
+    const target = recycled.find((checklist) => checklist.id === checklistId)
+    if (!target) return null
+    data.recycledChecklists = recycled.filter((checklist) => checklist.id !== checklistId)
+    const { deletedAt: _deletedAt, ...rest } = target
+    const restored = { ...rest, deletedAt: null }
+    data.checklists = Array.isArray(data.checklists) ? [...data.checklists, restored] : [restored]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return restored
+  }
+
+  /**
+   * Permanently delete every checklist in the recycle bin. Postgres mode lets
+   * the `checklist_items` FK cascade clean up the per-item rows. Time entries
+   * referencing the removed items via `task_id` are preserved because that
+   * column has no FK — billing history must survive. Returns the count of
+   * checklists that were purged so the caller can show meaningful feedback.
+   */
+  async emptyChecklistRecycleBin() {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `delete from checklists where deleted_at is not null returning id`,
+      )
+      return result.rowCount ?? 0
+    }
+
+    const data = await readJson(localDataPath)
+    const recycled = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
+    const removed = recycled.length
+    if (removed === 0) return 0
+    data.recycledChecklists = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return removed
   }
 
   /**
@@ -3600,7 +3705,7 @@ export class AppDataStore {
   async deleteTeamMember(userId) {
     if (this.pool) {
       const assignedResult = await this.pool.query(
-        `select 1 from checklists where assignee_id = $1 limit 1`,
+        `select 1 from checklists where assignee_id = $1 and deleted_at is null limit 1`,
         [userId],
       )
       if (assignedResult.rowCount) {

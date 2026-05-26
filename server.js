@@ -283,6 +283,10 @@ function scopeAppDataForSession(session, data) {
     timeEntries,
     plans,
     timesheetLocks,
+    // Recycle bin is owner-only — bookkeepers never see it. Empty array
+    // (rather than undefined) so the client code can iterate without a
+    // null check, and old front-ends still receive a present field.
+    recycledChecklists: [],
   }
 }
 
@@ -1137,7 +1141,70 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // DELETE /api/checklists/:id — owner-only whole-checklist delete.
+    // DELETE /api/checklists/recycle-bin — owner-only "empty the bin".
+    // Must be checked BEFORE the generic `:id` matcher below, otherwise the
+    // `:id` regex would treat "recycle-bin" as a checklist id and 404.
+    if (normalizedPath === '/api/checklists/recycle-bin') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+
+      if (request.method !== 'DELETE') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can empty the recycle bin' })
+        return
+      }
+
+      const removed = await appDataStore.emptyChecklistRecycleBin()
+      if (removed > 0) {
+        await appDataStore.recordActivity(
+          session.user.id,
+          'checklist_bin_emptied',
+          `${removed} task${removed === 1 ? '' : 's'}`,
+        )
+      }
+      sendJson(response, 200, { ok: true, removed })
+      return
+    }
+
+    // POST /api/checklists/:id/restore — owner-only restore from the bin.
+    const checklistRestoreMatch = normalizedPath.match(
+      /^\/api\/checklists\/([^/]+)\/restore$/,
+    )
+    if (checklistRestoreMatch) {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can restore a checklist' })
+        return
+      }
+
+      const checklistId = checklistRestoreMatch[1]
+      const restored = await appDataStore.restoreChecklist(checklistId)
+      if (!restored) {
+        sendJson(response, 404, { error: 'Recycled checklist not found' })
+        return
+      }
+
+      await appDataStore.recordActivity(session.user.id, 'checklist_restored', restored.title)
+      sendJson(response, 200, restored)
+      return
+    }
+
+    // DELETE /api/checklists/:id — owner-only soft delete (move to bin).
     // The matcher's trailing `$` keeps it from poaching the more-specific
     // /items/... routes below; those still resolve to their own handlers.
     const checklistDeleteMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)$/)

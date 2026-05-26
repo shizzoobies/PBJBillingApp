@@ -243,6 +243,13 @@ export type Checklist = {
   stageId?: string
   stageIndex?: number
   stageCount?: number
+  /**
+   * ISO timestamp set when an owner soft-deletes the checklist; the row is
+   * moved to `AppData.recycledChecklists` and excluded from the active
+   * `AppData.checklists` list. Cleared on restore, removed entirely when
+   * the bin is emptied. Unset on every active checklist.
+   */
+  deletedAt?: string | null
 }
 
 export type FirmSettings = {
@@ -286,6 +293,11 @@ export type AppData = {
   timeEntries: TimeEntry[]
   checklistTemplates: ChecklistTemplate[]
   checklists: Checklist[]
+  /**
+   * Soft-deleted checklists awaiting restore or bin empty. Owner-only;
+   * non-owners always see an empty array via server-side scoping.
+   */
+  recycledChecklists: Checklist[]
   timesheetLocks: TimesheetLock[]
   firmSettings?: FirmSettings
 }
