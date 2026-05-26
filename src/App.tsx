@@ -1549,6 +1549,24 @@ function App() {
   const ownerMode = effectiveRole === 'owner'
   const effectiveEmployeeId =
     previewMode && previewEmployee ? previewEmployee.id : activeEmployeeId
+
+  // Strict "what clients can this user log time against?" — drives the
+  // timer and manual-entry dropdowns on TimePage. A team member only ever
+  // sees clients on their formal Assigned Team list (Client → Assigned
+  // team UI, persisted to `assignedBookkeeperIds`). Owners outside preview
+  // mode see every client, matching how owners view the rest of the app.
+  // While an owner previews a bookkeeper `effectiveRole` is downgraded to
+  // 'employee' and `effectiveEmployeeId` is the bookkeeper's id, so the
+  // same rule naturally scopes the dropdown to the bookkeeper's view.
+  const timeTrackingClients = useMemo(
+    () =>
+      effectiveRole === 'owner'
+        ? data.clients
+        : data.clients.filter((client) =>
+            (client.assignedBookkeeperIds ?? []).includes(effectiveEmployeeId),
+          ),
+    [data.clients, effectiveRole, effectiveEmployeeId],
+  )
   const syncMessage =
     dataSyncState === 'loading'
       ? 'Loading server-backed workspace data...'
@@ -1624,6 +1642,7 @@ function App() {
     visibleChecklists,
     visibleClients,
     visibleClientIds,
+    timeTrackingClients,
     visibleEntries,
     billingPeriod,
     setBillingPeriod,

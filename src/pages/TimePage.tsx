@@ -15,7 +15,7 @@ import { clientName, currentBillingPeriod, employeeName, formatHours } from '../
 export function TimePage() {
   const {
     activeEmployeeId,
-    visibleClients,
+    timeTrackingClients,
     data,
     role,
     visibleEntries,
@@ -71,7 +71,7 @@ export function TimePage() {
       <div className="content-grid two-column">
         <TimeCapture
           activeEmployeeId={activeEmployeeId}
-          clients={visibleClients}
+          clients={timeTrackingClients}
           checklists={data.checklists}
           employees={data.employees}
           onStartTimer={startTimer}
@@ -98,7 +98,7 @@ export function TimePage() {
       {manualOpen ? (
         <ManualEntryModal
           activeEmployeeId={activeEmployeeId}
-          clients={visibleClients}
+          clients={timeTrackingClients}
           checklists={data.checklists}
           employees={data.employees}
           role={role}

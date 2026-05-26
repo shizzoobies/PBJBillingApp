@@ -28,6 +28,14 @@ export type AppContextValue = {
   visibleChecklists: Checklist[]
   visibleClients: Client[]
   visibleClientIds: Set<string>
+  /**
+   * Clients this user is allowed to log time against — strictly their
+   * Assigned Team list (`assignedBookkeeperIds`). Owners outside preview
+   * mode get every client; while an owner previews a bookkeeper this
+   * narrows to the bookkeeper's assignments so the time dropdowns match
+   * what the previewed user would actually see.
+   */
+  timeTrackingClients: Client[]
   visibleEntries: TimeEntry[]
   billingPeriod: string
   setBillingPeriod: (period: string) => void
