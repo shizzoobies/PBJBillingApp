@@ -3702,33 +3702,189 @@ export class AppDataStore {
     return this.regenerateMagicToken(userId)
   }
 
-  async deleteTeamMember(userId) {
+  /**
+   * Remove a team member without barriers: reassigns every FK-blocking
+   * reference (checklists, templates, template stages, time entries) to the
+   * calling owner so billing history and in-flight work survive, clears the
+   * user from every viewer / editor / assigned-team array, deletes their
+   * timesheet locks, then drops the user row. Wrapped in a single Postgres
+   * transaction so a failure mid-way doesn't leave a half-removed user.
+   *
+   * `ownerId` is the id of the owner performing the delete — used as the new
+   * assignee for anything that has a NOT NULL assignee FK. The owner can
+   * triage the reassigned items afterwards (the recycle bin handles tasks
+   * they want gone entirely).
+   *
+   * Returns `{ ok: true }` on success or `{ ok: false, reason: 'not_found' }`
+   * when no matching user exists. No more `has_checklists` rejection — the
+   * cleanup above guarantees the final DELETE never violates a FK.
+   */
+  async deleteTeamMember(userId, ownerId) {
     if (this.pool) {
-      const assignedResult = await this.pool.query(
-        `select 1 from checklists where assignee_id = $1 and deleted_at is null limit 1`,
-        [userId],
-      )
-      if (assignedResult.rowCount) {
-        return { ok: false, reason: 'has_checklists' }
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+
+        // Reassign every NOT NULL assignee_id FK to the owner so the final
+        // DELETE doesn't trip `on delete restrict`. Covers active AND
+        // recycled checklists — both still carry the foreign-key reference.
+        await client.query(
+          `update checklists set assignee_id = $1 where assignee_id = $2`,
+          [ownerId, userId],
+        )
+        await client.query(
+          `update checklist_templates set assignee_id = $1 where assignee_id = $2`,
+          [ownerId, userId],
+        )
+        await client.query(
+          `update checklist_template_stages set assignee_id = $1 where assignee_id = $2`,
+          [ownerId, userId],
+        )
+
+        // Per-item assignee columns are nullable text (no FK). Just clear
+        // them so the owner sees an unassigned step rather than a ghost name.
+        await client.query(
+          `update checklist_items set assignee_id = null where assignee_id = $1`,
+          [userId],
+        )
+        await client.query(
+          `update checklist_template_items set assignee_id = null where assignee_id = $1`,
+          [userId],
+        )
+
+        // Viewer / editor arrays carry no FK — strip the id everywhere it
+        // could grant lingering visibility. `array_remove` is a no-op when
+        // the id is absent, so the where-guard is purely an optimisation.
+        await client.query(
+          `update checklists
+             set viewer_ids = array_remove(viewer_ids, $1),
+                 editor_ids = array_remove(editor_ids, $1)
+             where $1 = any(viewer_ids) or $1 = any(editor_ids)`,
+          [userId],
+        )
+        await client.query(
+          `update checklist_templates
+             set viewer_ids = array_remove(viewer_ids, $1),
+                 editor_ids = array_remove(editor_ids, $1)
+             where $1 = any(viewer_ids) or $1 = any(editor_ids)`,
+          [userId],
+        )
+        await client.query(
+          `update checklist_template_stages
+             set viewer_ids = array_remove(viewer_ids, $1),
+                 editor_ids = array_remove(editor_ids, $1)
+             where $1 = any(viewer_ids) or $1 = any(editor_ids)`,
+          [userId],
+        )
+
+        // Client-level assigned-team list (the dropdown source used by the
+        // time-tracking scope) — strip the removed user from every client.
+        await client.query(
+          `update clients
+             set assigned_bookkeeper_ids = array_remove(assigned_bookkeeper_ids, $1)
+             where $1 = any(assigned_bookkeeper_ids)`,
+          [userId],
+        )
+
+        // Time entries: reassign to the owner so billing history survives
+        // (the FK is `on delete restrict`, so leaving them dangling isn't an
+        // option). The owner now sees those hours under their name — a
+        // deliberate trade for keeping the data alive after a user is gone.
+        await client.query(
+          `update time_entries set user_id = $1 where user_id = $2`,
+          [ownerId, userId],
+        )
+        // `approved_by` is a plain text column with no FK; null it so the
+        // approval audit doesn't point at a missing user.
+        await client.query(
+          `update time_entries set approved_by = null where approved_by = $1`,
+          [userId],
+        )
+
+        // Timesheet locks are per-user metadata; nothing else references them.
+        await client.query(
+          `delete from timesheet_locks where user_id = $1 or locked_by = $1`,
+          [userId],
+        )
+
+        // `client_assignments.user_id` cascades automatically when the user
+        // row goes. Finally drop the user themselves.
+        const result = await client.query(
+          `delete from users where id = $1 returning id`,
+          [userId],
+        )
+        if (!result.rowCount) {
+          await client.query('rollback')
+          return { ok: false, reason: 'not_found' }
+        }
+        await client.query('commit')
+        return { ok: true }
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
       }
-      const result = await this.pool.query('delete from users where id = $1 returning id', [userId])
-      if (!result.rowCount) {
-        return { ok: false, reason: 'not_found' }
-      }
-      return { ok: true }
     }
 
+    // File mode: mirror the cleanup on the in-memory JSON shape.
     const data = await readJson(localDataPath)
-    const hasChecklist = (data.checklists ?? []).some((checklist) => checklist.assigneeId === userId)
-    if (hasChecklist) {
-      return { ok: false, reason: 'has_checklists' }
-    }
-    const hasTemplate = (data.checklistTemplates ?? []).some(
-      (template) => template.assigneeId === userId,
+
+    const stripArrayId = (arr) =>
+      Array.isArray(arr) ? arr.filter((id) => id !== userId) : arr ?? []
+
+    const reassignChecklist = (checklist) => ({
+      ...checklist,
+      assigneeId: checklist.assigneeId === userId ? ownerId : checklist.assigneeId,
+      viewerIds: stripArrayId(checklist.viewerIds),
+      editorIds: stripArrayId(checklist.editorIds),
+      items: Array.isArray(checklist.items)
+        ? checklist.items.map((item) =>
+            item && item.assigneeId === userId ? { ...item, assigneeId: null } : item,
+          )
+        : checklist.items,
+    })
+
+    data.checklists = (data.checklists ?? []).map(reassignChecklist)
+    data.recycledChecklists = (data.recycledChecklists ?? []).map(reassignChecklist)
+
+    data.checklistTemplates = (data.checklistTemplates ?? []).map((template) => ({
+      ...template,
+      assigneeId: template.assigneeId === userId ? ownerId : template.assigneeId,
+      viewerIds: stripArrayId(template.viewerIds),
+      editorIds: stripArrayId(template.editorIds),
+      items: Array.isArray(template.items)
+        ? template.items.map((item) =>
+            item && item.assigneeId === userId ? { ...item, assigneeId: null } : item,
+          )
+        : template.items,
+      stages: Array.isArray(template.stages)
+        ? template.stages.map((stage) => ({
+            ...stage,
+            assigneeId: stage.assigneeId === userId ? ownerId : stage.assigneeId,
+            viewerIds: stripArrayId(stage.viewerIds),
+            editorIds: stripArrayId(stage.editorIds),
+          }))
+        : template.stages,
+    }))
+
+    data.clients = (data.clients ?? []).map((client) => ({
+      ...client,
+      assignedBookkeeperIds: stripArrayId(client.assignedBookkeeperIds),
+      assignedEmployeeIds: stripArrayId(client.assignedEmployeeIds),
+    }))
+
+    data.timeEntries = (data.timeEntries ?? []).map((entry) => ({
+      ...entry,
+      employeeId: entry.employeeId === userId ? ownerId : entry.employeeId,
+      ...(entry.approvedBy === userId ? { approvedBy: undefined } : {}),
+    }))
+
+    data.timesheetLocks = (data.timesheetLocks ?? []).filter(
+      (lock) => lock.userId !== userId && lock.lockedBy !== userId,
     )
-    if (hasTemplate) {
-      return { ok: false, reason: 'has_checklists' }
-    }
+
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
 
     const authState = await readJson(localAuthPath)
     const before = (authState.users ?? []).length

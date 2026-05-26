@@ -2128,11 +2128,18 @@ const server = createServer(async (request, response) => {
       }
 
       const userId = teamDeleteMatch[1]
-      const result = await appDataStore.deleteTeamMember(userId)
-      if (!result.ok && result.reason === 'has_checklists') {
-        sendJson(response, 409, { error: 'Reassign their work first' })
+      // Safety net: removing the owner's own record would orphan the firm
+      // and break the auth flow. Block it server-side regardless of UI gates.
+      if (userId === session.user.id) {
+        sendJson(response, 400, { error: 'You cannot remove your own account' })
         return
       }
+
+      // Pass the calling owner's id so the store can reassign FK-blocking
+      // references (checklists, templates, time entries) onto them in the
+      // same transaction as the user-row delete. No more "has_checklists"
+      // rejection — the cleanup happens inline.
+      const result = await appDataStore.deleteTeamMember(userId, session.user.id)
       if (!result.ok) {
         sendJson(response, 404, { error: 'Team member not found' })
         return

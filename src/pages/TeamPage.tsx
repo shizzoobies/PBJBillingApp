@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom'
 import { Eye, MailPlus, Send, Trash2, UserPlus, X } from 'lucide-react'
 import { useAppContext } from '../AppContext'
 import {
-  deleteTeamMember,
   fetchTeam,
   fetchTeamActivity,
   fetchTeamSessions,
@@ -26,7 +25,7 @@ import { describeActivityAction, formatActivityTimestamp, relativeTime } from '.
 const STAFF_ROLES = ['Owner', 'Accountant', 'Bookkeeper'] as const
 
 export function TeamPage() {
-  const { data, ownerMode, setPreviewUserId, updateClient } = useAppContext()
+  const { data, deleteTeamMember, ownerMode, setPreviewUserId, updateClient } = useAppContext()
   const navigate = useNavigate()
   const [members, setMembers] = useState<TeamMember[]>([])
   const [loading, setLoading] = useState(true)
@@ -157,8 +156,12 @@ export function TeamPage() {
   }
 
   const handleDelete = async (member: TeamMember) => {
+    // No barriers: the server reassigns their checklists, templates, and
+    // time entries to you so nothing is lost, strips them from every
+    // viewer / editor / assigned-team list, and revokes access immediately.
+    // This is destructive (can't be undone) but data survives via reassign.
     const confirmed = window.confirm(
-      `Remove ${member.name} from the team? Only allowed if they have no assigned checklists.`,
+      `Remove ${member.name} from the team?\n\nTheir checklists and time entries will be reassigned to you so nothing is lost. They'll be stripped from every viewer / editor / assigned-team list and lose access immediately. This can't be undone.`,
     )
     if (!confirmed) return
     try {

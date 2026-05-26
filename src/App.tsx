@@ -25,6 +25,7 @@ import {
   deleteChecklistRequest,
   emptyChecklistRecycleBinRequest,
   restoreChecklistRequest,
+  deleteTeamMember as deleteTeamMemberRequest,
   deleteTimeEntryRequest,
   fetchAppData,
   fetchFirmSettings,
@@ -1457,6 +1458,108 @@ function App() {
     }
   }
 
+  /**
+   * Remove a team member without barriers. The server reassigns every
+   * FK-blocking reference (checklist / template / time-entry assignees) to
+   * the calling owner, strips the user from viewer / editor / assigned-team
+   * arrays, deletes their timesheet locks, then drops the user row. We
+   * mirror that exact cleanup on local state in one `applyServerDataUpdate`
+   * so the rest of the UI (Checklists page, Time page, Productivity, etc.)
+   * reflects the change immediately without waiting for a refetch.
+   *
+   * Preview mode is blocked the same way the rest of the write surface is.
+   */
+  const deleteTeamMember = async (userId: string) => {
+    if (previewActiveRef.current) return
+    const ownerId = sessionUser?.id
+    if (!ownerId) return
+    try {
+      setDataSyncState('saving')
+      await deleteTeamMemberRequest(userId)
+
+      const stripArrayId = (arr: string[] | undefined) =>
+        Array.isArray(arr) ? arr.filter((id) => id !== userId) : (arr ?? [])
+
+      applyServerDataUpdate((current) => {
+        // Items use optional `assigneeId?: string`, so "unassign" is a field
+        // omit (not `null`) — copy then delete so the shape matches the type
+        // contract without leaving the field present-but-undefined.
+        const clearAssignee = <T extends { assigneeId?: string | null }>(item: T): T => {
+          const next = { ...item }
+          delete next.assigneeId
+          return next
+        }
+
+        const reassignChecklist = (checklist: AppData['checklists'][number]) => ({
+          ...checklist,
+          assigneeId:
+            checklist.assigneeId === userId ? ownerId : checklist.assigneeId,
+          viewerIds: stripArrayId(checklist.viewerIds),
+          editorIds: stripArrayId(checklist.editorIds),
+          items: Array.isArray(checklist.items)
+            ? checklist.items.map((item) =>
+                item && item.assigneeId === userId ? clearAssignee(item) : item,
+              )
+            : checklist.items,
+        })
+
+        return {
+          ...current,
+          checklists: current.checklists.map(reassignChecklist),
+          recycledChecklists: (current.recycledChecklists ?? []).map(reassignChecklist),
+          checklistTemplates: current.checklistTemplates.map((template) => ({
+            ...template,
+            assigneeId:
+              template.assigneeId === userId ? ownerId : template.assigneeId,
+            viewerIds: stripArrayId(template.viewerIds),
+            editorIds: stripArrayId(template.editorIds),
+            items: Array.isArray(template.items)
+              ? template.items.map((item) =>
+                  item && item.assigneeId === userId ? clearAssignee(item) : item,
+                )
+              : template.items,
+            stages: Array.isArray(template.stages)
+              ? template.stages.map((stage) => ({
+                  ...stage,
+                  assigneeId:
+                    stage.assigneeId === userId ? ownerId : stage.assigneeId,
+                  viewerIds: stripArrayId(stage.viewerIds),
+                  editorIds: stripArrayId(stage.editorIds),
+                }))
+              : template.stages,
+          })),
+          clients: current.clients.map((client) => ({
+            ...client,
+            assignedBookkeeperIds: stripArrayId(client.assignedBookkeeperIds),
+            assignedEmployeeIds: stripArrayId(client.assignedEmployeeIds),
+          })),
+          timeEntries: current.timeEntries.map((entry) => ({
+            ...entry,
+            employeeId: entry.employeeId === userId ? ownerId : entry.employeeId,
+            ...(entry.approvedBy === userId ? { approvedBy: undefined } : {}),
+          })),
+          timesheetLocks: (current.timesheetLocks ?? []).filter(
+            (lock) => lock.userId !== userId && lock.lockedBy !== userId,
+          ),
+          // The user-list `employees` array is also indexed by id everywhere
+          // (assignee names, dropdowns) — remove the row so they disappear
+          // from every selector without a refetch.
+          employees: current.employees.filter((employee) => employee.id !== userId),
+        }
+      })
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
   const duplicateChecklistTemplate = (templateId: string) => {
     updateWorkspaceData((current) => {
       const source = current.checklistTemplates.find((template) => template.id === templateId)
@@ -1796,6 +1899,7 @@ function App() {
     deleteChecklist,
     restoreChecklist,
     emptyChecklistRecycleBin,
+    deleteTeamMember,
     updateClientPlan,
     updateClient,
     deleteClient,

@@ -232,6 +232,15 @@ export type AppContextValue = {
   restoreChecklist: (checklistId: string) => Promise<void>
   /** Owner-only: permanently delete every recycled checklist. Not reversible. */
   emptyChecklistRecycleBin: () => Promise<void>
+  /**
+   * Owner-only: remove a team member with no barriers. The server reassigns
+   * their checklists / templates / time entries to the calling owner so
+   * billing history and in-flight work survive, and strips them from every
+   * viewer / editor / assigned-team list. The handler mirrors that cleanup
+   * on local state so the UI updates immediately. Re-throws on failure so
+   * the caller (TeamPage) can surface an error toast.
+   */
+  deleteTeamMember: (userId: string) => Promise<void>
   updateClientPlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
   updateClient: (clientId: string, patch: Partial<Client>) => void
   deleteClient: (clientId: string) => void
