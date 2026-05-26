@@ -12,6 +12,8 @@
   type SessionUser,
   type TeamMember,
   type TeamSession,
+  type RecurringReimbursement,
+  type RecurringReimbursementFrequency,
   type Reimbursement,
   type TimeEntry,
   type TimesheetLock,
@@ -425,6 +427,77 @@ export async function deleteReimbursementRequest(id: string) {
     throw new ApiError(
       response.status,
       message || `Failed to delete reimbursement (${response.status})`,
+    )
+  }
+}
+
+/** Owner-only: create a recurring reimbursement on a client. */
+export async function addRecurringReimbursementRequest(input: {
+  clientId: string
+  description: string
+  amount: number
+  frequency: RecurringReimbursementFrequency
+  startDate: string
+}) {
+  const response = await apiFetch('/api/recurring-reimbursements', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to add recurring reimbursement (${response.status})`,
+    )
+  }
+  return (await response.json()) as RecurringReimbursement
+}
+
+/** Owner-only: update an existing recurring reimbursement. */
+export async function updateRecurringReimbursementRequest(
+  id: string,
+  patch: {
+    description?: string
+    amount?: number
+    frequency?: RecurringReimbursementFrequency
+    startDate?: string
+  },
+) {
+  const response = await apiFetch(
+    `/api/recurring-reimbursements/${encodeURIComponent(id)}`,
+    {
+      credentials: 'same-origin',
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to update recurring reimbursement (${response.status})`,
+    )
+  }
+  return (await response.json()) as RecurringReimbursement
+}
+
+/** Owner-only: delete a recurring reimbursement. */
+export async function deleteRecurringReimbursementRequest(id: string) {
+  const response = await apiFetch(
+    `/api/recurring-reimbursements/${encodeURIComponent(id)}`,
+    {
+      credentials: 'same-origin',
+      method: 'DELETE',
+    },
+  )
+  if (!response.ok && response.status !== 204) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to delete recurring reimbursement (${response.status})`,
     )
   }
 }

@@ -1029,6 +1029,27 @@ export class AppDataStore {
           on reimbursements(client_id, date)
       `)
 
+      // Recurring per-client reimbursements (monthly / quarterly / annual).
+      // No row is generated per billing period — `getInvoice` decides whether
+      // to synthesize a line at read time based on `start_date` + `frequency`.
+      // Same on-delete-cascade for client_id as the one-off table.
+      await this.pool.query(`
+        create table if not exists recurring_reimbursements (
+          id text primary key,
+          client_id text not null references clients(id) on delete cascade,
+          description text not null,
+          amount numeric(12, 2) not null,
+          frequency text not null check (frequency in ('monthly', 'quarterly', 'annually')),
+          start_date date not null,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists recurring_reimbursements_client_idx
+          on recurring_reimbursements(client_id)
+      `)
+
       // Weekly lock-for-review submissions: a bookkeeper / accountant
       // submits their Sun-Sat week and an owner approves or rejects it.
       // Exactly one row per (user, week) — a resubmit after rejection
@@ -1475,6 +1496,7 @@ export class AppDataStore {
         timesheetLocksResult,
         weeklySubmissionsResult,
         reimbursementsResult,
+        recurringReimbursementsResult,
       ] =
         await Promise.all([
           this.pool.query(`
@@ -1550,6 +1572,11 @@ export class AppDataStore {
             select id, client_id, date, description, amount
             from reimbursements
             order by date desc, id asc
+          `),
+          this.pool.query(`
+            select id, client_id, description, amount, frequency, start_date
+            from recurring_reimbursements
+            order by start_date desc, id asc
           `),
         ])
 
@@ -1757,6 +1784,14 @@ export class AppDataStore {
           description: row.description,
           amount: Number(row.amount),
         })),
+        recurringReimbursements: recurringReimbursementsResult.rows.map((row) => ({
+          id: row.id,
+          clientId: row.client_id,
+          description: row.description,
+          amount: Number(row.amount),
+          frequency: row.frequency,
+          startDate: row.start_date.toISOString().slice(0, 10),
+        })),
       }
 
       if (data.checklistTemplates.length === 0) {
@@ -1819,6 +1854,11 @@ export class AppDataStore {
       backfilled = true
     }
 
+    if (!Array.isArray(data.recurringReimbursements)) {
+      data.recurringReimbursements = []
+      backfilled = true
+    }
+
     // Recycle-bin backfill for legacy file-fallback data. Old saves never
     // carried a separate array, so partition the existing list by `deletedAt`
     // and keep both arrays from now on. New saves always write both arrays
@@ -1862,6 +1902,7 @@ export class AppDataStore {
         await client.query('delete from timesheet_locks')
         await client.query('delete from weekly_submissions')
         await client.query('delete from reimbursements')
+        await client.query('delete from recurring_reimbursements')
         await client.query('delete from client_assignments')
         await client.query('delete from invoice_drafts')
         await client.query('delete from clients')
@@ -2020,6 +2061,24 @@ export class AppDataStore {
               reimbursement.date,
               reimbursement.description,
               reimbursement.amount,
+            ],
+          )
+        }
+
+        for (const recurring of data.recurringReimbursements ?? []) {
+          await client.query(
+            `
+              insert into recurring_reimbursements
+                (id, client_id, description, amount, frequency, start_date, updated_at)
+              values ($1, $2, $3, $4, $5, $6, now())
+            `,
+            [
+              recurring.id,
+              recurring.clientId,
+              recurring.description,
+              recurring.amount,
+              recurring.frequency,
+              recurring.startDate,
             ],
           )
         }
@@ -2851,6 +2910,178 @@ export class AppDataStore {
     const before = (data.reimbursements ?? []).length
     data.reimbursements = (data.reimbursements ?? []).filter((entry) => entry.id !== id)
     if (data.reimbursements.length === before) return false
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return true
+  }
+
+  /**
+   * Create a recurring reimbursement on a client. `startDate` is the
+   * anchor: the line shows up first on the invoice for THAT month, then
+   * monthly / quarterly (every 3 months from the anchor) / annually
+   * (same month each year) per `frequency`. Returns the persisted row,
+   * or null on validation / unknown-client failure.
+   */
+  async addRecurringReimbursement({ clientId, description, amount, frequency, startDate }) {
+    if (!clientId || typeof clientId !== 'string') return null
+    const trimmedDescription = typeof description === 'string' ? description.trim() : ''
+    if (!trimmedDescription) return null
+    const numericAmount = Number(amount)
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) return null
+    if (frequency !== 'monthly' && frequency !== 'quarterly' && frequency !== 'annually') {
+      return null
+    }
+    if (typeof startDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null
+    const id = `recur-${randomUUID().slice(0, 8)}`
+    const record = {
+      id,
+      clientId,
+      description: trimmedDescription,
+      amount: numericAmount,
+      frequency,
+      startDate,
+    }
+
+    if (this.pool) {
+      const exists = await this.pool.query(
+        `select 1 from clients where id = $1`,
+        [clientId],
+      )
+      if (!exists.rowCount) return null
+      await this.pool.query(
+        `insert into recurring_reimbursements
+           (id, client_id, description, amount, frequency, start_date)
+         values ($1, $2, $3, $4, $5, $6)`,
+        [id, clientId, trimmedDescription, numericAmount, frequency, startDate],
+      )
+      return record
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.clients) || !data.clients.some((entry) => entry.id === clientId)) {
+      return null
+    }
+    if (!Array.isArray(data.recurringReimbursements)) data.recurringReimbursements = []
+    data.recurringReimbursements.push(record)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return record
+  }
+
+  /**
+   * Partial update for a recurring reimbursement. Same validation as the
+   * create path. Returns the updated record, or null on miss / invalid.
+   */
+  async updateRecurringReimbursement(id, patch) {
+    if (!id) return null
+    const updates = {}
+    if (patch.description !== undefined) {
+      const trimmed = typeof patch.description === 'string' ? patch.description.trim() : ''
+      if (!trimmed) return null
+      updates.description = trimmed
+    }
+    if (patch.amount !== undefined) {
+      const numericAmount = Number(patch.amount)
+      if (!Number.isFinite(numericAmount) || numericAmount <= 0) return null
+      updates.amount = numericAmount
+    }
+    if (patch.frequency !== undefined) {
+      if (
+        patch.frequency !== 'monthly' &&
+        patch.frequency !== 'quarterly' &&
+        patch.frequency !== 'annually'
+      ) {
+        return null
+      }
+      updates.frequency = patch.frequency
+    }
+    if (patch.startDate !== undefined) {
+      if (typeof patch.startDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(patch.startDate)) {
+        return null
+      }
+      updates.startDate = patch.startDate
+    }
+    if (Object.keys(updates).length === 0) {
+      if (this.pool) {
+        const result = await this.pool.query(
+          `select id, client_id, description, amount, frequency, start_date
+           from recurring_reimbursements where id = $1`,
+          [id],
+        )
+        if (!result.rowCount) return null
+        const row = result.rows[0]
+        return {
+          id: row.id,
+          clientId: row.client_id,
+          description: row.description,
+          amount: Number(row.amount),
+          frequency: row.frequency,
+          startDate: row.start_date.toISOString().slice(0, 10),
+        }
+      }
+      const data = await readJson(localDataPath)
+      return (data.recurringReimbursements ?? []).find((entry) => entry.id === id) ?? null
+    }
+
+    if (this.pool) {
+      const setClauses = []
+      const values = [id]
+      if (updates.description !== undefined) {
+        values.push(updates.description)
+        setClauses.push(`description = $${values.length}`)
+      }
+      if (updates.amount !== undefined) {
+        values.push(updates.amount)
+        setClauses.push(`amount = $${values.length}`)
+      }
+      if (updates.frequency !== undefined) {
+        values.push(updates.frequency)
+        setClauses.push(`frequency = $${values.length}`)
+      }
+      if (updates.startDate !== undefined) {
+        values.push(updates.startDate)
+        setClauses.push(`start_date = $${values.length}`)
+      }
+      setClauses.push('updated_at = now()')
+      const result = await this.pool.query(
+        `update recurring_reimbursements set ${setClauses.join(', ')} where id = $1
+         returning id, client_id, description, amount, frequency, start_date`,
+        values,
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return {
+        id: row.id,
+        clientId: row.client_id,
+        description: row.description,
+        amount: Number(row.amount),
+        frequency: row.frequency,
+        startDate: row.start_date.toISOString().slice(0, 10),
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const target = (data.recurringReimbursements ?? []).find((entry) => entry.id === id)
+    if (!target) return null
+    Object.assign(target, updates)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return target
+  }
+
+  /** Delete one recurring reimbursement. Returns true on success. */
+  async deleteRecurringReimbursement(id) {
+    if (!id) return false
+    if (this.pool) {
+      const result = await this.pool.query(
+        `delete from recurring_reimbursements where id = $1 returning id`,
+        [id],
+      )
+      return (result.rowCount ?? 0) > 0
+    }
+    const data = await readJson(localDataPath)
+    const before = (data.recurringReimbursements ?? []).length
+    data.recurringReimbursements = (data.recurringReimbursements ?? []).filter(
+      (entry) => entry.id !== id,
+    )
+    if (data.recurringReimbursements.length === before) return false
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return true
   }

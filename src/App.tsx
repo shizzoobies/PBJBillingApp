@@ -32,12 +32,15 @@ import {
   fetchPublicFirmSettings,
   fetchSession,
   generateChecklistFromTemplateRequest,
+  addRecurringReimbursementRequest,
   addReimbursementRequest,
   approveWeeklySubmissionRequest,
+  deleteRecurringReimbursementRequest,
   deleteReimbursementRequest,
   lockTimesheetRequest,
   rejectWeeklySubmissionRequest,
   submitWeeklyTimesheetRequest,
+  updateRecurringReimbursementRequest,
   updateReimbursementRequest,
   logoutSession,
   rejectTimeEntryRequest,
@@ -782,6 +785,97 @@ function App() {
         ...current,
         reimbursements: (current.reimbursements ?? []).map((entry) =>
           entry.id === id ? updated : entry,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  /**
+   * Owner-only: add a recurring reimbursement to a client. Same local
+   * mirror pattern as the one-off — push onto `data.recurringReimbursements`
+   * so getInvoice picks it up everywhere without a refetch.
+   */
+  const addRecurringReimbursement = async (input: {
+    clientId: string
+    description: string
+    amount: number
+    frequency: 'monthly' | 'quarterly' | 'annually'
+    startDate: string
+  }) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const created = await addRecurringReimbursementRequest(input)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        recurringReimbursements: [created, ...(current.recurringReimbursements ?? [])],
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  /** Owner-only: patch a recurring reimbursement. */
+  const updateRecurringReimbursement = async (
+    id: string,
+    patch: {
+      description?: string
+      amount?: number
+      frequency?: 'monthly' | 'quarterly' | 'annually'
+      startDate?: string
+    },
+  ) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updated = await updateRecurringReimbursementRequest(id, patch)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        recurringReimbursements: (current.recurringReimbursements ?? []).map((entry) =>
+          entry.id === id ? updated : entry,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  /** Owner-only: stop a recurring reimbursement by removing it. */
+  const deleteRecurringReimbursement = async (id: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      await deleteRecurringReimbursementRequest(id)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        recurringReimbursements: (current.recurringReimbursements ?? []).filter(
+          (entry) => entry.id !== id,
         ),
       }))
       setDataSyncState('synced')
@@ -2062,6 +2156,9 @@ function App() {
     addReimbursement,
     updateReimbursement,
     deleteReimbursement,
+    addRecurringReimbursement,
+    updateRecurringReimbursement,
+    deleteRecurringReimbursement,
     toggleChecklistItem,
     toggleSubItem,
     addSubItem,

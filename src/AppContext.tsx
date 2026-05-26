@@ -87,6 +87,30 @@ export type AppContextValue = {
   ) => Promise<void>
   /** Owner-only: remove a reimbursement. */
   deleteReimbursement: (id: string) => Promise<void>
+  /**
+   * Owner-only: add a recurring reimbursement to a client. `frequency`
+   * controls how often it appears on the invoice (monthly / quarterly /
+   * annually), anchored on the month of `startDate`.
+   */
+  addRecurringReimbursement: (input: {
+    clientId: string
+    description: string
+    amount: number
+    frequency: 'monthly' | 'quarterly' | 'annually'
+    startDate: string
+  }) => Promise<void>
+  /** Owner-only: edit a recurring reimbursement (partial patch). */
+  updateRecurringReimbursement: (
+    id: string,
+    patch: {
+      description?: string
+      amount?: number
+      frequency?: 'monthly' | 'quarterly' | 'annually'
+      startDate?: string
+    },
+  ) => Promise<void>
+  /** Owner-only: stop a recurring reimbursement by deleting it. */
+  deleteRecurringReimbursement: (id: string) => Promise<void>
   toggleChecklistItem: (checklistId: string, itemId: string) => Promise<void>
   /** Toggle one sub-item of a live-checklist item (recomputes parent done). */
   toggleSubItem: (checklistId: string, itemId: string, subItemId: string) => Promise<void>

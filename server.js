@@ -286,6 +286,9 @@ function scopeAppDataForSession(session, data) {
   const reimbursements = (data.reimbursements ?? []).filter((reimbursement) =>
     allowedClientIds.has(reimbursement.clientId),
   )
+  const recurringReimbursements = (data.recurringReimbursements ?? []).filter((recurring) =>
+    allowedClientIds.has(recurring.clientId),
+  )
 
   return {
     ...data,
@@ -297,6 +300,7 @@ function scopeAppDataForSession(session, data) {
     timesheetLocks,
     weeklySubmissions,
     reimbursements,
+    recurringReimbursements,
     // Recycle bin is owner-only — bookkeepers never see it. Empty array
     // (rather than undefined) so the client code can iterate without a
     // null check, and old front-ends still receive a present field.
@@ -1333,6 +1337,88 @@ const server = createServer(async (request, response) => {
         `${created.description} ($${created.amount})`,
       )
       sendJson(response, 201, created)
+      return
+    }
+
+    // Owner-only recurring reimbursement create.
+    if (normalizedPath === '/api/recurring-reimbursements' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can add recurring reimbursements' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const created = await appDataStore.addRecurringReimbursement({
+        clientId: typeof payload?.clientId === 'string' ? payload.clientId : '',
+        description: typeof payload?.description === 'string' ? payload.description : '',
+        amount: payload?.amount,
+        frequency: payload?.frequency,
+        startDate: typeof payload?.startDate === 'string' ? payload.startDate.trim() : '',
+      })
+      if (!created) {
+        sendJson(response, 400, {
+          error:
+            'Invalid recurring reimbursement. Need clientId, description, positive amount, frequency (monthly/quarterly/annually), and YYYY-MM-DD startDate.',
+        })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'recurring_reimbursement_added',
+        `${created.description} ($${created.amount} ${created.frequency})`,
+      )
+      sendJson(response, 201, created)
+      return
+    }
+
+    // Owner-only recurring reimbursement update / delete.
+    const recurringReimbMatch = normalizedPath.match(
+      /^\/api\/recurring-reimbursements\/([^/]+)$/,
+    )
+    if (recurringReimbMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can change recurring reimbursements' })
+        return
+      }
+      const id = recurringReimbMatch[1]
+      if (request.method === 'PATCH') {
+        const payload = await readJsonBody(request)
+        const patch = {}
+        if (typeof payload?.description === 'string') patch.description = payload.description
+        if (payload?.amount !== undefined) patch.amount = payload.amount
+        if (typeof payload?.frequency === 'string') patch.frequency = payload.frequency
+        if (typeof payload?.startDate === 'string') patch.startDate = payload.startDate.trim()
+        const updated = await appDataStore.updateRecurringReimbursement(id, patch)
+        if (!updated) {
+          sendJson(response, 400, { error: 'Recurring reimbursement not found or update invalid.' })
+          return
+        }
+        await appDataStore.recordActivity(
+          session.user.id,
+          'recurring_reimbursement_updated',
+          updated.id,
+        )
+        sendJson(response, 200, updated)
+        return
+      }
+      if (request.method === 'DELETE') {
+        const removed = await appDataStore.deleteRecurringReimbursement(id)
+        if (!removed) {
+          sendJson(response, 404, { error: 'Recurring reimbursement not found' })
+          return
+        }
+        await appDataStore.recordActivity(
+          session.user.id,
+          'recurring_reimbursement_deleted',
+          id,
+        )
+        sendEmpty(response, 204)
+        return
+      }
+      sendJson(response, 405, { error: 'Method not allowed' })
       return
     }
 

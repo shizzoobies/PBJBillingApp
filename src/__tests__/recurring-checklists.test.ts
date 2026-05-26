@@ -57,6 +57,7 @@ function makeData(templates: ChecklistTemplate[]): AppData {
     timesheetLocks: [],
     weeklySubmissions: [],
     reimbursements: [],
+    recurringReimbursements: [],
   }
 }
 

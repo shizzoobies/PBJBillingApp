@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
+import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { recordClientProfileActivity, setClientAssignedTeamRequest } from '../lib/api'
 import { ApiError, type Client } from '../lib/types'
@@ -158,6 +159,7 @@ export function ClientDetailPage() {
         {assignedTeamError ? <p className="auth-error">{assignedTeamError}</p> : null}
       </section>
 
+      <RecurringReimbursementsCard clientId={client.id} />
       <ReimbursementsCard clientId={client.id} />
 
       <BrandingSection client={client} onCommit={commit} />

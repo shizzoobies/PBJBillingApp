@@ -6,6 +6,7 @@ import type {
   Client,
   Invoice,
   InvoiceLine,
+  RecurringReimbursement,
   Reimbursement,
   SubscriptionPlan,
   TimeEntry,
@@ -157,6 +158,7 @@ export function InvoicesPage() {
             data.plans,
             billingPeriod,
             data.reimbursements ?? [],
+            data.recurringReimbursements ?? [],
           )
         : null,
     [
@@ -165,6 +167,7 @@ export function InvoicesPage() {
       data.plans,
       billingPeriod,
       data.reimbursements,
+      data.recurringReimbursements,
     ],
   )
   const display = useMemo(
@@ -227,6 +230,7 @@ export function InvoicesPage() {
           entries={data.timeEntries}
           plans={data.plans}
           reimbursements={data.reimbursements ?? []}
+          recurringReimbursements={data.recurringReimbursements ?? []}
         />
       </section>
 
@@ -323,12 +327,14 @@ function BillingQueue({
   entries,
   plans,
   reimbursements,
+  recurringReimbursements,
 }: {
   billingPeriod: string
   clients: Client[]
   entries: TimeEntry[]
   plans: SubscriptionPlan[]
   reimbursements: Reimbursement[]
+  recurringReimbursements: RecurringReimbursement[]
 }) {
   return (
     <section className="panel">
@@ -340,7 +346,14 @@ function BillingQueue({
       </div>
       <div className="queue-list">
         {clients.map((client) => {
-          const invoice = getInvoice(client, entries, plans, billingPeriod, reimbursements)
+          const invoice = getInvoice(
+            client,
+            entries,
+            plans,
+            billingPeriod,
+            reimbursements,
+            recurringReimbursements,
+          )
           return (
             <article className="queue-row" key={client.id}>
               <div>

@@ -333,6 +333,12 @@ export type AppData = {
    * on the client's monthly invoice (matched by date → billing month).
    */
   reimbursements: Reimbursement[]
+  /**
+   * Owner-managed recurring expense reimbursements (monthly / quarterly /
+   * annual) that auto-populate the matching invoice without an entry per
+   * period. Synthesized into lines by `getInvoice`.
+   */
+  recurringReimbursements: RecurringReimbursement[]
   firmSettings?: FirmSettings
 }
 
@@ -356,6 +362,10 @@ export type InvoiceLine = {
  * client on their next invoice. Each `Reimbursement` shows up as a line on
  * the invoice for the month its `date` falls in (and contributes to the
  * total). Owner-managed; bookkeepers can see them but not edit.
+ *
+ * This is the **one-off** flavor — for things-that-recur use
+ * `RecurringReimbursement`, which auto-populates the line on every matching
+ * monthly invoice.
  */
 export type Reimbursement = {
   id: string
@@ -365,6 +375,30 @@ export type Reimbursement = {
   description: string
   /** Dollars, positive. The invoice line shows this verbatim. */
   amount: number
+}
+
+export type RecurringReimbursementFrequency = 'monthly' | 'quarterly' | 'annually'
+
+/**
+ * Per-client recurring expense (e.g. a monthly software subscription the
+ * firm fronts, an annual filing fee). Doesn't store generated rows —
+ * `getInvoice` computes whether it applies to each billing period based
+ * on `startDate` + `frequency` and synthesizes a line on the fly.
+ * Owner-managed; bookkeepers see-only same as one-off reimbursements.
+ */
+export type RecurringReimbursement = {
+  id: string
+  clientId: string
+  description: string
+  /** Dollars, positive. */
+  amount: number
+  frequency: RecurringReimbursementFrequency
+  /**
+   * YYYY-MM-DD — the first billing period this hits is the month of
+   * `startDate`. Quarterly recurs every 3 months from that anchor,
+   * annually recurs in the same month each year.
+   */
+  startDate: string
 }
 
 export type Invoice = {

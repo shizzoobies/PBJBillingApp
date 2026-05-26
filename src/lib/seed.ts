@@ -324,5 +324,6 @@ export function createSeedData(): AppData {
     timesheetLocks: [],
     weeklySubmissions: [],
     reimbursements: [],
+    recurringReimbursements: [],
   }
 }

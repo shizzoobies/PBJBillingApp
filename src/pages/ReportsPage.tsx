@@ -40,6 +40,7 @@ export function ReportsPage() {
         data.plans,
         billingPeriod,
         data.reimbursements ?? [],
+        data.recurringReimbursements ?? [],
       ).total,
     0,
   )
@@ -93,6 +94,7 @@ export function ReportsPage() {
           data.plans,
           billingPeriod,
           data.reimbursements ?? [],
+          data.recurringReimbursements ?? [],
         ).total,
       }
     })

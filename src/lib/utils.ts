@@ -7,6 +7,7 @@ import type {
   Employee,
   Invoice,
   InvoiceLine,
+  RecurringReimbursement,
   Reimbursement,
   SubscriptionPlan,
   TemplateStage,
@@ -489,11 +490,55 @@ export function clientName(clients: Client[], clientId: string) {
 }
 
 /**
+ * True when a recurring reimbursement should appear on the invoice for
+ * `billingPeriod` ('YYYY-MM'). Cadence logic:
+ *  - Skip if `startDate` is after the billing period (the recurring
+ *    hasn't started yet).
+ *  - `monthly`: hits every month from start.
+ *  - `quarterly`: every 3 months from start (Jan-anchor → Jan/Apr/Jul/Oct).
+ *  - `annually`: same calendar month each year (Mar-anchor → every Mar).
+ * Stop the line by deleting the row.
+ */
+export function recurringReimbursementAppliesToPeriod(
+  recurring: RecurringReimbursement,
+  billingPeriod: string,
+): boolean {
+  if (typeof billingPeriod !== 'string' || !/^\d{4}-\d{2}$/.test(billingPeriod)) return false
+  if (typeof recurring.startDate !== 'string' || recurring.startDate.length < 7) return false
+  const periodYear = Number(billingPeriod.slice(0, 4))
+  const periodMonth = Number(billingPeriod.slice(5, 7))
+  const startYear = Number(recurring.startDate.slice(0, 4))
+  const startMonth = Number(recurring.startDate.slice(5, 7))
+  if (
+    !Number.isFinite(periodYear) ||
+    !Number.isFinite(periodMonth) ||
+    !Number.isFinite(startYear) ||
+    !Number.isFinite(startMonth)
+  ) {
+    return false
+  }
+  const periodKey = periodYear * 12 + periodMonth
+  const startKey = startYear * 12 + startMonth
+  if (periodKey < startKey) return false
+  const monthsSinceStart = periodKey - startKey
+  if (recurring.frequency === 'monthly') return true
+  if (recurring.frequency === 'quarterly') return monthsSinceStart % 3 === 0
+  if (recurring.frequency === 'annually') return monthsSinceStart % 12 === 0
+  return false
+}
+
+/**
  * Build an Invoice for a single client + billing period. `reimbursements`
  * is optional for backward compatibility — when present, every entry that
  * matches this client AND falls inside the billing period is appended as
  * its own invoice line ("Reimb: <description>") and added to the total.
  * Each shows the date and the dollar amount the owner recorded.
+ *
+ * `recurringReimbursements` is similar but synthesized: any entry whose
+ * cadence (see `recurringReimbursementAppliesToPeriod`) lands on this
+ * billing period becomes a "Recurring: <description>" line. No row is
+ * stored per period; the line is derived at read time. Owner stops it
+ * by deleting the recurring record.
  */
 export function getInvoice(
   client: Client,
@@ -501,6 +546,7 @@ export function getInvoice(
   plans: SubscriptionPlan[],
   billingPeriod: string,
   reimbursements: Reimbursement[] = [],
+  recurringReimbursements: RecurringReimbursement[] = [],
 ): Invoice {
   const billableEntries = entries.filter(
     (entry) =>
@@ -532,6 +578,21 @@ export function getInvoice(
   }))
   const reimbursementTotal = reimbursementLines.reduce((total, line) => total + line.amount, 0)
 
+  // Recurring reimbursements that should appear on this billing period for
+  // this client. Synthesized — no per-period row is stored. The detail
+  // notes the cadence so the invoice reads "Recurring: Software · monthly".
+  const recurringForClient = recurringReimbursements.filter(
+    (recurring) =>
+      recurring.clientId === client.id &&
+      recurringReimbursementAppliesToPeriod(recurring, billingPeriod),
+  )
+  const recurringLines: InvoiceLine[] = recurringForClient.map((recurring) => ({
+    label: `Recurring: ${recurring.description}`,
+    detail: recurring.frequency,
+    amount: recurring.amount,
+  }))
+  const recurringTotal = recurringLines.reduce((total, line) => total + line.amount, 0)
+
   if (client.billingMode === 'subscription' && plan) {
     const includedMinutes = plan.includedHours * 60
     const overageMinutes = Math.max(0, billableMinutes - includedMinutes)
@@ -556,7 +617,7 @@ export function getInvoice(
       })
     }
 
-    lines.push(...reimbursementLines)
+    lines.push(...reimbursementLines, ...recurringLines)
 
     return {
       client,
@@ -584,8 +645,9 @@ export function getInvoice(
         amount: billableAmount,
       },
       ...reimbursementLines,
+      ...recurringLines,
     ],
-    total: billableAmount + reimbursementTotal,
+    total: billableAmount + reimbursementTotal + recurringTotal,
   }
 }
 
