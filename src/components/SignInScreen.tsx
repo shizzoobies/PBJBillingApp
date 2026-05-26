@@ -166,8 +166,9 @@ export function SignInScreen({
           submittedEmail ? (
             <div className="auth-form" aria-live="polite">
               <p className="auth-copy">
-                Check <strong>{submittedEmail}</strong> for a sign-in link. It expires in 15 minutes
-                and can only be used once.
+                Check <strong>{submittedEmail}</strong> for a sign-in link. It works for 15
+                minutes — open it as many times as you need (handy when your email scanner
+                pre-fetches the URL).
               </p>
               <p className="auth-copy">
                 Didn&rsquo;t get it? Try again in a minute, then check your spam folder. If it

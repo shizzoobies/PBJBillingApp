@@ -5129,8 +5129,24 @@ export class AppDataStore {
   }
 
   /**
-   * Validate and consume a sign-in link token. Returns { userId } on success
-   * or null if the token is unknown, expired, or already consumed.
+   * Validate a sign-in link token. Returns { userId } when the token exists
+   * and has not yet expired (15-minute window from creation), null otherwise.
+   *
+   * Reusable within the expiry window — the link no longer self-destructs
+   * on first use. Rationale:
+   *  1. Email-security scanners (Gmail / Outlook / corporate firewalls)
+   *     routinely pre-fetch URLs in incoming mail to scan them, which
+   *     would burn a single-use token before the human ever clicks it.
+   *     Reusable tokens are the standard fix.
+   *  2. A second click (browser link-preview, accidental double-tap,
+   *     refresh of the verify page) shouldn't lock the user out.
+   *  3. TOTP is the real session gate — owners are forced into setup,
+   *     and any 2FA-enabled user has to clear the challenge before a
+   *     full session is issued. The link just gets you to the gate.
+   *
+   * We still stamp `consumed_at` on first use as telemetry (when was the
+   * link first followed) but don't reject subsequent uses. The row drops
+   * naturally past `expires_at`.
    */
   async consumeLoginToken(token) {
     if (!token) return null
@@ -5139,9 +5155,8 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `update login_tokens
-         set consumed_at = $2
+         set consumed_at = coalesce(consumed_at, $2)
          where token = $1
-           and consumed_at is null
            and expires_at > now()
          returning user_id`,
         [token, consumedAt],
@@ -5151,17 +5166,17 @@ export class AppDataStore {
     }
 
     const authState = await readJson(localAuthPath)
-    let consumed = null
+    let resolved = null
     authState.loginTokens = (authState.loginTokens ?? []).map((entry) => {
       if (entry.token !== token) return entry
-      if (entry.consumedAt) return entry
       if (new Date(entry.expiresAt).getTime() <= Date.now()) return entry
-      consumed = { userId: entry.userId }
-      return { ...entry, consumedAt }
+      resolved = { userId: entry.userId }
+      // First-use telemetry only — don't gate on it.
+      return entry.consumedAt ? entry : { ...entry, consumedAt }
     })
-    if (!consumed) return null
+    if (!resolved) return null
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return consumed
+    return resolved
   }
 
   /**
