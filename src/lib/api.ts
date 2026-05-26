@@ -631,6 +631,22 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
   return (await response.json()) as Checklist
 }
 
+/**
+ * Delete an entire checklist. Owner-only on the server; the client also
+ * gates the UI affordance. Returns `{ ok, removed }` from the server so
+ * callers don't have to re-parse the URL to know which id was deleted.
+ */
+export async function deleteChecklistRequest(checklistId: string) {
+  const response = await apiFetch(`/api/checklists/${encodeURIComponent(checklistId)}`, {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to delete checklist (${response.status})`)
+  }
+  return (await response.json()) as { ok: true; removed: string }
+}
+
 export async function setClientAssignedTeamRequest(clientId: string, bookkeeperIds: string[]) {
   const response = await apiFetch(
     `/api/clients/${encodeURIComponent(clientId)}/assigned-team`,

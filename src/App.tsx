@@ -22,6 +22,7 @@ import {
   createStandardTemplateRequest,
   createTimeEntry,
   deleteChecklistItemRequest,
+  deleteChecklistRequest,
   deleteTimeEntryRequest,
   fetchAppData,
   fetchFirmSettings,
@@ -1360,6 +1361,33 @@ function App() {
     }
   }
 
+  /**
+   * Owner-only whole-checklist delete. The server cascades item rows via the
+   * `checklist_items` FK and leaves any referencing time entries intact so
+   * billing history survives. Preview mode is blocked the same way the rest
+   * of the write surface is, and 401s flip the session to offline.
+   */
+  const deleteChecklist = async (checklistId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      await deleteChecklistRequest(checklistId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.filter((checklist) => checklist.id !== checklistId),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
   const duplicateChecklistTemplate = (templateId: string) => {
     updateWorkspaceData((current) => {
       const source = current.checklistTemplates.find((template) => template.id === templateId)
@@ -1696,6 +1724,7 @@ function App() {
     createChecklist,
     updateChecklistItem,
     deleteChecklistItem,
+    deleteChecklist,
     updateClientPlan,
     updateClient,
     deleteClient,

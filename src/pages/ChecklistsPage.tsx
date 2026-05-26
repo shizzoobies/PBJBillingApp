@@ -178,6 +178,7 @@ export function ChecklistsPage() {
     createChecklist,
     updateChecklistItem,
     deleteChecklistItem,
+    deleteChecklist,
   } = useAppContext()
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -335,6 +336,7 @@ export function ChecklistsPage() {
           onAddSubItem={addSubItem}
           onAddSubSubItem={addSubSubItem}
           onBulkAddItems={bulkAddChecklistItems}
+          onDeleteChecklist={deleteChecklist}
           onDeleteItem={deleteChecklistItem}
           onRemoveSubItem={removeSubItem}
           onRemoveSubSubItem={removeSubSubItem}
@@ -422,6 +424,7 @@ function ChecklistInProgressSection({
   onAddSubItem,
   onAddSubSubItem,
   onBulkAddItems,
+  onDeleteChecklist,
   onDeleteItem,
   onRemoveSubItem,
   onRemoveSubSubItem,
@@ -447,6 +450,7 @@ function ChecklistInProgressSection({
     title: string,
   ) => void
   onBulkAddItems: (checklistId: string, labels: string[]) => void
+  onDeleteChecklist: (checklistId: string) => Promise<void>
   onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
   onRemoveSubItem: (checklistId: string, itemId: string, subItemId: string) => void
   onRemoveSubSubItem: (
@@ -570,6 +574,7 @@ function ChecklistInProgressSection({
       onAddSubItem={onAddSubItem}
       onAddSubSubItem={onAddSubSubItem}
       onBulkAddItems={onBulkAddItems}
+      onDeleteChecklist={onDeleteChecklist}
       onDeleteItem={onDeleteItem}
       onRemoveSubItem={onRemoveSubItem}
       onRemoveSubSubItem={onRemoveSubSubItem}
@@ -703,6 +708,7 @@ function ChecklistCard({
   onAddSubItem,
   onAddSubSubItem,
   onBulkAddItems,
+  onDeleteChecklist,
   onDeleteItem,
   onRemoveSubItem,
   onRemoveSubSubItem,
@@ -730,6 +736,7 @@ function ChecklistCard({
     title: string,
   ) => void
   onBulkAddItems: (checklistId: string, labels: string[]) => void
+  onDeleteChecklist: (checklistId: string) => Promise<void>
   onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
   onRemoveSubItem: (checklistId: string, itemId: string, subItemId: string) => void
   onRemoveSubSubItem: (
@@ -835,6 +842,27 @@ function ChecklistCard({
         <div className="checklist-meta">
           {handedOff ? <span className="status-pill">Handed off</span> : null}
           {isViewerOnly ? <span className="status-pill">View only</span> : null}
+          {ownerMode ? (
+            <button
+              type="button"
+              className="secondary-action danger"
+              title="Delete this task (owner only). Time entries are preserved."
+              onClick={() => {
+                // A whole-checklist delete is destructive and not undoable, so
+                // confirm with the checklist title and call out that billing
+                // data survives — the common worry when cleaning up after a
+                // departing client / employee.
+                const confirmed = window.confirm(
+                  `Delete "${checklist.title}"?\n\nThis removes the task and every step under it. Any time entries already logged against it are preserved.`,
+                )
+                if (confirmed) {
+                  void onDeleteChecklist(checklist.id)
+                }
+              }}
+            >
+              Delete task
+            </button>
+          ) : null}
         </div>
       </header>
       <div className="progress-track">

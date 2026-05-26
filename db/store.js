@@ -2964,6 +2964,32 @@ export class AppDataStore {
   }
 
   /**
+   * Delete an entire checklist by id. Owner-gated at the server boundary.
+   * In Postgres mode the `checklist_items` FK has `on delete cascade`, so a
+   * single DELETE removes the parent row and all of its items together.
+   * Time entries that reference items via `task_id` are deliberately
+   * preserved — billing history must survive a task cleanup — and become
+   * dangling references that the UI already handles as "unknown task."
+   * Returns the deleted checklist id, or `null` when no row matched.
+   */
+  async deleteChecklist(checklistId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `delete from checklists where id = $1 returning id`,
+        [checklistId],
+      )
+      return result.rowCount ? checklistId : null
+    }
+
+    const data = await readJson(localDataPath)
+    const before = data.checklists.length
+    data.checklists = data.checklists.filter((checklist) => checklist.id !== checklistId)
+    if (data.checklists.length === before) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return checklistId
+  }
+
+  /**
    * Add a sub-item (one nested level) under a checklist item. The new sub-item
    * starts `done: false`, which makes a previously-complete parent incomplete —
    * so the parent `done` roll-up is recomputed and persisted. Returns the

@@ -1137,6 +1137,47 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // DELETE /api/checklists/:id — owner-only whole-checklist delete.
+    // The matcher's trailing `$` keeps it from poaching the more-specific
+    // /items/... routes below; those still resolve to their own handlers.
+    const checklistDeleteMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)$/)
+    if (checklistDeleteMatch) {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+
+      if (request.method !== 'DELETE') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can delete checklists' })
+        return
+      }
+
+      const checklistId = checklistDeleteMatch[1]
+      // Capture the title for the activity log before the row is gone.
+      const existing = await appDataStore.read()
+      const target = existing.checklists.find((entry) => entry.id === checklistId)
+      if (!target) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      const removed = await appDataStore.deleteChecklist(checklistId)
+      if (!removed) {
+        // Raced with another deleter — same UX as 404 from the client's view.
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      await appDataStore.recordActivity(session.user.id, 'checklist_deleted', target.title)
+      sendJson(response, 200, { ok: true, removed: checklistId })
+      return
+    }
+
     const checklistToggleMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/items\/([^/]+)\/toggle$/)
     if (checklistToggleMatch) {
       const session = await requireSession(request, response)

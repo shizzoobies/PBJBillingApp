@@ -220,6 +220,13 @@ export type AppContextValue = {
     patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
   ) => Promise<void>
   deleteChecklistItem: (checklistId: string, itemId: string) => Promise<void>
+  /**
+   * Owner-only whole-checklist delete. Use when a one-time task should go
+   * away entirely (client removed, employee left, task created in error).
+   * Time entries that reference items via `taskId` are preserved on the
+   * server so billing history survives — they just become unlinked.
+   */
+  deleteChecklist: (checklistId: string) => Promise<void>
   updateClientPlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
   updateClient: (clientId: string, patch: Partial<Client>) => void
   deleteClient: (clientId: string) => void
