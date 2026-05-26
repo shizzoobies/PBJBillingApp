@@ -32,10 +32,13 @@ import {
   fetchPublicFirmSettings,
   fetchSession,
   generateChecklistFromTemplateRequest,
+  addReimbursementRequest,
   approveWeeklySubmissionRequest,
+  deleteReimbursementRequest,
   lockTimesheetRequest,
   rejectWeeklySubmissionRequest,
   submitWeeklyTimesheetRequest,
+  updateReimbursementRequest,
   logoutSession,
   rejectTimeEntryRequest,
   removeChecklistSubItemRequest,
@@ -734,6 +737,89 @@ function App() {
    * mutations on this path, since the bookkeeper still owns those rows
    * and may edit / resubmit.
    */
+  /**
+   * Owner-only: add a reimbursement to a client. Pushes the new record
+   * onto `data.reimbursements` so the InvoicesPage + ClientDetailPage
+   * pick it up without a refetch.
+   */
+  const addReimbursement = async (input: {
+    clientId: string
+    date: string
+    description: string
+    amount: number
+  }) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const created = await addReimbursementRequest(input)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        reimbursements: [created, ...(current.reimbursements ?? [])],
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  /** Owner-only: patch a reimbursement (date / description / amount). */
+  const updateReimbursement = async (
+    id: string,
+    patch: { date?: string; description?: string; amount?: number },
+  ) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updated = await updateReimbursementRequest(id, patch)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        reimbursements: (current.reimbursements ?? []).map((entry) =>
+          entry.id === id ? updated : entry,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  /** Owner-only: remove a reimbursement. */
+  const deleteReimbursement = async (id: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      await deleteReimbursementRequest(id)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        reimbursements: (current.reimbursements ?? []).filter((entry) => entry.id !== id),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
   const rejectWeeklySubmission = async (submissionId: string, note: string) => {
     if (previewActiveRef.current) return
     try {
@@ -1973,6 +2059,9 @@ function App() {
     submitWeeklyTimesheet,
     approveWeeklySubmission,
     rejectWeeklySubmission,
+    addReimbursement,
+    updateReimbursement,
+    deleteReimbursement,
     toggleChecklistItem,
     toggleSubItem,
     addSubItem,

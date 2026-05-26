@@ -7,6 +7,7 @@ import type {
   Employee,
   Invoice,
   InvoiceLine,
+  Reimbursement,
   SubscriptionPlan,
   TemplateStage,
   TimeEntry,
@@ -487,11 +488,19 @@ export function clientName(clients: Client[], clientId: string) {
   return clients.find((client) => client.id === clientId)?.name ?? 'Unknown client'
 }
 
+/**
+ * Build an Invoice for a single client + billing period. `reimbursements`
+ * is optional for backward compatibility — when present, every entry that
+ * matches this client AND falls inside the billing period is appended as
+ * its own invoice line ("Reimb: <description>") and added to the total.
+ * Each shows the date and the dollar amount the owner recorded.
+ */
 export function getInvoice(
   client: Client,
   entries: TimeEntry[],
   plans: SubscriptionPlan[],
   billingPeriod: string,
+  reimbursements: Reimbursement[] = [],
 ): Invoice {
   const billableEntries = entries.filter(
     (entry) =>
@@ -501,6 +510,27 @@ export function getInvoice(
   const billableAmount = (billableMinutes / 60) * client.hourlyRate
   const plan = client.planId ? plans.find((item) => item.id === client.planId) ?? null : null
   const periodLabel = getBillingPeriodLabel(billingPeriod)
+
+  // Reimbursements for THIS client and THIS billing period. Sorted by date
+  // ascending so the invoice lines read chronologically.
+  const clientReimbursements = reimbursements
+    .filter(
+      (reimbursement) =>
+        reimbursement.clientId === client.id && reimbursement.date.startsWith(billingPeriod),
+    )
+    .slice()
+    .sort((a, b) => a.date.localeCompare(b.date))
+
+  const reimbursementLines: InvoiceLine[] = clientReimbursements.map((reimbursement) => ({
+    label: `Reimbursement: ${reimbursement.description}`,
+    detail: new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(new Date(`${reimbursement.date}T12:00:00`)),
+    amount: reimbursement.amount,
+  }))
+  const reimbursementTotal = reimbursementLines.reduce((total, line) => total + line.amount, 0)
 
   if (client.billingMode === 'subscription' && plan) {
     const includedMinutes = plan.includedHours * 60
@@ -525,6 +555,8 @@ export function getInvoice(
         amount: (overageMinutes / 60) * client.hourlyRate,
       })
     }
+
+    lines.push(...reimbursementLines)
 
     return {
       client,
@@ -551,8 +583,9 @@ export function getInvoice(
         detail: `${formatHours(billableMinutes)} at ${currency.format(client.hourlyRate)}/hr`,
         amount: billableAmount,
       },
+      ...reimbursementLines,
     ],
-    total: billableAmount,
+    total: billableAmount + reimbursementTotal,
   }
 }
 

@@ -33,7 +33,14 @@ export function ReportsPage() {
   const billingPeriodLabel = getBillingPeriodLabel(billingPeriod)
   const ownerInvoiceTotal = data.clients.reduce(
     (total, client) =>
-      total + getInvoice(client, data.timeEntries, data.plans, billingPeriod).total,
+      total +
+      getInvoice(
+        client,
+        data.timeEntries,
+        data.plans,
+        billingPeriod,
+        data.reimbursements ?? [],
+      ).total,
     0,
   )
   const ownerBillableMinutes = billingPeriodEntries
@@ -80,7 +87,13 @@ export function ReportsPage() {
         internalMinutes: totalMinutes - billableEntryMinutes,
         entryCount: entries.length,
         employeeCount: new Set(entries.map((entry) => entry.employeeId)).size,
-        invoiceTotal: getInvoice(client, data.timeEntries, data.plans, billingPeriod).total,
+        invoiceTotal: getInvoice(
+          client,
+          data.timeEntries,
+          data.plans,
+          billingPeriod,
+          data.reimbursements ?? [],
+        ).total,
       }
     })
     .sort((left, right) => right.minutes - left.minutes)

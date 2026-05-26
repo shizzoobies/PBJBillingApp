@@ -328,6 +328,11 @@ export type AppData = {
    * submissions; non-owners see only their own (server-scoped).
    */
   weeklySubmissions: WeeklySubmission[]
+  /**
+   * Owner-managed expense reimbursements that show up as invoice lines
+   * on the client's monthly invoice (matched by date → billing month).
+   */
+  reimbursements: Reimbursement[]
   firmSettings?: FirmSettings
 }
 
@@ -343,6 +348,22 @@ export type TimerState = {
 export type InvoiceLine = {
   label: string
   detail: string
+  amount: number
+}
+
+/**
+ * Per-client out-of-pocket expense the firm fronts and bills back to the
+ * client on their next invoice. Each `Reimbursement` shows up as a line on
+ * the invoice for the month its `date` falls in (and contributes to the
+ * total). Owner-managed; bookkeepers can see them but not edit.
+ */
+export type Reimbursement = {
+  id: string
+  clientId: string
+  /** YYYY-MM-DD — drives which monthly invoice the line appears on. */
+  date: string
+  description: string
+  /** Dollars, positive. The invoice line shows this verbatim. */
   amount: number
 }
 

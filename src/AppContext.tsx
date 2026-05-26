@@ -70,6 +70,23 @@ export type AppContextValue = {
   approveWeeklySubmission: (submissionId: string) => Promise<void>
   /** Owner-only: reject a pending weekly submission with a written note. */
   rejectWeeklySubmission: (submissionId: string, note: string) => Promise<void>
+  /**
+   * Owner-only: add an expense reimbursement to a client. Shows up as a
+   * line on the invoice for the month matching the `date`.
+   */
+  addReimbursement: (input: {
+    clientId: string
+    date: string
+    description: string
+    amount: number
+  }) => Promise<void>
+  /** Owner-only: edit a reimbursement (date / description / amount). */
+  updateReimbursement: (
+    id: string,
+    patch: { date?: string; description?: string; amount?: number },
+  ) => Promise<void>
+  /** Owner-only: remove a reimbursement. */
+  deleteReimbursement: (id: string) => Promise<void>
   toggleChecklistItem: (checklistId: string, itemId: string) => Promise<void>
   /** Toggle one sub-item of a live-checklist item (recomputes parent done). */
   toggleSubItem: (checklistId: string, itemId: string, subItemId: string) => Promise<void>

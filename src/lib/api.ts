@@ -12,6 +12,7 @@
   type SessionUser,
   type TeamMember,
   type TeamSession,
+  type Reimbursement,
   type TimeEntry,
   type TimesheetLock,
   type TotpSetupInit,
@@ -367,6 +368,65 @@ export async function approveWeeklySubmissionRequest(submissionId: string) {
     )
   }
   return (await response.json()) as WeeklySubmission
+}
+
+/** Owner-only: create a new reimbursement line on a client. */
+export async function addReimbursementRequest(input: {
+  clientId: string
+  date: string
+  description: string
+  amount: number
+}) {
+  const response = await apiFetch('/api/reimbursements', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to add reimbursement (${response.status})`,
+    )
+  }
+  return (await response.json()) as Reimbursement
+}
+
+/** Owner-only: update an existing reimbursement. Patch fields are optional. */
+export async function updateReimbursementRequest(
+  id: string,
+  patch: { date?: string; description?: string; amount?: number },
+) {
+  const response = await apiFetch(`/api/reimbursements/${encodeURIComponent(id)}`, {
+    credentials: 'same-origin',
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to update reimbursement (${response.status})`,
+    )
+  }
+  return (await response.json()) as Reimbursement
+}
+
+/** Owner-only: delete a reimbursement. */
+export async function deleteReimbursementRequest(id: string) {
+  const response = await apiFetch(`/api/reimbursements/${encodeURIComponent(id)}`, {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok && response.status !== 204) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to delete reimbursement (${response.status})`,
+    )
+  }
 }
 
 /** Owner rejects a pending weekly submission with a note (the rationale). */

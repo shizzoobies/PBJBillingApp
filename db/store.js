@@ -1009,6 +1009,26 @@ export class AppDataStore {
         )
       `)
 
+      // Per-client expense reimbursements. Each row is an out-of-pocket
+      // expense the firm fronts and bills back on the client's invoice
+      // for the month matching `date`. Owner-managed; the client_id FK
+      // cascades on client delete so we don't leak orphan rows.
+      await this.pool.query(`
+        create table if not exists reimbursements (
+          id text primary key,
+          client_id text not null references clients(id) on delete cascade,
+          date date not null,
+          description text not null,
+          amount numeric(12, 2) not null,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists reimbursements_client_date_idx
+          on reimbursements(client_id, date)
+      `)
+
       // Weekly lock-for-review submissions: a bookkeeper / accountant
       // submits their Sun-Sat week and an owner approves or rejects it.
       // Exactly one row per (user, week) — a resubmit after rejection
@@ -1454,6 +1474,7 @@ export class AppDataStore {
         checklistTemplateStagesResult,
         timesheetLocksResult,
         weeklySubmissionsResult,
+        reimbursementsResult,
       ] =
         await Promise.all([
           this.pool.query(`
@@ -1524,6 +1545,11 @@ export class AppDataStore {
                    reviewed_by, reviewed_at, review_note
             from weekly_submissions
             order by week_start desc, user_id asc
+          `),
+          this.pool.query(`
+            select id, client_id, date, description, amount
+            from reimbursements
+            order by date desc, id asc
           `),
         ])
 
@@ -1724,6 +1750,13 @@ export class AppDataStore {
           ...(row.reviewed_at ? { reviewedAt: row.reviewed_at.toISOString() } : {}),
           ...(row.review_note ? { reviewNote: row.review_note } : {}),
         })),
+        reimbursements: reimbursementsResult.rows.map((row) => ({
+          id: row.id,
+          clientId: row.client_id,
+          date: row.date.toISOString().slice(0, 10),
+          description: row.description,
+          amount: Number(row.amount),
+        })),
       }
 
       if (data.checklistTemplates.length === 0) {
@@ -1781,6 +1814,11 @@ export class AppDataStore {
       backfilled = true
     }
 
+    if (!Array.isArray(data.reimbursements)) {
+      data.reimbursements = []
+      backfilled = true
+    }
+
     // Recycle-bin backfill for legacy file-fallback data. Old saves never
     // carried a separate array, so partition the existing list by `deletedAt`
     // and keep both arrays from now on. New saves always write both arrays
@@ -1823,6 +1861,7 @@ export class AppDataStore {
         await client.query('delete from time_entries')
         await client.query('delete from timesheet_locks')
         await client.query('delete from weekly_submissions')
+        await client.query('delete from reimbursements')
         await client.query('delete from client_assignments')
         await client.query('delete from invoice_drafts')
         await client.query('delete from clients')
@@ -1965,6 +2004,22 @@ export class AppDataStore {
               submission.reviewedBy ?? null,
               submission.reviewedAt ?? null,
               submission.reviewNote ?? null,
+            ],
+          )
+        }
+
+        for (const reimbursement of data.reimbursements ?? []) {
+          await client.query(
+            `
+              insert into reimbursements (id, client_id, date, description, amount, updated_at)
+              values ($1, $2, $3, $4, $5, now())
+            `,
+            [
+              reimbursement.id,
+              reimbursement.clientId,
+              reimbursement.date,
+              reimbursement.description,
+              reimbursement.amount,
             ],
           )
         }
@@ -2650,6 +2705,154 @@ export class AppDataStore {
     }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return target
+  }
+
+  /**
+   * Create a new reimbursement on a client. Validates the inputs (positive
+   * amount, non-empty description, ISO date) and returns the persisted
+   * record so the caller can drop it straight into local state. Returns
+   * null when validation fails or the client doesn't exist.
+   */
+  async addReimbursement({ clientId, date, description, amount }) {
+    if (!clientId || typeof clientId !== 'string') return null
+    if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
+    const trimmedDescription = typeof description === 'string' ? description.trim() : ''
+    if (!trimmedDescription) return null
+    const numericAmount = Number(amount)
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) return null
+    const id = `reimb-${randomUUID().slice(0, 8)}`
+    const record = {
+      id,
+      clientId,
+      date,
+      description: trimmedDescription,
+      amount: numericAmount,
+    }
+
+    if (this.pool) {
+      const exists = await this.pool.query(
+        `select 1 from clients where id = $1`,
+        [clientId],
+      )
+      if (!exists.rowCount) return null
+      await this.pool.query(
+        `insert into reimbursements (id, client_id, date, description, amount)
+         values ($1, $2, $3, $4, $5)`,
+        [id, clientId, date, trimmedDescription, numericAmount],
+      )
+      return record
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.clients) || !data.clients.some((entry) => entry.id === clientId)) {
+      return null
+    }
+    if (!Array.isArray(data.reimbursements)) data.reimbursements = []
+    data.reimbursements.push(record)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return record
+  }
+
+  /**
+   * Partial update for a single reimbursement. Only the fields in `patch`
+   * are touched; everything else is left as-is. Same validation rules as
+   * the create path. Returns the updated record or null on miss / invalid.
+   */
+  async updateReimbursement(id, patch) {
+    if (!id) return null
+    const updates = {}
+    if (patch.date !== undefined) {
+      if (typeof patch.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(patch.date)) return null
+      updates.date = patch.date
+    }
+    if (patch.description !== undefined) {
+      const trimmed = typeof patch.description === 'string' ? patch.description.trim() : ''
+      if (!trimmed) return null
+      updates.description = trimmed
+    }
+    if (patch.amount !== undefined) {
+      const numericAmount = Number(patch.amount)
+      if (!Number.isFinite(numericAmount) || numericAmount <= 0) return null
+      updates.amount = numericAmount
+    }
+    if (Object.keys(updates).length === 0) {
+      // No-op patch — fetch and return current record so the client can
+      // still receive a stable shape.
+      if (this.pool) {
+        const result = await this.pool.query(
+          `select id, client_id, date, description, amount from reimbursements where id = $1`,
+          [id],
+        )
+        if (!result.rowCount) return null
+        const row = result.rows[0]
+        return {
+          id: row.id,
+          clientId: row.client_id,
+          date: row.date.toISOString().slice(0, 10),
+          description: row.description,
+          amount: Number(row.amount),
+        }
+      }
+      const data = await readJson(localDataPath)
+      return (data.reimbursements ?? []).find((entry) => entry.id === id) ?? null
+    }
+
+    if (this.pool) {
+      const setClauses = []
+      const values = [id]
+      if (updates.date !== undefined) {
+        values.push(updates.date)
+        setClauses.push(`date = $${values.length}`)
+      }
+      if (updates.description !== undefined) {
+        values.push(updates.description)
+        setClauses.push(`description = $${values.length}`)
+      }
+      if (updates.amount !== undefined) {
+        values.push(updates.amount)
+        setClauses.push(`amount = $${values.length}`)
+      }
+      setClauses.push('updated_at = now()')
+      const result = await this.pool.query(
+        `update reimbursements set ${setClauses.join(', ')} where id = $1
+         returning id, client_id, date, description, amount`,
+        values,
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return {
+        id: row.id,
+        clientId: row.client_id,
+        date: row.date.toISOString().slice(0, 10),
+        description: row.description,
+        amount: Number(row.amount),
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const target = (data.reimbursements ?? []).find((entry) => entry.id === id)
+    if (!target) return null
+    Object.assign(target, updates)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return target
+  }
+
+  /** Delete one reimbursement. Returns true when a row was removed. */
+  async deleteReimbursement(id) {
+    if (!id) return false
+    if (this.pool) {
+      const result = await this.pool.query(
+        `delete from reimbursements where id = $1 returning id`,
+        [id],
+      )
+      return (result.rowCount ?? 0) > 0
+    }
+    const data = await readJson(localDataPath)
+    const before = (data.reimbursements ?? []).length
+    data.reimbursements = (data.reimbursements ?? []).filter((entry) => entry.id !== id)
+    if (data.reimbursements.length === before) return false
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return true
   }
 
   /**

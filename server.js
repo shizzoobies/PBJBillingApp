@@ -279,6 +279,13 @@ function scopeAppDataForSession(session, data) {
   const weeklySubmissions = (data.weeklySubmissions ?? []).filter(
     (submission) => submission.userId === me,
   )
+  // Reimbursements are owner-managed but bookkeepers see them on the
+  // invoice / client page for any client they have visibility into.
+  // The data is read-only for them client-side; the server-side endpoints
+  // already gate writes on role.
+  const reimbursements = (data.reimbursements ?? []).filter((reimbursement) =>
+    allowedClientIds.has(reimbursement.clientId),
+  )
 
   return {
     ...data,
@@ -289,6 +296,7 @@ function scopeAppDataForSession(session, data) {
     plans,
     timesheetLocks,
     weeklySubmissions,
+    reimbursements,
     // Recycle bin is owner-only — bookkeepers never see it. Empty array
     // (rather than undefined) so the client code can iterate without a
     // null check, and old front-ends still receive a present field.
@@ -1294,6 +1302,76 @@ const server = createServer(async (request, response) => {
         `${submission.userId} · ${submission.weekStart}`,
       )
       sendJson(response, 200, submission)
+      return
+    }
+
+    // Owner-only reimbursement create — body { clientId, date, description, amount }.
+    if (normalizedPath === '/api/reimbursements' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can add reimbursements' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const created = await appDataStore.addReimbursement({
+        clientId: typeof payload?.clientId === 'string' ? payload.clientId : '',
+        date: typeof payload?.date === 'string' ? payload.date.trim() : '',
+        description: typeof payload?.description === 'string' ? payload.description : '',
+        amount: payload?.amount,
+      })
+      if (!created) {
+        sendJson(response, 400, {
+          error:
+            'Invalid reimbursement. Need clientId, YYYY-MM-DD date, description, and positive amount.',
+        })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'reimbursement_added',
+        `${created.description} ($${created.amount})`,
+      )
+      sendJson(response, 201, created)
+      return
+    }
+
+    // Owner-only reimbursement update / delete — /api/reimbursements/:id.
+    const reimbursementMatch = normalizedPath.match(/^\/api\/reimbursements\/([^/]+)$/)
+    if (reimbursementMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can change reimbursements' })
+        return
+      }
+      const id = reimbursementMatch[1]
+      if (request.method === 'PATCH') {
+        const payload = await readJsonBody(request)
+        const patch = {}
+        if (typeof payload?.date === 'string') patch.date = payload.date.trim()
+        if (typeof payload?.description === 'string') patch.description = payload.description
+        if (payload?.amount !== undefined) patch.amount = payload.amount
+        const updated = await appDataStore.updateReimbursement(id, patch)
+        if (!updated) {
+          sendJson(response, 400, { error: 'Reimbursement not found or update invalid.' })
+          return
+        }
+        await appDataStore.recordActivity(session.user.id, 'reimbursement_updated', updated.id)
+        sendJson(response, 200, updated)
+        return
+      }
+      if (request.method === 'DELETE') {
+        const removed = await appDataStore.deleteReimbursement(id)
+        if (!removed) {
+          sendJson(response, 404, { error: 'Reimbursement not found' })
+          return
+        }
+        await appDataStore.recordActivity(session.user.id, 'reimbursement_deleted', id)
+        sendEmpty(response, 204)
+        return
+      }
+      sendJson(response, 405, { error: 'Method not allowed' })
       return
     }
 

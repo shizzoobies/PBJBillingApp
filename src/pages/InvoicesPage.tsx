@@ -1,10 +1,12 @@
 import { ExternalLink, FileText, Printer } from 'lucide-react'
 import { useMemo } from 'react'
 import { useAppContext } from '../AppContext'
+import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import type {
   Client,
   Invoice,
   InvoiceLine,
+  Reimbursement,
   SubscriptionPlan,
   TimeEntry,
 } from '../lib/types'
@@ -149,9 +151,21 @@ export function InvoicesPage() {
   const baseInvoice = useMemo(
     () =>
       selectedClient
-        ? getInvoice(selectedClient, data.timeEntries, data.plans, billingPeriod)
+        ? getInvoice(
+            selectedClient,
+            data.timeEntries,
+            data.plans,
+            billingPeriod,
+            data.reimbursements ?? [],
+          )
         : null,
-    [selectedClient, data.timeEntries, data.plans, billingPeriod],
+    [
+      selectedClient,
+      data.timeEntries,
+      data.plans,
+      billingPeriod,
+      data.reimbursements,
+    ],
   )
   const display = useMemo(
     () =>
@@ -198,12 +212,21 @@ export function InvoicesPage() {
             <span>{formatHours(baseInvoice.billableMinutes)} tracked</span>
           </div>
           <InvoicePreview display={display} />
+          {ownerMode ? (
+            <ReimbursementsCard
+              clientId={selectedClient.id}
+              periodFilter={billingPeriod}
+              title="This invoice's reimbursements"
+              subtitle={`Out-of-pocket expenses for ${selectedClient.name} that show up on the ${billingPeriodLabel} invoice. Each entry becomes a line above.`}
+            />
+          ) : null}
         </div>
         <BillingQueue
           billingPeriod={billingPeriod}
           clients={data.clients}
           entries={data.timeEntries}
           plans={data.plans}
+          reimbursements={data.reimbursements ?? []}
         />
       </section>
 
@@ -299,11 +322,13 @@ function BillingQueue({
   clients,
   entries,
   plans,
+  reimbursements,
 }: {
   billingPeriod: string
   clients: Client[]
   entries: TimeEntry[]
   plans: SubscriptionPlan[]
+  reimbursements: Reimbursement[]
 }) {
   return (
     <section className="panel">
@@ -315,7 +340,7 @@ function BillingQueue({
       </div>
       <div className="queue-list">
         {clients.map((client) => {
-          const invoice = getInvoice(client, entries, plans, billingPeriod)
+          const invoice = getInvoice(client, entries, plans, billingPeriod, reimbursements)
           return (
             <article className="queue-row" key={client.id}>
               <div>
