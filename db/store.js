@@ -587,8 +587,19 @@ function materializeRecurringChecklists(data) {
     return next
   })
 
+  // Treat recycled checklists as "already exists" so the materializer
+  // doesn't keep re-spawning instances the user explicitly deleted. The
+  // delete-then-comes-right-back symptom was caused by this set
+  // considering only active checklists — a recycled checklist for the
+  // current period wasn't here, so the next read materialized a fresh
+  // duplicate and undid the delete. If the user wants the instance back,
+  // they restore it from the recycle bin; otherwise we wait until the
+  // template's nextDueDate advances and produce a new instance for the
+  // next period naturally.
+  const recycled = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
+  const checklistsForKeys = [...nextChecklists, ...recycled]
   const existingKeys = new Set(
-    nextChecklists
+    checklistsForKeys
       .filter((checklist) => checklist.templateId && checklist.dueDate)
       .map((checklist) => `${checklist.templateId}:${checklist.dueDate}:${checklist.stageIndex ?? 0}`),
   )
@@ -596,7 +607,7 @@ function materializeRecurringChecklists(data) {
   // Year-month instance keys (`${templateId}:${YYYY-MM}`) for specific-months
   // templates — keep re-runs idempotent per designated month.
   const existingMonthKeys = new Set(
-    nextChecklists
+    checklistsForKeys
       .filter((checklist) => checklist.templateId && checklist.dueDate)
       .map((checklist) => `${checklist.templateId}:${String(checklist.dueDate).slice(0, 7)}`),
   )
