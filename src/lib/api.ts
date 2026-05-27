@@ -431,6 +431,26 @@ export async function deleteReimbursementRequest(id: string) {
   }
 }
 
+/**
+ * Owner-only subscription plan delete. Returns the affected client ids so
+ * the caller can flip their `planId` to null locally — the FK already does
+ * that server-side via `on delete set null`.
+ */
+export async function deletePlanRequest(id: string) {
+  const response = await apiFetch(`/api/plans/${encodeURIComponent(id)}`, {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to delete plan (${response.status})`,
+    )
+  }
+  return (await response.json()) as { removedPlanId: string; unlinkedClientIds: string[] }
+}
+
 /** Owner-only: create a recurring reimbursement on a client. */
 export async function addRecurringReimbursementRequest(input: {
   clientId: string

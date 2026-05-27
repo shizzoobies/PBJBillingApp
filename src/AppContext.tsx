@@ -297,6 +297,13 @@ export type AppContextValue = {
   deleteClient: (clientId: string) => void
   addClient: (client: Omit<Client, 'id'>) => void
   addPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void
+  /**
+   * Owner-only: permanently delete a subscription plan. Any clients
+   * currently on it are unlinked (their `planId` flips to null and they
+   * fall back to hourly billing). Server-side the FK cascade does the
+   * unlink; the handler mirrors it on local state.
+   */
+  deletePlan: (planId: string) => Promise<void>
   selectedClientId: string
   setSelectedClientId: (clientId: string) => void
   printInvoice: () => void

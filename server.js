@@ -1310,6 +1310,34 @@ const server = createServer(async (request, response) => {
     }
 
     // Owner-only reimbursement create — body { clientId, date, description, amount }.
+    // Owner-only subscription plan delete — DELETE /api/plans/:id.
+    // The clients.plan_id FK has `on delete set null`, so unlinking is
+    // automatic. Response carries the affected client ids so the client
+    // can mirror the unlink on local state without a full refetch.
+    const planDeleteMatch = normalizedPath.match(/^\/api\/plans\/([^/]+)$/)
+    if (planDeleteMatch && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can delete plans' })
+        return
+      }
+      const result = await appDataStore.deletePlan(planDeleteMatch[1])
+      if (!result) {
+        sendJson(response, 404, { error: 'Plan not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'plan_deleted',
+        `${result.removedPlanId} (unlinked ${result.unlinkedClientIds.length} client${
+          result.unlinkedClientIds.length === 1 ? '' : 's'
+        })`,
+      )
+      sendJson(response, 200, result)
+      return
+    }
+
     if (normalizedPath === '/api/reimbursements' && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return

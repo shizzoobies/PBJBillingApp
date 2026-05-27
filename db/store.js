@@ -2896,6 +2896,50 @@ export class AppDataStore {
     return target
   }
 
+  /**
+   * Delete a subscription plan. Postgres mode lets the `clients.plan_id`
+   * FK (`on delete set null`) handle unlinking — any client currently on
+   * this plan flips to `plan_id = null`, which the app interprets as
+   * billed-hourly. Returns the ids of clients that were unlinked so the
+   * caller can mirror the change on local state without a full refetch.
+   */
+  async deletePlan(id) {
+    if (!id) return null
+    if (this.pool) {
+      // Capture the soon-to-be-unlinked clients BEFORE the delete so the
+      // returned id list reflects what changed. The FK cascade does the
+      // null update for us; no separate UPDATE needed.
+      const affected = await this.pool.query(
+        `select id from clients where plan_id = $1`,
+        [id],
+      )
+      const result = await this.pool.query(
+        `delete from subscription_plans where id = $1 returning id`,
+        [id],
+      )
+      if (!result.rowCount) return null
+      return {
+        removedPlanId: id,
+        unlinkedClientIds: affected.rows.map((row) => row.id),
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const before = (data.plans ?? []).length
+    data.plans = (data.plans ?? []).filter((plan) => plan.id !== id)
+    if (data.plans.length === before) return null
+    const unlinkedClientIds = []
+    data.clients = (data.clients ?? []).map((client) => {
+      if (client.planId === id) {
+        unlinkedClientIds.push(client.id)
+        return { ...client, planId: null }
+      }
+      return client
+    })
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return { removedPlanId: id, unlinkedClientIds }
+  }
+
   /** Delete one reimbursement. Returns true when a row was removed. */
   async deleteReimbursement(id) {
     if (!id) return false

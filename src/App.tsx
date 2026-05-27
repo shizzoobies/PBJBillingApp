@@ -35,6 +35,7 @@ import {
   addRecurringReimbursementRequest,
   addReimbursementRequest,
   approveWeeklySubmissionRequest,
+  deletePlanRequest,
   deleteRecurringReimbursementRequest,
   deleteReimbursementRequest,
   lockTimesheetRequest,
@@ -2009,6 +2010,38 @@ function App() {
     }))
   }
 
+  /**
+   * Owner-only: permanently delete a subscription plan. Server-side the
+   * `clients.plan_id` FK cascades to null on delete, unlinking any clients
+   * currently on the plan; we mirror that locally so the Clients page and
+   * invoice calculations reflect the change instantly.
+   */
+  const deletePlan = async (planId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const result = await deletePlanRequest(planId)
+      const unlinkedSet = new Set(result.unlinkedClientIds)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        plans: current.plans.filter((plan) => plan.id !== planId),
+        clients: current.clients.map((client) =>
+          unlinkedSet.has(client.id) ? { ...client, planId: null } : client,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
   const printInvoice = () => {
     window.setTimeout(() => window.print(), 50)
   }
@@ -2206,6 +2239,7 @@ function App() {
     deleteClient,
     addClient,
     addPlan,
+    deletePlan,
     selectedClientId,
     setSelectedClientId,
     printInvoice,

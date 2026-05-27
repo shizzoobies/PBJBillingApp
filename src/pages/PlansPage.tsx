@@ -1,15 +1,20 @@
-import { Plus } from 'lucide-react'
+import { Plus, Trash2 } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
-import type { SubscriptionPlan } from '../lib/types'
+import { ApiError, type Client, type SubscriptionPlan } from '../lib/types'
 import { currency } from '../lib/utils'
 
 export function PlansPage() {
-  const { data, addPlan } = useAppContext()
+  const { data, addPlan, deletePlan, ownerMode } = useAppContext()
   return (
     <section className="content-grid two-column" id="plans">
       <PlanBuilder onCreate={addPlan} />
-      <PlanLibrary plans={data.plans} />
+      <PlanLibrary
+        plans={data.plans}
+        clients={data.clients}
+        ownerMode={ownerMode}
+        onDelete={deletePlan}
+      />
     </section>
   )
 }
@@ -96,7 +101,47 @@ function PlanBuilder({
   )
 }
 
-function PlanLibrary({ plans }: { plans: SubscriptionPlan[] }) {
+function PlanLibrary({
+  plans,
+  clients,
+  ownerMode,
+  onDelete,
+}: {
+  plans: SubscriptionPlan[]
+  clients: Client[]
+  ownerMode: boolean
+  onDelete: (planId: string) => Promise<void>
+}) {
+  const [pendingId, setPendingId] = useState<string | null>(null)
+
+  const handleDelete = async (plan: SubscriptionPlan) => {
+    // Tell the owner exactly which clients will be unlinked so they go in
+    // eyes-open. Unlinked clients keep their billing history but flip to
+    // hourly going forward (planId becomes null).
+    const attached = clients.filter((client) => client.planId === plan.id)
+    const attachedSummary =
+      attached.length === 0
+        ? 'No clients are currently on this plan.'
+        : attached.length === 1
+          ? `1 client is on this plan: ${attached[0].name}. They'll be unlinked and start being billed hourly going forward.`
+          : `${attached.length} clients are on this plan: ${attached
+              .map((client) => client.name)
+              .join(', ')}. They'll be unlinked and start being billed hourly going forward.`
+
+    const confirmed = window.confirm(
+      `Delete "${plan.name}"?\n\n${attachedSummary}\n\nPast invoices that used this plan are unaffected. This can't be undone.`,
+    )
+    if (!confirmed) return
+    setPendingId(plan.id)
+    try {
+      await onDelete(plan.id)
+    } catch (error) {
+      window.alert(error instanceof ApiError ? error.message : 'Could not delete the plan.')
+    } finally {
+      setPendingId(null)
+    }
+  }
+
   return (
     <section className="panel">
       <div className="section-heading">
@@ -106,18 +151,38 @@ function PlanLibrary({ plans }: { plans: SubscriptionPlan[] }) {
         </div>
       </div>
       <div className="plan-list">
-        {plans.map((plan) => (
-          <article className="plan-row" key={plan.id}>
-            <div>
-              <strong>{plan.name}</strong>
-              <span>{plan.notes}</span>
-            </div>
-            <div>
-              <strong>{currency.format(plan.monthlyFee)}</strong>
-              <span>{plan.includedHours}h included</span>
-            </div>
-          </article>
-        ))}
+        {plans.map((plan) => {
+          const attachedCount = clients.filter((client) => client.planId === plan.id).length
+          return (
+            <article className="plan-row" key={plan.id}>
+              <div>
+                <strong>{plan.name}</strong>
+                <span>{plan.notes}</span>
+                {attachedCount > 0 ? (
+                  <span className="checklist-meta-line">
+                    {attachedCount} client{attachedCount === 1 ? '' : 's'} on this plan
+                  </span>
+                ) : null}
+              </div>
+              <div>
+                <strong>{currency.format(plan.monthlyFee)}</strong>
+                <span>{plan.includedHours}h included</span>
+              </div>
+              {ownerMode ? (
+                <button
+                  className="item-delete-btn"
+                  type="button"
+                  aria-label={`Delete ${plan.name}`}
+                  title="Delete this plan (any attached clients will be unlinked)"
+                  disabled={pendingId === plan.id}
+                  onClick={() => void handleDelete(plan)}
+                >
+                  <Trash2 size={14} />
+                </button>
+              ) : null}
+            </article>
+          )
+        })}
       </div>
     </section>
   )
