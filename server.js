@@ -850,6 +850,37 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // One-shot maintenance: hard-delete orphan rows whose `client_id`
+    // points to a client that no longer exists. Built to unstick the
+    // "delete never works" symptom that appears after a client deletion
+    // leaves dangling checklists/templates/etc. in the DB. Owner-only.
+    if (normalizedPath === '/api/maintenance/cleanup-orphans') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can run cleanup' })
+        return
+      }
+      try {
+        const counts = await appDataStore.cleanupOrphanedClientData()
+        sendJson(response, 200, { ok: true, removed: counts })
+      } catch (error) {
+        console.error('[cleanup-orphans] failed:', error)
+        sendJson(response, 500, {
+          error: 'cleanup_failed',
+          message: error?.message || String(error),
+          code: error?.code,
+          constraint: error?.constraint,
+          detail: error?.detail,
+        })
+      }
+      return
+    }
+
     if (normalizedPath === '/api/time-entries') {
       const session = await requireSession(request, response)
       if (!session) {

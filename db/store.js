@@ -4030,6 +4030,120 @@ export class AppDataStore {
   }
 
   /**
+   * One-shot maintenance: hard-delete every checklist, checklist-template,
+   * reimbursement, recurring-reimbursement, time-entry, and client-assignment
+   * whose `client_id` points to a client that no longer exists in the DB.
+   * These rows accumulate when a client deletion finishes server-side (the FK
+   * cascade fires) before the client's in-memory cascade has rewritten the
+   * dependent state — or when an earlier autosave failed mid-flight and left
+   * dangling refs. They're invisible to the cascade because the parent client
+   * is already gone, but the bulk-save filter keeps DROPPING them on every
+   * subsequent save (correctly — there's nothing to attach them to), which
+   * makes the user-visible delete attempts feel like they "never stick."
+   *
+   * Returns the counts of removed rows so the caller can show feedback.
+   */
+  async cleanupOrphanedClientData() {
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        const checklistItemsResult = await client.query(`
+          delete from checklist_items
+          where checklist_id in (
+            select id from checklists where client_id not in (select id from clients)
+          )
+        `)
+        const checklistsResult = await client.query(
+          `delete from checklists where client_id not in (select id from clients)`,
+        )
+        const templateItemsResult = await client.query(`
+          delete from checklist_template_items
+          where template_id in (
+            select id from checklist_templates
+            where client_id is not null and client_id not in (select id from clients)
+          )
+        `)
+        const templateStagesResult = await client.query(`
+          delete from checklist_template_stages
+          where template_id in (
+            select id from checklist_templates
+            where client_id is not null and client_id not in (select id from clients)
+          )
+        `)
+        const templatesResult = await client.query(`
+          delete from checklist_templates
+          where client_id is not null and client_id not in (select id from clients)
+        `)
+        const reimbursementsResult = await client.query(
+          `delete from reimbursements where client_id not in (select id from clients)`,
+        )
+        const recurringResult = await client.query(
+          `delete from recurring_reimbursements where client_id not in (select id from clients)`,
+        )
+        const timeEntriesResult = await client.query(
+          `delete from time_entries where client_id not in (select id from clients)`,
+        )
+        const assignmentsResult = await client.query(
+          `delete from client_assignments where client_id not in (select id from clients)`,
+        )
+        await client.query('commit')
+        return {
+          checklists: checklistsResult.rowCount ?? 0,
+          checklistItems: checklistItemsResult.rowCount ?? 0,
+          checklistTemplates: templatesResult.rowCount ?? 0,
+          checklistTemplateItems: templateItemsResult.rowCount ?? 0,
+          checklistTemplateStages: templateStagesResult.rowCount ?? 0,
+          reimbursements: reimbursementsResult.rowCount ?? 0,
+          recurringReimbursements: recurringResult.rowCount ?? 0,
+          timeEntries: timeEntriesResult.rowCount ?? 0,
+          clientAssignments: assignmentsResult.rowCount ?? 0,
+        }
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    // File-fallback mode: filter the in-memory shape against `data.clients`.
+    const data = await readJson(localDataPath)
+    const validClientIds = new Set(
+      Array.isArray(data.clients) ? data.clients.map((c) => c.id) : [],
+    )
+    const isOrphan = (row) => row && row.clientId && !validClientIds.has(row.clientId)
+    const orphanFilter = (rows) => (Array.isArray(rows) ? rows.filter((r) => !isOrphan(r)) : [])
+    const counts = {
+      checklists: 0,
+      checklistItems: 0,
+      checklistTemplates: 0,
+      checklistTemplateItems: 0,
+      checklistTemplateStages: 0,
+      reimbursements: 0,
+      recurringReimbursements: 0,
+      timeEntries: 0,
+      clientAssignments: 0,
+    }
+    const beforeChecklists = Array.isArray(data.checklists) ? data.checklists.length : 0
+    const beforeTemplates = Array.isArray(data.checklistTemplates)
+      ? data.checklistTemplates.length
+      : 0
+    data.checklists = orphanFilter(data.checklists)
+    data.recycledChecklists = orphanFilter(data.recycledChecklists)
+    data.checklistTemplates = (
+      Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []
+    ).filter((t) => !t || !t.clientId || validClientIds.has(t.clientId))
+    data.reimbursements = orphanFilter(data.reimbursements)
+    data.recurringReimbursements = orphanFilter(data.recurringReimbursements)
+    data.timeEntries = orphanFilter(data.timeEntries)
+    counts.checklists = beforeChecklists - data.checklists.length
+    counts.checklistTemplates = beforeTemplates - data.checklistTemplates.length
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return counts
+  }
+
+  /**
    * Add a sub-item (one nested level) under a checklist item. The new sub-item
    * starts `done: false`, which makes a previously-complete parent incomplete —
    * so the parent `done` roll-up is recomputed and persisted. Returns the
