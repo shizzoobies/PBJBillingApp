@@ -139,6 +139,14 @@ function App() {
     brandColor: DEFAULT_FIRM_SETTINGS.brandColor ?? '#3c2044',
   })
   const skipAutosaveRef = useRef(0)
+  // Latched flag that forces the next autosave to fire even when
+  // `skipAutosaveRef` is positive. Set by `updateWorkspaceData` (the
+  // legacy local-only mutators like `deleteClient` / `addClient` /
+  // `addPlan` rely on autosave to actually persist their change). Cleared
+  // the moment the autosave effect honors it. Fixes the race where an
+  // API-backed mutation incremented the skip counter in the same render
+  // window as a local-only delete, swallowing the delete forever.
+  const forceNextSaveRef = useRef(false)
   const role = sessionUser?.role ?? 'employee'
 
   // Preview mode: an owner is viewing the app AS another user. It is strictly
@@ -295,7 +303,15 @@ function App() {
       return
     }
 
-    if (skipAutosaveRef.current > 0) {
+    // If a local-only mutator flagged this save as mandatory (e.g. a
+    // `deleteClient` whose only persistence path is autosave), honor it
+    // — drain the skip counter so we don't double-skip later, and fall
+    // through to the persist branch below. Otherwise, the skip counter
+    // is the normal "post-fetch echo / API-mirror" guard.
+    if (forceNextSaveRef.current) {
+      forceNextSaveRef.current = false
+      skipAutosaveRef.current = 0
+    } else if (skipAutosaveRef.current > 0) {
       skipAutosaveRef.current -= 1
       setDataSyncState('synced')
       return
@@ -379,6 +395,11 @@ function App() {
   }, [activeEmployeeId, data.timeEntries, role])
 
   const updateWorkspaceData = (updater: (current: AppData) => AppData) => {
+    // This mutator path is local-only — there's no companion API call to
+    // persist the change. The autosave is the ONLY way it reaches the
+    // server, so flag the next autosave as mandatory regardless of any
+    // pending skip-counter increments from concurrent API mutations.
+    forceNextSaveRef.current = true
     // Preview mode is strictly read-only: every workspace-config mutator
     // (templates, clients, plans, stages) routes through here, so a single
     // early-return neutralizes all of them at once.
