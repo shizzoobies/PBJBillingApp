@@ -1521,8 +1521,21 @@ export class AppDataStore {
   }
 
   async seedRelationalDataInPostgres() {
-    const result = await this.pool.query('select count(*)::int as count from clients')
-    if (result.rows[0].count > 0) {
+    const clientsResult = await this.pool.query('select count(*)::int as count from clients')
+    if (clientsResult.rows[0].count > 0) {
+      return
+    }
+
+    // PREVIOUSLY: we only checked the clients count, so any workspace
+    // that had intentionally cleared its seed clients (active OR inactive
+    // owner) got re-seeded on every server boot — every Railway redeploy
+    // resurrected the demo clients, the orphan templates, and the orphan
+    // checklists. The user-visible symptom: "I deleted everything and
+    // came back later and it's all back." Now we also require zero users.
+    // If any user row exists, the workspace was set up by a real person
+    // at some point — never re-seed, even if the clients list is empty.
+    const usersResult = await this.pool.query('select count(*)::int as count from users')
+    if (usersResult.rows[0].count > 0) {
       return
     }
 
