@@ -2074,13 +2074,27 @@ export class AppDataStore {
         await client.query('delete from subscription_plans')
 
         for (const employee of data.employees) {
+          // PRESERVE existing email like we preserve password_hash. The
+          // synthetic `${id}@pbj.local` is a placeholder used only on
+          // first-time insert; once the owner has set a real email
+          // (e.g., for magic-link sign-in), we must NEVER overwrite it
+          // on subsequent bulk saves — doing so locked the owner out of
+          // their account when they tried to log in with their real
+          // address and the DB only had the placeholder.
           await client.query(
             `
               insert into users (id, name, email, role, staff_role, password_hash, updated_at)
-              values ($1, $2, $3, $4, $5, coalesce((select password_hash from users where id = $1), $6), now())
+              values (
+                $1,
+                $2,
+                coalesce((select email from users where id = $1), $3),
+                $4,
+                $5,
+                coalesce((select password_hash from users where id = $1), $6),
+                now()
+              )
               on conflict (id) do update
               set name = excluded.name,
-                  email = excluded.email,
                   role = excluded.role,
                   staff_role = excluded.staff_role,
                   updated_at = now()
@@ -4036,6 +4050,27 @@ export class AppDataStore {
     data.recycledChecklists = []
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return removed
+  }
+
+  /**
+   * One-shot maintenance: set a user's email address by id. Used to
+   * restore real email addresses after the bulk-save bug overwrote them
+   * with the synthetic `${id}@pbj.local` placeholder. Touches ONLY the
+   * email column — password, 2FA secret, backup codes, sessions, and
+   * every FK on user_id all stay intact (user_id is the primary key
+   * everything else attaches to).
+   *
+   * Returns the user id when updated, or `null` if no row matched.
+   */
+  async setUserEmail(userId, email) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update users set email = $2, updated_at = now() where id = $1 returning id`,
+        [userId, String(email).trim()],
+      )
+      return result.rowCount ? userId : null
+    }
+    return null
   }
 
   /**

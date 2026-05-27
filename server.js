@@ -854,6 +854,51 @@ const server = createServer(async (request, response) => {
     // points to a client that no longer exists. Built to unstick the
     // "delete never works" symptom that appears after a client deletion
     // leaves dangling checklists/templates/etc. in the DB. Owner-only.
+    // One-shot maintenance: set a user's email by id. Built to undo the
+    // bulk-save bug that overwrote real email addresses with the
+    // synthetic `${id}@pbj.local` placeholder, locking the owner out
+    // of magic-link sign-in. Owner-only. Touches only the email column
+    // — 2FA, password, sessions all preserved.
+    if (normalizedPath === '/api/maintenance/set-user-emails') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can update emails' })
+        return
+      }
+      try {
+        const body = await readJsonBody(request)
+        const updates = Array.isArray(body?.updates) ? body.updates : []
+        if (updates.length === 0) {
+          sendJson(response, 400, { error: 'Body must include a non-empty `updates` array of {userId, email}' })
+          return
+        }
+        const results = []
+        for (const update of updates) {
+          if (!update || typeof update.userId !== 'string' || typeof update.email !== 'string') {
+            results.push({ userId: update?.userId, ok: false, reason: 'invalid_shape' })
+            continue
+          }
+          const updated = await appDataStore.setUserEmail(update.userId, update.email)
+          results.push({ userId: update.userId, ok: !!updated, email: update.email })
+        }
+        sendJson(response, 200, { ok: true, results })
+      } catch (error) {
+        console.error('[set-user-emails] failed:', error)
+        sendJson(response, 500, {
+          error: 'set_user_emails_failed',
+          message: error?.message || String(error),
+          code: error?.code,
+          constraint: error?.constraint,
+        })
+      }
+      return
+    }
+
     if (normalizedPath === '/api/maintenance/cleanup-orphans') {
       const session = await requireSession(request, response)
       if (!session) return
