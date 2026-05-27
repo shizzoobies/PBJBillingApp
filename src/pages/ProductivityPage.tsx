@@ -121,10 +121,23 @@ export function ProductivityPage() {
     return () => controller.abort()
   }, [fromIso, toIso, ownerMode])
 
+  // ----- Current team toggle (defaults to ON: only active members) -----
+  // When off, we union active + inactive (soft-deleted) employees so the
+  // breakdown surfaces historical contributions from former team members.
+  // Plain local state — the toggle isn't worth round-tripping through URL.
+  const [currentTeamOnly, setCurrentTeamOnly] = useState(true)
+
   // ----- Derived: per-employee stats -----
-  const employees: Employee[] = useMemo(
-    () => data.employees.filter((emp) => emp.role !== 'Owner'),
-    [data.employees],
+  const employees: Employee[] = useMemo(() => {
+    const active = data.employees.filter((emp) => emp.role !== 'Owner')
+    if (currentTeamOnly) return active
+    const inactive = (data.inactiveEmployees ?? []).filter((emp) => emp.role !== 'Owner')
+    return [...active, ...inactive]
+  }, [data.employees, data.inactiveEmployees, currentTeamOnly])
+
+  const inactiveCount = useMemo(
+    () => (data.inactiveEmployees ?? []).filter((emp) => emp.role !== 'Owner').length,
+    [data.inactiveEmployees],
   )
 
   const businessDays = useMemo(() => businessDaysIn(fromIso, toIso), [fromIso, toIso])
@@ -307,6 +320,21 @@ export function ProductivityPage() {
             Weekly
           </button>
         </div>
+
+        {inactiveCount > 0 ? (
+          <label
+            className="productivity-control"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            title={`${inactiveCount} former team member${inactiveCount === 1 ? '' : 's'} on file`}
+          >
+            <input
+              type="checkbox"
+              checked={currentTeamOnly}
+              onChange={(event) => setCurrentTeamOnly(event.target.checked)}
+            />
+            <span>Current team only</span>
+          </label>
+        ) : null}
 
         <label className="productivity-control">
           <span>Person</span>

@@ -301,6 +301,9 @@ function scopeAppDataForSession(session, data) {
     weeklySubmissions,
     reimbursements,
     recurringReimbursements,
+    // Soft-deleted team members are owner-only — bookkeepers never see
+    // historical analytics data, so they don't need the inactive list.
+    inactiveEmployees: [],
     // Recycle bin is owner-only — bookkeepers never see it. Empty array
     // (rather than undefined) so the client code can iterate without a
     // null check, and old front-ends still receive a present field.

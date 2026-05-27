@@ -166,6 +166,17 @@ function OwnerDashboardView() {
   const queueLater = myChecklists.filter((c) => c.dueDate && c.dueDate > weekEndIso)
 
   const teammates = data.employees.filter((e) => e.role !== 'Owner')
+  // Soft-deleted team members (owner-only — bookkeepers get an empty
+  // array). Used for the "current team only" analytics toggle on the
+  // Team section below. Doesn't affect the "preview as" picker, which
+  // sticks to active members only.
+  const inactiveTeammates = (data.inactiveEmployees ?? []).filter(
+    (e) => e.role !== 'Owner',
+  )
+  const [currentTeamOnly, setCurrentTeamOnly] = useState(true)
+  const analyticsMembers = currentTeamOnly
+    ? teammates
+    : [...teammates, ...inactiveTeammates]
 
   const casesInFlight = useMemo(() => {
     const byCase = new Map<string, Checklist[]>()
@@ -344,14 +355,38 @@ function OwnerDashboardView() {
       </section>
 
       <section className="dashboard-section" aria-label="Team">
-        <h2>Team</h2>
-        {teammates.length === 0 ? (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            justifyContent: 'space-between',
+            gap: 12,
+          }}
+        >
+          <h2 style={{ margin: 0 }}>Team</h2>
+          {inactiveTeammates.length > 0 ? (
+            <label
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}
+              title={`${inactiveTeammates.length} former team member${
+                inactiveTeammates.length === 1 ? '' : 's'
+              } on file`}
+            >
+              <input
+                type="checkbox"
+                checked={currentTeamOnly}
+                onChange={(event) => setCurrentTeamOnly(event.target.checked)}
+              />
+              <span>Current team only</span>
+            </label>
+          ) : null}
+        </div>
+        {analyticsMembers.length === 0 ? (
           <p className="empty-state">
             No bookkeepers yet. <Link to="/team">Invite one →</Link>
           </p>
         ) : (
           <div className="dashboard-team-grid">
-            {teammates.map((member) => {
+            {analyticsMembers.map((member) => {
               const memberChecklists = data.checklists.filter(
                 (c) => c.assigneeId === member.id && !isComplete(c),
               )

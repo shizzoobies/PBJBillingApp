@@ -756,6 +756,11 @@ export class AppDataStore {
       await this.pool.query(`alter table users add column if not exists magic_token text`)
       await this.pool.query(`alter table users add column if not exists token_revoked_at timestamptz`)
       await this.pool.query(`alter table users add column if not exists last_active_at timestamptz`)
+      // Soft-delete marker for team members. Null = active. Non-null =
+      // owner removed them; they can no longer sign in or be assigned new
+      // work, but their historical time entries / completed checklists
+      // stay attributed for analytics. See `deleteTeamMember`.
+      await this.pool.query(`alter table users add column if not exists inactive_at timestamptz`)
       await this.pool.query(`
         create unique index if not exists users_magic_token_unique on users (magic_token)
         where magic_token is not null
@@ -1497,11 +1502,17 @@ export class AppDataStore {
         weeklySubmissionsResult,
         reimbursementsResult,
         recurringReimbursementsResult,
+        inactiveUsersResult,
       ] =
         await Promise.all([
+          // Active team only — soft-deleted users have inactive_at set and
+          // appear in the separate `inactiveUsersResult` below so the UI
+          // can offer "current team only" vs "include former" toggles
+          // without conflating the two lists.
           this.pool.query(`
             select id, name, role
             from users
+            where inactive_at is null
             order by case when role = 'owner' then 0 else 1 end, name asc
           `),
           this.pool.query(`
@@ -1577,6 +1588,15 @@ export class AppDataStore {
             select id, client_id, description, amount, frequency, start_date
             from recurring_reimbursements
             order by start_date desc, id asc
+          `),
+          // Soft-deleted (former) team members for the analytics "include
+          // historical team" toggle. Same Employee shape as active users
+          // but with an `inactiveAt` timestamp so the UI can label them.
+          this.pool.query(`
+            select id, name, role, inactive_at
+            from users
+            where inactive_at is not null
+            order by inactive_at desc, name asc
           `),
         ])
 
@@ -1792,6 +1812,12 @@ export class AppDataStore {
           frequency: row.frequency,
           startDate: row.start_date.toISOString().slice(0, 10),
         })),
+        inactiveEmployees: inactiveUsersResult.rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          role: dbRoleToEmployeeRole(row.role),
+          inactiveAt: row.inactive_at ? row.inactive_at.toISOString() : null,
+        })),
       }
 
       if (data.checklistTemplates.length === 0) {
@@ -1856,6 +1882,11 @@ export class AppDataStore {
 
     if (!Array.isArray(data.recurringReimbursements)) {
       data.recurringReimbursements = []
+      backfilled = true
+    }
+
+    if (!Array.isArray(data.inactiveEmployees)) {
+      data.inactiveEmployees = []
       backfilled = true
     }
 
@@ -4307,10 +4338,14 @@ export class AppDataStore {
 
   async getTeamMembers() {
     if (this.pool) {
+      // Active members only — soft-deleted users still exist in the table
+      // (for historical analytics) but should never show up on the Team
+      // admin page. Owner re-adds with a fresh invite to undo a removal.
       const result = await this.pool.query(`
         select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at, created_at,
                totp_enabled
         from users
+        where inactive_at is null
         order by case when role = 'owner' then 0 else 1 end, name asc
       `)
 
@@ -4329,7 +4364,7 @@ export class AppDataStore {
     }
 
     const authState = await readJson(localAuthPath)
-    return (authState.users ?? []).map((user) => ({
+    return (authState.users ?? []).filter((user) => !user.inactiveAt).map((user) => ({
       id: user.id,
       name: user.name,
       email: user.email,
@@ -4483,33 +4518,47 @@ export class AppDataStore {
   }
 
   /**
-   * Remove a team member without barriers: reassigns every FK-blocking
-   * reference (checklists, templates, template stages, time entries) to the
-   * calling owner so billing history and in-flight work survive, clears the
-   * user from every viewer / editor / assigned-team array, deletes their
-   * timesheet locks, then drops the user row. Wrapped in a single Postgres
-   * transaction so a failure mid-way doesn't leave a half-removed user.
+   * SOFT-delete a team member. The user row stays in the DB with an
+   * `inactive_at` timestamp set; their time entries (and any other
+   * historical attribution) remain pointed at them so the analytics
+   * pages' "include former team members" toggle has real data to show.
    *
-   * `ownerId` is the id of the owner performing the delete — used as the new
-   * assignee for anything that has a NOT NULL assignee FK. The owner can
-   * triage the reassigned items afterwards (the recycle bin handles tasks
-   * they want gone entirely).
+   * What still happens:
+   *  - Active in-flight checklists / templates / template stages get
+   *    reassigned to the calling owner so work doesn't stall.
+   *  - Nullable per-item assignee fields are cleared.
+   *  - Viewer / editor / assigned_bookkeeper arrays drop the user id
+   *    (no lingering visibility).
+   *  - All of their sessions are revoked (logged out of every device).
+   *  - Their pending login tokens are revoked.
+   *  - Magic token nulled so any old emailed link goes dead.
    *
-   * Returns `{ ok: true }` on success or `{ ok: false, reason: 'not_found' }`
-   * when no matching user exists. No more `has_checklists` rejection — the
-   * cleanup above guarantees the final DELETE never violates a FK.
+   * What changed from the prior hard-delete behaviour:
+   *  - Time entries STAY attributed to them (was: reassigned to owner).
+   *  - `time_entries.approved_by` STAYS pointed at them when they approved.
+   *  - Timesheet locks STAY (they're historical sign-offs).
+   *  - The user row itself stays.
+   *
+   * `ownerId` is the calling owner — still used as the new assignee for
+   * the FK-restricted active-work tables. Wrapped in a transaction so a
+   * partial failure doesn't leave a half-removed user.
+   *
+   * Returns { ok: true } on success or { ok: false, reason: 'not_found' }
+   * when the user doesn't exist (or is already inactive).
    */
   async deleteTeamMember(userId, ownerId) {
+    const inactiveAt = nowIso()
+
     if (this.pool) {
       const client = await this.pool.connect()
       try {
         await client.query('begin')
 
-        // Reassign every NOT NULL assignee_id FK to the owner so the final
-        // DELETE doesn't trip `on delete restrict`. Covers active AND
-        // recycled checklists — both still carry the foreign-key reference.
+        // Reassign every NOT NULL assignee_id FK to the owner so the
+        // remaining active work has an actual assignee. The user row
+        // STAYS so historical attribution survives.
         await client.query(
-          `update checklists set assignee_id = $1 where assignee_id = $2`,
+          `update checklists set assignee_id = $1 where assignee_id = $2 and deleted_at is null`,
           [ownerId, userId],
         )
         await client.query(
@@ -4521,8 +4570,8 @@ export class AppDataStore {
           [ownerId, userId],
         )
 
-        // Per-item assignee columns are nullable text (no FK). Just clear
-        // them so the owner sees an unassigned step rather than a ghost name.
+        // Per-item assignee columns are nullable text — clear so the
+        // owner sees an unassigned step rather than a ghost name.
         await client.query(
           `update checklist_items set assignee_id = null where assignee_id = $1`,
           [userId],
@@ -4532,9 +4581,8 @@ export class AppDataStore {
           [userId],
         )
 
-        // Viewer / editor arrays carry no FK — strip the id everywhere it
-        // could grant lingering visibility. `array_remove` is a no-op when
-        // the id is absent, so the where-guard is purely an optimisation.
+        // Strip from every visibility array — they shouldn't see new
+        // anything. (Historical attribution doesn't depend on these.)
         await client.query(
           `update checklists
              set viewer_ids = array_remove(viewer_ids, $1),
@@ -4556,9 +4604,6 @@ export class AppDataStore {
              where $1 = any(viewer_ids) or $1 = any(editor_ids)`,
           [userId],
         )
-
-        // Client-level assigned-team list (the dropdown source used by the
-        // time-tracking scope) — strip the removed user from every client.
         await client.query(
           `update clients
              set assigned_bookkeeper_ids = array_remove(assigned_bookkeeper_ids, $1)
@@ -4566,34 +4611,28 @@ export class AppDataStore {
           [userId],
         )
 
-        // Time entries: reassign to the owner so billing history survives
-        // (the FK is `on delete restrict`, so leaving them dangling isn't an
-        // option). The owner now sees those hours under their name — a
-        // deliberate trade for keeping the data alive after a user is gone.
+        // Revoke sessions + magic tokens so the user can't continue
+        // using an open tab and any stale email link won't work.
+        await client.query(`delete from sessions where user_id = $1`, [userId])
+        await client.query(`delete from login_tokens where user_id = $1`, [userId])
         await client.query(
-          `update time_entries set user_id = $1 where user_id = $2`,
-          [ownerId, userId],
-        )
-        // `approved_by` is a plain text column with no FK; null it so the
-        // approval audit doesn't point at a missing user.
-        await client.query(
-          `update time_entries set approved_by = null where approved_by = $1`,
-          [userId],
+          `update users
+             set magic_token = null,
+                 token_revoked_at = now(),
+                 inactive_at = $2,
+                 updated_at = now()
+             where id = $1 and inactive_at is null`,
+          [userId, inactiveAt],
         )
 
-        // Timesheet locks are per-user metadata; nothing else references them.
-        await client.query(
-          `delete from timesheet_locks where user_id = $1 or locked_by = $1`,
+        // Check the update touched a row (i.e. the user existed AND was
+        // active). If not, this was a no-op — return not_found so the
+        // caller can show a proper error.
+        const verify = await client.query(
+          `select 1 from users where id = $1 and inactive_at is not null`,
           [userId],
         )
-
-        // `client_assignments.user_id` cascades automatically when the user
-        // row goes. Finally drop the user themselves.
-        const result = await client.query(
-          `delete from users where id = $1 returning id`,
-          [userId],
-        )
-        if (!result.rowCount) {
+        if (!verify.rowCount) {
           await client.query('rollback')
           return { ok: false, reason: 'not_found' }
         }
@@ -4615,7 +4654,12 @@ export class AppDataStore {
 
     const reassignChecklist = (checklist) => ({
       ...checklist,
-      assigneeId: checklist.assigneeId === userId ? ownerId : checklist.assigneeId,
+      // Only reassign active (non-recycled) checklists; recycled ones
+      // are historical and should stay attributed.
+      assigneeId:
+        checklist.assigneeId === userId && !checklist.deletedAt
+          ? ownerId
+          : checklist.assigneeId,
       viewerIds: stripArrayId(checklist.viewerIds),
       editorIds: stripArrayId(checklist.editorIds),
       items: Array.isArray(checklist.items)
@@ -4654,25 +4698,23 @@ export class AppDataStore {
       assignedEmployeeIds: stripArrayId(client.assignedEmployeeIds),
     }))
 
-    data.timeEntries = (data.timeEntries ?? []).map((entry) => ({
-      ...entry,
-      employeeId: entry.employeeId === userId ? ownerId : entry.employeeId,
-      ...(entry.approvedBy === userId ? { approvedBy: undefined } : {}),
-    }))
-
-    data.timesheetLocks = (data.timesheetLocks ?? []).filter(
-      (lock) => lock.userId !== userId && lock.lockedBy !== userId,
-    )
+    // NOTE: time entries + timesheet locks are NOT touched. They stay
+    // attributed to the (now inactive) user so analytics preserve history.
 
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
 
     const authState = await readJson(localAuthPath)
-    const before = (authState.users ?? []).length
-    authState.users = (authState.users ?? []).filter((user) => user.id !== userId)
-    if (authState.users.length === before) {
+    const target = (authState.users ?? []).find((user) => user.id === userId)
+    if (!target || target.inactiveAt) {
       return { ok: false, reason: 'not_found' }
     }
+    target.inactiveAt = inactiveAt
+    target.magicToken = null
+    target.tokenRevokedAt = inactiveAt
     authState.sessions = (authState.sessions ?? []).filter((session) => session.userId !== userId)
+    authState.loginTokens = (authState.loginTokens ?? []).filter(
+      (token) => token.userId !== userId,
+    )
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return { ok: true }
   }
@@ -5536,8 +5578,13 @@ export class AppDataStore {
     if (!trimmed) return null
 
     if (this.pool) {
+      // Skip soft-deleted users — they shouldn't be able to sign in via
+      // password OR receive a magic link. From the caller's perspective
+      // an inactive user is indistinguishable from a missing one.
       const result = await this.pool.query(
-        `select id, name, email, role, staff_role, password_hash from users where lower(email) = $1`,
+        `select id, name, email, role, staff_role, password_hash
+         from users
+         where lower(email) = $1 and inactive_at is null`,
         [trimmed],
       )
       if (!result.rowCount) return null
@@ -5557,7 +5604,10 @@ export class AppDataStore {
 
     const authState = await readJson(localAuthPath)
     const user = (authState.users ?? []).find(
-      (entry) => entry.email && entry.email.toLowerCase() === trimmed,
+      (entry) =>
+        entry.email &&
+        entry.email.toLowerCase() === trimmed &&
+        !entry.inactiveAt,
     )
     if (!user) return null
     return {
@@ -5641,6 +5691,11 @@ export class AppDataStore {
          set consumed_at = coalesce(consumed_at, $2)
          where token = $1
            and expires_at > now()
+           and exists (
+             select 1 from users
+             where users.id = login_tokens.user_id
+               and users.inactive_at is null
+           )
          returning user_id`,
         [token, consumedAt],
       )
@@ -5653,6 +5708,9 @@ export class AppDataStore {
     authState.loginTokens = (authState.loginTokens ?? []).map((entry) => {
       if (entry.token !== token) return entry
       if (new Date(entry.expiresAt).getTime() <= Date.now()) return entry
+      // Reject if the user has been soft-deleted since the token was issued.
+      const user = (authState.users ?? []).find((u) => u.id === entry.userId)
+      if (!user || user.inactiveAt) return entry
       resolved = { userId: entry.userId }
       // First-use telemetry only — don't gate on it.
       return entry.consumedAt ? entry : { ...entry, consumedAt }

@@ -12,6 +12,15 @@ export type Employee = {
   id: string
   name: string
   role: 'Bookkeeper' | 'Accountant' | 'Owner'
+  /**
+   * ISO timestamp set when an owner removes the team member via the
+   * Team page. Only present on entries in `AppData.inactiveEmployees`;
+   * absent (or null) on every active member in `AppData.employees`.
+   * Inactive members can't sign in or be assigned new work, but their
+   * historical attribution on time entries and completed checklists is
+   * preserved for the analytics "include former team members" toggle.
+   */
+  inactiveAt?: string | null
 }
 
 export type Client = {
@@ -312,6 +321,13 @@ export const DEFAULT_FIRM_SETTINGS: FirmSettings = {
 
 export type AppData = {
   employees: Employee[]
+  /**
+   * Soft-deleted (removed) team members. Owner-only — non-owners see an
+   * empty array via server-side scoping. Used by analytics pages so a
+   * "include former team members" toggle has real historical data to
+   * surface; not used anywhere else.
+   */
+  inactiveEmployees: Employee[]
   clients: Client[]
   plans: SubscriptionPlan[]
   timeEntries: TimeEntry[]

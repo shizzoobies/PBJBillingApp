@@ -1763,13 +1763,20 @@ function App() {
   }
 
   /**
-   * Remove a team member without barriers. The server reassigns every
-   * FK-blocking reference (checklist / template / time-entry assignees) to
-   * the calling owner, strips the user from viewer / editor / assigned-team
-   * arrays, deletes their timesheet locks, then drops the user row. We
-   * mirror that exact cleanup on local state in one `applyServerDataUpdate`
-   * so the rest of the UI (Checklists page, Time page, Productivity, etc.)
-   * reflects the change immediately without waiting for a refetch.
+   * Soft-delete a team member. The server stamps `inactive_at` on their
+   * user row (so historical attribution on time entries / completed
+   * checklists survives), reassigns FK-blocking ACTIVE work to the
+   * calling owner, strips them from viewer / editor / assigned-team
+   * arrays, and revokes their sessions. We mirror locally so the UI
+   * reflects the change instantly:
+   *  - Move them from `employees` to `inactiveEmployees` (with
+   *    `inactiveAt` set) — analytics' "include former team" toggle
+   *    surfaces them from there.
+   *  - Reassign assignees on ACTIVE checklists / templates / stages
+   *    (matching the server's `where deleted_at is null` scope; the
+   *    recycle bin keeps its original assignee for the audit trail).
+   *  - Strip permission arrays.
+   *  - LEAVE time entries and timesheet locks alone — they're history.
    *
    * Preview mode is blocked the same way the rest of the write surface is.
    */
@@ -1780,6 +1787,7 @@ function App() {
     try {
       setDataSyncState('saving')
       await deleteTeamMemberRequest(userId)
+      const inactiveAt = new Date().toISOString()
 
       const stripArrayId = (arr: string[] | undefined) =>
         Array.isArray(arr) ? arr.filter((id) => id !== userId) : (arr ?? [])
@@ -1794,7 +1802,7 @@ function App() {
           return next
         }
 
-        const reassignChecklist = (checklist: AppData['checklists'][number]) => ({
+        const reassignActiveChecklist = (checklist: AppData['checklists'][number]) => ({
           ...checklist,
           assigneeId:
             checklist.assigneeId === userId ? ownerId : checklist.assigneeId,
@@ -1807,10 +1815,18 @@ function App() {
             : checklist.items,
         })
 
+        const removed = current.employees.find((employee) => employee.id === userId)
+        const remainingEmployees = current.employees.filter((employee) => employee.id !== userId)
+        const nextInactive = removed
+          ? [{ ...removed, inactiveAt }, ...(current.inactiveEmployees ?? [])]
+          : (current.inactiveEmployees ?? [])
+
         return {
           ...current,
-          checklists: current.checklists.map(reassignChecklist),
-          recycledChecklists: (current.recycledChecklists ?? []).map(reassignChecklist),
+          // Active checklists get reassigned; recycled ones keep their
+          // original assignee (now pointing at an inactive user, which
+          // is fine because the user row still exists for lookups).
+          checklists: current.checklists.map(reassignActiveChecklist),
           checklistTemplates: current.checklistTemplates.map((template) => ({
             ...template,
             assigneeId:
@@ -1837,18 +1853,10 @@ function App() {
             assignedBookkeeperIds: stripArrayId(client.assignedBookkeeperIds),
             assignedEmployeeIds: stripArrayId(client.assignedEmployeeIds),
           })),
-          timeEntries: current.timeEntries.map((entry) => ({
-            ...entry,
-            employeeId: entry.employeeId === userId ? ownerId : entry.employeeId,
-            ...(entry.approvedBy === userId ? { approvedBy: undefined } : {}),
-          })),
-          timesheetLocks: (current.timesheetLocks ?? []).filter(
-            (lock) => lock.userId !== userId && lock.lockedBy !== userId,
-          ),
-          // The user-list `employees` array is also indexed by id everywhere
-          // (assignee names, dropdowns) — remove the row so they disappear
-          // from every selector without a refetch.
-          employees: current.employees.filter((employee) => employee.id !== userId),
+          // Time entries + timesheet locks intentionally untouched so
+          // analytics can still attribute the work / sign-offs.
+          employees: remainingEmployees,
+          inactiveEmployees: nextInactive,
         }
       })
       setDataSyncState('synced')

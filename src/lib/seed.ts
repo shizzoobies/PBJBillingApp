@@ -325,5 +325,6 @@ export function createSeedData(): AppData {
     weeklySubmissions: [],
     reimbursements: [],
     recurringReimbursements: [],
+    inactiveEmployees: [],
   }
 }

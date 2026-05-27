@@ -1,4 +1,5 @@
 import { Download, Printer } from 'lucide-react'
+import { useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
@@ -23,9 +24,22 @@ import {
 export function ReportsPage() {
   const { data, billingPeriod, ownerMode } = useAppContext()
 
+  // Toggle: default ON shows only current team members; flip off to fold
+  // in former (soft-deleted) team members so their historical hours are
+  // still attributed in the breakdown.
+  const [currentTeamOnly, setCurrentTeamOnly] = useState(true)
+
   if (!ownerMode) {
     return null
   }
+
+  const inactiveEmployees = (data.inactiveEmployees ?? []).filter(
+    (employee) => employee.role !== 'Owner',
+  )
+  const employeesForReport = currentTeamOnly
+    ? data.employees
+    : [...data.employees, ...inactiveEmployees]
+  const employeesForNameLookup = [...data.employees, ...inactiveEmployees]
 
   const billingPeriodEntries = data.timeEntries.filter((entry) =>
     isInBillingPeriod(entry, billingPeriod),
@@ -53,7 +67,7 @@ export function ReportsPage() {
   const ownerTrackedMinutes = ownerBillableMinutes + ownerInternalMinutes
   const activeClientCount = new Set(billingPeriodEntries.map((entry) => entry.clientId)).size
 
-  const employeeReportRows: EmployeeReportRow[] = data.employees
+  const employeeReportRows: EmployeeReportRow[] = employeesForReport
     .filter((employee) => employee.role !== 'Owner')
     .map((employee) => {
       const entries = billingPeriodEntries.filter((entry) => entry.employeeId === employee.id)
@@ -129,6 +143,21 @@ export function ReportsPage() {
     <section className="content-grid reports-layout" id="reports">
       <PrintHeader title="Owner Reports" subtitle={billingPeriodLabel} />
       <div className="page-actions no-print">
+        {inactiveEmployees.length > 0 ? (
+          <label
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginRight: 8 }}
+            title={`${inactiveEmployees.length} former team member${
+              inactiveEmployees.length === 1 ? '' : 's'
+            } on file`}
+          >
+            <input
+              type="checkbox"
+              checked={currentTeamOnly}
+              onChange={(event) => setCurrentTeamOnly(event.target.checked)}
+            />
+            <span>Current team only</span>
+          </label>
+        ) : null}
         <button
           type="button"
           className="ghost-action"
@@ -146,7 +175,7 @@ export function ReportsPage() {
         clientRows={clientReportRows}
         clients={data.clients}
         employeeRows={employeeReportRows}
-        employees={data.employees}
+        employees={employeesForNameLookup}
         ownerBillableMinutes={ownerBillableMinutes}
         ownerInternalMinutes={ownerInternalMinutes}
         ownerInvoiceTotal={ownerInvoiceTotal}
