@@ -1869,10 +1869,19 @@ export class AppDataStore {
         })),
       }
 
-      if (data.checklistTemplates.length === 0) {
-        const seed = await this.getSeedData()
-        data.checklistTemplates = seed.checklistTemplates ?? []
-      }
+      // PREVIOUSLY: when `data.checklistTemplates.length === 0` we re-injected
+      // the seed templates on every read as a safety net. That turned every
+      // page reload into a re-seed loop for any workspace whose templates
+      // had been intentionally cleared (e.g., after the user deleted all
+      // their clients) — the seed templates carry past `nextDueDate`s and
+      // orphan `clientId`s pointing at the seed clients, so the materializer
+      // immediately backfilled fresh checklists for every missed period.
+      // Those checklists were then dropped by the bulk-save orphan filter
+      // on the writeback, but the response returned the spawned data anyway,
+      // so the user saw "ALL the checklists are back again" every refresh.
+      // Workspace setup belongs to the user, not to a silent reload effect.
+      // First-time bootstrap is still handled by `seedRelationalDataInPostgres`
+      // (which only fires when the clients table is empty during init).
 
       data.firmSettings = await this.getFirmSettings()
 
