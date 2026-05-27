@@ -1,6 +1,31 @@
 import type { AppData } from './types'
 import { dateOffset } from './utils'
 
+/**
+ * Empty workspace shape for React state initialization BEFORE the real
+ * workspace is fetched from the server. Using the rich `createSeedData`
+ * blueprint for that role made the UI flash demo clients / templates /
+ * checklists on every reload until the fetch resolved — which made
+ * just-deleted items briefly reappear. The empty shape renders nothing
+ * instead.
+ */
+export function createEmptyAppData(): AppData {
+  return {
+    employees: [],
+    clients: [],
+    plans: [],
+    timeEntries: [],
+    checklistTemplates: [],
+    checklists: [],
+    recycledChecklists: [],
+    timesheetLocks: [],
+    weeklySubmissions: [],
+    reimbursements: [],
+    recurringReimbursements: [],
+    inactiveEmployees: [],
+  }
+}
+
 export function createSeedData(): AppData {
   return {
     employees: [

@@ -57,7 +57,7 @@ import {
   updateChecklistItemRequest,
   updateTimeEntryRequest,
 } from './lib/api'
-import { createSeedData } from './lib/seed'
+import { createEmptyAppData } from './lib/seed'
 import {
   ApiError,
   DEFAULT_FIRM_SETTINGS,
@@ -120,7 +120,10 @@ function OwnerOnly({
 }
 
 function App() {
-  const [data, setData] = useState<AppData>(createSeedData)
+  // Empty workspace until the server fetch resolves — avoids the flash
+  // of stale demo clients / checklists on reload that made just-deleted
+  // items briefly reappear before the real data arrived.
+  const [data, setData] = useState<AppData>(createEmptyAppData)
   const [authState, setAuthState] = useState<AuthState>('loading')
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null)
   const [dataSyncState, setDataSyncState] = useState<DataSyncState>('loading')
