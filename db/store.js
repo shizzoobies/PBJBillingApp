@@ -536,7 +536,45 @@ function backfillAssignedBookkeepers(data) {
   return { changed, clients: nextClients }
 }
 
-function materializeRecurringChecklists(data) {
+/**
+ * Drop rows from a bulk-save batch whose FK refs no longer exist in the
+ * post-filter id sets. Pure function so it can be exercised in unit tests
+ * without spinning up a DB pool. Returns the kept rows; logs the dropped
+ * ones at warn level for Railway log forensics.
+ *
+ * IMPORTANT: `getRefs(row)` should only return ref kinds that map to
+ * REAL foreign keys in the schema. Returning a ref for a plain text
+ * column (no FK) will silently nuke valid rows for no benefit — that
+ * was the bug that caused recycled-bin tombstones referencing missing
+ * templates to vanish on autosave, which then let the materializer
+ * respawn the deleted instance on the next read.
+ */
+export function filterBulkSaveOrphans(rows, { validClientIds, validTemplateIds, label, getRefs }) {
+  if (!Array.isArray(rows)) return []
+  const kept = []
+  const dropped = []
+  for (const row of rows) {
+    const refs = getRefs(row) || {}
+    const bad = []
+    if (refs.clientId && !validClientIds.has(refs.clientId)) {
+      bad.push({ kind: 'client', id: refs.clientId })
+    }
+    if (refs.templateId && validTemplateIds && !validTemplateIds.has(refs.templateId)) {
+      bad.push({ kind: 'template', id: refs.templateId })
+    }
+    if (bad.length > 0) {
+      dropped.push({ id: row?.id, bad })
+    } else {
+      kept.push(row)
+    }
+  }
+  if (dropped.length > 0) {
+    console.warn(`[bulk-save] dropped ${dropped.length} orphan ${label}:`, dropped)
+  }
+  return kept
+}
+
+export function materializeRecurringChecklists(data) {
   const templates = Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []
   if (templates.length === 0) {
     const backfill = backfillAssignedBookkeepers(data)
@@ -1955,33 +1993,8 @@ export class AppDataStore {
       // front so the closure below doesn't hit a TDZ on first call.
       const validTemplateIds = new Set()
 
-      const filterOrphans = (rows, label, getRefs) => {
-        if (!Array.isArray(rows)) return []
-        const kept = []
-        const dropped = []
-        for (const row of rows) {
-          const refs = getRefs(row) || {}
-          const bad = []
-          if (refs.clientId && !validClientIds.has(refs.clientId)) {
-            bad.push({ kind: 'client', id: refs.clientId })
-          }
-          if (refs.templateId && !validTemplateIds.has(refs.templateId)) {
-            bad.push({ kind: 'template', id: refs.templateId })
-          }
-          if (bad.length > 0) {
-            dropped.push({ id: row?.id, bad })
-          } else {
-            kept.push(row)
-          }
-        }
-        if (dropped.length > 0) {
-          console.warn(
-            `[bulk-save] dropped ${dropped.length} orphan ${label}:`,
-            dropped,
-          )
-        }
-        return kept
-      }
+      const filterOrphans = (rows, label, getRefs) =>
+        filterBulkSaveOrphans(rows, { validClientIds, validTemplateIds, label, getRefs })
 
       // Templates first — checklists may reference them, so we need the
       // post-filter id set to validate template_id refs on checklists.
@@ -1993,15 +2006,24 @@ export class AppDataStore {
       )
       for (const t of safeTemplates) validTemplateIds.add(t.id)
 
+      // IMPORTANT: only check `clientId`. The `template_id` column on
+      // `checklists` has NO foreign-key constraint (it's a plain nullable
+      // text column — see the schema in this file). Dropping checklists
+      // whose templateId isn't in the post-filter template set was an
+      // over-zealous defensive guard that silently nuked recycled-bin
+      // tombstones whenever a referenced template was filtered out. With
+      // the tombstone gone, the next read's materializer saw no record
+      // of the deleted instance for the current period and respawned it
+      // — the exact "checklist comes back after delete" symptom users hit.
       const safeChecklists = filterOrphans(
         data.checklists,
         'checklists',
-        (c) => ({ clientId: c?.clientId, templateId: c?.templateId }),
+        (c) => ({ clientId: c?.clientId }),
       )
       const safeRecycledChecklists = filterOrphans(
         data.recycledChecklists,
         'recycledChecklists',
-        (c) => ({ clientId: c?.clientId, templateId: c?.templateId }),
+        (c) => ({ clientId: c?.clientId }),
       )
       const safeReimbursements = filterOrphans(
         data.reimbursements,
