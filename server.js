@@ -825,7 +825,23 @@ const server = createServer(async (request, response) => {
         }
 
         const data = await readJsonBody(request)
-        await appDataStore.write(data)
+        try {
+          await appDataStore.write(data)
+        } catch (error) {
+          // Surface the real SQL/JS error so the client can show / log it
+          // instead of falling through to the generic 500. Without this the
+          // autosave failure mode is "Latest changes could not be saved"
+          // with no clue what's actually wrong.
+          console.error('[bulk-save] write() failed:', error)
+          sendJson(response, 500, {
+            error: 'bulk_save_failed',
+            message: error?.message || String(error),
+            code: error?.code,
+            constraint: error?.constraint,
+            detail: error?.detail,
+          })
+          return
+        }
         sendJson(response, 200, { ok: true })
         return
       }
