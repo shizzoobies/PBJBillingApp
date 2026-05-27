@@ -1922,6 +1922,70 @@ export class AppDataStore {
     if (this.pool) {
       const client = await this.pool.connect()
 
+      // Defensive: drop any records that reference a client_id no longer in
+      // `data.clients`. Without this guard, deleting a client locally and
+      // leaving an orphan template / checklist / reimbursement / time entry
+      // around blocks every subsequent bulk save with an FK violation. We've
+      // seen this in the wild (e.g. `client-clover` orphan template wedged
+      // saves entirely). The schema already CASCADEs on delete; this just
+      // mirrors that behavior for in-memory cleanups that never round-tripped
+      // through a server-side delete.
+      const validClientIds = new Set(
+        Array.isArray(data.clients) ? data.clients.map((c) => c.id) : [],
+      )
+      const filterOrphans = (rows, label, getClientId) => {
+        if (!Array.isArray(rows)) return []
+        const kept = []
+        const dropped = []
+        for (const row of rows) {
+          const ref = getClientId(row)
+          if (ref && !validClientIds.has(ref)) {
+            dropped.push({ id: row?.id, client_id: ref })
+          } else {
+            kept.push(row)
+          }
+        }
+        if (dropped.length > 0) {
+          console.warn(
+            `[bulk-save] dropped ${dropped.length} orphan ${label} referencing missing clients:`,
+            dropped,
+          )
+        }
+        return kept
+      }
+
+      const safeTemplates = filterOrphans(
+        data.checklistTemplates,
+        'checklist_templates',
+        // Standard templates legitimately have no client_id — leave those.
+        (t) => (t && t.clientId ? t.clientId : null),
+      )
+      const safeChecklists = filterOrphans(
+        data.checklists,
+        'checklists',
+        (c) => c?.clientId,
+      )
+      const safeRecycledChecklists = filterOrphans(
+        data.recycledChecklists,
+        'recycledChecklists',
+        (c) => c?.clientId,
+      )
+      const safeReimbursements = filterOrphans(
+        data.reimbursements,
+        'reimbursements',
+        (r) => r?.clientId,
+      )
+      const safeRecurringReimbursements = filterOrphans(
+        data.recurringReimbursements,
+        'recurring_reimbursements',
+        (r) => r?.clientId,
+      )
+      const safeTimeEntries = filterOrphans(
+        data.timeEntries,
+        'time_entries',
+        (e) => e?.clientId,
+      )
+
       try {
         await client.query('begin')
         await client.query('delete from checklist_items')
@@ -2024,7 +2088,7 @@ export class AppDataStore {
           }
         }
 
-        for (const entry of data.timeEntries) {
+        for (const entry of safeTimeEntries) {
           await client.query(
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
@@ -2080,7 +2144,7 @@ export class AppDataStore {
           )
         }
 
-        for (const reimbursement of data.reimbursements ?? []) {
+        for (const reimbursement of safeReimbursements) {
           await client.query(
             `
               insert into reimbursements (id, client_id, date, description, amount, updated_at)
@@ -2096,7 +2160,7 @@ export class AppDataStore {
           )
         }
 
-        for (const recurring of data.recurringReimbursements ?? []) {
+        for (const recurring of safeRecurringReimbursements) {
           await client.query(
             `
               insert into recurring_reimbursements
@@ -2114,7 +2178,7 @@ export class AppDataStore {
           )
         }
 
-        for (const template of data.checklistTemplates ?? []) {
+        for (const template of safeTemplates) {
           await client.query(
             `
               insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, updated_at)
@@ -2187,11 +2251,10 @@ export class AppDataStore {
         // Re-insert active and recycled checklists in one pass — the bulk
         // wipe above clears the table either way, so we'd lose the recycle
         // bin on every autosave if we only wrote `data.checklists` back.
-        // `deletedAt` is the only distinguishing field on the row.
-        const checklistsToWrite = [
-          ...(Array.isArray(data.checklists) ? data.checklists : []),
-          ...(Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []),
-        ]
+        // `deletedAt` is the only distinguishing field on the row. We use the
+        // pre-filtered safe lists so orphan checklists (whose client was
+        // deleted locally) don't wedge the FK insert.
+        const checklistsToWrite = [...safeChecklists, ...safeRecycledChecklists]
         for (const checklist of checklistsToWrite) {
           await client.query(
             `

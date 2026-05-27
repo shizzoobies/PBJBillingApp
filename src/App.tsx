@@ -2019,9 +2019,31 @@ function App() {
   }
 
   const deleteClient = (clientId: string) => {
+    // Cascade the local cleanup so we don't leave orphan rows that reference a
+    // client we just removed. Server-side these tables CASCADE on
+    // `clients.id`, but the bulk autosave wipes-and-rewrites from local state,
+    // so any orphan we keep around here would re-fail the FK on the next save.
     updateWorkspaceData((current) => ({
       ...current,
       clients: current.clients.filter((client) => client.id !== clientId),
+      checklistTemplates: (current.checklistTemplates ?? []).filter(
+        (template) => template.clientId !== clientId,
+      ),
+      checklists: (current.checklists ?? []).filter(
+        (checklist) => checklist.clientId !== clientId,
+      ),
+      recycledChecklists: (current.recycledChecklists ?? []).filter(
+        (checklist) => checklist.clientId !== clientId,
+      ),
+      reimbursements: (current.reimbursements ?? []).filter(
+        (reimbursement) => reimbursement.clientId !== clientId,
+      ),
+      recurringReimbursements: (current.recurringReimbursements ?? []).filter(
+        (recurring) => recurring.clientId !== clientId,
+      ),
+      timeEntries: (current.timeEntries ?? []).filter(
+        (entry) => entry.clientId !== clientId,
+      ),
     }))
   }
 
