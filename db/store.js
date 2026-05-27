@@ -1928,19 +1928,17 @@ export class AppDataStore {
       // wedges every subsequent bulk save with an FK violation. The schema
       // CASCADEs on delete server-side; this just mirrors that behavior for
       // local-only mutations that never round-tripped.
+      // IMPORTANT: We only filter rows that reference tables we wipe and
+      // re-insert in this transaction (clients, checklist_templates).
+      // We do NOT filter on user/employee refs because the `users` table
+      // is NOT wiped on bulk save — any assignee_id that was valid before
+      // is still valid via users. Filtering on the client's view of
+      // employees was a bug that caused standard templates (with seed
+      // assignees not present in data.employees) to be dropped, taking
+      // their dependent checklists with them.
       const validClientIds = new Set(
         Array.isArray(data.clients) ? data.clients.map((c) => c.id) : [],
       )
-      const validEmployeeIds = new Set(
-        Array.isArray(data.employees) ? data.employees.map((e) => e.id) : [],
-      )
-      // Include inactive employees too — they're soft-deleted but still in
-      // the `users` table, so FK references to their ids remain valid.
-      if (Array.isArray(data.inactiveEmployees)) {
-        for (const e of data.inactiveEmployees) {
-          if (e && e.id) validEmployeeIds.add(e.id)
-        }
-      }
       // Filled in after we filter templates (so checklists can validate
       // their template_id refs against the post-filter set). Declared up
       // front so the closure below doesn't hit a TDZ on first call.
@@ -1959,9 +1957,6 @@ export class AppDataStore {
           if (refs.templateId && !validTemplateIds.has(refs.templateId)) {
             bad.push({ kind: 'template', id: refs.templateId })
           }
-          if (refs.assigneeId && !validEmployeeIds.has(refs.assigneeId)) {
-            bad.push({ kind: 'assignee', id: refs.assigneeId })
-          }
           if (bad.length > 0) {
             dropped.push({ id: row?.id, bad })
           } else {
@@ -1979,36 +1974,23 @@ export class AppDataStore {
 
       // Templates first — checklists may reference them, so we need the
       // post-filter id set to validate template_id refs on checklists.
+      // Standard templates legitimately have no client_id — leave those.
       const safeTemplates = filterOrphans(
         data.checklistTemplates,
         'checklist_templates',
-        (t) => ({
-          // Standard templates legitimately have no client_id — leave those.
-          clientId: t && t.clientId ? t.clientId : null,
-          // assignee_id is NOT NULL ON DELETE RESTRICT in the schema, so a
-          // stale assignee would block the insert. Filter defensively.
-          assigneeId: t?.assigneeId,
-        }),
+        (t) => ({ clientId: t && t.clientId ? t.clientId : null }),
       )
       for (const t of safeTemplates) validTemplateIds.add(t.id)
 
       const safeChecklists = filterOrphans(
         data.checklists,
         'checklists',
-        (c) => ({
-          clientId: c?.clientId,
-          templateId: c?.templateId,
-          assigneeId: c?.assigneeId,
-        }),
+        (c) => ({ clientId: c?.clientId, templateId: c?.templateId }),
       )
       const safeRecycledChecklists = filterOrphans(
         data.recycledChecklists,
         'recycledChecklists',
-        (c) => ({
-          clientId: c?.clientId,
-          templateId: c?.templateId,
-          assigneeId: c?.assigneeId,
-        }),
+        (c) => ({ clientId: c?.clientId, templateId: c?.templateId }),
       )
       const safeReimbursements = filterOrphans(
         data.reimbursements,
@@ -2026,23 +2008,11 @@ export class AppDataStore {
         (e) => ({ clientId: e?.clientId }),
       )
 
-      // Strip unknown user ids from client.assignedEmployeeIds before we
-      // insert into client_assignments, where user_id has an FK to users.
-      const safeClients = Array.isArray(data.clients)
-        ? data.clients.map((c) => {
-            if (!Array.isArray(c?.assignedEmployeeIds)) return c
-            const cleaned = c.assignedEmployeeIds.filter((id) =>
-              validEmployeeIds.has(id),
-            )
-            if (cleaned.length === c.assignedEmployeeIds.length) return c
-            console.warn(
-              `[bulk-save] dropped ${
-                c.assignedEmployeeIds.length - cleaned.length
-              } orphan client_assignments on client ${c.id}`,
-            )
-            return { ...c, assignedEmployeeIds: cleaned }
-          })
-        : []
+      // No filtering on client.assignedEmployeeIds either — same reason
+      // (users table is preserved across saves, so user_id refs remain
+      // valid). If we ever see an FK error on client_assignments.user_id,
+      // it'll surface via the diagnostic in server.js.
+      const safeClients = Array.isArray(data.clients) ? data.clients : []
 
       try {
         await client.query('begin')
