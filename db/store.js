@@ -1922,69 +1922,127 @@ export class AppDataStore {
     if (this.pool) {
       const client = await this.pool.connect()
 
-      // Defensive: drop any records that reference a client_id no longer in
-      // `data.clients`. Without this guard, deleting a client locally and
-      // leaving an orphan template / checklist / reimbursement / time entry
-      // around blocks every subsequent bulk save with an FK violation. We've
-      // seen this in the wild (e.g. `client-clover` orphan template wedged
-      // saves entirely). The schema already CASCADEs on delete; this just
-      // mirrors that behavior for in-memory cleanups that never round-tripped
-      // through a server-side delete.
+      // Defensive: drop any records that reference an FK target no longer
+      // present in this snapshot. Without this guard, an in-memory delete
+      // (client / template / employee) that leaves stale references behind
+      // wedges every subsequent bulk save with an FK violation. The schema
+      // CASCADEs on delete server-side; this just mirrors that behavior for
+      // local-only mutations that never round-tripped.
       const validClientIds = new Set(
         Array.isArray(data.clients) ? data.clients.map((c) => c.id) : [],
       )
-      const filterOrphans = (rows, label, getClientId) => {
+      const validEmployeeIds = new Set(
+        Array.isArray(data.employees) ? data.employees.map((e) => e.id) : [],
+      )
+      // Include inactive employees too — they're soft-deleted but still in
+      // the `users` table, so FK references to their ids remain valid.
+      if (Array.isArray(data.inactiveEmployees)) {
+        for (const e of data.inactiveEmployees) {
+          if (e && e.id) validEmployeeIds.add(e.id)
+        }
+      }
+      // Filled in after we filter templates (so checklists can validate
+      // their template_id refs against the post-filter set). Declared up
+      // front so the closure below doesn't hit a TDZ on first call.
+      const validTemplateIds = new Set()
+
+      const filterOrphans = (rows, label, getRefs) => {
         if (!Array.isArray(rows)) return []
         const kept = []
         const dropped = []
         for (const row of rows) {
-          const ref = getClientId(row)
-          if (ref && !validClientIds.has(ref)) {
-            dropped.push({ id: row?.id, client_id: ref })
+          const refs = getRefs(row) || {}
+          const bad = []
+          if (refs.clientId && !validClientIds.has(refs.clientId)) {
+            bad.push({ kind: 'client', id: refs.clientId })
+          }
+          if (refs.templateId && !validTemplateIds.has(refs.templateId)) {
+            bad.push({ kind: 'template', id: refs.templateId })
+          }
+          if (refs.assigneeId && !validEmployeeIds.has(refs.assigneeId)) {
+            bad.push({ kind: 'assignee', id: refs.assigneeId })
+          }
+          if (bad.length > 0) {
+            dropped.push({ id: row?.id, bad })
           } else {
             kept.push(row)
           }
         }
         if (dropped.length > 0) {
           console.warn(
-            `[bulk-save] dropped ${dropped.length} orphan ${label} referencing missing clients:`,
+            `[bulk-save] dropped ${dropped.length} orphan ${label}:`,
             dropped,
           )
         }
         return kept
       }
 
+      // Templates first — checklists may reference them, so we need the
+      // post-filter id set to validate template_id refs on checklists.
       const safeTemplates = filterOrphans(
         data.checklistTemplates,
         'checklist_templates',
-        // Standard templates legitimately have no client_id — leave those.
-        (t) => (t && t.clientId ? t.clientId : null),
+        (t) => ({
+          // Standard templates legitimately have no client_id — leave those.
+          clientId: t && t.clientId ? t.clientId : null,
+          // assignee_id is NOT NULL ON DELETE RESTRICT in the schema, so a
+          // stale assignee would block the insert. Filter defensively.
+          assigneeId: t?.assigneeId,
+        }),
       )
+      for (const t of safeTemplates) validTemplateIds.add(t.id)
+
       const safeChecklists = filterOrphans(
         data.checklists,
         'checklists',
-        (c) => c?.clientId,
+        (c) => ({
+          clientId: c?.clientId,
+          templateId: c?.templateId,
+          assigneeId: c?.assigneeId,
+        }),
       )
       const safeRecycledChecklists = filterOrphans(
         data.recycledChecklists,
         'recycledChecklists',
-        (c) => c?.clientId,
+        (c) => ({
+          clientId: c?.clientId,
+          templateId: c?.templateId,
+          assigneeId: c?.assigneeId,
+        }),
       )
       const safeReimbursements = filterOrphans(
         data.reimbursements,
         'reimbursements',
-        (r) => r?.clientId,
+        (r) => ({ clientId: r?.clientId }),
       )
       const safeRecurringReimbursements = filterOrphans(
         data.recurringReimbursements,
         'recurring_reimbursements',
-        (r) => r?.clientId,
+        (r) => ({ clientId: r?.clientId }),
       )
       const safeTimeEntries = filterOrphans(
         data.timeEntries,
         'time_entries',
-        (e) => e?.clientId,
+        (e) => ({ clientId: e?.clientId }),
       )
+
+      // Strip unknown user ids from client.assignedEmployeeIds before we
+      // insert into client_assignments, where user_id has an FK to users.
+      const safeClients = Array.isArray(data.clients)
+        ? data.clients.map((c) => {
+            if (!Array.isArray(c?.assignedEmployeeIds)) return c
+            const cleaned = c.assignedEmployeeIds.filter((id) =>
+              validEmployeeIds.has(id),
+            )
+            if (cleaned.length === c.assignedEmployeeIds.length) return c
+            console.warn(
+              `[bulk-save] dropped ${
+                c.assignedEmployeeIds.length - cleaned.length
+              } orphan client_assignments on client ${c.id}`,
+            )
+            return { ...c, assignedEmployeeIds: cleaned }
+          })
+        : []
 
       try {
         await client.query('begin')
@@ -2036,7 +2094,7 @@ export class AppDataStore {
           )
         }
 
-        for (const clientRecord of data.clients) {
+        for (const clientRecord of safeClients) {
           await client.query(
             `
               insert into clients (
