@@ -396,19 +396,10 @@ function BrandingSection({
           placeholder="e.g. Strategic bookkeeping for growing firms"
           onCommit={(value) => onCommit({ tagline: value })}
         />
-        <TextField
-          label="Logo URL"
-          value={settings.logoUrl ?? ''}
-          placeholder="https://..."
-          onCommit={(value) => onCommit({ logoUrl: value })}
+        <LogoUploadField
+          settings={settings}
+          onCommit={onCommit}
         />
-        <div className="logo-preview">
-          {settings.logoUrl ? (
-            <img alt={`${settings.name} logo`} src={settings.logoUrl} />
-          ) : (
-            <span className="muted-text">No logo set. Paste a public image URL.</span>
-          )}
-        </div>
         <label className="field">
           <span>Brand color</span>
           <ColorInput
@@ -417,8 +408,132 @@ function BrandingSection({
           />
           <small className="field-helper">Used for the sidebar background and accent colors.</small>
         </label>
+        <label className="field">
+          <span>Sidebar text color</span>
+          <ColorInput
+            value={settings.sidebarTextColor ?? '#ffffff'}
+            onCommit={(value) => onCommit({ sidebarTextColor: value })}
+          />
+          <small className="field-helper">Color of the text that appears on top of the brand color in the sidebar.</small>
+        </label>
       </div>
     </section>
+  )
+}
+
+/**
+ * Logo upload UI — accepts a local image file, validates type/size, and
+ * stores the encoded data URI in the firm settings. Keeps the inline
+ * preview so the owner can see what's selected. Picking another file
+ * replaces the existing logo; the Remove button clears it entirely.
+ */
+function LogoUploadField({
+  settings,
+  onCommit,
+}: {
+  settings: FirmSettings
+  onCommit: (patch: Partial<FirmSettings>) => void | Promise<void>
+}) {
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  const MAX_BYTES = 1_000_000 // 1 MB raw image. Base64 inflates ~33%.
+
+  const handleSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null)
+    const file = event.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setError('Logo must be an image file (PNG, JPG, SVG, etc.).')
+      event.target.value = ''
+      return
+    }
+    if (file.size > MAX_BYTES) {
+      setError(
+        `Logo is ${(file.size / 1024).toFixed(0)} KB. Please pick a file under ${(
+          MAX_BYTES / 1024
+        ).toFixed(0)} KB.`,
+      )
+      event.target.value = ''
+      return
+    }
+    setBusy(true)
+    const reader = new FileReader()
+    reader.onload = async () => {
+      try {
+        const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+        if (!dataUrl) {
+          setError('Could not read the image. Try a different file.')
+          return
+        }
+        await onCommit({ logoUrl: dataUrl })
+      } catch (commitError) {
+        const message =
+          commitError instanceof Error ? commitError.message : 'Failed to save logo.'
+        setError(message)
+      } finally {
+        setBusy(false)
+        // Reset the input so picking the same file again still fires onChange.
+        if (inputRef.current) inputRef.current.value = ''
+      }
+    }
+    reader.onerror = () => {
+      setError('Could not read the image. Try a different file.')
+      setBusy(false)
+      if (inputRef.current) inputRef.current.value = ''
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const handleRemove = async () => {
+    setError(null)
+    setBusy(true)
+    try {
+      await onCommit({ logoUrl: '' })
+    } catch (commitError) {
+      const message =
+        commitError instanceof Error ? commitError.message : 'Failed to clear logo.'
+      setError(message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="field logo-upload-field">
+      <span>Logo</span>
+      <div className="logo-preview">
+        {settings.logoUrl ? (
+          <img alt={`${settings.name} logo`} src={settings.logoUrl} />
+        ) : (
+          <span className="muted-text">No logo uploaded yet.</span>
+        )}
+      </div>
+      <div className="logo-upload-actions">
+        <input
+          ref={inputRef}
+          id="firm-logo-upload"
+          type="file"
+          accept="image/*"
+          onChange={handleSelected}
+          disabled={busy}
+          style={{ display: 'none' }}
+        />
+        <label htmlFor="firm-logo-upload" className="ghost-button">
+          {busy ? 'Uploading…' : settings.logoUrl ? 'Replace logo' : 'Upload logo'}
+        </label>
+        {settings.logoUrl ? (
+          <button type="button" className="ghost-button" onClick={handleRemove} disabled={busy}>
+            Remove
+          </button>
+        ) : null}
+      </div>
+      <small className="field-helper">
+        PNG, JPG, or SVG — under 1 MB. The image is stored with your firm settings.
+      </small>
+      {error ? <small className="field-helper error-text">{error}</small> : null}
+    </div>
   )
 }
 

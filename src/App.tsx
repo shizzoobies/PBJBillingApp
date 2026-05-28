@@ -140,6 +140,7 @@ function App() {
     tagline: DEFAULT_FIRM_SETTINGS.tagline ?? '',
     logoUrl: DEFAULT_FIRM_SETTINGS.logoUrl ?? '',
     brandColor: DEFAULT_FIRM_SETTINGS.brandColor ?? '#3c2044',
+    sidebarTextColor: DEFAULT_FIRM_SETTINGS.sidebarTextColor ?? '#ffffff',
   })
   const skipAutosaveRef = useRef(0)
   // Latched flag that forces the next autosave to fire even when
@@ -247,6 +248,15 @@ function App() {
     const color = publicFirmSettings.brandColor || '#3c2044'
     document.documentElement.style.setProperty('--plum', color)
   }, [publicFirmSettings.brandColor])
+
+  // Sidebar text color — kept as a separate variable so any brand color
+  // can still have legible text on top of it. Defaults to white so the
+  // existing styles (designed for a plum background) keep working when
+  // no value is set.
+  useEffect(() => {
+    const color = publicFirmSettings.sidebarTextColor || '#ffffff'
+    document.documentElement.style.setProperty('--sidebar-text', color)
+  }, [publicFirmSettings.sidebarTextColor])
 
   // Load app data on session change AND whenever preview state changes.
   // Entering preview refetches with `?previewAs=<id>` so the whole app

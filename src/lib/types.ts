@@ -290,6 +290,11 @@ export type FirmSettings = {
   tagline?: string
   logoUrl?: string
   brandColor?: string
+  /**
+   * Color used for text rendered on top of the brand color (sidebar, etc).
+   * Defaults to white so any brand color picked still has legible text.
+   */
+  sidebarTextColor?: string
   addressLine1?: string
   addressLine2?: string
   city?: string
@@ -301,13 +306,17 @@ export type FirmSettings = {
   ein?: string
 }
 
-export type PublicFirmSettings = Pick<FirmSettings, 'name' | 'tagline' | 'logoUrl' | 'brandColor'>
+export type PublicFirmSettings = Pick<
+  FirmSettings,
+  'name' | 'tagline' | 'logoUrl' | 'brandColor' | 'sidebarTextColor'
+>
 
 export const DEFAULT_FIRM_SETTINGS: FirmSettings = {
   name: 'PB&J Strategic Accounting',
   tagline: '',
   logoUrl: '',
   brandColor: '#3c2044',
+  sidebarTextColor: '#ffffff',
   addressLine1: '',
   addressLine2: '',
   city: '',
