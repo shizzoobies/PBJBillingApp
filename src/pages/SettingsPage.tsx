@@ -416,6 +416,14 @@ function BrandingSection({
           />
           <small className="field-helper">Color of the text that appears on top of the brand color in the sidebar.</small>
         </label>
+        <label className="field">
+          <span>Active section color</span>
+          <ColorInput
+            value={settings.sidebarActiveTextColor ?? '#ffffff'}
+            onCommit={(value) => onCommit({ sidebarActiveTextColor: value })}
+          />
+          <small className="field-helper">Color of the currently-open page in the sidebar — pick something that contrasts with the sidebar text color above.</small>
+        </label>
       </div>
     </section>
   )

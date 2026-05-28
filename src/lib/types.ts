@@ -295,6 +295,13 @@ export type FirmSettings = {
    * Defaults to white so any brand color picked still has legible text.
    */
   sidebarTextColor?: string
+  /**
+   * Color used specifically for the currently-active sidebar nav item.
+   * Defaults to white so an unconfigured workspace looks identical to
+   * the previous single-color behavior; pick a contrasting value to
+   * make the current page stand out from the inactive items.
+   */
+  sidebarActiveTextColor?: string
   addressLine1?: string
   addressLine2?: string
   city?: string
@@ -308,7 +315,12 @@ export type FirmSettings = {
 
 export type PublicFirmSettings = Pick<
   FirmSettings,
-  'name' | 'tagline' | 'logoUrl' | 'brandColor' | 'sidebarTextColor'
+  | 'name'
+  | 'tagline'
+  | 'logoUrl'
+  | 'brandColor'
+  | 'sidebarTextColor'
+  | 'sidebarActiveTextColor'
 >
 
 export const DEFAULT_FIRM_SETTINGS: FirmSettings = {
@@ -317,6 +329,7 @@ export const DEFAULT_FIRM_SETTINGS: FirmSettings = {
   logoUrl: '',
   brandColor: '#3c2044',
   sidebarTextColor: '#ffffff',
+  sidebarActiveTextColor: '#ffffff',
   addressLine1: '',
   addressLine2: '',
   city: '',

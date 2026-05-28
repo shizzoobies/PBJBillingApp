@@ -74,6 +74,24 @@ button {
   gap: 12px;
 }
 
+/* Logo-only sidebar header (no text lockup). Centers the uploaded logo
+   and lets it fill the available width so a real brand image is
+   actually legible at sidebar scale. */
+.brand-logo-only {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  padding: 4px 0 8px;
+}
+
+.brand-logo-full {
+  display: block;
+  height: auto;
+  max-height: 140px;
+  max-width: 100%;
+  object-fit: contain;
+}
+
 .brand-mark {
   align-items: center;
   background: var(--gold);
@@ -121,11 +139,16 @@ button {
   width: 100%;
 }
 
-.nav-item:hover,
-.nav-item.active {
+.nav-item:hover {
   background: color-mix(in srgb, var(--sidebar-text, #fffaf3) 10%, transparent);
   border-color: color-mix(in srgb, var(--sidebar-text, #fffaf3) 12%, transparent);
   color: var(--sidebar-text, #fffaf3);
+}
+
+.nav-item.active {
+  background: color-mix(in srgb, var(--sidebar-active-text, var(--sidebar-text, #fffaf3)) 10%, transparent);
+  border-color: color-mix(in srgb, var(--sidebar-active-text, var(--sidebar-text, #fffaf3)) 12%, transparent);
+  color: var(--sidebar-active-text, var(--sidebar-text, #fffaf3));
 }
 
 .security-note {

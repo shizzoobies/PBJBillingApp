@@ -141,6 +141,7 @@ function App() {
     logoUrl: DEFAULT_FIRM_SETTINGS.logoUrl ?? '',
     brandColor: DEFAULT_FIRM_SETTINGS.brandColor ?? '#3c2044',
     sidebarTextColor: DEFAULT_FIRM_SETTINGS.sidebarTextColor ?? '#ffffff',
+    sidebarActiveTextColor: DEFAULT_FIRM_SETTINGS.sidebarActiveTextColor ?? '#ffffff',
   })
   const skipAutosaveRef = useRef(0)
   // Latched flag that forces the next autosave to fire even when
@@ -257,6 +258,15 @@ function App() {
     const color = publicFirmSettings.sidebarTextColor || '#ffffff'
     document.documentElement.style.setProperty('--sidebar-text', color)
   }, [publicFirmSettings.sidebarTextColor])
+
+  // Active sidebar nav-item color — distinct from the regular sidebar
+  // text color so the currently-open page can stand out from the rest.
+  // Defaults to white so unconfigured workspaces look the same as
+  // before.
+  useEffect(() => {
+    const color = publicFirmSettings.sidebarActiveTextColor || '#ffffff'
+    document.documentElement.style.setProperty('--sidebar-active-text', color)
+  }, [publicFirmSettings.sidebarActiveTextColor])
 
   // Load app data on session change AND whenever preview state changes.
   // Entering preview refetches with `?previewAs=<id>` so the whole app

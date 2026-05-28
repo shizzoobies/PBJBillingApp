@@ -39,6 +39,7 @@ const FIRM_SETTINGS_FIELDS = [
   ['logoUrl', 'logo_url'],
   ['brandColor', 'brand_color'],
   ['sidebarTextColor', 'sidebar_text_color'],
+  ['sidebarActiveTextColor', 'sidebar_active_text_color'],
   ['addressLine1', 'address_line1'],
   ['addressLine2', 'address_line2'],
   ['city', 'city'],
@@ -871,6 +872,13 @@ export class AppDataStore {
       // the owner picks a custom value.
       await this.pool.query(
         `alter table firm_settings add column if not exists sidebar_text_color text default '#ffffff'`,
+      )
+      // Active nav-item color (distinct from the regular sidebar text
+      // color) so the currently-open page can pop against the rest of
+      // the sidebar. Defaults to white so legacy deployments look the
+      // same until the owner picks a custom value.
+      await this.pool.query(
+        `alter table firm_settings add column if not exists sidebar_active_text_color text default '#ffffff'`,
       )
 
       // Phase 5: notifications (in-app bell + email-ready).
@@ -5797,6 +5805,7 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select name, tagline, logo_url, brand_color, sidebar_text_color,
+                sidebar_active_text_color,
                 address_line1, address_line2,
                 city, state, postal_code, phone, email, website, ein
            from firm_settings where id = 'singleton'`,
@@ -5828,15 +5837,17 @@ export class AppDataStore {
     if (this.pool) {
       await this.pool.query(
         `insert into firm_settings (id, name, tagline, logo_url, brand_color, sidebar_text_color,
+            sidebar_active_text_color,
             address_line1, address_line2, city, state, postal_code,
             phone, email, website, ein, updated_at)
-         values ('singleton', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+         values ('singleton', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
          on conflict (id) do update set
             name = excluded.name,
             tagline = excluded.tagline,
             logo_url = excluded.logo_url,
             brand_color = excluded.brand_color,
             sidebar_text_color = excluded.sidebar_text_color,
+            sidebar_active_text_color = excluded.sidebar_active_text_color,
             address_line1 = excluded.address_line1,
             address_line2 = excluded.address_line2,
             city = excluded.city,
@@ -5853,6 +5864,7 @@ export class AppDataStore {
           next.logoUrl || null,
           next.brandColor || null,
           next.sidebarTextColor || null,
+          next.sidebarActiveTextColor || null,
           next.addressLine1 || null,
           next.addressLine2 || null,
           next.city || null,

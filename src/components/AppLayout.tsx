@@ -63,19 +63,26 @@ export function AppLayout() {
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
-        <div className="brand-lockup">
-          <div className="brand-mark" aria-hidden="true">
-            {firmLogoUrl ? (
-              <img alt="" src={firmLogoUrl} className="brand-mark-img" />
-            ) : (
-              initials
-            )}
+        {firmLogoUrl ? (
+          // Logo-only header: the firm's name is assumed to be baked
+          // into the image, so we drop the text lockup entirely. The
+          // logo gets its own block-level styles in CSS so it can
+          // actually fill the sidebar width instead of being crammed
+          // into a 44px badge.
+          <div className="brand-logo-only">
+            <img alt={firmName} src={firmLogoUrl} className="brand-logo-full" />
           </div>
-          <div>
-            <strong>{firmName}</strong>
-            {firmTagline ? <span>{firmTagline}</span> : null}
+        ) : (
+          <div className="brand-lockup">
+            <div className="brand-mark" aria-hidden="true">
+              {initials}
+            </div>
+            <div>
+              <strong>{firmName}</strong>
+              {firmTagline ? <span>{firmTagline}</span> : null}
+            </div>
           </div>
-        </div>
+        )}
 
         <nav className="nav-list">
           {navItems
