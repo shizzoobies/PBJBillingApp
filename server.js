@@ -749,6 +749,11 @@ const server = createServer(async (request, response) => {
         tagline: settings.tagline ?? '',
         logoUrl: settings.logoUrl ?? '',
         brandColor: settings.brandColor ?? '#3c2044',
+        // Both sidebar colors are part of the public surface so the
+        // pre-sign-in screens (login, magic-link confirmation, etc.)
+        // render the same branding as the authenticated app.
+        sidebarTextColor: settings.sidebarTextColor ?? '#ffffff',
+        sidebarActiveTextColor: settings.sidebarActiveTextColor ?? '#ffffff',
       })
       return
     }
