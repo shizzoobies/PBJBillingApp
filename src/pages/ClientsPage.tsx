@@ -34,7 +34,13 @@ export function ClientsPage() {
       </div>
       {ownerMode ? (
         <ClientBuilder
-          employees={data.employees.filter((employee) => employee.role !== 'Owner')}
+          // PREVIOUSLY: this list was filtered to non-Owner employees only,
+          // which made the Add-client form unusable for any firm whose only
+          // active employees were Owners (e.g., a 2-person shop with both
+          // partners listed as Owner). Owners do client work too, so let
+          // them be assignable; visibility scoping doesn't care because
+          // owners always see every client anyway.
+          employees={data.employees}
           onCreate={addClient}
           plans={data.plans}
         />
