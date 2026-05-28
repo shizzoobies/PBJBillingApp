@@ -2490,6 +2490,35 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (normalizedPath === '/api/team/reorder' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can reorder the team' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const userIds = Array.isArray(payload?.userIds)
+        ? payload.userIds.filter((id) => typeof id === 'string')
+        : []
+      if (userIds.length === 0) {
+        sendJson(response, 400, { error: 'userIds (a non-empty array) is required' })
+        return
+      }
+      const members = await appDataStore.reorderTeamMembers(userIds)
+      if (!members) {
+        sendJson(response, 404, { error: 'No matching team members to reorder' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'team_reordered', '')
+      sendJson(response, 200, {
+        users: members.map((member) => decorateTeamMember(member)),
+      })
+      return
+    }
+
     if (normalizedPath === '/api/team/invite' && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) {

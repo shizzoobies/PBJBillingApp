@@ -88,7 +88,7 @@ function ClientBuilder({
 }) {
   const [name, setName] = useState('Summit Retail Co.')
   const [contact, setContact] = useState('Jamie Miller')
-  const [hourlyRate, setHourlyRate] = useState('135')
+  const [hourlyRate, setHourlyRate] = useState('125')
   const [billingMode, setBillingMode] = useState<BillingMode>('hourly')
   const [planId, setPlanId] = useState(plans[0]?.id ?? '')
   const [assignedEmployeeIds, setAssignedEmployeeIds] = useState<string[]>(
@@ -120,7 +120,7 @@ function ClientBuilder({
     })
     setName('')
     setContact('')
-    setHourlyRate('135')
+    setHourlyRate('125')
   }
 
   return (

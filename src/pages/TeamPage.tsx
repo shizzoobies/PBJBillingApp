@@ -1,12 +1,13 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Eye, MailPlus, Send, Trash2, UserPlus, X } from 'lucide-react'
+import { ChevronDown, ChevronUp, Eye, MailPlus, Send, Trash2, UserPlus, X } from 'lucide-react'
 import { useAppContext } from '../AppContext'
 import {
   fetchTeam,
   fetchTeamActivity,
   fetchTeamSessions,
   inviteTeamMember,
+  reorderTeamMembersRequest,
   resendTeamSignInLink,
   revokeAllTeamSessions,
   revokeTeamSession,
@@ -74,6 +75,23 @@ export function TeamPage() {
       }
       return [...current, member]
     })
+  }
+
+  const moveMember = async (index: number, direction: -1 | 1) => {
+    const target = index + direction
+    if (target < 0 || target >= members.length) return
+    const previous = members
+    const reordered = [...members]
+    const [moved] = reordered.splice(index, 1)
+    reordered.splice(target, 0, moved)
+    setMembers(reordered)
+    try {
+      const response = await reorderTeamMembersRequest(reordered.map((entry) => entry.id))
+      setMembers(response.users)
+    } catch (error) {
+      setMembers(previous)
+      window.alert(error instanceof ApiError ? error.message : 'Failed to reorder team')
+    }
   }
 
   const handleInvite = async (event: FormEvent<HTMLFormElement>) => {
@@ -298,27 +316,51 @@ export function TeamPage() {
           <p className="team-muted">No team members yet. Invite someone above.</p>
         ) : (
           <ul className="team-list">
-            {members.map((member) => {
+            {members.map((member, index) => {
               const isExpanded = expandedId === member.id
               return (
                 <li className="team-card" key={member.id}>
-                  <button
-                    className="team-card-header"
-                    onClick={() => handleToggleExpand(member)}
-                    type="button"
-                    aria-expanded={isExpanded}
-                  >
-                    <div className="team-card-identity">
-                      <strong>{member.name}</strong>
-                      <span className="team-card-email">{member.email}</span>
-                    </div>
-                    <div className="team-card-meta">
-                      <span className="team-role-badge">{member.staffRole}</span>
-                      <span className="team-card-last-active">
-                        Last login: {relativeTime(member.lastActiveAt)}
-                      </span>
-                    </div>
-                  </button>
+                  <div className="team-card-top">
+                    {ownerMode ? (
+                      <div className="team-card-reorder">
+                        <button
+                          type="button"
+                          className="team-reorder-btn"
+                          aria-label={`Move ${member.name} up`}
+                          disabled={index === 0}
+                          onClick={() => moveMember(index, -1)}
+                        >
+                          <ChevronUp size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className="team-reorder-btn"
+                          aria-label={`Move ${member.name} down`}
+                          disabled={index === members.length - 1}
+                          onClick={() => moveMember(index, 1)}
+                        >
+                          <ChevronDown size={14} />
+                        </button>
+                      </div>
+                    ) : null}
+                    <button
+                      className="team-card-header"
+                      onClick={() => handleToggleExpand(member)}
+                      type="button"
+                      aria-expanded={isExpanded}
+                    >
+                      <div className="team-card-identity">
+                        <strong>{member.name}</strong>
+                        <span className="team-card-email">{member.email}</span>
+                      </div>
+                      <div className="team-card-meta">
+                        <span className="team-role-badge">{member.staffRole}</span>
+                        <span className="team-card-last-active">
+                          Last login: {relativeTime(member.lastActiveAt)}
+                        </span>
+                      </div>
+                    </button>
+                  </div>
                   {isExpanded ? (
                     <div className="team-card-body">
                       {member.staffRole !== 'Owner' ? (

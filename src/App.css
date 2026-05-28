@@ -2628,8 +2628,46 @@ td strong {
   overflow: hidden;
 }
 
+.team-card-top {
+  display: flex;
+  align-items: stretch;
+}
+
+.team-card-reorder {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding-left: 10px;
+}
+
+.team-reorder-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid #e6dfd6;
+  border-radius: 6px;
+  background: var(--surface);
+  color: #6e6571;
+  cursor: pointer;
+}
+
+.team-reorder-btn:hover:not(:disabled) {
+  background: #faf6f2;
+  color: #3c2044;
+}
+
+.team-reorder-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .team-card-header {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   padding: 14px 16px;

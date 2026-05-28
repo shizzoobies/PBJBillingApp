@@ -816,6 +816,26 @@ export class AppDataStore {
       // work, but their historical time entries / completed checklists
       // stay attributed for analytics. See `deleteTeamMember`.
       await this.pool.query(`alter table users add column if not exists inactive_at timestamptz`)
+      // Owner-controlled team-roster order. Null until first reorder/backfill.
+      // The backfill seeds any missing values with the previous default order
+      // (owners first, then name) and appends freshly-invited users after the
+      // current max — so an explicit order set on the Team page survives reboots
+      // and is never clobbered.
+      await this.pool.query(`alter table users add column if not exists sort_order int`)
+      await this.pool.query(`
+        update users u
+        set sort_order = sub.rn
+        from (
+          select id,
+                 (select coalesce(max(sort_order), -1) from users)
+                   + row_number() over (
+                       order by case when role = 'owner' then 0 else 1 end, name asc
+                     ) as rn
+          from users
+          where sort_order is null
+        ) sub
+        where u.id = sub.id and u.sort_order is null
+      `)
       await this.pool.query(`
         create unique index if not exists users_magic_token_unique on users (magic_token)
         where magic_token is not null
@@ -4677,7 +4697,7 @@ export class AppDataStore {
                totp_enabled
         from users
         where inactive_at is null
-        order by case when role = 'owner' then 0 else 1 end, name asc
+        order by sort_order asc nulls last, name asc
       `)
 
       return result.rows.map((row) => ({
@@ -4712,6 +4732,45 @@ export class AppDataStore {
   async getTeamMember(userId) {
     const members = await this.getTeamMembers()
     return members.find((member) => member.id === userId) ?? null
+  }
+
+  /**
+   * Persist a new top-to-bottom order for the team roster. `orderedIds` is the
+   * full list of member ids in the desired order; each gets sort_order 0..n-1.
+   * Returns the freshly-ordered team list, or null if nothing matched.
+   */
+  async reorderTeamMembers(orderedIds) {
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      return null
+    }
+    if (this.pool) {
+      const cases = orderedIds.map((id, idx) => `when id = $${idx + 1} then ${idx}`).join(' ')
+      const result = await this.pool.query(
+        `
+          update users
+          set sort_order = case ${cases} end
+          where id = any($${orderedIds.length + 1}::text[]) and inactive_at is null
+        `,
+        [...orderedIds, orderedIds],
+      )
+      if (!result.rowCount) {
+        return null
+      }
+      return this.getTeamMembers()
+    }
+
+    const authState = await readJson(localAuthPath)
+    const users = authState.users ?? []
+    const byId = new Map(users.map((user) => [user.id, user]))
+    const reordered = orderedIds.map((id) => byId.get(id)).filter(Boolean)
+    if (reordered.length === 0) {
+      return null
+    }
+    const seen = new Set(orderedIds)
+    const tail = users.filter((user) => !seen.has(user.id))
+    authState.users = [...reordered, ...tail]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return this.getTeamMembers()
   }
 
   async createTeamMember({ name, email, staffRole }) {

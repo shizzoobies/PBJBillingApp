@@ -694,6 +694,21 @@ export async function fetchTeam(signal?: AbortSignal) {
   return (await response.json()) as { users: TeamMember[] }
 }
 
+/** Owner-only: persist a new top-to-bottom order for the team roster. */
+export async function reorderTeamMembersRequest(userIds: string[]) {
+  const response = await apiFetch('/api/team/reorder', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userIds }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to reorder team (${response.status})`)
+  }
+  return (await response.json()) as { users: TeamMember[] }
+}
+
 export async function inviteTeamMember(payload: { name: string; email: string; role: string }) {
   const response = await apiFetch('/api/team/invite', {
     credentials: 'same-origin',
