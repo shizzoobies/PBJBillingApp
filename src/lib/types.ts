@@ -251,11 +251,20 @@ export type ChecklistTemplate = {
    */
   scheduledMonths?: number[]
   /**
-   * Only meaningful when `frequency === 'specific-months'`: the day of month
-   * (1–28; capped to avoid invalid dates in short months) the checklist is due
-   * in each designated month. Defaults to the last day of month when unset.
+   * @deprecated Legacy single shared day-of-month for specific-months. Kept as
+   * a fallback for templates created before per-month due dates existed; new
+   * templates use `monthlyDueDays`. Honored only when `monthlyDueDays` has no
+   * entry for a given month.
    */
   dueDayOfMonth?: number
+  /**
+   * Only meaningful when `frequency === 'specific-months'`: a per-month due-day
+   * map keyed by month number (1–12, as a string key) → day-of-month. Each
+   * selected month's checklist is due on its own day, clamped to that month's
+   * real length (so Jan can be the 31st, Feb the 28th/29th). Months absent from
+   * the map fall back to `dueDayOfMonth`, then to the last day of the month.
+   */
+  monthlyDueDays?: Record<string, number>
   /**
    * A standard template is client-agnostic — it has no client, never
    * materializes checklists on its own, and exists purely as a reusable

@@ -321,21 +321,22 @@ function buildChecklistFromStage(
 }
 
 /**
- * Day-of-month a specific-months template's checklist is due in `month` of
- * `year`. Honors `dueDayOfMonth` (capped to 28); falls back to the actual last
- * day of that month when unset. `month` is 1–12.
+ * Concrete due date a specific-months template's checklist gets in `month` of
+ * `year`. Prefers the per-month `monthlyDueDays` entry, falls back to the legacy
+ * shared `dueDayOfMonth`, then to the last day of the month. The chosen day is
+ * clamped to the month's real length (so "31" lands on Feb 28/29). `month` is
+ * 1–12.
  */
 export function resolveSpecificMonthsDueDate(
-  template: Pick<ChecklistTemplate, 'dueDayOfMonth'>,
+  template: Pick<ChecklistTemplate, 'dueDayOfMonth' | 'monthlyDueDays'>,
   year: number,
   month: number,
 ): string {
-  const day =
-    typeof template.dueDayOfMonth === 'number' &&
-    template.dueDayOfMonth >= 1 &&
-    template.dueDayOfMonth <= 28
-      ? template.dueDayOfMonth
-      : new Date(year, month, 0).getDate()
+  const lastDay = new Date(year, month, 0).getDate()
+  const perMonth = template.monthlyDueDays ? Number(template.monthlyDueDays[month]) : NaN
+  const legacy = typeof template.dueDayOfMonth === 'number' ? template.dueDayOfMonth : NaN
+  const requested = Number.isFinite(perMonth) && perMonth >= 1 ? perMonth : legacy
+  const day = Number.isFinite(requested) && requested >= 1 ? Math.min(requested, lastDay) : lastDay
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 

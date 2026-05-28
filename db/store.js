@@ -294,17 +294,19 @@ function resolveStageDueDate(stage, baseDate) {
 }
 
 /**
- * Day-of-month a specific-months template's checklist is due in `month` of
- * `year`. Honors `dueDayOfMonth` (capped to 28); falls back to the actual last
- * day of that month when unset. `month` is 1–12.
+ * Concrete due date a specific-months template's checklist gets in `month` of
+ * `year`. Prefers the per-month `monthlyDueDays` entry, falls back to the legacy
+ * shared `dueDayOfMonth`, then to the last day of the month. The chosen day is
+ * clamped to the month's real length (so "31" lands on Feb 28/29). `month` is
+ * 1–12. The returned date always stays inside `month`, which keeps the
+ * materializer's per-month idempotency key valid.
  */
 function resolveSpecificMonthsDueDate(template, year, month) {
-  const day =
-    typeof template.dueDayOfMonth === 'number' &&
-    template.dueDayOfMonth >= 1 &&
-    template.dueDayOfMonth <= 28
-      ? template.dueDayOfMonth
-      : new Date(year, month, 0).getDate()
+  const lastDay = new Date(year, month, 0).getDate()
+  const perMonth = template.monthlyDueDays ? Number(template.monthlyDueDays[month]) : NaN
+  const legacy = typeof template.dueDayOfMonth === 'number' ? template.dueDayOfMonth : NaN
+  const requested = Number.isFinite(perMonth) && perMonth >= 1 ? perMonth : legacy
+  const day = Number.isFinite(requested) && requested >= 1 ? Math.min(requested, lastDay) : lastDay
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
@@ -1270,6 +1272,13 @@ export class AppDataStore {
         alter table checklist_templates
           add column if not exists due_day_of_month int
       `)
+      // Per-month due-day map for specific-months templates (month -> day),
+      // superseding the single shared due_day_of_month. Additive + nullable so
+      // existing templates keep their behavior until edited.
+      await this.pool.query(`
+        alter table checklist_templates
+          add column if not exists monthly_due_days jsonb
+      `)
       // A specific-months template has no fixed next-due date, so next_due_date
       // must be nullable.
       await this.pool.query(`
@@ -1622,7 +1631,7 @@ export class AppDataStore {
             select id, name, role
             from users
             where inactive_at is null
-            order by case when role = 'owner' then 0 else 1 end, name asc
+            order by sort_order asc nulls last, name asc
           `),
           this.pool.query(`
             select id, name, monthly_fee, included_hours, notes
@@ -1664,7 +1673,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
-                   scheduled_months, due_day_of_month
+                   scheduled_months, due_day_of_month, monthly_due_days
             from checklist_templates
             order by title asc
           `),
@@ -1890,6 +1899,9 @@ export class AppDataStore {
             : [],
           ...(typeof row.due_day_of_month === 'number'
             ? { dueDayOfMonth: row.due_day_of_month }
+            : {}),
+          ...(row.monthly_due_days && typeof row.monthly_due_days === 'object'
+            ? { monthlyDueDays: row.monthly_due_days }
             : {}),
           stages: stagesByTemplate.get(row.id) ?? [],
           items: templateItemsByTemplate.get(row.id) ?? [],
@@ -2334,8 +2346,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
             `,
             [
               template.id,
@@ -2354,6 +2366,9 @@ export class AppDataStore {
                 ? template.scheduledMonths.filter((m) => Number.isInteger(m) && m >= 1 && m <= 12)
                 : [],
               typeof template.dueDayOfMonth === 'number' ? template.dueDayOfMonth : null,
+              template.monthlyDueDays && typeof template.monthlyDueDays === 'object'
+                ? JSON.stringify(template.monthlyDueDays)
+                : null,
             ],
           )
 

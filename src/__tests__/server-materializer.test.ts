@@ -295,3 +295,52 @@ describe('materializeRecurringChecklists — biweekly cadence', () => {
     expect(dayGap(start, tpl.nextDueDate)).toBeGreaterThan(0)
   })
 })
+
+describe('materializeRecurringChecklists — specific-months per-month due dates', () => {
+  const thisYear = new Date().getFullYear()
+
+  function makeSpecificMonthsTemplate(overrides: Record<string, unknown> = {}) {
+    // January has started by any date the test could run on, so an occurrence
+    // in month 1 is always generated — keeps these assertions deterministic.
+    return makeMonthlyTemplate({
+      id: 'tpl-sm',
+      frequency: 'specific-months',
+      nextDueDate: '',
+      scheduledMonths: [1],
+      ...overrides,
+    })
+  }
+
+  it('honors the per-month day and lifts the old 28-day cap (Jan 31)', () => {
+    const data = makeData({
+      checklistTemplates: [makeSpecificMonthsTemplate({ monthlyDueDays: { 1: 31 } })],
+    })
+    const result = materializeRecurringChecklists(data)
+    const due = result.data.checklists
+      .filter((c: { templateId?: string }) => c.templateId === 'tpl-sm')
+      .map((c: { dueDate: string }) => c.dueDate)
+    expect(due).toContain(`${thisYear}-01-31`)
+  })
+
+  it('clamps an out-of-range day down to the month length', () => {
+    const data = makeData({
+      checklistTemplates: [makeSpecificMonthsTemplate({ monthlyDueDays: { 1: 99 } })],
+    })
+    const result = materializeRecurringChecklists(data)
+    const due = result.data.checklists
+      .filter((c: { templateId?: string }) => c.templateId === 'tpl-sm')
+      .map((c: { dueDate: string }) => c.dueDate)
+    expect(due).toContain(`${thisYear}-01-31`)
+  })
+
+  it('falls back to the legacy shared dueDayOfMonth when no per-month entry exists', () => {
+    const data = makeData({
+      checklistTemplates: [makeSpecificMonthsTemplate({ dueDayOfMonth: 10, monthlyDueDays: {} })],
+    })
+    const result = materializeRecurringChecklists(data)
+    const due = result.data.checklists
+      .filter((c: { templateId?: string }) => c.templateId === 'tpl-sm')
+      .map((c: { dueDate: string }) => c.dueDate)
+    expect(due).toContain(`${thisYear}-01-10`)
+  })
+})

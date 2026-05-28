@@ -35,7 +35,6 @@ import {
   getChecklistFrequencyLabel,
   lastDayOfCurrentMonth,
   makeId,
-  MAX_DUE_DAY_OF_MONTH,
   monthShortNames,
   shortDate,
 } from '../lib/utils'
@@ -1562,14 +1561,14 @@ function ChecklistBulkAdd({
  */
 function SpecificMonthsPicker({
   scheduledMonths,
-  dueDayOfMonth,
+  monthlyDueDays,
   onChangeMonths,
-  onChangeDueDay,
+  onChangeMonthDue,
 }: {
   scheduledMonths: number[]
-  dueDayOfMonth: number | undefined
+  monthlyDueDays: Record<string, number> | undefined
   onChangeMonths: (months: number[]) => void
-  onChangeDueDay: (day: number | undefined) => void
+  onChangeMonthDue: (month: number, day: number | undefined) => void
 }) {
   const toggleMonth = (month: number) => {
     const set = new Set(scheduledMonths)
@@ -1581,18 +1580,7 @@ function SpecificMonthsPicker({
     onChangeMonths([...set].sort((a, b) => a - b))
   }
 
-  // No explicit day-of-month means "the last day of the month".
-  const useLastDay = dueDayOfMonth === undefined
-  // The date control only cares about the DAY the owner picks; we pin the
-  // displayed date to the first selected month (or the current month) of the
-  // current year purely so the native picker has a coherent value to show.
-  const dueDateDisplay = (() => {
-    if (dueDayOfMonth === undefined) return ''
-    const now = new Date()
-    const month = scheduledMonths[0] ?? now.getMonth() + 1
-    const day = Math.min(MAX_DUE_DAY_OF_MONTH, Math.max(1, dueDayOfMonth))
-    return `${now.getFullYear()}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-  })()
+  const currentYear = new Date().getFullYear()
 
   return (
     <div className="specific-months">
@@ -1609,39 +1597,42 @@ function SpecificMonthsPicker({
           </label>
         ))}
       </div>
-      <label className="specific-months-due-day">
-        <span>Due date</span>
-        <input
-          className="input"
-          type="date"
-          value={dueDateDisplay}
-          disabled={useLastDay}
-          onChange={(event) => {
-            const raw = event.target.value
-            if (!raw) {
-              onChangeDueDay(undefined)
-              return
-            }
-            const day = Number(raw.split('-')[2])
-            if (!Number.isFinite(day)) return
-            const clamped = Math.min(MAX_DUE_DAY_OF_MONTH, Math.max(1, day))
-            onChangeDueDay(clamped)
-          }}
-        />
-        <label className="specific-months-last-day">
-          <input
-            type="checkbox"
-            checked={useLastDay}
-            onChange={(event) => onChangeDueDay(event.target.checked ? undefined : 1)}
-          />
-          <span>Due on the last day of the month</span>
-        </label>
-        <small className="new-task-hint">
-          Each selected month&apos;s task is due on this day — only the day is
-          used, so the month shown is just for picking. Latest is the{' '}
-          {MAX_DUE_DAY_OF_MONTH}th; tick the box for month-end.
-        </small>
-      </label>
+      {scheduledMonths.length > 0 ? (
+        <div className="specific-months-due-dates">
+          <span className="specific-months-label">Due date in each month</span>
+          {scheduledMonths.map((month) => {
+            const lastDay = new Date(currentYear, month, 0).getDate()
+            const stored = monthlyDueDays ? Number(monthlyDueDays[month]) : NaN
+            const day = Number.isFinite(stored) && stored >= 1 ? Math.min(stored, lastDay) : lastDay
+            const value = `${currentYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+            return (
+              <label key={month} className="specific-months-due-row">
+                <span className="specific-months-due-month">{monthShortNames[month]}</span>
+                <input
+                  className="input"
+                  type="date"
+                  value={value}
+                  onChange={(event) => {
+                    const raw = event.target.value
+                    if (!raw) {
+                      onChangeMonthDue(month, undefined)
+                      return
+                    }
+                    const picked = Number(raw.split('-')[2])
+                    if (!Number.isFinite(picked)) return
+                    onChangeMonthDue(month, Math.min(Math.max(1, picked), lastDay))
+                  }}
+                />
+              </label>
+            )
+          })}
+          <small className="new-task-hint">
+            Each selected month&apos;s task is due on the day you pick — any day of
+            that month. The due date always stays within its month; clear a date
+            to use that month&apos;s last day.
+          </small>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -1706,7 +1697,19 @@ function NewTaskForm({
   const [dueDate, setDueDate] = useState(lastDayOfCurrentMonth())
   const [frequency, setFrequency] = useState<ChecklistFrequency>('monthly')
   const [scheduledMonths, setScheduledMonths] = useState<number[]>([])
-  const [dueDayOfMonth, setDueDayOfMonth] = useState<number | undefined>(undefined)
+  const [monthlyDueDays, setMonthlyDueDays] = useState<Record<string, number>>({})
+
+  const setMonthDue = (month: number, day: number | undefined) => {
+    setMonthlyDueDays((prev) => {
+      const next = { ...prev }
+      if (day === undefined) {
+        delete next[month]
+      } else {
+        next[month] = day
+      }
+      return next
+    })
+  }
   // The first stage's steps as a nested outliner tree (item → sub → sub-sub).
   const [itemTree, setItemTree] = useState<ChecklistTemplateItem[]>([])
   const [error, setError] = useState('')
@@ -1834,7 +1837,7 @@ function NewTaskForm({
         ...(isSpecificMonths
           ? {
               scheduledMonths,
-              ...(dueDayOfMonth !== undefined ? { dueDayOfMonth } : {}),
+              monthlyDueDays,
             }
           : {}),
       },
@@ -1933,9 +1936,9 @@ function NewTaskForm({
       {isSpecificMonths ? (
         <SpecificMonthsPicker
           scheduledMonths={scheduledMonths}
-          dueDayOfMonth={dueDayOfMonth}
+          monthlyDueDays={monthlyDueDays}
           onChangeMonths={setScheduledMonths}
-          onChangeDueDay={setDueDayOfMonth}
+          onChangeMonthDue={setMonthDue}
         />
       ) : null}
 
@@ -2536,21 +2539,23 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
       {template.frequency === 'specific-months' ? (
         <SpecificMonthsPicker
           scheduledMonths={template.scheduledMonths ?? []}
-          dueDayOfMonth={template.dueDayOfMonth}
+          monthlyDueDays={template.monthlyDueDays}
           onChangeMonths={(months) =>
             props.onUpdateTemplate(template.id, (current) => ({
               ...current,
               scheduledMonths: months,
             }))
           }
-          onChangeDueDay={(day) =>
+          onChangeMonthDue={(month, day) =>
             props.onUpdateTemplate(template.id, (current) => {
               const next = { ...current }
+              const map = { ...(next.monthlyDueDays ?? {}) }
               if (day === undefined) {
-                delete next.dueDayOfMonth
+                delete map[month]
               } else {
-                next.dueDayOfMonth = day
+                map[month] = day
               }
+              next.monthlyDueDays = map
               return next
             })
           }
