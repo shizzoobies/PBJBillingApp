@@ -6,9 +6,15 @@ import { AssignedTeamControl } from '../components/AssignedTeamControl'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { recordClientProfileActivity, setClientAssignedTeamRequest } from '../lib/api'
-import { ApiError, type Client } from '../lib/types'
+import {
+  ApiError,
+  type BillingMode,
+  type Client,
+  type SubscriptionPlan,
+} from '../lib/types'
 import {
   clientName,
+  currency,
   employeeName,
   formatHours,
   shortDate,
@@ -158,6 +164,8 @@ export function ClientDetailPage() {
         />
         {assignedTeamError ? <p className="auth-error">{assignedTeamError}</p> : null}
       </section>
+
+      <BillingSection client={client} plans={data.plans} onCommit={commit} />
 
       <RecurringReimbursementsCard clientId={client.id} />
       <ReimbursementsCard clientId={client.id} />
@@ -326,6 +334,198 @@ function ContactSection({
         />
       </div>
     </section>
+  )
+}
+
+function BillingSection({
+  client,
+  plans,
+  onCommit,
+}: {
+  client: Client
+  plans: SubscriptionPlan[]
+  onCommit: (patch: Partial<Client>) => void
+}) {
+  const plan = client.planId ? plans.find((p) => p.id === client.planId) ?? null : null
+  const planFeeLabel = plan ? currency.format(plan.monthlyFee) : '—'
+  const effectiveFee =
+    typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
+      ? client.customMonthlyFee
+      : plan?.monthlyFee ?? 0
+  const hasOverride =
+    typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Billing</p>
+          <h2>Rates and subscription</h2>
+        </div>
+      </div>
+      <div className="form-grid two-col">
+        <label className="field">
+          <span>Billing type</span>
+          <select
+            className="input"
+            onChange={(event) => {
+              const nextMode = event.target.value as BillingMode
+              const patch: Partial<Client> = { billingMode: nextMode }
+              if (nextMode === 'hourly') {
+                // Drop the subscription plan + override when switching off
+                // subscription. The override would otherwise apply if the
+                // client is flipped back later, which is confusing.
+                patch.planId = null
+                patch.customMonthlyFee = null
+              } else if (nextMode === 'subscription' && !client.planId && plans[0]) {
+                patch.planId = plans[0].id
+              }
+              onCommit(patch)
+            }}
+            value={client.billingMode}
+          >
+            <option value="hourly">Hourly</option>
+            <option value="subscription">Subscription</option>
+          </select>
+        </label>
+        <NumberField
+          label="Hourly rate"
+          step="0.01"
+          min="0"
+          value={client.hourlyRate}
+          onCommit={(next) => onCommit({ hourlyRate: next })}
+          helper={
+            client.billingMode === 'subscription'
+              ? 'Used to bill the overage hours beyond the plan’s included hours.'
+              : 'Used to bill every billable hour worked for this client.'
+          }
+        />
+        {client.billingMode === 'subscription' ? (
+          <>
+            <label className="field">
+              <span>Subscription plan</span>
+              <select
+                className="input"
+                onChange={(event) => onCommit({ planId: event.target.value })}
+                value={client.planId ?? plans[0]?.id ?? ''}
+              >
+                {plans.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({currency.format(p.monthlyFee)}/mo, {p.includedHours}h)
+                  </option>
+                ))}
+              </select>
+              <small className="field-helper">
+                Plan default fee: <strong>{planFeeLabel}</strong>
+                {hasOverride
+                  ? ` — overridden below to ${currency.format(effectiveFee)}.`
+                  : ' — used unless overridden below.'}
+              </small>
+            </label>
+            <div className="field">
+              <span>Custom monthly fee (this client only)</span>
+              <div className="form-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <NumberInputControl
+                  canonical={hasOverride ? client.customMonthlyFee! : null}
+                  onCommit={(next) =>
+                    onCommit({ customMonthlyFee: next === null ? null : Number(next) })
+                  }
+                  placeholder={plan ? plan.monthlyFee.toFixed(2) : '0.00'}
+                />
+                {hasOverride ? (
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => onCommit({ customMonthlyFee: null })}
+                  >
+                    Use plan default
+                  </button>
+                ) : null}
+              </div>
+              <small className="field-helper">
+                {hasOverride
+                  ? `Invoices use ${currency.format(effectiveFee)}/mo for this client instead of the plan default.`
+                  : 'Leave blank to use the plan default. Set a value here to bill this client a custom monthly rate.'}
+              </small>
+            </div>
+          </>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
+function NumberField({
+  label,
+  helper,
+  min,
+  step,
+  value,
+  onCommit,
+}: {
+  label: string
+  helper?: string
+  min?: string
+  step?: string
+  value: number
+  onCommit: (value: number) => void
+}) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <NumberInputControl
+        canonical={value}
+        min={min}
+        step={step}
+        onCommit={(next) => {
+          if (next === null) return
+          onCommit(next)
+        }}
+      />
+      {helper ? <small className="field-helper">{helper}</small> : null}
+    </label>
+  )
+}
+
+function NumberInputControl({
+  canonical,
+  min,
+  step,
+  placeholder,
+  onCommit,
+}: {
+  canonical: number | null
+  min?: string
+  step?: string
+  placeholder?: string
+  onCommit: (value: number | null) => void
+}) {
+  const [draft, setDraft] = useState(canonical === null ? '' : String(canonical))
+  return (
+    <input
+      className="input"
+      min={min ?? '0'}
+      step={step ?? '0.01'}
+      type="number"
+      placeholder={placeholder}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => {
+        const trimmed = draft.trim()
+        if (trimmed === '') {
+          if (canonical !== null) onCommit(null)
+          return
+        }
+        const parsed = Number(trimmed)
+        if (Number.isNaN(parsed)) {
+          setDraft(canonical === null ? '' : String(canonical))
+          return
+        }
+        if (parsed !== canonical) {
+          onCommit(parsed)
+        }
+      }}
+    />
   )
 }
 

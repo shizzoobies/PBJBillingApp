@@ -30,6 +30,14 @@ export type Client = {
   billingMode: BillingMode
   hourlyRate: number
   planId: string | null
+  /**
+   * Per-client override for the subscription plan's monthly fee. When
+   * `null` or undefined, the plan's `monthlyFee` is used. When set,
+   * this exact value is used in invoices and dashboard revenue
+   * calculations instead. Only meaningful when `billingMode` is
+   * 'subscription' and `planId` is set.
+   */
+  customMonthlyFee?: number | null
   assignedEmployeeIds?: string[]
   /**
    * Server-enforced visibility scoping. Owners always see all clients. A

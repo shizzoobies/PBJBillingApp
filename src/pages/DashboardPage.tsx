@@ -228,7 +228,14 @@ function OwnerDashboardView() {
       if (plan) {
         const includedMinutes = plan.includedHours * 60
         const overage = Math.max(0, minutes - includedMinutes)
-        return total + plan.monthlyFee + (overage / 60) * client.hourlyRate
+        // Per-client override of the plan's monthly fee. Most of the
+        // user's clients negotiate custom rates, so a `null` value
+        // falls back to the plan default.
+        const effectiveMonthlyFee =
+          typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
+            ? client.customMonthlyFee
+            : plan.monthlyFee
+        return total + effectiveMonthlyFee + (overage / 60) * client.hourlyRate
       }
     }
     return total + (minutes / 60) * client.hourlyRate

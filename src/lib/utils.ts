@@ -596,11 +596,17 @@ export function getInvoice(
   if (client.billingMode === 'subscription' && plan) {
     const includedMinutes = plan.includedHours * 60
     const overageMinutes = Math.max(0, billableMinutes - includedMinutes)
+    // Per-client override of the plan's monthly fee. `null`/undefined
+    // means "use the plan default"; a number is the negotiated rate.
+    const effectiveMonthlyFee =
+      typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
+        ? client.customMonthlyFee
+        : plan.monthlyFee
     const lines: InvoiceLine[] = [
       {
         label: `${plan.name} subscription`,
         detail: `${plan.includedHours} included hours`,
-        amount: plan.monthlyFee,
+        amount: effectiveMonthlyFee,
       },
       {
         label: 'Billable time tracked',

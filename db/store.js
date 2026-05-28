@@ -996,6 +996,12 @@ export class AppDataStore {
       await this.pool.query(`alter table clients add column if not exists payment_terms text`)
       await this.pool.query(`alter table clients add column if not exists footer_note text`)
       await this.pool.query(`alter table clients add column if not exists quickbooks_pay_url text`)
+      // Per-client override of the subscription plan's monthly fee — used
+      // when the client negotiates a custom rate. Nullable: a null value
+      // means "use the plan's default fee".
+      await this.pool.query(
+        `alter table clients add column if not exists custom_monthly_fee numeric(12, 2)`,
+      )
       await this.pool.query(
         `alter table clients add column if not exists invoice_show_time_breakdown boolean not null default true`,
       )
@@ -1601,6 +1607,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, name, contact, billing_mode, hourly_rate, plan_id,
+                   custom_monthly_fee,
                    email, contact_name, phone, address_line1, address_line2,
                    city, state, postal_code, logo_url, payment_terms,
                    footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
@@ -1799,6 +1806,10 @@ export class AppDataStore {
           billingMode: row.billing_mode,
           hourlyRate: Number(row.hourly_rate),
           planId: row.plan_id,
+          customMonthlyFee:
+            row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
+              ? null
+              : Number(row.custom_monthly_fee),
           assignedEmployeeIds: assignmentsByClient.get(row.id) ?? [],
           assignedBookkeeperIds: Array.isArray(row.assigned_bookkeeper_ids)
             ? [...new Set(row.assigned_bookkeeper_ids.filter((id) => typeof id === 'string'))]
@@ -2155,13 +2166,14 @@ export class AppDataStore {
             `
               insert into clients (
                 id, name, contact, billing_mode, hourly_rate, plan_id,
+                custom_monthly_fee,
                 email, contact_name, phone, address_line1, address_line2,
                 city, state, postal_code, logo_url, payment_terms,
                 footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
                 invoice_hide_internal_hours, invoice_group_by_category,
                 assigned_bookkeeper_ids, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, now())
             `,
             [
               clientRecord.id,
@@ -2170,6 +2182,9 @@ export class AppDataStore {
               clientRecord.billingMode,
               clientRecord.hourlyRate,
               clientRecord.planId,
+              clientRecord.customMonthlyFee === undefined || clientRecord.customMonthlyFee === null
+                ? null
+                : Number(clientRecord.customMonthlyFee),
               clientRecord.email ?? '',
               clientRecord.contactName ?? '',
               clientRecord.phone ?? '',
