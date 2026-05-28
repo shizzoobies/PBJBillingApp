@@ -2,9 +2,11 @@ import { ChevronRight, Plus, ShieldCheck } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import type {
   BillingMode,
   Client,
+  Contact,
   Employee,
   SubscriptionPlan,
 } from '../lib/types'
@@ -43,6 +45,7 @@ export function ClientsPage() {
           employees={data.employees}
           onCreate={addClient}
           plans={data.plans}
+          contacts={data.contacts}
         />
       ) : (
         <VisibilityPanel visibleClients={visibleClients} />
@@ -81,16 +84,21 @@ function ClientBuilder({
   employees,
   onCreate,
   plans,
+  contacts,
 }: {
   employees: Employee[]
   onCreate: (client: Omit<Client, 'id'>) => void
   plans: SubscriptionPlan[]
+  contacts: Contact[]
 }) {
   const [name, setName] = useState('Summit Retail Co.')
   const [contact, setContact] = useState('Jamie Miller')
   const [hourlyRate, setHourlyRate] = useState('125')
+  const [monthlyRate, setMonthlyRate] = useState('')
+  const [estimatedMonthlyHours, setEstimatedMonthlyHours] = useState('')
   const [billingMode, setBillingMode] = useState<BillingMode>('hourly')
-  const [planId, setPlanId] = useState(plans[0]?.id ?? '')
+  const [planIds, setPlanIds] = useState<string[]>([])
+  const [contactIds, setContactIds] = useState<string[]>([])
   const [assignedEmployeeIds, setAssignedEmployeeIds] = useState<string[]>(
     employees[0] ? [employees[0].id] : [],
   )
@@ -110,17 +118,30 @@ function ClientBuilder({
       return
     }
 
+    const parsedMonthly = Number(monthlyRate)
+    const parsedEstHours = Number(estimatedMonthlyHours)
     onCreate({
       name,
       contact,
       billingMode,
       hourlyRate: rate,
-      planId: billingMode === 'subscription' ? planId || plans[0]?.id || null : null,
+      planIds,
+      contactIds,
+      ...(billingMode === 'subscription' && monthlyRate.trim() && !Number.isNaN(parsedMonthly)
+        ? { monthlyRate: parsedMonthly }
+        : {}),
+      ...(estimatedMonthlyHours.trim() && !Number.isNaN(parsedEstHours)
+        ? { estimatedMonthlyHours: parsedEstHours }
+        : {}),
       assignedEmployeeIds,
     })
     setName('')
     setContact('')
     setHourlyRate('125')
+    setMonthlyRate('')
+    setEstimatedMonthlyHours('')
+    setPlanIds([])
+    setContactIds([])
   }
 
   return (
@@ -149,17 +170,6 @@ function ClientBuilder({
           />
         </label>
         <label className="field">
-          <span>Hourly rate</span>
-          <input
-            className="input"
-            min="0"
-            onChange={(event) => setHourlyRate(event.target.value)}
-            step="0.01"
-            type="number"
-            value={hourlyRate}
-          />
-        </label>
-        <label className="field">
           <span>Billing type</span>
           <select
             className="input"
@@ -167,25 +177,66 @@ function ClientBuilder({
             value={billingMode}
           >
             <option value="hourly">Hourly</option>
-            <option value="subscription">Subscription</option>
+            <option value="subscription">Monthly</option>
           </select>
         </label>
-        {billingMode === 'subscription' && (
+        {billingMode === 'hourly' ? (
           <label className="field">
-            <span>Subscription plan</span>
-            <select
+            <span>Hourly rate</span>
+            <input
               className="input"
-              onChange={(event) => setPlanId(event.target.value)}
-              value={planId}
-            >
-              {plans.map((plan) => (
-                <option key={plan.id} value={plan.id}>
-                  {plan.name}
-                </option>
-              ))}
-            </select>
+              min="0"
+              onChange={(event) => setHourlyRate(event.target.value)}
+              step="0.01"
+              type="number"
+              value={hourlyRate}
+            />
+          </label>
+        ) : (
+          <label className="field">
+            <span>Monthly rate</span>
+            <input
+              className="input"
+              min="0"
+              onChange={(event) => setMonthlyRate(event.target.value)}
+              step="0.01"
+              type="number"
+              value={monthlyRate}
+            />
           </label>
         )}
+        <label className="field">
+          <span>Estimated monthly hours</span>
+          <input
+            className="input"
+            min="0"
+            onChange={(event) => setEstimatedMonthlyHours(event.target.value)}
+            step="0.5"
+            type="number"
+            value={estimatedMonthlyHours}
+          />
+          <small className="field-helper">For planning only — does not affect invoices.</small>
+        </label>
+        <div className="field">
+          <span>Plans / services</span>
+          <ChipMultiSelect
+            selectedIds={planIds}
+            options={plans.map((plan) => ({ id: plan.id, label: plan.name }))}
+            onChange={setPlanIds}
+            addLabel="+ Add plan / service"
+            emptyHelper="No plans/services selected yet."
+          />
+        </div>
+        <div className="field">
+          <span>Contacts</span>
+          <ChipMultiSelect
+            selectedIds={contactIds}
+            options={contacts.map((entry) => ({ id: entry.id, label: entry.name }))}
+            onChange={setContactIds}
+            addLabel="+ Add contact"
+            emptyHelper="No contacts selected yet."
+          />
+        </div>
         <fieldset className="assignment-field">
           <legend>Assigned employees</legend>
           {employees.map((employee) => (
@@ -231,12 +282,14 @@ function ClientTable({
             {ownerMode ? <th>Billing</th> : null}
             {ownerMode ? <th>Rate</th> : null}
             <th>Assigned team</th>
-            {ownerMode ? <th>Subscription plan</th> : null}
+            {ownerMode ? <th>Plans / services</th> : null}
           </tr>
         </thead>
         <tbody>
           {clients.map((client) => {
-            const plan = plans.find((item) => item.id === client.planId)
+            const clientPlans = (client.planIds ?? [])
+              .map((id) => plans.find((item) => item.id === id))
+              .filter((item): item is SubscriptionPlan => Boolean(item))
             return (
               <tr key={client.id}>
                 <td>
@@ -258,19 +311,23 @@ function ClientTable({
                         onUpdatePlan(
                           client.id,
                           event.target.value as BillingMode,
-                          event.target.value === 'hourly'
-                            ? null
-                            : client.planId ?? plans[0]?.id ?? null,
+                          client.planId ?? null,
                         )
                       }
                       value={client.billingMode}
                     >
                       <option value="hourly">Hourly</option>
-                      <option value="subscription">Subscription</option>
+                      <option value="subscription">Monthly</option>
                     </select>
                   </td>
                 ) : null}
-                {ownerMode ? <td>{currency.format(client.hourlyRate)}/hr</td> : null}
+                {ownerMode ? (
+                  <td>
+                    {client.billingMode === 'subscription'
+                      ? `${currency.format(client.monthlyRate ?? 0)}/mo`
+                      : `${currency.format(client.hourlyRate)}/hr`}
+                  </td>
+                ) : null}
                 <td>
                   <div className="client-chip-list compact">
                     {getAssignedEmployeeIds(client).length > 0 ? (
@@ -284,22 +341,14 @@ function ClientTable({
                 </td>
                 {ownerMode ? (
                   <td>
-                    {client.billingMode === 'subscription' ? (
-                      <select
-                        className="compact-input"
-                        onChange={(event) =>
-                          onUpdatePlan(client.id, 'subscription', event.target.value)
-                        }
-                        value={client.planId ?? plans[0]?.id ?? ''}
-                      >
-                        {plans.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.name}
-                          </option>
+                    {clientPlans.length > 0 ? (
+                      <div className="client-chip-list compact">
+                        {clientPlans.map((plan) => (
+                          <span key={plan.id}>{plan.name}</span>
                         ))}
-                      </select>
+                      </div>
                     ) : (
-                      plan?.name ?? 'Hourly billing'
+                      <span className="muted-text">None</span>
                     )}
                   </td>
                 ) : null}

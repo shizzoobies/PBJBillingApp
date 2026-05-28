@@ -205,8 +205,29 @@ function advanceChecklistFrequency(dateString, frequency) {
 }
 
 function normalizeClientProfile(client) {
+  // Billing refactor back-compat. Surface `planIds`/`contactIds` as arrays
+  // (never undefined) and derive `monthlyRate` from the legacy
+  // `customMonthlyFee` when the new field is absent — mirrors the Postgres
+  // read-map so the file-fallback path produces identical shapes.
+  const planIdsRaw = Array.isArray(client.planIds)
+    ? client.planIds.filter((id) => typeof id === 'string' && id)
+    : []
+  const planIds =
+    planIdsRaw.length > 0 ? planIdsRaw : client.planId ? [client.planId] : []
+  const contactIds = Array.isArray(client.contactIds)
+    ? client.contactIds.filter((id) => typeof id === 'string' && id)
+    : []
+  const monthlyRate =
+    typeof client.monthlyRate === 'number' && !Number.isNaN(client.monthlyRate)
+      ? client.monthlyRate
+      : typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
+        ? client.customMonthlyFee
+        : undefined
   return {
     ...client,
+    planIds,
+    contactIds,
+    ...(monthlyRate === undefined ? {} : { monthlyRate }),
     assignedBookkeeperIds: Array.isArray(client.assignedBookkeeperIds)
       ? [...new Set(client.assignedBookkeeperIds.filter((id) => typeof id === 'string'))]
       : [],
@@ -997,6 +1018,36 @@ export class AppDataStore {
         )
       `)
 
+      // Pricing left the plan model — a plan is now just name + notes. The
+      // legacy `monthly_fee` / `included_hours` columns are KEPT (not dropped)
+      // so the billing migration below can still read each client's old plan
+      // fee, but we stop reading/writing them. Relax their NOT NULL +
+      // backfill a default so inserts that omit them succeed on every DB.
+      await this.pool.query(
+        `alter table subscription_plans alter column monthly_fee drop not null`,
+      )
+      await this.pool.query(
+        `alter table subscription_plans alter column monthly_fee set default 0`,
+      )
+      await this.pool.query(
+        `alter table subscription_plans alter column included_hours drop not null`,
+      )
+
+      // Reusable contacts (shared across clients). Mirrors the plans/clients
+      // table idioms incl. `updated_at`. Selected on clients via `contact_ids`.
+      await this.pool.query(`
+        create table if not exists contacts (
+          id text primary key,
+          name text not null,
+          email text,
+          phone text,
+          title text,
+          notes text,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+
       await this.pool.query(`
         create table if not exists clients (
           id text primary key,
@@ -1040,6 +1091,53 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists assigned_bookkeeper_ids text[] not null default '{}'`,
       )
+
+      // Billing refactor: a client is now either Hourly (hourly_rate) OR
+      // Monthly (its own monthly_rate, replacing the plan-derived fee +
+      // per-client override). `estimated_monthly_hours` is INFORMATIONAL
+      // ONLY and must never affect invoice totals. A client can subscribe to
+      // MULTIPLE plans/services (`plan_ids`) and have MULTIPLE contacts
+      // (`contact_ids`). All additive + nullable so legacy rows keep working.
+      await this.pool.query(
+        `alter table clients add column if not exists monthly_rate numeric(12, 2)`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists estimated_monthly_hours numeric(8, 2)`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists plan_ids text[] not null default '{}'`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists contact_ids text[] not null default '{}'`,
+      )
+
+      // BILLING-CRITICAL MIGRATION — preserve every client's current
+      // effective monthly amount before pricing left the plan. Guarded on
+      // null so re-runs / row reorders never clobber an owner's edits.
+      //
+      //   monthly_rate ← coalesce(custom_monthly_fee, <old plan's monthly_fee>)
+      //   plan_ids     ← [plan_id] when a legacy plan_id exists, else {}
+      await this.pool.query(`
+        update clients c
+        set monthly_rate = coalesce(
+          c.custom_monthly_fee,
+          (select p.monthly_fee from subscription_plans p where p.id = c.plan_id)
+        )
+        where c.monthly_rate is null
+          and (
+            c.custom_monthly_fee is not null
+            or c.plan_id is not null
+          )
+      `)
+      await this.pool.query(`
+        update clients c
+        set plan_ids = case
+          when c.plan_id is not null then array[c.plan_id]
+          else '{}'::text[]
+        end
+        where (c.plan_ids is null or c.plan_ids = '{}'::text[])
+          and c.plan_id is not null
+      `)
 
       await this.pool.query(`
         create table if not exists client_assignments (
@@ -1608,6 +1706,7 @@ export class AppDataStore {
       const [
         usersResult,
         plansResult,
+        contactsResult,
         clientsResult,
         assignmentsResult,
         timeEntriesResult,
@@ -1634,13 +1733,19 @@ export class AppDataStore {
             order by sort_order asc nulls last, name asc
           `),
           this.pool.query(`
-            select id, name, monthly_fee, included_hours, notes
+            select id, name, notes
             from subscription_plans
             order by name asc
           `),
           this.pool.query(`
+            select id, name, email, phone, title, notes
+            from contacts
+            order by name asc
+          `),
+          this.pool.query(`
             select id, name, contact, billing_mode, hourly_rate, plan_id,
-                   custom_monthly_fee,
+                   custom_monthly_fee, monthly_rate, estimated_monthly_hours,
+                   plan_ids, contact_ids,
                    email, contact_name, phone, address_line1, address_line2,
                    city, state, postal_code, logo_url, payment_terms,
                    footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
@@ -1828,22 +1933,59 @@ export class AppDataStore {
         plans: plansResult.rows.map((row) => ({
           id: row.id,
           name: row.name,
-          monthlyFee: Number(row.monthly_fee),
-          includedHours: Number(row.included_hours),
           notes: row.notes,
         })),
-        clients: clientsResult.rows.map((row) => ({
+        contacts: contactsResult.rows.map((row) => ({
           id: row.id,
           name: row.name,
-          contact: row.contact,
-          billingMode: row.billing_mode,
-          hourlyRate: Number(row.hourly_rate),
-          planId: row.plan_id,
-          customMonthlyFee:
-            row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
-              ? null
-              : Number(row.custom_monthly_fee),
-          assignedEmployeeIds: assignmentsByClient.get(row.id) ?? [],
+          email: row.email ?? '',
+          phone: row.phone ?? '',
+          title: row.title ?? '',
+          notes: row.notes ?? '',
+        })),
+        clients: clientsResult.rows.map((row) => {
+          // Back-compat normalization. The frontend always gets
+          // `planIds: string[]` and `contactIds: string[]` (never undefined),
+          // and a `monthlyRate` that prefers the new column, then the legacy
+          // per-client custom fee.
+          const planIds = Array.isArray(row.plan_ids)
+            ? row.plan_ids.filter((id) => typeof id === 'string' && id)
+            : []
+          const normalizedPlanIds =
+            planIds.length > 0
+              ? planIds
+              : row.plan_id
+                ? [row.plan_id]
+                : []
+          const contactIds = Array.isArray(row.contact_ids)
+            ? row.contact_ids.filter((id) => typeof id === 'string' && id)
+            : []
+          const monthlyRate =
+            row.monthly_rate === null || row.monthly_rate === undefined
+              ? row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
+                ? null
+                : Number(row.custom_monthly_fee)
+              : Number(row.monthly_rate)
+          return {
+            id: row.id,
+            name: row.name,
+            contact: row.contact,
+            billingMode: row.billing_mode,
+            hourlyRate: Number(row.hourly_rate),
+            planIds: normalizedPlanIds,
+            contactIds,
+            monthlyRate: monthlyRate === null ? undefined : monthlyRate,
+            estimatedMonthlyHours:
+              row.estimated_monthly_hours === null || row.estimated_monthly_hours === undefined
+                ? undefined
+                : Number(row.estimated_monthly_hours),
+            // Legacy fields surfaced for back-compat reads + migration only.
+            planId: row.plan_id ?? null,
+            customMonthlyFee:
+              row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
+                ? null
+                : Number(row.custom_monthly_fee),
+            assignedEmployeeIds: assignmentsByClient.get(row.id) ?? [],
           assignedBookkeeperIds: Array.isArray(row.assigned_bookkeeper_ids)
             ? [...new Set(row.assigned_bookkeeper_ids.filter((id) => typeof id === 'string'))]
             : [],
@@ -1859,10 +2001,11 @@ export class AppDataStore {
           paymentTerms: row.payment_terms ?? '',
           footerNote: row.footer_note ?? '',
           quickbooksPayUrl: row.quickbooks_pay_url ?? '',
-          invoiceShowTimeBreakdown: row.invoice_show_time_breakdown ?? true,
-          invoiceHideInternalHours: row.invoice_hide_internal_hours ?? true,
-          invoiceGroupByCategory: row.invoice_group_by_category ?? false,
-        })),
+            invoiceShowTimeBreakdown: row.invoice_show_time_breakdown ?? true,
+            invoiceHideInternalHours: row.invoice_hide_internal_hours ?? true,
+            invoiceGroupByCategory: row.invoice_group_by_category ?? false,
+          }
+        }),
         timeEntries: timeEntriesResult.rows.map((row) => ({
           id: row.id,
           employeeId: row.user_id,
@@ -2025,6 +2168,11 @@ export class AppDataStore {
       backfilled = true
     }
 
+    if (!Array.isArray(data.contacts)) {
+      data.contacts = []
+      backfilled = true
+    }
+
     // Recycle-bin backfill for legacy file-fallback data. Old saves never
     // carried a separate array, so partition the existing list by `deletedAt`
     // and keep both arrays from now on. New saves always write both arrays
@@ -2149,6 +2297,7 @@ export class AppDataStore {
         await client.query('delete from invoice_drafts')
         await client.query('delete from clients')
         await client.query('delete from subscription_plans')
+        await client.query('delete from contacts')
 
         for (const employee of data.employees) {
           // PRESERVE existing email like we preserve password_hash. The
@@ -2188,12 +2337,32 @@ export class AppDataStore {
         }
 
         for (const plan of data.plans) {
+          // Pricing left the plan model — only name + notes are written now.
+          // The legacy monthly_fee / included_hours columns keep their DB
+          // defaults (0) and are otherwise ignored.
           await client.query(
             `
-              insert into subscription_plans (id, name, monthly_fee, included_hours, notes, updated_at)
-              values ($1, $2, $3, $4, $5, now())
+              insert into subscription_plans (id, name, notes, updated_at)
+              values ($1, $2, $3, now())
             `,
-            [plan.id, plan.name, plan.monthlyFee, plan.includedHours, plan.notes],
+            [plan.id, plan.name, plan.notes ?? ''],
+          )
+        }
+
+        for (const contact of data.contacts ?? []) {
+          await client.query(
+            `
+              insert into contacts (id, name, email, phone, title, notes, updated_at)
+              values ($1, $2, $3, $4, $5, $6, now())
+            `,
+            [
+              contact.id,
+              contact.name,
+              contact.email ?? null,
+              contact.phone ?? null,
+              contact.title ?? null,
+              contact.notes ?? null,
+            ],
           )
         }
 
@@ -2202,14 +2371,15 @@ export class AppDataStore {
             `
               insert into clients (
                 id, name, contact, billing_mode, hourly_rate, plan_id,
-                custom_monthly_fee,
+                custom_monthly_fee, monthly_rate, estimated_monthly_hours,
+                plan_ids, contact_ids,
                 email, contact_name, phone, address_line1, address_line2,
                 city, state, postal_code, logo_url, payment_terms,
                 footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
                 invoice_hide_internal_hours, invoice_group_by_category,
                 assigned_bookkeeper_ids, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, now())
             `,
             [
               clientRecord.id,
@@ -2217,10 +2387,27 @@ export class AppDataStore {
               clientRecord.contact,
               clientRecord.billingMode,
               clientRecord.hourlyRate,
-              clientRecord.planId,
+              // Legacy single plan_id: keep writing it from planIds[0] (or the
+              // legacy field) so old-shaped reads / the FK stay coherent.
+              Array.isArray(clientRecord.planIds) && clientRecord.planIds.length > 0
+                ? clientRecord.planIds[0]
+                : clientRecord.planId ?? null,
               clientRecord.customMonthlyFee === undefined || clientRecord.customMonthlyFee === null
                 ? null
                 : Number(clientRecord.customMonthlyFee),
+              clientRecord.monthlyRate === undefined || clientRecord.monthlyRate === null
+                ? null
+                : Number(clientRecord.monthlyRate),
+              clientRecord.estimatedMonthlyHours === undefined ||
+              clientRecord.estimatedMonthlyHours === null
+                ? null
+                : Number(clientRecord.estimatedMonthlyHours),
+              Array.isArray(clientRecord.planIds)
+                ? clientRecord.planIds.filter((id) => typeof id === 'string' && id)
+                : [],
+              Array.isArray(clientRecord.contactIds)
+                ? clientRecord.contactIds.filter((id) => typeof id === 'string' && id)
+                : [],
               clientRecord.email ?? '',
               clientRecord.contactName ?? '',
               clientRecord.phone ?? '',
@@ -3192,9 +3379,16 @@ export class AppDataStore {
     if (data.plans.length === before) return null
     const unlinkedClientIds = []
     data.clients = (data.clients ?? []).map((client) => {
-      if (client.planId === id) {
+      const onPlanIds = Array.isArray(client.planIds) && client.planIds.includes(id)
+      if (client.planId === id || onPlanIds) {
         unlinkedClientIds.push(client.id)
-        return { ...client, planId: null }
+        return {
+          ...client,
+          planId: client.planId === id ? null : client.planId,
+          planIds: Array.isArray(client.planIds)
+            ? client.planIds.filter((planId) => planId !== id)
+            : [],
+        }
       }
       return client
     })

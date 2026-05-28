@@ -2,7 +2,6 @@ import { Plus, Trash2 } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import { ApiError, type Client, type SubscriptionPlan } from '../lib/types'
-import { currency } from '../lib/utils'
 
 export function PlansPage() {
   const { data, addPlan, deletePlan, ownerMode } = useAppContext()
@@ -25,22 +24,16 @@ function PlanBuilder({
   onCreate: (plan: Omit<SubscriptionPlan, 'id'>) => void
 }) {
   const [name, setName] = useState('Controller Support')
-  const [monthlyFee, setMonthlyFee] = useState('2400')
-  const [includedHours, setIncludedHours] = useState('18')
   const [notes, setNotes] = useState('Monthly reporting, close review, and client advisory support.')
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const fee = Number(monthlyFee)
-    const hours = Number(includedHours)
-    if (!name || Number.isNaN(fee) || Number.isNaN(hours)) {
+    if (!name) {
       return
     }
 
-    onCreate({ name, monthlyFee: fee, includedHours: hours, notes })
+    onCreate({ name, notes })
     setName('')
-    setMonthlyFee('1200')
-    setIncludedHours('10')
     setNotes('')
   }
 
@@ -54,33 +47,11 @@ function PlanBuilder({
       </div>
       <form className="form-grid single" onSubmit={handleSubmit}>
         <label className="field">
-          <span>Plan name</span>
+          <span>Plan / service name</span>
           <input
             className="input"
             onChange={(event) => setName(event.target.value)}
             value={name}
-          />
-        </label>
-        <label className="field">
-          <span>Monthly fee</span>
-          <input
-            className="input"
-            min="0"
-            onChange={(event) => setMonthlyFee(event.target.value)}
-            step="0.01"
-            type="number"
-            value={monthlyFee}
-          />
-        </label>
-        <label className="field">
-          <span>Included hours</span>
-          <input
-            className="input"
-            min="0"
-            onChange={(event) => setIncludedHours(event.target.value)}
-            step="1"
-            type="number"
-            value={includedHours}
           />
         </label>
         <label className="field">
@@ -118,18 +89,18 @@ function PlanLibrary({
     // Tell the owner exactly which clients will be unlinked so they go in
     // eyes-open. Unlinked clients keep their billing history but flip to
     // hourly going forward (planId becomes null).
-    const attached = clients.filter((client) => client.planId === plan.id)
+    const attached = clients.filter((client) => (client.planIds ?? []).includes(plan.id))
     const attachedSummary =
       attached.length === 0
-        ? 'No clients are currently on this plan.'
+        ? 'No clients are currently on this plan/service.'
         : attached.length === 1
-          ? `1 client is on this plan: ${attached[0].name}. They'll be unlinked and start being billed hourly going forward.`
-          : `${attached.length} clients are on this plan: ${attached
+          ? `1 client has this plan/service: ${attached[0].name}. It will be removed from their selected services (their billing is unaffected).`
+          : `${attached.length} clients have this plan/service: ${attached
               .map((client) => client.name)
-              .join(', ')}. They'll be unlinked and start being billed hourly going forward.`
+              .join(', ')}. It will be removed from their selected services (their billing is unaffected).`
 
     const confirmed = window.confirm(
-      `Delete "${plan.name}"?\n\n${attachedSummary}\n\nPast invoices that used this plan are unaffected. This can't be undone.`,
+      `Delete "${plan.name}"?\n\n${attachedSummary}\n\nThis can't be undone.`,
     )
     if (!confirmed) return
     setPendingId(plan.id)
@@ -152,7 +123,9 @@ function PlanLibrary({
       </div>
       <div className="plan-list">
         {plans.map((plan) => {
-          const attachedCount = clients.filter((client) => client.planId === plan.id).length
+          const attachedCount = clients.filter((client) =>
+            (client.planIds ?? []).includes(plan.id),
+          ).length
           return (
             <article className="plan-row" key={plan.id}>
               <div>
@@ -163,10 +136,6 @@ function PlanLibrary({
                     {attachedCount} client{attachedCount === 1 ? '' : 's'} on this plan
                   </span>
                 ) : null}
-              </div>
-              <div>
-                <strong>{currency.format(plan.monthlyFee)}</strong>
-                <span>{plan.includedHours}h included</span>
               </div>
               {ownerMode ? (
                 <button

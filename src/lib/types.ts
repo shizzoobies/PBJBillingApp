@@ -30,13 +30,41 @@ export type Client = {
   contact: string
   billingMode: BillingMode
   hourlyRate: number
-  planId: string | null
   /**
-   * Per-client override for the subscription plan's monthly fee. When
-   * `null` or undefined, the plan's `monthlyFee` is used. When set,
-   * this exact value is used in invoices and dashboard revenue
-   * calculations instead. Only meaningful when `billingMode` is
-   * 'subscription' and `planId` is set.
+   * Plans/services this client subscribes to. A client may select MULTIPLE
+   * plans (rendered as chips in the UI). Plans are now just name + notes
+   * labels — they carry no fee. Used purely to label the monthly invoice
+   * line. Always an array on read (the store normalizes legacy `planId`
+   * rows into a single-element array).
+   */
+  planIds: string[]
+  /**
+   * The client's own monthly rate (dollars). The single source of truth for
+   * a Monthly (subscription-mode) client's invoice amount — it replaces the
+   * old plan-derived fee + per-client override. Only meaningful when
+   * `billingMode` is 'subscription'.
+   */
+  monthlyRate?: number
+  /**
+   * INFORMATIONAL ONLY — the client's estimated monthly hours, used for
+   * planning. Must NEVER affect any invoice total.
+   */
+  estimatedMonthlyHours?: number
+  /**
+   * Reusable Contacts (shared across clients) selected on this client.
+   * A client may select MULTIPLE contacts. Always an array on read.
+   */
+  contactIds: string[]
+  /**
+   * @deprecated Legacy single-plan reference. Kept optional for back-compat
+   * reads + migration only — the store backfills `planIds` from it. New
+   * writes use `planIds`.
+   */
+  planId?: string | null
+  /**
+   * @deprecated Legacy per-client override of the subscription plan's
+   * monthly fee. Kept optional for back-compat reads + migration only — the
+   * store backfills `monthlyRate` from it. New writes use `monthlyRate`.
    */
   customMonthlyFee?: number | null
   assignedEmployeeIds?: string[]
@@ -67,9 +95,21 @@ export type Client = {
 export type SubscriptionPlan = {
   id: string
   name: string
-  monthlyFee: number
-  includedHours: number
   notes: string
+}
+
+/**
+ * A reusable contact entered once and selected (via dropdown / multi-select)
+ * on one or more clients. Contacts are shared across clients and managed on
+ * their own owner-only Contacts page.
+ */
+export type Contact = {
+  id: string
+  name: string
+  email?: string
+  phone?: string
+  title?: string
+  notes?: string
 }
 
 export type TimeApprovalStatus = 'pending' | 'approved' | 'rejected'
@@ -370,6 +410,8 @@ export type AppData = {
   inactiveEmployees: Employee[]
   clients: Client[]
   plans: SubscriptionPlan[]
+  /** Reusable contacts shared across clients (owner-managed). */
+  contacts: Contact[]
   timeEntries: TimeEntry[]
   checklistTemplates: ChecklistTemplate[]
   checklists: Checklist[]

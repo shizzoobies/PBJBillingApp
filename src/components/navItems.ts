@@ -1,6 +1,7 @@
 import {
   Activity,
   BarChart3,
+  BookUser,
   Building2,
   ClipboardCheck,
   Clock3,
@@ -25,6 +26,7 @@ export const navItems: Array<{
   { to: '/time-approvals', label: 'Time Approvals', icon: ClipboardCheck, ownerOnly: true },
   { to: '/checklists', label: 'Checklists', icon: ListChecks },
   { to: '/clients', label: 'Clients', icon: Building2 },
+  { to: '/contacts', label: 'Contacts', icon: BookUser, ownerOnly: true },
   { to: '/reports', label: 'Reports', icon: FolderKanban, ownerOnly: true },
   { to: '/productivity', label: 'Productivity', icon: Activity, ownerOnly: true },
   { to: '/gantt', label: 'Gantt', icon: BarChart3, ownerOnly: true },

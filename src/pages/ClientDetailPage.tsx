@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
+import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { recordClientProfileActivity, setClientAssignedTeamRequest } from '../lib/api'
@@ -10,11 +11,11 @@ import {
   ApiError,
   type BillingMode,
   type Client,
+  type Contact,
   type SubscriptionPlan,
 } from '../lib/types'
 import {
   clientName,
-  currency,
   employeeName,
   formatHours,
   shortDate,
@@ -136,7 +137,7 @@ export function ClientDetailPage() {
         </div>
       </div>
 
-      <ContactSection client={client} onCommit={commit} />
+      <ContactSection client={client} contacts={data.contacts} onCommit={commit} />
 
       <section className="panel">
         <div className="section-heading">
@@ -276,9 +277,11 @@ function NameInput({
 
 function ContactSection({
   client,
+  contacts,
   onCommit,
 }: {
   client: Client
+  contacts: Contact[]
   onCommit: (patch: Partial<Client>) => void
 }) {
   return (
@@ -286,27 +289,20 @@ function ContactSection({
       <div className="section-heading">
         <div>
           <p className="section-kicker">Contact</p>
-          <h2>Contact details</h2>
+          <h2>Contacts &amp; address</h2>
         </div>
       </div>
       <div className="form-grid two-col">
-        <TextField
-          label="Primary contact name"
-          onCommit={(value) => onCommit({ contactName: value })}
-          value={client.contactName ?? ''}
-        />
-        <TextField
-          label="Email"
-          onCommit={(value) => onCommit({ email: value })}
-          type="email"
-          value={client.email ?? ''}
-        />
-        <TextField
-          label="Phone"
-          onCommit={(value) => onCommit({ phone: value })}
-          value={client.phone ?? ''}
-        />
-        <div />
+        <div className="field full-row">
+          <span>Contacts</span>
+          <ChipMultiSelect
+            selectedIds={client.contactIds ?? []}
+            options={contacts.map((entry) => ({ id: entry.id, label: entry.name }))}
+            onChange={(nextIds) => onCommit({ contactIds: nextIds })}
+            addLabel="+ Add contact"
+            emptyHelper="No contacts selected. Manage the shared list on the Contacts page."
+          />
+        </div>
         <TextField
           label="Address line 1"
           onCommit={(value) => onCommit({ addressLine1: value })}
@@ -346,21 +342,14 @@ function BillingSection({
   plans: SubscriptionPlan[]
   onCommit: (patch: Partial<Client>) => void
 }) {
-  const plan = client.planId ? plans.find((p) => p.id === client.planId) ?? null : null
-  const planFeeLabel = plan ? currency.format(plan.monthlyFee) : '—'
-  const effectiveFee =
-    typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
-      ? client.customMonthlyFee
-      : plan?.monthlyFee ?? 0
-  const hasOverride =
-    typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
+  const isMonthly = client.billingMode === 'subscription'
 
   return (
     <section className="panel">
       <div className="section-heading">
         <div>
           <p className="section-kicker">Billing</p>
-          <h2>Rates and subscription</h2>
+          <h2>Rate and services</h2>
         </div>
       </div>
       <div className="form-grid two-col">
@@ -368,88 +357,50 @@ function BillingSection({
           <span>Billing type</span>
           <select
             className="input"
-            onChange={(event) => {
-              const nextMode = event.target.value as BillingMode
-              const patch: Partial<Client> = { billingMode: nextMode }
-              if (nextMode === 'hourly') {
-                // Drop the subscription plan + override when switching off
-                // subscription. The override would otherwise apply if the
-                // client is flipped back later, which is confusing.
-                patch.planId = null
-                patch.customMonthlyFee = null
-              } else if (nextMode === 'subscription' && !client.planId && plans[0]) {
-                patch.planId = plans[0].id
-              }
-              onCommit(patch)
-            }}
+            onChange={(event) => onCommit({ billingMode: event.target.value as BillingMode })}
             value={client.billingMode}
           >
             <option value="hourly">Hourly</option>
-            <option value="subscription">Subscription</option>
+            <option value="subscription">Monthly</option>
           </select>
         </label>
+        {isMonthly ? (
+          <NumberField
+            label="Monthly rate"
+            step="0.01"
+            min="0"
+            value={client.monthlyRate ?? 0}
+            onCommit={(next) => onCommit({ monthlyRate: next })}
+            helper="The fixed monthly amount billed to this client."
+          />
+        ) : (
+          <NumberField
+            label="Hourly rate"
+            step="0.01"
+            min="0"
+            value={client.hourlyRate}
+            onCommit={(next) => onCommit({ hourlyRate: next })}
+            helper="Used to bill every billable hour worked for this client."
+          />
+        )}
         <NumberField
-          label="Hourly rate"
-          step="0.01"
+          label="Estimated monthly hours"
+          step="0.5"
           min="0"
-          value={client.hourlyRate}
-          onCommit={(next) => onCommit({ hourlyRate: next })}
-          helper={
-            client.billingMode === 'subscription'
-              ? 'Used to bill the overage hours beyond the plan’s included hours.'
-              : 'Used to bill every billable hour worked for this client.'
-          }
+          value={client.estimatedMonthlyHours ?? 0}
+          onCommit={(next) => onCommit({ estimatedMonthlyHours: next })}
+          helper="For planning only — does not affect invoices."
         />
-        {client.billingMode === 'subscription' ? (
-          <>
-            <label className="field">
-              <span>Subscription plan</span>
-              <select
-                className="input"
-                onChange={(event) => onCommit({ planId: event.target.value })}
-                value={client.planId ?? plans[0]?.id ?? ''}
-              >
-                {plans.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({currency.format(p.monthlyFee)}/mo, {p.includedHours}h)
-                  </option>
-                ))}
-              </select>
-              <small className="field-helper">
-                Plan default fee: <strong>{planFeeLabel}</strong>
-                {hasOverride
-                  ? ` — overridden below to ${currency.format(effectiveFee)}.`
-                  : ' — used unless overridden below.'}
-              </small>
-            </label>
-            <div className="field">
-              <span>Custom monthly fee (this client only)</span>
-              <div className="form-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <NumberInputControl
-                  canonical={hasOverride ? client.customMonthlyFee! : null}
-                  onCommit={(next) =>
-                    onCommit({ customMonthlyFee: next === null ? null : Number(next) })
-                  }
-                  placeholder={plan ? plan.monthlyFee.toFixed(2) : '0.00'}
-                />
-                {hasOverride ? (
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={() => onCommit({ customMonthlyFee: null })}
-                  >
-                    Use plan default
-                  </button>
-                ) : null}
-              </div>
-              <small className="field-helper">
-                {hasOverride
-                  ? `Invoices use ${currency.format(effectiveFee)}/mo for this client instead of the plan default.`
-                  : 'Leave blank to use the plan default. Set a value here to bill this client a custom monthly rate.'}
-              </small>
-            </div>
-          </>
-        ) : null}
+        <div className="field full-row">
+          <span>Plans / services</span>
+          <ChipMultiSelect
+            selectedIds={client.planIds ?? []}
+            options={plans.map((plan) => ({ id: plan.id, label: plan.name }))}
+            onChange={(nextIds) => onCommit({ planIds: nextIds })}
+            addLabel="+ Add plan / service"
+            emptyHelper="No plans/services selected yet."
+          />
+        </div>
       </div>
     </section>
   )

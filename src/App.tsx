@@ -67,6 +67,7 @@ import {
   type ChecklistTemplate,
   type ChecklistTemplateItem,
   type Client,
+  type Contact,
   type DataSyncState,
   type FirmSettings,
   type PublicFirmSettings,
@@ -88,6 +89,7 @@ import { ChecklistsPage } from './pages/ChecklistsPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { ClientDetailPage } from './pages/ClientDetailPage'
 import { ClientsPage } from './pages/ClientsPage'
+import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
 import { InvoicesPage } from './pages/InvoicesPage'
 import { NotificationsPage } from './pages/NotificationsPage'
@@ -2090,6 +2092,39 @@ function App() {
     }))
   }
 
+  // Contacts persist the SAME WAY plans/clients do — a local-only workspace
+  // mutation that reaches the server via the bulk `/api/app-data` autosave
+  // (saveAppData). No dedicated endpoint, matching addPlan/addClient.
+  const addContact = (contact: Omit<Contact, 'id'>) => {
+    updateWorkspaceData((current) => ({
+      ...current,
+      contacts: [{ ...contact, id: makeId('contact') }, ...(current.contacts ?? [])],
+    }))
+  }
+
+  const updateContact = (contactId: string, patch: Partial<Contact>) => {
+    updateWorkspaceData((current) => ({
+      ...current,
+      contacts: (current.contacts ?? []).map((contact) =>
+        contact.id === contactId ? { ...contact, ...patch } : contact,
+      ),
+    }))
+  }
+
+  const deleteContact = (contactId: string) => {
+    updateWorkspaceData((current) => ({
+      ...current,
+      contacts: (current.contacts ?? []).filter((contact) => contact.id !== contactId),
+      // Strip the deleted contact from every client so none reference a
+      // missing contact id.
+      clients: current.clients.map((client) =>
+        Array.isArray(client.contactIds) && client.contactIds.includes(contactId)
+          ? { ...client, contactIds: client.contactIds.filter((id) => id !== contactId) }
+          : client,
+      ),
+    }))
+  }
+
   /**
    * Owner-only: permanently delete a subscription plan. Server-side the
    * `clients.plan_id` FK cascades to null on delete, unlinking any clients
@@ -2320,6 +2355,9 @@ function App() {
     addClient,
     addPlan,
     deletePlan,
+    addContact,
+    updateContact,
+    deleteContact,
     selectedClientId,
     setSelectedClientId,
     printInvoice,
@@ -2367,6 +2405,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
       '/gantt',
       '/invoices',
       '/plans',
+      '/contacts',
       '/team',
       '/cases',
       '/settings',
@@ -2397,6 +2436,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
         />
         <Route path="/checklists" element={<ChecklistsPage />} />
         <Route path="/clients" element={<ClientsPage />} />
+        <Route
+          path="/contacts"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <ContactsPage />
+            </OwnerOnly>
+          }
+        />
         <Route
           path="/clients/:clientId"
           element={

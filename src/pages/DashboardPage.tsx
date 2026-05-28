@@ -223,20 +223,13 @@ function OwnerDashboardView() {
     const minutes = monthEntries
       .filter((entry) => entry.clientId === client.id && entry.billable)
       .reduce((sum, e) => sum + e.minutes, 0)
-    if (client.billingMode === 'subscription' && client.planId) {
-      const plan = data.plans.find((p) => p.id === client.planId)
-      if (plan) {
-        const includedMinutes = plan.includedHours * 60
-        const overage = Math.max(0, minutes - includedMinutes)
-        // Per-client override of the plan's monthly fee. Most of the
-        // user's clients negotiate custom rates, so a `null` value
-        // falls back to the plan default.
-        const effectiveMonthlyFee =
-          typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
-            ? client.customMonthlyFee
-            : plan.monthlyFee
-        return total + effectiveMonthlyFee + (overage / 60) * client.hourlyRate
-      }
+    if (client.billingMode === 'subscription') {
+      // Monthly billing uses the client's own monthly rate. No overage math.
+      const monthlyRate =
+        typeof client.monthlyRate === 'number' && !Number.isNaN(client.monthlyRate)
+          ? client.monthlyRate
+          : 0
+      return total + monthlyRate
     }
     return total + (minutes / 60) * client.hourlyRate
   }, 0)

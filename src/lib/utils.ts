@@ -559,7 +559,15 @@ export function getInvoice(
   )
   const billableMinutes = billableEntries.reduce((total, entry) => total + entry.minutes, 0)
   const billableAmount = (billableMinutes / 60) * client.hourlyRate
-  const plan = client.planId ? plans.find((item) => item.id === client.planId) ?? null : null
+  // The subscribed plans/services are now just labels (no fee). Resolve the
+  // names for the monthly invoice line; the amount comes from the client's
+  // own `monthlyRate`. `Invoice.plan` keeps the first matched plan for
+  // back-compat with callers that still read a single plan.
+  const planIds = Array.isArray(client.planIds) ? client.planIds : []
+  const subscribedPlans = planIds
+    .map((id) => plans.find((item) => item.id === id))
+    .filter((item): item is SubscriptionPlan => Boolean(item))
+  const plan = subscribedPlans[0] ?? null
   const periodLabel = getBillingPeriodLabel(billingPeriod)
 
   // Reimbursements for THIS client and THIS billing period. Sorted by date
@@ -598,35 +606,26 @@ export function getInvoice(
   }))
   const recurringTotal = recurringLines.reduce((total, line) => total + line.amount, 0)
 
-  if (client.billingMode === 'subscription' && plan) {
-    const includedMinutes = plan.includedHours * 60
-    const overageMinutes = Math.max(0, billableMinutes - includedMinutes)
-    // Per-client override of the plan's monthly fee. `null`/undefined
-    // means "use the plan default"; a number is the negotiated rate.
-    const effectiveMonthlyFee =
-      typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
-        ? client.customMonthlyFee
-        : plan.monthlyFee
+  if (client.billingMode === 'subscription') {
+    // Monthly billing: the client's own `monthlyRate` is the line amount.
+    // There is NO included-hours / overage math anymore. The line is
+    // labeled with the subscribed plan/service names, or "Monthly service"
+    // when none are selected.
+    const monthlyRate =
+      typeof client.monthlyRate === 'number' && !Number.isNaN(client.monthlyRate)
+        ? client.monthlyRate
+        : 0
+    const serviceLabel =
+      subscribedPlans.length > 0
+        ? subscribedPlans.map((item) => item.name).join(', ')
+        : 'Monthly service'
     const lines: InvoiceLine[] = [
       {
-        label: `${plan.name} subscription`,
-        detail: `${plan.includedHours} included hours`,
-        amount: effectiveMonthlyFee,
-      },
-      {
-        label: 'Billable time tracked',
-        detail: `${formatHours(billableMinutes)} this period`,
-        amount: 0,
+        label: serviceLabel,
+        detail: 'Monthly service',
+        amount: monthlyRate,
       },
     ]
-
-    if (overageMinutes > 0) {
-      lines.push({
-        label: 'Hourly overage',
-        detail: `${formatHours(overageMinutes)} at ${currency.format(client.hourlyRate)}/hr`,
-        amount: (overageMinutes / 60) * client.hourlyRate,
-      })
-    }
 
     lines.push(...reimbursementLines, ...recurringLines)
 

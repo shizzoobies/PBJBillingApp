@@ -6,6 +6,7 @@ import type {
   ChecklistTemplate,
   ChecklistTemplateItem,
   Client,
+  Contact,
   FirmSettings,
   Role,
   SessionUser,
@@ -304,6 +305,15 @@ export type AppContextValue = {
    * unlink; the handler mirrors it on local state.
    */
   deletePlan: (planId: string) => Promise<void>
+  /** Owner-only: add a reusable contact (shared across clients). */
+  addContact: (contact: Omit<Contact, 'id'>) => void
+  /** Owner-only: patch a reusable contact. */
+  updateContact: (contactId: string, patch: Partial<Contact>) => void
+  /**
+   * Owner-only: delete a reusable contact. Also strips its id from every
+   * client's `contactIds` so no client references a missing contact.
+   */
+  deleteContact: (contactId: string) => void
   selectedClientId: string
   setSelectedClientId: (clientId: string) => void
   printInvoice: () => void

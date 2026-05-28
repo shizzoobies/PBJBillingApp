@@ -256,7 +256,14 @@ function scopeAppDataForSession(session, data) {
   // every client object the server sends them.
   const clients = (data.clients ?? [])
     .filter((client) => allowedClientIds.has(client.id))
-    .map((client) => ({ ...client, hourlyRate: 0, planId: null }))
+    .map((client) => ({
+      ...client,
+      hourlyRate: 0,
+      monthlyRate: undefined,
+      customMonthlyFee: null,
+      planId: null,
+      planIds: [],
+    }))
   const checklists = (data.checklists ?? []).filter((checklist) => {
     if (!allowedClientIds.has(checklist.clientId)) return false
     // Existing assignee/viewer/editor filtering is still applied.
