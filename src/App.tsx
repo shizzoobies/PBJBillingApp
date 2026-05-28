@@ -208,6 +208,10 @@ function App() {
           tagline: settings.tagline ?? '',
           logoUrl: settings.logoUrl ?? '',
           brandColor: settings.brandColor || (DEFAULT_FIRM_SETTINGS.brandColor ?? '#3c2044'),
+          sidebarTextColor: settings.sidebarTextColor || (DEFAULT_FIRM_SETTINGS.sidebarTextColor ?? '#ffffff'),
+          sidebarActiveTextColor:
+            settings.sidebarActiveTextColor ||
+            (DEFAULT_FIRM_SETTINGS.sidebarActiveTextColor ?? '#ffffff'),
         })
       })
       .catch(() => {
@@ -230,6 +234,8 @@ function App() {
           tagline: merged.tagline ?? '',
           logoUrl: merged.logoUrl ?? '',
           brandColor: merged.brandColor || '#3c2044',
+          sidebarTextColor: merged.sidebarTextColor || '#ffffff',
+          sidebarActiveTextColor: merged.sidebarActiveTextColor || '#ffffff',
         })
       })
       .catch(() => {
@@ -2329,6 +2335,8 @@ function App() {
         tagline: merged.tagline ?? '',
         logoUrl: merged.logoUrl ?? '',
         brandColor: merged.brandColor || '#3c2044',
+        sidebarTextColor: merged.sidebarTextColor || '#ffffff',
+        sidebarActiveTextColor: merged.sidebarActiveTextColor || '#ffffff',
       })
     },
   }
