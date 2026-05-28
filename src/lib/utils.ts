@@ -27,6 +27,7 @@ export const shortDate = new Intl.DateTimeFormat('en-US', {
 export const checklistFrequencies: ChecklistFrequency[] = [
   'daily',
   'weekly',
+  'biweekly',
   'monthly',
   'quarterly',
   'annually',
@@ -180,6 +181,9 @@ export function advanceChecklistFrequency(dateString: string, frequency: Checkli
 export function getChecklistFrequencyLabel(frequency: ChecklistFrequency) {
   if (frequency === 'specific-months') {
     return 'Specific months'
+  }
+  if (frequency === 'biweekly') {
+    return 'Biweekly (every 2 weeks)'
   }
   return frequency.charAt(0).toUpperCase() + frequency.slice(1)
 }

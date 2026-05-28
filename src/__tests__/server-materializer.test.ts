@@ -256,3 +256,42 @@ describe('materializeRecurringChecklists — soft-delete respect', () => {
     ).toBeDefined()
   })
 })
+
+describe('materializeRecurringChecklists — biweekly cadence', () => {
+  const addDaysIso = (iso: string, days: number) => {
+    const d = new Date(`${iso}T12:00:00`)
+    d.setDate(d.getDate() + days)
+    return d.toISOString().slice(0, 10)
+  }
+  const dayGap = (a: string, b: string) =>
+    Math.round(
+      (new Date(`${b}T12:00:00`).getTime() - new Date(`${a}T12:00:00`).getTime()) / 86_400_000,
+    )
+
+  it('spawns biweekly instances exactly 14 days apart and advances nextDueDate by 14', () => {
+    const start = daysAgo(28) // two full biweekly periods overdue
+    const data = makeData({
+      checklistTemplates: [
+        makeMonthlyTemplate({ id: 'tpl-biweekly', frequency: 'biweekly', nextDueDate: start }),
+      ],
+    })
+
+    const result = materializeRecurringChecklists(data)
+    const dueDates: string[] = result.data.checklists
+      .filter((c: { templateId?: string }) => c.templateId === 'tpl-biweekly')
+      .map((c: { dueDate: string }) => c.dueDate)
+      .sort()
+
+    // First spawn is the original due date; the next is exactly 14 days later.
+    expect(dueDates[0]).toBe(start)
+    expect(dueDates).toContain(addDaysIso(start, 14))
+    // Every consecutive spawn is a clean 14-day step — not 7 (weekly) or ~30 (monthly).
+    for (let i = 1; i < dueDates.length; i += 1) {
+      expect(dayGap(dueDates[i - 1], dueDates[i])).toBe(14)
+    }
+    // The template's own cursor advanced in whole 14-day steps into the future.
+    const tpl = result.data.checklistTemplates.find((t: { id: string }) => t.id === 'tpl-biweekly')
+    expect(dayGap(start, tpl.nextDueDate) % 14).toBe(0)
+    expect(dayGap(start, tpl.nextDueDate)).toBeGreaterThan(0)
+  })
+})

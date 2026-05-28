@@ -86,6 +86,8 @@ function frequencyCadence(frequency: ChecklistFrequency): string {
       return 'every day'
     case 'weekly':
       return 'every week'
+    case 'biweekly':
+      return 'every 2 weeks'
     case 'quarterly':
       return 'every quarter'
     case 'annually':
@@ -1579,6 +1581,19 @@ function SpecificMonthsPicker({
     onChangeMonths([...set].sort((a, b) => a - b))
   }
 
+  // No explicit day-of-month means "the last day of the month".
+  const useLastDay = dueDayOfMonth === undefined
+  // The date control only cares about the DAY the owner picks; we pin the
+  // displayed date to the first selected month (or the current month) of the
+  // current year purely so the native picker has a coherent value to show.
+  const dueDateDisplay = (() => {
+    if (dueDayOfMonth === undefined) return ''
+    const now = new Date()
+    const month = scheduledMonths[0] ?? now.getMonth() + 1
+    const day = Math.min(MAX_DUE_DAY_OF_MONTH, Math.max(1, dueDayOfMonth))
+    return `${now.getFullYear()}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  })()
+
   return (
     <div className="specific-months">
       <span className="specific-months-label">Which months</span>
@@ -1595,28 +1610,36 @@ function SpecificMonthsPicker({
         ))}
       </div>
       <label className="specific-months-due-day">
-        <span>Due day of month</span>
+        <span>Due date</span>
         <input
-          className="compact-input"
-          type="number"
-          min={1}
-          max={MAX_DUE_DAY_OF_MONTH}
-          value={dueDayOfMonth ?? ''}
-          placeholder="Last day"
+          className="input"
+          type="date"
+          value={dueDateDisplay}
+          disabled={useLastDay}
           onChange={(event) => {
             const raw = event.target.value
-            if (raw === '') {
+            if (!raw) {
               onChangeDueDay(undefined)
               return
             }
-            const parsed = Number(raw)
-            if (!Number.isFinite(parsed)) return
-            const clamped = Math.min(MAX_DUE_DAY_OF_MONTH, Math.max(1, Math.round(parsed)))
+            const day = Number(raw.split('-')[2])
+            if (!Number.isFinite(day)) return
+            const clamped = Math.min(MAX_DUE_DAY_OF_MONTH, Math.max(1, day))
             onChangeDueDay(clamped)
           }}
         />
+        <label className="specific-months-last-day">
+          <input
+            type="checkbox"
+            checked={useLastDay}
+            onChange={(event) => onChangeDueDay(event.target.checked ? undefined : 1)}
+          />
+          <span>Due on the last day of the month</span>
+        </label>
         <small className="new-task-hint">
-          1–{MAX_DUE_DAY_OF_MONTH}. Leave blank for the last day of the month.
+          Each selected month&apos;s task is due on this day — only the day is
+          used, so the month shown is just for picking. Latest is the{' '}
+          {MAX_DUE_DAY_OF_MONTH}th; tick the box for month-end.
         </small>
       </label>
     </div>

@@ -3,6 +3,7 @@ export type BillingMode = 'hourly' | 'subscription'
 export type ChecklistFrequency =
   | 'daily'
   | 'weekly'
+  | 'biweekly'
   | 'monthly'
   | 'quarterly'
   | 'annually'

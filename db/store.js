@@ -189,6 +189,10 @@ function advanceChecklistFrequency(dateString, frequency) {
     return addDays(dateString, 7)
   }
 
+  if (frequency === 'biweekly') {
+    return addDays(dateString, 14)
+  }
+
   if (frequency === 'quarterly') {
     return addMonths(dateString, 3)
   }
@@ -1203,7 +1207,7 @@ export class AppDataStore {
           title text not null,
           client_id text not null references clients(id) on delete cascade,
           assignee_id text not null references users(id) on delete restrict,
-          frequency text not null check (frequency in ('daily', 'weekly', 'monthly', 'quarterly', 'annually')),
+          frequency text not null check (frequency in ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'annually')),
           next_due_date date not null,
           active boolean not null default true,
           viewer_ids text[] not null default '{}',
@@ -1258,7 +1262,7 @@ export class AppDataStore {
       await this.pool.query(`
         alter table checklist_templates
           add constraint checklist_templates_frequency_check
-          check (frequency in ('daily', 'weekly', 'monthly', 'quarterly', 'annually', 'specific-months'))
+          check (frequency in ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'annually', 'specific-months'))
       `)
 
       await this.pool.query(`
