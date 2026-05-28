@@ -67,7 +67,7 @@ function PlanBuilder({
             className="input"
             min="0"
             onChange={(event) => setMonthlyFee(event.target.value)}
-            step="50"
+            step="0.01"
             type="number"
             value={monthlyFee}
           />

@@ -152,9 +152,9 @@ function ClientBuilder({
           <span>Hourly rate</span>
           <input
             className="input"
-            min="1"
+            min="0"
             onChange={(event) => setHourlyRate(event.target.value)}
-            step="5"
+            step="0.01"
             type="number"
             value={hourlyRate}
           />
