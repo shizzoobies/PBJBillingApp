@@ -1585,6 +1585,7 @@ function SpecificMonthsPicker({
   }
 
   const currentYear = new Date().getFullYear()
+  const todayStr = new Date().toISOString().slice(0, 10)
 
   return (
     <div className="specific-months">
@@ -1617,6 +1618,9 @@ function SpecificMonthsPicker({
             const stored = monthlyDueDays ? Number(monthlyDueDays[month]) : NaN
             const day = Number.isFinite(stored) && stored >= 1 ? Math.min(stored, lastDay) : lastDay
             const value = `${currentYear}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+            // A month whose due date has already passed is auto-completed by the
+            // materializer; flag it here so the owner sees that at a glance.
+            const isPast = value < todayStr
             return (
               <label key={month} className="specific-months-due-row">
                 <span className="specific-months-due-month">{monthShortNames[month]}</span>
@@ -1635,6 +1639,9 @@ function SpecificMonthsPicker({
                     onChangeMonthDue(month, Math.min(Math.max(1, picked), lastDay))
                   }}
                 />
+                {isPast ? (
+                  <span className="specific-months-complete-badge">Complete</span>
+                ) : null}
               </label>
             )
           })}
