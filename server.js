@@ -435,6 +435,60 @@ function renderVerifyErrorPage() {
 </html>`
 }
 
+/**
+ * Escape a string for safe interpolation into HTML attribute / text content.
+ * Used for the verify token in the confirm-sign-in interstitial below. The
+ * token is a base64url string (so already safe), but we escape defensively
+ * so a malformed/crafted path segment can never break out of the attribute.
+ */
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
+ * SECURITY (H6): click-to-consume interstitial served by GET /verify/:token.
+ * The GET no longer consumes the token — an email scanner's GET prefetch (or
+ * an intercepted link opened by a bot) would otherwise silently burn the link
+ * or auto-sign-in. Instead we render this minimal, self-contained page (inline
+ * styles, no SPA dependency) with a single button inside a POST form. Only a
+ * real click POSTs back and consumes the token. No auto-submit — the explicit
+ * click is the whole point. The token is escaped into the form action.
+ */
+function renderVerifyConfirmPage(token) {
+  const safeToken = escapeHtml(token)
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Confirm sign-in - PB&amp;J Strategic Accounting</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f6f5f1; color: #1f1d1a; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  .card { background: #fff; padding: 32px 36px; border-radius: 14px; box-shadow: 0 12px 40px rgba(31, 29, 26, 0.08); max-width: 420px; text-align: center; }
+  h1 { margin: 0 0 12px 0; font-size: 22px; }
+  p { line-height: 1.5; margin: 0 0 20px 0; color: #555049; }
+  button { font: inherit; font-weight: 600; color: #fff; background: #7d2a4d; border: none; border-radius: 10px; padding: 12px 24px; cursor: pointer; }
+  button:hover { background: #6a2342; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Confirm sign-in</h1>
+    <p>Click the button below to finish signing in to PB&amp;J Strategic Accounting.</p>
+    <form method="POST" action="/verify/${safeToken}">
+      <button type="submit">Confirm sign-in</button>
+    </form>
+  </div>
+</body>
+</html>`
+}
+
 const server = createServer(async (request, response) => {
   try {
     const requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
@@ -665,9 +719,20 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'Password must be at least 8 characters' })
         return
       }
-      const ok = await appDataStore.setUserPassword(session.user.id, newPassword)
-      if (!ok) {
-        sendJson(response, 500, { error: 'Could not update password' })
+      // SECURITY (M4): forward the supplied current password. The store gates
+      // on it — required once the user has set their own password, ignored on
+      // a first-time set (magic-link user who's still on the random default).
+      const currentPassword =
+        typeof payload?.currentPassword === 'string' ? payload.currentPassword : ''
+      const result = await appDataStore.setUserPassword(
+        session.user.id,
+        newPassword,
+        currentPassword,
+      )
+      if (!result.ok) {
+        sendJson(response, result.status ?? 500, {
+          error: result.error ?? 'Could not update password',
+        })
         return
       }
       await appDataStore.recordActivity(session.user.id, 'password_changed', '')
@@ -675,9 +740,30 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // Email-gated sign-in: consume a link, set the session cookie, redirect.
+    // Email-gated sign-in. SECURITY (H6): split into GET (click-to-consume
+    // interstitial, does NOT consume) and POST (consumes + signs in). An email
+    // scanner's GET prefetch would otherwise burn the one-time link or
+    // auto-sign-in; requiring a real button click (POST) prevents that.
     const verifyMatch = normalizedPath.match(/^\/verify\/([^/]+)$/)
     if (verifyMatch && request.method === 'GET') {
+      // Do NOT consume. Render a minimal confirm-sign-in page whose single
+      // button POSTs the token back. The token is validated/consumed only on
+      // that POST below.
+      const token = decodeURIComponent(verifyMatch[1])
+      response.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        // Defense-in-depth: keep this page out of any framing context.
+        'X-Frame-Options': 'DENY',
+      })
+      response.end(renderVerifyConfirmPage(token))
+      return
+    }
+
+    // POST /verify/:token — the real consume + sign-in. This is EXACTLY what
+    // the old GET handler did (every branch, including the TOTP ones); only
+    // the HTTP method changed.
+    if (verifyMatch && request.method === 'POST') {
       const token = decodeURIComponent(verifyMatch[1])
       const consumed = await appDataStore.consumeLoginToken(token)
       if (!consumed) {

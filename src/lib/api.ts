@@ -174,16 +174,20 @@ export async function signInWithPasswordRequest(email: string, password: string)
 
 /**
  * Set or change the caller's own password. Session cookie is the
- * authorization. No current-password check — a magic-link sign-in counts
- * as enough proof to set a fresh one, matching the "password reset via
- * email" pattern. Server enforces a minimum length.
+ * authorization. SECURITY (M4): once the user has set their own password the
+ * server requires `currentPassword` and verifies it before allowing the
+ * change (so a hijacked session can't silently lock the real user out). On a
+ * first-time set — a magic-link user still on the random default — the server
+ * ignores `currentPassword` and a valid session is enough. The caller always
+ * passes the field (empty string when the user hasn't filled it in); the
+ * server enforces a minimum length on the new password.
  */
-export async function changePasswordRequest(newPassword: string) {
+export async function changePasswordRequest(newPassword: string, currentPassword = '') {
   const response = await apiFetch('/api/auth/change-password', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ newPassword }),
+    body: JSON.stringify({ newPassword, currentPassword }),
   })
   if (!response.ok) {
     const message = await safeErrorMessage(response)

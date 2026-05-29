@@ -5,19 +5,26 @@ import { ApiError } from '../lib/types'
 /**
  * Self-service "Set / change my password" card. Shown on Settings (owners)
  * and Security (bookkeepers / accountants). The session cookie is the
- * authorization — no current-password challenge — so a user who signed in
- * via magic link can establish their first password without already
- * knowing one. Server enforces the minimum length.
+ * authorization, so a user who signed in via magic link can establish their
+ * first password without already knowing one.
+ *
+ * SECURITY (M4): once a password has been set, the server requires the
+ * current password before changing it (a hijacked session can't silently
+ * rotate the credential). We always render the "Current password" field and
+ * always send it — it's ignored by the server on a first-time set, and on a
+ * subsequent change the server returns a clear error if it's missing/wrong,
+ * which we surface inline.
  *
  * UX choices:
- *  - Two fields (new + confirm) to catch typos before submit.
- *  - Optional show/hide toggle isn't worth the surface here; the field
- *    is type="password" with autocomplete="new-password".
- *  - Success state stays for a moment, then both inputs clear.
+ *  - Three fields (current + new + confirm); new/confirm catch typos.
+ *  - Optional show/hide toggle isn't worth the surface here; the fields
+ *    are type="password" with appropriate autocomplete hints.
+ *  - Success state stays for a moment, then all inputs clear.
  */
 const MIN_LENGTH = 8
 
 export function ChangePasswordCard({ userEmail }: { userEmail: string | null }) {
+  const [currentPassword, setCurrentPassword] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -39,8 +46,9 @@ export function ChangePasswordCard({ userEmail }: { userEmail: string | null }) 
     setError('')
     setSaved(false)
     try {
-      await changePasswordRequest(password)
+      await changePasswordRequest(password, currentPassword)
       setSaved(true)
+      setCurrentPassword('')
       setPassword('')
       setConfirm('')
       window.setTimeout(() => setSaved(false), 4000)
@@ -73,6 +81,17 @@ export function ChangePasswordCard({ userEmail }: { userEmail: string | null }) 
         onSubmit={handleSubmit}
         style={{ display: 'grid', gap: 12, maxWidth: 360 }}
       >
+        <label className="field">
+          <span>Current password</span>
+          <input
+            autoComplete="current-password"
+            className="input"
+            onChange={(event) => setCurrentPassword(event.target.value)}
+            placeholder="Leave blank if you've never set one"
+            type="password"
+            value={currentPassword}
+          />
+        </label>
         <label className="field">
           <span>New password</span>
           <input

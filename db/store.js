@@ -595,6 +595,55 @@ function backfillAssignedBookkeepers(data) {
 }
 
 /**
+ * SECURITY (M4): decide whether a self-service password change is allowed.
+ * Pure function so the branching can be unit-tested without a DB or any
+ * crypto. The caller supplies the facts; this returns the verdict and, on
+ * rejection, the HTTP status + message the endpoint should send.
+ *
+ * Rules:
+ *  - `passwordSetAt` null/falsy  -> the user has never set their OWN password
+ *    (still on the seed/random default). A valid session is enough to set a
+ *    first password — they can't know the random default, and a magic-link
+ *    sign-in already proves inbox control. `currentPassword` is ignored.
+ *  - `passwordSetAt` set         -> a current-password challenge is required.
+ *    `currentPasswordProvided` must be true AND `currentPasswordValid` must be
+ *    true; otherwise reject so a hijacked session can't silently rotate the
+ *    password and lock the real user out.
+ *
+ * @param {object} args
+ * @param {*} args.passwordSetAt          Truthy when the user has set their own password.
+ * @param {boolean} args.currentPasswordProvided  A non-empty currentPassword was sent.
+ * @param {boolean} args.currentPasswordValid     The supplied currentPassword verified.
+ * @returns {{ allowed: boolean, status?: number, error?: string }}
+ */
+export function evaluatePasswordChange({
+  passwordSetAt,
+  currentPasswordProvided,
+  currentPasswordValid,
+}) {
+  // First-time set: session alone is sufficient.
+  if (!passwordSetAt) {
+    return { allowed: true }
+  }
+  // A password already exists — require the current one.
+  if (!currentPasswordProvided) {
+    return {
+      allowed: false,
+      status: 400,
+      error: 'Current password is required to change your password.',
+    }
+  }
+  if (!currentPasswordValid) {
+    return {
+      allowed: false,
+      status: 403,
+      error: 'Current password is incorrect.',
+    }
+  }
+  return { allowed: true }
+}
+
+/**
  * Drop rows from a bulk-save batch whose FK refs no longer exist in the
  * post-filter id sets. Pure function so it can be exercised in unit tests
  * without spinning up a DB pool. Returns the kept rows; logs the dropped
@@ -873,6 +922,13 @@ export class AppDataStore {
       await this.pool.query(`alter table users add column if not exists magic_token text`)
       await this.pool.query(`alter table users add column if not exists token_revoked_at timestamptz`)
       await this.pool.query(`alter table users add column if not exists last_active_at timestamptz`)
+      // SECURITY (M4): timestamp of when the user last set their OWN password.
+      // Null = they have never set one (still on the seed/random default), so
+      // the change-password endpoint lets them set a first password with just
+      // a valid session. Non-null = a current-password challenge is required
+      // before the password can be changed, so a hijacked session can't
+      // silently lock the real user out. Additive, backfills as null.
+      await this.pool.query(`alter table users add column if not exists password_set_at timestamptz`)
       // Soft-delete marker for team members. Null = active. Non-null =
       // owner removed them; they can no longer sign in or be assigned new
       // work, but their historical time entries / completed checklists
@@ -5191,7 +5247,13 @@ export class AppDataStore {
     const id = `emp-${randomUUID().slice(0, 8)}`
     const role = roleToDbRole(safeStaffRole)
     const magicToken = generateMagicToken()
-    const passwordHash = hashPassword(demoPassword)
+    // SECURITY (M2): never seed new members with the shared demo password.
+    // They onboard via a one-time magic link and set their own password from
+    // the Security page, so they never need to know this value — it just must
+    // not be a known/guessable credential. Hash a fresh high-entropy random
+    // secret instead (covers BOTH the Postgres and file-fallback branches
+    // below, since both read this same `passwordHash`).
+    const passwordHash = hashPassword(randomBytes(32).toString('base64url'))
     const createdAt = nowIso()
 
     if (this.pool) {
@@ -6540,25 +6602,75 @@ export class AppDataStore {
   /**
    * Update a single user's password_hash from a new plain-text password.
    * Authorization is the caller's responsibility — usually "session cookie
-   * belongs to userId" via the change-password endpoint. Returns true on
-   * success, false when no row matched.
+   * belongs to userId" via the change-password endpoint.
+   *
+   * SECURITY (M4): once a user has set their OWN password (password_set_at is
+   * non-null) we require the current password before changing it, so a
+   * hijacked session can't silently rotate the credential and lock the real
+   * user out. A first-time set (password_set_at null — still on the seed or
+   * the M2 random default) is allowed with just the session, since the user
+   * can't know that default. The gate verdict comes from the pure
+   * `evaluatePasswordChange` helper; this method supplies the facts (and the
+   * timing-safe `verifyPassword`) and, on success, stamps password_set_at.
+   *
+   * Returns a discriminated result so the endpoint can map it to a status:
+   *   { ok: true }
+   *   { ok: false, status, error }   // gate failed (missing/wrong current pw)
+   *   { ok: false, status: 404 }     // no such user / row didn't match
+   *
+   * @param {string} userId
+   * @param {string} newPassword
+   * @param {string} [currentPassword]  Required once password_set_at is set.
    */
-  async setUserPassword(userId, newPassword) {
-    if (!userId || typeof newPassword !== 'string' || !newPassword) return false
+  async setUserPassword(userId, newPassword, currentPassword = '') {
+    if (!userId || typeof newPassword !== 'string' || !newPassword) {
+      return { ok: false, status: 400, error: 'A new password is required.' }
+    }
+    const suppliedCurrent = typeof currentPassword === 'string' ? currentPassword : ''
     const newHash = hashPassword(newPassword)
+
     if (this.pool) {
+      const existing = await this.pool.query(
+        `select password_hash, password_set_at from users where id = $1`,
+        [userId],
+      )
+      if (!existing.rowCount) return { ok: false, status: 404, error: 'User not found.' }
+      const row = existing.rows[0]
+      const gate = evaluatePasswordChange({
+        passwordSetAt: row.password_set_at,
+        currentPasswordProvided: suppliedCurrent.length > 0,
+        currentPasswordValid:
+          suppliedCurrent.length > 0 &&
+          Boolean(row.password_hash) &&
+          verifyPassword(suppliedCurrent, row.password_hash),
+      })
+      if (!gate.allowed) return { ok: false, status: gate.status, error: gate.error }
+
       const result = await this.pool.query(
-        `update users set password_hash = $1, updated_at = now() where id = $2`,
+        `update users set password_hash = $1, password_set_at = now(), updated_at = now() where id = $2`,
         [newHash, userId],
       )
-      return (result.rowCount ?? 0) > 0
+      if ((result.rowCount ?? 0) === 0) return { ok: false, status: 404, error: 'User not found.' }
+      return { ok: true }
     }
+
     const authState = await readJson(localAuthPath)
     const target = (authState.users ?? []).find((user) => user.id === userId)
-    if (!target) return false
+    if (!target) return { ok: false, status: 404, error: 'User not found.' }
+    const gate = evaluatePasswordChange({
+      passwordSetAt: target.passwordSetAt,
+      currentPasswordProvided: suppliedCurrent.length > 0,
+      currentPasswordValid:
+        suppliedCurrent.length > 0 &&
+        Boolean(target.passwordHash) &&
+        verifyPassword(suppliedCurrent, target.passwordHash),
+    })
+    if (!gate.allowed) return { ok: false, status: gate.status, error: gate.error }
+
     target.passwordHash = newHash
+    target.passwordSetAt = nowIso()
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return true
+    return { ok: true }
   }
 
   /**
