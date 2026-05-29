@@ -233,6 +233,36 @@ function getPublicAppUrl(request) {
 }
 
 /**
+ * CSRF guard for auth POSTs. Rejects only when the browser sends an `Origin`
+ * header whose host doesn't match the host this request was actually served on
+ * (or the configured APP_PUBLIC_URL). A genuine same-origin sign-in always
+ * passes, so the check no longer hard-depends on APP_PUBLIC_URL being set
+ * exactly right — while a cross-site (CSRF) POST from another domain is still
+ * blocked. A request with no Origin header (direct API / tooling) is allowed,
+ * matching the prior behavior.
+ */
+function isCrossSiteOrigin(request) {
+  const origin = request.headers.origin
+  if (!origin) return false
+  let originHost
+  try {
+    originHost = new URL(origin).host
+  } catch {
+    return true // unparseable Origin → treat as cross-site
+  }
+  const allowedHosts = new Set()
+  if (request.headers.host) allowedHosts.add(request.headers.host)
+  if (process.env.APP_PUBLIC_URL) {
+    try {
+      allowedHosts.add(new URL(process.env.APP_PUBLIC_URL).host)
+    } catch {
+      // ignore a malformed APP_PUBLIC_URL
+    }
+  }
+  return !allowedHosts.has(originHost)
+}
+
+/**
  * Compute the set of client ids visible to a session. Owners always see
  * everything. Non-owners see only clients where their user id appears in the
  * client's `assignedBookkeeperIds` array.
@@ -460,14 +490,9 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      // Loose Origin check — when APP_PUBLIC_URL is configured we require
-      // matches; otherwise any same-origin request (including direct API
-      // testing without an Origin header) is permitted.
-      const origin = request.headers.origin
-      const expectedOrigin = process.env.APP_PUBLIC_URL
-        ? process.env.APP_PUBLIC_URL.replace(/\/$/, '')
-        : null
-      if (expectedOrigin && origin && origin.replace(/\/$/, '') !== expectedOrigin) {
+      // CSRF guard: block cross-site POSTs, but let any genuine same-origin
+      // sign-in through regardless of how APP_PUBLIC_URL is configured.
+      if (isCrossSiteOrigin(request)) {
         sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
@@ -542,11 +567,7 @@ const server = createServer(async (request, response) => {
       }
 
       // Origin guard mirrors /api/auth/request-link.
-      const origin = request.headers.origin
-      const expectedOrigin = process.env.APP_PUBLIC_URL
-        ? process.env.APP_PUBLIC_URL.replace(/\/$/, '')
-        : null
-      if (expectedOrigin && origin && origin.replace(/\/$/, '') !== expectedOrigin) {
+      if (isCrossSiteOrigin(request)) {
         sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
