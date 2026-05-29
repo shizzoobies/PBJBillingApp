@@ -1564,11 +1564,15 @@ function SpecificMonthsPicker({
   monthlyDueDays,
   onChangeMonths,
   onChangeMonthDue,
+  repeatAnnually,
+  onChangeRepeatAnnually,
 }: {
   scheduledMonths: number[]
   monthlyDueDays: Record<string, number> | undefined
   onChangeMonths: (months: number[]) => void
   onChangeMonthDue: (month: number, day: number | undefined) => void
+  repeatAnnually: boolean
+  onChangeRepeatAnnually: (value: boolean) => void
 }) {
   const toggleMonth = (month: number) => {
     const set = new Set(scheduledMonths)
@@ -1597,6 +1601,14 @@ function SpecificMonthsPicker({
           </label>
         ))}
       </div>
+      <label className="specific-months-repeat">
+        <input
+          type="checkbox"
+          checked={repeatAnnually}
+          onChange={(event) => onChangeRepeatAnnually(event.target.checked)}
+        />
+        <span>Repeat every year</span>
+      </label>
       {scheduledMonths.length > 0 ? (
         <div className="specific-months-due-dates">
           <span className="specific-months-label">Due date in each month</span>
@@ -1698,6 +1710,9 @@ function NewTaskForm({
   const [frequency, setFrequency] = useState<ChecklistFrequency>('monthly')
   const [scheduledMonths, setScheduledMonths] = useState<number[]>([])
   const [monthlyDueDays, setMonthlyDueDays] = useState<Record<string, number>>({})
+  // Specific-months "Repeat every year" toggle. Defaults ON to match the
+  // historical (always-repeat) behavior.
+  const [repeatAnnually, setRepeatAnnually] = useState(true)
 
   const setMonthDue = (month: number, day: number | undefined) => {
     setMonthlyDueDays((prev) => {
@@ -1838,6 +1853,9 @@ function NewTaskForm({
           ? {
               scheduledMonths,
               monthlyDueDays,
+              repeatAnnually,
+              // Pin the year so a non-repeating template only fires this year.
+              scheduleYear: new Date().getFullYear(),
             }
           : {}),
       },
@@ -1939,6 +1957,8 @@ function NewTaskForm({
           monthlyDueDays={monthlyDueDays}
           onChangeMonths={setScheduledMonths}
           onChangeMonthDue={setMonthDue}
+          repeatAnnually={repeatAnnually}
+          onChangeRepeatAnnually={setRepeatAnnually}
         />
       ) : null}
 
@@ -2540,6 +2560,16 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
         <SpecificMonthsPicker
           scheduledMonths={template.scheduledMonths ?? []}
           monthlyDueDays={template.monthlyDueDays}
+          repeatAnnually={template.repeatAnnually !== false}
+          onChangeRepeatAnnually={(value) =>
+            props.onUpdateTemplate(template.id, (current) => ({
+              ...current,
+              repeatAnnually: value,
+              // Pin the schedule year the moment annual repeat is turned off so
+              // the materializer knows which single year to fire in.
+              ...(value ? {} : { scheduleYear: current.scheduleYear ?? new Date().getFullYear() }),
+            }))
+          }
           onChangeMonths={(months) =>
             props.onUpdateTemplate(template.id, (current) => ({
               ...current,

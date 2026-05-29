@@ -466,7 +466,18 @@ function applyItemToggle(rawSubItems, itemDone, { subItemId, subSubItemId } = {}
   return { subItems, done: !itemDone }
 }
 
-function buildChecklistFromStage({ template, stage, stageIndex, stageCount, caseId, dueDate }) {
+function buildChecklistFromStage({
+  template,
+  stage,
+  stageIndex,
+  stageCount,
+  caseId,
+  dueDate,
+  completed = false,
+}) {
+  // When `completed` is true (a specific-months instance for a month whose
+  // due date is already in the past), every item/sub-item/sub-sub-item is
+  // born `done:true` so the historical occurrence shows as finished.
   return {
     id: `check-${randomUUID().slice(0, 8)}`,
     templateId: template.id,
@@ -484,7 +495,7 @@ function buildChecklistFromStage({ template, stage, stageIndex, stageCount, case
     items: stage.items.map((item) => ({
       id: `item-${randomUUID().slice(0, 8)}`,
       label: item.label,
-      done: false,
+      done: completed,
       ...(item.dueDate ? { dueDate: item.dueDate } : {}),
       ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
       ...(Array.isArray(item.subItems) && item.subItems.length > 0
@@ -492,13 +503,13 @@ function buildChecklistFromStage({ template, stage, stageIndex, stageCount, case
             subItems: item.subItems.map((sub) => ({
               id: `subitem-${randomUUID().slice(0, 8)}`,
               title: sub.title,
-              done: false,
+              done: completed,
               ...(Array.isArray(sub.subItems) && sub.subItems.length > 0
                 ? {
                     subItems: sub.subItems.map((subSub) => ({
                       id: `subsubitem-${randomUUID().slice(0, 8)}`,
                       title: subSub.title,
-                      done: false,
+                      done: completed,
                     })),
                   }
                 : {}),
@@ -701,6 +712,11 @@ export function materializeRecurringChecklists(data) {
     // designated month of the current year that has started, generate a
     // Stage-1 instance unless one already exists for that template+month.
     if (template.frequency === 'specific-months') {
+      // "Repeat every year" off: only generate for the year the template was
+      // scheduled in. true/undefined behaves as today (every year).
+      if (template.repeatAnnually === false && currentYear !== template.scheduleYear) {
+        continue
+      }
       const months = Array.isArray(template.scheduledMonths) ? template.scheduledMonths : []
       for (const month of months) {
         if (!Number.isInteger(month) || month < 1 || month > 12) continue
@@ -710,6 +726,10 @@ export function materializeRecurringChecklists(data) {
         if (existingMonthKeys.has(monthKey)) continue
         const stageOne = stages[0]
         const stageOneDue = resolveSpecificMonthsDueDate(template, currentYear, month)
+        // A designated month whose due date already passed is born completed
+        // so the historical occurrence shows as finished; the current/future
+        // month generates open exactly as before.
+        const completed = stageOneDue < today
         const caseId = `case-${randomUUID().slice(0, 8)}`
         nextChecklists.push(
           buildChecklistFromStage({
@@ -719,6 +739,7 @@ export function materializeRecurringChecklists(data) {
             stageCount: stages.length,
             caseId,
             dueDate: stageOneDue,
+            completed,
           }),
         )
         existingMonthKeys.add(monthKey)
@@ -1392,6 +1413,18 @@ export class AppDataStore {
           check (frequency in ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'annually', 'specific-months'))
       `)
 
+      // "Repeat every year" toggle for specific-months templates. Defaults to
+      // true so every existing template keeps repeating annually. schedule_year
+      // pins the calendar year when repeat_annually is off.
+      await this.pool.query(`
+        alter table checklist_templates
+          add column if not exists repeat_annually boolean not null default true
+      `)
+      await this.pool.query(`
+        alter table checklist_templates
+          add column if not exists schedule_year int
+      `)
+
       await this.pool.query(`
         create table if not exists checklist_template_items (
           id text primary key,
@@ -1455,6 +1488,7 @@ export class AppDataStore {
       await this.seedUsersInPostgres()
       await this.seedRelationalDataInPostgres()
       await this.syncOwnerEmailInPostgres()
+      await this.backfillContactsFromClientsInPostgres()
       return
     }
 
@@ -1594,6 +1628,134 @@ export class AppDataStore {
       )
       console.log(`[auth] Admin Alex Anderson seeded/updated with email ${adminEmail}`)
     }
+  }
+
+  /**
+   * One-time, idempotent boot migration: derive a reusable Contact from each
+   * client's legacy free-text contact fields and link it via contact_ids.
+   *
+   * Idempotency: ONLY clients whose contact_ids is empty/`{}` are touched, and
+   * the very last step of processing a client sets its contact_ids — so once a
+   * client is linked it is permanently skipped on every future boot. Contacts
+   * are deduped by EXACT case-insensitive (lower(trim(name)), lower(email)) so
+   * two clients sharing the same contact reuse one row rather than duplicating.
+   * Runs AFTER the contacts table + client contact_ids column migrations.
+   */
+  async backfillContactsFromClientsInPostgres() {
+    const client = await this.pool.connect()
+    try {
+      await client.query('begin')
+      // Eligible clients: no linked contacts yet AND some legacy contact info.
+      const { rows: eligible } = await client.query(`
+        select id, contact, contact_name, email, phone
+        from clients
+        where (contact_ids is null or contact_ids = '{}'::text[])
+          and (
+            coalesce(nullif(trim(contact), ''), '') != ''
+            or coalesce(nullif(trim(contact_name), ''), '') != ''
+            or coalesce(nullif(trim(email), ''), '') != ''
+            or coalesce(nullif(trim(phone), ''), '') != ''
+          )
+        for update
+      `)
+
+      let linked = 0
+      for (const row of eligible) {
+        const name = (row.contact && row.contact.trim()) || (row.contact_name && row.contact_name.trim()) || ''
+        if (!name) continue // a contact with no name is useless — skip.
+        const email = row.email && row.email.trim() ? row.email.trim() : null
+        const phone = row.phone && row.phone.trim() ? row.phone.trim() : null
+
+        // Find an existing contact matching EXACT case-insensitive name+email.
+        const { rows: match } = await client.query(
+          `select id from contacts
+           where lower(trim(name)) = lower(trim($1))
+             and lower(coalesce(email, '')) = lower(coalesce($2, ''))
+           limit 1`,
+          [name, email],
+        )
+
+        let contactId
+        if (match.length > 0) {
+          contactId = match[0].id
+        } else {
+          contactId = `contact-${randomUUID().slice(0, 8)}`
+          await client.query(
+            `insert into contacts (id, name, email, phone, updated_at)
+             values ($1, $2, $3, $4, now())`,
+            [contactId, name, email, phone],
+          )
+        }
+
+        await client.query(`update clients set contact_ids = array[$1::text], updated_at = now() where id = $2`, [
+          contactId,
+          row.id,
+        ])
+        linked += 1
+      }
+
+      await client.query('commit')
+      if (linked > 0) {
+        console.log(`[migrate] Backfilled contacts for ${linked} client(s) from legacy contact fields`)
+      }
+    } catch (err) {
+      await client.query('rollback')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * File-fallback mirror of `backfillContactsFromClientsInPostgres`. Same
+   * idempotency rule: only clients with an empty `contactIds` are processed,
+   * deduping against existing contacts by case-insensitive name+email. Mutates
+   * `data` in place and returns whether anything changed.
+   */
+  backfillContactsFromClientsInFile(data) {
+    const clients = Array.isArray(data.clients) ? data.clients : []
+    const contacts = Array.isArray(data.contacts) ? data.contacts : []
+    if (clients.length === 0) return false
+
+    const keyOf = (name, email) =>
+      `${String(name).trim().toLowerCase()}|${String(email ?? '').trim().toLowerCase()}`
+    const byKey = new Map(contacts.map((c) => [keyOf(c.name, c.email), c]))
+
+    let changed = false
+    for (const client of clients) {
+      const hasContacts = Array.isArray(client.contactIds) && client.contactIds.length > 0
+      if (hasContacts) continue
+      const name =
+        (client.contact && String(client.contact).trim()) ||
+        (client.contactName && String(client.contactName).trim()) ||
+        ''
+      const email = client.email && String(client.email).trim() ? String(client.email).trim() : ''
+      const phone = client.phone && String(client.phone).trim() ? String(client.phone).trim() : ''
+      // No legacy info at all → nothing to derive.
+      if (!name && !email && !phone) continue
+      // A contact with no name is useless — skip.
+      if (!name) continue
+
+      const key = keyOf(name, email)
+      let contact = byKey.get(key)
+      if (!contact) {
+        contact = {
+          id: `contact-${randomUUID().slice(0, 8)}`,
+          name,
+          email: email || undefined,
+          phone: phone || undefined,
+        }
+        contacts.push(contact)
+        byKey.set(key, contact)
+      }
+      client.contactIds = [contact.id]
+      changed = true
+    }
+
+    if (changed) {
+      data.contacts = contacts
+    }
+    return changed
   }
 
   async syncOwnerEmailInFile() {
@@ -1778,7 +1940,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
-                   scheduled_months, due_day_of_month, monthly_due_days
+                   scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year
             from checklist_templates
             order by title asc
           `),
@@ -2046,6 +2208,10 @@ export class AppDataStore {
           ...(row.monthly_due_days && typeof row.monthly_due_days === 'object'
             ? { monthlyDueDays: row.monthly_due_days }
             : {}),
+          repeatAnnually: row.repeat_annually === null || row.repeat_annually === undefined
+            ? true
+            : Boolean(row.repeat_annually),
+          ...(typeof row.schedule_year === 'number' ? { scheduleYear: row.schedule_year } : {}),
           stages: stagesByTemplate.get(row.id) ?? [],
           items: templateItemsByTemplate.get(row.id) ?? [],
         })),
@@ -2170,6 +2336,12 @@ export class AppDataStore {
 
     if (!Array.isArray(data.contacts)) {
       data.contacts = []
+      backfilled = true
+    }
+
+    // One-time idempotent contacts backfill from legacy client contact fields.
+    // Only clients with empty contactIds are touched, so reboots never dupe.
+    if (this.backfillContactsFromClientsInFile(data)) {
       backfilled = true
     }
 
@@ -2533,8 +2705,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
             `,
             [
               template.id,
@@ -2556,6 +2728,9 @@ export class AppDataStore {
               template.monthlyDueDays && typeof template.monthlyDueDays === 'object'
                 ? JSON.stringify(template.monthlyDueDays)
                 : null,
+              // Defaults to true (repeat every year) when unset.
+              template.repeatAnnually === false ? false : true,
+              typeof template.scheduleYear === 'number' ? template.scheduleYear : null,
             ],
           )
 

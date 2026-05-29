@@ -344,3 +344,105 @@ describe('materializeRecurringChecklists — specific-months per-month due dates
     expect(due).toContain(`${thisYear}-01-10`)
   })
 })
+
+describe('materializeRecurringChecklists — specific-months auto-complete past months', () => {
+  const thisYear = new Date().getFullYear()
+  const today = new Date().toISOString().slice(0, 10)
+  const currentMonth = new Date().getMonth() + 1 // 1–12
+
+  type GenItem = {
+    done: boolean
+    subItems?: Array<{ done: boolean; subItems?: Array<{ done: boolean }> }>
+  }
+  type GenChecklist = { templateId?: string; dueDate: string; items: GenItem[] }
+
+  const everyLevelDone = (checklist: GenChecklist): boolean =>
+    checklist.items.every(
+      (item) =>
+        item.done &&
+        (item.subItems ?? []).every(
+          (sub) => sub.done && (sub.subItems ?? []).every((subSub) => subSub.done),
+        ),
+    )
+
+  function makeSpecificMonthsTemplate(overrides: Record<string, unknown> = {}) {
+    return makeMonthlyTemplate({
+      id: 'tpl-sm-auto',
+      frequency: 'specific-months',
+      nextDueDate: '',
+      // A deeply-nested step tree so we can assert all three levels flip.
+      stages: [
+        {
+          id: 'stage-1',
+          name: 'Stage 1',
+          assigneeId: 'emp-1',
+          offsetDays: 0,
+          viewerIds: [],
+          editorIds: [],
+          items: [
+            {
+              id: 'ti-1',
+              label: 'Top step',
+              subItems: [
+                {
+                  id: 'sub-1',
+                  title: 'Sub step',
+                  subItems: [{ id: 'subsub-1', title: 'Sub-sub step' }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      ...overrides,
+    })
+  }
+
+  it('generates a COMPLETED instance for a designated month whose due date is in the past', () => {
+    // Month 1 with day 1 → its due date is clearly in the past for any run date
+    // after Jan 1 (which is every possible run date except Jan 1 itself).
+    const data = makeData({
+      checklistTemplates: [makeSpecificMonthsTemplate({ scheduledMonths: [1], monthlyDueDays: { 1: 1 } })],
+    })
+    const result = materializeRecurringChecklists(data)
+    const generated: GenChecklist[] = result.data.checklists.filter(
+      (c: GenChecklist) => c.templateId === 'tpl-sm-auto',
+    )
+    const pastInstance = generated.find((c) => c.dueDate === `${thisYear}-01-01`)
+    // Skip if the test happens to run exactly on Jan 1 (then it's not past).
+    if (today !== `${thisYear}-01-01`) {
+      expect(pastInstance).toBeDefined()
+      expect(everyLevelDone(pastInstance as GenChecklist)).toBe(true)
+    }
+  })
+
+  it('generates an OPEN instance (done:false everywhere) for the current month', () => {
+    // Current month with NO per-month day → end-of-month due date, which is
+    // always today-or-later within the current month, so it's never "strictly
+    // before today" and must be born OPEN regardless of the run date.
+    const data = makeData({
+      checklistTemplates: [
+        makeSpecificMonthsTemplate({ scheduledMonths: [currentMonth], monthlyDueDays: {} }),
+      ],
+    })
+    const result = materializeRecurringChecklists(data)
+    const generated: GenChecklist[] = result.data.checklists.filter(
+      (c: GenChecklist) => c.templateId === 'tpl-sm-auto',
+    )
+    const presentInstance = generated.find(
+      (c) => c.dueDate.slice(5, 7) === String(currentMonth).padStart(2, '0'),
+    )
+    expect(presentInstance).toBeDefined()
+    // Sanity: the resolved end-of-month due date is on/after today.
+    expect((presentInstance as GenChecklist).dueDate >= today).toBe(true)
+    // Every item / sub-item / sub-sub-item is born open.
+    const allOpen = (presentInstance as GenChecklist).items.every(
+      (item) =>
+        item.done === false &&
+        (item.subItems ?? []).every(
+          (sub) => sub.done === false && (sub.subItems ?? []).every((subSub) => subSub.done === false),
+        ),
+    )
+    expect(allOpen).toBe(true)
+  })
+})

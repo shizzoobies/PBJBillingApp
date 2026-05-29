@@ -306,6 +306,19 @@ export type ChecklistTemplate = {
    */
   monthlyDueDays?: Record<string, number>
   /**
+   * Only meaningful when `frequency === 'specific-months'`. When `false`, the
+   * template only generates occurrences during `scheduleYear`; when `true` or
+   * undefined it repeats every year (the legacy behavior). Semantically
+   * defaults to `true` so existing templates are unaffected.
+   */
+  repeatAnnually?: boolean
+  /**
+   * Only meaningful when `frequency === 'specific-months'` and
+   * `repeatAnnually === false`: the calendar year this template's designated
+   * months apply to. Set at creation time.
+   */
+  scheduleYear?: number
+  /**
    * A standard template is client-agnostic — it has no client, never
    * materializes checklists on its own, and exists purely as a reusable
    * blueprint that can be applied/copied onto a client.

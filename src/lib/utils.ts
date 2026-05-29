@@ -276,7 +276,11 @@ function buildChecklistFromStage(
   stageCount: number,
   caseId: string,
   dueDate: string,
+  completed = false,
 ): Checklist {
+  // When `completed` is true (a specific-months instance for a month whose
+  // due date is already in the past), every item/sub-item/sub-sub-item is
+  // born `done:true` so the historical occurrence shows as finished.
   return {
     id: makeId('check'),
     templateId: template.id,
@@ -295,7 +299,7 @@ function buildChecklistFromStage(
     items: stage.items.map((item) => ({
       id: makeId('item'),
       label: item.label,
-      done: false,
+      done: completed,
       ...(item.dueDate ? { dueDate: item.dueDate } : {}),
       ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
       ...(Array.isArray(item.subItems) && item.subItems.length > 0
@@ -303,13 +307,13 @@ function buildChecklistFromStage(
             subItems: item.subItems.map((sub) => ({
               id: makeId('subitem'),
               title: sub.title,
-              done: false,
+              done: completed,
               ...(Array.isArray(sub.subItems) && sub.subItems.length > 0
                 ? {
                     subItems: sub.subItems.map((subSub) => ({
                       id: makeId('subsubitem'),
                       title: subSub.title,
-                      done: false,
+                      done: completed,
                     })),
                   }
                 : {}),
@@ -411,6 +415,11 @@ export function ensureRecurringChecklists(data: AppData) {
     // designated month of the current year that has already started, generate
     // a Stage-1 instance unless one already exists for that template+month.
     if (template.frequency === 'specific-months') {
+      // "Repeat every year" off: only generate for the year the template was
+      // scheduled in. true/undefined behaves as today (every year).
+      if (template.repeatAnnually === false && currentYear !== template.scheduleYear) {
+        continue
+      }
       const months = Array.isArray(template.scheduledMonths) ? template.scheduledMonths : []
       for (const month of months) {
         if (!Number.isInteger(month) || month < 1 || month > 12) continue
@@ -421,9 +430,13 @@ export function ensureRecurringChecklists(data: AppData) {
         if (existingMonthKeys.has(monthKey)) continue
         const stageOne = stages[0]
         const stageOneDue = resolveSpecificMonthsDueDate(template, currentYear, month)
+        // A designated month whose due date already passed is born completed
+        // so the historical occurrence shows as finished; the current/future
+        // month generates open exactly as before.
+        const completed = stageOneDue < today
         const caseId = makeId('case')
         checklists.push(
-          buildChecklistFromStage(template, stageOne, 0, stages.length, caseId, stageOneDue),
+          buildChecklistFromStage(template, stageOne, 0, stages.length, caseId, stageOneDue, completed),
         )
         existingMonthKeys.add(monthKey)
         existingKeys.add(`${template.id}:${stageOneDue}:0`)
