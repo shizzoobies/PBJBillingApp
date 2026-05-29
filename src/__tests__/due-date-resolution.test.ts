@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { resolveStageDueDate, resolveNodeDueDate } from '../lib/utils'
-import type { TemplateStage } from '../lib/types'
+import { resolveStageDueDate, resolveNodeDueDate, ensureTemplateStages } from '../lib/utils'
+import type { ChecklistTemplate, TemplateStage } from '../lib/types'
 
 function makeStage(overrides: Partial<TemplateStage>): TemplateStage {
   return {
@@ -14,6 +14,35 @@ function makeStage(overrides: Partial<TemplateStage>): TemplateStage {
     ...overrides,
   }
 }
+
+describe('ensureTemplateStages — preserves a stage due spec (regression)', () => {
+  // Regression for: the stage normalizer rebuilt each stage's fields and
+  // dropped `dueDayOfMonth`, so the "Day of the month" option never engaged.
+  function makeTemplate(stage: Partial<TemplateStage>): ChecklistTemplate {
+    return {
+      id: 'tpl-1',
+      title: 'Monthly close',
+      clientId: 'client-1',
+      assigneeId: 'emp-1',
+      frequency: 'monthly',
+      nextDueDate: '2026-01-31',
+      active: true,
+      viewerIds: [],
+      editorIds: [],
+      stages: [makeStage(stage)],
+    }
+  }
+
+  it('keeps a stage dueDayOfMonth through normalization', () => {
+    const out = ensureTemplateStages(makeTemplate({ dueDayOfMonth: 15 }))
+    expect(out.stages[0].dueDayOfMonth).toBe(15)
+  })
+
+  it('keeps a stage dueDate through normalization', () => {
+    const out = ensureTemplateStages(makeTemplate({ dueDate: '2026-03-10' }))
+    expect(out.stages[0].dueDate).toBe('2026-03-10')
+  })
+})
 
 describe('resolveStageDueDate', () => {
   it('uses a fixed dueDate when set (wins over everything)', () => {

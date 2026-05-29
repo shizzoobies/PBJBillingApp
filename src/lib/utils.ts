@@ -235,6 +235,9 @@ export function ensureTemplateStages(template: ChecklistTemplate): ChecklistTemp
       assigneeId: stage.assigneeId || template.assigneeId,
       offsetDays: Number.isFinite(stage.offsetDays) ? Number(stage.offsetDays) : 0,
       ...(stage.dueDate ? { dueDate: stage.dueDate } : {}),
+      ...(typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1
+        ? { dueDayOfMonth: stage.dueDayOfMonth }
+        : {}),
       viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
       editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
       items: Array.isArray(stage.items) ? stage.items.map((item) => ({ ...item })) : [],
