@@ -5390,6 +5390,10 @@ export class AppDataStore {
         // Revoke sessions + magic tokens so the user can't continue
         // using an open tab and any stale email link won't work.
         await client.query(`delete from sessions where user_id = $1`, [userId])
+        // The active session system is `user_sessions` (the legacy `sessions`
+        // table above is no longer what auth reads) — revoke those too so an
+        // already-open tab stops working immediately.
+        await client.query(`delete from user_sessions where user_id = $1`, [userId])
         await client.query(`delete from login_tokens where user_id = $1`, [userId])
         await client.query(
           `update users
@@ -5488,6 +5492,9 @@ export class AppDataStore {
     target.magicToken = null
     target.tokenRevokedAt = inactiveAt
     authState.sessions = (authState.sessions ?? []).filter((session) => session.userId !== userId)
+    authState.userSessions = (authState.userSessions ?? []).filter(
+      (session) => session.userId !== userId,
+    )
     authState.loginTokens = (authState.loginTokens ?? []).filter(
       (token) => token.userId !== userId,
     )
@@ -6709,7 +6716,8 @@ export class AppDataStore {
                 u.name, u.email, u.role, u.staff_role
          from user_sessions s
          join users u on u.id = s.user_id
-         where s.id = $1`,
+         where s.id = $1
+           and u.inactive_at is null`,
         [sessionId],
       )
       if (!result.rowCount) return null
@@ -6737,7 +6745,9 @@ export class AppDataStore {
     const entry = list.find((item) => item.id === sessionId)
     if (!entry || entry.revokedAt) return null
     const user = (authState.users ?? []).find((item) => item.id === entry.userId)
-    if (!user) return null
+    // A removed (inactive) user's open session must stop working immediately —
+    // mirrors the `u.inactive_at is null` guard on the Postgres path.
+    if (!user || user.inactiveAt) return null
     entry.lastSeenAt = lastSeenAt
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return {
