@@ -257,16 +257,18 @@ export function ensureTemplateStages(template: ChecklistTemplate): ChecklistTemp
 
 /**
  * Resolve a stage's due date. An explicit `stage.dueDate` always wins over the
- * `offsetDays` calculation. Otherwise the due date is `baseDate` shifted by the
- * stage's `offsetDays`. Note: per-stage *repeat cadence* is not supported — the
- * template repeats as a whole; only the due date can be per-stage.
+ * `offsetDays` calculation. Otherwise the due date is `baseDate` minus the
+ * stage's `offsetDays` — the offset counts days BEFORE the deadline, so a
+ * hand-off stage lands on or before the task's due date (e.g. the end of the
+ * month), never after it. Note: per-stage *repeat cadence* is not supported —
+ * the template repeats as a whole; only the due date can be per-stage.
  */
 export function resolveStageDueDate(stage: TemplateStage, baseDate: string): string {
   if (stage.dueDate) {
     return stage.dueDate
   }
   const offset = Number(stage.offsetDays) || 0
-  return offset ? addDays(baseDate, offset) : baseDate
+  return offset ? addDays(baseDate, -offset) : baseDate
 }
 
 function buildChecklistFromStage(

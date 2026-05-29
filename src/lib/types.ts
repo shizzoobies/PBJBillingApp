@@ -259,10 +259,12 @@ export type TemplateStage = {
   name: string
   assigneeId: string
   /**
-   * Days after the previous stage's due date. Used only when `dueDate` is not
-   * set — an explicit `dueDate` always wins. Note: independent *repeat cadence*
-   * per stage is NOT supported; the template repeats as a whole and only the
-   * due date can be pinned per stage.
+   * Days BEFORE the deadline (the task's due date, or the previous stage's due
+   * date) this stage is due — so hand-off stages land on/before the end of the
+   * month, not after. Used only when `dueDate` is not set — an explicit
+   * `dueDate` always wins. Note: independent *repeat cadence* per stage is NOT
+   * supported; the template repeats as a whole and only the due date can be
+   * pinned per stage.
    */
   offsetDays: number
   /**

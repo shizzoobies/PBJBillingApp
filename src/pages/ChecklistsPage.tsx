@@ -2891,8 +2891,8 @@ function StageScheduleControl({
 }) {
   const mode: 'offset' | 'date' = dueDate ? 'date' : 'offset'
   const offsetLabel = isFirstStage
-    ? 'days after the task is due'
-    : 'days after previous step'
+    ? 'days before it is due'
+    : 'days before the previous step'
   return (
     <div className="stage-schedule">
       <span className="stage-schedule-title">Due</span>
