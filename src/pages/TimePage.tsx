@@ -451,13 +451,13 @@ function TimeCapture({
               value={employeeId}
               disabled={inputsDisabled || Boolean(timer)}
             >
-              {employees
-                .filter((employee) => employee.role !== 'Owner')
-                .map((employee) => (
-                  <option key={employee.id} value={employee.id}>
-                    {employee.name}
-                  </option>
-                ))}
+              {/* Owners do billable work too — include everyone so an owner can
+                  log their OWN time, not just a staff member's. */}
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.id}>
+                  {employee.name}
+                </option>
+              ))}
             </select>
           </label>
         )}
@@ -710,13 +710,12 @@ function ManualEntryModal({
                     value={employeeId}
                     onChange={(event) => setEmployeeId(event.target.value)}
                   >
-                    {employees
-                      .filter((employee) => employee.role !== 'Owner')
-                      .map((employee) => (
-                        <option key={employee.id} value={employee.id}>
-                          {employee.name}
-                        </option>
-                      ))}
+                    {/* Include owners — an owner logs their own time too. */}
+                    {employees.map((employee) => (
+                      <option key={employee.id} value={employee.id}>
+                        {employee.name}
+                      </option>
+                    ))}
                   </select>
                 </label>
               )}
