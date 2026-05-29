@@ -46,10 +46,28 @@ export type Client = {
    */
   monthlyRate?: number
   /**
-   * INFORMATIONAL ONLY — the client's estimated monthly hours, used for
-   * planning. Must NEVER affect any invoice total.
+   * @deprecated Legacy single informational estimated-monthly-hours field.
+   * Superseded by the per-role fields below (`estimatedBookkeeperHours`,
+   * `estimatedAccountantHours`, `estimatedCfoHours`). Kept optional for
+   * back-compat reads + migration only — the store surfaces it as
+   * `estimatedBookkeeperHours` when the new role fields are all absent.
    */
   estimatedMonthlyHours?: number
+  /**
+   * INFORMATIONAL ONLY — estimated monthly Bookkeeper hours for planning.
+   * Must NEVER affect any invoice total.
+   */
+  estimatedBookkeeperHours?: number
+  /**
+   * INFORMATIONAL ONLY — estimated monthly Accountant hours for planning.
+   * Must NEVER affect any invoice total.
+   */
+  estimatedAccountantHours?: number
+  /**
+   * INFORMATIONAL ONLY — estimated monthly CFO hours for planning.
+   * Must NEVER affect any invoice total.
+   */
+  estimatedCfoHours?: number
   /**
    * Reusable Contacts (shared across clients) selected on this client.
    * A client may select MULTIPLE contacts. Always an array on read.

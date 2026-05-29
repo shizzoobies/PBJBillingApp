@@ -218,7 +218,32 @@ function isSafeHttpUrl(value) {
   }
 }
 
-function normalizeClientProfile(client) {
+/**
+ * Per-role estimated hours, with legacy fallback. Returns the three role-hour
+ * fields to spread onto a client. If all three new role fields are absent but
+ * the legacy `estimatedMonthlyHours` is set, surface it as
+ * `estimatedBookkeeperHours` so existing clients' numbers aren't lost and the
+ * total isn't 0. Shared by the Postgres read-map and `normalizeClientProfile`.
+ */
+function mapEstimatedRoleHours({ legacy, bookkeeper, accountant, cfo }) {
+  const num = (value) =>
+    value === null || value === undefined || Number.isNaN(Number(value))
+      ? undefined
+      : Number(value)
+  const bk = num(bookkeeper)
+  const ac = num(accountant)
+  const cf = num(cfo)
+  const lg = num(legacy)
+  const allRolesAbsent = bk === undefined && ac === undefined && cf === undefined
+  const out = {}
+  if (bk !== undefined) out.estimatedBookkeeperHours = bk
+  else if (allRolesAbsent && lg !== undefined) out.estimatedBookkeeperHours = lg
+  if (ac !== undefined) out.estimatedAccountantHours = ac
+  if (cf !== undefined) out.estimatedCfoHours = cf
+  return out
+}
+
+export function normalizeClientProfile(client) {
   // Billing refactor back-compat. Surface `planIds`/`contactIds` as arrays
   // (never undefined) and derive `monthlyRate` from the legacy
   // `customMonthlyFee` when the new field is absent — mirrors the Postgres
@@ -242,6 +267,12 @@ function normalizeClientProfile(client) {
     planIds,
     contactIds,
     ...(monthlyRate === undefined ? {} : { monthlyRate }),
+    ...mapEstimatedRoleHours({
+      legacy: client.estimatedMonthlyHours,
+      bookkeeper: client.estimatedBookkeeperHours,
+      accountant: client.estimatedAccountantHours,
+      cfo: client.estimatedCfoHours,
+    }),
     assignedBookkeeperIds: Array.isArray(client.assignedBookkeeperIds)
       ? [...new Set(client.assignedBookkeeperIds.filter((id) => typeof id === 'string'))]
       : [],
@@ -826,6 +857,15 @@ export function sanitizeAppData(data) {
     if ('monthlyRate' in client) client.monthlyRate = clampMoney(client.monthlyRate)
     if ('estimatedMonthlyHours' in client) {
       client.estimatedMonthlyHours = clampMoney(client.estimatedMonthlyHours)
+    }
+    if ('estimatedBookkeeperHours' in client) {
+      client.estimatedBookkeeperHours = clampMoney(client.estimatedBookkeeperHours)
+    }
+    if ('estimatedAccountantHours' in client) {
+      client.estimatedAccountantHours = clampMoney(client.estimatedAccountantHours)
+    }
+    if ('estimatedCfoHours' in client) {
+      client.estimatedCfoHours = clampMoney(client.estimatedCfoHours)
     }
   }
 
@@ -1420,6 +1460,19 @@ export class AppDataStore {
       )
       await this.pool.query(
         `alter table clients add column if not exists estimated_monthly_hours numeric(8, 2)`,
+      )
+      // Per-role estimated hours (informational only) — replace the single
+      // estimated_monthly_hours field. Additive + nullable so legacy rows
+      // keep working; the read-map surfaces the legacy value as the
+      // bookkeeper hours when all three are absent.
+      await this.pool.query(
+        `alter table clients add column if not exists estimated_bookkeeper_hours numeric`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists estimated_accountant_hours numeric`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists estimated_cfo_hours numeric`,
       )
       await this.pool.query(
         `alter table clients add column if not exists plan_ids text[] not null default '{}'`,
@@ -2214,6 +2267,8 @@ export class AppDataStore {
           this.pool.query(`
             select id, name, contact, billing_mode, hourly_rate, plan_id,
                    custom_monthly_fee, monthly_rate, estimated_monthly_hours,
+                   estimated_bookkeeper_hours, estimated_accountant_hours,
+                   estimated_cfo_hours,
                    plan_ids, contact_ids,
                    email, contact_name, phone, address_line1, address_line2,
                    city, state, postal_code, logo_url, payment_terms,
@@ -2450,10 +2505,12 @@ export class AppDataStore {
             planIds: normalizedPlanIds,
             contactIds,
             monthlyRate: monthlyRate === null ? undefined : monthlyRate,
-            estimatedMonthlyHours:
-              row.estimated_monthly_hours === null || row.estimated_monthly_hours === undefined
-                ? undefined
-                : Number(row.estimated_monthly_hours),
+            ...mapEstimatedRoleHours({
+              legacy: row.estimated_monthly_hours,
+              bookkeeper: row.estimated_bookkeeper_hours,
+              accountant: row.estimated_accountant_hours,
+              cfo: row.estimated_cfo_hours,
+            }),
             // Legacy fields surfaced for back-compat reads + migration only.
             planId: row.plan_id ?? null,
             customMonthlyFee:
@@ -2880,9 +2937,11 @@ export class AppDataStore {
                 city, state, postal_code, logo_url, payment_terms,
                 footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
                 invoice_hide_internal_hours, invoice_group_by_category,
-                assigned_bookkeeper_ids, updated_at
+                assigned_bookkeeper_ids,
+                estimated_bookkeeper_hours, estimated_accountant_hours,
+                estimated_cfo_hours, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, now())
             `,
             [
               clientRecord.id,
@@ -2930,6 +2989,18 @@ export class AppDataStore {
               Array.isArray(clientRecord.assignedBookkeeperIds)
                 ? clientRecord.assignedBookkeeperIds
                 : [],
+              clientRecord.estimatedBookkeeperHours === undefined ||
+              clientRecord.estimatedBookkeeperHours === null
+                ? null
+                : Number(clientRecord.estimatedBookkeeperHours),
+              clientRecord.estimatedAccountantHours === undefined ||
+              clientRecord.estimatedAccountantHours === null
+                ? null
+                : Number(clientRecord.estimatedAccountantHours),
+              clientRecord.estimatedCfoHours === undefined ||
+              clientRecord.estimatedCfoHours === null
+                ? null
+                : Number(clientRecord.estimatedCfoHours),
             ],
           )
 

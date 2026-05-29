@@ -1,10 +1,10 @@
-import { Plus, Trash2 } from 'lucide-react'
+import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import { ApiError, type Client, type SubscriptionPlan } from '../lib/types'
 
 export function PlansPage() {
-  const { data, addPlan, deletePlan, ownerMode } = useAppContext()
+  const { data, addPlan, updatePlan, deletePlan, ownerMode } = useAppContext()
   return (
     <section className="content-grid two-column" id="plans">
       <PlanBuilder onCreate={addPlan} />
@@ -12,6 +12,7 @@ export function PlansPage() {
         plans={data.plans}
         clients={data.clients}
         ownerMode={ownerMode}
+        onUpdate={updatePlan}
         onDelete={deletePlan}
       />
     </section>
@@ -76,14 +77,38 @@ function PlanLibrary({
   plans,
   clients,
   ownerMode,
+  onUpdate,
   onDelete,
 }: {
   plans: SubscriptionPlan[]
   clients: Client[]
   ownerMode: boolean
+  onUpdate: (planId: string, patch: Partial<SubscriptionPlan>) => void
   onDelete: (planId: string) => Promise<void>
 }) {
   const [pendingId, setPendingId] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editNotes, setEditNotes] = useState('')
+
+  const startEdit = (plan: SubscriptionPlan) => {
+    setEditingId(plan.id)
+    setEditName(plan.name)
+    setEditNotes(plan.notes)
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setEditName('')
+    setEditNotes('')
+  }
+
+  const saveEdit = (plan: SubscriptionPlan) => {
+    const name = editName.trim()
+    if (!name) return
+    onUpdate(plan.id, { name, notes: editNotes })
+    cancelEdit()
+  }
 
   const handleDelete = async (plan: SubscriptionPlan) => {
     // Tell the owner exactly which clients will be unlinked so they go in
@@ -126,29 +151,79 @@ function PlanLibrary({
           const attachedCount = clients.filter((client) =>
             (client.planIds ?? []).includes(plan.id),
           ).length
+          const isEditing = editingId === plan.id
           return (
             <article className="plan-row" key={plan.id}>
-              <div>
-                <strong>{plan.name}</strong>
-                <span>{plan.notes}</span>
-                {attachedCount > 0 ? (
-                  <span className="checklist-meta-line">
-                    {attachedCount} client{attachedCount === 1 ? '' : 's'} on this plan
-                  </span>
-                ) : null}
-              </div>
-              {ownerMode ? (
-                <button
-                  className="item-delete-btn"
-                  type="button"
-                  aria-label={`Delete ${plan.name}`}
-                  title="Delete this plan (any attached clients will be unlinked)"
-                  disabled={pendingId === plan.id}
-                  onClick={() => void handleDelete(plan)}
-                >
-                  <Trash2 size={14} />
-                </button>
-              ) : null}
+              {isEditing ? (
+                <div className="plan-edit-form">
+                  <label className="field">
+                    <span>Plan / service name</span>
+                    <input
+                      className="input"
+                      onChange={(event) => setEditName(event.target.value)}
+                      value={editName}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Notes</span>
+                    <textarea
+                      className="input"
+                      onChange={(event) => setEditNotes(event.target.value)}
+                      rows={3}
+                      value={editNotes}
+                    />
+                  </label>
+                  <div className="plan-edit-actions">
+                    <button
+                      className="primary-action"
+                      type="button"
+                      onClick={() => saveEdit(plan)}
+                    >
+                      <Check size={14} />
+                      Save
+                    </button>
+                    <button className="ghost-action" type="button" onClick={cancelEdit}>
+                      <X size={14} />
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <strong>{plan.name}</strong>
+                    <span>{plan.notes}</span>
+                    {attachedCount > 0 ? (
+                      <span className="checklist-meta-line">
+                        {attachedCount} client{attachedCount === 1 ? '' : 's'} on this plan
+                      </span>
+                    ) : null}
+                  </div>
+                  {ownerMode ? (
+                    <div className="plan-row-actions">
+                      <button
+                        className="item-delete-btn"
+                        type="button"
+                        aria-label={`Edit ${plan.name}`}
+                        title="Edit this plan"
+                        onClick={() => startEdit(plan)}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        className="item-delete-btn"
+                        type="button"
+                        aria-label={`Delete ${plan.name}`}
+                        title="Delete this plan (any attached clients will be unlinked)"
+                        disabled={pendingId === plan.id}
+                        onClick={() => void handleDelete(plan)}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ) : null}
+                </>
+              )}
             </article>
           )
         })}

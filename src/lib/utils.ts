@@ -205,6 +205,38 @@ export function isChecklistItemDone(item: {
   return item.done
 }
 
+export type ChecklistStatus = 'Done' | 'Overdue' | 'In progress' | 'Not started'
+
+/**
+ * Derive a single rolled-up status label for a checklist. Pure — `today` is a
+ * YYYY-MM-DD string so callers control "now" (and tests stay deterministic).
+ *   - Done: every item is done (via the `isChecklistItemDone` roll-up)
+ *   - Overdue: not done and `dueDate` is strictly before `today`
+ *   - In progress: not done, not overdue, and at least one item done
+ *   - Not started: nothing done yet
+ */
+export function deriveChecklistStatus(
+  checklist: {
+    items: { done: boolean; subItems?: { done: boolean; subItems?: { done: boolean }[] }[] }[]
+    dueDate?: string
+  },
+  today: string,
+): ChecklistStatus {
+  const items = checklist.items ?? []
+  const total = items.length
+  const doneCount = items.filter((item) => isChecklistItemDone(item)).length
+  if (total > 0 && doneCount === total) {
+    return 'Done'
+  }
+  if (checklist.dueDate && checklist.dueDate < today) {
+    return 'Overdue'
+  }
+  if (doneCount > 0) {
+    return 'In progress'
+  }
+  return 'Not started'
+}
+
 export function sortChecklists(checklists: Checklist[]) {
   return [...checklists].sort((left, right) => {
     if (left.dueDate !== right.dueDate) {

@@ -2092,6 +2092,17 @@ function App() {
     }))
   }
 
+  // Patch a plan's editable fields (name / notes). Mirrors updateContact /
+  // updateClient — a local workspace mutation persisted by the bulk autosave.
+  const updatePlan = (planId: string, patch: Partial<SubscriptionPlan>) => {
+    updateWorkspaceData((current) => ({
+      ...current,
+      plans: current.plans.map((plan) =>
+        plan.id === planId ? { ...plan, ...patch } : plan,
+      ),
+    }))
+  }
+
   // Contacts persist the SAME WAY plans/clients do — a local-only workspace
   // mutation that reaches the server via the bulk `/api/app-data` autosave
   // (saveAppData). No dedicated endpoint, matching addPlan/addClient.
@@ -2354,6 +2365,7 @@ function App() {
     deleteClient,
     addClient,
     addPlan,
+    updatePlan,
     deletePlan,
     addContact,
     updateContact,

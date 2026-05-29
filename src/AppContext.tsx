@@ -299,6 +299,12 @@ export type AppContextValue = {
   addClient: (client: Omit<Client, 'id'>) => void
   addPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void
   /**
+   * Owner-only: patch a subscription plan's editable fields (name / notes).
+   * Persists via the bulk app-data autosave — no dedicated endpoint, the
+   * same way `updateContact` / `updateClient` do.
+   */
+  updatePlan: (planId: string, patch: Partial<SubscriptionPlan>) => void
+  /**
    * Owner-only: permanently delete a subscription plan. Any clients
    * currently on it are unlinked (their `planId` flips to null and they
    * fall back to hourly billing). Server-side the FK cascade does the

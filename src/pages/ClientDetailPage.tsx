@@ -9,6 +9,7 @@ import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { recordClientProfileActivity, setClientAssignedTeamRequest } from '../lib/api'
 import {
   ApiError,
+  type AppData,
   type BillingMode,
   type Client,
   type Contact,
@@ -16,8 +17,11 @@ import {
 } from '../lib/types'
 import {
   clientName,
+  deriveChecklistStatus,
   employeeName,
   formatHours,
+  getChecklistFrequencyLabel,
+  isChecklistItemDone,
   isSafeImageSrc,
   shortDate,
   sortChecklists,
@@ -174,6 +178,8 @@ export function ClientDetailPage() {
 
       <BrandingSection client={client} onCommit={commit} />
       <InvoiceSettingsSection client={client} onCommit={commit} />
+
+      <ActiveChecklistsSection client={client} data={data} />
 
       <section className="panel">
         <div className="section-heading">
@@ -384,14 +390,7 @@ function BillingSection({
             helper="Used to bill every billable hour worked for this client."
           />
         )}
-        <NumberField
-          label="Estimated monthly hours"
-          step="0.5"
-          min="0"
-          value={client.estimatedMonthlyHours ?? 0}
-          onCommit={(next) => onCommit({ estimatedMonthlyHours: next })}
-          helper="For planning only — does not affect invoices."
-        />
+        <EstimatedRoleHours client={client} onCommit={onCommit} />
         <div className="field full-row">
           <span>Plans / services</span>
           <ChipMultiSelect
@@ -404,6 +403,111 @@ function BillingSection({
         </div>
       </div>
     </section>
+  )
+}
+
+function ActiveChecklistsSection({
+  client,
+  data,
+}: {
+  client: Client
+  data: AppData
+}) {
+  const today = new Date().toISOString().slice(0, 10)
+  const checklists = sortChecklists(
+    data.checklists.filter((entry) => entry.clientId === client.id && !entry.deletedAt),
+  )
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Work in flight</p>
+          <h2>Active checklists</h2>
+        </div>
+      </div>
+      {checklists.length === 0 ? (
+        <p className="muted-text">No active checklists for this client.</p>
+      ) : (
+        <ul className="active-checklist-list">
+          {checklists.map((checklist) => {
+            const total = checklist.items.length
+            const done = checklist.items.filter((item) => isChecklistItemDone(item)).length
+            const pct = total > 0 ? Math.round((done / total) * 100) : 0
+            const status = deriveChecklistStatus(checklist, today)
+            const statusClass = status.toLowerCase().replace(/\s+/g, '-')
+            const stageLabel =
+              checklist.stageCount && checklist.stageCount > 1
+                ? `Step ${(checklist.stageIndex ?? 0) + 1} of ${checklist.stageCount}`
+                : null
+            const frequencyLabel = checklist.frequency
+              ? getChecklistFrequencyLabel(checklist.frequency)
+              : null
+            return (
+              <li className="active-checklist-row" key={checklist.id}>
+                <div className="active-checklist-main">
+                  <strong>{checklist.title}</strong>
+                  <span className={`status-badge status-${statusClass}`}>{status}</span>
+                </div>
+                <div className="active-checklist-meta">
+                  <span>Assignee: {employeeName(data.employees, checklist.assigneeId)}</span>
+                  <span>
+                    {done} / {total} steps ({pct}%)
+                  </span>
+                  <span>Due {shortDate.format(new Date(`${checklist.dueDate}T12:00:00`))}</span>
+                  {stageLabel ? <span>{stageLabel}</span> : null}
+                  {frequencyLabel ? <span>{frequencyLabel}</span> : null}
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function EstimatedRoleHours({
+  client,
+  onCommit,
+}: {
+  client: Client
+  onCommit: (patch: Partial<Client>) => void
+}) {
+  const bookkeeper = client.estimatedBookkeeperHours ?? 0
+  const accountant = client.estimatedAccountantHours ?? 0
+  const cfo = client.estimatedCfoHours ?? 0
+  const total = bookkeeper + accountant + cfo
+  return (
+    <div className="field full-row estimated-role-hours">
+      <span>Estimated monthly hours</span>
+      <div className="form-grid two-col">
+        <NumberField
+          label="Bookkeeper"
+          step="0.5"
+          min="0"
+          value={bookkeeper}
+          onCommit={(next) => onCommit({ estimatedBookkeeperHours: next })}
+        />
+        <NumberField
+          label="Accountant"
+          step="0.5"
+          min="0"
+          value={accountant}
+          onCommit={(next) => onCommit({ estimatedAccountantHours: next })}
+        />
+        <NumberField
+          label="CFO"
+          step="0.5"
+          min="0"
+          value={cfo}
+          onCommit={(next) => onCommit({ estimatedCfoHours: next })}
+        />
+      </div>
+      <small className="field-helper">
+        Total: {total} hrs/mo · For planning only — does not affect invoices.
+      </small>
+    </div>
   )
 }
 

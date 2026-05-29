@@ -95,7 +95,9 @@ function ClientBuilder({
   const [contact, setContact] = useState('Jamie Miller')
   const [hourlyRate, setHourlyRate] = useState('125')
   const [monthlyRate, setMonthlyRate] = useState('')
-  const [estimatedMonthlyHours, setEstimatedMonthlyHours] = useState('')
+  const [estimatedBookkeeperHours, setEstimatedBookkeeperHours] = useState('')
+  const [estimatedAccountantHours, setEstimatedAccountantHours] = useState('')
+  const [estimatedCfoHours, setEstimatedCfoHours] = useState('')
   const [billingMode, setBillingMode] = useState<BillingMode>('hourly')
   const [planIds, setPlanIds] = useState<string[]>([])
   const [contactIds, setContactIds] = useState<string[]>([])
@@ -119,7 +121,9 @@ function ClientBuilder({
     }
 
     const parsedMonthly = Number(monthlyRate)
-    const parsedEstHours = Number(estimatedMonthlyHours)
+    const parsedBookkeeper = Number(estimatedBookkeeperHours)
+    const parsedAccountant = Number(estimatedAccountantHours)
+    const parsedCfo = Number(estimatedCfoHours)
     onCreate({
       name,
       contact,
@@ -130,8 +134,14 @@ function ClientBuilder({
       ...(billingMode === 'subscription' && monthlyRate.trim() && !Number.isNaN(parsedMonthly)
         ? { monthlyRate: parsedMonthly }
         : {}),
-      ...(estimatedMonthlyHours.trim() && !Number.isNaN(parsedEstHours)
-        ? { estimatedMonthlyHours: parsedEstHours }
+      ...(estimatedBookkeeperHours.trim() && !Number.isNaN(parsedBookkeeper)
+        ? { estimatedBookkeeperHours: parsedBookkeeper }
+        : {}),
+      ...(estimatedAccountantHours.trim() && !Number.isNaN(parsedAccountant)
+        ? { estimatedAccountantHours: parsedAccountant }
+        : {}),
+      ...(estimatedCfoHours.trim() && !Number.isNaN(parsedCfo)
+        ? { estimatedCfoHours: parsedCfo }
         : {}),
       assignedEmployeeIds,
     })
@@ -139,10 +149,17 @@ function ClientBuilder({
     setContact('')
     setHourlyRate('125')
     setMonthlyRate('')
-    setEstimatedMonthlyHours('')
+    setEstimatedBookkeeperHours('')
+    setEstimatedAccountantHours('')
+    setEstimatedCfoHours('')
     setPlanIds([])
     setContactIds([])
   }
+
+  const totalEstimatedHours =
+    (Number(estimatedBookkeeperHours) || 0) +
+    (Number(estimatedAccountantHours) || 0) +
+    (Number(estimatedCfoHours) || 0)
 
   return (
     <section className="panel">
@@ -205,18 +222,47 @@ function ClientBuilder({
             />
           </label>
         )}
-        <label className="field">
+        <div className="field">
           <span>Estimated monthly hours</span>
-          <input
-            className="input"
-            min="0"
-            onChange={(event) => setEstimatedMonthlyHours(event.target.value)}
-            step="0.5"
-            type="number"
-            value={estimatedMonthlyHours}
-          />
-          <small className="field-helper">For planning only — does not affect invoices.</small>
-        </label>
+          <div className="form-grid two-col">
+            <label className="field">
+              <span>Bookkeeper</span>
+              <input
+                className="input"
+                min="0"
+                onChange={(event) => setEstimatedBookkeeperHours(event.target.value)}
+                step="0.5"
+                type="number"
+                value={estimatedBookkeeperHours}
+              />
+            </label>
+            <label className="field">
+              <span>Accountant</span>
+              <input
+                className="input"
+                min="0"
+                onChange={(event) => setEstimatedAccountantHours(event.target.value)}
+                step="0.5"
+                type="number"
+                value={estimatedAccountantHours}
+              />
+            </label>
+            <label className="field">
+              <span>CFO</span>
+              <input
+                className="input"
+                min="0"
+                onChange={(event) => setEstimatedCfoHours(event.target.value)}
+                step="0.5"
+                type="number"
+                value={estimatedCfoHours}
+              />
+            </label>
+          </div>
+          <small className="field-helper">
+            Total: {totalEstimatedHours} hrs/mo · For planning only — does not affect invoices.
+          </small>
+        </div>
         <div className="field">
           <span>Plans / services</span>
           <ChipMultiSelect
