@@ -146,10 +146,21 @@ function isRateLimited(emailKey) {
   return false
 }
 
+// Generous cap for the bulk /api/app-data save while still bounding memory so
+// an oversized (multi-GB) body can't OOM the process. Throws past the limit;
+// the global request handler catch turns it into a 500.
+const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024 // 10 MB
+
 async function readJsonBody(request) {
   const chunks = []
+  let total = 0
 
   for await (const chunk of request) {
+    total += chunk.length
+    if (total > MAX_JSON_BODY_BYTES) {
+      request.destroy()
+      throw Object.assign(new Error('Request body too large'), { statusCode: 413 })
+    }
     chunks.push(chunk)
   }
 
@@ -772,6 +783,12 @@ const server = createServer(async (request, response) => {
       }
 
       if (request.method === 'GET') {
+        // Full firm settings (address, EIN, contact details) are owner-only.
+        // Non-owners read display branding from /api/firm-settings/public.
+        if (session.user.role !== 'owner') {
+          sendJson(response, 403, { error: 'Only owners can view firm settings' })
+          return
+        }
         const settings = await appDataStore.getFirmSettings()
         sendJson(response, 200, settings)
         return
@@ -840,17 +857,13 @@ const server = createServer(async (request, response) => {
         try {
           await appDataStore.write(data)
         } catch (error) {
-          // Surface the real SQL/JS error so the client can show / log it
-          // instead of falling through to the generic 500. Without this the
-          // autosave failure mode is "Latest changes could not be saved"
-          // with no clue what's actually wrong.
+          // Log the full SQL/JS error server-side (visible in Railway logs);
+          // return only a generic message so Postgres internals (schema,
+          // constraint names, row data in `detail`) aren't leaked to clients.
           console.error('[bulk-save] write() failed:', error)
           sendJson(response, 500, {
             error: 'bulk_save_failed',
-            message: error?.message || String(error),
-            code: error?.code,
-            constraint: error?.constraint,
-            detail: error?.detail,
+            message: 'Could not save changes — please try again.',
           })
           return
         }
@@ -901,12 +914,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, { ok: true, results })
       } catch (error) {
         console.error('[set-user-emails] failed:', error)
-        sendJson(response, 500, {
-          error: 'set_user_emails_failed',
-          message: error?.message || String(error),
-          code: error?.code,
-          constraint: error?.constraint,
-        })
+        sendJson(response, 500, { error: 'set_user_emails_failed' })
       }
       return
     }
@@ -927,13 +935,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, { ok: true, removed: counts })
       } catch (error) {
         console.error('[cleanup-orphans] failed:', error)
-        sendJson(response, 500, {
-          error: 'cleanup_failed',
-          message: error?.message || String(error),
-          code: error?.code,
-          constraint: error?.constraint,
-          detail: error?.detail,
-        })
+        sendJson(response, 500, { error: 'cleanup_failed' })
       }
       return
     }
