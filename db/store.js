@@ -643,6 +643,166 @@ export function evaluatePasswordChange({
   return { allowed: true }
 }
 
+// Largest value we'll ever persist for a money/hours field. Anything beyond
+// this is certainly garbage (overflow, malformed paste, hostile payload) so
+// we clamp rather than store a number that would blow up downstream math or
+// the numeric/JSON columns. One billion is comfortably past any real rate.
+const MAX_SANE_NUMBER = 1e9
+// A single time entry should never exceed this many minutes (~69 days). Real
+// entries are minutes-to-hours; this just stops an absurd value from skewing
+// totals or overflowing the integer column.
+const MAX_ENTRY_MINUTES = 100000
+
+/**
+ * Coerce a value to a finite number clamped into [0, MAX_SANE_NUMBER].
+ * Non-finite (NaN, Infinity, non-numeric strings) and negatives collapse to 0.
+ * Used for money/hours fields where "garbage in" must never reject the save —
+ * we normalize in place instead. Returns the cleaned number.
+ */
+function clampMoney(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return 0
+  if (n > MAX_SANE_NUMBER) return MAX_SANE_NUMBER
+  return n
+}
+
+/**
+ * True only for a plain `YYYY-MM-DD` string whose year is in the sane window
+ * (2000–2100) AND which round-trips as a real calendar date (so 2026-02-31 is
+ * rejected). Conservative on purpose: a valid date returns true and is left
+ * untouched by the sanitizer; anything else returns false so the caller can
+ * drop just that field rather than persisting garbage.
+ */
+function isSaneDateString(value) {
+  if (typeof value !== 'string') return false
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  if (!m) return false
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const day = Number(m[3])
+  if (year < 2000 || year > 2100) return false
+  if (month < 1 || month > 12) return false
+  if (day < 1 || day > 31) return false
+  // Reject impossible calendar dates (e.g. Feb 31) by round-tripping.
+  const dt = new Date(Date.UTC(year, month - 1, day))
+  return (
+    dt.getUTCFullYear() === year &&
+    dt.getUTCMonth() === month - 1 &&
+    dt.getUTCDate() === day
+  )
+}
+
+/**
+ * Drop a date-valued field IN PLACE when it's present but clearly invalid.
+ * A missing/empty field is left as-is (nothing to clean). A valid date is
+ * left EXACTLY as-is. Only a present-but-garbage value gets removed, so the
+ * persisted record never carries an unparseable date that would crash a
+ * later read/render. `key` is the property name on `record`.
+ */
+function dropInvalidDateField(record, key) {
+  const value = record[key]
+  // Nothing there (or intentionally blank) — leave it alone.
+  if (value === undefined || value === null || value === '') return
+  if (!isSaneDateString(value)) {
+    delete record[key]
+  }
+}
+
+/**
+ * Defensive, NON-REJECTING normalizer run at the very top of
+ * `appDataStore.write()` before either persistence branch. The overriding
+ * rule: a normal save's values pass through UNCHANGED — we only clamp/normalize
+ * clearly-bad data and we NEVER throw or reject the whole blob (the owner may
+ * be doing month-end billing right now). Mutates `data` in place and returns it.
+ *
+ * What it cleans:
+ *  - Missing top-level arrays are coerced to [].
+ *  - Records that aren't objects, or lack a string `id`, are dropped from
+ *    their array so one bad record can't crash the whole save.
+ *  - Money/hours fields (client rates/hours, reimbursement amounts) are
+ *    coerced finite and clamped to [0, 1e9].
+ *  - timeEntries[].minutes is coerced to a positive integer in [1, 100000].
+ *  - Date fields that are present but not a sane YYYY-MM-DD are dropped.
+ */
+export function sanitizeAppData(data) {
+  if (!data || typeof data !== 'object') return data
+
+  // Arrays the rest of write() iterates with `for...of` (no Array.isArray
+  // guard) — coerce a missing/garbage value to [] so the loop can't throw.
+  const ARRAY_KEYS = [
+    'employees',
+    'clients',
+    'plans',
+    'contacts',
+    'timeEntries',
+    'reimbursements',
+    'recurringReimbursements',
+    'checklists',
+    'recycledChecklists',
+    'checklistTemplates',
+  ]
+  for (const key of ARRAY_KEYS) {
+    if (!Array.isArray(data[key])) {
+      data[key] = []
+    }
+  }
+
+  // Keep only well-formed records (object with a string id). A single
+  // malformed record must never wedge the entire bulk save.
+  const keepValidRecords = (key) => {
+    data[key] = data[key].filter(
+      (record) =>
+        record && typeof record === 'object' && typeof record.id === 'string',
+    )
+  }
+  for (const key of ARRAY_KEYS) {
+    keepValidRecords(key)
+  }
+
+  for (const client of data.clients) {
+    if ('hourlyRate' in client) client.hourlyRate = clampMoney(client.hourlyRate)
+    if ('monthlyRate' in client) client.monthlyRate = clampMoney(client.monthlyRate)
+    if ('estimatedMonthlyHours' in client) {
+      client.estimatedMonthlyHours = clampMoney(client.estimatedMonthlyHours)
+    }
+  }
+
+  for (const reimbursement of data.reimbursements) {
+    reimbursement.amount = clampMoney(reimbursement.amount)
+    dropInvalidDateField(reimbursement, 'date')
+  }
+
+  for (const recurring of data.recurringReimbursements) {
+    recurring.amount = clampMoney(recurring.amount)
+    dropInvalidDateField(recurring, 'startDate')
+  }
+
+  for (const entry of data.timeEntries) {
+    // Minutes must be a positive integer in a sane range. Non-finite or
+    // <= 0 collapses to the 1-minute floor (never drop a logged entry);
+    // huge values clamp to the ceiling.
+    const minutes = Math.round(Number(entry.minutes))
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      entry.minutes = 1
+    } else if (minutes > MAX_ENTRY_MINUTES) {
+      entry.minutes = MAX_ENTRY_MINUTES
+    } else {
+      entry.minutes = minutes
+    }
+    dropInvalidDateField(entry, 'date')
+  }
+
+  for (const checklist of data.checklists) {
+    dropInvalidDateField(checklist, 'dueDate')
+  }
+
+  for (const template of data.checklistTemplates) {
+    dropInvalidDateField(template, 'nextDueDate')
+  }
+
+  return data
+}
+
 /**
  * Drop rows from a bulk-save batch whose FK refs no longer exist in the
  * post-filter id sets. Pure function so it can be exercised in unit tests
@@ -2448,6 +2608,13 @@ export class AppDataStore {
   }
 
   async write(data) {
+    // SECURITY (L1/L2): normalize/clamp clearly-bad values IN PLACE before
+    // either persistence branch. This NEVER rejects a save — a normal blob
+    // passes through unchanged; only garbage (negative/huge numbers, invalid
+    // dates, non-object records, missing arrays) is cleaned so one bad value
+    // can't crash the bulk wipe-and-reinsert or persist unparseable data.
+    data = sanitizeAppData(data)
+
     if (this.pool) {
       const client = await this.pool.connect()
 
@@ -2546,13 +2713,26 @@ export class AppDataStore {
         await client.query('delete from contacts')
 
         for (const employee of data.employees) {
-          // PRESERVE existing email like we preserve password_hash. The
-          // synthetic `${id}@pbj.local` is a placeholder used only on
-          // first-time insert; once the owner has set a real email
-          // (e.g., for magic-link sign-in), we must NEVER overwrite it
-          // on subsequent bulk saves — doing so locked the owner out of
-          // their account when they tried to log in with their real
-          // address and the DB only had the placeholder.
+          // SECURITY (H4): the bulk save is owner-writable and re-inserts
+          // every employee, but it must NEVER be a path to escalate
+          // privileges, hijack an email, or overwrite a credential. There
+          // is no role-edit server endpoint and the Team UI only sets a
+          // role at invite time (via the separate createTeamMember path),
+          // so a bulk save legitimately changes ONLY a member's name.
+          //
+          // ON CONFLICT therefore updates name + updated_at ONLY — role,
+          // staff_role, email and password_hash are all PRESERVED on an
+          // existing row (a crafted/compromised owner payload can't promote
+          // someone to owner, steal their email, or reset their password).
+          //
+          // On a FIRST insert (id not yet in users) we default to the
+          // NON-owner role and a RANDOM, unknowable password — the bulk
+          // path can never mint an owner or a known default credential.
+          // Real owners/members are created exclusively by the invite
+          // endpoint (createTeamMember), which is untouched. Email is
+          // still the `${id}@pbj.local` placeholder on first insert and is
+          // preserved via coalesce on every subsequent save (so a real
+          // address the owner later set for magic-link sign-in is kept).
           await client.query(
             `
               insert into users (id, name, email, role, staff_role, password_hash, updated_at)
@@ -2567,17 +2747,15 @@ export class AppDataStore {
               )
               on conflict (id) do update
               set name = excluded.name,
-                  role = excluded.role,
-                  staff_role = excluded.staff_role,
                   updated_at = now()
             `,
             [
               employee.id,
               employee.name,
               `${employee.id}@pbj.local`,
-              roleToDbRole(employee.role),
-              employee.role,
-              hashPassword(demoPassword),
+              roleToDbRole('Bookkeeper'),
+              'Bookkeeper',
+              hashPassword(randomBytes(32).toString('base64url')),
             ],
           )
         }
@@ -2918,6 +3096,38 @@ export class AppDataStore {
       }
 
       return
+    }
+
+    // SECURITY (H4) — file-fallback mirror. In file mode the auth-sensitive
+    // fields (the owner/employee `role`, `staffRole`, email and password_hash)
+    // live in the SEPARATE auth-state file, which this method never touches —
+    // so email and password_hash can't be changed by a bulk save here at all.
+    // The one auth-adjacent field carried in app-data is `employees[].role`
+    // (the staff-role label). Preserve it the same way the Postgres path does:
+    // for any employee id already present in the persisted app-data, keep the
+    // prior `role` and let ONLY `name` change. New ids fall through with
+    // whatever role the payload carried (real members are created via the
+    // invite path; this just stops a bulk save from rewriting an existing
+    // member's role). Best-effort: if there's no prior file yet, write as-is.
+    try {
+      if (existsSync(localDataPath)) {
+        const previous = await readJson(localDataPath)
+        const priorRoleById = new Map(
+          (Array.isArray(previous.employees) ? previous.employees : [])
+            .filter((e) => e && typeof e.id === 'string')
+            .map((e) => [e.id, e.role]),
+        )
+        if (Array.isArray(data.employees)) {
+          data.employees = data.employees.map((employee) =>
+            employee && priorRoleById.has(employee.id)
+              ? { ...employee, role: priorRoleById.get(employee.id) }
+              : employee,
+          )
+        }
+      }
+    } catch {
+      // A malformed/absent prior file must never block a legitimate save.
+      // Fall through and persist the incoming data unchanged.
     }
 
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
