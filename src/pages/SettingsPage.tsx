@@ -17,6 +17,7 @@ import {
   type FirmSettings,
   type TotpStatus,
 } from '../lib/types'
+import { isSafeImageSrc } from '../lib/utils'
 
 export function SettingsPage() {
   const { ownerMode, sessionUser, setFirmSettings } = useAppContext()
@@ -512,7 +513,7 @@ function LogoUploadField({
     <div className="field logo-upload-field">
       <span>Logo</span>
       <div className="logo-preview">
-        {settings.logoUrl ? (
+        {isSafeImageSrc(settings.logoUrl) ? (
           <img alt={`${settings.name} logo`} src={settings.logoUrl} />
         ) : (
           <span className="muted-text">No logo uploaded yet.</span>

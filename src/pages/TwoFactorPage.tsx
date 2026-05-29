@@ -8,6 +8,19 @@ import {
 import { DEFAULT_FIRM_SETTINGS } from '../lib/types'
 
 /**
+ * Open-redirect guard for a server-supplied `redirectTo`. Only accepts a
+ * same-origin relative path — it must start with a single `/` and must NOT
+ * start with `//` (a protocol-relative URL that points off-site). Anything
+ * else falls back to `fallback`.
+ */
+function safeRedirectPath(value: string | null | undefined, fallback: string): string {
+  if (typeof value === 'string' && value.startsWith('/') && !value.startsWith('//')) {
+    return value
+  }
+  return fallback
+}
+
+/**
  * Sign-in challenge: the user already clicked the email link and is holding
  * the pending-2fa cookie. We just need a 6-digit TOTP (or a backup code).
  *
@@ -55,7 +68,7 @@ export function TwoFactorPage() {
         : await totpVerifyChallenge(code.trim())
       // Hard navigation so the new session cookie picks up cleanly and the
       // app re-bootstraps with /api/session.
-      window.location.assign(result.redirectTo || '/')
+      window.location.assign(safeRedirectPath(result.redirectTo, '/'))
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : 'Could not verify code right now.',

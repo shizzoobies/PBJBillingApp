@@ -15,6 +15,19 @@ import {
 type Step = 'qr' | 'verify' | 'backup'
 
 /**
+ * Open-redirect guard for a server-supplied `redirectTo`. Only accepts a
+ * same-origin relative path — it must start with a single `/` and must NOT
+ * start with `//` (a protocol-relative URL that points off-site). Anything
+ * else falls back to `fallback`.
+ */
+function safeRedirectPath(value: string | null | undefined, fallback: string): string {
+  if (typeof value === 'string' && value.startsWith('/') && !value.startsWith('//')) {
+    return value
+  }
+  return fallback
+}
+
+/**
  * Two-factor setup wizard. Reachable two ways:
  *   1. Forced flow on first owner login (with `pbj_2fa_pending` cookie set
  *      by /verify/:token). On completion the page calls /setup-complete to
@@ -104,7 +117,7 @@ export function TwoFactorSetupPage({
     if (needsSessionFinalize) {
       try {
         const result = await totpSetupComplete()
-        window.location.assign(result.redirectTo || '/dashboard')
+        window.location.assign(safeRedirectPath(result.redirectTo, '/dashboard'))
       } catch (err) {
         setFinalizeError(
           err instanceof ApiError ? err.message : 'Could not finalize sign-in.',
@@ -184,11 +197,11 @@ export function TwoFactorSetupPage({
               4. Point your camera at the code below
             </p>
             <div
-              aria-label="Authenticator QR code"
               className="totp-qr"
-              dangerouslySetInnerHTML={{ __html: setup.qrSvg }}
               style={{ display: 'flex', justifyContent: 'center', padding: '12px 0' }}
-            />
+            >
+              <img src={setup.qrDataUrl} alt="Authenticator QR code" />
+            </div>
 
             <button
               className="auth-secondary"

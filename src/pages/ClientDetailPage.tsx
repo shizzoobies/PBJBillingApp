@@ -18,6 +18,7 @@ import {
   clientName,
   employeeName,
   formatHours,
+  isSafeImageSrc,
   shortDate,
   sortChecklists,
 } from '../lib/utils'
@@ -503,7 +504,7 @@ function BrandingSection({
           value={client.logoUrl ?? ''}
         />
         <div className="logo-preview">
-          {client.logoUrl ? (
+          {isSafeImageSrc(client.logoUrl) ? (
             <img alt={`${client.name} logo`} src={client.logoUrl} />
           ) : (
             <span className="muted-text">No logo set. Paste a public image URL.</span>

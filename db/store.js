@@ -204,6 +204,20 @@ function advanceChecklistFrequency(dateString, frequency) {
   return addMonths(dateString, 1)
 }
 
+// Server-side guard for user-supplied URLs (e.g. a client's QuickBooks pay
+// link). Mirrors `isSafeHttpUrl` in src/lib/utils.ts — only absolute http(s)
+// URLs survive, so a `javascript:`/`data:` value never reaches the DB even via
+// a direct API write.
+function isSafeHttpUrl(value) {
+  if (!value || typeof value !== 'string') return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' || url.protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
 function normalizeClientProfile(client) {
   // Billing refactor back-compat. Surface `planIds`/`contactIds` as arrays
   // (never undefined) and derive `monthlyRate` from the legacy
@@ -242,7 +256,9 @@ function normalizeClientProfile(client) {
     logoUrl: client.logoUrl ?? '',
     paymentTerms: client.paymentTerms ?? '',
     footerNote: client.footerNote ?? '',
-    quickbooksPayUrl: client.quickbooksPayUrl ?? '',
+    // Reject non-http(s) pay URLs (e.g. `javascript:`) so a bad value never
+    // persists — the invoice screen renders this as a live `<a href>`.
+    quickbooksPayUrl: isSafeHttpUrl(client.quickbooksPayUrl) ? client.quickbooksPayUrl : '',
     invoiceShowTimeBreakdown:
       typeof client.invoiceShowTimeBreakdown === 'boolean' ? client.invoiceShowTimeBreakdown : true,
     invoiceHideInternalHours:
@@ -2593,7 +2609,8 @@ export class AppDataStore {
               clientRecord.logoUrl ?? '',
               clientRecord.paymentTerms ?? '',
               clientRecord.footerNote ?? '',
-              clientRecord.quickbooksPayUrl ?? '',
+              // Only persist a safe http(s) pay link — never a javascript:/data: URL.
+              isSafeHttpUrl(clientRecord.quickbooksPayUrl) ? clientRecord.quickbooksPayUrl : '',
               clientRecord.invoiceShowTimeBreakdown ?? true,
               clientRecord.invoiceHideInternalHours ?? true,
               clientRecord.invoiceGroupByCategory ?? false,
@@ -6291,10 +6308,20 @@ export class AppDataStore {
   async updateFirmSettings(patch) {
     const current = await this.getFirmSettings()
     const next = { ...current }
+    // Color fields are bound straight into inline styles client-side, so a
+    // malformed value would be a CSS-injection vector. Accept only 6-digit
+    // hex; anything else is ignored (the prior/default value is kept).
+    const HEX_COLOR_FIELDS = new Set(['brandColor', 'sidebarTextColor', 'sidebarActiveTextColor'])
+    const isHexColor = (value) => typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value)
     for (const [appKey] of FIRM_SETTINGS_FIELDS) {
       if (patch && Object.prototype.hasOwnProperty.call(patch, appKey)) {
         const value = patch[appKey]
-        if (typeof value === 'string') {
+        if (HEX_COLOR_FIELDS.has(appKey)) {
+          if (isHexColor(value)) {
+            next[appKey] = value
+          }
+          // Invalid color: leave the existing/default value untouched.
+        } else if (typeof value === 'string') {
           next[appKey] = value
         } else if (value === null || value === undefined) {
           next[appKey] = appKey === 'name' ? DEFAULT_FIRM_SETTINGS.name : ''

@@ -812,3 +812,29 @@ export function lastDayOfCurrentMonth() {
   const last = new Date(date.getFullYear(), date.getMonth() + 1, 0)
   return last.toISOString().slice(0, 10)
 }
+
+/**
+ * True only for absolute http(s) URLs. Used to gate user-supplied URLs before
+ * rendering them as a live link (an `<a href>`), so a `javascript:` / `data:`
+ * URL can never execute in the viewer's session.
+ */
+export function isSafeHttpUrl(value: string | null | undefined): boolean {
+  if (!value) return false
+  try {
+    const u = new URL(value)
+    return u.protocol === 'https:' || u.protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * True for image sources we're willing to put in an `<img src>`: inline
+ * `data:image/...` (our firm-logo uploads) or an absolute http(s) URL.
+ * Anything else (e.g. `javascript:`) is rejected.
+ */
+export function isSafeImageSrc(value: string | null | undefined): boolean {
+  if (!value) return false
+  if (value.startsWith('data:image/')) return true
+  return isSafeHttpUrl(value)
+}

@@ -17,6 +17,8 @@ import {
   getBillingPeriodLabel,
   getInvoice,
   isInBillingPeriod,
+  isSafeHttpUrl,
+  isSafeImageSrc,
 } from '../lib/utils'
 
 type DisplayLine = InvoiceLine & { groupKey?: string }
@@ -246,7 +248,10 @@ function PayButton({ client, variant }: { client: Client; variant: 'screen' | 'p
     return null
   }
 
-  if (variant === 'print') {
+  // Print variant — and the screen variant when the stored URL isn't a safe
+  // http(s) link — render the URL as plain text so a `javascript:` URL can
+  // never execute as a live link in the viewer's session.
+  if (variant === 'print' || !isSafeHttpUrl(client.quickbooksPayUrl)) {
     return (
       <div className="invoice-pay-print">
         <strong>Pay via QuickBooks</strong>
@@ -259,7 +264,7 @@ function PayButton({ client, variant }: { client: Client; variant: 'screen' | 'p
     <a
       className="primary-action invoice-pay-button"
       href={client.quickbooksPayUrl}
-      rel="noreferrer"
+      rel="noopener noreferrer"
       target="_blank"
     >
       <ExternalLink size={16} />
@@ -411,7 +416,7 @@ function InvoiceDocument({ display }: { display: DisplayInvoice }) {
             <span key={line}>{line}</span>
           ))}
         </div>
-        {headerLogoUrl ? (
+        {isSafeImageSrc(headerLogoUrl) ? (
           <img alt={`${firmName} logo`} className="print-logo" src={headerLogoUrl} />
         ) : (
           <FileText size={34} />

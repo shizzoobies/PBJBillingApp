@@ -3120,8 +3120,10 @@ const server = createServer(async (request, response) => {
       const issuer = await issuerForTotp()
       const otpauthUri = secret.otpauthUri(totpState.email || totpState.name, issuer)
       let qrSvg = ''
+      let qrDataUrl = ''
       try {
         qrSvg = await QRCode.toString(otpauthUri, { type: 'svg', margin: 1, width: 220 })
+        qrDataUrl = await QRCode.toDataURL(otpauthUri, { margin: 1, width: 220 })
       } catch (error) {
         console.error('[totp] QR render failed:', error?.message || error)
       }
@@ -3129,6 +3131,7 @@ const server = createServer(async (request, response) => {
         secret: secret.base32,
         otpauthUri,
         qrSvg,
+        qrDataUrl,
       })
       return
     }

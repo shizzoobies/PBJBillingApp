@@ -1,4 +1,5 @@
 import { useAppContext } from '../AppContext'
+import { isSafeImageSrc } from '../lib/utils'
 
 // Print-only header block. Hidden in normal page flow (display: none) and
 // shown by `@media print` rules. Renders firm branding + report metadata so
@@ -30,8 +31,8 @@ export function PrintHeader({
   return (
     <header className="print-header" aria-hidden="true">
       <div className="print-header-firm">
-        {firmSettings?.logoUrl ? (
-          <img alt={`${firmName} logo`} className="print-header-logo" src={firmSettings.logoUrl} />
+        {isSafeImageSrc(firmSettings?.logoUrl) ? (
+          <img alt={`${firmName} logo`} className="print-header-logo" src={firmSettings?.logoUrl} />
         ) : null}
         <div className="print-header-firm-text">
           <strong>{firmName}</strong>

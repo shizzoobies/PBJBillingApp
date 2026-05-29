@@ -7,7 +7,12 @@ import {
 } from 'lucide-react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
-import { formatHours, getBillingPeriodLabel, isInBillingPeriod } from '../lib/utils'
+import {
+  formatHours,
+  getBillingPeriodLabel,
+  isInBillingPeriod,
+  isSafeImageSrc,
+} from '../lib/utils'
 import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
 import { navItems } from './navItems'
@@ -63,7 +68,7 @@ export function AppLayout() {
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
-        {firmLogoUrl ? (
+        {isSafeImageSrc(firmLogoUrl) ? (
           // Logo-only header: the firm's name is assumed to be baked
           // into the image, so we drop the text lockup entirely. The
           // logo gets its own block-level styles in CSS so it can

@@ -592,7 +592,10 @@ export type TotpStatus = {
 export type TotpSetupInit = {
   secret: string
   otpauthUri: string
-  qrSvg: string
+  /** Data-URL PNG of the otpauth QR — rendered into an `<img>` (no HTML sink). */
+  qrDataUrl: string
+  /** @deprecated Raw SVG markup. Kept optional for transition; prefer `qrDataUrl`. */
+  qrSvg?: string
 }
 
 export type TeamSession = {
