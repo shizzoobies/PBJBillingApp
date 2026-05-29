@@ -317,19 +317,54 @@ function ensureTemplateStages(template) {
 }
 
 /**
- * Resolve a stage's due date. An explicit `stage.dueDate` always wins over the
- * `offsetDays` calculation. Otherwise the due date is `baseDate` minus the
- * stage's `offsetDays` — the offset counts days BEFORE the deadline, so a
- * hand-off stage lands on or before the task's due date (e.g. the end of the
- * month), never after it. Note: per-stage *repeat cadence* is not supported —
- * the template repeats as a whole; only the due date can be per-stage.
+ * The Nth day of `baseDate`'s month as an ISO yyyy-mm-dd, with `day` clamped to
+ * the month's real length (so "31" lands on Feb 28/29). Mirrors the helper in
+ * src/lib/utils.ts.
+ */
+function dayOfMonthDate(baseDate, day) {
+  const [year, month] = baseDate.split('-').map(Number)
+  const lastDay = new Date(year, month, 0).getDate()
+  const clamped = Math.min(Math.max(Math.trunc(day), 1), lastDay)
+  return `${year}-${String(month).padStart(2, '0')}-${String(clamped).padStart(2, '0')}`
+}
+
+/**
+ * Resolve a stage's due date. Precedence: an explicit fixed `stage.dueDate`
+ * always wins; else a recurring `stage.dueDayOfMonth` resolves to that day of
+ * `baseDate`'s month (clamped to the month's length); else the LEGACY
+ * `offsetDays` — kept for back-compat — counts days BEFORE the deadline so a
+ * hand-off stage lands on or before the task's due date; else `baseDate`.
+ * Note: per-stage *repeat cadence* is not supported — the template repeats as a
+ * whole; only the due date can be per-stage. Mirrors src/lib/utils.ts.
  */
 function resolveStageDueDate(stage, baseDate) {
   if (stage && stage.dueDate) {
     return stage.dueDate
   }
+  if (stage && typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1) {
+    return dayOfMonthDate(baseDate, stage.dueDayOfMonth)
+  }
   const offset = Number(stage && stage.offsetDays) || 0
   return offset ? addDays(baseDate, -offset) : baseDate
+}
+
+/**
+ * Resolve a checklist NODE's (item / sub-item / sub-sub-item) concrete due date
+ * for a given cycle month. Precedence: a fixed `node.dueDate` wins; else a
+ * recurring `node.dueDayOfMonth` resolves to that day of `cycleYear`/
+ * `cycleMonth` (1–12), clamped to the month's length; else `undefined`.
+ * Mirrors src/lib/utils.ts.
+ */
+function resolveNodeDueDate(node, cycleYear, cycleMonth) {
+  if (node && node.dueDate) {
+    return node.dueDate
+  }
+  if (node && typeof node.dueDayOfMonth === 'number' && node.dueDayOfMonth >= 1) {
+    const lastDay = new Date(cycleYear, cycleMonth, 0).getDate()
+    const day = Math.min(Math.trunc(node.dueDayOfMonth), lastDay)
+    return `${cycleYear}-${String(cycleMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  }
+  return undefined
 }
 
 /**
@@ -367,6 +402,13 @@ function normalizeSubSubItems(raw, { withDone = true } = {}) {
         title: sub.title.trim(),
       }
       if (withDone) base.done = Boolean(sub.done)
+      // Preserve the per-node due spec — template nodes carry the recurring
+      // `dueDayOfMonth` / fixed `dueDate`; live nodes carry only a concrete
+      // resolved `dueDate`. Dropping these silently loses sub-node due dates.
+      if (typeof sub.dueDate === 'string' && sub.dueDate) base.dueDate = sub.dueDate
+      if (typeof sub.dueDayOfMonth === 'number' && sub.dueDayOfMonth >= 1) {
+        base.dueDayOfMonth = sub.dueDayOfMonth
+      }
       return base
     })
 }
@@ -386,6 +428,12 @@ function normalizeSubItems(raw, { withDone = true } = {}) {
       const base = {
         id: typeof sub.id === 'string' && sub.id ? sub.id : `subitem-${randomUUID().slice(0, 8)}`,
         title: sub.title.trim(),
+      }
+      // Preserve the per-node due spec (see normalizeSubSubItems) so sub-item
+      // due dates survive the JSONB round-trip.
+      if (typeof sub.dueDate === 'string' && sub.dueDate) base.dueDate = sub.dueDate
+      if (typeof sub.dueDayOfMonth === 'number' && sub.dueDayOfMonth >= 1) {
+        base.dueDayOfMonth = sub.dueDayOfMonth
       }
       const subSubItems = normalizeSubSubItems(sub.subItems, { withDone })
       if (subSubItems.length > 0) {
@@ -496,6 +544,9 @@ function buildChecklistFromStage({
   // When `completed` is true (a specific-months instance for a month whose
   // due date is already in the past), every item/sub-item/sub-sub-item is
   // born `done:true` so the historical occurrence shows as finished.
+  // Derive the cycle month from the stage's resolved due date so each node's
+  // recurring day-of-month lands in the right month.
+  const [cycleYear, cycleMonth] = dueDate.split('-').map(Number)
   return {
     id: `check-${randomUUID().slice(0, 8)}`,
     templateId: template.id,
@@ -510,31 +561,42 @@ function buildChecklistFromStage({
     stageId: stage.id,
     stageIndex,
     stageCount,
-    items: stage.items.map((item) => ({
-      id: `item-${randomUUID().slice(0, 8)}`,
-      label: item.label,
-      done: completed,
-      ...(item.dueDate ? { dueDate: item.dueDate } : {}),
-      ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
-      ...(Array.isArray(item.subItems) && item.subItems.length > 0
-        ? {
-            subItems: item.subItems.map((sub) => ({
-              id: `subitem-${randomUUID().slice(0, 8)}`,
-              title: sub.title,
-              done: completed,
-              ...(Array.isArray(sub.subItems) && sub.subItems.length > 0
-                ? {
-                    subItems: sub.subItems.map((subSub) => ({
-                      id: `subsubitem-${randomUUID().slice(0, 8)}`,
-                      title: subSub.title,
-                      done: completed,
-                    })),
-                  }
-                : {}),
-            })),
-          }
-        : {}),
-    })),
+    items: stage.items.map((item) => {
+      const itemDue = resolveNodeDueDate(item, cycleYear, cycleMonth)
+      return {
+        id: `item-${randomUUID().slice(0, 8)}`,
+        label: item.label,
+        done: completed,
+        ...(itemDue ? { dueDate: itemDue } : {}),
+        ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
+        ...(Array.isArray(item.subItems) && item.subItems.length > 0
+          ? {
+              subItems: item.subItems.map((sub) => {
+                const subDue = resolveNodeDueDate(sub, cycleYear, cycleMonth)
+                return {
+                  id: `subitem-${randomUUID().slice(0, 8)}`,
+                  title: sub.title,
+                  done: completed,
+                  ...(subDue ? { dueDate: subDue } : {}),
+                  ...(Array.isArray(sub.subItems) && sub.subItems.length > 0
+                    ? {
+                        subItems: sub.subItems.map((subSub) => {
+                          const subSubDue = resolveNodeDueDate(subSub, cycleYear, cycleMonth)
+                          return {
+                            id: `subsubitem-${randomUUID().slice(0, 8)}`,
+                            title: subSub.title,
+                            done: completed,
+                            ...(subSubDue ? { dueDate: subSubDue } : {}),
+                          }
+                        }),
+                      }
+                    : {}),
+                }
+              }),
+            }
+          : {}),
+      }
+    }),
   }
 }
 
@@ -1680,6 +1742,12 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_template_items add column if not exists sub_items jsonb not null default '[]'::jsonb`,
       )
+      // Per-node recurring day-of-month due spec (1–31), resolved per cycle
+      // month at materialization. Additive + nullable so existing template
+      // items keep their behavior.
+      await this.pool.query(
+        `alter table checklist_template_items add column if not exists due_day_of_month int`,
+      )
 
       // Phase 3: workflow stages on templates.
       await this.pool.query(`
@@ -1700,6 +1768,11 @@ export class AppDataStore {
       `)
       // Wave 2: per-stage explicit due date (overrides offset_days when set).
       await this.pool.query(`alter table checklist_template_stages add column if not exists due_date date`)
+      // Per-stage recurring day-of-month due spec (1–31), resolved per cycle
+      // month. Additive + nullable so existing stages keep their behavior.
+      await this.pool.query(
+        `alter table checklist_template_stages add column if not exists due_day_of_month int`,
+      )
       await this.pool.query(`alter table checklists add column if not exists case_id text`)
       await this.pool.query(`alter table checklists add column if not exists stage_id text`)
       await this.pool.query(`alter table checklists add column if not exists stage_index int`)
@@ -2179,12 +2252,12 @@ export class AppDataStore {
             order by title asc
           `),
           this.pool.query(`
-            select id, template_id, label, sort_order, due_date, assignee_id, stage_id, sub_items
+            select id, template_id, label, sort_order, due_date, due_day_of_month, assignee_id, stage_id, sub_items
             from checklist_template_items
             order by template_id asc, sort_order asc, id asc
           `),
           this.pool.query(`
-            select id, template_id, name, assignee_id, offset_days, due_date, position, viewer_ids, editor_ids
+            select id, template_id, name, assignee_id, offset_days, due_date, due_day_of_month, position, viewer_ids, editor_ids
             from checklist_template_stages
             order by template_id asc, position asc, id asc
           `),
@@ -2263,6 +2336,9 @@ export class AppDataStore {
         if (row.due_date) {
           item.dueDate = row.due_date.toISOString().slice(0, 10)
         }
+        if (typeof row.due_day_of_month === 'number') {
+          item.dueDayOfMonth = row.due_day_of_month
+        }
         if (row.assignee_id) {
           item.assigneeId = row.assignee_id
         }
@@ -2294,6 +2370,9 @@ export class AppDataStore {
         }
         if (row.due_date) {
           stage.dueDate = row.due_date.toISOString().slice(0, 10)
+        }
+        if (typeof row.due_day_of_month === 'number') {
+          stage.dueDayOfMonth = row.due_day_of_month
         }
         const list = stagesByTemplate.get(row.template_id) ?? []
         list.push(stage)
@@ -2994,8 +3073,8 @@ export class AppDataStore {
           for (const [stageIdx, stage] of migratedTemplate.stages.entries()) {
             await client.query(
               `
-                insert into checklist_template_stages (id, template_id, name, assignee_id, offset_days, due_date, position, viewer_ids, editor_ids, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+                insert into checklist_template_stages (id, template_id, name, assignee_id, offset_days, due_date, due_day_of_month, position, viewer_ids, editor_ids, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
               `,
               [
                 stage.id,
@@ -3004,6 +3083,9 @@ export class AppDataStore {
                 stage.assigneeId || null,
                 Number(stage.offsetDays) || 0,
                 stage.dueDate || null,
+                typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1
+                  ? stage.dueDayOfMonth
+                  : null,
                 stageIdx,
                 Array.isArray(stage.viewerIds) ? stage.viewerIds : [],
                 Array.isArray(stage.editorIds) ? stage.editorIds : [],
@@ -3013,8 +3095,8 @@ export class AppDataStore {
             for (const [index, item] of (stage.items ?? []).entries()) {
               await client.query(
                 `
-                  insert into checklist_template_items (id, template_id, label, sort_order, due_date, assignee_id, stage_id, sub_items, updated_at)
-                  values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now())
+                  insert into checklist_template_items (id, template_id, label, sort_order, due_date, due_day_of_month, assignee_id, stage_id, sub_items, updated_at)
+                  values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now())
                 `,
                 [
                   item.id,
@@ -3022,6 +3104,9 @@ export class AppDataStore {
                   item.label,
                   index,
                   item.dueDate ?? null,
+                  typeof item.dueDayOfMonth === 'number' && item.dueDayOfMonth >= 1
+                    ? item.dueDayOfMonth
+                    : null,
                   item.assigneeId ?? null,
                   stage.id,
                   JSON.stringify(normalizeSubItems(item.subItems, { withDone: false })),

@@ -193,12 +193,18 @@ export type SubSubChecklistItem = {
   id: string
   title: string
   done: boolean
+  /** Concrete resolved due date (ISO yyyy-mm-dd), computed at materialization. */
+  dueDate?: string
 }
 
 /** A sub-sub-item on a template item. Template nodes have no `done`. */
 export type SubSubChecklistTemplateItem = {
   id: string
   title: string
+  /** Optional fixed due date (ISO yyyy-mm-dd). Wins over `dueDayOfMonth`. */
+  dueDate?: string
+  /** Optional recurring day-of-month (1–31) resolved per cycle month. */
+  dueDayOfMonth?: number
 }
 
 /**
@@ -217,6 +223,8 @@ export type SubChecklistItem = {
    * roll-up still works. Sub-items with no sub-sub-items behave as before.
    */
   done: boolean
+  /** Concrete resolved due date (ISO yyyy-mm-dd), computed at materialization. */
+  dueDate?: string
   /** One deeper level of nested sub-sub-items. Empty/undefined when flat. */
   subItems?: SubSubChecklistItem[]
 }
@@ -225,6 +233,10 @@ export type SubChecklistItem = {
 export type SubChecklistTemplateItem = {
   id: string
   title: string
+  /** Optional fixed due date (ISO yyyy-mm-dd). Wins over `dueDayOfMonth`. */
+  dueDate?: string
+  /** Optional recurring day-of-month (1–31) resolved per cycle month. */
+  dueDayOfMonth?: number
   /** Sub-sub-items defined in the template; copied with fresh ids on materialize. */
   subItems?: SubSubChecklistTemplateItem[]
 }
@@ -249,6 +261,8 @@ export type ChecklistTemplateItem = {
   id: string
   label: string
   dueDate?: string
+  /** Optional recurring day-of-month (1–31) resolved per cycle month. */
+  dueDayOfMonth?: number
   assigneeId?: string
   /** Sub-items defined in the template; copied with fresh ids on materialize. */
   subItems?: SubChecklistTemplateItem[]
@@ -273,6 +287,12 @@ export type TemplateStage = {
    * `offsetDays` calculation.
    */
   dueDate?: string
+  /**
+   * Optional recurring day-of-month (1–31). When set (and `dueDate` is not),
+   * the materialized instance for this stage is due on the Nth of the cycle
+   * month, clamped to that month's length. Wins over `offsetDays`.
+   */
+  dueDayOfMonth?: number
   viewerIds: string[]
   editorIds: string[]
   items: ChecklistTemplateItem[]

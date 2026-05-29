@@ -47,6 +47,10 @@ export type OutlineRow = {
   canIndent: boolean
   /** True when the row may outdent (depth > 1). */
   canOutdent: boolean
+  /** Optional fixed due date (ISO yyyy-mm-dd) for this node. */
+  dueDate?: string
+  /** Optional recurring day-of-month (1–31) for this node. */
+  dueDayOfMonth?: number
 }
 
 /* -------------------------------------------------------------------------- */
@@ -95,6 +99,8 @@ export function flattenOutline(items: ChecklistTemplateItem[]): OutlineRow[] {
       // grand-children that would overflow the 3-level cap.
       canIndent: itemIndex > 0 && !itemHasGrandChildren,
       canOutdent: false,
+      dueDate: item.dueDate,
+      dueDayOfMonth: item.dueDayOfMonth,
     })
     const subItems = item.subItems ?? []
     subItems.forEach((sub, subIndex) => {
@@ -109,6 +115,8 @@ export function flattenOutline(items: ChecklistTemplateItem[]): OutlineRow[] {
         // it already has sub-sub-steps that would overflow the cap.
         canIndent: subIndex > 0 && !subHasChildren,
         canOutdent: true,
+        dueDate: sub.dueDate,
+        dueDayOfMonth: sub.dueDayOfMonth,
       })
       const subSubItems = sub.subItems ?? []
       subSubItems.forEach((subSub, subSubIndex) => {
@@ -121,6 +129,8 @@ export function flattenOutline(items: ChecklistTemplateItem[]): OutlineRow[] {
           // Already at the deepest level — cannot indent further.
           canIndent: false,
           canOutdent: true,
+          dueDate: subSub.dueDate,
+          dueDayOfMonth: subSub.dueDayOfMonth,
         })
       })
     })
@@ -190,8 +200,19 @@ export function indentItem(
     const movedSub: SubChecklistTemplateItem = {
       id: moving.id,
       title: moving.label,
+      ...(moving.dueDate ? { dueDate: moving.dueDate } : {}),
+      ...(typeof moving.dueDayOfMonth === 'number' ? { dueDayOfMonth: moving.dueDayOfMonth } : {}),
       ...(movingSubItems.length > 0
-        ? { subItems: movingSubItems.map((sub) => ({ id: sub.id, title: sub.title })) }
+        ? {
+            subItems: movingSubItems.map((sub) => ({
+              id: sub.id,
+              title: sub.title,
+              ...(sub.dueDate ? { dueDate: sub.dueDate } : {}),
+              ...(typeof sub.dueDayOfMonth === 'number'
+                ? { dueDayOfMonth: sub.dueDayOfMonth }
+                : {}),
+            })),
+          }
         : {}),
     }
     const next = items.map((item) => ({ ...item }))
@@ -214,6 +235,8 @@ export function indentItem(
     const movedSubSub: SubSubChecklistTemplateItem = {
       id: moving.id,
       title: moving.title,
+      ...(moving.dueDate ? { dueDate: moving.dueDate } : {}),
+      ...(typeof moving.dueDayOfMonth === 'number' ? { dueDayOfMonth: moving.dueDayOfMonth } : {}),
     }
     const target = subItems[loc.subIndex - 1]
     target.subItems = [...(target.subItems ?? []), movedSubSub]
@@ -252,6 +275,8 @@ export function outdentItem(
     const promoted: ChecklistTemplateItem = {
       id: moving.id,
       label: moving.title,
+      ...(moving.dueDate ? { dueDate: moving.dueDate } : {}),
+      ...(typeof moving.dueDayOfMonth === 'number' ? { dueDayOfMonth: moving.dueDayOfMonth } : {}),
       ...(moving.subItems && moving.subItems.length > 0
         ? { subItems: moving.subItems.map((subSub) => ({ ...subSub })) }
         : {}),
@@ -272,6 +297,8 @@ export function outdentItem(
   const promoted: SubChecklistTemplateItem = {
     id: moving.id,
     title: moving.title,
+    ...(moving.dueDate ? { dueDate: moving.dueDate } : {}),
+    ...(typeof moving.dueDayOfMonth === 'number' ? { dueDayOfMonth: moving.dueDayOfMonth } : {}),
   }
   subItems.splice(loc.subIndex + 1, 0, promoted)
   parentItem.subItems = subItems
@@ -302,7 +329,7 @@ export function pruneEmptyOutlineItems(
         .filter((subSub) => subSub.title.length > 0)
       if (title.length === 0 && subSubItems.length === 0) continue
       subItems.push({
-        id: sub.id,
+        ...sub,
         title,
         ...(subSubItems.length > 0 ? { subItems: subSubItems } : {}),
       })

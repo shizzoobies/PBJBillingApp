@@ -2032,16 +2032,14 @@ function NewTaskForm({
                     </label>
                   </div>
                   <StageScheduleControl
-                    offsetDays={stage.offsetDays}
                     dueDate={stage.dueDate}
-                    isFirstStage={false}
-                    onChangeOffset={(value) =>
-                      updateExtraStage(stage.id, { offsetDays: value })
+                    dueDayOfMonth={stage.dueDayOfMonth}
+                    onChange={(next) =>
+                      updateExtraStage(stage.id, {
+                        dueDate: next.dueDate,
+                        dueDayOfMonth: next.dueDayOfMonth,
+                      })
                     }
-                    onChangeDueDate={(value) => {
-                      const next: Partial<TemplateStage> = { dueDate: value }
-                      updateExtraStage(stage.id, next)
-                    }}
                   />
                   <div className="new-task-field">
                     <span>Steps for this hand-off</span>
@@ -2762,14 +2760,13 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
                 </label>
               </div>
               <StageScheduleControl
-                offsetDays={stage.offsetDays}
                 dueDate={stage.dueDate}
-                isFirstStage={index === 0}
-                onChangeOffset={(value) =>
-                  props.onPatchStage(template.id, stage.id, { offsetDays: value })
-                }
-                onChangeDueDate={(value) =>
-                  props.onPatchStage(template.id, stage.id, { dueDate: value ?? '' })
+                dueDayOfMonth={stage.dueDayOfMonth}
+                onChange={(next) =>
+                  props.onPatchStage(template.id, stage.id, {
+                    dueDate: next.dueDate ?? '',
+                    dueDayOfMonth: next.dueDayOfMonth,
+                  })
                 }
               />
               <div className="stage-steps-outline">
@@ -2877,22 +2874,23 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
  * per stage is intentionally not offered — the template repeats as a whole.
  */
 function StageScheduleControl({
-  offsetDays,
   dueDate,
-  isFirstStage,
-  onChangeOffset,
-  onChangeDueDate,
+  dueDayOfMonth,
+  onChange,
 }: {
-  offsetDays: number
   dueDate?: string
-  isFirstStage: boolean
-  onChangeOffset: (value: number) => void
-  onChangeDueDate: (value: string | undefined) => void
+  dueDayOfMonth?: number
+  /**
+   * Sets the stage's due spec. Setting one of `dueDate` / `dueDayOfMonth`
+   * clears the other; the "No specific due date" choice clears both.
+   */
+  onChange: (next: { dueDate?: string; dueDayOfMonth?: number }) => void
 }) {
-  const mode: 'offset' | 'date' = dueDate ? 'date' : 'offset'
-  const offsetLabel = isFirstStage
-    ? 'days before it is due'
-    : 'days before the previous step'
+  const mode: 'none' | 'day' | 'date' = dueDate
+    ? 'date'
+    : typeof dueDayOfMonth === 'number'
+      ? 'day'
+      : 'none'
   return (
     <div className="stage-schedule">
       <span className="stage-schedule-title">Due</span>
@@ -2900,19 +2898,34 @@ function StageScheduleControl({
         <label className="stage-schedule-radio">
           <input
             type="radio"
-            checked={mode === 'offset'}
-            onChange={() => onChangeDueDate(undefined)}
+            checked={mode === 'none'}
+            onChange={() => onChange({ dueDate: undefined, dueDayOfMonth: undefined })}
+          />
+          <span>No specific due date</span>
+        </label>
+        <label className="stage-schedule-radio">
+          <input
+            type="radio"
+            checked={mode === 'day'}
+            onChange={() =>
+              onChange({ dueDate: undefined, dueDayOfMonth: dueDayOfMonth ?? 1 })
+            }
           />
           <span>
-            <input
-              className="compact-input stage-schedule-offset"
-              type="number"
-              min={0}
-              value={offsetDays}
-              disabled={mode !== 'offset'}
-              onChange={(event) => onChangeOffset(Number(event.target.value) || 0)}
-            />{' '}
-            {offsetLabel}
+            Day of the month
+            {mode === 'day' ? (
+              <input
+                className="compact-input stage-schedule-offset"
+                type="number"
+                min={1}
+                max={31}
+                value={dueDayOfMonth ?? 1}
+                onChange={(event) => {
+                  const value = Math.min(Math.max(Number(event.target.value) || 1, 1), 31)
+                  onChange({ dueDate: undefined, dueDayOfMonth: value })
+                }}
+              />
+            ) : null}
           </span>
         </label>
         <label className="stage-schedule-radio">
@@ -2920,7 +2933,10 @@ function StageScheduleControl({
             type="radio"
             checked={mode === 'date'}
             onChange={() =>
-              onChangeDueDate(dueDate || new Date().toISOString().slice(0, 10))
+              onChange({
+                dueDate: dueDate || new Date().toISOString().slice(0, 10),
+                dueDayOfMonth: undefined,
+              })
             }
           />
           <span>
@@ -2931,7 +2947,7 @@ function StageScheduleControl({
                 type="date"
                 value={dueDate ?? ''}
                 onChange={(event) =>
-                  onChangeDueDate(event.target.value || undefined)
+                  onChange({ dueDate: event.target.value || undefined, dueDayOfMonth: undefined })
                 }
               />
             ) : null}

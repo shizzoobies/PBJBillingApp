@@ -256,19 +256,57 @@ export function ensureTemplateStages(template: ChecklistTemplate): ChecklistTemp
 }
 
 /**
- * Resolve a stage's due date. An explicit `stage.dueDate` always wins over the
- * `offsetDays` calculation. Otherwise the due date is `baseDate` minus the
- * stage's `offsetDays` — the offset counts days BEFORE the deadline, so a
- * hand-off stage lands on or before the task's due date (e.g. the end of the
- * month), never after it. Note: per-stage *repeat cadence* is not supported —
- * the template repeats as a whole; only the due date can be per-stage.
+ * The Nth day of `baseDate`'s month as an ISO yyyy-mm-dd, with `day` clamped to
+ * the month's real length (so "31" lands on Feb 28/29). Mirrors the helper in
+ * db/store.js.
+ */
+function dayOfMonthDate(baseDate: string, day: number): string {
+  const [year, month] = baseDate.split('-').map(Number)
+  const lastDay = new Date(year, month, 0).getDate()
+  const clamped = Math.min(Math.max(Math.trunc(day), 1), lastDay)
+  return `${year}-${String(month).padStart(2, '0')}-${String(clamped).padStart(2, '0')}`
+}
+
+/**
+ * Resolve a stage's due date. Precedence: an explicit fixed `stage.dueDate`
+ * always wins; else a recurring `stage.dueDayOfMonth` resolves to that day of
+ * `baseDate`'s month (clamped to the month's length); else the LEGACY
+ * `offsetDays` — kept for back-compat — counts days BEFORE the deadline so a
+ * hand-off stage lands on or before the task's due date; else `baseDate`.
+ * Note: per-stage *repeat cadence* is not supported — the template repeats as a
+ * whole; only the due date can be per-stage.
  */
 export function resolveStageDueDate(stage: TemplateStage, baseDate: string): string {
   if (stage.dueDate) {
     return stage.dueDate
   }
+  if (typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1) {
+    return dayOfMonthDate(baseDate, stage.dueDayOfMonth)
+  }
   const offset = Number(stage.offsetDays) || 0
   return offset ? addDays(baseDate, -offset) : baseDate
+}
+
+/**
+ * Resolve a checklist NODE's (item / sub-item / sub-sub-item) concrete due date
+ * for a given cycle month. Precedence: a fixed `node.dueDate` wins; else a
+ * recurring `node.dueDayOfMonth` resolves to that day of `cycleYear`/
+ * `cycleMonth` (1–12), clamped to the month's length; else `undefined`.
+ */
+export function resolveNodeDueDate(
+  node: { dueDate?: string; dueDayOfMonth?: number },
+  cycleYear: number,
+  cycleMonth: number,
+): string | undefined {
+  if (node.dueDate) {
+    return node.dueDate
+  }
+  if (typeof node.dueDayOfMonth === 'number' && node.dueDayOfMonth >= 1) {
+    const lastDay = new Date(cycleYear, cycleMonth, 0).getDate()
+    const day = Math.min(Math.trunc(node.dueDayOfMonth), lastDay)
+    return `${cycleYear}-${String(cycleMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  }
+  return undefined
 }
 
 function buildChecklistFromStage(
@@ -283,6 +321,9 @@ function buildChecklistFromStage(
   // When `completed` is true (a specific-months instance for a month whose
   // due date is already in the past), every item/sub-item/sub-sub-item is
   // born `done:true` so the historical occurrence shows as finished.
+  // Derive the cycle month from the stage's resolved due date so each node's
+  // recurring day-of-month lands in the right month.
+  const [cycleYear, cycleMonth] = dueDate.split('-').map(Number)
   return {
     id: makeId('check'),
     templateId: template.id,
@@ -298,31 +339,42 @@ function buildChecklistFromStage(
     stageId: stage.id,
     stageIndex,
     stageCount,
-    items: stage.items.map((item) => ({
-      id: makeId('item'),
-      label: item.label,
-      done: completed,
-      ...(item.dueDate ? { dueDate: item.dueDate } : {}),
-      ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
-      ...(Array.isArray(item.subItems) && item.subItems.length > 0
-        ? {
-            subItems: item.subItems.map((sub) => ({
-              id: makeId('subitem'),
-              title: sub.title,
-              done: completed,
-              ...(Array.isArray(sub.subItems) && sub.subItems.length > 0
-                ? {
-                    subItems: sub.subItems.map((subSub) => ({
-                      id: makeId('subsubitem'),
-                      title: subSub.title,
-                      done: completed,
-                    })),
-                  }
-                : {}),
-            })),
-          }
-        : {}),
-    })),
+    items: stage.items.map((item) => {
+      const itemDue = resolveNodeDueDate(item, cycleYear, cycleMonth)
+      return {
+        id: makeId('item'),
+        label: item.label,
+        done: completed,
+        ...(itemDue ? { dueDate: itemDue } : {}),
+        ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
+        ...(Array.isArray(item.subItems) && item.subItems.length > 0
+          ? {
+              subItems: item.subItems.map((sub) => {
+                const subDue = resolveNodeDueDate(sub, cycleYear, cycleMonth)
+                return {
+                  id: makeId('subitem'),
+                  title: sub.title,
+                  done: completed,
+                  ...(subDue ? { dueDate: subDue } : {}),
+                  ...(Array.isArray(sub.subItems) && sub.subItems.length > 0
+                    ? {
+                        subItems: sub.subItems.map((subSub) => {
+                          const subSubDue = resolveNodeDueDate(subSub, cycleYear, cycleMonth)
+                          return {
+                            id: makeId('subsubitem'),
+                            title: subSub.title,
+                            done: completed,
+                            ...(subSubDue ? { dueDate: subSubDue } : {}),
+                          }
+                        }),
+                      }
+                    : {}),
+                }
+              }),
+            }
+          : {}),
+      }
+    }),
   }
 }
 

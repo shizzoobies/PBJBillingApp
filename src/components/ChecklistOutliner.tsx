@@ -73,6 +73,45 @@ function setRowText(
   })
 }
 
+/**
+ * Patch the per-node due spec (`dueDate` / `dueDayOfMonth`) on the node `id` at
+ * any of the three levels. The patch is shallow-merged; pass `undefined` to
+ * clear a field. Mirrors `setRowText`'s level-walking shape.
+ */
+function setRowDue(
+  items: ChecklistTemplateItem[],
+  id: string,
+  patch: { dueDate?: string; dueDayOfMonth?: number },
+): ChecklistTemplateItem[] {
+  return items.map((item) => {
+    if (item.id === id) return { ...item, ...patch }
+    const subItems = item.subItems ?? []
+    if (subItems.length === 0) return item
+    let subChanged = false
+    const nextSubItems = subItems.map((sub) => {
+      if (sub.id === id) {
+        subChanged = true
+        return { ...sub, ...patch }
+      }
+      const subSubItems = sub.subItems ?? []
+      if (subSubItems.length === 0) return sub
+      let subSubChanged = false
+      const nextSubSub = subSubItems.map((subSub) => {
+        if (subSub.id === id) {
+          subSubChanged = true
+          return { ...subSub, ...patch }
+        }
+        return subSub
+      })
+      if (!subSubChanged) return sub
+      subChanged = true
+      return { ...sub, subItems: nextSubSub }
+    })
+    if (!subChanged) return item
+    return { ...item, subItems: nextSubItems }
+  })
+}
+
 /** Remove the node `id` from the forest at any of the three levels. */
 function removeRow(
   items: ChecklistTemplateItem[],
@@ -277,6 +316,13 @@ export function ChecklistOutliner({
     onChange(removeRow(items, id))
   }
 
+  const handleSetDue = (
+    id: string,
+    patch: { dueDate?: string; dueDayOfMonth?: number },
+  ) => {
+    onChange(setRowDue(items, id, patch))
+  }
+
   const handleRowKeyDown = (event: KeyboardEvent<HTMLInputElement>, row: OutlineRow) => {
     if (event.key === 'Enter') {
       // Enter adds a sibling step right after this row, at the same level, and
@@ -384,6 +430,12 @@ export function ChecklistOutliner({
                     Add sub-step
                   </button>
                 ) : null}
+                <OutlinerDueControl
+                  depthLabel={DEPTH_LABEL[row.depth]}
+                  dueDate={row.dueDate}
+                  dueDayOfMonth={row.dueDayOfMonth}
+                  onChange={(patch) => handleSetDue(row.id, patch)}
+                />
                 <button
                   type="button"
                   className="item-delete-btn outliner-delete-btn"
@@ -413,5 +465,79 @@ export function ChecklistOutliner({
         <kbd>Tab</kbd> to move it back out. <kbd>Enter</kbd> adds the next step.
       </p>
     </div>
+  )
+}
+
+/**
+ * Compact per-row due control for the outliner: a small select
+ * [No due date | Day of month | Specific date] plus the matching input. Setting
+ * one of `dueDate` / `dueDayOfMonth` clears the other; "No due date" clears both.
+ */
+function OutlinerDueControl({
+  depthLabel,
+  dueDate,
+  dueDayOfMonth,
+  onChange,
+}: {
+  depthLabel: string
+  dueDate?: string
+  dueDayOfMonth?: number
+  onChange: (patch: { dueDate?: string; dueDayOfMonth?: number }) => void
+}) {
+  const mode: 'none' | 'day' | 'date' = dueDate
+    ? 'date'
+    : typeof dueDayOfMonth === 'number'
+      ? 'day'
+      : 'none'
+  return (
+    <span className="outliner-due">
+      <select
+        className="outliner-due-select"
+        aria-label={`Due for ${depthLabel}`}
+        value={mode}
+        onChange={(event) => {
+          const next = event.target.value
+          if (next === 'day') {
+            onChange({ dueDate: undefined, dueDayOfMonth: dueDayOfMonth ?? 1 })
+          } else if (next === 'date') {
+            onChange({
+              dueDate: dueDate || new Date().toISOString().slice(0, 10),
+              dueDayOfMonth: undefined,
+            })
+          } else {
+            onChange({ dueDate: undefined, dueDayOfMonth: undefined })
+          }
+        }}
+      >
+        <option value="none">No due date</option>
+        <option value="day">Day of month</option>
+        <option value="date">Specific date</option>
+      </select>
+      {mode === 'day' ? (
+        <input
+          className="compact-input outliner-due-day"
+          type="number"
+          min={1}
+          max={31}
+          aria-label={`Day of month for ${depthLabel}`}
+          value={dueDayOfMonth ?? 1}
+          onChange={(event) => {
+            const value = Math.min(Math.max(Number(event.target.value) || 1, 1), 31)
+            onChange({ dueDate: undefined, dueDayOfMonth: value })
+          }}
+        />
+      ) : null}
+      {mode === 'date' ? (
+        <input
+          className="compact-input outliner-due-date"
+          type="date"
+          aria-label={`Due date for ${depthLabel}`}
+          value={dueDate ?? ''}
+          onChange={(event) =>
+            onChange({ dueDate: event.target.value || undefined, dueDayOfMonth: undefined })
+          }
+        />
+      ) : null}
+    </span>
   )
 }
