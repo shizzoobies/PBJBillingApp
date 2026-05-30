@@ -3641,6 +3641,21 @@ td strong {
 .repeating-task-row.open {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
 }
+/* Deep-link target (?focusTemplate=<id>): briefly highlight the row a
+   visitor was sent here to find, then fade back to normal. */
+.repeating-task-row-focused {
+  border-color: var(--accent, #2563eb);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+  animation: repeating-task-focus-pulse 1.6s ease-out;
+}
+@keyframes repeating-task-focus-pulse {
+  0% {
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.45);
+  }
+  100% {
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+  }
+}
 .repeating-task-summary {
   align-items: center;
   background: transparent;

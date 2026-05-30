@@ -1,4 +1,4 @@
-import { ArrowLeft, Trash2 } from 'lucide-react'
+import { ArrowLeft, ExternalLink, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
@@ -180,6 +180,8 @@ export function ClientDetailPage() {
       <InvoiceSettingsSection client={client} onCommit={commit} />
 
       <ActiveChecklistsSection client={client} data={data} />
+
+      <RecurringChecklistsSection client={client} data={data} />
 
       <section className="panel">
         <div className="section-heading">
@@ -471,6 +473,103 @@ function ActiveChecklistsSection({
             )
           })}
         </ul>
+      )}
+    </section>
+  )
+}
+
+function RecurringChecklistsSection({
+  client,
+  data,
+}: {
+  client: Client
+  data: AppData
+}) {
+  const [query, setQuery] = useState('')
+
+  // Every client-bound recurring template targeting this client. Standard
+  // (client-agnostic) blueprints are excluded — they never belong to a client.
+  const templates = useMemo(
+    () =>
+      data.checklistTemplates
+        .filter((template) => !template.isStandard && template.clientId === client.id)
+        .slice()
+        .sort((a, b) => a.title.localeCompare(b.title)),
+    [data.checklistTemplates, client.id],
+  )
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return templates
+    return templates.filter((template) => {
+      const freq = getChecklistFrequencyLabel(template.frequency).toLowerCase()
+      const assignee = employeeName(data.employees, template.assigneeId).toLowerCase()
+      return (
+        template.title.toLowerCase().includes(q) ||
+        freq.includes(q) ||
+        assignee.includes(q)
+      )
+    })
+  }, [templates, query, data.employees])
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Schedule</p>
+          <h2>Recurring checklists</h2>
+        </div>
+        {templates.length > 0 ? <span className="status-pill">{templates.length}</span> : null}
+      </div>
+      {templates.length === 0 ? (
+        <p className="muted-text">No recurring checklists assigned to this client.</p>
+      ) : (
+        <>
+          <label className="field" style={{ marginBottom: 12 }}>
+            <input
+              aria-label="Search recurring checklists"
+              className="input"
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search by name, frequency, or assignee…"
+              type="search"
+              value={query}
+            />
+          </label>
+          {filtered.length === 0 ? (
+            <p className="muted-text">No recurring checklists match “{query.trim()}”.</p>
+          ) : (
+            <ul className="active-checklist-list">
+              {filtered.map((template) => {
+                const jumpTo = `/checklists?focusTemplate=${encodeURIComponent(template.id)}`
+                return (
+                  <li className="active-checklist-row" key={template.id}>
+                    <div className="active-checklist-main">
+                      <Link to={jumpTo} className="active-checklist-link">
+                        <strong>{template.title}</strong>
+                      </Link>
+                      <span
+                        className={
+                          template.active
+                            ? 'repeating-task-toggle-pill on'
+                            : 'repeating-task-toggle-pill off'
+                        }
+                      >
+                        {template.active ? 'On' : 'Off'}
+                      </span>
+                    </div>
+                    <div className="active-checklist-meta">
+                      <span>Assignee: {employeeName(data.employees, template.assigneeId)}</span>
+                      <span>{getChecklistFrequencyLabel(template.frequency)}</span>
+                      <Link to={jumpTo} className="active-checklist-link">
+                        View <ExternalLink size={12} style={{ verticalAlign: 'middle' }} />
+                      </Link>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </>
       )}
     </section>
   )

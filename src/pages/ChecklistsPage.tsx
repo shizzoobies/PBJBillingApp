@@ -7,6 +7,7 @@ import {
   type DragEvent,
   type FormEvent,
   type KeyboardEvent,
+  type RefObject,
 } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
@@ -2282,6 +2283,9 @@ type RepeatingTasksManagerProps = {
  */
 function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   const [openId, setOpenId] = useState<string | null>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const focusTemplateId = searchParams.get('focusTemplate')
+  const focusRef = useRef<HTMLElement | null>(null)
 
   const toggleOpen = (templateId: string) => {
     setOpenId((current) => (current === templateId ? null : templateId))
@@ -2290,6 +2294,31 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   // Client-bound repeating tasks only — standard (client-agnostic) templates
   // live in their own section.
   const regularTemplates = props.templates.filter((template) => !template.isStandard)
+
+  // Deep-link support: another page (e.g. the client detail "Recurring
+  // checklists" card) can navigate here with ?focusTemplate=<id> to open and
+  // scroll to a specific repeating task. We expand it, scroll it into view,
+  // then strip the param so it doesn't keep re-firing.
+  useEffect(() => {
+    if (!focusTemplateId) return
+    const exists = regularTemplates.some((template) => template.id === focusTemplateId)
+    if (!exists) return
+    // Defer the open + scroll out of the effect body (avoids a synchronous
+    // setState-in-effect) and gives the row a tick to expand before scrolling.
+    const scrollTimer = window.setTimeout(() => {
+      setOpenId(focusTemplateId)
+      focusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 50)
+    const clearTimer = window.setTimeout(() => {
+      const next = new URLSearchParams(searchParams)
+      next.delete('focusTemplate')
+      setSearchParams(next, { replace: true })
+    }, 1500)
+    return () => {
+      window.clearTimeout(scrollTimer)
+      window.clearTimeout(clearTimer)
+    }
+  }, [focusTemplateId, regularTemplates, searchParams, setSearchParams])
 
   return (
     <section className="panel">
@@ -2309,6 +2338,7 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
             template={template}
             open={openId === template.id}
             onToggleOpen={() => toggleOpen(template.id)}
+            rowRef={template.id === focusTemplateId ? focusRef : undefined}
           />
         ))}
       </div>
@@ -2320,10 +2350,11 @@ type RepeatingTaskRowProps = Omit<RepeatingTasksManagerProps, 'templates'> & {
   template: ChecklistTemplate
   open: boolean
   onToggleOpen: () => void
+  rowRef?: RefObject<HTMLElement | null>
 }
 
 function RepeatingTaskRow(props: RepeatingTaskRowProps) {
-  const { template, open, onToggleOpen } = props
+  const { template, open, onToggleOpen, rowRef } = props
   const isSpecificMonths = template.frequency === 'specific-months'
   const dueLabel = template.nextDueDate
     ? shortDate.format(new Date(`${template.nextDueDate}T12:00:00`))
@@ -2337,7 +2368,12 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
       : `Generates a checklist ${frequencyCadence(template.frequency)} — next on ${dueLabel}.`
 
   return (
-    <article className={open ? 'repeating-task-row open' : 'repeating-task-row'}>
+    <article
+      ref={rowRef}
+      className={`${open ? 'repeating-task-row open' : 'repeating-task-row'}${
+        rowRef ? ' repeating-task-row-focused' : ''
+      }`}
+    >
       <button
         type="button"
         className="repeating-task-summary"
