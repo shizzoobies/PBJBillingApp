@@ -1,6 +1,7 @@
 import { Plus, Trash2, Upload } from 'lucide-react'
 import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
+import { CollapsibleSection, SavingTextInput, SavingTextarea } from '../components/SectionKit'
 import type { Client, Contact } from '../lib/types'
 import {
   applyMerge,
@@ -63,13 +64,7 @@ function ContactBuilder({
   }
 
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Shared contacts</p>
-          <h2>Add contact</h2>
-        </div>
-      </div>
+    <CollapsibleSection kicker="Shared contacts" title="Add contact">
       <form className="form-grid single" onSubmit={handleSubmit}>
         <label className="field">
           <span>Name</span>
@@ -114,7 +109,7 @@ function ContactBuilder({
           Add contact
         </button>
       </form>
-    </section>
+    </CollapsibleSection>
   )
 }
 
@@ -165,36 +160,37 @@ function ContactLibrary({
     reader.readAsText(file)
   }
 
+  const importActions = ownerMode ? (
+    <div className="section-heading-actions">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv,text/csv"
+        onChange={handleFileSelected}
+        style={{ display: 'none' }}
+        aria-hidden="true"
+        tabIndex={-1}
+      />
+      <button
+        className="secondary-action"
+        type="button"
+        onClick={() => fileInputRef.current?.click()}
+      >
+        <Upload size={16} />
+        Import from CSV
+      </button>
+    </div>
+  ) : null
+
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Directory</p>
-          <h2>Contacts</h2>
-        </div>
-        {ownerMode ? (
-          <div className="section-heading-actions">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,text/csv"
-              onChange={handleFileSelected}
-              style={{ display: 'none' }}
-              aria-hidden="true"
-              tabIndex={-1}
-            />
-            <button
-              className="secondary-action"
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <Upload size={16} />
-              Import from CSV
-            </button>
-          </div>
-        ) : null}
-      </div>
-      <div className="plan-list">
+    <>
+      <CollapsibleSection
+        kicker="Directory"
+        title="Contacts"
+        lockable
+        headerAction={importActions}
+      >
+        <div className="plan-list">
         {contacts.length === 0 ? (
           <p className="muted-text">No contacts yet. Add one to select it on a client.</p>
         ) : null}
@@ -257,7 +253,8 @@ function ContactLibrary({
             </article>
           )
         })}
-      </div>
+        </div>
+      </CollapsibleSection>
       {ownerMode && importText !== null ? (
         <ImportContactsModal
           text={importText}
@@ -267,10 +264,14 @@ function ContactLibrary({
           onClose={() => setImportText(null)}
         />
       ) : null}
-    </section>
+    </>
   )
 }
 
+// Reliable inline editor: commits on a short debounce, on Enter, and on blur,
+// and re-syncs to the saved value when idle (via the shared SectionKit
+// control). Replaces the old blur-only input that could lose an edit if you
+// left the field without clicking away first.
 function ContactTextInput({
   ariaLabel,
   canonical,
@@ -282,26 +283,18 @@ function ContactTextInput({
   placeholder?: string
   onCommit: (value: string) => void
 }) {
-  const [draft, setDraft] = useState(canonical)
   return (
-    <input
-      aria-label={ariaLabel}
-      className="input"
+    <SavingTextInput
+      ariaLabel={ariaLabel}
+      canonical={canonical}
       placeholder={placeholder}
-      value={draft}
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={() => {
-        if (draft !== canonical) {
-          onCommit(draft)
-        }
-      }}
+      onCommit={onCommit}
     />
   )
 }
 
-// Multi-line notes editor for a contact. Commits on blur — matches the
-// single-line ContactTextInput pattern, but uses a textarea since notes are
-// free-form and often span multiple lines.
+// Multi-line notes editor for a contact. Reliable commit (debounce + Enter is
+// n/a for textarea, but blur + debounce apply) via the shared control.
 function ContactNotesInput({
   ariaLabel,
   canonical,
@@ -313,20 +306,14 @@ function ContactNotesInput({
   placeholder?: string
   onCommit: (value: string) => void
 }) {
-  const [draft, setDraft] = useState(canonical)
   return (
-    <textarea
-      aria-label={ariaLabel}
+    <SavingTextarea
+      ariaLabel={ariaLabel}
+      canonical={canonical}
       className="input contact-notes-input"
       placeholder={placeholder}
       rows={2}
-      value={draft}
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={() => {
-        if (draft !== canonical) {
-          onCommit(draft)
-        }
-      }}
+      onCommit={onCommit}
     />
   )
 }

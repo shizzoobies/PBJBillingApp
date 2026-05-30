@@ -269,19 +269,31 @@ button {
 }
 
 .sync-banner {
-  color: #5b6472;
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 0.8rem;
+  font-weight: 600;
+  gap: 5px;
   margin: 8px 0 0;
-  font-size: 0.92rem;
+  padding: 3px 11px;
 }
 
-.sync-saving,
-.sync-synced {
-  color: #24563b;
+.sync-banner.sync-saving,
+.sync-banner.sync-loading {
+  background: #eef1f6;
+  color: #5a6577;
 }
 
-.sync-offline,
-.sync-error {
-  color: #8a3d12;
+.sync-banner.sync-synced {
+  background: #e6f4ec;
+  color: #2f7d4f;
+}
+
+.sync-banner.sync-offline,
+.sync-banner.sync-error {
+  background: #fdeaea;
+  color: #b23535;
 }
 
 .account-pill {

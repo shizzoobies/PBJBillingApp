@@ -2231,14 +2231,14 @@ function App() {
   )
   const syncMessage =
     dataSyncState === 'loading'
-      ? 'Loading server-backed workspace data...'
+      ? 'Loading…'
       : dataSyncState === 'saving'
-        ? 'Saving changes to the server...'
+        ? 'Saving…'
         : dataSyncState === 'synced'
-          ? 'Server-backed persistence is active.'
+          ? 'All changes saved'
           : dataSyncState === 'error'
-            ? 'Latest changes could not be saved to the server.'
-            : 'API unavailable. Showing seed data until the backend is reachable.'
+            ? 'Couldn’t save — retrying'
+            : 'Offline — changes not saved'
 
   if (authState === 'loading') {
     return (

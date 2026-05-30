@@ -1,6 +1,7 @@
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
+import { CollapsibleSection } from '../components/SectionKit'
 import { ApiError, type Client, type SubscriptionPlan } from '../lib/types'
 
 export function PlansPage() {
@@ -39,13 +40,7 @@ function PlanBuilder({
   }
 
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Subscription setup</p>
-          <h2>Create plan</h2>
-        </div>
-      </div>
+    <CollapsibleSection kicker="Subscription setup" title="Create plan">
       <form className="form-grid single" onSubmit={handleSubmit}>
         <label className="field">
           <span>Plan / service name</span>
@@ -69,7 +64,7 @@ function PlanBuilder({
           Add plan
         </button>
       </form>
-    </section>
+    </CollapsibleSection>
   )
 }
 
@@ -139,13 +134,7 @@ function PlanLibrary({
   }
 
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Available templates</p>
-          <h2>Plans</h2>
-        </div>
-      </div>
+    <CollapsibleSection kicker="Available templates" title="Plans" lockable>
       <div className="plan-list">
         {plans.map((plan) => {
           const attachedCount = clients.filter((client) =>
@@ -228,6 +217,6 @@ function PlanLibrary({
           )
         })}
       </div>
-    </section>
+    </CollapsibleSection>
   )
 }
