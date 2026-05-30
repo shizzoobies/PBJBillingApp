@@ -1,4 +1,4 @@
-import { Plus, Trash2 } from 'lucide-react'
+import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useMemo, useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import type { Reimbursement } from '../lib/types'
@@ -30,7 +30,8 @@ export function ReimbursementsCard({
   title?: string
   subtitle?: string
 }) {
-  const { data, ownerMode, addReimbursement, deleteReimbursement } = useAppContext()
+  const { data, ownerMode, addReimbursement, updateReimbursement, deleteReimbursement } =
+    useAppContext()
 
   const today = new Date().toISOString().slice(0, 10)
   const [date, setDate] = useState(today)
@@ -39,6 +40,54 @@ export function ReimbursementsCard({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [removingId, setRemovingId] = useState<string | null>(null)
+
+  // Inline edit state — only one row is editable at a time.
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editDate, setEditDate] = useState('')
+  const [editDescription, setEditDescription] = useState('')
+  const [editAmount, setEditAmount] = useState('')
+  const [savingEdit, setSavingEdit] = useState(false)
+  const [editError, setEditError] = useState('')
+
+  const beginEdit = (entry: Reimbursement) => {
+    setEditingId(entry.id)
+    setEditDate(entry.date)
+    setEditDescription(entry.description)
+    setEditAmount(String(entry.amount))
+    setEditError('')
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setEditError('')
+  }
+
+  const handleSaveEdit = async (id: string) => {
+    if (savingEdit) return
+    const numericAmount = Number(editAmount)
+    if (!editDescription.trim()) {
+      setEditError('Description is required.')
+      return
+    }
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      setEditError('Amount must be a positive number.')
+      return
+    }
+    setSavingEdit(true)
+    setEditError('')
+    try {
+      await updateReimbursement(id, {
+        date: editDate,
+        description: editDescription.trim(),
+        amount: numericAmount,
+      })
+      setEditingId(null)
+    } catch (err) {
+      setEditError(err instanceof ApiError ? err.message : 'Could not update reimbursement.')
+    } finally {
+      setSavingEdit(false)
+    }
+  }
 
   // Filter to this client and (optionally) this billing period. Newest
   // date first so the most recent expense reads at the top.
@@ -137,45 +186,130 @@ export function ReimbursementsCard({
             gap: 8,
           }}
         >
-          {rows.map((entry) => (
-            <li
-              key={entry.id}
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'baseline',
-                gap: 12,
-                paddingBottom: 8,
-                borderBottom: '1px solid var(--border-subtle, #eee)',
-              }}
-            >
-              <div>
-                <strong>{entry.description}</strong>
-                <div className="checklist-meta-line">
-                  {new Intl.DateTimeFormat('en-US', {
-                    month: 'short',
-                    day: 'numeric',
-                    year: 'numeric',
-                  }).format(new Date(`${entry.date}T12:00:00`))}
-                </div>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <strong>{currency.format(entry.amount)}</strong>
-                {canEdit ? (
+          {rows.map((entry) =>
+            editingId === entry.id ? (
+              <li
+                key={entry.id}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '140px 1fr 120px auto',
+                  gap: 8,
+                  alignItems: 'end',
+                  paddingBottom: 8,
+                  borderBottom: '1px solid var(--border-subtle, #eee)',
+                }}
+              >
+                <label className="field">
+                  <span>Date</span>
+                  <input
+                    className="input"
+                    max={today}
+                    onChange={(event) => setEditDate(event.target.value)}
+                    type="date"
+                    value={editDate}
+                  />
+                </label>
+                <label className="field">
+                  <span>Description</span>
+                  <input
+                    className="input"
+                    onChange={(event) => setEditDescription(event.target.value)}
+                    type="text"
+                    value={editDescription}
+                  />
+                </label>
+                <label className="field">
+                  <span>Amount ($)</span>
+                  <input
+                    className="input"
+                    inputMode="decimal"
+                    min="0.01"
+                    onChange={(event) => setEditAmount(event.target.value)}
+                    step="0.01"
+                    type="number"
+                    value={editAmount}
+                  />
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <button
                     type="button"
                     className="item-delete-btn"
-                    aria-label={`Delete ${entry.description}`}
-                    title="Delete this reimbursement"
-                    disabled={removingId === entry.id}
-                    onClick={() => void handleDelete(entry.id, entry.description)}
+                    aria-label="Save changes"
+                    title="Save changes"
+                    disabled={savingEdit}
+                    onClick={() => void handleSaveEdit(entry.id)}
                   >
-                    <Trash2 size={14} />
+                    <Check size={14} />
                   </button>
+                  <button
+                    type="button"
+                    className="item-delete-btn"
+                    aria-label="Cancel edit"
+                    title="Cancel edit"
+                    disabled={savingEdit}
+                    onClick={cancelEdit}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+                {editError ? (
+                  <p className="auth-error" style={{ gridColumn: '1 / -1', margin: 0 }}>
+                    {editError}
+                  </p>
                 ) : null}
-              </div>
-            </li>
-          ))}
+              </li>
+            ) : (
+              <li
+                key={entry.id}
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'baseline',
+                  gap: 12,
+                  paddingBottom: 8,
+                  borderBottom: '1px solid var(--border-subtle, #eee)',
+                }}
+              >
+                <div>
+                  <strong>{entry.description}</strong>
+                  <div className="checklist-meta-line">
+                    {new Intl.DateTimeFormat('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                    }).format(new Date(`${entry.date}T12:00:00`))}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <strong>{currency.format(entry.amount)}</strong>
+                  {canEdit ? (
+                    <>
+                      <button
+                        type="button"
+                        className="item-delete-btn"
+                        aria-label={`Edit ${entry.description}`}
+                        title="Edit this reimbursement"
+                        disabled={editingId !== null || removingId === entry.id}
+                        onClick={() => beginEdit(entry)}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        className="item-delete-btn"
+                        aria-label={`Delete ${entry.description}`}
+                        title="Delete this reimbursement"
+                        disabled={removingId === entry.id}
+                        onClick={() => void handleDelete(entry.id, entry.description)}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+              </li>
+            ),
+          )}
         </ul>
       )}
 
