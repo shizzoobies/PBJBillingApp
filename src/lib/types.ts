@@ -406,11 +406,30 @@ export type Checklist = {
   deletedAt?: string | null
 }
 
+/**
+ * Owner-configurable defaults applied when creating a NEW client. Lets the
+ * firm set its house rate / terms / invoice prefs once instead of retyping
+ * them on every new client. Only affects the Add-client form's starting
+ * values — existing clients are never changed.
+ */
+export type ClientDefaults = {
+  billingMode?: BillingMode
+  hourlyRate?: number
+  monthlyRate?: number
+  paymentTerms?: string
+  footerNote?: string
+  invoiceShowTimeBreakdown?: boolean
+  invoiceHideInternalHours?: boolean
+  invoiceGroupByCategory?: boolean
+}
+
 export type FirmSettings = {
   name: string
   tagline?: string
   logoUrl?: string
   brandColor?: string
+  /** Defaults pre-filled on the Add-client form. */
+  clientDefaults?: ClientDefaults
   /**
    * Color used for text rendered on top of the brand color (sidebar, etc).
    * Defaults to white so any brand color picked still has legible text.
@@ -460,6 +479,16 @@ export const DEFAULT_FIRM_SETTINGS: FirmSettings = {
   email: '',
   website: '',
   ein: '',
+  clientDefaults: {
+    billingMode: 'hourly',
+    hourlyRate: 125,
+    monthlyRate: 0,
+    paymentTerms: '',
+    footerNote: '',
+    invoiceShowTimeBreakdown: true,
+    invoiceHideInternalHours: true,
+    invoiceGroupByCategory: false,
+  },
 }
 
 export type AppData = {

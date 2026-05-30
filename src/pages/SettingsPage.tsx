@@ -2,7 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChangePasswordCard } from '../components/ChangePasswordCard'
-import { CollapsibleSection, SavingTextInput } from '../components/SectionKit'
+import {
+  CollapsibleSection,
+  SavingNumberInput,
+  SavingTextarea,
+  SavingTextInput,
+} from '../components/SectionKit'
 import {
   fetchAuthStatus,
   fetchFirmSettings,
@@ -15,6 +20,7 @@ import {
 import {
   ApiError,
   DEFAULT_FIRM_SETTINGS,
+  type BillingMode,
   type FirmSettings,
   type TotpStatus,
 } from '../lib/types'
@@ -106,6 +112,7 @@ export function SettingsPage() {
       <AddressSection settings={settings} onCommit={commit} />
       <ContactSection settings={settings} onCommit={commit} />
       <BusinessSection settings={settings} onCommit={commit} />
+      <ClientDefaultsSection settings={settings} onCommit={commit} />
       <AuthenticationSection />
       <SecuritySection />
       <ChangePasswordCard userEmail={sessionUser?.email ?? null} />
@@ -608,6 +615,109 @@ function ContactSection({
           placeholder="https://..."
           onCommit={(value) => onCommit({ website: value })}
         />
+      </div>
+    </CollapsibleSection>
+  )
+}
+
+/**
+ * Owner-configurable defaults for the Add-client form. Editing these never
+ * touches existing clients — it only changes what a brand-new client starts
+ * with (house rate, terms, invoice prefs).
+ */
+function ClientDefaultsSection({
+  settings,
+  onCommit,
+}: {
+  settings: FirmSettings
+  onCommit: (patch: Partial<FirmSettings>) => void | Promise<void>
+}) {
+  const defaults = settings.clientDefaults ?? DEFAULT_FIRM_SETTINGS.clientDefaults ?? {}
+  const patch = (next: Partial<NonNullable<FirmSettings['clientDefaults']>>) => {
+    onCommit({ clientDefaults: { ...defaults, ...next } })
+  }
+
+  return (
+    <CollapsibleSection kicker="New clients" title="Default values for new clients" lockable>
+      <p className="muted-text" style={{ marginTop: 0 }}>
+        These pre-fill the “Add client” form so you don’t retype your house rate and terms each
+        time. Changing them here never affects clients you’ve already created.
+      </p>
+      <div className="form-grid two-col">
+        <label className="field">
+          <span>Default billing type</span>
+          <select
+            className="input"
+            value={defaults.billingMode ?? 'hourly'}
+            onChange={(event) => patch({ billingMode: event.target.value as BillingMode })}
+          >
+            <option value="hourly">Hourly</option>
+            <option value="subscription">Monthly</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Default hourly rate</span>
+          <SavingNumberInput
+            canonical={defaults.hourlyRate ?? 0}
+            min="0"
+            step="0.01"
+            onCommit={(value) => patch({ hourlyRate: value ?? 0 })}
+          />
+        </label>
+        <label className="field">
+          <span>Default monthly rate</span>
+          <SavingNumberInput
+            canonical={defaults.monthlyRate ?? 0}
+            min="0"
+            step="0.01"
+            onCommit={(value) => patch({ monthlyRate: value ?? 0 })}
+          />
+        </label>
+        <label className="field">
+          <span>Default payment terms</span>
+          <SavingTextInput
+            canonical={defaults.paymentTerms ?? ''}
+            placeholder='e.g. "Net 30" or "Due on receipt"'
+            onCommit={(value) => patch({ paymentTerms: value })}
+          />
+        </label>
+        <label className="field full-row">
+          <span>Default invoice footer note</span>
+          <SavingTextarea
+            canonical={defaults.footerNote ?? ''}
+            onCommit={(value) => patch({ footerNote: value })}
+          />
+        </label>
+        <label className="field toggle-field">
+          <span className="toggle-label">
+            <input
+              type="checkbox"
+              checked={defaults.invoiceShowTimeBreakdown ?? true}
+              onChange={(event) => patch({ invoiceShowTimeBreakdown: event.target.checked })}
+            />
+            <strong>Show time breakdown on invoices</strong>
+          </span>
+        </label>
+        <label className="field toggle-field">
+          <span className="toggle-label">
+            <input
+              type="checkbox"
+              checked={defaults.invoiceHideInternalHours ?? true}
+              onChange={(event) => patch({ invoiceHideInternalHours: event.target.checked })}
+            />
+            <strong>Hide internal hours on invoices</strong>
+          </span>
+        </label>
+        <label className="field toggle-field">
+          <span className="toggle-label">
+            <input
+              type="checkbox"
+              checked={defaults.invoiceGroupByCategory ?? false}
+              onChange={(event) => patch({ invoiceGroupByCategory: event.target.checked })}
+            />
+            <strong>Group invoice lines by category</strong>
+          </span>
+        </label>
       </div>
     </CollapsibleSection>
   )

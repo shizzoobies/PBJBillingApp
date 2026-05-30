@@ -6,6 +6,7 @@ import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import type {
   BillingMode,
   Client,
+  ClientDefaults,
   Contact,
   Employee,
   SubscriptionPlan,
@@ -46,6 +47,7 @@ export function ClientsPage() {
           onCreate={addClient}
           plans={data.plans}
           contacts={data.contacts}
+          defaults={data.firmSettings?.clientDefaults}
         />
       ) : (
         <VisibilityPanel visibleClients={visibleClients} />
@@ -85,20 +87,29 @@ function ClientBuilder({
   onCreate,
   plans,
   contacts,
+  defaults,
 }: {
   employees: Employee[]
   onCreate: (client: Omit<Client, 'id'>) => void
   plans: SubscriptionPlan[]
   contacts: Contact[]
+  defaults?: ClientDefaults
 }) {
-  const [name, setName] = useState('Summit Retail Co.')
-  const [contact, setContact] = useState('Jamie Miller')
-  const [hourlyRate, setHourlyRate] = useState('125')
-  const [monthlyRate, setMonthlyRate] = useState('')
+  // Owner-configured house defaults (Settings → "Default values for new
+  // clients"). Fall back to the historical hard-coded values when unset.
+  const defaultHourly = defaults?.hourlyRate != null ? String(defaults.hourlyRate) : '125'
+  const defaultMonthly =
+    defaults?.monthlyRate != null && defaults.monthlyRate > 0 ? String(defaults.monthlyRate) : ''
+  const defaultBillingMode: BillingMode = defaults?.billingMode ?? 'hourly'
+
+  const [name, setName] = useState('')
+  const [contact, setContact] = useState('')
+  const [hourlyRate, setHourlyRate] = useState(defaultHourly)
+  const [monthlyRate, setMonthlyRate] = useState(defaultMonthly)
   const [estimatedBookkeeperHours, setEstimatedBookkeeperHours] = useState('')
   const [estimatedAccountantHours, setEstimatedAccountantHours] = useState('')
   const [estimatedCfoHours, setEstimatedCfoHours] = useState('')
-  const [billingMode, setBillingMode] = useState<BillingMode>('hourly')
+  const [billingMode, setBillingMode] = useState<BillingMode>(defaultBillingMode)
   const [planIds, setPlanIds] = useState<string[]>([])
   const [contactIds, setContactIds] = useState<string[]>([])
   const [assignedEmployeeIds, setAssignedEmployeeIds] = useState<string[]>(
@@ -143,15 +154,30 @@ function ClientBuilder({
       ...(estimatedCfoHours.trim() && !Number.isNaN(parsedCfo)
         ? { estimatedCfoHours: parsedCfo }
         : {}),
+      // Silently seed the firm's default invoice prefs / terms onto the new
+      // client (these aren't fields on the Add form — they live on the client
+      // detail page — but a new client should still inherit the house default).
+      ...(defaults?.paymentTerms ? { paymentTerms: defaults.paymentTerms } : {}),
+      ...(defaults?.footerNote ? { footerNote: defaults.footerNote } : {}),
+      ...(defaults?.invoiceShowTimeBreakdown !== undefined
+        ? { invoiceShowTimeBreakdown: defaults.invoiceShowTimeBreakdown }
+        : {}),
+      ...(defaults?.invoiceHideInternalHours !== undefined
+        ? { invoiceHideInternalHours: defaults.invoiceHideInternalHours }
+        : {}),
+      ...(defaults?.invoiceGroupByCategory !== undefined
+        ? { invoiceGroupByCategory: defaults.invoiceGroupByCategory }
+        : {}),
       assignedEmployeeIds,
     })
     setName('')
     setContact('')
-    setHourlyRate('125')
-    setMonthlyRate('')
+    setHourlyRate(defaultHourly)
+    setMonthlyRate(defaultMonthly)
     setEstimatedBookkeeperHours('')
     setEstimatedAccountantHours('')
     setEstimatedCfoHours('')
+    setBillingMode(defaultBillingMode)
     setPlanIds([])
     setContactIds([])
   }

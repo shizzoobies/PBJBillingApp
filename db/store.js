@@ -59,7 +59,61 @@ function rowToFirmSettings(row) {
       settings[appKey] = row[dbCol]
     }
   }
+  if (row.client_defaults !== null && row.client_defaults !== undefined) {
+    // jsonb comes back parsed from pg; tolerate a string just in case.
+    const raw =
+      typeof row.client_defaults === 'string'
+        ? safeJsonParse(row.client_defaults)
+        : row.client_defaults
+    settings.clientDefaults = {
+      ...DEFAULT_FIRM_SETTINGS.clientDefaults,
+      ...sanitizeClientDefaults(raw),
+    }
+  }
   return settings
+}
+
+function safeJsonParse(value) {
+  try {
+    return JSON.parse(value)
+  } catch {
+    return {}
+  }
+}
+
+const VALID_BILLING_MODES = new Set(['hourly', 'subscription'])
+
+/**
+ * Validate the owner-configured new-client defaults. Every field is optional;
+ * only well-typed values survive so a crafted payload can't poison the
+ * Add-client form (numbers clamp to [0, 1e9], strings are length-capped,
+ * billing mode is enum-checked, toggles must be real booleans).
+ */
+function sanitizeClientDefaults(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {}
+  const out = {}
+  const toMoney = (v) => {
+    const n = Number(v)
+    if (!Number.isFinite(n) || n < 0) return undefined
+    return Math.min(n, 1e9)
+  }
+  if (VALID_BILLING_MODES.has(src.billingMode)) out.billingMode = src.billingMode
+  const hourly = toMoney(src.hourlyRate)
+  if (hourly !== undefined) out.hourlyRate = hourly
+  const monthly = toMoney(src.monthlyRate)
+  if (monthly !== undefined) out.monthlyRate = monthly
+  if (typeof src.paymentTerms === 'string') out.paymentTerms = src.paymentTerms.slice(0, 500)
+  if (typeof src.footerNote === 'string') out.footerNote = src.footerNote.slice(0, 2000)
+  if (typeof src.invoiceShowTimeBreakdown === 'boolean') {
+    out.invoiceShowTimeBreakdown = src.invoiceShowTimeBreakdown
+  }
+  if (typeof src.invoiceHideInternalHours === 'boolean') {
+    out.invoiceHideInternalHours = src.invoiceHideInternalHours
+  }
+  if (typeof src.invoiceGroupByCategory === 'boolean') {
+    out.invoiceGroupByCategory = src.invoiceGroupByCategory
+  }
+  return out
 }
 
 const seededUsers = [
@@ -1283,6 +1337,12 @@ export class AppDataStore {
       // same until the owner picks a custom value.
       await this.pool.query(
         `alter table firm_settings add column if not exists sidebar_active_text_color text default '#ffffff'`,
+      )
+      // Owner-configurable defaults for the Add-client form (house rate,
+      // payment terms, invoice prefs, etc.). Stored as JSON so it's easy to
+      // extend without a column per field. Additive + idempotent.
+      await this.pool.query(
+        `alter table firm_settings add column if not exists client_defaults jsonb`,
       )
 
       // Phase 5: notifications (in-app bell + email-ready).
@@ -6740,14 +6800,22 @@ export class AppDataStore {
         `select name, tagline, logo_url, brand_color, sidebar_text_color,
                 sidebar_active_text_color,
                 address_line1, address_line2,
-                city, state, postal_code, phone, email, website, ein
+                city, state, postal_code, phone, email, website, ein,
+                client_defaults
            from firm_settings where id = 'singleton'`,
       )
       return rowToFirmSettings(result.rows[0])
     }
     const data = await readJson(localDataPath)
     const stored = data.firmSettings || {}
-    return { ...DEFAULT_FIRM_SETTINGS, ...stored }
+    return {
+      ...DEFAULT_FIRM_SETTINGS,
+      ...stored,
+      clientDefaults: {
+        ...DEFAULT_FIRM_SETTINGS.clientDefaults,
+        ...sanitizeClientDefaults(stored.clientDefaults),
+      },
+    }
   }
 
   async updateFirmSettings(patch) {
@@ -6777,13 +6845,22 @@ export class AppDataStore {
       next.name = DEFAULT_FIRM_SETTINGS.name
     }
 
+    // New-client defaults: merge the validated patch over the current values
+    // so a partial update (just the hourly rate, say) doesn't wipe the rest.
+    if (patch && Object.prototype.hasOwnProperty.call(patch, 'clientDefaults')) {
+      next.clientDefaults = {
+        ...(next.clientDefaults ?? DEFAULT_FIRM_SETTINGS.clientDefaults),
+        ...sanitizeClientDefaults(patch.clientDefaults),
+      }
+    }
+
     if (this.pool) {
       await this.pool.query(
         `insert into firm_settings (id, name, tagline, logo_url, brand_color, sidebar_text_color,
             sidebar_active_text_color,
             address_line1, address_line2, city, state, postal_code,
-            phone, email, website, ein, updated_at)
-         values ('singleton', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+            phone, email, website, ein, client_defaults, updated_at)
+         values ('singleton', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, now())
          on conflict (id) do update set
             name = excluded.name,
             tagline = excluded.tagline,
@@ -6800,6 +6877,7 @@ export class AppDataStore {
             email = excluded.email,
             website = excluded.website,
             ein = excluded.ein,
+            client_defaults = excluded.client_defaults,
             updated_at = now()`,
         [
           next.name,
@@ -6817,6 +6895,7 @@ export class AppDataStore {
           next.email || null,
           next.website || null,
           next.ein || null,
+          JSON.stringify(next.clientDefaults ?? DEFAULT_FIRM_SETTINGS.clientDefaults),
         ],
       )
       return next
