@@ -231,6 +231,12 @@ function ContactLibrary({
                   placeholder="Phone"
                   onCommit={(value) => onUpdate(contact.id, { phone: value })}
                 />
+                <ContactNotesInput
+                  ariaLabel={`${contact.name} notes`}
+                  canonical={contact.notes ?? ''}
+                  placeholder="Notes"
+                  onCommit={(value) => onUpdate(contact.id, { notes: value })}
+                />
                 {attachedCount > 0 ? (
                   <span className="checklist-meta-line">
                     On {attachedCount} client{attachedCount === 1 ? '' : 's'}
@@ -282,6 +288,38 @@ function ContactTextInput({
       aria-label={ariaLabel}
       className="input"
       placeholder={placeholder}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => {
+        if (draft !== canonical) {
+          onCommit(draft)
+        }
+      }}
+    />
+  )
+}
+
+// Multi-line notes editor for a contact. Commits on blur — matches the
+// single-line ContactTextInput pattern, but uses a textarea since notes are
+// free-form and often span multiple lines.
+function ContactNotesInput({
+  ariaLabel,
+  canonical,
+  placeholder,
+  onCommit,
+}: {
+  ariaLabel: string
+  canonical: string
+  placeholder?: string
+  onCommit: (value: string) => void
+}) {
+  const [draft, setDraft] = useState(canonical)
+  return (
+    <textarea
+      aria-label={ariaLabel}
+      className="input contact-notes-input"
+      placeholder={placeholder}
+      rows={2}
       value={draft}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={() => {

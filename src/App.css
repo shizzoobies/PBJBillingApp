@@ -896,6 +896,23 @@ textarea.input {
   padding: 13px;
 }
 
+/* Inline contact editor: name/title/email/phone in a 2-col grid, with the
+   free-form notes textarea spanning the full width beneath them. */
+.contact-edit-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  flex: 1;
+}
+.contact-edit-fields .contact-notes-input {
+  grid-column: 1 / -1;
+  resize: vertical;
+  min-height: 2.4rem;
+}
+.contact-edit-fields .checklist-meta-line {
+  grid-column: 1 / -1;
+}
+
 .entry-row strong,
 .entry-row span,
 .entry-row small,
