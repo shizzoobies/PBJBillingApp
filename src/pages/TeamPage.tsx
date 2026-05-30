@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronDown, ChevronUp, Eye, MailPlus, Send, Trash2, UserPlus, X } from 'lucide-react'
+import { ChevronDown, ChevronUp, Eye, MailPlus, Send, Trash2, X } from 'lucide-react'
 import { useAppContext } from '../AppContext'
+import { CollapsibleSection } from '../components/SectionKit'
 import {
   fetchTeam,
   fetchTeamActivity,
@@ -231,15 +232,7 @@ export function TeamPage() {
 
   return (
     <section className="content-grid single" id="team">
-      <section className="panel">
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">Team management</p>
-            <h2>
-              <UserPlus size={18} /> Invite bookkeeper
-            </h2>
-          </div>
-        </div>
+      <CollapsibleSection kicker="Team management" title="Invite bookkeeper">
         <form className="team-invite-form" onSubmit={handleInvite}>
           <label className="field">
             <span>Name</span>
@@ -299,15 +292,9 @@ export function TeamPage() {
             </p>
           </div>
         ) : null}
-      </section>
+      </CollapsibleSection>
 
-      <section className="panel">
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">Members</p>
-            <h2>Team roster</h2>
-          </div>
-        </div>
+      <CollapsibleSection kicker="Members" title="Team roster">
         {loading ? (
           <p className="team-muted">Loading team...</p>
         ) : loadError ? (
@@ -511,7 +498,7 @@ export function TeamPage() {
             })}
           </ul>
         )}
-      </section>
+      </CollapsibleSection>
     </section>
   )
 }
