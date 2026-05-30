@@ -375,6 +375,7 @@ function BillingSection({
         </label>
         {isMonthly ? (
           <NumberField
+            key="monthly-rate"
             label="Monthly rate"
             step="0.01"
             min="0"
@@ -384,6 +385,7 @@ function BillingSection({
           />
         ) : (
           <NumberField
+            key="hourly-rate"
             label="Hourly rate"
             step="0.01"
             min="0"
@@ -673,6 +675,33 @@ function NumberInputControl({
   onCommit: (value: number | null) => void
 }) {
   const [draft, setDraft] = useState(canonical === null ? '' : String(canonical))
+  // Debounce timer for change-driven commits. Without this, a value only
+  // committed on blur — so typing a number and then refreshing or leaving the
+  // page WITHOUT first clicking away never persisted (the edit lived only in
+  // this local draft, never reaching app state / the autosave). We now also
+  // commit shortly after typing stops, and on Enter, so "type then leave"
+  // reliably saves.
+  const commitTimerRef = useRef<number | null>(null)
+
+  const commitValue = (raw: string) => {
+    const trimmed = raw.trim()
+    if (trimmed === '') {
+      if (canonical !== null) onCommit(null)
+      return
+    }
+    const parsed = Number(trimmed)
+    if (Number.isNaN(parsed)) return
+    if (parsed !== canonical) onCommit(parsed)
+  }
+
+  // Clear any pending debounce on unmount so a late timer can't fire after the
+  // control is gone.
+  useEffect(() => {
+    return () => {
+      if (commitTimerRef.current) window.clearTimeout(commitTimerRef.current)
+    }
+  }, [])
+
   return (
     <input
       className="input"
@@ -681,8 +710,20 @@ function NumberInputControl({
       type="number"
       placeholder={placeholder}
       value={draft}
-      onChange={(event) => setDraft(event.target.value)}
+      onChange={(event) => {
+        const next = event.target.value
+        setDraft(next)
+        if (commitTimerRef.current) window.clearTimeout(commitTimerRef.current)
+        commitTimerRef.current = window.setTimeout(() => commitValue(next), 600)
+      }}
+      onKeyDown={(event) => {
+        // Enter commits immediately (blur fires the same path).
+        if (event.key === 'Enter') {
+          event.currentTarget.blur()
+        }
+      }}
       onBlur={() => {
+        if (commitTimerRef.current) window.clearTimeout(commitTimerRef.current)
         const trimmed = draft.trim()
         if (trimmed === '') {
           if (canonical !== null) onCommit(null)
