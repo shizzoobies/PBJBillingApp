@@ -2,6 +2,24 @@ import { Check, ChevronDown, ChevronRight, Lock, Pencil } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSaveFlash, type SaveFlashState } from '../lib/useSaveFlash'
 
+// Persist a section's lock / collapse state across refreshes. These are local
+// UI preferences (not workspace data), so localStorage is the right home.
+function readStoredBool(key: string, fallback: boolean): boolean {
+  try {
+    const value = window.localStorage.getItem(key)
+    return value === null ? fallback : value === '1'
+  } catch {
+    return fallback
+  }
+}
+function writeStoredBool(key: string, value: boolean) {
+  try {
+    window.localStorage.setItem(key, value ? '1' : '0')
+  } catch {
+    // localStorage may be unavailable (private mode / quota) — ignore.
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Per-field save confirmation                                                */
 /* -------------------------------------------------------------------------- */
@@ -40,6 +58,7 @@ export function CollapsibleSection({
   lockable = false,
   defaultCollapsed = false,
   defaultLocked = false,
+  storageKey,
   bodyClassName,
   children,
 }: {
@@ -49,11 +68,35 @@ export function CollapsibleSection({
   lockable?: boolean
   defaultCollapsed?: boolean
   defaultLocked?: boolean
+  /**
+   * Stable key used to remember lock / collapse state across refreshes.
+   * Defaults to the title. Lock/collapse are remembered globally per key, so
+   * e.g. locking "Billing" keeps it locked everywhere it appears.
+   */
+  storageKey?: string
   bodyClassName?: string
   children: ReactNode
 }) {
-  const [collapsed, setCollapsed] = useState(defaultCollapsed)
-  const [locked, setLocked] = useState(defaultLocked)
+  const persistBase = `pbj.section.${storageKey ?? title}`
+  const collapseKey = `${persistBase}.collapsed`
+  const lockKey = `${persistBase}.locked`
+  const [collapsed, setCollapsed] = useState(() => readStoredBool(collapseKey, defaultCollapsed))
+  const [locked, setLocked] = useState(() =>
+    lockable ? readStoredBool(lockKey, defaultLocked) : defaultLocked,
+  )
+
+  const toggleCollapsed = () =>
+    setCollapsed((value) => {
+      const next = !value
+      writeStoredBool(collapseKey, next)
+      return next
+    })
+  const toggleLocked = () =>
+    setLocked((value) => {
+      const next = !value
+      writeStoredBool(lockKey, next)
+      return next
+    })
 
   return (
     <section className={`panel client-section${collapsed ? ' collapsed' : ''}`}>
@@ -64,7 +107,7 @@ export function CollapsibleSection({
           aria-expanded={!collapsed}
           aria-label={collapsed ? `Expand ${title}` : `Collapse ${title}`}
           title={collapsed ? 'Expand section' : 'Collapse section'}
-          onClick={() => setCollapsed((value) => !value)}
+          onClick={toggleCollapsed}
         >
           {collapsed ? <ChevronRight size={18} /> : <ChevronDown size={18} />}
         </button>
@@ -78,7 +121,7 @@ export function CollapsibleSection({
             <button
               type="button"
               className={`section-lock-btn${locked ? '' : ' unlocked'}`}
-              onClick={() => setLocked((value) => !value)}
+              onClick={toggleLocked}
               title={locked ? 'Unlock to edit these fields' : 'Lock to prevent accidental edits'}
             >
               {locked ? (

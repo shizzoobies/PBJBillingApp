@@ -315,7 +315,9 @@ function scopeAppDataForSession(session, data) {
     allowedClientIds.has(template.clientId),
   )
   const timeEntries = (data.timeEntries ?? []).filter(
-    (entry) => entry.employeeId === me && allowedClientIds.has(entry.clientId),
+    (entry) =>
+      entry.employeeId === me &&
+      (entry.isAdministrative || allowedClientIds.has(entry.clientId)),
   )
   // Subscription plans carry monthly fees — billing data the owner keeps
   // private. Non-owners receive no plans at all.
@@ -1062,7 +1064,15 @@ const server = createServer(async (request, response) => {
               : ''
             : session.user.id
 
-        const clientId = typeof payload?.clientId === 'string' ? payload.clientId : ''
+        // Administrative / internal time (company meetings, training, etc.) is
+        // not tied to a client: no clientId, no task, never billable — the
+        // employee just records hours + notes.
+        const isAdministrative = Boolean(payload?.isAdministrative)
+        const clientId = isAdministrative
+          ? ''
+          : typeof payload?.clientId === 'string'
+            ? payload.clientId
+            : ''
         const date = typeof payload?.date === 'string' ? payload.date : ''
         const minutes = typeof payload?.minutes === 'number' ? payload.minutes : Number(payload?.minutes)
         // Legacy "work type" — the UI no longer surfaces it. We keep the DB
@@ -1072,18 +1082,35 @@ const server = createServer(async (request, response) => {
             ? payload.category
             : 'General'
         const description = typeof payload?.description === 'string' ? payload.description : ''
-        const billable = Boolean(payload?.billable)
+        const billable = isAdministrative ? false : Boolean(payload?.billable)
         const taskIdRaw = payload?.taskId
-        const taskId =
-          typeof taskIdRaw === 'string' && taskIdRaw.trim() ? taskIdRaw.trim() : null
+        const taskId = isAdministrative
+          ? null
+          : typeof taskIdRaw === 'string' && taskIdRaw.trim()
+            ? taskIdRaw.trim()
+            : null
         // Capture method: anything other than an explicit 'manual' is a timer
         // entry. A manual entry must carry a non-empty reason; timer-stop and
         // any non-manual creation ignore manualReason entirely.
         const { entryMethod, manualReason, error: methodError } =
           normalizeTimeEntryMethod(payload)
 
-        if (!employeeId || !clientId || !date || Number.isNaN(minutes) || minutes <= 0) {
+        // Admin time needs no client, but a client-bound entry still does.
+        if (
+          !employeeId ||
+          (!isAdministrative && !clientId) ||
+          !date ||
+          Number.isNaN(minutes) ||
+          minutes <= 0
+        ) {
           sendJson(response, 400, { error: 'Invalid time entry payload' })
+          return
+        }
+
+        if (isAdministrative && !description.trim()) {
+          sendJson(response, 400, {
+            error: 'Administrative time needs a note describing the work.',
+          })
           return
         }
 
@@ -1105,12 +1132,15 @@ const server = createServer(async (request, response) => {
         }
 
         // Visibility scoping: a non-owner can only log time against clients
-        // they have visibility on.
+        // they have visibility on. Administrative time has no client, so this
+        // check is skipped for it.
         const allData = await appDataStore.read()
-        const allowed = visibleClientIdSet(session, allData.clients ?? [])
-        if (!allowed.has(clientId)) {
-          sendJson(response, 403, { error: 'Client not visible to this user' })
-          return
+        if (!isAdministrative) {
+          const allowed = visibleClientIdSet(session, allData.clients ?? [])
+          if (!allowed.has(clientId)) {
+            sendJson(response, 403, { error: 'Client not visible to this user' })
+            return
+          }
         }
 
         // Validate taskId if provided: must reference an existing checklist
@@ -1135,6 +1165,7 @@ const server = createServer(async (request, response) => {
         const entry = await appDataStore.createTimeEntry({
           employeeId,
           clientId,
+          isAdministrative,
           date,
           minutes,
           category,
@@ -1150,7 +1181,7 @@ const server = createServer(async (request, response) => {
         // Timer-stopped entries enter the approval queue silently, as before.
         if (entryMethod === 'manual') {
           const client = (allData.clients ?? []).find((c) => c.id === clientId)
-          const clientLabel = client?.name ?? 'a client'
+          const clientLabel = isAdministrative ? 'Administrative' : client?.name ?? 'a client'
           const employee = (allData.employees ?? []).find((e) => e.id === employeeId)
           const employeeLabel = employee?.name ?? 'An employee'
           const hoursLabel = (minutes / 60).toFixed(2).replace(/\.?0+$/, '')

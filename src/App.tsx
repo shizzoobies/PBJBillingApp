@@ -474,13 +474,16 @@ function App() {
       return
     }
 
+    const isAdministrative = Boolean(timer.isAdministrative)
     await logTime({
       employeeId: timer.employeeId,
       clientId: timer.clientId,
+      isAdministrative,
       date: new Date().toISOString().slice(0, 10),
       minutes: Math.max(1, Math.round((Date.now() - timer.startedAt) / 60000)),
       description: timer.description,
-      billable: true,
+      // Administrative time is never billable; the server enforces this too.
+      billable: !isAdministrative,
       taskId: timer.taskId ?? null,
       entryMethod: 'timer',
     })

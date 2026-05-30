@@ -1568,6 +1568,14 @@ export class AppDataStore {
       )
       await this.pool.query(`alter table time_entries add column if not exists manual_reason text`)
 
+      // Administrative / internal time (company meetings, training, etc.) is
+      // not tied to any client, so client_id must be nullable and we flag the
+      // row as administrative. Additive + idempotent.
+      await this.pool.query(
+        `alter table time_entries add column if not exists is_administrative boolean not null default false`,
+      )
+      await this.pool.query(`alter table time_entries alter column client_id drop not null`)
+
       // Month-end timesheet locks: one per employee per 'YYYY-MM' period.
       await this.pool.query(`
         create table if not exists timesheet_locks (
@@ -2285,7 +2293,8 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
-                   approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason
+                   approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
+                   is_administrative
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -2541,7 +2550,8 @@ export class AppDataStore {
         timeEntries: timeEntriesResult.rows.map((row) => ({
           id: row.id,
           employeeId: row.user_id,
-          clientId: row.client_id,
+          clientId: row.client_id ?? '',
+          isAdministrative: Boolean(row.is_administrative),
           date: row.entry_date.toISOString().slice(0, 10),
           minutes: row.minutes,
           category: row.category,
@@ -3019,13 +3029,14 @@ export class AppDataStore {
           await client.query(
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
-                                        approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+                                        approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
             `,
             [
               entry.id,
               entry.employeeId,
-              entry.clientId,
+              // Administrative entries have no client — persist NULL.
+              entry.clientId || null,
               entry.date,
               entry.minutes,
               entry.category ?? 'General',
@@ -3038,6 +3049,7 @@ export class AppDataStore {
               entry.approvedAt ?? null,
               entry.entryMethod === 'manual' ? 'manual' : 'timer',
               entry.entryMethod === 'manual' ? entry.manualReason ?? null : null,
+              Boolean(entry.isAdministrative),
             ],
           )
         }
@@ -3310,13 +3322,15 @@ export class AppDataStore {
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
         `,
         [
           nextEntry.id,
           nextEntry.employeeId,
-          nextEntry.clientId,
+          // Administrative time has no client — store NULL so the FK and the
+          // orphan-cleanup `not in (clients)` check both leave it alone.
+          nextEntry.clientId || null,
           nextEntry.date,
           nextEntry.minutes,
           nextEntry.category ?? 'General',
@@ -3326,6 +3340,7 @@ export class AppDataStore {
           nextEntry.approvalStatus,
           nextEntry.entryMethod,
           nextEntry.manualReason ?? null,
+          Boolean(nextEntry.isAdministrative),
         ],
       )
 
@@ -3346,7 +3361,8 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
-                approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason
+                approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
+                is_administrative
          from time_entries where id = $1`,
         [entryId],
       )
@@ -3355,7 +3371,8 @@ export class AppDataStore {
       return {
         id: row.id,
         employeeId: row.user_id,
-        clientId: row.client_id,
+        clientId: row.client_id ?? '',
+        isAdministrative: Boolean(row.is_administrative),
         date: row.entry_date.toISOString().slice(0, 10),
         minutes: row.minutes,
         category: row.category,

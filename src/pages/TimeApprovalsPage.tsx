@@ -417,7 +417,9 @@ function EmployeeApprovalGroup({
           <ApprovalRow
             key={entry.id}
             entry={entry}
-            clientLabel={clientName(clients, entry.clientId)}
+            clientLabel={
+              entry.isAdministrative ? 'Administrative' : clientName(clients, entry.clientId)
+            }
             taskLabel={taskTitleFor(checklists, entry.taskId)}
             onApprove={onApprove}
             onReject={onReject}

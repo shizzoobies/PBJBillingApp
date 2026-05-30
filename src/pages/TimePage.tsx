@@ -373,6 +373,7 @@ function TimeCapture({
   const [employeeId, setEmployeeId] = useState(activeEmployeeId)
   const [description, setDescription] = useState('Reviewed transactions and added client notes.')
   const [taskId, setTaskId] = useState<string>('')
+  const [isAdministrative, setIsAdministrative] = useState(false)
   const [busy, setBusy] = useState(false)
   const effectiveClientId = clients.some((client) => client.id === clientId)
     ? clientId
@@ -392,16 +393,18 @@ function TimeCapture({
   const inputsDisabled = locked || previewMode
 
   const handleStartTimer = () => {
-    if (!effectiveClientId) {
+    if (!isAdministrative && !effectiveClientId) {
       return
     }
 
     onStartTimer({
       employeeId: effectiveEmployeeId,
-      clientId: effectiveClientId,
-      description: description || 'Timed bookkeeping work',
+      clientId: isAdministrative ? '' : effectiveClientId,
+      description:
+        description || (isAdministrative ? 'Administrative time' : 'Timed bookkeeping work'),
       startedAt: Date.now(),
-      taskId: effectiveTaskId || null,
+      taskId: isAdministrative ? null : effectiveTaskId || null,
+      isAdministrative,
     })
   }
 
@@ -461,42 +464,55 @@ function TimeCapture({
             </select>
           </label>
         )}
-        <label className="field">
-          <span>Client</span>
-          <select
-            className="input"
-            onChange={(event) => {
-              setClientId(event.target.value)
-              setTaskId('')
-            }}
-            value={effectiveClientId}
+        <label className="check-row full-span">
+          <input
+            checked={isAdministrative}
+            onChange={(event) => setIsAdministrative(event.target.checked)}
+            type="checkbox"
             disabled={inputsDisabled || Boolean(timer)}
-          >
-            {clients.map((client) => (
-              <option key={client.id} value={client.id}>
-                {client.name}
-              </option>
-            ))}
-          </select>
+          />
+          <span>Administrative work (company meeting, internal — no client or task)</span>
         </label>
-        <label className="field">
-          <span>Task</span>
-          <select
-            className="input"
-            onChange={(event) => setTaskId(event.target.value)}
-            value={effectiveTaskId}
-            disabled={inputsDisabled || Boolean(timer) || eligibleTasks.length === 0}
-          >
-            <option value="">(none / general)</option>
-            {eligibleTasks.map((task) => (
-              <option key={task.id} value={task.id}>
-                {task.title}
-              </option>
-            ))}
-          </select>
-        </label>
+        {isAdministrative ? null : (
+          <>
+            <label className="field">
+              <span>Client</span>
+              <select
+                className="input"
+                onChange={(event) => {
+                  setClientId(event.target.value)
+                  setTaskId('')
+                }}
+                value={effectiveClientId}
+                disabled={inputsDisabled || Boolean(timer)}
+              >
+                {clients.map((client) => (
+                  <option key={client.id} value={client.id}>
+                    {client.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Task</span>
+              <select
+                className="input"
+                onChange={(event) => setTaskId(event.target.value)}
+                value={effectiveTaskId}
+                disabled={inputsDisabled || Boolean(timer) || eligibleTasks.length === 0}
+              >
+                <option value="">(none / general)</option>
+                {eligibleTasks.map((task) => (
+                  <option key={task.id} value={task.id}>
+                    {task.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
         <label className="field full-span">
-          <span>What did you do?</span>
+          <span>{isAdministrative ? 'Notes (what was this for?)' : 'What did you do?'}</span>
           <textarea
             className="input"
             onChange={(event) => setDescription(event.target.value)}
@@ -519,7 +535,7 @@ function TimeCapture({
           ) : (
             <button
               className="primary-action"
-              disabled={busy || inputsDisabled || !effectiveClientId}
+              disabled={busy || inputsDisabled || (!isAdministrative && !effectiveClientId)}
               onClick={handleStartTimer}
               type="button"
             >
@@ -565,6 +581,7 @@ function ManualEntryModal({
   const [description, setDescription] = useState('')
   const [billable, setBillable] = useState(true)
   const [taskId, setTaskId] = useState<string>('')
+  const [isAdministrative, setIsAdministrative] = useState(false)
   const [reason, setReason] = useState('')
   const [submitError, setSubmitError] = useState('')
   const [submitPending, setSubmitPending] = useState(false)
@@ -593,8 +610,16 @@ function ManualEntryModal({
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const numericHours = Number(hours)
-    if (!effectiveClientId || Number.isNaN(numericHours) || numericHours <= 0) {
-      setSubmitError('Enter a valid client and number of hours.')
+    if (Number.isNaN(numericHours) || numericHours <= 0) {
+      setSubmitError('Enter a valid number of hours.')
+      return
+    }
+    if (!isAdministrative && !effectiveClientId) {
+      setSubmitError('Select a client, or check "Administrative work".')
+      return
+    }
+    if (isAdministrative && !description.trim()) {
+      setSubmitError('Add notes describing the administrative work.')
       return
     }
     if (!reason.trim()) {
@@ -612,12 +637,13 @@ function ManualEntryModal({
     try {
       await onLog({
         employeeId: effectiveEmployeeId,
-        clientId: effectiveClientId,
+        clientId: isAdministrative ? '' : effectiveClientId,
+        isAdministrative,
         date,
         minutes: Math.round(numericHours * 60),
         description,
-        billable,
-        taskId: effectiveTaskId || null,
+        billable: isAdministrative ? false : billable,
+        taskId: isAdministrative ? null : effectiveTaskId || null,
         entryMethod: 'manual',
         manualReason: reason.trim(),
       })
@@ -719,49 +745,61 @@ function ManualEntryModal({
                   </select>
                 </label>
               )}
-              <label className="field">
-                <span>Client</span>
-                <select
-                  className="input"
-                  value={effectiveClientId}
-                  onChange={(event) => {
-                    setClientId(event.target.value)
-                    setTaskId('')
-                  }}
-                >
-                  {clients.map((client) => (
-                    <option key={client.id} value={client.id}>
-                      {client.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>Task</span>
-                <select
-                  className="input"
-                  value={effectiveTaskId}
-                  onChange={(event) => setTaskId(event.target.value)}
-                  disabled={eligibleTasks.length === 0}
-                >
-                  <option value="">(none / general)</option>
-                  {eligibleTasks.map((task) => (
-                    <option key={task.id} value={task.id}>
-                      {task.title}
-                    </option>
-                  ))}
-                </select>
-              </label>
               <label className="check-row full-span">
                 <input
-                  checked={billable}
-                  onChange={(event) => setBillable(event.target.checked)}
+                  checked={isAdministrative}
+                  onChange={(event) => setIsAdministrative(event.target.checked)}
                   type="checkbox"
                 />
-                <span>Billable</span>
+                <span>Administrative work (company meeting, internal — no client or task)</span>
               </label>
+              {isAdministrative ? null : (
+                <>
+                  <label className="field">
+                    <span>Client</span>
+                    <select
+                      className="input"
+                      value={effectiveClientId}
+                      onChange={(event) => {
+                        setClientId(event.target.value)
+                        setTaskId('')
+                      }}
+                    >
+                      {clients.map((client) => (
+                        <option key={client.id} value={client.id}>
+                          {client.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Task</span>
+                    <select
+                      className="input"
+                      value={effectiveTaskId}
+                      onChange={(event) => setTaskId(event.target.value)}
+                      disabled={eligibleTasks.length === 0}
+                    >
+                      <option value="">(none / general)</option>
+                      {eligibleTasks.map((task) => (
+                        <option key={task.id} value={task.id}>
+                          {task.title}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="check-row full-span">
+                    <input
+                      checked={billable}
+                      onChange={(event) => setBillable(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>Billable</span>
+                  </label>
+                </>
+              )}
               <label className="field full-span">
-                <span>Details</span>
+                <span>{isAdministrative ? 'Notes (what was this for?)' : 'Details'}</span>
                 <textarea
                   className="input"
                   rows={3}
@@ -847,7 +885,9 @@ function RecentTimeEntries({
             <TimeEntryRow
               key={entry.id}
               entry={entry}
-              clientLabel={clientName(clients, entry.clientId)}
+              clientLabel={
+                entry.isAdministrative ? 'Administrative' : clientName(clients, entry.clientId)
+              }
               employeeLabel={employeeName(employees, entry.employeeId)}
               taskTitle={linkedTask ? linkedTask.title : null}
               locked={monthLocked}

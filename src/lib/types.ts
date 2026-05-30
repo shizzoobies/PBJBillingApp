@@ -159,7 +159,17 @@ export type WeeklySubmission = {
 export type TimeEntry = {
   id: string
   employeeId: string
+  /**
+   * The client this time is billed against. EMPTY ('') for administrative
+   * work (company meetings, internal training, etc.) — see `isAdministrative`.
+   */
   clientId: string
+  /**
+   * Administrative / internal time that isn't tied to any client (e.g. company
+   * meetings). When true, `clientId` is empty, `taskId` is null, and the entry
+   * is never billable — the employee just records hours + notes.
+   */
+  isAdministrative?: boolean
   date: string
   minutes: number
   /**
@@ -500,6 +510,8 @@ export type TimerState = {
   startedAt: number
   /** Optional task this timed work is attached to. */
   taskId?: string | null
+  /** Administrative / internal timing — no client or task. */
+  isAdministrative?: boolean
 }
 
 export type InvoiceLine = {
