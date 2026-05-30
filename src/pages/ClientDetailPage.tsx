@@ -383,8 +383,8 @@ function BillingSectionBody({
           label="Monthly rate"
           step="0.01"
           min="0"
-          value={client.monthlyRate ?? 0}
-          onCommit={(next) => onCommit({ monthlyRate: next })}
+          value={client.monthlyRate ?? null}
+          onCommit={(next) => onCommit({ monthlyRate: next ?? undefined })}
           helper="The fixed monthly amount billed to this client."
         />
       ) : (
@@ -394,7 +394,7 @@ function BillingSectionBody({
           step="0.01"
           min="0"
           value={client.hourlyRate}
-          onCommit={(next) => onCommit({ hourlyRate: next })}
+          onCommit={(next) => onCommit({ hourlyRate: next ?? 0 })}
           helper="Used to bill every billable hour worked for this client."
         />
       )}
@@ -430,22 +430,22 @@ function EstimatedRoleHours({
           label="Bookkeeper"
           step="0.5"
           min="0"
-          value={bookkeeper}
-          onCommit={(next) => onCommit({ estimatedBookkeeperHours: next })}
+          value={client.estimatedBookkeeperHours ?? null}
+          onCommit={(next) => onCommit({ estimatedBookkeeperHours: next ?? undefined })}
         />
         <SaveNumberField
           label="Accountant"
           step="0.5"
           min="0"
-          value={accountant}
-          onCommit={(next) => onCommit({ estimatedAccountantHours: next })}
+          value={client.estimatedAccountantHours ?? null}
+          onCommit={(next) => onCommit({ estimatedAccountantHours: next ?? undefined })}
         />
         <SaveNumberField
           label="CFO"
           step="0.5"
           min="0"
-          value={cfo}
-          onCommit={(next) => onCommit({ estimatedCfoHours: next })}
+          value={client.estimatedCfoHours ?? null}
+          onCommit={(next) => onCommit({ estimatedCfoHours: next ?? undefined })}
         />
       </div>
       <small className="field-helper">

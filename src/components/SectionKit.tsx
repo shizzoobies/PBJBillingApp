@@ -411,8 +411,12 @@ export function SaveNumberField({
   helper?: string
   min?: string
   step?: string
-  value: number
-  onCommit: (value: number) => void
+  // Accepts null so the field can be cleared (the input shows blank for a
+  // null value).
+  value: number | null
+  // Receives null when the field is cleared — callers decide whether that
+  // means 0, undefined, etc. for their specific field.
+  onCommit: (value: number | null) => void
 }) {
   const { state, flash } = useSaveFlash()
   return (
@@ -426,7 +430,6 @@ export function SaveNumberField({
         min={min}
         step={step}
         onCommit={(next) => {
-          if (next === null) return
           onCommit(next)
           flash()
         }}
