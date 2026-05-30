@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChangePasswordCard } from '../components/ChangePasswordCard'
+import { CollapsibleSection, SavingTextInput } from '../components/SectionKit'
 import {
   fetchAuthStatus,
   fetchFirmSettings,
@@ -378,13 +379,7 @@ function BrandingSection({
   onCommit: (patch: Partial<FirmSettings>) => void | Promise<void>
 }) {
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Branding</p>
-          <h2>Firm identity</h2>
-        </div>
-      </div>
+    <CollapsibleSection kicker="Branding" title="Firm identity" lockable>
       <div className="form-grid two-col">
         <TextField
           label="Firm name"
@@ -426,7 +421,7 @@ function BrandingSection({
           <small className="field-helper">Color of the currently-open page in the sidebar — pick something that contrasts with the sidebar text color above.</small>
         </label>
       </div>
-    </section>
+    </CollapsibleSection>
   )
 }
 
@@ -554,13 +549,7 @@ function AddressSection({
   onCommit: (patch: Partial<FirmSettings>) => void | Promise<void>
 }) {
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Address</p>
-          <h2>Mailing address</h2>
-        </div>
-      </div>
+    <CollapsibleSection kicker="Address" title="Mailing address" lockable>
       <div className="form-grid two-col">
         <TextField
           label="Address line 1"
@@ -588,7 +577,7 @@ function AddressSection({
           onCommit={(value) => onCommit({ postalCode: value })}
         />
       </div>
-    </section>
+    </CollapsibleSection>
   )
 }
 
@@ -600,13 +589,7 @@ function ContactSection({
   onCommit: (patch: Partial<FirmSettings>) => void | Promise<void>
 }) {
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Contact</p>
-          <h2>How clients reach you</h2>
-        </div>
-      </div>
+    <CollapsibleSection kicker="Contact" title="How clients reach you" lockable>
       <div className="form-grid two-col">
         <TextField
           label="Phone"
@@ -626,7 +609,7 @@ function ContactSection({
           onCommit={(value) => onCommit({ website: value })}
         />
       </div>
-    </section>
+    </CollapsibleSection>
   )
 }
 
@@ -638,13 +621,7 @@ function BusinessSection({
   onCommit: (patch: Partial<FirmSettings>) => void | Promise<void>
 }) {
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Business</p>
-          <h2>Tax / business identifiers</h2>
-        </div>
-      </div>
+    <CollapsibleSection kicker="Business" title="Tax / business identifiers" lockable>
       <div className="form-grid two-col">
         <TextField
           label="EIN / Business ID"
@@ -652,7 +629,7 @@ function BusinessSection({
           onCommit={(value) => onCommit({ ein: value })}
         />
       </div>
-    </section>
+    </CollapsibleSection>
   )
 }
 
@@ -683,6 +660,10 @@ function TextField({
   )
 }
 
+// Reliable settings input: commits on a short debounce, on Enter, and on blur,
+// and re-syncs when idle (via the shared SectionKit control). Replaces the old
+// blur-only input that could drop an edit if the field was left without an
+// explicit blur.
 function BlurInput({
   canonical,
   onCommit,
@@ -694,19 +675,14 @@ function BlurInput({
   placeholder?: string
   type: string
 }) {
-  const [draft, setDraft] = useState(canonical)
   return (
-    <input
-      className="input"
-      onBlur={() => {
-        if (draft !== canonical) {
-          void onCommit(draft)
-        }
+    <SavingTextInput
+      canonical={canonical}
+      onCommit={(value) => {
+        void onCommit(value)
       }}
-      onChange={(event) => setDraft(event.target.value)}
       placeholder={placeholder}
       type={type}
-      value={draft}
     />
   )
 }
