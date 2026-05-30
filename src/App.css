@@ -586,6 +586,19 @@ h2 {
   box-shadow: 0 0 0 3px rgba(142, 47, 82, 0.12);
 }
 
+/* Hide the native up/down spinner on every number input app-wide — owners
+   type values directly rather than tick them. Numeric validation/step still
+   apply; this only removes the spinner UI. */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
 .summary-strip {
   display: grid;
   gap: 12px;
