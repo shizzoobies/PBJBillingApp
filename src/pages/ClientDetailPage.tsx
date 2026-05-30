@@ -416,8 +416,16 @@ function ActiveChecklistsSection({
   data: AppData
 }) {
   const today = new Date().toISOString().slice(0, 10)
+  // "Work in flight" = currently active checklists only. A checklist whose
+  // every item is done (status 'Done') is finished, not in flight, so it's
+  // excluded here. Overdue / In progress / Not started all remain.
   const checklists = sortChecklists(
-    data.checklists.filter((entry) => entry.clientId === client.id && !entry.deletedAt),
+    data.checklists.filter(
+      (entry) =>
+        entry.clientId === client.id &&
+        !entry.deletedAt &&
+        deriveChecklistStatus(entry, today) !== 'Done',
+    ),
   )
 
   return (
