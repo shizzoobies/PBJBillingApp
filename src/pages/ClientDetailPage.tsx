@@ -446,7 +446,16 @@ function ActiveChecklistsSection({
             return (
               <li className="active-checklist-row" key={checklist.id}>
                 <div className="active-checklist-main">
-                  <strong>{checklist.title}</strong>
+                  {checklist.caseId ? (
+                    <Link
+                      to={`/cases/${encodeURIComponent(checklist.caseId)}`}
+                      className="active-checklist-link"
+                    >
+                      <strong>{checklist.title}</strong>
+                    </Link>
+                  ) : (
+                    <strong>{checklist.title}</strong>
+                  )}
                   <span className={`status-badge status-${statusClass}`}>{status}</span>
                 </div>
                 <div className="active-checklist-meta">

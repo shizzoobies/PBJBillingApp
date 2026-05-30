@@ -825,6 +825,16 @@ textarea.input {
   justify-content: space-between;
 }
 
+.active-checklist-link {
+  text-decoration: none;
+  color: inherit;
+}
+
+.active-checklist-link:hover strong {
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .active-checklist-meta {
   color: var(--muted);
   display: flex;
