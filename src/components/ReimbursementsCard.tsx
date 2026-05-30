@@ -24,11 +24,14 @@ export function ReimbursementsCard({
   periodFilter,
   title = 'Expenses & reimbursements',
   subtitle = 'Out-of-pocket expenses to bill back. Each entry shows up as a line on the invoice for the month its date falls in.',
+  bare = false,
 }: {
   clientId: string
   periodFilter?: string
   title?: string
   subtitle?: string
+  /** When embedded in a section that already renders its own panel + title. */
+  bare?: boolean
 }) {
   const { data, ownerMode, addReimbursement, updateReimbursement, deleteReimbursement } =
     useAppContext()
@@ -155,20 +158,33 @@ export function ReimbursementsCard({
   const canEdit = ownerMode
 
   return (
-    <section className="panel" aria-label="Client reimbursements">
-      <div className="section-heading">
-        <div>
-          <h2 style={{ margin: 0 }}>{title}</h2>
-          <p className="muted-text" style={{ margin: '4px 0 0 0' }}>
+    <section className={bare ? 'reimbursements-body' : 'panel'} aria-label="Client reimbursements">
+      {bare ? (
+        <div className="reimbursements-bare-head">
+          <p className="muted-text" style={{ margin: 0 }}>
             {subtitle}
           </p>
+          {rows.length > 0 ? (
+            <span className="status-pill">
+              {rows.length} · {currency.format(total)}
+            </span>
+          ) : null}
         </div>
-        {rows.length > 0 ? (
-          <span className="status-pill">
-            {rows.length} · {currency.format(total)}
-          </span>
-        ) : null}
-      </div>
+      ) : (
+        <div className="section-heading">
+          <div>
+            <h2 style={{ margin: 0 }}>{title}</h2>
+            <p className="muted-text" style={{ margin: '4px 0 0 0' }}>
+              {subtitle}
+            </p>
+          </div>
+          {rows.length > 0 ? (
+            <span className="status-pill">
+              {rows.length} · {currency.format(total)}
+            </span>
+          ) : null}
+        </div>
+      )}
 
       {rows.length === 0 ? (
         <p className="checklist-empty-hint">

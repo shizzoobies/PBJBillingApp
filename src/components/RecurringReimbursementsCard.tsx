@@ -43,7 +43,14 @@ function formatStartLabel(startDate: string): string {
   }).format(parsed)
 }
 
-export function RecurringReimbursementsCard({ clientId }: { clientId: string }) {
+export function RecurringReimbursementsCard({
+  clientId,
+  bare = false,
+}: {
+  clientId: string
+  /** When embedded in a section that already renders its own panel + title. */
+  bare?: boolean
+}) {
   const {
     data,
     ownerMode,
@@ -173,19 +180,29 @@ export function RecurringReimbursementsCard({ clientId }: { clientId: string }) 
     }
   }
 
+  const subtitle =
+    'Expenses that bill on a schedule (software subscriptions, annual filings, etc.). Each one auto-populates the invoice for every matching period — no need to re-enter it each month.'
+
   return (
-    <section className="panel" aria-label="Recurring reimbursements">
-      <div className="section-heading">
-        <div>
-          <h2 style={{ margin: 0 }}>Recurring reimbursements</h2>
-          <p className="muted-text" style={{ margin: '4px 0 0 0' }}>
-            Expenses that bill on a schedule (software subscriptions, annual filings, etc.).
-            Each one auto-populates the invoice for every matching period — no need to
-            re-enter it each month.
+    <section className={bare ? 'reimbursements-body' : 'panel'} aria-label="Recurring reimbursements">
+      {bare ? (
+        <div className="reimbursements-bare-head">
+          <p className="muted-text" style={{ margin: 0 }}>
+            {subtitle}
           </p>
+          {rows.length > 0 ? <span className="status-pill">{rows.length}</span> : null}
         </div>
-        {rows.length > 0 ? <span className="status-pill">{rows.length}</span> : null}
-      </div>
+      ) : (
+        <div className="section-heading">
+          <div>
+            <h2 style={{ margin: 0 }}>Recurring reimbursements</h2>
+            <p className="muted-text" style={{ margin: '4px 0 0 0' }}>
+              {subtitle}
+            </p>
+          </div>
+          {rows.length > 0 ? <span className="status-pill">{rows.length}</span> : null}
+        </div>
+      )}
 
       {rows.length === 0 ? (
         <p className="checklist-empty-hint">No recurring reimbursements set up yet.</p>

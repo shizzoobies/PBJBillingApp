@@ -3013,6 +3013,146 @@ td strong {
   border-radius: 999px;
 }
 
+/* Always-accurate workspace sync status in the page header. */
+.sync-indicator {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 5px;
+  padding: 4px 11px;
+  white-space: nowrap;
+}
+.sync-indicator.sync-ok {
+  background: #e6f4ec;
+  color: #2f7d4f;
+}
+.sync-indicator.sync-saving {
+  background: #eef1f6;
+  color: #5a6577;
+}
+.sync-indicator.sync-bad {
+  background: #fdeaea;
+  color: #b23535;
+}
+
+/* Per-field "Saving… / Saved / Couldn't save" echo next to each label. */
+.field-label-row {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.save-badge {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 10.5px;
+  font-weight: 600;
+  gap: 3px;
+  letter-spacing: 0.01em;
+  padding: 1px 7px;
+  text-transform: none;
+}
+.save-badge-saving {
+  background: #eef1f6;
+  color: #5a6577;
+}
+.save-badge-saved {
+  background: #e6f4ec;
+  color: #2f7d4f;
+}
+.save-badge-error {
+  background: #fdeaea;
+  color: #b23535;
+}
+
+/* Collapsible + lockable client-page sections. */
+.client-section-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+.client-section.collapsed .client-section-heading {
+  margin-bottom: 0;
+}
+.section-collapse-btn {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted, #6e6571);
+  cursor: pointer;
+  display: inline-flex;
+  flex-shrink: 0;
+  justify-content: center;
+  padding: 4px;
+}
+.section-collapse-btn:hover {
+  background: var(--surface-2, #f3f0f4);
+  color: var(--berry, #8e2f52);
+}
+.client-section-title {
+  flex: 1;
+  min-width: 0;
+}
+.client-section-actions {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+.section-lock-btn {
+  align-items: center;
+  background: var(--surface-2, #f3f0f4);
+  border: 1px solid var(--line, #e4dfe6);
+  border-radius: 7px;
+  color: var(--ink, #2a2430);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 600;
+  gap: 5px;
+  padding: 6px 12px;
+}
+.section-lock-btn:hover {
+  border-color: var(--berry, #8e2f52);
+  color: var(--berry, #8e2f52);
+}
+.section-lock-btn.unlocked {
+  background: var(--berry, #8e2f52);
+  border-color: var(--berry, #8e2f52);
+  color: #fff;
+}
+.section-lock-btn.unlocked:hover {
+  color: #fff;
+  opacity: 0.92;
+}
+.client-section-body.locked {
+  opacity: 0.62;
+}
+.section-locked-hint {
+  align-items: center;
+  color: var(--muted, #6e6571);
+  display: flex;
+  font-size: 12.5px;
+  gap: 6px;
+  margin: 0 0 14px;
+}
+
+/* Bare reimbursement cards embedded inside a ClientSection. */
+.reimbursements-body {
+  display: block;
+}
+.reimbursements-bare-head {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .client-detail-title {
   margin: 0;
 }
