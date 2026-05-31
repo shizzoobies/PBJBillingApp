@@ -9,6 +9,7 @@
   --berry: #8e2f52;
   --jam: #b9475f;
   --gold: #d39b2a;
+  --pink: #ff43a4;
   --green: #23745a;
   --red: #ad3042;
   --bluegray: #425466;
@@ -33,7 +34,7 @@ html {
 
 body {
   margin: 0;
-  background: #f4f1f5;
+  background: #f6f2ef;
   color: var(--ink);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -299,6 +300,11 @@ button {
   display: flex;
   gap: 20px;
   justify-content: space-between;
+  background: #fbf3e2;
+  border: 1px solid color-mix(in srgb, var(--gold) 22%, #efe4cb);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 16px 20px;
 }
 
 .sync-banner {
@@ -529,7 +535,7 @@ button {
 
 .eyeline,
 .section-kicker {
-  color: var(--berry);
+  color: var(--pink);
   font-size: 11px;
   font-weight: 750;
   letter-spacing: 0.07em;
@@ -1050,7 +1056,7 @@ textarea.input {
 }
 
 .checklist-block header small {
-  color: var(--berry);
+  color: var(--pink);
   font-weight: 760;
   white-space: nowrap;
 }
@@ -2153,7 +2159,7 @@ td strong {
 }
 
 .invoice-preview-header > strong {
-  color: var(--berry);
+  color: var(--pink);
   font-size: 24px;
 }
 
