@@ -13,6 +13,14 @@
   --red: #ad3042;
   --bluegray: #425466;
   --shadow: 0 18px 50px rgba(48, 31, 53, 0.08);
+  /* Premium elevation scale — applied app-wide for layered depth. */
+  --shadow-sm: 0 1px 2px rgba(48, 31, 53, 0.05), 0 1px 1px rgba(48, 31, 53, 0.04);
+  --shadow-md: 0 1px 2px rgba(48, 31, 53, 0.05), 0 10px 24px rgba(48, 31, 53, 0.07);
+  --shadow-lg: 0 2px 4px rgba(48, 31, 53, 0.06), 0 18px 44px rgba(48, 31, 53, 0.12);
+  --shadow-hover: 0 3px 8px rgba(48, 31, 53, 0.08), 0 18px 38px rgba(48, 31, 53, 0.14);
+  --radius: 12px;
+  --radius-sm: 9px;
+  --ease: 0.18s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * {
@@ -522,8 +530,9 @@ button {
 .eyeline,
 .section-kicker {
   color: var(--berry);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 750;
+  letter-spacing: 0.07em;
   margin: 0 0 4px;
   text-transform: uppercase;
 }
@@ -609,18 +618,25 @@ h2 {
 .compact-input {
   background: var(--surface);
   border: 1px solid var(--line-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   color: var(--ink);
   min-height: 38px;
   outline: none;
-  padding: 8px 10px;
+  padding: 8px 11px;
+  transition: border-color var(--ease), box-shadow var(--ease);
+}
+
+.select-control:hover,
+.input:hover,
+.compact-input:hover {
+  border-color: color-mix(in srgb, var(--berry) 45%, var(--line-strong));
 }
 
 .select-control:focus,
 .input:focus,
 .compact-input:focus {
   border-color: var(--berry);
-  box-shadow: 0 0 0 3px rgba(142, 47, 82, 0.12);
+  box-shadow: 0 0 0 3.5px rgba(142, 47, 82, 0.16);
 }
 
 /* Hide the native up/down spinner on every number input app-wide — owners
@@ -645,22 +661,33 @@ input[type='number'] {
 .summary-item,
 .panel {
   background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: var(--shadow);
+  border: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  transition: box-shadow var(--ease), transform var(--ease);
 }
 
 .summary-item {
   align-items: flex-start;
   display: flex;
-  gap: 12px;
+  gap: 14px;
   min-height: 112px;
-  padding: 18px;
+  padding: 20px;
 }
 
+.summary-item:hover {
+  box-shadow: var(--shadow-hover);
+  transform: translateY(-2px);
+}
+
+/* Icon sits in a tinted rounded badge for a more premium stat-card feel. */
 .summary-item svg {
+  background: color-mix(in srgb, var(--berry) 12%, transparent);
+  border-radius: 12px;
+  box-sizing: content-box;
   color: var(--berry);
-  margin-top: 3px;
+  flex: 0 0 auto;
+  padding: 9px;
 }
 
 .summary-item span,
@@ -676,8 +703,11 @@ input[type='number'] {
 }
 
 .summary-item strong {
+  color: var(--ink);
   display: block;
-  font-size: 25px;
+  font-size: 28px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
   line-height: 1.1;
   margin: 4px 0;
 }
@@ -710,7 +740,7 @@ input[type='number'] {
 
 .panel {
   min-width: 0;
-  padding: 18px;
+  padding: 20px 22px;
 }
 
 .section-heading {
@@ -793,33 +823,54 @@ textarea.input {
 .primary-action,
 .secondary-action {
   align-items: center;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
   display: inline-flex;
   font-weight: 760;
   gap: 8px;
   justify-content: center;
   min-height: 40px;
-  padding: 9px 13px;
+  padding: 9px 15px;
+  transition: background var(--ease), box-shadow var(--ease), transform var(--ease),
+    border-color var(--ease);
 }
 
 .primary-action {
-  background: var(--berry);
-  border: 1px solid var(--berry);
+  background: linear-gradient(135deg, var(--berry), var(--jam));
+  border: 1px solid transparent;
+  box-shadow: 0 4px 12px rgba(142, 47, 82, 0.26);
   color: #fff;
 }
 
 .primary-action:hover {
-  background: #7f2849;
+  box-shadow: 0 7px 18px rgba(142, 47, 82, 0.32);
+  filter: brightness(1.04);
+  transform: translateY(-1px);
+}
+
+.primary-action:active {
+  transform: translateY(0);
+  box-shadow: 0 3px 9px rgba(142, 47, 82, 0.26);
+}
+
+.primary-action:disabled {
+  box-shadow: none;
+  filter: none;
+  opacity: 0.55;
+  transform: none;
 }
 
 .secondary-action {
   background: var(--surface);
   border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-sm);
   color: var(--plum);
 }
 
 .secondary-action:hover {
   background: var(--soft);
+  border-color: var(--plum);
+  transform: translateY(-1px);
 }
 
 .secondary-action.danger {
@@ -1945,6 +1996,8 @@ textarea.input {
 }
 
 .table-wrap {
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: var(--radius);
   overflow-x: auto;
 }
 
@@ -1955,20 +2008,40 @@ table {
 
 th,
 td {
-  border-bottom: 1px solid var(--line);
-  padding: 12px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  padding: 13px 14px;
   text-align: left;
   vertical-align: middle;
 }
 
+/* Hairline-free last row so the rounded container reads clean. */
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+thead th {
+  background: var(--soft);
+}
+
 th {
   color: var(--bluegray);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 780;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 td {
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+tbody tr {
+  transition: background var(--ease);
+}
+
+tbody tr:hover {
+  background: color-mix(in srgb, var(--soft) 70%, transparent);
 }
 
 td strong {
@@ -4693,6 +4766,39 @@ td strong {
 .ghost-action:hover {
   background: var(--soft);
   border-color: var(--plum);
+  transform: translateY(-1px);
+}
+
+/* ---- Premium pass v1: shared interaction polish --------------------------- */
+
+.danger-action {
+  transition: background var(--ease), border-color var(--ease), transform var(--ease);
+}
+.danger-action:hover {
+  transform: translateY(-1px);
+}
+
+/* Gentle lift on the list "cards" so rows feel tactile without jitter. */
+.plan-row,
+.active-checklist-row {
+  transition: box-shadow var(--ease), border-color var(--ease), transform var(--ease);
+}
+.plan-row:hover,
+.active-checklist-row:hover {
+  border-color: color-mix(in srgb, var(--berry) 35%, var(--line));
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+/* Crisp, aligned figures for money/hours across summaries and invoices. */
+.invoice-line strong,
+.invoice-total strong,
+.status-pill {
+  font-variant-numeric: tabular-nums;
+}
+
+h2 {
+  letter-spacing: -0.01em;
 }
 
 /* --- Settings page ------------------------------------------------------- */
