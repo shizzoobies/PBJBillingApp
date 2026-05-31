@@ -1,264 +1,111 @@
-# PB&J Strategic Accounting Cross-Agent Handoff
+# PB&J Strategic Accounting — Cross-Agent Handoff
 
-## Project Identity
+_Last updated: 2026-05-30_
 
-- Project name: `PB&J Strategic Accounting`
-- Local workspace path: `D:\PBJ Accounting Work\AP For Time Stuff`
-- GitHub repo: `https://github.com/shizzoobies/PBJBillingApp.git`
-- Current branch in this workspace: `main`
-- Current checked-out commit in this workspace: `c1aab9677cebab3614d30fa18cdf9b08c344761e`
-- Handoff updated on: `2026-04-30`
+## Project identity
 
-## Very Important Current Reality
+- App: **PB&J Strategic Accounting** — a bookkeeping/time-tracking/billing SaaS for an accounting firm.
+- Local workspace: `D:\PBJ Accounting Work\AP For Time Stuff`
+- GitHub repo: `https://github.com/shizzoobies/PBJBillingApp.git` (branch `main`)
+- Live app (Railway, auto-deploys on push to `main`): `https://pbjbillingapp-production.up.railway.app`
+- People: **Alex Anderson** (`asoalexander@gmail.com`) is the developer + an Owner. **Brittany Ferguson** (`emp-patrice`) is the firm owner/client the work is for. "push" / "go ahead" is the go signal to ship.
 
-The GitHub repo is behind the real working state.
+## Current reality (IMPORTANT — differs from the old handoff)
 
-This local workspace contains important uncommitted and unpushed changes that do **not** exist yet on GitHub. Any future Codex or Claude Code session must understand this before assuming the repo is current.
+**GitHub `main` is the single source of truth and is fully current.** Every change is committed and pushed immediately, and Railway auto-deploys `main`. The old "GitHub is behind local" note is obsolete — ignore it. Start from the repo; the local workspace and remote are in sync.
 
-That means:
+## Workflow (follow this exactly)
 
-1. If a new agent starts from GitHub alone, it will **not** have the latest backend auth, persistence, checklist extraction, recurring checklist template work, or the new admin reporting UI.
-2. Until these local changes are committed and pushed, GitHub is only the last published baseline, not the true current state.
-3. Future work should be done with a GitHub-first discipline:
-   - pull latest remote state
-   - reconcile against this handoff and the local file list below
-   - commit intentional changes
-   - push to GitHub at the end of each meaningful work session
+1. Make the change.
+2. **Verify:** `npm run verify` (= `eslint .` + `tsc -b && vite build` + `vitest run`). Tests must stay green (currently **171 tests / 15 files**).
+3. Commit with a descriptive multi-line message ending with the `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>` trailer. One feature per commit.
+4. Push to `main` → Railway auto-deploys.
+5. **Confirm the deploy** by diffing the bundle hash:
+   `curl -s https://pbjbillingapp-production.up.railway.app/ | grep -o 'index-[A-Za-z0-9_-]*\.js'`
+   Poll until the hash **changes** from the previous one. **Gotcha:** Railway often briefly serves an *intermediate* build — after the hash changes, `sleep 20` and re-check that it's the **same** (stable) hash before trusting it. Then optionally `curl` the `/assets/<hash>.js|.css` and `grep` for a string unique to your change to confirm it's really live.
+6. Tell the user what to test, and remind them to hard-refresh (Ctrl+Shift+R) since Railway may serve the prior build for ~a minute.
 
-## Required Workflow For Any Next Agent
+### Hard constraints
+- **Never commit `package-lock.json`** (gitignored on purpose; committing it breaks Railway `npm ci`). Never run `npm install` casually.
+- `rescue-login.mjs` stays gitignored.
+- Estimated-hours fields are **informational only** — must NEVER affect invoice totals.
+- Don't push `--force` to main; don't skip hooks.
 
-Use this exact operating model unless the user says otherwise:
+## Stack & architecture
 
-1. Clone or pull the repo from:
-   - `https://github.com/shizzoobies/PBJBillingApp.git`
-2. Read this file first:
-   - `HANDOFF.md`
-3. Verify whether the local machine still has the richer workspace at:
-   - `D:\PBJ Accounting Work\AP For Time Stuff`
-4. If yes, compare GitHub state to the local workspace state before making assumptions.
-5. Preserve existing local work. Do not overwrite or revert it casually.
-6. After each meaningful milestone:
-   - run verification
-   - commit
-   - push to GitHub
-7. Keep GitHub as the shared source of truth going forward so Codex, Claude Code, and any other coding assistant can continue from the same state.
+- **Frontend:** React 19 + TypeScript + Vite. Entry `src/App.tsx` (large — holds the context provider + all the mutation handlers). Pages in `src/pages/`. Shared UI in `src/components/`. Styles all in `src/App.css` (one big file). Types in `src/lib/types.ts`. Pure logic in `src/lib/utils.ts`. API client in `src/lib/api.ts`.
+- **Server:** `server.js` (plain Node http server, route-matched by path/method).
+- **Persistence:** `db/store.js` — **dual backend**: Postgres (when `DATABASE_URL` is set, i.e. on Railway) AND a local JSON file fallback for dev. **Any data-model change must update BOTH paths.** Schema lives in the migration blocks inside `store.js` (`create table if not exists` + `alter table ... add column if not exists` — idempotent, run on every boot) and `db/schema.sql`.
+- **Auth:** email magic-link + password + optional TOTP 2FA. Sessions cookie `pbj_session`. Gotcha: there's a `user_sessions` table (current) vs a legacy `sessions` table — use `user_sessions`.
 
-## Current Working Tree Status
+### Data flow (critical mental model)
+- `GET /api/app-data` returns the whole workspace, **scoped per session** (`scopeAppDataForSession` in `server.js`): owners get everything; non-owners get only their assigned clients/checklists/own time entries, with billing rates stripped.
+- **Most workspace edits (clients, plans, contacts, templates) persist via a bulk autosave**: the frontend mutates local `data` via `updateWorkspaceData`, which debounces (~250ms) and `PUT`s the entire `data` to `/api/app-data` (`saveAppData`). There is **no per-field endpoint** for these — the bulk save is the only persistence path. `forceNextSaveRef` guarantees workspace edits aren't skipped.
+- **Some operations use dedicated endpoints** (and `applyServerDataUpdate`, which increments a skip-counter so the echo doesn't re-save): time entries (`POST /api/time-entries`), checklist item toggles, reimbursements CRUD, checklist-template create/apply/duplicate, assigned-team, firm settings (`PUT /api/firm-settings`).
+- **Bulk write is wipe-and-rewrite inside one transaction** (`store.write`): it deletes and re-inserts every table from the payload. It's **all-or-nothing** — one bad row throws and the whole save 500s (frontend shows "Couldn't save"). `filterBulkSaveOrphans` pre-drops rows whose `clientId`/`templateId` FK no longer exists (note: empty/`''` clientId is falsy → skipped → kept, which is how administrative time entries survive).
 
-At time of handoff, this workspace has these local changes:
+### Gotchas that have bitten us (read before touching data)
+- **Adding a `Client` field** requires, in lockstep: (1) `Client` type in `types.ts`; (2) the clients **bulk INSERT** in `store.js` (column list + `$N` placeholder + value array must stay aligned — currently **31 columns**); (3) the clients **read mapping**; (4) an `alter table clients add column if not exists ...` migration. Miss any and the field silently doesn't persist while the save still returns 200 (the "green save, gone after refresh" bug class).
+- **Normalizers silently drop new fields.** `ensureTemplateStages`, `normalizeSubItems`/`normalizeSubSubItems` (store), and `sanitizeAppData` rebuild objects — if you add a field to a checklist node/template and don't carry it through these, it vanishes on save. (This caused the "subtask due dates reset" and "day-of-month wouldn't engage" bugs.)
+- **`sanitizeAppData`** (store) clamps numbers / drops bad dates before write; it keeps unknown fields (spreads), so plain new fields pass through, but it does coerce known numeric fields.
+- **Frontend input reliability:** use the shared `SectionKit` controls. Plain blur-only inputs lose data if you type then refresh/navigate without clicking away. The shared `SavingTextInput`/`SavingNumberInput`/`SavingTextarea` commit on **debounce (700ms) + Enter + blur**, and resync to the canonical value when idle. They use a **focus `useState`, NOT a ref** — the `react-hooks/refs` lint rule forbids reading `.current` during render, and `react-hooks/set-state-in-effect` forbids sync setState in effects (mirror sync state into a ref inside a `useEffect` instead).
+- `SaveNumberField` passes `null` through on clear (don't swallow it) so clearing a number actually persists.
+- Locked sections use the `inert` attribute on the body (React 19 supports it) so the whole subtree is non-interactive without threading `disabled` everywhere.
 
-- modified:
-  - `README.md`
-  - `package-lock.json`
-  - `package.json`
-  - `server.js`
-  - `src/App.css`
-  - `src/App.tsx`
-  - `vite.config.ts`
-- untracked:
-  - `HANDOFF.md`
-  - `db/`
-  - `output/`
-  - `prototype-data.json`
-  - `railway.json`
+## What's built (current feature set)
 
-## What Has Been Built Locally
+- **Auth & team:** magic-link/password login + 2FA, owner-managed team (invite, roles, sessions, soft-delete inactive members).
+- **Clients:** profile, contacts (multi-select from a shared Contacts directory), address, billing (hourly **or** monthly), per-role estimated hours (Bookkeeper/Accountant/CFO, informational), plans/services chips, invoice settings (payment terms, footer, toggles), logo. **Monthly service package** dropdown (7 named tiers in `MONTHLY_SERVICE_TIERS`) drives the invoice line label when on monthly billing.
+- **Checklists:** one-time + recurring templates → materialized live instances ("cases" for multi-stage). Per-node due dates (specific date or day-of-month) at item/sub-item/sub-sub-item level. Recycle bin. Standard (client-agnostic) blueprint templates + "apply to client".
+- **Time tracking:** live timer + gated manual entry, approval workflow (pending → approved/rejected), weekly submissions, month-end timesheet locks. **Administrative time** (company meetings/internal): a checkbox on both timer and manual forms — no client/task, not billable, notes required (`TimeEntry.isAdministrative`, nullable `client_id` + `is_administrative` column).
+- **Invoices / billing:** monthly period selector; subscription + hourly; one-off + recurring reimbursements (auto-populated on matching periods); reimbursements have inline edit.
+- **Reports / productivity / gantt / dashboard:** owner analytics.
+- **Settings (owner):** firm branding (name, tagline, logo, sidebar colors), address/contact/business identifiers, **"Default values for new clients"** (`FirmSettings.clientDefaults` → `client_defaults` JSON column) that pre-fill the Add-client form, plus 2FA + password management.
+- **Contacts:** shared directory with CSV import (dedupe/merge), inline-editable fields incl. notes.
 
-### App / stack
+## Recent work (this batch of sessions) — what a fresh context won't know
 
-- React + TypeScript + Vite frontend
-- Node server in `server.js`
-- backend persistence layer in `db/store.js`
-- Postgres-ready schema in `db/schema.sql`
-- local file fallback persistence for development
+- **Shared UI kit:** `src/components/SectionKit.tsx` + `src/lib/useSaveFlash.ts`. Exports `CollapsibleSection` (collapse + optional lock, **unlocked by default**, state persisted to `localStorage` keyed by section title — `pbj.section.<title>.{locked,collapsed}`), `SaveBadge`, `SavingTextInput/SavingNumberInput/SavingTextarea`, and field wrappers (`SaveTextField`, `SaveNumberField`, `SaveSelectField`, `SaveTextareaField`, `SaveToggleField`).
+- **Save confidence:** per-field "Saving… / Saved ✓ / Couldn't save" badges (tied to `dataSyncState`), plus an always-on header sync banner ("All changes saved / Saving… / Couldn't save — retrying / Offline") in `AppLayout` (`syncMessage` computed in `App.tsx`).
+- Applied collapse/lock + reliable inputs to **Client detail, Contacts, Plans, Settings (firm fields), Team**. (Time + Checklists pages were intentionally left — they're explicit-submit / already commit-on-change; Checklists already has its own collapse.)
+- **Premium UI pass v1** (global, CSS-only in `App.css`): elevation tokens (`--shadow-sm/md/lg/hover`, `--radius`, `--ease`), softer floating panels, gradient primary buttons with hover/press lift, restyled tables (rounded container, tinted uppercase header, row hover, tabular figures), refined inputs/focus rings, summary **stat cards** with tinted icon badge, hover lifts on list rows.
+- **Sidebar:** now sticky (`align-self:start; height:100vh; position:sticky; top:0; overflow-y:auto`) + elevated (right-edge shadow, z-index) — follows scroll instead of being flat.
+- **Time approvals:** owners are now included in the queue, so an owner can see + approve their **own** logged time (server already allowed it; the UI was filtering owners out).
+- Recurring-checklists card on the client page (search + "View" deep-link via `?focusTemplate=<id>` which auto-expands/scrolls the template on the Checklists page).
+- Number-input spinners hidden globally.
 
-### Auth / sessions
+## Known backlog / parked
 
-- login is now session-backed
-- cookie session name: `pbj_session`
-- endpoints exist for:
-  - `GET /api/login-options`
-  - `GET /api/session`
-  - `POST /api/login`
-  - `POST /api/logout`
-- seeded demo users:
-  - Patrice Bell - Owner
-  - Avery Johnson - Senior Bookkeeper
-  - Jordan Ellis - Bookkeeper
-- default demo password:
-  - `pbj-demo`
-  - can be overridden with `AUTH_DEMO_PASSWORD`
+- **Security backlog is parked** until the user says "pick up the security backlog" (after EOM). Items live in the user's memory file `security-notes.md`: deferred H3, Batch 6 (H5/M1), Batch 7 (M7/L4). Shipped: Batches 1–5 + the Origin same-origin fix.
+- **Premium UI next layers** (discussed, not done): dashboard "hero", invoice-as-premium-document (letterhead/emphasized totals), empty states (icon + prompt), loading skeletons. Intensity chosen: "noticeably elevated."
+- Possible future: extract more owner-only mutations off the bulk `PUT /api/app-data`; split `App.tsx`; CSV/date-range report exports.
 
-### Persistence / API progress
+## Important files
 
-- `GET /health` exists
-- `GET /api/app-data` exists
-- `PUT /api/app-data` exists
-  - important: this is now effectively owner/admin-only
-- dedicated route already extracted:
-  - `POST /api/time-entries`
-- dedicated checklist route already extracted:
-  - `POST /api/checklists/:checklistId/items/:itemId/toggle`
+- `src/App.tsx` — context provider + all mutation handlers (timer, logTime, updateClient, template/checklist CRUD, autosave effect, sync state).
+- `src/App.css` — all styles + the design tokens (`:root`).
+- `src/components/SectionKit.tsx`, `src/lib/useSaveFlash.ts` — the shared save/lock/collapse kit.
+- `src/components/AppLayout.tsx` — shell, sidebar, header sync banner.
+- `src/lib/types.ts` — all types + `DEFAULT_FIRM_SETTINGS`, `MONTHLY_SERVICE_TIERS`.
+- `src/lib/utils.ts` — `getInvoice`, materializer (`materializeRecurringChecklists`, `ensureTemplateStages`, due-date resolvers), status helpers.
+- `server.js` — all API routes + `scopeAppDataForSession`.
+- `db/store.js` — dual-backend persistence, schema migrations, bulk write/read.
+- `src/pages/` — `ClientDetailPage`, `ClientsPage`, `TimePage`, `TimeApprovalsPage`, `ContactsPage`, `PlansPage`, `SettingsPage`, `ChecklistsPage`, `CaseDetailPage`, etc.
 
-### Checklist system state
-
-The checklist system is no longer just flat ad hoc checklists.
-
-Local work now supports:
-
-- recurring checklist templates in the app data model
-- template frequency options:
-  - `daily`
-  - `weekly`
-  - `monthly`
-  - `quarterly`
-  - `annually`
-- owner/admin can:
-  - create templates
-  - change titles
-  - change assigned employee
-  - change client
-  - change frequency
-  - change next due date
-  - toggle active/inactive
-  - add/remove template items
-- employees can:
-  - only see assigned live checklist instances
-  - only check off items on assigned checklist instances
-  - they cannot add/remove template items through the intended flow
-- recurring live checklist instances are materialized from templates when app data is loaded
-
-### Reporting state
-
-An owner/admin reporting section now exists in the frontend.
-
-It currently includes:
-
-- month summary
-  - tracked hours
-  - billable hours
-  - internal hours
-  - projected billing
-  - active client count
-  - staff coverage count
-- employee reporting
-  - tracked hours per person
-  - billable/internal split
-  - entry count
-  - client count
-- client reporting
-  - tracked hours per client
-  - billable/internal split
-  - staff count
-  - projected billing
-- category/work-type breakdown
-
-### Billing / invoices
-
-- invoice draft and billing queue UI still exists
-- monthly period selector drives billing context and reports
-- subscription and hourly client billing still works in the prototype UI
-
-### Railway / deployment prep
-
-- `railway.json` exists
-- Railway doc exists at:
-  - `output/doc/Railway Setup Guide - PBJ Strategic Accounting.docx`
-
-## Important Files
-
-- frontend app:
-  - `src/App.tsx`
-- frontend styles:
-  - `src/App.css`
-- API/server:
-  - `server.js`
-- persistence layer:
-  - `db/store.js`
-- schema:
-  - `db/schema.sql`
-- seed data:
-  - `prototype-data.json`
-- deployment config:
-  - `railway.json`
-- setup notes:
-  - `README.md`
-- Railway walkthrough docx:
-  - `output/doc/Railway Setup Guide - PBJ Strategic Accounting.docx`
-
-## Verification Most Recently Completed
-
-These checks passed locally in this workspace:
-
-- `npm run lint`
-- `npm run build`
-- owner authenticated app-data load
-- employee blocked from owner-only whole-workspace update path with `403`
-- assigned employee checklist toggle still works
-- recurring templates and generated live checklists load correctly
-
-## What The Next Agent Should Do First
-
-If the goal is to continue development safely across tools, the next agent should:
-
-1. Pull or clone the GitHub repo.
-2. Read this handoff.
-3. Compare GitHub state against the richer local workspace.
-4. Stage and commit the current local changes intentionally.
-5. Push them to GitHub so the remote catches up to the real state.
-6. Only then continue feature work.
-
-## Suggested Commit Strategy
-
-If the next agent is asked to publish the current local work, a reasonable commit split would be:
-
-1. backend auth + persistence + Railway prep
-2. dedicated checklist API extraction + permission hardening
-3. recurring checklist template system + admin reporting UI
-
-If the user prefers a single catch-up commit, that is also acceptable, but it should still be pushed immediately after verification.
-
-## Best Next Product Steps
-
-After GitHub is brought up to date, the next best work items are:
-
-1. Extract more owner-only mutations off `PUT /api/app-data`
-   - checklist template CRUD endpoints
-   - client mutations
-   - plan mutations
-2. Add export/report actions
-   - CSV export for employee/client reports
-   - custom date range reporting in addition to monthly reporting
-3. Normalize checklist recurrence further
-   - stronger instance generation rules
-   - maybe background generation later
-4. Split `src/App.tsx` into smaller modules/components
-5. Verify the app against a real Railway Postgres `DATABASE_URL`
-6. Commit and push every meaningful milestone
-
-## Prompt For The Next Agent
+## Prompt for the next agent
 
 ```text
 Continue the PB&J Strategic Accounting app.
 
-GitHub repo: https://github.com/shizzoobies/PBJBillingApp.git
-Primary local workspace used so far: D:\PBJ Accounting Work\AP For Time Stuff
+GitHub repo (source of truth, auto-deploys to Railway): https://github.com/shizzoobies/PBJBillingApp.git
+Local workspace: D:\PBJ Accounting Work\AP For Time Stuff
+Live: https://pbjbillingapp-production.up.railway.app
 
-Important:
-- The GitHub repo is behind the true local state.
-- Read HANDOFF.md before making assumptions.
-- Compare local workspace changes against GitHub before proceeding.
-- Preserve local work.
-- After verification, commit and push so GitHub becomes the shared source of truth for future Codex and Claude Code sessions.
+Read HANDOFF.md fully first — especially "Workflow", "Data flow", and "Gotchas".
 
-Current local feature state includes:
-- session-backed login
-- backend persistence layer with file fallback and Postgres-ready schema
-- dedicated time-entry API route
-- checklist toggle API route
-- owner-only recurring checklist template management
-- employee-assigned live checklist instances
-- owner/admin reporting section
+Workflow: make change → `npm run verify` (must stay green, 171 tests) → commit (descriptive, Co-Authored-By trailer) → push main → confirm Railway deploy via bundle-hash diff (watch for intermediate builds; wait for a stable hash). Never commit package-lock.json.
 
-If publishing current work is allowed, first bring GitHub up to date with the local workspace, then continue feature development.
+When changing the data model, update BOTH the Postgres and file-fallback paths in db/store.js (type + INSERT alignment + read mapping + add-column migration), and make sure normalizers (ensureTemplateStages / normalizeSubItems / sanitizeAppData) preserve the new field.
+
+For editable UI, reuse src/components/SectionKit.tsx controls so fields save reliably (debounce+Enter+blur) and show save badges.
 ```
