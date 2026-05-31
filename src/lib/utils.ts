@@ -717,10 +717,14 @@ export function getInvoice(
       typeof client.monthlyRate === 'number' && !Number.isNaN(client.monthlyRate)
         ? client.monthlyRate
         : 0
+    // Prefer the explicitly-picked monthly service package (e.g. "The
+    // Classic"); else fall back to the subscribed plan names; else generic.
     const serviceLabel =
-      subscribedPlans.length > 0
-        ? subscribedPlans.map((item) => item.name).join(', ')
-        : 'Monthly service'
+      client.monthlyServiceTier && client.monthlyServiceTier.trim()
+        ? client.monthlyServiceTier
+        : subscribedPlans.length > 0
+          ? subscribedPlans.map((item) => item.name).join(', ')
+          : 'Monthly service'
     const lines: InvoiceLine[] = [
       {
         label: serviceLabel,

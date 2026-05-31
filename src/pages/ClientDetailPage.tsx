@@ -20,6 +20,7 @@ import { recordClientProfileActivity, setClientAssignedTeamRequest } from '../li
 import { useSaveFlash } from '../lib/useSaveFlash'
 import {
   ApiError,
+  MONTHLY_SERVICE_TIERS,
   type AppData,
   type BillingMode,
   type Client,
@@ -398,6 +399,17 @@ function BillingSectionBody({
           helper="Used to bill every billable hour worked for this client."
         />
       )}
+      {isMonthly ? (
+        <SaveSelectField
+          label="Monthly service package"
+          value={client.monthlyServiceTier ?? ''}
+          onCommit={(value) => onCommit({ monthlyServiceTier: value || undefined })}
+          options={[
+            { value: '', label: 'Generic (no package)' },
+            ...MONTHLY_SERVICE_TIERS.map((tier) => ({ value: tier, label: tier })),
+          ]}
+        />
+      ) : null}
       <EstimatedRoleHours client={client} onCommit={onCommit} />
       <ChipField
         label="Plans / services"

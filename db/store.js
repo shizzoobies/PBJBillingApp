@@ -1540,6 +1540,11 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists contact_ids text[] not null default '{}'`,
       )
+      // Named monthly service package (e.g. "The Classic") for subscription
+      // clients — drives the invoice line label. Additive + nullable.
+      await this.pool.query(
+        `alter table clients add column if not exists monthly_service_tier text`,
+      )
 
       // BILLING-CRITICAL MIGRATION — preserve every client's current
       // effective monthly amount before pricing left the plan. Guarded on
@@ -2342,7 +2347,7 @@ export class AppDataStore {
                    city, state, postal_code, logo_url, payment_terms,
                    footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
                    invoice_hide_internal_hours, invoice_group_by_category,
-                   assigned_bookkeeper_ids
+                   assigned_bookkeeper_ids, monthly_service_tier
             from clients
             order by name asc
           `),
@@ -2574,6 +2579,7 @@ export class AppDataStore {
             planIds: normalizedPlanIds,
             contactIds,
             monthlyRate: monthlyRate === null ? undefined : monthlyRate,
+            monthlyServiceTier: row.monthly_service_tier ?? undefined,
             ...mapEstimatedRoleHours({
               legacy: row.estimated_monthly_hours,
               bookkeeper: row.estimated_bookkeeper_hours,
@@ -3009,9 +3015,9 @@ export class AppDataStore {
                 invoice_hide_internal_hours, invoice_group_by_category,
                 assigned_bookkeeper_ids,
                 estimated_bookkeeper_hours, estimated_accountant_hours,
-                estimated_cfo_hours, updated_at
+                estimated_cfo_hours, monthly_service_tier, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, now())
             `,
             [
               clientRecord.id,
@@ -3071,6 +3077,10 @@ export class AppDataStore {
               clientRecord.estimatedCfoHours === null
                 ? null
                 : Number(clientRecord.estimatedCfoHours),
+              typeof clientRecord.monthlyServiceTier === 'string' &&
+              clientRecord.monthlyServiceTier.trim()
+                ? clientRecord.monthlyServiceTier
+                : null,
             ],
           )
 

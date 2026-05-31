@@ -1,5 +1,19 @@
 export type Role = 'employee' | 'owner'
 export type BillingMode = 'hourly' | 'subscription'
+
+/**
+ * The firm's named monthly service packages. Picked per-client when billing
+ * mode is 'subscription' and used as the invoice line label.
+ */
+export const MONTHLY_SERVICE_TIERS = [
+  'The Crustless',
+  'Just the Crust',
+  'The Classic',
+  'The Jelly Royale',
+  'The Ultimate Spread',
+  'The Nutty Buddy',
+  'The Rescue Spread',
+] as const
 export type ChecklistFrequency =
   | 'daily'
   | 'weekly'
@@ -45,6 +59,13 @@ export type Client = {
    * `billingMode` is 'subscription'.
    */
   monthlyRate?: number
+  /**
+   * Which named monthly service package this client is on (e.g. "The
+   * Classic"). Only meaningful when `billingMode` is 'subscription'. Drives
+   * the invoice line label. One of MONTHLY_SERVICE_TIERS, or unset for a
+   * generic "Monthly service" line.
+   */
+  monthlyServiceTier?: string
   /**
    * @deprecated Legacy single informational estimated-monthly-hours field.
    * Superseded by the per-role fields below (`estimatedBookkeeperHours`,
