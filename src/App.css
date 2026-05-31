@@ -62,10 +62,35 @@ button {
   display: flex;
   flex-direction: column;
   gap: 28px;
-  min-height: 100vh;
   padding: 24px 18px;
+  /* Pin to the top of the viewport and follow the user as the main content
+     scrolls. `align-self: start` stops the grid from stretching the sidebar
+     to the full page-content height — which would leave `sticky` nothing to
+     do (the old "flat" behavior). The fixed viewport height + overflow lets a
+     long nav scroll inside the bar without getting clipped. */
+  align-self: start;
   position: sticky;
   top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  /* Elevation: lift the sidebar above the scrolling content. */
+  z-index: 20;
+  box-shadow: 6px 0 24px rgba(40, 20, 40, 0.22);
+  /* Slim, brand-tinted internal scrollbar (Firefox). */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+}
+
+/* Slim internal scrollbar (WebKit/Chromium). */
+.sidebar::-webkit-scrollbar {
+  width: 8px;
+}
+.sidebar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+}
+.sidebar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.34);
 }
 
 .brand-lockup {
