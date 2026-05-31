@@ -1,5 +1,5 @@
-import { ExternalLink, FileText, Printer } from 'lucide-react'
-import { useMemo } from 'react'
+import { ExternalLink, FileText, Plus, Printer, RotateCcw, Sliders, Trash2 } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import type {
@@ -30,6 +30,117 @@ type DisplayInvoice = {
   hideTimeBreakdown: boolean
   hideInternal: boolean
   groupByCategory: boolean
+}
+
+// ---- Build-invoice (customize-before-print) draft model -------------------
+// Session-only: the draft lives in component state, seeded from the generated
+// invoice. It is intentionally NOT persisted (v1). Switching client/period or
+// refreshing re-seeds from the freshly generated invoice.
+
+type IncludeFlags = {
+  contactName: boolean
+  email: boolean
+  phone: boolean
+  address: boolean
+  logo: boolean
+  serviceLabel: boolean
+  paymentTerms: boolean
+  footerNote: boolean
+  payLink: boolean
+}
+
+type DraftLine = InvoiceLine & { id: string }
+
+type InvoiceDraft = {
+  include: IncludeFlags
+  lines: DraftLine[]
+  intro: string
+  footer: string
+}
+
+type CustomMeta = { include: IncludeFlags; intro: string; footer: string }
+
+const INCLUDE_FIELDS: Array<{ key: keyof IncludeFlags; label: string }> = [
+  { key: 'contactName', label: 'Contact name' },
+  { key: 'email', label: 'Email' },
+  { key: 'phone', label: 'Phone' },
+  { key: 'address', label: 'Mailing address' },
+  { key: 'logo', label: 'Logo' },
+  { key: 'serviceLabel', label: 'Service / plan label' },
+  { key: 'paymentTerms', label: 'Payment terms' },
+  { key: 'footerNote', label: 'Footer note' },
+  { key: 'payLink', label: 'QuickBooks pay link' },
+]
+
+let draftLineSeq = 0
+function makeLineId() {
+  draftLineSeq += 1
+  return `draft-line-${draftLineSeq}`
+}
+
+function hasText(value?: string | null) {
+  return Boolean(value && value.trim().length > 0)
+}
+
+function hasAddress(client: Client) {
+  return (
+    hasText(client.addressLine1) ||
+    hasText(client.addressLine2) ||
+    hasText(client.city) ||
+    hasText(client.state) ||
+    hasText(client.postalCode)
+  )
+}
+
+function getServiceLabel(client: Client) {
+  if (client.billingMode === 'subscription') {
+    return client.monthlyServiceTier || 'Monthly service'
+  }
+  return 'Billable hours'
+}
+
+function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean): InvoiceDraft {
+  return {
+    include: {
+      contactName: hasText(client.contactName),
+      email: hasText(client.email),
+      phone: hasText(client.phone),
+      address: hasAddress(client),
+      logo: hasText(client.logoUrl) || hasFirmLogo,
+      serviceLabel: true,
+      paymentTerms: hasText(client.paymentTerms),
+      footerNote: hasText(client.footerNote),
+      payLink: hasText(client.quickbooksPayUrl),
+    },
+    lines: display.lines.map((line) => ({
+      id: makeLineId(),
+      label: line.label,
+      detail: line.detail,
+      amount: line.amount,
+    })),
+    intro: '',
+    footer: client.footerNote ?? '',
+  }
+}
+
+function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoice {
+  const lines: InvoiceLine[] = draft.lines.map((line) => ({
+    label: line.label,
+    detail: line.detail,
+    amount: line.amount,
+  }))
+  const total = lines.reduce(
+    (sum, line) => sum + (Number.isFinite(line.amount) ? line.amount : 0),
+    0,
+  )
+  return {
+    invoice: { ...baseInvoice, lines, total },
+    lines,
+    groupSubtotals: [],
+    hideTimeBreakdown: false,
+    hideInternal: true,
+    groupByCategory: false,
+  }
 }
 
 function formatEntryDate(date: string) {
@@ -147,6 +258,7 @@ export function InvoicesPage() {
     billingPeriod,
     printInvoice,
     ownerMode,
+    firmSettings,
   } = useAppContext()
 
   const selectedClient =
@@ -179,9 +291,56 @@ export function InvoicesPage() {
   )
   const billingPeriodLabel = getBillingPeriodLabel(billingPeriod)
 
+  const [customizing, setCustomizing] = useState(false)
+  const [draft, setDraft] = useState<InvoiceDraft | null>(null)
+  const hasFirmLogo = hasText(firmSettings?.logoUrl)
+  const seedKey = `${selectedClient?.id ?? ''}::${billingPeriod}`
+  const seededKeyRef = useRef<string | null>(null)
+
+  // Re-seed the draft only when the client or billing period changes (not on
+  // every keystroke or time-entry update), so her edits aren't clobbered while
+  // she's building the same invoice.
+  useEffect(() => {
+    if (!display || !selectedClient) return
+    if (seededKeyRef.current === seedKey) return
+    seededKeyRef.current = seedKey
+    setDraft(seedDraft(display, selectedClient, hasFirmLogo))
+  }, [seedKey, display, selectedClient, hasFirmLogo])
+
+  const customDisplay = useMemo(
+    () => (customizing && draft && baseInvoice ? draftToDisplay(draft, baseInvoice) : null),
+    [customizing, draft, baseInvoice],
+  )
+
   if (!ownerMode || !selectedClient || !baseInvoice || !display) {
     return null
   }
+
+  const effectiveDisplay = customizing && customDisplay ? customDisplay : display
+  const customMeta: CustomMeta | null =
+    customizing && draft
+      ? { include: draft.include, intro: draft.intro, footer: draft.footer }
+      : null
+
+  const resetDraft = () => setDraft(seedDraft(display, selectedClient, hasFirmLogo))
+  const updateLine = (id: string, patch: Partial<DraftLine>) =>
+    setDraft((prev) =>
+      prev
+        ? { ...prev, lines: prev.lines.map((line) => (line.id === id ? { ...line, ...patch } : line)) }
+        : prev,
+    )
+  const addLine = () =>
+    setDraft((prev) =>
+      prev
+        ? { ...prev, lines: [...prev.lines, { id: makeLineId(), label: '', detail: '', amount: 0 }] }
+        : prev,
+    )
+  const removeLine = (id: string) =>
+    setDraft((prev) => (prev ? { ...prev, lines: prev.lines.filter((line) => line.id !== id) } : prev))
+  const setInclude = (key: keyof IncludeFlags, value: boolean) =>
+    setDraft((prev) => (prev ? { ...prev, include: { ...prev.include, [key]: value } } : prev))
+  const setIntro = (intro: string) => setDraft((prev) => (prev ? { ...prev, intro } : prev))
+  const setFooter = (footer: string) => setDraft((prev) => (prev ? { ...prev, footer } : prev))
 
   return (
     <>
@@ -192,10 +351,20 @@ export function InvoicesPage() {
               <p className="section-kicker">Owner billing</p>
               <h2>Invoices</h2>
             </div>
-            <button className="primary-action" onClick={printInvoice} type="button">
-              <Printer size={16} />
-              Print invoice
-            </button>
+            <div className="invoice-header-actions">
+              <button
+                className="ghost-action"
+                onClick={() => setCustomizing((value) => !value)}
+                type="button"
+              >
+                <Sliders size={16} />
+                {customizing ? 'Use generated' : 'Customize'}
+              </button>
+              <button className="primary-action" onClick={printInvoice} type="button">
+                <Printer size={16} />
+                Print invoice
+              </button>
+            </div>
           </div>
           <label className="field">
             <span>Client</span>
@@ -216,7 +385,20 @@ export function InvoicesPage() {
             <span>{baseInvoice.entryCount} billable entries</span>
             <span>{formatHours(baseInvoice.billableMinutes)} tracked</span>
           </div>
-          <InvoicePreview display={display} />
+          {customizing && draft ? (
+            <InvoiceBuilder
+              draft={draft}
+              total={effectiveDisplay.invoice.total}
+              onToggleInclude={setInclude}
+              onUpdateLine={updateLine}
+              onAddLine={addLine}
+              onRemoveLine={removeLine}
+              onIntro={setIntro}
+              onFooter={setFooter}
+              onReset={resetDraft}
+            />
+          ) : null}
+          <InvoicePreview display={effectiveDisplay} custom={customMeta} />
           {ownerMode ? (
             <ReimbursementsCard
               clientId={selectedClient.id}
@@ -237,9 +419,155 @@ export function InvoicesPage() {
       </section>
 
       <div className="print-document" aria-hidden="true">
-        <InvoiceDocument display={display} />
+        <InvoiceDocument display={effectiveDisplay} custom={customMeta} />
       </div>
     </>
+  )
+}
+
+// Uncontrolled on purpose: a controlled number input coerces "12." to 12 on
+// each keystroke, making decimals impossible to type. The parent row is keyed
+// by the draft line id, so "Reset to generated" (which mints new ids) remounts
+// this and re-reads `initial`; during editing the input keeps its own buffer.
+function AmountInput({
+  initial,
+  onChange,
+}: {
+  initial: number
+  onChange: (amount: number) => void
+}) {
+  return (
+    <input
+      className="input invoice-edit-amount"
+      defaultValue={Number.isFinite(initial) ? String(initial) : ''}
+      inputMode="decimal"
+      onChange={(event) => {
+        const raw = event.target.value.trim()
+        const next = raw === '' ? 0 : Number(raw)
+        if (Number.isFinite(next)) {
+          onChange(next)
+        }
+      }}
+      placeholder="0.00"
+      type="text"
+    />
+  )
+}
+
+function InvoiceBuilder({
+  draft,
+  total,
+  onToggleInclude,
+  onUpdateLine,
+  onAddLine,
+  onRemoveLine,
+  onIntro,
+  onFooter,
+  onReset,
+}: {
+  draft: InvoiceDraft
+  total: number
+  onToggleInclude: (key: keyof IncludeFlags, value: boolean) => void
+  onUpdateLine: (id: string, patch: Partial<DraftLine>) => void
+  onAddLine: () => void
+  onRemoveLine: (id: string) => void
+  onIntro: (value: string) => void
+  onFooter: (value: string) => void
+  onReset: () => void
+}) {
+  return (
+    <div className="invoice-builder">
+      <div className="invoice-builder-block">
+        <div className="invoice-builder-head">
+          <strong>Pull in client info</strong>
+          <button className="ghost-action" onClick={onReset} type="button">
+            <RotateCcw size={14} />
+            Reset to generated
+          </button>
+        </div>
+        <div className="invoice-include-grid">
+          {INCLUDE_FIELDS.map((field) => (
+            <label className="invoice-include-option" key={field.key}>
+              <input
+                checked={draft.include[field.key]}
+                onChange={(event) => onToggleInclude(field.key, event.target.checked)}
+                type="checkbox"
+              />
+              <span>{field.label}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="invoice-builder-block">
+        <strong>Intro note</strong>
+        <textarea
+          className="input"
+          onChange={(event) => onIntro(event.target.value)}
+          placeholder="Optional note shown above the line items"
+          rows={2}
+          value={draft.intro}
+        />
+      </div>
+
+      <div className="invoice-builder-block">
+        <div className="invoice-builder-head">
+          <strong>Line items</strong>
+          <button className="ghost-action" onClick={onAddLine} type="button">
+            <Plus size={14} />
+            Add line
+          </button>
+        </div>
+        <div className="invoice-edit-lines">
+          {draft.lines.map((line) => (
+            <div className="invoice-edit-line" key={line.id}>
+              <input
+                className="input"
+                onChange={(event) => onUpdateLine(line.id, { label: event.target.value })}
+                placeholder="Description"
+                value={line.label}
+              />
+              <input
+                className="input"
+                onChange={(event) => onUpdateLine(line.id, { detail: event.target.value })}
+                placeholder="Detail"
+                value={line.detail}
+              />
+              <AmountInput
+                initial={line.amount}
+                onChange={(amount) => onUpdateLine(line.id, { amount })}
+              />
+              <button
+                aria-label="Remove line"
+                className="icon-button"
+                onClick={() => onRemoveLine(line.id)}
+                type="button"
+              >
+                <Trash2 size={15} />
+              </button>
+            </div>
+          ))}
+          {draft.lines.length === 0 ? (
+            <p className="invoice-edit-empty">No line items yet — add one above.</p>
+          ) : null}
+        </div>
+        <div className="invoice-edit-total">
+          <span>Total</span>
+          <strong>{currency.format(total)}</strong>
+        </div>
+      </div>
+
+      <div className="invoice-builder-block">
+        <strong>Footer note</strong>
+        <textarea
+          className="input"
+          onChange={(event) => onFooter(event.target.value)}
+          placeholder="Shown at the bottom of the invoice"
+          rows={2}
+          value={draft.footer}
+        />
+      </div>
+    </div>
   )
 }
 
@@ -273,8 +601,15 @@ function PayButton({ client, variant }: { client: Client; variant: 'screen' | 'p
   )
 }
 
-function InvoicePreview({ display }: { display: DisplayInvoice }) {
+function InvoicePreview({ display, custom }: { display: DisplayInvoice; custom?: CustomMeta | null }) {
   const { invoice } = display
+  const showTerms = custom ? custom.include.paymentTerms : true
+  const showPay = custom ? custom.include.payLink : true
+  const footerText = custom
+    ? custom.include.footerNote
+      ? custom.footer
+      : ''
+    : invoice.client.footerNote ?? ''
   return (
     <div className="invoice-preview">
       <div className="invoice-preview-header">
@@ -285,6 +620,9 @@ function InvoicePreview({ display }: { display: DisplayInvoice }) {
         </div>
         <strong>{currency.format(invoice.total)}</strong>
       </div>
+      {custom && custom.intro.trim() ? (
+        <p className="invoice-intro-note">{custom.intro}</p>
+      ) : null}
       <div className="invoice-lines">
         {display.lines.map((line, index) => (
           <div className="invoice-line" key={`${line.label}-${line.detail}-${index}`}>
@@ -306,7 +644,7 @@ function InvoicePreview({ display }: { display: DisplayInvoice }) {
           ))}
         </div>
       ) : null}
-      {invoice.client.paymentTerms ? (
+      {showTerms && invoice.client.paymentTerms ? (
         <div className="invoice-payment-terms">
           <span>Payment terms</span>
           <strong>{invoice.client.paymentTerms}</strong>
@@ -316,12 +654,12 @@ function InvoicePreview({ display }: { display: DisplayInvoice }) {
         <span>Total due</span>
         <strong>{currency.format(invoice.total)}</strong>
       </div>
-      <div className="invoice-pay-row">
-        <PayButton client={invoice.client} variant="screen" />
-      </div>
-      {invoice.client.footerNote ? (
-        <p className="invoice-footer-note">{invoice.client.footerNote}</p>
+      {showPay ? (
+        <div className="invoice-pay-row">
+          <PayButton client={invoice.client} variant="screen" />
+        </div>
       ) : null}
+      {footerText.trim() ? <p className="invoice-footer-note">{footerText}</p> : null}
     </div>
   )
 }
@@ -377,7 +715,7 @@ function BillingQueue({
   )
 }
 
-function InvoiceDocument({ display }: { display: DisplayInvoice }) {
+function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?: CustomMeta | null }) {
   const { invoice } = display
   const { firmSettings } = useAppContext()
   const issuedDate = new Intl.DateTimeFormat('en-US', {
@@ -387,13 +725,17 @@ function InvoiceDocument({ display }: { display: DisplayInvoice }) {
   }).format(new Date())
 
   const billingClient = invoice.client
-  const addressLines = [
-    billingClient.addressLine1,
-    billingClient.addressLine2,
-    [billingClient.city, billingClient.state, billingClient.postalCode]
-      .filter((part) => part && part.trim())
-      .join(', '),
-  ].filter((line) => line && line.trim().length > 0)
+  const showField = (key: keyof IncludeFlags) => (custom ? custom.include[key] : true)
+
+  const addressLines = showField('address')
+    ? [
+        billingClient.addressLine1,
+        billingClient.addressLine2,
+        [billingClient.city, billingClient.state, billingClient.postalCode]
+          .filter((part) => part && part.trim())
+          .join(', '),
+      ].filter((line) => line && line.trim().length > 0)
+    : []
 
   const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
   const firmTagline = firmSettings?.tagline || 'Strategic bookkeeping, payroll, and advisory support'
@@ -404,7 +746,21 @@ function InvoiceDocument({ display }: { display: DisplayInvoice }) {
       .filter((part) => part && part.trim())
       .join(', '),
   ].filter((line) => line && line.trim().length > 0) as string[]
-  const headerLogoUrl = billingClient.logoUrl || firmSettings?.logoUrl || ''
+  const headerLogoUrl = showField('logo')
+    ? billingClient.logoUrl || firmSettings?.logoUrl || ''
+    : ''
+  const serviceLabel = custom
+    ? showField('serviceLabel')
+      ? getServiceLabel(billingClient)
+      : ''
+    : billingClient.billingMode === 'subscription'
+      ? 'Subscription plan'
+      : 'Billable hours'
+  const footerText = custom
+    ? custom.include.footerNote
+      ? custom.footer
+      : ''
+    : billingClient.footerNote ?? ''
 
   return (
     <section className="print-sheet">
@@ -426,9 +782,11 @@ function InvoiceDocument({ display }: { display: DisplayInvoice }) {
         <div>
           <span>Bill to</span>
           <strong>{billingClient.name}</strong>
-          {billingClient.contactName ? <small>{billingClient.contactName}</small> : null}
-          {billingClient.email ? <small>{billingClient.email}</small> : null}
-          {billingClient.phone ? <small>{billingClient.phone}</small> : null}
+          {showField('contactName') && billingClient.contactName ? (
+            <small>{billingClient.contactName}</small>
+          ) : null}
+          {showField('email') && billingClient.email ? <small>{billingClient.email}</small> : null}
+          {showField('phone') && billingClient.phone ? <small>{billingClient.phone}</small> : null}
           {addressLines.map((line) => (
             <small key={line}>{line}</small>
           ))}
@@ -436,12 +794,11 @@ function InvoiceDocument({ display }: { display: DisplayInvoice }) {
         <div>
           <span>Issued</span>
           <strong>{issuedDate}</strong>
-          <small>
-            {billingClient.billingMode === 'subscription' ? 'Subscription plan' : 'Billable hours'}
-          </small>
+          {serviceLabel ? <small>{serviceLabel}</small> : null}
           <small>{invoice.periodLabel}</small>
         </div>
       </div>
+      {custom && custom.intro.trim() ? <p className="print-intro-note">{custom.intro}</p> : null}
       <table>
         <thead>
           <tr>
@@ -466,7 +823,7 @@ function InvoiceDocument({ display }: { display: DisplayInvoice }) {
           ))}
         </tbody>
       </table>
-      {billingClient.paymentTerms ? (
+      {showField('paymentTerms') && billingClient.paymentTerms ? (
         <div className="print-terms">
           <span>Payment terms:</span>
           <strong>{billingClient.paymentTerms}</strong>
@@ -476,9 +833,9 @@ function InvoiceDocument({ display }: { display: DisplayInvoice }) {
         <span>Total due</span>
         <strong>{currency.format(invoice.total)}</strong>
       </footer>
-      <PayButton client={billingClient} variant="print" />
-      {billingClient.footerNote ? (
-        <p className="print-footer-note">{billingClient.footerNote}</p>
+      {showField('payLink') ? <PayButton client={billingClient} variant="print" /> : null}
+      {footerText.trim() ? (
+        <p className="print-footer-note">{footerText}</p>
       ) : (
         <p>Thank you for trusting {firmName}.</p>
       )}

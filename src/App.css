@@ -2145,6 +2145,129 @@ td strong {
   padding: 5px 9px;
 }
 
+/* ---- Build-invoice (customize-before-print) controls ------------------- */
+.invoice-header-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.invoice-builder {
+  display: grid;
+  gap: 18px;
+  margin: 4px 0 16px;
+  padding: 16px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.invoice-builder-block {
+  display: grid;
+  gap: 9px;
+}
+
+.invoice-builder-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.invoice-builder-block > strong,
+.invoice-builder-head > strong {
+  font-size: 13px;
+}
+
+.invoice-include-grid {
+  display: grid;
+  gap: 8px 16px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.invoice-include-option {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+}
+
+.invoice-include-option input {
+  accent-color: var(--pink);
+}
+
+.invoice-edit-lines {
+  display: grid;
+  gap: 8px;
+}
+
+.invoice-edit-line {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1.2fr 1.6fr 110px auto;
+}
+
+.invoice-edit-amount {
+  text-align: right;
+}
+
+.icon-button {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+.icon-button:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.invoice-edit-total {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  font-size: 15px;
+  justify-content: space-between;
+  margin-top: 4px;
+  padding-top: 9px;
+}
+
+.invoice-edit-empty {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.invoice-intro-note {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 6px;
+  padding: 0 16px;
+}
+
+.print-intro-note {
+  margin: 10px 0 0;
+}
+
+@media (max-width: 640px) {
+  .invoice-edit-line {
+    grid-template-columns: 1fr 1fr;
+  }
+  .invoice-edit-amount {
+    text-align: left;
+  }
+}
+
 .invoice-preview-header {
   align-items: center;
   background: #fbf7f5;
