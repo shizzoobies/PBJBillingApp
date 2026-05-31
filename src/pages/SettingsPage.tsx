@@ -409,7 +409,7 @@ function BrandingSection({
             value={settings.brandColor ?? '#3c2044'}
             onCommit={(value) => onCommit({ brandColor: value })}
           />
-          <small className="field-helper">Used for the sidebar background and accent colors.</small>
+          <small className="field-helper">Sets the sidebar background. A light color works well with a dark sidebar text color (and vice-versa).</small>
         </label>
         <label className="field">
           <span>Sidebar text color</span>

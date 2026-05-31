@@ -66,7 +66,7 @@ button {
 }
 
 .sidebar {
-  background: var(--plum);
+  background: var(--sidebar-bg, var(--plum));
   color: var(--sidebar-text, #fffaf3);
   display: flex;
   flex-direction: column;
@@ -115,7 +115,11 @@ button {
   align-items: center;
   display: flex;
   justify-content: center;
-  padding: 4px 0 8px;
+  background: #ffffff;
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 6px;
+  box-shadow: var(--shadow-sm);
 }
 
 .brand-logo-full {

@@ -251,11 +251,14 @@ function App() {
     document.title = publicFirmSettings.name || DEFAULT_FIRM_SETTINGS.name
   }, [publicFirmSettings.name])
 
-  // Push the firm brand color into the --plum CSS variable so it cascades to
-  // the sidebar and other accent surfaces that already reference it.
+  // Push the firm brand color into the --sidebar-bg CSS variable. It drives
+  // ONLY the sidebar background — deliberately decoupled from --plum (which
+  // stays a fixed dark accent used for page/section header TEXT on the light
+  // pages). Coupling them meant a light brand color (e.g. pale blue) turned
+  // every header into invisible light-on-white text.
   useEffect(() => {
     const color = publicFirmSettings.brandColor || '#3c2044'
-    document.documentElement.style.setProperty('--plum', color)
+    document.documentElement.style.setProperty('--sidebar-bg', color)
   }, [publicFirmSettings.brandColor])
 
   // Sidebar text color — kept as a separate variable so any brand color
