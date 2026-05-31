@@ -49,7 +49,11 @@ export function TimeApprovalsPage() {
     return null
   }
 
-  const employees = data.employees.filter((employee) => employee.role !== 'Owner')
+  // Include owners too: an owner can log their own time (timer or manual), and
+  // those entries also land in the approval queue — so the owner needs to see
+  // and approve them. Empty groups are dropped downstream, so an owner only
+  // appears here when they actually have entries awaiting review.
+  const employees = data.employees
 
   return (
     <section className="content-grid" id="time-approvals">
