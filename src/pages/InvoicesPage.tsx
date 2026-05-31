@@ -1,4 +1,4 @@
-import { ExternalLink, FileText, Plus, Printer, RotateCcw, Sliders, Trash2 } from 'lucide-react'
+import { ExternalLink, FileText, Mail, Plus, Printer, RotateCcw, Sliders, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
@@ -141,6 +141,56 @@ function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoi
     hideInternal: true,
     groupByCategory: false,
   }
+}
+
+// Build a clean plain-text invoice for the body of an email. Reflects the
+// prepared/customized invoice (lines, total, intro/footer, included fields)
+// so "Email invoice" matches what would print.
+function buildEmailParts(
+  display: DisplayInvoice,
+  custom: CustomMeta | null,
+  firmName: string,
+): { to: string; subject: string; body: string } {
+  const { invoice } = display
+  const client = invoice.client
+  const show = (key: keyof IncludeFlags) => (custom ? custom.include[key] : true)
+  const greetingName =
+    (show('contactName') && hasText(client.contactName) ? client.contactName!.trim() : '') ||
+    client.name
+  const footer = custom
+    ? custom.include.footerNote
+      ? custom.footer
+      : ''
+    : client.footerNote ?? ''
+
+  const lines: string[] = [
+    `Hi ${greetingName},`,
+    '',
+    `Please find your invoice for ${invoice.periodLabel} below.`,
+  ]
+  if (custom && custom.intro.trim()) {
+    lines.push('', custom.intro.trim())
+  }
+  lines.push('', `${firmName}`, `Invoice — ${invoice.periodLabel}`, `Bill to: ${client.name}`, '', 'Line items:')
+  for (const line of display.lines) {
+    const detail = line.detail ? ` (${line.detail})` : ''
+    lines.push(`  • ${line.label}${detail} — ${currency.format(line.amount)}`)
+  }
+  lines.push('', `Total due: ${currency.format(invoice.total)}`)
+  if (show('paymentTerms') && hasText(client.paymentTerms)) {
+    lines.push(`Payment terms: ${client.paymentTerms!.trim()}`)
+  }
+  if (show('payLink') && hasText(client.quickbooksPayUrl)) {
+    lines.push(`Pay online: ${client.quickbooksPayUrl!.trim()}`)
+  }
+  if (footer.trim()) {
+    lines.push('', footer.trim())
+  }
+  lines.push('', 'Thank you,', firmName)
+
+  const to = show('email') && hasText(client.email) ? client.email!.trim() : ''
+  const subject = `${firmName} invoice — ${invoice.periodLabel}`
+  return { to, subject, body: lines.join('\n') }
 }
 
 function formatEntryDate(date: string) {
@@ -342,6 +392,13 @@ export function InvoicesPage() {
   const setIntro = (intro: string) => setDraft((prev) => (prev ? { ...prev, intro } : prev))
   const setFooter = (footer: string) => setDraft((prev) => (prev ? { ...prev, footer } : prev))
 
+  const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
+  const emailInvoice = () => {
+    const { to, subject, body } = buildEmailParts(effectiveDisplay, customMeta, firmName)
+    const href = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+    window.location.href = href
+  }
+
   return (
     <>
       <section className="content-grid invoice-layout" id="invoices">
@@ -359,6 +416,10 @@ export function InvoicesPage() {
               >
                 <Sliders size={16} />
                 {customizing ? 'Use generated' : 'Customize'}
+              </button>
+              <button className="ghost-action" onClick={emailInvoice} type="button">
+                <Mail size={16} />
+                Email invoice
               </button>
               <button className="primary-action" onClick={printInvoice} type="button">
                 <Printer size={16} />

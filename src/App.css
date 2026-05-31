@@ -2572,11 +2572,17 @@ td strong {
     background: #fff;
   }
 
-  .app-shell {
+  /* Invoice-only print: hide the entire app shell and show just the
+     formatted invoice sheet. Scoped to body.printing-invoice (set via a
+     beforeprint listener when the invoice .print-sheet is mounted) so it
+     wins by specificity over the later report-print block — which keeps the
+     app shell visible — instead of leaking the whole Invoices screen (billing
+     queue, every client) into the printout. */
+  body.printing-invoice .app-shell {
     display: none;
   }
 
-  .print-document {
+  body.printing-invoice .print-document {
     color: #1b1720;
     display: block;
     font-family: Georgia, "Times New Roman", serif;

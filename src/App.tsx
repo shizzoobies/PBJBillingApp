@@ -279,6 +279,30 @@ function App() {
     document.documentElement.style.setProperty('--sidebar-active-text', color)
   }, [publicFirmSettings.sidebarActiveTextColor])
 
+  // Invoice printing: the report-print CSS keeps the whole app shell visible,
+  // which would otherwise leak the entire Invoices screen (billing queue +
+  // every client) into the printout next to the formatted invoice sheet. Tag
+  // <body> while an invoice print is in flight so the invoice-only print rules
+  // (hide app shell, show just .print-document) win by specificity. Detecting
+  // the mounted .print-sheet means this also covers a plain Ctrl+P on the
+  // Invoices page, while Reports/Productivity printing is left untouched.
+  useEffect(() => {
+    const onBeforePrint = () => {
+      if (document.querySelector('.print-document .print-sheet')) {
+        document.body.classList.add('printing-invoice')
+      }
+    }
+    const onAfterPrint = () => {
+      document.body.classList.remove('printing-invoice')
+    }
+    window.addEventListener('beforeprint', onBeforePrint)
+    window.addEventListener('afterprint', onAfterPrint)
+    return () => {
+      window.removeEventListener('beforeprint', onBeforePrint)
+      window.removeEventListener('afterprint', onAfterPrint)
+    }
+  }, [])
+
   // Load app data on session change AND whenever preview state changes.
   // Entering preview refetches with `?previewAs=<id>` so the whole app
   // reflects the previewed person's scoped dataset; exiting refetches as the
@@ -2175,6 +2199,12 @@ function App() {
   }
 
   const printInvoice = () => {
+    // Tag the body up front so the invoice-only print rules apply even on
+    // browsers that don't fire `beforeprint` (the listener above also sets
+    // this for a plain Ctrl+P, and `afterprint` clears it). The class only
+    // does anything inside @media print, so a lingering class can't affect
+    // the on-screen layout.
+    document.body.classList.add('printing-invoice')
     window.setTimeout(() => window.print(), 50)
   }
 
