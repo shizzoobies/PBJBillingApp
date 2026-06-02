@@ -581,6 +581,20 @@ export function formatHours(minutes: number) {
   return `${Number.isInteger(hours) ? hours.toFixed(0) : hours.toFixed(1)}h`
 }
 
+/**
+ * Exact hours + minutes, e.g. 80 -> "1h 20m", 45 -> "45m", 120 -> "2h".
+ * Unlike formatHours (which rounds to one decimal), this shows the precise
+ * time the user logged.
+ */
+export function formatHoursMinutes(minutes: number) {
+  const total = Math.max(0, Math.round(minutes))
+  const h = Math.floor(total / 60)
+  const m = total % 60
+  if (h === 0) return `${m}m`
+  if (m === 0) return `${h}h`
+  return `${h}h ${m}m`
+}
+
 export function formatTimeFromMs(ms: number) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000))
   const minutes = Math.floor(totalSeconds / 60)

@@ -17,6 +17,7 @@ import {
   currentWeekStart,
   employeeName,
   formatHours,
+  formatHoursMinutes,
   getWeekLabel,
   shiftWeek,
   weekRangeOf,
@@ -577,7 +578,8 @@ function ManualEntryModal({
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
   const [employeeId, setEmployeeId] = useState(activeEmployeeId)
   const [clientId, setClientId] = useState(clients[0]?.id ?? '')
-  const [hours, setHours] = useState('1.00')
+  const [hours, setHours] = useState('1')
+  const [minutes, setMinutes] = useState('0')
   const [description, setDescription] = useState('')
   const [billable, setBillable] = useState(true)
   const [taskId, setTaskId] = useState<string>('')
@@ -609,9 +611,20 @@ function ManualEntryModal({
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const numericHours = Number(hours)
-    if (Number.isNaN(numericHours) || numericHours <= 0) {
-      setSubmitError('Enter a valid number of hours.')
+    const hoursPart = hours.trim() === '' ? 0 : Number(hours)
+    const minutesPart = minutes.trim() === '' ? 0 : Number(minutes)
+    if (
+      Number.isNaN(hoursPart) ||
+      Number.isNaN(minutesPart) ||
+      hoursPart < 0 ||
+      minutesPart < 0
+    ) {
+      setSubmitError('Enter a valid number of hours and minutes.')
+      return
+    }
+    const totalMinutes = Math.round(hoursPart * 60 + minutesPart)
+    if (totalMinutes <= 0) {
+      setSubmitError('Enter hours and/or minutes greater than zero.')
       return
     }
     if (!isAdministrative && !effectiveClientId) {
@@ -640,7 +653,7 @@ function ManualEntryModal({
         clientId: isAdministrative ? '' : effectiveClientId,
         isAdministrative,
         date,
-        minutes: Math.round(numericHours * 60),
+        minutes: totalMinutes,
         description,
         billable: isAdministrative ? false : billable,
         taskId: isAdministrative ? null : effectiveTaskId || null,
@@ -722,10 +735,21 @@ function ManualEntryModal({
                 <input
                   className="input"
                   min="0"
-                  step="any"
+                  step="1"
                   type="number"
                   value={hours}
                   onChange={(event) => setHours(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>Minutes</span>
+                <input
+                  className="input"
+                  min="0"
+                  step="1"
+                  type="number"
+                  value={minutes}
+                  onChange={(event) => setMinutes(event.target.value)}
                 />
               </label>
               {role === 'owner' && (
@@ -925,7 +949,8 @@ function TimeEntryRow({
   onDelete: (entryId: string) => Promise<void>
 }) {
   const [editing, setEditing] = useState(false)
-  const [hours, setHours] = useState((entry.minutes / 60).toString())
+  const [hours, setHours] = useState(Math.floor(entry.minutes / 60).toString())
+  const [minutes, setMinutes] = useState((entry.minutes % 60).toString())
   const [description, setDescription] = useState(entry.description)
   const [billable, setBillable] = useState(entry.billable)
   const [busy, setBusy] = useState(false)
@@ -936,16 +961,27 @@ function TimeEntryRow({
   const canEdit = !locked
 
   const handleSave = async () => {
-    const numericHours = Number(hours)
-    if (Number.isNaN(numericHours) || numericHours <= 0) {
-      setError('Enter a valid number of hours.')
+    const hoursPart = hours.trim() === '' ? 0 : Number(hours)
+    const minutesPart = minutes.trim() === '' ? 0 : Number(minutes)
+    if (
+      Number.isNaN(hoursPart) ||
+      Number.isNaN(minutesPart) ||
+      hoursPart < 0 ||
+      minutesPart < 0
+    ) {
+      setError('Enter a valid number of hours and minutes.')
+      return
+    }
+    const totalMinutes = Math.round(hoursPart * 60 + minutesPart)
+    if (totalMinutes <= 0) {
+      setError('Enter hours and/or minutes greater than zero.')
       return
     }
     setBusy(true)
     setError('')
     try {
       await onUpdate(entry.id, {
-        minutes: Math.round(numericHours * 60),
+        minutes: totalMinutes,
         description,
         billable,
       })
@@ -977,10 +1013,21 @@ function TimeEntryRow({
             <input
               className="input"
               min="0"
-              step="any"
+              step="1"
               type="number"
               value={hours}
               onChange={(event) => setHours(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Minutes</span>
+            <input
+              className="input"
+              min="0"
+              step="1"
+              type="number"
+              value={minutes}
+              onChange={(event) => setMinutes(event.target.value)}
             />
           </label>
           <label className="field">
@@ -1053,7 +1100,8 @@ function TimeEntryRow({
               className="link-action"
               disabled={busy}
               onClick={() => {
-                setHours((entry.minutes / 60).toString())
+                setHours(Math.floor(entry.minutes / 60).toString())
+                setMinutes((entry.minutes % 60).toString())
                 setDescription(entry.description)
                 setBillable(entry.billable)
                 setEditing(true)
@@ -1074,7 +1122,7 @@ function TimeEntryRow({
         {error ? <small className="auth-error">{error}</small> : null}
       </div>
       <div className="entry-meta">
-        <strong>{formatHours(entry.minutes)}</strong>
+        <strong>{formatHoursMinutes(entry.minutes)}</strong>
         <span>{entry.billable ? 'Billable' : 'Internal'}</span>
       </div>
     </article>
