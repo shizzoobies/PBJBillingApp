@@ -721,8 +721,8 @@ function ManualEntryModal({
                 <span>Hours</span>
                 <input
                   className="input"
-                  min="0.25"
-                  step="0.25"
+                  min="0"
+                  step="any"
                   type="number"
                   value={hours}
                   onChange={(event) => setHours(event.target.value)}
@@ -976,8 +976,8 @@ function TimeEntryRow({
             <span>Hours</span>
             <input
               className="input"
-              min="0.25"
-              step="0.25"
+              min="0"
+              step="any"
               type="number"
               value={hours}
               onChange={(event) => setHours(event.target.value)}
