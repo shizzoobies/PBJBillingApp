@@ -81,6 +81,31 @@ function safeJsonParse(value) {
   }
 }
 
+/**
+ * Normalize the stored work-sessions for a time entry into a clean array of
+ * { startAt, endAt } ISO pairs. jsonb comes back already parsed from pg; we
+ * tolerate a string just in case. When there are no stored sessions but the
+ * row has the legacy envelope columns (started_at/ended_at), synthesize a
+ * single session so older entries display + edit consistently.
+ */
+function normalizeStoredSessions(rawSessions, startedAt, endedAt) {
+  let list = rawSessions
+  if (typeof list === 'string') {
+    const parsed = safeJsonParse(list)
+    list = Array.isArray(parsed) ? parsed : []
+  }
+  if (Array.isArray(list)) {
+    const clean = list
+      .filter((s) => s && typeof s.startAt === 'string' && typeof s.endAt === 'string')
+      .map((s) => ({ startAt: s.startAt, endAt: s.endAt }))
+    if (clean.length > 0) return clean
+  }
+  if (startedAt && endedAt) {
+    return [{ startAt: startedAt.toISOString(), endAt: endedAt.toISOString() }]
+  }
+  return []
+}
+
 const VALID_BILLING_MODES = new Set(['hourly', 'subscription'])
 
 /**
@@ -1647,6 +1672,13 @@ export class AppDataStore {
       await this.pool.query(`alter table time_entries add column if not exists started_at timestamptz`)
       await this.pool.query(`alter table time_entries add column if not exists ended_at timestamptz`)
 
+      // Work sessions: the list of exact start/stop spans that make up an
+      // entry (timer + "Resume" + "Add time" each append one). `minutes` is the
+      // sum; started_at/ended_at remain the first-start/last-stop envelope.
+      await this.pool.query(
+        `alter table time_entries add column if not exists sessions jsonb not null default '[]'::jsonb`,
+      )
+
       // Month-end timesheet locks: one per employee per 'YYYY-MM' period.
       await this.pool.query(`
         create table if not exists timesheet_locks (
@@ -2365,7 +2397,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                    approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                   is_administrative, started_at, ended_at
+                   is_administrative, started_at, ended_at, sessions
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -2638,6 +2670,7 @@ export class AppDataStore {
           manualReason: row.manual_reason ?? undefined,
           startAt: row.started_at ? row.started_at.toISOString() : undefined,
           endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
+          sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
         })),
         checklists: allChecklists.filter((checklist) => !checklist.deletedAt),
         recycledChecklists: allChecklists.filter((checklist) => Boolean(checklist.deletedAt)),
@@ -3108,8 +3141,8 @@ export class AppDataStore {
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                                         approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative,
-                                        started_at, ended_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
+                                        started_at, ended_at, sessions, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, now())
             `,
             [
               entry.id,
@@ -3131,6 +3164,7 @@ export class AppDataStore {
               Boolean(entry.isAdministrative),
               entry.startAt ?? null,
               entry.endAt ?? null,
+              JSON.stringify(Array.isArray(entry.sessions) ? entry.sessions : []),
             ],
           )
         }
@@ -3403,8 +3437,8 @@ export class AppDataStore {
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, now())
         `,
         [
           nextEntry.id,
@@ -3424,6 +3458,7 @@ export class AppDataStore {
           Boolean(nextEntry.isAdministrative),
           nextEntry.startAt ?? null,
           nextEntry.endAt ?? null,
+          JSON.stringify(Array.isArray(nextEntry.sessions) ? nextEntry.sessions : []),
         ],
       )
 
@@ -3445,7 +3480,7 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                 approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                is_administrative, started_at, ended_at
+                is_administrative, started_at, ended_at, sessions
          from time_entries where id = $1`,
         [entryId],
       )
@@ -3470,6 +3505,7 @@ export class AppDataStore {
         manualReason: row.manual_reason ?? undefined,
         startAt: row.started_at ? row.started_at.toISOString() : undefined,
         endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
+        sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
       }
     }
 
@@ -3513,6 +3549,11 @@ export class AppDataStore {
           setClauses.push(`${dbCol} = $${params.length}`)
         }
       }
+      // sessions is jsonb — stringify + cast, separate from the scalar map.
+      if (patch && Object.prototype.hasOwnProperty.call(patch, 'sessions')) {
+        params.push(JSON.stringify(Array.isArray(patch.sessions) ? patch.sessions : []))
+        setClauses.push(`sessions = $${params.length}::jsonb`)
+      }
       if (setClauses.length === 0) return this.getTimeEntry(entryId)
       setClauses.push('updated_at = now()')
       const result = await this.pool.query(
@@ -3530,7 +3571,7 @@ export class AppDataStore {
       const next = { ...entry }
       for (const key of [
         'minutes', 'description', 'billable', 'taskId', 'category', 'date',
-        'approvalStatus', 'approvalNote', 'approvedBy', 'approvedAt', 'startAt', 'endAt',
+        'approvalStatus', 'approvalNote', 'approvedBy', 'approvedAt', 'startAt', 'endAt', 'sessions',
       ]) {
         if (patch && Object.prototype.hasOwnProperty.call(patch, key)) {
           const value = patch[key]

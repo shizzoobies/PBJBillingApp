@@ -510,7 +510,31 @@ function App() {
         ? descriptionOverride
         : timer.description
     // Audit timestamps: the timer knows exactly when it started and stopped.
-    const stoppedAtMs = Date.now()
+    const stoppedAtMs = new Date().getTime()
+    const session = {
+      startAt: new Date(timer.startedAt).toISOString(),
+      endAt: new Date(stoppedAtMs).toISOString(),
+    }
+
+    // Resuming an existing pending entry: append this session to it (the
+    // server recomputes the total + envelope and keeps it pending) instead of
+    // creating a brand-new entry.
+    if (timer.resumeEntryId) {
+      const existing = data.timeEntries.find((entry) => entry.id === timer.resumeEntryId)
+      if (existing) {
+        const prior =
+          existing.sessions && existing.sessions.length > 0
+            ? existing.sessions
+            : existing.startAt && existing.endAt
+              ? [{ startAt: existing.startAt, endAt: existing.endAt }]
+              : []
+        await updateTimeEntry(existing.id, { sessions: [...prior, session] })
+        setTimer(null)
+        return
+      }
+      // The entry vanished (deleted) — fall through to log a fresh one.
+    }
+
     await logTime({
       employeeId: timer.employeeId,
       clientId: timer.clientId,
@@ -518,8 +542,9 @@ function App() {
       date: new Date(timer.startedAt).toISOString().slice(0, 10),
       minutes: Math.max(1, Math.round((stoppedAtMs - timer.startedAt) / 60000)),
       description,
-      startAt: new Date(timer.startedAt).toISOString(),
-      endAt: new Date(stoppedAtMs).toISOString(),
+      startAt: session.startAt,
+      endAt: session.endAt,
+      sessions: [session],
       // Administrative time is never billable; the server enforces this too.
       billable: !isAdministrative,
       taskId: timer.taskId ?? null,
@@ -538,6 +563,7 @@ function App() {
       date?: string
       startAt?: string
       endAt?: string
+      sessions?: { startAt: string; endAt: string }[]
     },
   ) => {
     if (previewActiveRef.current) return

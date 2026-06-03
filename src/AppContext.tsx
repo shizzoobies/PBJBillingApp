@@ -55,6 +55,7 @@ export type AppContextValue = {
       date?: string
       startAt?: string
       endAt?: string
+      sessions?: { startAt: string; endAt: string }[]
     },
   ) => Promise<void>
   deleteTimeEntry: (entryId: string) => Promise<void>

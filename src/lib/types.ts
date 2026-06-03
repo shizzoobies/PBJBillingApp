@@ -229,10 +229,24 @@ export type TimeEntry = {
    */
   startAt?: string
   /**
-   * Exact moment work stopped, ISO 8601 timestamp. Paired with `startAt`;
-   * `minutes` is derived from the span. Optional for legacy rows.
+   * Exact moment work stopped, ISO 8601 timestamp. For a single-session entry
+   * this equals the last session's stop. Optional for legacy rows.
    */
   endAt?: string
+  /**
+   * The work sessions that make up this entry — each an exact start/stop span.
+   * A plain timer or manual entry has one session; "Resume" and "Add time"
+   * append more. `minutes` is the sum of the sessions, and `startAt`/`endAt`
+   * are the first start / last stop. Empty/absent for legacy rows that predate
+   * the sessions model (those fall back to the stored `minutes`).
+   */
+  sessions?: WorkSession[]
+}
+
+/** One exact start/stop span of work within a `TimeEntry`. */
+export type WorkSession = {
+  startAt: string
+  endAt: string
 }
 
 /** A per-employee, per-month timesheet lock. Locking signs off the month. */
@@ -573,6 +587,12 @@ export type TimerState = {
   taskId?: string | null
   /** Administrative / internal timing — no client or task. */
   isAdministrative?: boolean
+  /**
+   * When set, this timer is RESUMING an existing pending entry: stopping it
+   * appends a new session to that entry (keeping it pending) instead of
+   * creating a brand-new entry.
+   */
+  resumeEntryId?: string
 }
 
 export type InvoiceLine = {

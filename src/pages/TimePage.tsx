@@ -1,4 +1,13 @@
-import { ChevronLeft, ChevronRight, Clock3, PencilLine, TimerReset } from 'lucide-react'
+import {
+  ChevronLeft,
+  ChevronRight,
+  Clock3,
+  PencilLine,
+  Play,
+  Plus,
+  TimerReset,
+  Trash2,
+} from 'lucide-react'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import type {
@@ -10,6 +19,7 @@ import type {
   TimerState,
   TimesheetLock,
   WeeklySubmission,
+  WorkSession,
 } from '../lib/types'
 import {
   clientName,
@@ -20,6 +30,7 @@ import {
   formatHours,
   formatHoursMinutes,
   getWeekLabel,
+  sessionMinutes,
   shiftWeek,
   weekRangeOf,
 } from '../lib/utils'
@@ -58,6 +69,29 @@ function formatDurationHint(startLocal: string, stopLocal: string) {
   return formatHoursMinutes(Math.round((stopMs - startMs) / 60000))
 }
 
+// ---- Sessions editor rows (local datetime strings + a stable key) ---------
+let sessionRowSeq = 0
+function makeSessionRowId() {
+  sessionRowSeq += 1
+  return `srow-${sessionRowSeq}`
+}
+
+/** The sessions an entry effectively has (synthesizing one from the envelope). */
+function effectiveSessions(entry: TimeEntry): WorkSession[] {
+  if (entry.sessions && entry.sessions.length > 0) return entry.sessions
+  if (entry.startAt && entry.endAt) return [{ startAt: entry.startAt, endAt: entry.endAt }]
+  return []
+}
+
+/** Build editor rows (datetime-local values) from an entry's sessions. */
+function entryToEditSessions(entry: TimeEntry): Array<{ id: string; start: string; stop: string }> {
+  return effectiveSessions(entry).map((s) => ({
+    id: makeSessionRowId(),
+    start: isoToLocalInput(s.startAt),
+    stop: isoToLocalInput(s.endAt),
+  }))
+}
+
 export function TimePage() {
   const {
     activeEmployeeId,
@@ -89,6 +123,22 @@ export function TimePage() {
   // locked or an owner is previewing — exactly like the timer inputs.
   const inputsDisabled = lockedThisPeriod || previewMode
   const [manualOpen, setManualOpen] = useState(false)
+
+  // Resume a pending entry: start a fresh timer bound to it. Stopping appends a
+  // new session to that entry instead of creating a new one. Blocked while a
+  // timer is already running (only one timer at a time).
+  const handleResume = (entry: TimeEntry) => {
+    if (timer || previewMode || lockedThisPeriod) return
+    startTimer({
+      employeeId: entry.employeeId,
+      clientId: entry.clientId,
+      description: entry.description,
+      startedAt: Date.now(),
+      taskId: entry.taskId ?? null,
+      isAdministrative: Boolean(entry.isAdministrative),
+      resumeEntryId: entry.id,
+    })
+  }
 
   return (
     <section className="content-grid" id="time">
@@ -148,8 +198,10 @@ export function TimePage() {
           entries={visibleEntries}
           role={role}
           locks={data.timesheetLocks ?? []}
+          timerRunning={Boolean(timer)}
           onUpdate={updateTimeEntry}
           onDelete={deleteTimeEntry}
+          onResume={handleResume}
         />
       </div>
 
@@ -471,6 +523,19 @@ function TimeCapture({
         when you begin work.
       </p>
 
+      {timer?.resumeEntryId ? (
+        <div className="resume-banner">
+          <Play size={15} />
+          <span>
+            Resuming{' '}
+            <strong>
+              {timer.isAdministrative ? 'Administrative' : clientName(clients, timer.clientId)}
+            </strong>{' '}
+            — when you stop, this session is added to that pending entry.
+          </span>
+        </div>
+      ) : null}
+
       {locked ? (
         <div className="lock-banner">
           <strong>This timesheet is locked.</strong>
@@ -699,6 +764,9 @@ function ManualEntryModal({
         manualReason: reason.trim(),
         startAt: localInputToIso(startLocal),
         endAt: localInputToIso(stopLocal),
+        sessions: [
+          { startAt: localInputToIso(startLocal), endAt: localInputToIso(stopLocal) },
+        ],
       })
       setSuccess(true)
     } catch {
@@ -900,8 +968,10 @@ function RecentTimeEntries({
   entries,
   role,
   locks,
+  timerRunning,
   onUpdate,
   onDelete,
+  onResume,
 }: {
   checklists: Checklist[]
   clients: Client[]
@@ -909,11 +979,21 @@ function RecentTimeEntries({
   entries: TimeEntry[]
   role: Role
   locks: TimesheetLock[]
+  timerRunning: boolean
   onUpdate: (
     entryId: string,
-    patch: { minutes?: number; description?: string; billable?: boolean; taskId?: string | null },
+    patch: {
+      minutes?: number
+      description?: string
+      billable?: boolean
+      taskId?: string | null
+      startAt?: string
+      endAt?: string
+      sessions?: WorkSession[]
+    },
   ) => Promise<void>
   onDelete: (entryId: string) => Promise<void>
+  onResume: (entry: TimeEntry) => void
 }) {
   return (
     <section className="panel">
@@ -945,8 +1025,10 @@ function RecentTimeEntries({
               employeeLabel={employeeName(employees, entry.employeeId)}
               taskTitle={linkedTask ? linkedTask.title : null}
               locked={monthLocked}
+              timerRunning={timerRunning}
               onUpdate={onUpdate}
               onDelete={onDelete}
+              onResume={onResume}
             />
           )
         })}
@@ -964,14 +1046,17 @@ function TimeEntryRow({
   employeeLabel,
   taskTitle,
   locked,
+  timerRunning,
   onUpdate,
   onDelete,
+  onResume,
 }: {
   entry: TimeEntry
   clientLabel: string
   employeeLabel: string
   taskTitle: string | null
   locked: boolean
+  timerRunning: boolean
   onUpdate: (
     entryId: string,
     patch: {
@@ -981,19 +1066,21 @@ function TimeEntryRow({
       taskId?: string | null
       startAt?: string
       endAt?: string
+      sessions?: WorkSession[]
     },
   ) => Promise<void>
   onDelete: (entryId: string) => Promise<void>
+  onResume: (entry: TimeEntry) => void
 }) {
   // Entries captured with exact start/stop (timer + new manual entries) edit
-  // via date/time pickers; legacy entries without timestamps keep the simpler
+  // via a sessions editor; legacy entries without timestamps keep the simpler
   // hours/minutes editor.
-  const hasTimestamps = Boolean(entry.startAt && entry.endAt)
+  const sessions = effectiveSessions(entry)
+  const hasSessions = sessions.length > 0
   const [editing, setEditing] = useState(false)
   const [hours, setHours] = useState(Math.floor(entry.minutes / 60).toString())
   const [minutes, setMinutes] = useState((entry.minutes % 60).toString())
-  const [startLocal, setStartLocal] = useState(isoToLocalInput(entry.startAt))
-  const [stopLocal, setStopLocal] = useState(isoToLocalInput(entry.endAt))
+  const [editSessions, setEditSessions] = useState(() => entryToEditSessions(entry))
   const [description, setDescription] = useState(entry.description)
   const [billable, setBillable] = useState(entry.billable)
   const [busy, setBusy] = useState(false)
@@ -1002,61 +1089,111 @@ function TimeEntryRow({
   // Pending and rejected entries are always editable; approved entries stay
   // editable until the month is locked. So a locked month is the only blocker.
   const canEdit = !locked
+  // Resume / Add-time stay inside the approval pipeline (pending or rejected),
+  // and only make sense for entries that already track sessions.
+  const canResumeOrAdd =
+    canEdit &&
+    hasSessions &&
+    (entry.approvalStatus === 'pending' || entry.approvalStatus === 'rejected')
+
+  // Open the editor; `withExtraSession` pre-appends a fresh session (continuing
+  // from the last stop to now) so "Add time" is one click.
+  const openEditor = (withExtraSession: boolean) => {
+    const rows = entryToEditSessions(entry)
+    if (withExtraSession) {
+      const last = rows[rows.length - 1]
+      rows.push({
+        id: makeSessionRowId(),
+        start: last ? last.stop : toLocalInput(new Date()),
+        stop: toLocalInput(new Date()),
+      })
+    }
+    setEditSessions(rows)
+    setHours(Math.floor(entry.minutes / 60).toString())
+    setMinutes((entry.minutes % 60).toString())
+    setDescription(entry.description)
+    setBillable(entry.billable)
+    setError('')
+    setEditing(true)
+  }
+
+  const updateSessionRow = (id: string, patch: { start?: string; stop?: string }) =>
+    setEditSessions((rows) => rows.map((row) => (row.id === id ? { ...row, ...patch } : row)))
+  const addSessionRow = () =>
+    setEditSessions((rows) => {
+      const last = rows[rows.length - 1]
+      return [
+        ...rows,
+        {
+          id: makeSessionRowId(),
+          start: last ? last.stop : toLocalInput(new Date()),
+          stop: toLocalInput(new Date()),
+        },
+      ]
+    })
+  const removeSessionRow = (id: string) =>
+    setEditSessions((rows) => rows.filter((row) => row.id !== id))
+
+  const editTotalMinutes = editSessions.reduce((sum, row) => {
+    const startMs = row.start ? new Date(row.start).getTime() : NaN
+    const stopMs = row.stop ? new Date(row.stop).getTime() : NaN
+    if (Number.isNaN(startMs) || Number.isNaN(stopMs) || stopMs <= startMs) return sum
+    return sum + Math.round((stopMs - startMs) / 60000)
+  }, 0)
 
   const handleSave = async () => {
-    let patch: {
-      minutes: number
-      description: string
-      billable: boolean
-      startAt?: string
-      endAt?: string
+    if (hasSessions) {
+      if (editSessions.length === 0) {
+        setError('Keep at least one work session.')
+        return
+      }
+      const built: WorkSession[] = []
+      for (const row of editSessions) {
+        const startMs = row.start ? new Date(row.start).getTime() : NaN
+        const stopMs = row.stop ? new Date(row.stop).getTime() : NaN
+        if (Number.isNaN(startMs) || Number.isNaN(stopMs)) {
+          setError('Each session needs a valid start and stop time.')
+          return
+        }
+        if (stopMs <= startMs) {
+          setError('Each session must stop after it starts.')
+          return
+        }
+        built.push({ startAt: localInputToIso(row.start), endAt: localInputToIso(row.stop) })
+      }
+      setBusy(true)
+      setError('')
+      try {
+        await onUpdate(entry.id, { sessions: built, description, billable })
+        setEditing(false)
+      } catch {
+        setError('Could not save — the month may be locked.')
+      } finally {
+        setBusy(false)
+      }
+      return
     }
-    if (hasTimestamps) {
-      const startMs = startLocal ? new Date(startLocal).getTime() : NaN
-      const stopMs = stopLocal ? new Date(stopLocal).getTime() : NaN
-      if (Number.isNaN(startMs) || Number.isNaN(stopMs)) {
-        setError('Enter a valid start and stop date/time.')
-        return
-      }
-      if (stopMs <= startMs) {
-        setError('The stop time must be after the start time.')
-        return
-      }
-      const totalMinutes = Math.round((stopMs - startMs) / 60000)
-      if (totalMinutes <= 0) {
-        setError('Start and stop must be at least a minute apart.')
-        return
-      }
-      patch = {
-        minutes: totalMinutes,
-        description,
-        billable,
-        startAt: localInputToIso(startLocal),
-        endAt: localInputToIso(stopLocal),
-      }
-    } else {
-      const hoursPart = hours.trim() === '' ? 0 : Number(hours)
-      const minutesPart = minutes.trim() === '' ? 0 : Number(minutes)
-      if (
-        Number.isNaN(hoursPart) ||
-        Number.isNaN(minutesPart) ||
-        hoursPart < 0 ||
-        minutesPart < 0
-      ) {
-        setError('Enter a valid number of hours and minutes.')
-        return
-      }
-      const totalMinutes = Math.round(hoursPart * 60 + minutesPart)
-      if (totalMinutes <= 0) {
-        setError('Enter hours and/or minutes greater than zero.')
-        return
-      }
-      patch = { minutes: totalMinutes, description, billable }
+
+    const hoursPart = hours.trim() === '' ? 0 : Number(hours)
+    const minutesPart = minutes.trim() === '' ? 0 : Number(minutes)
+    if (
+      Number.isNaN(hoursPart) ||
+      Number.isNaN(minutesPart) ||
+      hoursPart < 0 ||
+      minutesPart < 0
+    ) {
+      setError('Enter a valid number of hours and minutes.')
+      return
+    }
+    const totalMinutes = Math.round(hoursPart * 60 + minutesPart)
+    if (totalMinutes <= 0) {
+      setError('Enter hours and/or minutes greater than zero.')
+      return
     }
     setBusy(true)
     setError('')
     try {
-      await onUpdate(entry.id, patch)
+      await onUpdate(entry.id, { minutes: totalMinutes, description, billable })
       setEditing(false)
     } catch {
       setError('Could not save — the month may be locked.')
@@ -1080,30 +1217,50 @@ function TimeEntryRow({
     return (
       <article className="entry-row entry-row-editing">
         <div className="entry-edit-fields">
-          {hasTimestamps ? (
-            <>
-              <label className="field">
-                <span>Started</span>
-                <input
-                  className="input"
-                  type="datetime-local"
-                  value={startLocal}
-                  onChange={(event) => setStartLocal(event.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span>Stopped</span>
-                <input
-                  className="input"
-                  type="datetime-local"
-                  value={stopLocal}
-                  onChange={(event) => setStopLocal(event.target.value)}
-                />
-              </label>
-              <p className="field manual-duration-hint">
-                Duration: {formatDurationHint(startLocal, stopLocal)}
-              </p>
-            </>
+          {hasSessions ? (
+            <div className="session-editor">
+              <span className="session-editor-label">Work sessions</span>
+              {editSessions.map((row) => (
+                <div className="session-edit-row" key={row.id}>
+                  <label className="field">
+                    <span>Started</span>
+                    <input
+                      className="input"
+                      type="datetime-local"
+                      value={row.start}
+                      onChange={(event) => updateSessionRow(row.id, { start: event.target.value })}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Stopped</span>
+                    <input
+                      className="input"
+                      type="datetime-local"
+                      value={row.stop}
+                      onChange={(event) => updateSessionRow(row.id, { stop: event.target.value })}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label="Remove session"
+                    disabled={editSessions.length <= 1}
+                    onClick={() => removeSessionRow(row.id)}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ))}
+              <div className="session-editor-foot">
+                <button type="button" className="ghost-action" onClick={addSessionRow}>
+                  <Plus size={14} />
+                  Add session
+                </button>
+                <span className="session-editor-total">
+                  Total: {formatHoursMinutes(editTotalMinutes)}
+                </span>
+              </div>
+            </div>
           ) : (
             <>
               <label className="field">
@@ -1182,10 +1339,16 @@ function TimeEntryRow({
         <small>
           {entry.date} · {employeeLabel}
         </small>
-        {entry.startAt && entry.endAt ? (
-          <small className="entry-audit-times">
-            {formatAuditStamp(entry.startAt)} → {formatAuditStamp(entry.endAt)}
-          </small>
+        {hasSessions ? (
+          <div className="entry-sessions">
+            {sessions.map((session, index) => (
+              <small className="entry-audit-times" key={`${session.startAt}-${index}`}>
+                {sessions.length > 1 ? `${index + 1}. ` : ''}
+                {formatAuditStamp(session.startAt)} → {formatAuditStamp(session.endAt)} ·{' '}
+                {formatHoursMinutes(sessionMinutes(session))}
+              </small>
+            ))}
+          </div>
         ) : null}
         <div className="entry-tags">
           <StatusPill status={entry.approvalStatus} />
@@ -1204,18 +1367,32 @@ function TimeEntryRow({
               type="button"
               className="link-action"
               disabled={busy}
-              onClick={() => {
-                setHours(Math.floor(entry.minutes / 60).toString())
-                setMinutes((entry.minutes % 60).toString())
-                setStartLocal(isoToLocalInput(entry.startAt))
-                setStopLocal(isoToLocalInput(entry.endAt))
-                setDescription(entry.description)
-                setBillable(entry.billable)
-                setEditing(true)
-              }}
+              onClick={() => openEditor(false)}
             >
               {entry.approvalStatus === 'rejected' ? 'Edit & resubmit' : 'Edit'}
             </button>
+            {canResumeOrAdd ? (
+              <>
+                <button
+                  type="button"
+                  className="link-action"
+                  disabled={busy || timerRunning}
+                  title={timerRunning ? 'Stop the running timer first' : undefined}
+                  onClick={() => onResume(entry)}
+                >
+                  <Play size={13} />
+                  Resume
+                </button>
+                <button
+                  type="button"
+                  className="link-action"
+                  disabled={busy}
+                  onClick={() => openEditor(true)}
+                >
+                  Add time
+                </button>
+              </>
+            ) : null}
             <button
               type="button"
               className="link-action danger"

@@ -13,8 +13,10 @@ import {
   employeeName,
   formatAuditStamp,
   formatHours,
+  formatHoursMinutes,
   getBillingPeriodLabel,
   getWeekLabel,
+  sessionMinutes,
   weekRangeOf,
 } from '../lib/utils'
 
@@ -493,12 +495,25 @@ function ApprovalRow({
             {entry.date} · {taskLabel} · {formatHours(entry.minutes)} ·{' '}
             {entry.billable ? 'Billable' : 'Internal'}
           </small>
-          {entry.startAt && entry.endAt ? (
-            <small className="approval-audit-times">
-              Started {formatAuditStamp(entry.startAt)} · Stopped{' '}
-              {formatAuditStamp(entry.endAt)}
-            </small>
-          ) : null}
+          {(() => {
+            const sessions =
+              entry.sessions && entry.sessions.length > 0
+                ? entry.sessions
+                : entry.startAt && entry.endAt
+                  ? [{ startAt: entry.startAt, endAt: entry.endAt }]
+                  : []
+            return sessions.length > 0 ? (
+              <div className="approval-sessions">
+                {sessions.map((session, index) => (
+                  <small className="approval-audit-times" key={`${session.startAt}-${index}`}>
+                    {sessions.length > 1 ? `Session ${index + 1}: ` : ''}
+                    {formatAuditStamp(session.startAt)} → {formatAuditStamp(session.endAt)} ·{' '}
+                    {formatHoursMinutes(sessionMinutes(session))}
+                  </small>
+                ))}
+              </div>
+            ) : null
+          })()}
           {entry.entryMethod === 'manual' ? (
             <div className="approval-manual-note">
               <strong>Manual entry</strong>

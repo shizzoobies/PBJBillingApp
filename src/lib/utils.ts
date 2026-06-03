@@ -12,6 +12,7 @@ import type {
   SubscriptionPlan,
   TemplateStage,
   TimeEntry,
+  WorkSession,
 } from './types'
 
 export const currency = new Intl.NumberFormat('en-US', {
@@ -609,6 +610,36 @@ export function formatAuditStamp(iso?: string) {
     hour: 'numeric',
     minute: '2-digit',
   }).format(date)
+}
+
+/** Whole minutes in a single session (rounded, never negative). */
+export function sessionMinutes(session: WorkSession): number {
+  const startMs = new Date(session.startAt).getTime()
+  const endMs = new Date(session.endAt).getTime()
+  if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs <= startMs) return 0
+  return Math.round((endMs - startMs) / 60000)
+}
+
+/** Total minutes across all sessions. */
+export function sessionsTotalMinutes(sessions: WorkSession[]): number {
+  return sessions.reduce((sum, session) => sum + sessionMinutes(session), 0)
+}
+
+/** First start / last stop across sessions (chronological), or undefined. */
+export function sessionsEnvelope(sessions: WorkSession[]): {
+  startAt?: string
+  endAt?: string
+} {
+  const valid = sessions.filter(
+    (s) => !Number.isNaN(new Date(s.startAt).getTime()) && !Number.isNaN(new Date(s.endAt).getTime()),
+  )
+  if (valid.length === 0) return {}
+  const starts = valid.map((s) => new Date(s.startAt).getTime())
+  const ends = valid.map((s) => new Date(s.endAt).getTime())
+  return {
+    startAt: new Date(Math.min(...starts)).toISOString(),
+    endAt: new Date(Math.max(...ends)).toISOString(),
+  }
 }
 
 export function formatTimeFromMs(ms: number) {

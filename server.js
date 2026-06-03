@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import { AppDataStore } from './db/store.js'
 import { notify, sendLoginLinkEmail } from './lib/notify.js'
-import { normalizeTimeEntryMethod } from './lib/time-entry.js'
+import { normalizeTimeEntryMethod, normalizeWorkSessions } from './lib/time-entry.js'
 import {
   generateBackupCodes,
   generateSecret,
@@ -1134,6 +1134,28 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // Work sessions. When the client sends them, they're authoritative for
+        // minutes + the start/stop envelope. Otherwise, synthesize a single
+        // session from the start/stop pair so every timed entry has one.
+        const sessionsResult = normalizeWorkSessions(payload?.sessions)
+        if (sessionsResult.error) {
+          sendJson(response, 400, { error: sessionsResult.error })
+          return
+        }
+        let finalSessions = sessionsResult.sessions
+        let finalMinutes = minutes
+        let finalStartAt = startAt
+        let finalEndAt = endAt
+        if (finalSessions && finalSessions.length > 0) {
+          finalMinutes = sessionsResult.minutes
+          finalStartAt = sessionsResult.startAt
+          finalEndAt = sessionsResult.endAt
+        } else if (startAt && endAt) {
+          finalSessions = [{ startAt, endAt }]
+        } else {
+          finalSessions = []
+        }
+
         // Month-end lock enforcement: a bookkeeper cannot log time dated within
         // a locked period. Owners are exempt (they're the approver/adjuster).
         if (session.user.role !== 'owner') {
@@ -1182,15 +1204,16 @@ const server = createServer(async (request, response) => {
           clientId,
           isAdministrative,
           date,
-          minutes,
+          minutes: finalMinutes,
           category,
           description,
           billable,
           taskId,
           entryMethod,
           manualReason: entryMethod === 'manual' ? manualReason : undefined,
-          startAt,
-          endAt,
+          startAt: finalStartAt,
+          endAt: finalEndAt,
+          sessions: finalSessions,
         })
 
         // Manual entries are deliberately gated: log the submission and ping
@@ -1382,6 +1405,20 @@ const server = createServer(async (request, response) => {
         ) {
           sendJson(response, 400, { error: 'Stop time must be after the start time.' })
           return
+        }
+        // Sessions are authoritative when sent (Resume / Add time / edit): they
+        // override minutes and the start/stop envelope so everything stays in
+        // sync. Keeping the entry pending for re-approval is handled below.
+        if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'sessions')) {
+          const sessionsResult = normalizeWorkSessions(payload.sessions)
+          if (sessionsResult.error) {
+            sendJson(response, 400, { error: sessionsResult.error })
+            return
+          }
+          patch.sessions = sessionsResult.sessions
+          patch.minutes = sessionsResult.minutes
+          patch.startAt = sessionsResult.startAt ?? null
+          patch.endAt = sessionsResult.endAt ?? null
         }
 
         // Lock enforcement: bookkeepers cannot edit entries in a locked month.
