@@ -395,6 +395,7 @@ function ApprovalQueue({
               clients={clients}
               checklists={checklists}
               reassignTargets={reassignTargets}
+              knownEmployees={employees}
               onApprove={onApprove}
               onReject={onReject}
               onApproveBatch={onApproveBatch}
@@ -413,6 +414,7 @@ function EmployeeApprovalGroup({
   clients,
   checklists,
   reassignTargets,
+  knownEmployees,
   onApprove,
   onReject,
   onApproveBatch,
@@ -423,6 +425,7 @@ function EmployeeApprovalGroup({
   clients: Client[]
   checklists: Checklist[]
   reassignTargets: Employee[]
+  knownEmployees: Employee[]
   onApprove: (entryId: string) => Promise<void>
   onReject: (entryId: string, note: string) => Promise<void>
   onApproveBatch: (entryIds: string[]) => Promise<void>
@@ -466,6 +469,7 @@ function EmployeeApprovalGroup({
             }
             taskLabel={taskTitleFor(checklists, entry.taskId)}
             reassignTargets={reassignTargets}
+            knownEmployees={knownEmployees}
             onApprove={onApprove}
             onReject={onReject}
             onReassign={onReassign}
@@ -481,6 +485,7 @@ function ApprovalRow({
   clientLabel,
   taskLabel,
   reassignTargets,
+  knownEmployees,
   onApprove,
   onReject,
   onReassign,
@@ -489,10 +494,25 @@ function ApprovalRow({
   clientLabel: string
   taskLabel: string
   reassignTargets: Employee[]
+  knownEmployees: Employee[]
   onApprove: (entryId: string) => Promise<void>
   onReject: (entryId: string, note: string) => Promise<void>
   onReassign: (entryId: string, employeeId: string) => Promise<void>
 }) {
+  // The dropdown must SHOW the entry's actual current person — even a former/
+  // inactive teammate (e.g. a leftover seed employee) who isn't a valid
+  // reassignment target — so that picking an active member is a real change
+  // that fires onChange. Targets stay active-only.
+  const reassignOptions = reassignTargets.some((e) => e.id === entry.employeeId)
+    ? reassignTargets
+    : [
+        knownEmployees.find((e) => e.id === entry.employeeId) ?? {
+          id: entry.employeeId,
+          name: 'Unknown (former)',
+          role: 'Bookkeeper' as const,
+        },
+        ...reassignTargets,
+      ]
   const [rejecting, setRejecting] = useState(false)
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
@@ -665,7 +685,7 @@ function ApprovalRow({
           disabled={busy}
           onChange={(event) => void handleReassign(event.target.value)}
         >
-          {reassignTargets.map((employee) => (
+          {reassignOptions.map((employee) => (
             <option key={employee.id} value={employee.id}>
               {employee.name}
             </option>
