@@ -238,6 +238,7 @@ export async function updateTimeEntryRequest(
     startAt?: string
     endAt?: string
     sessions?: { startAt: string; endAt: string }[]
+    employeeId?: string
   },
 ) {
   const response = await apiFetch(`/api/time-entries/${encodeURIComponent(entryId)}`, {

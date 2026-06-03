@@ -40,11 +40,17 @@ export function TimeApprovalsPage() {
     approveTimeEntry,
     rejectTimeEntry,
     approveTimeEntriesBatch,
+    updateTimeEntry,
     lockTimesheet,
     unlockTimesheet,
     approveWeeklySubmission,
     rejectWeeklySubmission,
   } = useAppContext()
+
+  // Owner-only: move an entry mis-filed under the wrong person (e.g. a leftover
+  // seed employee) to the correct team member.
+  const reassignEntry = (entryId: string, employeeId: string) =>
+    updateTimeEntry(entryId, { employeeId })
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('pending')
 
@@ -83,6 +89,7 @@ export function TimeApprovalsPage() {
 
       <ApprovalQueue
         employees={approvalEmployees}
+        reassignTargets={data.employees}
         clients={data.clients}
         checklists={data.checklists}
         entries={data.timeEntries}
@@ -91,6 +98,7 @@ export function TimeApprovalsPage() {
         onApprove={approveTimeEntry}
         onReject={rejectTimeEntry}
         onApproveBatch={approveTimeEntriesBatch}
+        onReassign={reassignEntry}
       />
 
       <MonthEndSection
@@ -285,6 +293,7 @@ function WeeklyReviewSection({
 
 function ApprovalQueue({
   employees,
+  reassignTargets,
   clients,
   checklists,
   entries,
@@ -293,8 +302,10 @@ function ApprovalQueue({
   onApprove,
   onReject,
   onApproveBatch,
+  onReassign,
 }: {
   employees: Employee[]
+  reassignTargets: Employee[]
   clients: Client[]
   checklists: Checklist[]
   entries: TimeEntry[]
@@ -303,6 +314,7 @@ function ApprovalQueue({
   onApprove: (entryId: string) => Promise<void>
   onReject: (entryId: string, note: string) => Promise<void>
   onApproveBatch: (entryIds: string[]) => Promise<void>
+  onReassign: (entryId: string, employeeId: string) => Promise<void>
 }) {
   const filtered = useMemo(() => {
     if (statusFilter === 'all') return entries
@@ -382,9 +394,11 @@ function ApprovalQueue({
               entries={group.entries}
               clients={clients}
               checklists={checklists}
+              reassignTargets={reassignTargets}
               onApprove={onApprove}
               onReject={onReject}
               onApproveBatch={onApproveBatch}
+              onReassign={onReassign}
             />
           ))}
         </div>
@@ -398,17 +412,21 @@ function EmployeeApprovalGroup({
   entries,
   clients,
   checklists,
+  reassignTargets,
   onApprove,
   onReject,
   onApproveBatch,
+  onReassign,
 }: {
   employee: Employee
   entries: TimeEntry[]
   clients: Client[]
   checklists: Checklist[]
+  reassignTargets: Employee[]
   onApprove: (entryId: string) => Promise<void>
   onReject: (entryId: string, note: string) => Promise<void>
   onApproveBatch: (entryIds: string[]) => Promise<void>
+  onReassign: (entryId: string, employeeId: string) => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
   const pendingIds = entries
@@ -447,8 +465,10 @@ function EmployeeApprovalGroup({
               entry.isAdministrative ? 'Administrative' : clientName(clients, entry.clientId)
             }
             taskLabel={taskTitleFor(checklists, entry.taskId)}
+            reassignTargets={reassignTargets}
             onApprove={onApprove}
             onReject={onReject}
+            onReassign={onReassign}
           />
         ))}
       </div>
@@ -460,19 +480,36 @@ function ApprovalRow({
   entry,
   clientLabel,
   taskLabel,
+  reassignTargets,
   onApprove,
   onReject,
+  onReassign,
 }: {
   entry: TimeEntry
   clientLabel: string
   taskLabel: string
+  reassignTargets: Employee[]
   onApprove: (entryId: string) => Promise<void>
   onReject: (entryId: string, note: string) => Promise<void>
+  onReassign: (entryId: string, employeeId: string) => Promise<void>
 }) {
   const [rejecting, setRejecting] = useState(false)
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  const handleReassign = async (employeeId: string) => {
+    if (!employeeId || employeeId === entry.employeeId) return
+    setBusy(true)
+    setError('')
+    try {
+      await onReassign(entry.id, employeeId)
+    } catch {
+      setError('Could not reassign this entry.')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const handleApprove = async () => {
     setBusy(true)
@@ -620,6 +657,21 @@ function ApprovalRow({
           )}
         </div>
       ) : null}
+      <label className="approval-reassign">
+        <span>Logged by</span>
+        <select
+          className="input"
+          value={entry.employeeId}
+          disabled={busy}
+          onChange={(event) => void handleReassign(event.target.value)}
+        >
+          {reassignTargets.map((employee) => (
+            <option key={employee.id} value={employee.id}>
+              {employee.name}
+            </option>
+          ))}
+        </select>
+      </label>
       {error ? <small className="auth-error">{error}</small> : null}
     </article>
   )

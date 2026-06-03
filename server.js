@@ -1386,6 +1386,22 @@ const server = createServer(async (request, response) => {
               : null
         }
         if (typeof payload?.date === 'string' && payload.date) patch.date = payload.date
+        // Reassign to another team member — owner only. Validate the target is
+        // an active user so the user_id FK can never break.
+        if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'employeeId')) {
+          if (!isOwner) {
+            sendJson(response, 403, { error: 'Only owners can reassign time entries.' })
+            return
+          }
+          const targetId = typeof payload.employeeId === 'string' ? payload.employeeId.trim() : ''
+          const reassignData = await appDataStore.read()
+          const validTarget = (reassignData.employees ?? []).some((e) => e.id === targetId)
+          if (!validTarget) {
+            sendJson(response, 400, { error: 'Invalid employee for reassignment.' })
+            return
+          }
+          patch.employeeId = targetId
+        }
         // Audit timestamps — accept exact start/stop edits (normalized to ISO).
         const toIsoTimestamp = (value) => {
           if (typeof value !== 'string' || !value.trim()) return null

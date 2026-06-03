@@ -3524,6 +3524,7 @@ export class AppDataStore {
       const setClauses = []
       const params = [entryId]
       const map = {
+        employeeId: 'user_id',
         minutes: 'minutes',
         description: 'description',
         billable: 'billable',
@@ -3570,7 +3571,7 @@ export class AppDataStore {
       if (entry.id !== entryId) return entry
       const next = { ...entry }
       for (const key of [
-        'minutes', 'description', 'billable', 'taskId', 'category', 'date',
+        'employeeId', 'minutes', 'description', 'billable', 'taskId', 'category', 'date',
         'approvalStatus', 'approvalNote', 'approvedBy', 'approvedAt', 'startAt', 'endAt', 'sessions',
       ]) {
         if (patch && Object.prototype.hasOwnProperty.call(patch, key)) {

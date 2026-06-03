@@ -5253,6 +5253,24 @@ h2 {
   margin-top: 3px;
 }
 
+.approval-reassign {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.approval-reassign span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.approval-reassign select {
+  max-width: 240px;
+}
+
 /* Sessions editor (inline on a time entry) */
 .session-editor {
   background: var(--soft);

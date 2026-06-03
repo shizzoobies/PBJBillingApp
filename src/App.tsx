@@ -570,6 +570,7 @@ function App() {
       startAt?: string
       endAt?: string
       sessions?: { startAt: string; endAt: string }[]
+      employeeId?: string
     },
   ) => {
     if (previewActiveRef.current) return

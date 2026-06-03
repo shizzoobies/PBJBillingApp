@@ -1040,6 +1040,8 @@ function RecentTimeEntries({
               taskTitle={linkedTask ? linkedTask.title : null}
               locked={monthLocked}
               timerRunning={timerRunning}
+              employees={employees}
+              isOwner={role === 'owner'}
               onUpdate={onUpdate}
               onDelete={onDelete}
               onResume={onResume}
@@ -1061,6 +1063,8 @@ function TimeEntryRow({
   taskTitle,
   locked,
   timerRunning,
+  employees,
+  isOwner,
   onUpdate,
   onDelete,
   onResume,
@@ -1071,6 +1075,8 @@ function TimeEntryRow({
   taskTitle: string | null
   locked: boolean
   timerRunning: boolean
+  employees: Employee[]
+  isOwner: boolean
   onUpdate: (
     entryId: string,
     patch: {
@@ -1081,6 +1087,7 @@ function TimeEntryRow({
       startAt?: string
       endAt?: string
       sessions?: WorkSession[]
+      employeeId?: string
     },
   ) => Promise<void>
   onDelete: (entryId: string) => Promise<void>
@@ -1097,6 +1104,7 @@ function TimeEntryRow({
   const [editSessions, setEditSessions] = useState(() => entryToEditSessions(entry))
   const [description, setDescription] = useState(entry.description)
   const [billable, setBillable] = useState(entry.billable)
+  const [reassignTo, setReassignTo] = useState(entry.employeeId)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -1127,9 +1135,15 @@ function TimeEntryRow({
     setMinutes((entry.minutes % 60).toString())
     setDescription(entry.description)
     setBillable(entry.billable)
+    setReassignTo(entry.employeeId)
     setError('')
     setEditing(true)
   }
+
+  // Owner-only: reassign this entry to another team member when the picked
+  // employee differs from the current one. Empty otherwise.
+  const reassignPatch =
+    isOwner && reassignTo && reassignTo !== entry.employeeId ? { employeeId: reassignTo } : {}
 
   const updateSessionRow = (id: string, patch: { start?: string; stop?: string }) =>
     setEditSessions((rows) => rows.map((row) => (row.id === id ? { ...row, ...patch } : row)))
@@ -1178,7 +1192,7 @@ function TimeEntryRow({
       setBusy(true)
       setError('')
       try {
-        await onUpdate(entry.id, { sessions: built, description, billable })
+        await onUpdate(entry.id, { sessions: built, description, billable, ...reassignPatch })
         setEditing(false)
       } catch {
         setError('Could not save — the month may be locked.')
@@ -1207,7 +1221,7 @@ function TimeEntryRow({
     setBusy(true)
     setError('')
     try {
-      await onUpdate(entry.id, { minutes: totalMinutes, description, billable })
+      await onUpdate(entry.id, { minutes: totalMinutes, description, billable, ...reassignPatch })
       setEditing(false)
     } catch {
       setError('Could not save — the month may be locked.')
@@ -1231,6 +1245,22 @@ function TimeEntryRow({
     return (
       <article className="entry-row entry-row-editing">
         <div className="entry-edit-fields">
+          {isOwner ? (
+            <label className="field">
+              <span>Team member</span>
+              <select
+                className="input"
+                value={reassignTo}
+                onChange={(event) => setReassignTo(event.target.value)}
+              >
+                {employees.map((employee) => (
+                  <option key={employee.id} value={employee.id}>
+                    {employee.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           {hasSessions ? (
             <div className="session-editor">
               <span className="session-editor-label">Work sessions</span>
