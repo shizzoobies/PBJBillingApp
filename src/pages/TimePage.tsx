@@ -466,7 +466,14 @@ function TimeCapture({
   const effectiveClientId = clients.some((client) => client.id === clientId)
     ? clientId
     : clients[0]?.id ?? ''
-  const effectiveEmployeeId = role === 'owner' ? employeeId : activeEmployeeId
+  // Owners pick the employee; fall back to themselves (activeEmployeeId) when
+  // the selection is missing/invalid so time is never attributed to a stale id.
+  const effectiveEmployeeId =
+    role === 'owner'
+      ? employees.some((employee) => employee.id === employeeId)
+        ? employeeId
+        : activeEmployeeId
+      : activeEmployeeId
 
   const eligibleTasks = useMemo(
     () => eligibleChecklistsFor(checklists, effectiveClientId, effectiveEmployeeId, role),
@@ -708,7 +715,14 @@ function ManualEntryModal({
   const effectiveClientId = clients.some((client) => client.id === clientId)
     ? clientId
     : clients[0]?.id ?? ''
-  const effectiveEmployeeId = role === 'owner' ? employeeId : activeEmployeeId
+  // Owners pick the employee; fall back to themselves (activeEmployeeId) when
+  // the selection is missing/invalid so time is never attributed to a stale id.
+  const effectiveEmployeeId =
+    role === 'owner'
+      ? employees.some((employee) => employee.id === employeeId)
+        ? employeeId
+        : activeEmployeeId
+      : activeEmployeeId
 
   const eligibleTasks = useMemo(
     () => eligibleChecklistsFor(checklists, effectiveClientId, effectiveEmployeeId, role),

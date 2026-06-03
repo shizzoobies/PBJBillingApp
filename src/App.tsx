@@ -179,7 +179,13 @@ function App() {
       try {
         const sessionResponse = await fetchSession(controller.signal)
         setSessionUser(sessionResponse.user)
-        if (sessionResponse.user?.role === 'employee') {
+        // Default the active employee to whoever is signed in — for OWNERS too.
+        // Previously this only fired for employees, so an owner's timer/manual
+        // employee picker defaulted to a stale seed id (e.g. another teammate),
+        // silently logging the owner's own time under someone else. That made
+        // it look like an owner "couldn't approve their own time" because it
+        // never appeared under their name in the approval queue.
+        if (sessionResponse.user) {
           setActiveEmployeeId(sessionResponse.user.id)
         }
       } catch {

@@ -57,6 +57,10 @@ export function TimeApprovalsPage() {
   // and approve them. Empty groups are dropped downstream, so an owner only
   // appears here when they actually have entries awaiting review.
   const employees = data.employees
+  // The approval queue also groups by FORMER team members so their pending
+  // time stays approvable (active list alone would orphan it). A catch-all in
+  // the queue handles any remaining unmatched employeeId.
+  const approvalEmployees = [...data.employees, ...(data.inactiveEmployees ?? [])]
 
   return (
     <section className="content-grid" id="time-approvals">
@@ -78,7 +82,7 @@ export function TimeApprovalsPage() {
       />
 
       <ApprovalQueue
-        employees={employees}
+        employees={approvalEmployees}
         clients={data.clients}
         checklists={data.checklists}
         entries={data.timeEntries}
@@ -306,7 +310,7 @@ function ApprovalQueue({
   }, [entries, statusFilter])
 
   const groups = useMemo(() => {
-    return employees
+    const byEmployee = employees
       .map((employee) => ({
         employee,
         entries: filtered
@@ -314,6 +318,21 @@ function ApprovalQueue({
           .sort((left, right) => right.date.localeCompare(left.date)),
       }))
       .filter((group) => group.entries.length > 0)
+
+    // Safety net: any entry whose employeeId matches no known team member
+    // (active or former) would otherwise be invisible and unapprovable. Surface
+    // them in a single catch-all group so an owner can always act on them.
+    const knownIds = new Set(employees.map((employee) => employee.id))
+    const unmatched = filtered
+      .filter((entry) => !knownIds.has(entry.employeeId))
+      .sort((left, right) => right.date.localeCompare(left.date))
+    if (unmatched.length > 0) {
+      byEmployee.push({
+        employee: { id: '__unattributed__', name: 'Unattributed / former team', role: 'Bookkeeper' },
+        entries: unmatched,
+      })
+    }
+    return byEmployee
   }, [employees, filtered])
 
   return (
