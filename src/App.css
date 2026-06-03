@@ -5232,6 +5232,20 @@ h2 {
   margin-top: 5px;
 }
 
+.entry-audit-times,
+.approval-audit-times {
+  color: var(--muted);
+  display: block;
+  font-variant-numeric: tabular-nums;
+  margin-top: 3px;
+}
+
+.manual-duration-hint {
+  color: var(--muted);
+  font-weight: 600;
+  margin: 0;
+}
+
 .approval-row-pills {
   align-items: flex-end;
   display: flex;

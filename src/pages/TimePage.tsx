@@ -16,12 +16,47 @@ import {
   currentBillingPeriod,
   currentWeekStart,
   employeeName,
+  formatAuditStamp,
   formatHours,
   formatHoursMinutes,
   getWeekLabel,
   shiftWeek,
   weekRangeOf,
 } from '../lib/utils'
+
+// ---- Exact start/stop capture: datetime-local <-> ISO helpers ------------
+function pad2(value: number) {
+  return String(value).padStart(2, '0')
+}
+
+/** Format a Date as a `datetime-local` input value in LOCAL time. */
+function toLocalInput(date: Date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
+/** ISO timestamp -> `datetime-local` value (local), or '' if missing/invalid. */
+function isoToLocalInput(iso?: string) {
+  if (!iso) return ''
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '' : toLocalInput(date)
+}
+
+/** `datetime-local` value -> ISO timestamp, or '' if empty/invalid. */
+function localInputToIso(value: string) {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString()
+}
+
+/** Live duration between two `datetime-local` values, for the form hint. */
+function formatDurationHint(startLocal: string, stopLocal: string) {
+  const startMs = startLocal ? new Date(startLocal).getTime() : NaN
+  const stopMs = stopLocal ? new Date(stopLocal).getTime() : NaN
+  if (Number.isNaN(startMs) || Number.isNaN(stopMs) || stopMs <= startMs) {
+    return '—'
+  }
+  return formatHoursMinutes(Math.round((stopMs - startMs) / 60000))
+}
 
 export function TimePage() {
   const {
@@ -577,11 +612,16 @@ function ManualEntryModal({
   onClose: () => void
 }) {
   const [step, setStep] = useState<'confirm' | 'form'>('confirm')
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  // Exact start/stop the employee enters, so the owner can audit. Default to a
+  // one-hour block ending now; duration is derived from the span.
+  const [startLocal, setStartLocal] = useState(() => {
+    const start = new Date()
+    start.setHours(start.getHours() - 1)
+    return toLocalInput(start)
+  })
+  const [stopLocal, setStopLocal] = useState(() => toLocalInput(new Date()))
   const [employeeId, setEmployeeId] = useState(activeEmployeeId)
   const [clientId, setClientId] = useState(clients[0]?.id ?? '')
-  const [hours, setHours] = useState('1')
-  const [minutes, setMinutes] = useState('0')
   const [description, setDescription] = useState('')
   const [billable, setBillable] = useState(true)
   const [taskId, setTaskId] = useState<string>('')
@@ -613,20 +653,19 @@ function ManualEntryModal({
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const hoursPart = hours.trim() === '' ? 0 : Number(hours)
-    const minutesPart = minutes.trim() === '' ? 0 : Number(minutes)
-    if (
-      Number.isNaN(hoursPart) ||
-      Number.isNaN(minutesPart) ||
-      hoursPart < 0 ||
-      minutesPart < 0
-    ) {
-      setSubmitError('Enter a valid number of hours and minutes.')
+    const startMs = startLocal ? new Date(startLocal).getTime() : NaN
+    const stopMs = stopLocal ? new Date(stopLocal).getTime() : NaN
+    if (Number.isNaN(startMs) || Number.isNaN(stopMs)) {
+      setSubmitError('Enter a valid start and stop date/time.')
       return
     }
-    const totalMinutes = Math.round(hoursPart * 60 + minutesPart)
+    if (stopMs <= startMs) {
+      setSubmitError('The stop time must be after the start time.')
+      return
+    }
+    const totalMinutes = Math.round((stopMs - startMs) / 60000)
     if (totalMinutes <= 0) {
-      setSubmitError('Enter hours and/or minutes greater than zero.')
+      setSubmitError('Start and stop must be at least a minute apart.')
       return
     }
     if (!isAdministrative && !effectiveClientId) {
@@ -641,10 +680,6 @@ function ManualEntryModal({
       setSubmitError('A reason is required for manual entries.')
       return
     }
-    if (!date) {
-      setSubmitError('Choose a date for this entry.')
-      return
-    }
 
     setSubmitPending(true)
     setSubmitError('')
@@ -654,13 +689,16 @@ function ManualEntryModal({
         employeeId: effectiveEmployeeId,
         clientId: isAdministrative ? '' : effectiveClientId,
         isAdministrative,
-        date,
+        // Entry date follows the (local) start day.
+        date: startLocal.slice(0, 10),
         minutes: totalMinutes,
         description,
         billable: isAdministrative ? false : billable,
         taskId: isAdministrative ? null : effectiveTaskId || null,
         entryMethod: 'manual',
         manualReason: reason.trim(),
+        startAt: localInputToIso(startLocal),
+        endAt: localInputToIso(stopLocal),
       })
       setSuccess(true)
     } catch {
@@ -724,36 +762,26 @@ function ManualEntryModal({
             </p>
             <div className="form-grid">
               <label className="field">
-                <span>Date</span>
+                <span>Started</span>
                 <input
                   className="input"
-                  type="date"
-                  value={date}
-                  onChange={(event) => setDate(event.target.value)}
+                  type="datetime-local"
+                  value={startLocal}
+                  onChange={(event) => setStartLocal(event.target.value)}
                 />
               </label>
               <label className="field">
-                <span>Hours</span>
+                <span>Stopped</span>
                 <input
                   className="input"
-                  min="0"
-                  step="1"
-                  type="number"
-                  value={hours}
-                  onChange={(event) => setHours(event.target.value)}
+                  type="datetime-local"
+                  value={stopLocal}
+                  onChange={(event) => setStopLocal(event.target.value)}
                 />
               </label>
-              <label className="field">
-                <span>Minutes</span>
-                <input
-                  className="input"
-                  min="0"
-                  step="1"
-                  type="number"
-                  value={minutes}
-                  onChange={(event) => setMinutes(event.target.value)}
-                />
-              </label>
+              <p className="field full-span manual-duration-hint">
+                Duration: {formatDurationHint(startLocal, stopLocal)}
+              </p>
               {role === 'owner' && (
                 <label className="field">
                   <span>Employee</span>
@@ -946,13 +974,26 @@ function TimeEntryRow({
   locked: boolean
   onUpdate: (
     entryId: string,
-    patch: { minutes?: number; description?: string; billable?: boolean; taskId?: string | null },
+    patch: {
+      minutes?: number
+      description?: string
+      billable?: boolean
+      taskId?: string | null
+      startAt?: string
+      endAt?: string
+    },
   ) => Promise<void>
   onDelete: (entryId: string) => Promise<void>
 }) {
+  // Entries captured with exact start/stop (timer + new manual entries) edit
+  // via date/time pickers; legacy entries without timestamps keep the simpler
+  // hours/minutes editor.
+  const hasTimestamps = Boolean(entry.startAt && entry.endAt)
   const [editing, setEditing] = useState(false)
   const [hours, setHours] = useState(Math.floor(entry.minutes / 60).toString())
   const [minutes, setMinutes] = useState((entry.minutes % 60).toString())
+  const [startLocal, setStartLocal] = useState(isoToLocalInput(entry.startAt))
+  const [stopLocal, setStopLocal] = useState(isoToLocalInput(entry.endAt))
   const [description, setDescription] = useState(entry.description)
   const [billable, setBillable] = useState(entry.billable)
   const [busy, setBusy] = useState(false)
@@ -963,30 +1004,59 @@ function TimeEntryRow({
   const canEdit = !locked
 
   const handleSave = async () => {
-    const hoursPart = hours.trim() === '' ? 0 : Number(hours)
-    const minutesPart = minutes.trim() === '' ? 0 : Number(minutes)
-    if (
-      Number.isNaN(hoursPart) ||
-      Number.isNaN(minutesPart) ||
-      hoursPart < 0 ||
-      minutesPart < 0
-    ) {
-      setError('Enter a valid number of hours and minutes.')
-      return
+    let patch: {
+      minutes: number
+      description: string
+      billable: boolean
+      startAt?: string
+      endAt?: string
     }
-    const totalMinutes = Math.round(hoursPart * 60 + minutesPart)
-    if (totalMinutes <= 0) {
-      setError('Enter hours and/or minutes greater than zero.')
-      return
+    if (hasTimestamps) {
+      const startMs = startLocal ? new Date(startLocal).getTime() : NaN
+      const stopMs = stopLocal ? new Date(stopLocal).getTime() : NaN
+      if (Number.isNaN(startMs) || Number.isNaN(stopMs)) {
+        setError('Enter a valid start and stop date/time.')
+        return
+      }
+      if (stopMs <= startMs) {
+        setError('The stop time must be after the start time.')
+        return
+      }
+      const totalMinutes = Math.round((stopMs - startMs) / 60000)
+      if (totalMinutes <= 0) {
+        setError('Start and stop must be at least a minute apart.')
+        return
+      }
+      patch = {
+        minutes: totalMinutes,
+        description,
+        billable,
+        startAt: localInputToIso(startLocal),
+        endAt: localInputToIso(stopLocal),
+      }
+    } else {
+      const hoursPart = hours.trim() === '' ? 0 : Number(hours)
+      const minutesPart = minutes.trim() === '' ? 0 : Number(minutes)
+      if (
+        Number.isNaN(hoursPart) ||
+        Number.isNaN(minutesPart) ||
+        hoursPart < 0 ||
+        minutesPart < 0
+      ) {
+        setError('Enter a valid number of hours and minutes.')
+        return
+      }
+      const totalMinutes = Math.round(hoursPart * 60 + minutesPart)
+      if (totalMinutes <= 0) {
+        setError('Enter hours and/or minutes greater than zero.')
+        return
+      }
+      patch = { minutes: totalMinutes, description, billable }
     }
     setBusy(true)
     setError('')
     try {
-      await onUpdate(entry.id, {
-        minutes: totalMinutes,
-        description,
-        billable,
-      })
+      await onUpdate(entry.id, patch)
       setEditing(false)
     } catch {
       setError('Could not save — the month may be locked.')
@@ -1010,28 +1080,56 @@ function TimeEntryRow({
     return (
       <article className="entry-row entry-row-editing">
         <div className="entry-edit-fields">
-          <label className="field">
-            <span>Hours</span>
-            <input
-              className="input"
-              min="0"
-              step="1"
-              type="number"
-              value={hours}
-              onChange={(event) => setHours(event.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span>Minutes</span>
-            <input
-              className="input"
-              min="0"
-              step="1"
-              type="number"
-              value={minutes}
-              onChange={(event) => setMinutes(event.target.value)}
-            />
-          </label>
+          {hasTimestamps ? (
+            <>
+              <label className="field">
+                <span>Started</span>
+                <input
+                  className="input"
+                  type="datetime-local"
+                  value={startLocal}
+                  onChange={(event) => setStartLocal(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>Stopped</span>
+                <input
+                  className="input"
+                  type="datetime-local"
+                  value={stopLocal}
+                  onChange={(event) => setStopLocal(event.target.value)}
+                />
+              </label>
+              <p className="field manual-duration-hint">
+                Duration: {formatDurationHint(startLocal, stopLocal)}
+              </p>
+            </>
+          ) : (
+            <>
+              <label className="field">
+                <span>Hours</span>
+                <input
+                  className="input"
+                  min="0"
+                  step="1"
+                  type="number"
+                  value={hours}
+                  onChange={(event) => setHours(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>Minutes</span>
+                <input
+                  className="input"
+                  min="0"
+                  step="1"
+                  type="number"
+                  value={minutes}
+                  onChange={(event) => setMinutes(event.target.value)}
+                />
+              </label>
+            </>
+          )}
           <label className="field">
             <span>What did you do?</span>
             <textarea
@@ -1084,6 +1182,11 @@ function TimeEntryRow({
         <small>
           {entry.date} · {employeeLabel}
         </small>
+        {entry.startAt && entry.endAt ? (
+          <small className="entry-audit-times">
+            {formatAuditStamp(entry.startAt)} → {formatAuditStamp(entry.endAt)}
+          </small>
+        ) : null}
         <div className="entry-tags">
           <StatusPill status={entry.approvalStatus} />
           {entry.entryMethod === 'manual' ? <ManualBadge /> : null}
@@ -1104,6 +1207,8 @@ function TimeEntryRow({
               onClick={() => {
                 setHours(Math.floor(entry.minutes / 60).toString())
                 setMinutes((entry.minutes % 60).toString())
+                setStartLocal(isoToLocalInput(entry.startAt))
+                setStopLocal(isoToLocalInput(entry.endAt))
                 setDescription(entry.description)
                 setBillable(entry.billable)
                 setEditing(true)

@@ -1641,6 +1641,12 @@ export class AppDataStore {
       )
       await this.pool.query(`alter table time_entries alter column client_id drop not null`)
 
+      // Audit timestamps: the exact start/stop of the work. Populated for new
+      // timer entries (from the timer span) and manual entries (entered by the
+      // user). Nullable — legacy rows predate this and simply have no span.
+      await this.pool.query(`alter table time_entries add column if not exists started_at timestamptz`)
+      await this.pool.query(`alter table time_entries add column if not exists ended_at timestamptz`)
+
       // Month-end timesheet locks: one per employee per 'YYYY-MM' period.
       await this.pool.query(`
         create table if not exists timesheet_locks (
@@ -2359,7 +2365,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                    approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                   is_administrative
+                   is_administrative, started_at, ended_at
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -2630,6 +2636,8 @@ export class AppDataStore {
           approvedAt: row.approved_at ? row.approved_at.toISOString() : undefined,
           entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
           manualReason: row.manual_reason ?? undefined,
+          startAt: row.started_at ? row.started_at.toISOString() : undefined,
+          endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
         })),
         checklists: allChecklists.filter((checklist) => !checklist.deletedAt),
         recycledChecklists: allChecklists.filter((checklist) => Boolean(checklist.deletedAt)),
@@ -3099,8 +3107,9 @@ export class AppDataStore {
           await client.query(
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
-                                        approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+                                        approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative,
+                                        started_at, ended_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
             `,
             [
               entry.id,
@@ -3120,6 +3129,8 @@ export class AppDataStore {
               entry.entryMethod === 'manual' ? 'manual' : 'timer',
               entry.entryMethod === 'manual' ? entry.manualReason ?? null : null,
               Boolean(entry.isAdministrative),
+              entry.startAt ?? null,
+              entry.endAt ?? null,
             ],
           )
         }
@@ -3392,8 +3403,8 @@ export class AppDataStore {
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
         `,
         [
           nextEntry.id,
@@ -3411,6 +3422,8 @@ export class AppDataStore {
           nextEntry.entryMethod,
           nextEntry.manualReason ?? null,
           Boolean(nextEntry.isAdministrative),
+          nextEntry.startAt ?? null,
+          nextEntry.endAt ?? null,
         ],
       )
 
@@ -3432,7 +3445,7 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                 approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                is_administrative
+                is_administrative, started_at, ended_at
          from time_entries where id = $1`,
         [entryId],
       )
@@ -3455,6 +3468,8 @@ export class AppDataStore {
         approvedAt: row.approved_at ? row.approved_at.toISOString() : undefined,
         entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
         manualReason: row.manual_reason ?? undefined,
+        startAt: row.started_at ? row.started_at.toISOString() : undefined,
+        endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
       }
     }
 
@@ -3483,12 +3498,15 @@ export class AppDataStore {
         approvalNote: 'approval_note',
         approvedBy: 'approved_by',
         approvedAt: 'approved_at',
+        startAt: 'started_at',
+        endAt: 'ended_at',
       }
       for (const [appKey, dbCol] of Object.entries(map)) {
         if (patch && Object.prototype.hasOwnProperty.call(patch, appKey)) {
           let value = patch[appKey]
           if ((appKey === 'taskId' || appKey === 'approvalNote' || appKey === 'approvedBy' ||
-               appKey === 'approvedAt') && (value === '' || value === undefined)) {
+               appKey === 'approvedAt' || appKey === 'startAt' || appKey === 'endAt') &&
+              (value === '' || value === undefined)) {
             value = null
           }
           params.push(value)
@@ -3512,7 +3530,7 @@ export class AppDataStore {
       const next = { ...entry }
       for (const key of [
         'minutes', 'description', 'billable', 'taskId', 'category', 'date',
-        'approvalStatus', 'approvalNote', 'approvedBy', 'approvedAt',
+        'approvalStatus', 'approvalNote', 'approvedBy', 'approvedAt', 'startAt', 'endAt',
       ]) {
         if (patch && Object.prototype.hasOwnProperty.call(patch, key)) {
           const value = patch[key]

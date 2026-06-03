@@ -595,6 +595,22 @@ export function formatHoursMinutes(minutes: number) {
   return `${h}h ${m}m`
 }
 
+/**
+ * Human-readable audit timestamp for an exact start/stop, e.g. "Jun 3, 9:15 AM".
+ * Renders in the viewer's local timezone. Returns '' for missing/invalid input.
+ */
+export function formatAuditStamp(iso?: string) {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date)
+}
+
 export function formatTimeFromMs(ms: number) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000))
   const minutes = Math.floor(totalSeconds / 60)

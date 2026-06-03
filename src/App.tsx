@@ -509,13 +509,17 @@ function App() {
       descriptionOverride && descriptionOverride.trim()
         ? descriptionOverride
         : timer.description
+    // Audit timestamps: the timer knows exactly when it started and stopped.
+    const stoppedAtMs = Date.now()
     await logTime({
       employeeId: timer.employeeId,
       clientId: timer.clientId,
       isAdministrative,
-      date: new Date().toISOString().slice(0, 10),
-      minutes: Math.max(1, Math.round((Date.now() - timer.startedAt) / 60000)),
+      date: new Date(timer.startedAt).toISOString().slice(0, 10),
+      minutes: Math.max(1, Math.round((stoppedAtMs - timer.startedAt) / 60000)),
       description,
+      startAt: new Date(timer.startedAt).toISOString(),
+      endAt: new Date(stoppedAtMs).toISOString(),
       // Administrative time is never billable; the server enforces this too.
       billable: !isAdministrative,
       taskId: timer.taskId ?? null,
@@ -532,6 +536,8 @@ function App() {
       billable?: boolean
       taskId?: string | null
       date?: string
+      startAt?: string
+      endAt?: string
     },
   ) => {
     if (previewActiveRef.current) return

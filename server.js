@@ -1089,6 +1089,16 @@ const server = createServer(async (request, response) => {
           : typeof taskIdRaw === 'string' && taskIdRaw.trim()
             ? taskIdRaw.trim()
             : null
+        // Audit timestamps: exact start/stop of the work, normalized to ISO.
+        // Optional — invalid/absent values are simply dropped.
+        const toIsoTimestamp = (value) => {
+          if (typeof value !== 'string' || !value.trim()) return undefined
+          const parsed = new Date(value)
+          return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString()
+        }
+        const startAt = toIsoTimestamp(payload?.startAt)
+        const endAt = toIsoTimestamp(payload?.endAt)
+
         // Capture method: anything other than an explicit 'manual' is a timer
         // entry. A manual entry must carry a non-empty reason; timer-stop and
         // any non-manual creation ignore manualReason entirely.
@@ -1116,6 +1126,11 @@ const server = createServer(async (request, response) => {
 
         if (methodError) {
           sendJson(response, 400, { error: methodError })
+          return
+        }
+
+        if (startAt && endAt && new Date(endAt).getTime() <= new Date(startAt).getTime()) {
+          sendJson(response, 400, { error: 'Stop time must be after the start time.' })
           return
         }
 
@@ -1174,6 +1189,8 @@ const server = createServer(async (request, response) => {
           taskId,
           entryMethod,
           manualReason: entryMethod === 'manual' ? manualReason : undefined,
+          startAt,
+          endAt,
         })
 
         // Manual entries are deliberately gated: log the submission and ping
@@ -1346,6 +1363,26 @@ const server = createServer(async (request, response) => {
               : null
         }
         if (typeof payload?.date === 'string' && payload.date) patch.date = payload.date
+        // Audit timestamps — accept exact start/stop edits (normalized to ISO).
+        const toIsoTimestamp = (value) => {
+          if (typeof value !== 'string' || !value.trim()) return null
+          const parsed = new Date(value)
+          return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+        }
+        if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'startAt')) {
+          patch.startAt = toIsoTimestamp(payload.startAt)
+        }
+        if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'endAt')) {
+          patch.endAt = toIsoTimestamp(payload.endAt)
+        }
+        if (
+          patch.startAt &&
+          patch.endAt &&
+          new Date(patch.endAt).getTime() <= new Date(patch.startAt).getTime()
+        ) {
+          sendJson(response, 400, { error: 'Stop time must be after the start time.' })
+          return
+        }
 
         // Lock enforcement: bookkeepers cannot edit entries in a locked month.
         // Owners are exempt. Check both the current and any new date.

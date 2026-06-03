@@ -53,6 +53,8 @@ export type AppContextValue = {
       billable?: boolean
       taskId?: string | null
       date?: string
+      startAt?: string
+      endAt?: string
     },
   ) => Promise<void>
   deleteTimeEntry: (entryId: string) => Promise<void>

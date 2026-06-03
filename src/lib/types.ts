@@ -222,6 +222,17 @@ export type TimeEntry = {
   entryMethod: 'timer' | 'manual'
   /** Required reason text — set only when `entryMethod` is `manual`. */
   manualReason?: string
+  /**
+   * Exact moment work started, ISO 8601 timestamp. Set for timer entries
+   * (from the timer's start) and for manual entries (the user enters it).
+   * Optional for back-compat with legacy rows that predate audit timestamps.
+   */
+  startAt?: string
+  /**
+   * Exact moment work stopped, ISO 8601 timestamp. Paired with `startAt`;
+   * `minutes` is derived from the span. Optional for legacy rows.
+   */
+  endAt?: string
 }
 
 /** A per-employee, per-month timesheet lock. Locking signs off the month. */

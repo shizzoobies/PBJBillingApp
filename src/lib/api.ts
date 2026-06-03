@@ -235,6 +235,8 @@ export async function updateTimeEntryRequest(
     billable?: boolean
     taskId?: string | null
     date?: string
+    startAt?: string
+    endAt?: string
   },
 ) {
   const response = await apiFetch(`/api/time-entries/${encodeURIComponent(entryId)}`, {

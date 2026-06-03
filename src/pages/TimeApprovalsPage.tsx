@@ -11,6 +11,7 @@ import type {
 import {
   clientName,
   employeeName,
+  formatAuditStamp,
   formatHours,
   getBillingPeriodLabel,
   getWeekLabel,
@@ -492,6 +493,12 @@ function ApprovalRow({
             {entry.date} · {taskLabel} · {formatHours(entry.minutes)} ·{' '}
             {entry.billable ? 'Billable' : 'Internal'}
           </small>
+          {entry.startAt && entry.endAt ? (
+            <small className="approval-audit-times">
+              Started {formatAuditStamp(entry.startAt)} · Stopped{' '}
+              {formatAuditStamp(entry.endAt)}
+            </small>
+          ) : null}
           {entry.entryMethod === 'manual' ? (
             <div className="approval-manual-note">
               <strong>Manual entry</strong>
