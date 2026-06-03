@@ -496,19 +496,26 @@ function App() {
     }
   }
 
-  const stopTimer = async () => {
+  const stopTimer = async (descriptionOverride?: string) => {
     if (previewActiveRef.current || !timer) {
       return
     }
 
     const isAdministrative = Boolean(timer.isAdministrative)
+    // Use the latest edited description (the timer panel lets users keep
+    // editing "what did you do?" while the timer runs). Fall back to the
+    // description captured at start if the field was cleared.
+    const description =
+      descriptionOverride && descriptionOverride.trim()
+        ? descriptionOverride
+        : timer.description
     await logTime({
       employeeId: timer.employeeId,
       clientId: timer.clientId,
       isAdministrative,
       date: new Date().toISOString().slice(0, 10),
       minutes: Math.max(1, Math.round((Date.now() - timer.startedAt) / 60000)),
-      description: timer.description,
+      description,
       // Administrative time is never billable; the server enforces this too.
       billable: !isAdministrative,
       taskId: timer.taskId ?? null,

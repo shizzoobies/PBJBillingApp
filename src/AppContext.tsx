@@ -43,7 +43,7 @@ export type AppContextValue = {
   timer: TimerState | null
   timerElapsed: string
   startTimer: (timer: TimerState) => void
-  stopTimer: () => Promise<void>
+  stopTimer: (descriptionOverride?: string) => Promise<void>
   logTime: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
   updateTimeEntry: (
     entryId: string,

@@ -362,7 +362,7 @@ function TimeCapture({
   checklists: Checklist[]
   employees: Employee[]
   onStartTimer: (timer: TimerState) => void
-  onStopTimer: () => Promise<void>
+  onStopTimer: (descriptionOverride?: string) => Promise<void>
   role: Role
   timer: TimerState | null
   timerElapsed: string
@@ -412,7 +412,7 @@ function TimeCapture({
   const handleStopTimer = async () => {
     setBusy(true)
     try {
-      await onStopTimer()
+      await onStopTimer(description)
     } finally {
       setBusy(false)
     }
@@ -514,12 +514,14 @@ function TimeCapture({
         )}
         <label className="field full-span">
           <span>{isAdministrative ? 'Notes (what was this for?)' : 'What did you do?'}</span>
+          {/* Editable while the timer runs — the latest text is what gets
+              logged on stop. Only locked timesheets / preview mode disable it. */}
           <textarea
             className="input"
             onChange={(event) => setDescription(event.target.value)}
             rows={4}
             value={description}
-            disabled={inputsDisabled || Boolean(timer)}
+            disabled={inputsDisabled}
           />
         </label>
         <div className="button-row full-span">
