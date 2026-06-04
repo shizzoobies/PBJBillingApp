@@ -14,7 +14,9 @@ import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { FilterBar } from '../components/FilterBar'
 import { useFilters } from '../components/useFilters'
+import { SaveBadge } from '../components/SectionKit'
 import { SharingControl } from '../components/SharingControl'
+import { useSaveFlash } from '../lib/useSaveFlash'
 import type {
   Checklist,
   ChecklistFrequency,
@@ -3005,6 +3007,11 @@ function StageScheduleControl({
    */
   onChange: (next: { dueDate?: string; dueDayOfMonth?: number }) => void
 }) {
+  const { state, flash } = useSaveFlash()
+  const emit = (next: { dueDate?: string; dueDayOfMonth?: number }) => {
+    onChange(next)
+    flash()
+  }
   const mode: 'none' | 'day' | 'date' = dueDate
     ? 'date'
     : typeof dueDayOfMonth === 'number'
@@ -3012,13 +3019,15 @@ function StageScheduleControl({
       : 'none'
   return (
     <div className="stage-schedule">
-      <span className="stage-schedule-title">Due</span>
+      <span className="stage-schedule-title">
+        Due <SaveBadge state={state} />
+      </span>
       <div className="stage-schedule-options">
         <label className="stage-schedule-radio">
           <input
             type="radio"
             checked={mode === 'none'}
-            onChange={() => onChange({ dueDate: undefined, dueDayOfMonth: undefined })}
+            onChange={() => emit({ dueDate: undefined, dueDayOfMonth: undefined })}
           />
           <span>No specific due date</span>
         </label>
@@ -3026,9 +3035,7 @@ function StageScheduleControl({
           <input
             type="radio"
             checked={mode === 'day'}
-            onChange={() =>
-              onChange({ dueDate: undefined, dueDayOfMonth: dueDayOfMonth ?? 1 })
-            }
+            onChange={() => emit({ dueDate: undefined, dueDayOfMonth: dueDayOfMonth ?? 1 })}
           />
           <span>
             Day of the month
@@ -3041,7 +3048,7 @@ function StageScheduleControl({
                 value={dueDayOfMonth ?? 1}
                 onChange={(event) => {
                   const value = Math.min(Math.max(Number(event.target.value) || 1, 1), 31)
-                  onChange({ dueDate: undefined, dueDayOfMonth: value })
+                  emit({ dueDate: undefined, dueDayOfMonth: value })
                 }}
               />
             ) : null}
@@ -3052,7 +3059,7 @@ function StageScheduleControl({
             type="radio"
             checked={mode === 'date'}
             onChange={() =>
-              onChange({
+              emit({
                 dueDate: dueDate || new Date().toISOString().slice(0, 10),
                 dueDayOfMonth: undefined,
               })
@@ -3066,7 +3073,7 @@ function StageScheduleControl({
                 type="date"
                 value={dueDate ?? ''}
                 onChange={(event) =>
-                  onChange({ dueDate: event.target.value || undefined, dueDayOfMonth: undefined })
+                  emit({ dueDate: event.target.value || undefined, dueDayOfMonth: undefined })
                 }
               />
             ) : null}

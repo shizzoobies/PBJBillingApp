@@ -406,6 +406,12 @@ function ensureTemplateStages(template) {
       assigneeId: stage.assigneeId || template.assigneeId,
       offsetDays: Number.isFinite(Number(stage.offsetDays)) ? Number(stage.offsetDays) : 0,
       ...(stage.dueDate ? { dueDate: stage.dueDate } : {}),
+      // Carry the recurring day-of-month spec — without this, picking "Day of
+      // the month" on a stage was silently dropped on save (the field never
+      // survived this normalizer), so the due date reverted to "none".
+      ...(typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1
+        ? { dueDayOfMonth: stage.dueDayOfMonth }
+        : {}),
       viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
       editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
       items: Array.isArray(stage.items) ? stage.items.map((item) => ({ ...item })) : [],

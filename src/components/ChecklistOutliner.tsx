@@ -1,5 +1,7 @@
 import { ChevronLeft, ChevronRight, CornerDownRight, Plus } from 'lucide-react'
 import { useRef, type KeyboardEvent } from 'react'
+import { SaveBadge } from './SectionKit'
+import { useSaveFlash } from '../lib/useSaveFlash'
 import {
   flattenOutline,
   indentItem,
@@ -484,6 +486,11 @@ function OutlinerDueControl({
   dueDayOfMonth?: number
   onChange: (patch: { dueDate?: string; dueDayOfMonth?: number }) => void
 }) {
+  const { state, flash } = useSaveFlash()
+  const emit = (patch: { dueDate?: string; dueDayOfMonth?: number }) => {
+    onChange(patch)
+    flash()
+  }
   const mode: 'none' | 'day' | 'date' = dueDate
     ? 'date'
     : typeof dueDayOfMonth === 'number'
@@ -498,14 +505,14 @@ function OutlinerDueControl({
         onChange={(event) => {
           const next = event.target.value
           if (next === 'day') {
-            onChange({ dueDate: undefined, dueDayOfMonth: dueDayOfMonth ?? 1 })
+            emit({ dueDate: undefined, dueDayOfMonth: dueDayOfMonth ?? 1 })
           } else if (next === 'date') {
-            onChange({
+            emit({
               dueDate: dueDate || new Date().toISOString().slice(0, 10),
               dueDayOfMonth: undefined,
             })
           } else {
-            onChange({ dueDate: undefined, dueDayOfMonth: undefined })
+            emit({ dueDate: undefined, dueDayOfMonth: undefined })
           }
         }}
       >
@@ -523,7 +530,7 @@ function OutlinerDueControl({
           value={dueDayOfMonth ?? 1}
           onChange={(event) => {
             const value = Math.min(Math.max(Number(event.target.value) || 1, 1), 31)
-            onChange({ dueDate: undefined, dueDayOfMonth: value })
+            emit({ dueDate: undefined, dueDayOfMonth: value })
           }}
         />
       ) : null}
@@ -534,10 +541,11 @@ function OutlinerDueControl({
           aria-label={`Due date for ${depthLabel}`}
           value={dueDate ?? ''}
           onChange={(event) =>
-            onChange({ dueDate: event.target.value || undefined, dueDayOfMonth: undefined })
+            emit({ dueDate: event.target.value || undefined, dueDayOfMonth: undefined })
           }
         />
       ) : null}
+      <SaveBadge state={state} />
     </span>
   )
 }

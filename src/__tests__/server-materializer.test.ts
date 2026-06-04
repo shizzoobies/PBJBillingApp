@@ -257,6 +257,36 @@ describe('materializeRecurringChecklists — soft-delete respect', () => {
   })
 })
 
+describe('materializeRecurringChecklists — due day-of-month survives the normalizer', () => {
+  it('keeps a stage AND item dueDayOfMonth through ensureTemplateStages', () => {
+    // Regression: the store-side ensureTemplateStages rebuilt each stage but
+    // dropped its dueDayOfMonth, so picking "Day of the month" on a stage was
+    // silently lost on save (it reverted to "no due date" on reload).
+    const template = makeMonthlyTemplate({
+      stages: [
+        {
+          id: 'stage-1',
+          name: 'Stage 1',
+          assigneeId: 'emp-1',
+          offsetDays: 0,
+          dueDayOfMonth: 15,
+          viewerIds: [],
+          editorIds: [],
+          items: [{ id: 'ti-1', label: 'Reconcile', dueDayOfMonth: 10 }],
+        },
+      ],
+    })
+    const result = materializeRecurringChecklists(
+      makeData({ checklistTemplates: [template] }),
+    )
+    const out = result.data.checklistTemplates.find(
+      (t: { id: string }) => t.id === 'tpl-monthly',
+    )
+    expect(out.stages[0].dueDayOfMonth).toBe(15)
+    expect(out.stages[0].items[0].dueDayOfMonth).toBe(10)
+  })
+})
+
 describe('materializeRecurringChecklists — biweekly cadence', () => {
   const addDaysIso = (iso: string, days: number) => {
     const d = new Date(`${iso}T12:00:00`)
