@@ -155,6 +155,11 @@ function App() {
   // API-backed mutation incremented the skip counter in the same render
   // window as a local-only delete, swallowing the delete forever.
   const forceNextSaveRef = useRef(false)
+  // Real-time sync support: timestamp of the last local workspace edit (so an
+  // incoming refetch never clobbers an in-flight edit), plus a live mirror of
+  // the sync state readable inside the SSE refetch timer.
+  const lastWorkspaceEditRef = useRef(0)
+  const dataSyncStateRef = useRef(dataSyncState)
   const role = sessionUser?.role ?? 'employee'
 
   // Preview mode: an owner is viewing the app AS another user. It is strictly
@@ -172,6 +177,69 @@ function App() {
     previewActiveRef.current = previewActive
     setPreviewModeActive(previewActive)
   }, [previewActive])
+
+  useEffect(() => {
+    dataSyncStateRef.current = dataSyncState
+  }, [dataSyncState])
+
+  // Real-time sync: subscribe to the server's change stream and refetch the
+  // shared workspace whenever ANOTHER session edits it, so two owners see each
+  // other's changes within a moment. The refetch defers while THIS session has
+  // an unsaved / in-flight edit, so it never clobbers local work.
+  useEffect(() => {
+    if (!sessionUser) return
+    // EventSource is unavailable in some test/SSR environments — degrade
+    // gracefully (the app still works, just without live cross-session sync).
+    if (typeof EventSource === 'undefined') return
+    let refetchTimer = 0
+    let cancelled = false
+
+    const doRefetch = async () => {
+      if (cancelled || previewActiveRef.current) return
+      try {
+        const remote = await fetchAppData(new AbortController().signal, null)
+        if (cancelled) return
+        // Suppress the autosave echo this setData would otherwise trigger.
+        skipAutosaveRef.current += 1
+        setData(remote)
+        setDataSyncState('synced')
+      } catch {
+        /* transient — the next ping (or auto-reconnect) retries */
+      }
+    }
+
+    const attempt = () => {
+      if (cancelled) return
+      const recentlyEdited = new Date().getTime() - lastWorkspaceEditRef.current < 2500
+      const syncState = dataSyncStateRef.current
+      if (
+        previewActiveRef.current ||
+        syncState === 'saving' ||
+        syncState === 'loading' ||
+        recentlyEdited
+      ) {
+        // Don't overwrite an active edit — retry once it settles.
+        window.clearTimeout(refetchTimer)
+        refetchTimer = window.setTimeout(attempt, 1500)
+        return
+      }
+      void doRefetch()
+    }
+
+    const schedule = () => {
+      window.clearTimeout(refetchTimer)
+      refetchTimer = window.setTimeout(attempt, 500)
+    }
+
+    const source = new EventSource('/api/events')
+    source.addEventListener('data-changed', schedule)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(refetchTimer)
+      source.close()
+    }
+  }, [sessionUser])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -465,6 +533,9 @@ function App() {
     // server, so flag the next autosave as mandatory regardless of any
     // pending skip-counter increments from concurrent API mutations.
     forceNextSaveRef.current = true
+    // Mark the moment of this edit so a real-time refetch (SSE) defers rather
+    // than overwriting an in-flight, not-yet-saved change.
+    lastWorkspaceEditRef.current = new Date().getTime()
     // Preview mode is strictly read-only: every workspace-config mutator
     // (templates, clients, plans, stages) routes through here, so a single
     // early-return neutralizes all of them at once.

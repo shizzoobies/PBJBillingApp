@@ -491,6 +491,23 @@ function renderVerifyConfirmPage(token) {
 </html>`
 }
 
+// ---- Real-time sync: SSE fan-out ------------------------------------------
+// Every authenticated client holds an open /api/events stream. After ANY
+// successful data mutation we ping all of them so each session refetches the
+// shared workspace — so two owners (e.g. Alex + Brittany) see each other's
+// edits within a moment instead of working off stale snapshots.
+const sseClients = new Set()
+function broadcastDataChanged() {
+  const payload = 'event: data-changed\ndata: {}\n\n'
+  for (const client of [...sseClients]) {
+    try {
+      client.write(payload)
+    } catch {
+      sseClients.delete(client)
+    }
+  }
+}
+
 const server = createServer(async (request, response) => {
   try {
     const requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
@@ -516,6 +533,27 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Central real-time hook: after any successful API write, ping every open
+    // SSE client. Wrapping response.end once here avoids instrumenting every
+    // individual mutation handler.
+    const isDataMutation =
+      method !== 'GET' &&
+      method !== 'HEAD' &&
+      method !== 'OPTIONS' &&
+      normalizedPath.startsWith('/api/') &&
+      !normalizedPath.startsWith('/api/auth') &&
+      normalizedPath !== '/api/events'
+    if (isDataMutation) {
+      const originalEnd = response.end.bind(response)
+      response.end = (...args) => {
+        const result = originalEnd(...args)
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          broadcastDataChanged()
+        }
+        return result
+      }
+    }
+
     // Legacy persistent magic-link route — replaced by /api/auth/request-link
     // and /verify/:token. Bookkeepers may have bookmarked the old URL; bounce
     // them to the staff sign-in entry page so the owner URL stays unadvertised.
@@ -533,6 +571,40 @@ const server = createServer(async (request, response) => {
         appendSetCookie(response, buildSessionCookie(session.sessionId))
       }
       sendJson(response, 200, { user: session?.user ?? null })
+      return
+    }
+
+    // Server-Sent Events stream: the client subscribes here and refetches the
+    // workspace whenever a "data-changed" ping arrives (see broadcastDataChanged).
+    if (normalizedPath === '/api/events' && request.method === 'GET') {
+      const cookies = parseCookies(request.headers.cookie)
+      const session = await appDataStore.getUserSession(cookies[sessionCookieName])
+      if (!session) {
+        sendJson(response, 401, { error: 'Not authenticated' })
+        return
+      }
+      response.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        // Disable proxy buffering (nginx/Railway) so events flush immediately.
+        'X-Accel-Buffering': 'no',
+      })
+      response.write('retry: 5000\n\n')
+      sseClients.add(response)
+      // Heartbeat keeps the connection alive through idle proxy timeouts.
+      const heartbeat = setInterval(() => {
+        try {
+          response.write(': ping\n\n')
+        } catch {
+          clearInterval(heartbeat)
+          sseClients.delete(response)
+        }
+      }, 25000)
+      request.on('close', () => {
+        clearInterval(heartbeat)
+        sseClients.delete(response)
+      })
       return
     }
 
