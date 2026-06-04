@@ -1795,6 +1795,12 @@ export class AppDataStore {
 
       await this.pool.query(`alter table checklist_items add column if not exists due_date date`)
       await this.pool.query(`alter table checklist_items add column if not exists assignee_id text`)
+      // Recurring day-of-month on a LIVE checklist item (1–31), mirroring the
+      // template + sub-item support. Without this column the "Day of month" due
+      // option on a live checklist line was silently dropped on save.
+      await this.pool.query(
+        `alter table checklist_items add column if not exists due_day_of_month int`,
+      )
       // Sub-bullets: one level of nested sub-items, stored as a JSONB array
       // ({ id, title, done }[]) directly on the item row. Least-invasive
       // choice given the existing schema; mirrors the `payload jsonb` pattern.
@@ -2469,7 +2475,7 @@ export class AppDataStore {
             order by due_date asc, id asc
           `),
           this.pool.query(`
-            select id, checklist_id, label, done, sort_order, due_date, assignee_id, sub_items
+            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, sub_items
             from checklist_items
             order by checklist_id asc, sort_order asc, id asc
           `),
@@ -2539,6 +2545,9 @@ export class AppDataStore {
         }
         if (row.due_date) {
           item.dueDate = row.due_date.toISOString().slice(0, 10)
+        }
+        if (typeof row.due_day_of_month === 'number') {
+          item.dueDayOfMonth = row.due_day_of_month
         }
         if (row.assignee_id) {
           item.assigneeId = row.assignee_id
@@ -3414,8 +3423,8 @@ export class AppDataStore {
               subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
             await client.query(
               `
-                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, assignee_id, sub_items, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now())
+                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, sub_items, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now())
               `,
               [
                 item.id,
@@ -3424,6 +3433,9 @@ export class AppDataStore {
                 itemDone,
                 index,
                 item.dueDate ?? null,
+                typeof item.dueDayOfMonth === 'number' && item.dueDayOfMonth >= 1
+                  ? item.dueDayOfMonth
+                  : null,
                 item.assigneeId ?? null,
                 JSON.stringify(subItems),
               ],
@@ -4557,8 +4569,8 @@ export class AppDataStore {
         for (const item of nextChecklist.items) {
           await client.query(
             `
-              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, assignee_id, sub_items, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now())
+              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, sub_items, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now())
             `,
             [
               item.id,
@@ -4567,6 +4579,9 @@ export class AppDataStore {
               item.done,
               item.sortOrder,
               item.dueDate ?? null,
+              typeof item.dueDayOfMonth === 'number' && item.dueDayOfMonth >= 1
+                ? item.dueDayOfMonth
+                : null,
               item.assigneeId ?? null,
               JSON.stringify(Array.isArray(item.subItems) ? item.subItems : []),
             ],
