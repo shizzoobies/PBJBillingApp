@@ -1,4 +1,4 @@
-import { ArrowLeft, ExternalLink, Pencil, Plus, Trash2 } from 'lucide-react'
+import { ArrowLeft, Copy, ExternalLink, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
@@ -667,6 +667,129 @@ const SIMPLE_FREQUENCIES: ChecklistFrequency[] = [
   'annually',
 ]
 
+// Pick an existing recurring checklist (a standard blueprint, or one already
+// set up on another client) and copy it onto this client.
+function ApplyExistingTemplateModal({
+  client,
+  clients,
+  templates,
+  onApply,
+  onClose,
+}: {
+  client: Client
+  clients: Client[]
+  templates: ChecklistTemplate[]
+  onApply: (
+    templateId: string,
+    payload: { clientId: string; firstDueDate?: string; frequency?: string },
+  ) => Promise<void>
+  onClose: () => void
+}) {
+  const [query, setQuery] = useState('')
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [error, setError] = useState('')
+
+  // Offer standard blueprints plus templates from OTHER clients. Templates
+  // already on this client are skipped (she already has them).
+  const pickable = useMemo(
+    () =>
+      templates
+        .filter((template) => template.isStandard || template.clientId !== client.id)
+        .slice()
+        .sort((a, b) => a.title.localeCompare(b.title)),
+    [templates, client.id],
+  )
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return pickable
+    return pickable.filter((template) => template.title.toLowerCase().includes(q))
+  }, [pickable, query])
+
+  const apply = async (templateId: string) => {
+    setBusyId(templateId)
+    setError('')
+    try {
+      await onApply(templateId, { clientId: client.id })
+      onClose()
+    } catch {
+      setError('Could not add that checklist — please try again.')
+      setBusyId(null)
+    }
+  }
+
+  return (
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div
+        className="modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add an existing recurring checklist"
+      >
+        <div className="modal-body">
+          <h2 className="modal-title">Add an existing recurring checklist</h2>
+          <p className="modal-intro">
+            Pick a recurring checklist you&apos;ve already created. A copy is added to{' '}
+            <strong>{client.name}</strong> — editing it here won&apos;t change the original.
+          </p>
+          <label className="field">
+            <input
+              aria-label="Search existing recurring checklists"
+              className="input"
+              type="search"
+              placeholder="Search by name…"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          {filtered.length === 0 ? (
+            <p className="muted-text">
+              {pickable.length === 0
+                ? "You haven't created any recurring checklists to reuse yet."
+                : `No matches for “${query.trim()}”.`}
+            </p>
+          ) : (
+            <ul className="apply-existing-list">
+              {filtered.map((template) => (
+                <li className="apply-existing-row" key={template.id}>
+                  <div className="apply-existing-info">
+                    <strong>{template.title}</strong>
+                    <span className="apply-existing-meta">
+                      {getChecklistFrequencyLabel(template.frequency)} ·{' '}
+                      {template.isStandard
+                        ? 'Standard blueprint'
+                        : `From ${clientName(clients, template.clientId)}`}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="primary-action"
+                    disabled={busyId !== null}
+                    onClick={() => void apply(template.id)}
+                  >
+                    {busyId === template.id ? 'Adding…' : 'Add'}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {error ? <p className="auth-error">{error}</p> : null}
+          <div className="button-row">
+            <button type="button" className="secondary-action" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function RecurringChecklistsBody({ client, data }: { client: Client; data: AppData }) {
   const {
     role,
@@ -675,9 +798,11 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
     addChecklistTemplate,
     createChecklist,
     updateChecklistTemplate,
+    applyTemplateToClient,
   } = useAppContext()
   const [query, setQuery] = useState('')
   const [adding, setAdding] = useState(false)
+  const [picking, setPicking] = useState(false)
 
   // Every client-bound recurring template targeting this client. Standard
   // (client-agnostic) blueprints are excluded — they never belong to a client.
@@ -738,7 +863,20 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
           <button type="button" className="primary-action" onClick={() => setAdding(true)}>
             <Plus size={14} /> Add recurring checklist
           </button>
+          <button type="button" className="secondary-action" onClick={() => setPicking(true)}>
+            <Copy size={14} /> Add from existing
+          </button>
         </div>
+      ) : null}
+
+      {ownerMode && picking ? (
+        <ApplyExistingTemplateModal
+          client={client}
+          clients={data.clients}
+          templates={data.checklistTemplates}
+          onApply={applyTemplateToClient}
+          onClose={() => setPicking(false)}
+        />
       ) : null}
 
       {ownerMode && adding ? (
