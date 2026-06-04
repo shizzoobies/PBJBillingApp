@@ -1956,6 +1956,7 @@ export class AppDataStore {
         )
       `)
 
+      await this.cleanupSeedEmployeesInPostgres()
       await this.seedUsersInPostgres()
       await this.seedRelationalDataInPostgres()
       await this.syncOwnerEmailInPostgres()
@@ -2287,7 +2288,67 @@ export class AppDataStore {
     }
   }
 
+  /**
+   * One-time, idempotent cleanup of the leftover demo employees "Avery
+   * Johnson" and "Jordan Ellis": move any work attributed to them onto the
+   * firm owner (Brittany Ferguson) and delete the accounts so there's no trace
+   * left in the app. Guarded by their existence (only acts while they're still
+   * present) and fully wrapped so a failure can never block server boot. If a
+   * hard delete is blocked, the account is deactivated as a safe fallback.
+   */
+  async cleanupSeedEmployeesInPostgres() {
+    try {
+      const ownerResult = await this.pool.query(
+        `select id from users
+         where id = 'emp-patrice' or lower(name) = 'brittany ferguson'
+         order by (id = 'emp-patrice') desc, (role = 'owner') desc
+         limit 1`,
+      )
+      const brittanyId = ownerResult.rows[0]?.id
+      if (!brittanyId) return
+
+      const fakesResult = await this.pool.query(
+        `select id from users
+         where id in ('emp-avery', 'emp-jordan')
+            or lower(name) in ('avery johnson', 'jordan ellis')`,
+      )
+      for (const { id: fakeId } of fakesResult.rows) {
+        if (fakeId === brittanyId) continue
+        try {
+          // Reassign everything that points at the fake user to Brittany. The
+          // RESTRICT foreign keys (time_entries.user_id, checklists.assignee_id,
+          // checklist_templates.assignee_id) MUST move before the delete; the
+          // rest are reassigned for cleanliness.
+          await this.pool.query(`update time_entries set user_id = $1 where user_id = $2`, [brittanyId, fakeId])
+          await this.pool.query(`update time_entries set approved_by = $1 where approved_by = $2`, [brittanyId, fakeId])
+          await this.pool.query(`update checklists set assignee_id = $1 where assignee_id = $2`, [brittanyId, fakeId])
+          await this.pool.query(`update checklist_templates set assignee_id = $1 where assignee_id = $2`, [brittanyId, fakeId])
+          await this.pool.query(`update checklist_items set assignee_id = $1 where assignee_id = $2`, [brittanyId, fakeId])
+          await this.pool.query(`delete from users where id = $1`, [fakeId])
+          console.log(`[cleanup] removed demo employee ${fakeId}; work reassigned to ${brittanyId}`)
+        } catch (err) {
+          console.error(`[cleanup] could not remove ${fakeId}; deactivating instead:`, err.message)
+          try {
+            await this.pool.query(`update users set inactive_at = now() where id = $1`, [fakeId])
+          } catch {
+            /* best effort — never block boot */
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[cleanup] seed-employee cleanup skipped:', err.message)
+    }
+  }
+
   async seedUsersInPostgres() {
+    // Only seed the demo users into a BRAND-NEW workspace. On an established
+    // one (any user already exists) we must never re-upsert them: doing it on
+    // every boot resurrected deleted seed employees (e.g. Avery / Jordan) on
+    // each deploy and overwrote real users' credentials with demo values.
+    const existing = await this.pool.query('select count(*)::int as count from users')
+    if (existing.rows[0].count > 0) {
+      return
+    }
     for (const user of createSeededAuthUsers()) {
       await this.pool.query(
         `
