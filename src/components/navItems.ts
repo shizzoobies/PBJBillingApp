@@ -3,6 +3,7 @@ import {
   BarChart3,
   BookUser,
   Building2,
+  CalendarRange,
   ClipboardCheck,
   Clock3,
   FolderKanban,
@@ -23,6 +24,7 @@ export const navItems: Array<{
 }> = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/time', label: 'Time', icon: Clock3 },
+  { to: '/timesheet', label: 'Timesheet', icon: CalendarRange },
   { to: '/time-approvals', label: 'Time Approvals', icon: ClipboardCheck, ownerOnly: true },
   { to: '/checklists', label: 'Checklists', icon: ListChecks },
   { to: '/clients', label: 'Clients', icon: Building2 },

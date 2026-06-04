@@ -99,6 +99,7 @@ import { ReportsPage } from './pages/ReportsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { TeamPage } from './pages/TeamPage'
 import { TimePage } from './pages/TimePage'
+import { TimesheetPage } from './pages/TimesheetPage'
 import { TimeApprovalsPage } from './pages/TimeApprovalsPage'
 import { SecurityPage } from './pages/SecurityPage'
 import { TwoFactorPage } from './pages/TwoFactorPage'
@@ -2520,6 +2521,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/time" element={<TimePage />} />
+        <Route path="/timesheet" element={<TimesheetPage />} />
         <Route
           path="/time-approvals"
           element={

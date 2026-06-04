@@ -5271,6 +5271,163 @@ h2 {
   max-width: 240px;
 }
 
+/* ---- Daily timesheet view ---------------------------------------------- */
+.timesheet-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.timesheet-weeknav {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.timesheet-weeklabel {
+  font-weight: 700;
+  min-width: 150px;
+  text-align: center;
+}
+
+.timesheet-toolbar-right {
+  align-items: flex-end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.timesheet-employee {
+  min-width: 200px;
+}
+
+.timesheet-weektotal {
+  display: grid;
+  gap: 2px;
+  text-align: right;
+}
+
+.timesheet-weektotal span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.timesheet-weektotal strong {
+  font-size: 20px;
+}
+
+.timesheet-days {
+  display: grid;
+  gap: 14px;
+}
+
+.timesheet-day {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.timesheet-day-head {
+  align-items: center;
+  background: var(--soft);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 14px;
+}
+
+.timesheet-day-total {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.timesheet-rows {
+  display: grid;
+}
+
+.timesheet-row {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+  padding: 10px 14px;
+}
+
+.timesheet-row:last-child {
+  border-bottom: 0;
+}
+
+.timesheet-row:hover {
+  background: color-mix(in srgb, var(--soft) 60%, transparent);
+}
+
+.timesheet-row-what {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.timesheet-client {
+  font-weight: 600;
+}
+
+.timesheet-task {
+  color: var(--berry);
+  font-size: 12px;
+}
+
+.timesheet-desc {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timesheet-time {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.timesheet-arrow {
+  color: var(--muted);
+}
+
+.timesheet-dur {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  min-width: 56px;
+  text-align: right;
+}
+
+@media (max-width: 640px) {
+  .timesheet-row {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      'what dur'
+      'times times';
+  }
+  .timesheet-row-what {
+    grid-area: what;
+  }
+  .timesheet-dur {
+    grid-area: dur;
+  }
+  .timesheet-time,
+  .timesheet-arrow {
+    grid-area: times;
+    display: inline;
+  }
+}
+
 /* Sessions editor (inline on a time entry) */
 .session-editor {
   background: var(--soft);
