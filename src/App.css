@@ -5447,6 +5447,41 @@ h2 {
   min-width: 160px;
 }
 
+/* Recurring checklists on the client page: add + inline edit */
+.recurring-add-row {
+  margin-bottom: 12px;
+}
+
+.recurring-edit-row {
+  display: grid;
+  gap: 10px;
+}
+
+.recurring-edit-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.recurring-edit-fields .field {
+  flex: 1;
+  min-width: 150px;
+}
+
+button.repeating-task-toggle-pill {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.recurring-edit-btn {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+
 /* Sessions editor (inline on a time entry) */
 .session-editor {
   background: var(--soft);

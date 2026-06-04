@@ -1748,7 +1748,7 @@ function SpecificMonthsPicker({
  *   - On submit, repeating mode constructs a ChecklistTemplate (with stages),
  *     one-time mode posts a Checklist
  */
-function NewTaskForm({
+export function NewTaskForm({
   mode,
   activeEmployeeId,
   clients,

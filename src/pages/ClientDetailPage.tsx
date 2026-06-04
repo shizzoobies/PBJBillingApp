@@ -1,7 +1,8 @@
-import { ArrowLeft, ExternalLink, Trash2 } from 'lucide-react'
+import { ArrowLeft, ExternalLink, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { NewTaskForm } from './ChecklistsPage'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
@@ -23,8 +24,11 @@ import {
   MONTHLY_SERVICE_TIERS,
   type AppData,
   type BillingMode,
+  type ChecklistFrequency,
+  type ChecklistTemplate,
   type Client,
   type Contact,
+  type Employee,
   type SubscriptionPlan,
 } from '../lib/types'
 import {
@@ -654,8 +658,26 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
   )
 }
 
+const SIMPLE_FREQUENCIES: ChecklistFrequency[] = [
+  'daily',
+  'weekly',
+  'biweekly',
+  'monthly',
+  'quarterly',
+  'annually',
+]
+
 function RecurringChecklistsBody({ client, data }: { client: Client; data: AppData }) {
+  const {
+    role,
+    activeEmployeeId,
+    ownerMode,
+    addChecklistTemplate,
+    createChecklist,
+    updateChecklistTemplate,
+  } = useAppContext()
   const [query, setQuery] = useState('')
+  const [adding, setAdding] = useState(false)
 
   // Every client-bound recurring template targeting this client. Standard
   // (client-agnostic) blueprints are excluded — they never belong to a client.
@@ -680,56 +702,230 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
     })
   }, [templates, query, data.employees])
 
-  if (templates.length === 0) {
-    return <p className="muted-text">No recurring checklists assigned to this client.</p>
+  // Mirrors the Checklists page: create the template (bulk-saved) and, when
+  // "start the first one now" is chosen, also materialize a Stage-1 instance.
+  const handleCreateRepeating = async (
+    template: Omit<ChecklistTemplate, 'id'>,
+    startFirstNow: boolean,
+  ) => {
+    addChecklistTemplate(template)
+    if (startFirstNow) {
+      const stageOne = template.stages[0]
+      if (stageOne && stageOne.items.length > 0) {
+        const today = new Date().toISOString().slice(0, 10)
+        const firstDue =
+          template.nextDueDate && template.nextDueDate < today ? template.nextDueDate : today
+        try {
+          await createChecklist({
+            title: template.title,
+            clientId: template.clientId,
+            assigneeId: stageOne.assigneeId || template.assigneeId,
+            dueDate: firstDue,
+            items: stageOne.items.map((item) => ({ label: item.label })),
+          })
+        } catch {
+          /* template still created; the instance can be generated later */
+        }
+      }
+    }
+    setAdding(false)
   }
 
   return (
     <>
-      <label className="field" style={{ marginBottom: 12 }}>
-        <input
-          aria-label="Search recurring checklists"
-          className="input"
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search by name, frequency, or assignee…"
-          type="search"
-          value={query}
+      {ownerMode && !adding ? (
+        <div className="recurring-add-row">
+          <button type="button" className="primary-action" onClick={() => setAdding(true)}>
+            <Plus size={14} /> Add recurring checklist
+          </button>
+        </div>
+      ) : null}
+
+      {ownerMode && adding ? (
+        <NewTaskForm
+          mode="repeating"
+          activeEmployeeId={activeEmployeeId}
+          clients={[client]}
+          employees={data.employees}
+          role={role}
+          onCancel={() => setAdding(false)}
+          onCreateOneTime={async (payload) => {
+            await createChecklist(payload)
+          }}
+          onCreateRepeating={handleCreateRepeating}
         />
-      </label>
-      {filtered.length === 0 ? (
-        <p className="muted-text">No recurring checklists match “{query.trim()}”.</p>
+      ) : null}
+
+      {templates.length === 0 ? (
+        <p className="muted-text">No recurring checklists assigned to this client yet.</p>
       ) : (
-        <ul className="active-checklist-list">
-          {filtered.map((template) => {
-            const jumpTo = `/checklists?focusTemplate=${encodeURIComponent(template.id)}`
-            return (
-              <li className="active-checklist-row" key={template.id}>
-                <div className="active-checklist-main">
-                  <Link to={jumpTo} className="active-checklist-link">
-                    <strong>{template.title}</strong>
-                  </Link>
-                  <span
-                    className={
-                      template.active
-                        ? 'repeating-task-toggle-pill on'
-                        : 'repeating-task-toggle-pill off'
-                    }
-                  >
-                    {template.active ? 'On' : 'Off'}
-                  </span>
-                </div>
-                <div className="active-checklist-meta">
-                  <span>Assignee: {employeeName(data.employees, template.assigneeId)}</span>
-                  <span>{getChecklistFrequencyLabel(template.frequency)}</span>
-                  <Link to={jumpTo} className="active-checklist-link">
-                    View <ExternalLink size={12} style={{ verticalAlign: 'middle' }} />
-                  </Link>
-                </div>
-              </li>
-            )
-          })}
-        </ul>
+        <>
+          <label className="field" style={{ margin: '12px 0' }}>
+            <input
+              aria-label="Search recurring checklists"
+              className="input"
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search by name, frequency, or assignee…"
+              type="search"
+              value={query}
+            />
+          </label>
+          {filtered.length === 0 ? (
+            <p className="muted-text">No recurring checklists match “{query.trim()}”.</p>
+          ) : (
+            <ul className="active-checklist-list">
+              {filtered.map((template) => (
+                <RecurringTemplateRow
+                  key={template.id}
+                  template={template}
+                  employees={data.employees}
+                  canEdit={ownerMode}
+                  onUpdate={updateChecklistTemplate}
+                />
+              ))}
+            </ul>
+          )}
+        </>
       )}
     </>
+  )
+}
+
+function RecurringTemplateRow({
+  template,
+  employees,
+  canEdit,
+  onUpdate,
+}: {
+  template: ChecklistTemplate
+  employees: Employee[]
+  canEdit: boolean
+  onUpdate: (
+    templateId: string,
+    updater: (template: ChecklistTemplate) => ChecklistTemplate,
+  ) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [title, setTitle] = useState(template.title)
+  const [assigneeId, setAssigneeId] = useState(template.assigneeId)
+  const [frequency, setFrequency] = useState<ChecklistFrequency>(template.frequency)
+  const jumpTo = `/checklists?focusTemplate=${encodeURIComponent(template.id)}`
+
+  const openEditor = () => {
+    setTitle(template.title)
+    setAssigneeId(template.assigneeId)
+    setFrequency(template.frequency)
+    setEditing(true)
+  }
+  const save = () => {
+    onUpdate(template.id, (current) => ({
+      ...current,
+      title: title.trim() || current.title,
+      assigneeId,
+      frequency,
+    }))
+    setEditing(false)
+  }
+
+  if (editing) {
+    return (
+      <li className="active-checklist-row recurring-edit-row">
+        <input
+          className="input"
+          aria-label="Checklist name"
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+        />
+        <div className="recurring-edit-fields">
+          <label className="field">
+            <span>Assignee</span>
+            <select
+              className="input"
+              value={assigneeId}
+              onChange={(event) => setAssigneeId(event.target.value)}
+            >
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.id}>
+                  {employee.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Frequency</span>
+            <select
+              className="input"
+              value={frequency}
+              onChange={(event) => setFrequency(event.target.value as ChecklistFrequency)}
+            >
+              {template.frequency === 'specific-months' ? (
+                <option value="specific-months">Specific months (edit on Checklists)</option>
+              ) : null}
+              {SIMPLE_FREQUENCIES.map((freq) => (
+                <option key={freq} value={freq}>
+                  {getChecklistFrequencyLabel(freq)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="button-row">
+          <button type="button" className="primary-action" onClick={save}>
+            Save
+          </button>
+          <button type="button" className="secondary-action" onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+        </div>
+      </li>
+    )
+  }
+
+  return (
+    <li className="active-checklist-row">
+      <div className="active-checklist-main">
+        <Link to={jumpTo} className="active-checklist-link">
+          <strong>{template.title}</strong>
+        </Link>
+        {canEdit ? (
+          <button
+            type="button"
+            className={
+              template.active
+                ? 'repeating-task-toggle-pill on'
+                : 'repeating-task-toggle-pill off'
+            }
+            title="Turn this recurring checklist on or off"
+            onClick={() =>
+              onUpdate(template.id, (current) => ({ ...current, active: !current.active }))
+            }
+          >
+            {template.active ? 'On' : 'Off'}
+          </button>
+        ) : (
+          <span
+            className={
+              template.active
+                ? 'repeating-task-toggle-pill on'
+                : 'repeating-task-toggle-pill off'
+            }
+          >
+            {template.active ? 'On' : 'Off'}
+          </span>
+        )}
+      </div>
+      <div className="active-checklist-meta">
+        <span>Assignee: {employeeName(employees, template.assigneeId)}</span>
+        <span>{getChecklistFrequencyLabel(template.frequency)}</span>
+        {canEdit ? (
+          <button type="button" className="active-checklist-link recurring-edit-btn" onClick={openEditor}>
+            <Pencil size={12} style={{ verticalAlign: 'middle' }} /> Edit
+          </button>
+        ) : null}
+        <Link to={jumpTo} className="active-checklist-link">
+          Items <ExternalLink size={12} style={{ verticalAlign: 'middle' }} />
+        </Link>
+      </div>
+    </li>
   )
 }
