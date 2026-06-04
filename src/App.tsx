@@ -1353,6 +1353,21 @@ function App() {
     }))
   }
 
+  // Edit an ACTIVE (materialized) checklist's own fields — title, concrete due
+  // date, assignee. Item-level edits keep their dedicated endpoints; these
+  // checklist-level fields ride the bulk autosave like other workspace edits.
+  const updateChecklist = (
+    checklistId: string,
+    patch: { title?: string; dueDate?: string; assigneeId?: string },
+  ) => {
+    updateWorkspaceData((current) => ({
+      ...current,
+      checklists: current.checklists.map((checklist) =>
+        checklist.id === checklistId ? { ...checklist, ...patch } : checklist,
+      ),
+    }))
+  }
+
   // Phase 3: stage-aware mutators. Each mutator targets a specific stage by id;
   // the legacy single-list handlers are gone. Forward-only: items can move
   // across stages via remove/add, but there's no send-back chain.
@@ -2412,6 +2427,7 @@ function App() {
     setTemplateViewers,
     addChecklistTemplate,
     updateChecklistTemplate,
+    updateChecklist,
     deleteChecklistTemplate,
     addChecklistTemplateItem,
     updateChecklistTemplateItem,

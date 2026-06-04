@@ -160,6 +160,10 @@ export type AppContextValue = {
     updater: (template: ChecklistTemplate) => ChecklistTemplate,
   ) => void
   deleteChecklistTemplate: (templateId: string) => void
+  updateChecklist: (
+    checklistId: string,
+    patch: { title?: string; dueDate?: string; assigneeId?: string },
+  ) => void
   addChecklistTemplateItem: (templateId: string, stageId: string) => void
   updateChecklistTemplateItem: (
     templateId: string,

@@ -917,6 +917,29 @@ function ChecklistCard({
   // Whether the current viewer can edit checklist structure (reorder, bulk add)
   const canEditStructure = role === 'owner' || isAssignee || isEditor
 
+  // Owner-only inline edit of the active checklist's own fields (title, due
+  // date, assignee). Item-level edits stay on their own controls below.
+  const { updateChecklist } = useAppContext()
+  const [editingMeta, setEditingMeta] = useState(false)
+  const [metaTitle, setMetaTitle] = useState(checklist.title)
+  const [metaDue, setMetaDue] = useState(checklist.dueDate)
+  const [metaAssignee, setMetaAssignee] = useState(checklist.assigneeId)
+  const openMetaEditor = () => {
+    setMetaTitle(checklist.title)
+    setMetaDue(checklist.dueDate)
+    setMetaAssignee(checklist.assigneeId)
+    setEditingMeta(true)
+  }
+  const saveMetaEditor = () => {
+    const title = metaTitle.trim()
+    updateChecklist(checklist.id, {
+      title: title || checklist.title,
+      dueDate: metaDue || checklist.dueDate,
+      assigneeId: metaAssignee || checklist.assigneeId,
+    })
+    setEditingMeta(false)
+  }
+
   const stageCount = checklist.stageCount ?? 1
   const stageIndex = checklist.stageIndex ?? 0
   const showStageBadge = stageCount > 1
@@ -945,28 +968,78 @@ function ChecklistCard({
     >
       <header>
         <div>
-          <strong>{checklist.title}</strong>
-          {showStageBadge ? (
-            <span className="stage-badge">
-              Step {stageNumber} of {stageCount}
-              {checklist.caseId && ownerMode ? (
-                <Link
-                  className="stage-badge-link"
-                  to={`/cases/${encodeURIComponent(checklist.caseId)}`}
+          {editingMeta ? (
+            <div className="checklist-meta-editor">
+              <input
+                className="input"
+                aria-label="Checklist title"
+                value={metaTitle}
+                onChange={(event) => setMetaTitle(event.target.value)}
+              />
+              <div className="checklist-meta-editor-row">
+                <label className="field">
+                  <span>Due date</span>
+                  <input
+                    className="input"
+                    type="date"
+                    value={metaDue}
+                    onChange={(event) => setMetaDue(event.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Assignee</span>
+                  <select
+                    className="input"
+                    value={metaAssignee}
+                    onChange={(event) => setMetaAssignee(event.target.value)}
+                  >
+                    {employees.map((employee) => (
+                      <option key={employee.id} value={employee.id}>
+                        {employee.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="button-row">
+                <button type="button" className="primary-action" onClick={saveMetaEditor}>
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => setEditingMeta(false)}
                 >
-                  Open case
-                </Link>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <strong>{checklist.title}</strong>
+              {showStageBadge ? (
+                <span className="stage-badge">
+                  Step {stageNumber} of {stageCount}
+                  {checklist.caseId && ownerMode ? (
+                    <Link
+                      className="stage-badge-link"
+                      to={`/cases/${encodeURIComponent(checklist.caseId)}`}
+                    >
+                      Open case
+                    </Link>
+                  ) : null}
+                </span>
               ) : null}
-            </span>
-          ) : null}
-          <span className="checklist-meta-line">
-            {clientName(clients, checklist.clientId)} ·{' '}
-            {employeeName(employees, checklist.assigneeId)} · Due{' '}
-            {shortDate.format(new Date(`${checklist.dueDate}T12:00:00`))}
-            {checklist.frequency
-              ? ` · ${getChecklistFrequencyLabel(checklist.frequency)}`
-              : ''}
-          </span>
+              <span className="checklist-meta-line">
+                {clientName(clients, checklist.clientId)} ·{' '}
+                {employeeName(employees, checklist.assigneeId)} · Due{' '}
+                {shortDate.format(new Date(`${checklist.dueDate}T12:00:00`))}
+                {checklist.frequency
+                  ? ` · ${getChecklistFrequencyLabel(checklist.frequency)}`
+                  : ''}
+              </span>
+            </>
+          )}
           {(() => {
             const totalMinutes = timeEntries
               .filter((entry) => entry.taskId === checklist.id)
@@ -979,6 +1052,16 @@ function ChecklistCard({
         <div className="checklist-meta">
           {handedOff ? <span className="status-pill">Handed off</span> : null}
           {isViewerOnly ? <span className="status-pill">View only</span> : null}
+          {ownerMode && !editingMeta ? (
+            <button
+              type="button"
+              className="secondary-action"
+              title="Edit this task's title, due date, and assignee."
+              onClick={openMetaEditor}
+            >
+              Edit details
+            </button>
+          ) : null}
           {ownerMode ? (
             <button
               type="button"

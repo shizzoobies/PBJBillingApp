@@ -5428,6 +5428,25 @@ h2 {
   }
 }
 
+/* Inline editor for an active checklist's title/due/assignee */
+.checklist-meta-editor {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 6px;
+  max-width: 520px;
+}
+
+.checklist-meta-editor-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.checklist-meta-editor-row .field {
+  flex: 1;
+  min-width: 160px;
+}
+
 /* Sessions editor (inline on a time entry) */
 .session-editor {
   background: var(--soft);
