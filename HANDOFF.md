@@ -2,6 +2,16 @@
 
 _Last updated: 2026-06-05_
 
+## ⭐ LATEST — "Waiting on" toggle + Delayed page (`695c1ae`, pushed)
+
+A new feature on top of the 6-item batch. **Per item AND sub-item ⏳ toggle** that flags a step as blocked/delayed and reveals a free-text "waiting on" note; plus a new **owner-only `/delayed` page** that lists every flagged step **grouped by client** (collapsible cards: checklist → item/sub-item → note + assignee + due date, with deep-links).
+- **Data:** `ChecklistItem.waiting`; `SubChecklistItem.waiting` + `waitingOn`. New `checklist_items.waiting boolean` column (migration; threaded through SELECT/read-map + BOTH full INSERTs). `normalizeSubItems` now preserves `waiting`/`waitingOn` on sub-items through the JSONB round-trip. Legacy `waiting_on` notes auto-flag as waiting on read.
+- **Top-level item:** reuses the existing `updateChecklistItem` path (PATCH gained `waiting`). **Sub-item:** new `updateChecklistSubItem` store method + **PATCH on the sub-item route** + `updateChecklistSubItemRequest` (api) + `updateSubItemWaiting` (App/context), threaded ChecklistInProgressSection → ChecklistCard → DraggableTaskList (+ ClientDetailPage's ChecklistCard).
+- **Page:** `src/pages/DelayedPage.tsx`; `/delayed` route wrapped in `OwnerOnly`; owner-only nav item in `navItems.ts`; added to the redirect-guard array in App.tsx.
+- 191 tests green; lint + tsc + build clean. Migration runs on deploy (only exercised against live Postgres; dev uses the file fallback).
+
+---
+
 ## ⭐ ACTIVE TASK — 6-item client feedback batch (ALL SHIPPED ✅)
 
 The full 6-item feedback batch from Brittany is **complete and pushed**. Awaiting her live testing / further feedback.
