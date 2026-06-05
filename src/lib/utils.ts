@@ -140,6 +140,30 @@ export function isInBillingPeriod(entry: TimeEntry, period: string) {
   return entry.date.startsWith(period)
 }
 
+/** Full English month names indexed 1–12 (index 0 unused). */
+export const MONTH_NAMES = [
+  '',
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+] as const
+
+/** Clamp an arbitrary value to a valid billing month (1–12), defaulting to January. */
+export function normalizeBillingMonth(value: unknown): number {
+  const month = Number(value)
+  if (!Number.isFinite(month) || month < 1 || month > 12) return 1
+  return Math.floor(month)
+}
+
 export function getAssignedEmployeeIds(client: Client) {
   return client.assignedEmployeeIds ?? []
 }
@@ -768,6 +792,46 @@ export function getInvoice(
     amount: recurring.amount,
   }))
   const recurringTotal = recurringLines.reduce((total, line) => total + line.amount, 0)
+
+  if (client.billingMode === 'annual') {
+    // Annual billing: a flat yearly fee billed ONCE per year, in the client's
+    // chosen `annualBillingMonth`. The fee appears on the invoice only when the
+    // billing period's month matches; every other month shows no subscription
+    // line (just any reimbursements that happen to fall in that month).
+    const annualRate =
+      typeof client.annualRate === 'number' && !Number.isNaN(client.annualRate)
+        ? client.annualRate
+        : 0
+    const billingMonth = normalizeBillingMonth(client.annualBillingMonth)
+    const periodMonth = Number(billingPeriod.slice(5, 7))
+    const lines: InvoiceLine[] = []
+    if (periodMonth === billingMonth) {
+      const serviceLabel =
+        client.monthlyServiceTier && client.monthlyServiceTier.trim()
+          ? client.monthlyServiceTier
+          : subscribedPlans.length > 0
+            ? subscribedPlans.map((item) => item.name).join(', ')
+            : 'Annual service'
+      lines.push({
+        label: serviceLabel,
+        detail: `Annual fee · billed in ${MONTH_NAMES[billingMonth]}`,
+        amount: annualRate,
+      })
+    }
+
+    lines.push(...reimbursementLines, ...recurringLines)
+
+    return {
+      client,
+      plan,
+      billableMinutes,
+      entryCount: billableEntries.length,
+      period: billingPeriod,
+      periodLabel,
+      lines,
+      total: lines.reduce((total, line) => total + line.amount, 0),
+    }
+  }
 
   if (client.billingMode === 'subscription') {
     // Monthly billing: the client's own `monthlyRate` is the line amount.

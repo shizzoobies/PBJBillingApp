@@ -106,7 +106,7 @@ function normalizeStoredSessions(rawSessions, startedAt, endedAt) {
   return []
 }
 
-const VALID_BILLING_MODES = new Set(['hourly', 'subscription'])
+const VALID_BILLING_MODES = new Set(['hourly', 'subscription', 'annual'])
 
 /**
  * Validate the owner-configured new-client defaults. Every field is optional;
@@ -940,6 +940,12 @@ export function sanitizeAppData(data) {
   for (const client of data.clients) {
     if ('hourlyRate' in client) client.hourlyRate = clampMoney(client.hourlyRate)
     if ('monthlyRate' in client) client.monthlyRate = clampMoney(client.monthlyRate)
+    if ('annualRate' in client) client.annualRate = clampMoney(client.annualRate)
+    if ('annualBillingMonth' in client) {
+      const month = Number(client.annualBillingMonth)
+      client.annualBillingMonth =
+        Number.isFinite(month) && month >= 1 && month <= 12 ? Math.floor(month) : undefined
+    }
     if ('estimatedMonthlyHours' in client) {
       client.estimatedMonthlyHours = clampMoney(client.estimatedMonthlyHours)
     }
@@ -1501,7 +1507,7 @@ export class AppDataStore {
           id text primary key,
           name text not null,
           contact text not null,
-          billing_mode text not null check (billing_mode in ('hourly', 'subscription')),
+          billing_mode text not null check (billing_mode in ('hourly', 'subscription', 'annual')),
           hourly_rate numeric(12, 2) not null,
           plan_id text references subscription_plans(id) on delete set null,
           created_at timestamptz not null default now(),
@@ -1575,6 +1581,23 @@ export class AppDataStore {
       // clients — drives the invoice line label. Additive + nullable.
       await this.pool.query(
         `alter table clients add column if not exists monthly_service_tier text`,
+      )
+      // Annual billing: a flat yearly fee billed ONCE per year in a chosen
+      // month. Additive + nullable so legacy rows keep working. The existing
+      // billing_mode CHECK constraint only allowed hourly/subscription — drop
+      // and re-add it (idempotently, every boot) so 'annual' is permitted on
+      // databases created before this mode existed.
+      await this.pool.query(
+        `alter table clients drop constraint if exists clients_billing_mode_check`,
+      )
+      await this.pool.query(
+        `alter table clients add constraint clients_billing_mode_check check (billing_mode in ('hourly', 'subscription', 'annual'))`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists annual_rate numeric(12, 2)`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists annual_billing_month integer`,
       )
 
       // BILLING-CRITICAL MIGRATION — preserve every client's current
@@ -2462,7 +2485,8 @@ export class AppDataStore {
                    city, state, postal_code, logo_url, payment_terms,
                    footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
                    invoice_hide_internal_hours, invoice_group_by_category,
-                   assigned_bookkeeper_ids, monthly_service_tier
+                   assigned_bookkeeper_ids, monthly_service_tier,
+                   annual_rate, annual_billing_month
             from clients
             order by name asc
           `),
@@ -2701,6 +2725,14 @@ export class AppDataStore {
             contactIds,
             monthlyRate: monthlyRate === null ? undefined : monthlyRate,
             monthlyServiceTier: row.monthly_service_tier ?? undefined,
+            annualRate:
+              row.annual_rate === null || row.annual_rate === undefined
+                ? undefined
+                : Number(row.annual_rate),
+            annualBillingMonth:
+              row.annual_billing_month === null || row.annual_billing_month === undefined
+                ? undefined
+                : Number(row.annual_billing_month),
             ...mapEstimatedRoleHours({
               legacy: row.estimated_monthly_hours,
               bookkeeper: row.estimated_bookkeeper_hours,
@@ -3139,9 +3171,10 @@ export class AppDataStore {
                 invoice_hide_internal_hours, invoice_group_by_category,
                 assigned_bookkeeper_ids,
                 estimated_bookkeeper_hours, estimated_accountant_hours,
-                estimated_cfo_hours, monthly_service_tier, updated_at
+                estimated_cfo_hours, monthly_service_tier,
+                annual_rate, annual_billing_month, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, now())
             `,
             [
               clientRecord.id,
@@ -3205,6 +3238,13 @@ export class AppDataStore {
               clientRecord.monthlyServiceTier.trim()
                 ? clientRecord.monthlyServiceTier
                 : null,
+              clientRecord.annualRate === undefined || clientRecord.annualRate === null
+                ? null
+                : Number(clientRecord.annualRate),
+              clientRecord.annualBillingMonth === undefined ||
+              clientRecord.annualBillingMonth === null
+                ? null
+                : Number(clientRecord.annualBillingMonth),
             ],
           )
 

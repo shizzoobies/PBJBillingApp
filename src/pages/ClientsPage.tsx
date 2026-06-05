@@ -11,7 +11,7 @@ import type {
   Employee,
   SubscriptionPlan,
 } from '../lib/types'
-import { currency, employeeName, getAssignedEmployeeIds } from '../lib/utils'
+import { currency, employeeName, getAssignedEmployeeIds, MONTH_NAMES } from '../lib/utils'
 
 export function ClientsPage() {
   const { ownerMode, visibleClients, data, updateClientPlan, addClient } = useAppContext()
@@ -106,6 +106,8 @@ function ClientBuilder({
   const [contact, setContact] = useState('')
   const [hourlyRate, setHourlyRate] = useState(defaultHourly)
   const [monthlyRate, setMonthlyRate] = useState(defaultMonthly)
+  const [annualRate, setAnnualRate] = useState('')
+  const [annualBillingMonth, setAnnualBillingMonth] = useState('1')
   const [estimatedBookkeeperHours, setEstimatedBookkeeperHours] = useState('')
   const [estimatedAccountantHours, setEstimatedAccountantHours] = useState('')
   const [estimatedCfoHours, setEstimatedCfoHours] = useState('')
@@ -132,6 +134,7 @@ function ClientBuilder({
     }
 
     const parsedMonthly = Number(monthlyRate)
+    const parsedAnnual = Number(annualRate)
     const parsedBookkeeper = Number(estimatedBookkeeperHours)
     const parsedAccountant = Number(estimatedAccountantHours)
     const parsedCfo = Number(estimatedCfoHours)
@@ -144,6 +147,9 @@ function ClientBuilder({
       contactIds,
       ...(billingMode === 'subscription' && monthlyRate.trim() && !Number.isNaN(parsedMonthly)
         ? { monthlyRate: parsedMonthly }
+        : {}),
+      ...(billingMode === 'annual' && annualRate.trim() && !Number.isNaN(parsedAnnual)
+        ? { annualRate: parsedAnnual, annualBillingMonth: Number(annualBillingMonth) }
         : {}),
       ...(estimatedBookkeeperHours.trim() && !Number.isNaN(parsedBookkeeper)
         ? { estimatedBookkeeperHours: parsedBookkeeper }
@@ -174,6 +180,8 @@ function ClientBuilder({
     setContact('')
     setHourlyRate(defaultHourly)
     setMonthlyRate(defaultMonthly)
+    setAnnualRate('')
+    setAnnualBillingMonth('1')
     setEstimatedBookkeeperHours('')
     setEstimatedAccountantHours('')
     setEstimatedCfoHours('')
@@ -221,6 +229,7 @@ function ClientBuilder({
           >
             <option value="hourly">Hourly</option>
             <option value="subscription">Monthly</option>
+            <option value="annual">Annual</option>
           </select>
         </label>
         {billingMode === 'hourly' ? (
@@ -235,6 +244,34 @@ function ClientBuilder({
               value={hourlyRate}
             />
           </label>
+        ) : billingMode === 'annual' ? (
+          <>
+            <label className="field">
+              <span>Annual fee</span>
+              <input
+                className="input"
+                min="0"
+                onChange={(event) => setAnnualRate(event.target.value)}
+                step="0.01"
+                type="number"
+                value={annualRate}
+              />
+            </label>
+            <label className="field">
+              <span>Billing month</span>
+              <select
+                className="input"
+                onChange={(event) => setAnnualBillingMonth(event.target.value)}
+                value={annualBillingMonth}
+              >
+                {MONTH_NAMES.slice(1).map((name, index) => (
+                  <option key={name} value={String(index + 1)}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
         ) : (
           <label className="field">
             <span>Monthly rate</span>
@@ -390,6 +427,7 @@ function ClientTable({
                     >
                       <option value="hourly">Hourly</option>
                       <option value="subscription">Monthly</option>
+                      <option value="annual">Annual</option>
                     </select>
                   </td>
                 ) : null}
@@ -397,7 +435,9 @@ function ClientTable({
                   <td>
                     {client.billingMode === 'subscription'
                       ? `${currency.format(client.monthlyRate ?? 0)}/mo`
-                      : `${currency.format(client.hourlyRate)}/hr`}
+                      : client.billingMode === 'annual'
+                        ? `${currency.format(client.annualRate ?? 0)}/yr`
+                        : `${currency.format(client.hourlyRate)}/hr`}
                   </td>
                 ) : null}
                 <td>

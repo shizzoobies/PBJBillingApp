@@ -39,6 +39,8 @@ import {
   formatHours,
   getChecklistFrequencyLabel,
   isSafeImageSrc,
+  MONTH_NAMES,
+  normalizeBillingMonth,
   shortDate,
   sortChecklists,
 } from '../lib/utils'
@@ -372,6 +374,7 @@ function BillingSectionBody({
   onCommit: (patch: Partial<Client>) => void
 }) {
   const isMonthly = client.billingMode === 'subscription'
+  const isAnnual = client.billingMode === 'annual'
 
   return (
     <div className="form-grid two-col">
@@ -382,6 +385,7 @@ function BillingSectionBody({
         options={[
           { value: 'hourly', label: 'Hourly' },
           { value: 'subscription', label: 'Monthly' },
+          { value: 'annual', label: 'Annual' },
         ]}
       />
       {isMonthly ? (
@@ -394,6 +398,16 @@ function BillingSectionBody({
           onCommit={(next) => onCommit({ monthlyRate: next ?? undefined })}
           helper="The fixed monthly amount billed to this client."
         />
+      ) : isAnnual ? (
+        <SaveNumberField
+          key="annual-rate"
+          label="Annual fee"
+          step="0.01"
+          min="0"
+          value={client.annualRate ?? null}
+          onCommit={(next) => onCommit({ annualRate: next ?? undefined })}
+          helper="The flat yearly fee — billed once a year in the month below."
+        />
       ) : (
         <SaveNumberField
           key="hourly-rate"
@@ -405,9 +419,20 @@ function BillingSectionBody({
           helper="Used to bill every billable hour worked for this client."
         />
       )}
-      {isMonthly ? (
+      {isAnnual ? (
         <SaveSelectField
-          label="Monthly service package"
+          label="Billing month"
+          value={String(normalizeBillingMonth(client.annualBillingMonth))}
+          onCommit={(value) => onCommit({ annualBillingMonth: Number(value) })}
+          options={MONTH_NAMES.slice(1).map((name, index) => ({
+            value: String(index + 1),
+            label: name,
+          }))}
+        />
+      ) : null}
+      {isMonthly || isAnnual ? (
+        <SaveSelectField
+          label={isAnnual ? 'Service package' : 'Monthly service package'}
           value={client.monthlyServiceTier ?? ''}
           onCommit={(value) => onCommit({ monthlyServiceTier: value || undefined })}
           options={[

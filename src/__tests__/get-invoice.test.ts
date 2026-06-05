@@ -86,3 +86,73 @@ describe('getInvoice — monthly billing', () => {
     expect(invoice.total).toBe(1000)
   })
 })
+
+describe('getInvoice — annual billing', () => {
+  it('charges the flat annual fee only in the chosen billing month', () => {
+    const client = makeClient({
+      billingMode: 'annual',
+      annualRate: 6000,
+      annualBillingMonth: 5, // May — matches the period
+    })
+    const invoice = getInvoice(client, [entry], plans, '2026-05')
+    expect(invoice.total).toBe(6000)
+    expect(invoice.lines).toHaveLength(1)
+    expect(invoice.lines[0].amount).toBe(6000)
+    expect(invoice.lines[0].detail).toContain('May')
+  })
+
+  it('shows no subscription charge in non-billing months', () => {
+    const client = makeClient({
+      billingMode: 'annual',
+      annualRate: 6000,
+      annualBillingMonth: 1, // January — period is May
+    })
+    const invoice = getInvoice(client, [entry], plans, '2026-05')
+    expect(invoice.total).toBe(0)
+    expect(invoice.lines).toHaveLength(0)
+  })
+
+  it('ignores tracked billable hours entirely (flat fee only)', () => {
+    const client = makeClient({
+      billingMode: 'annual',
+      annualRate: 1200,
+      annualBillingMonth: 5,
+    })
+    const invoice = getInvoice(client, [entry, entry], plans, '2026-05')
+    expect(invoice.total).toBe(1200)
+  })
+
+  it('defaults to January when annualBillingMonth is unset', () => {
+    const client = makeClient({ billingMode: 'annual', annualRate: 900 })
+    expect(getInvoice(client, [], plans, '2026-01').total).toBe(900)
+    expect(getInvoice(client, [], plans, '2026-02').total).toBe(0)
+  })
+
+  it('labels the annual line with the service tier or plan names', () => {
+    const tierClient = makeClient({
+      billingMode: 'annual',
+      annualRate: 500,
+      annualBillingMonth: 5,
+      monthlyServiceTier: 'The Classic',
+    })
+    expect(getInvoice(tierClient, [], plans, '2026-05').lines[0].label).toBe('The Classic')
+
+    const planClient = makeClient({
+      billingMode: 'annual',
+      annualRate: 500,
+      annualBillingMonth: 5,
+      planIds: ['plan-a'],
+    })
+    expect(getInvoice(planClient, [], plans, '2026-05').lines[0].label).toBe('Monthly Close')
+
+    const bareClient = makeClient({ billingMode: 'annual', annualRate: 500, annualBillingMonth: 5 })
+    expect(getInvoice(bareClient, [], plans, '2026-05').lines[0].label).toBe('Annual service')
+  })
+
+  it('treats a missing annualRate as 0 in the billing month', () => {
+    const client = makeClient({ billingMode: 'annual', annualBillingMonth: 5 })
+    const invoice = getInvoice(client, [], plans, '2026-05')
+    expect(invoice.total).toBe(0)
+    expect(invoice.lines).toHaveLength(1)
+  })
+})

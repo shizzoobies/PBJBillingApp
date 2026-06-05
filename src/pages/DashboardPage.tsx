@@ -27,6 +27,7 @@ import {
   formatActivityTimestamp,
   formatHours,
   isInBillingPeriod,
+  normalizeBillingMonth,
   relativeTime,
 } from '../lib/utils'
 
@@ -230,6 +231,16 @@ function OwnerDashboardView() {
           ? client.monthlyRate
           : 0
       return total + monthlyRate
+    }
+    if (client.billingMode === 'annual') {
+      // Annual billing only contributes in the client's chosen billing month.
+      const annualRate =
+        typeof client.annualRate === 'number' && !Number.isNaN(client.annualRate)
+          ? client.annualRate
+          : 0
+      const billingMonth = normalizeBillingMonth(client.annualBillingMonth)
+      const periodMonth = Number(billingPeriod.slice(5, 7))
+      return total + (periodMonth === billingMonth ? annualRate : 0)
     }
     return total + (minutes / 60) * client.hourlyRate
   }, 0)

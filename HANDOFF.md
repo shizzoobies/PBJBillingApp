@@ -1,6 +1,41 @@
 # PB&J Strategic Accounting — Cross-Agent Handoff
 
-_Last updated: 2026-05-30_
+_Last updated: 2026-06-05_
+
+## ⭐ ACTIVE TASK (start here) — 6-item client feedback batch
+
+Working through a 6-item feedback batch from Brittany. **4 of 6 shipped & live; 2 remain** (both billing/data-model features).
+
+| # | Item | Status |
+|---|------|--------|
+| 1 | **Annual billing method** — flat yearly fee, billed once in a chosen month | ⏳ **PENDING** |
+| 2 | Organize repeating tasks → group by client (collapsible headers) | ✅ Live |
+| 3 | Lock bug (locks affected all clients) → now scoped per-client | ✅ Live |
+| 4 | Edit checklists under clients (full editor on client page) | ✅ Live |
+| 5 | "Waiting on" note per checklist item (amber badge) | ✅ Live |
+| 6 | **Group time billing** — pick Group → multiple clients, flexible split | ⏳ **PENDING** |
+
+Last stable deploy: bundle `index-wnH_9WAC.js` (HTTP 200; `waiting_on` migration ran). Last commit: `ea5c5f5`. **172 tests** green.
+
+### #1 Annual billing — spec & plan
+Confirmed semantics: **"Flat yearly fee, billed once."** A flat yearly fee that appears on the invoice **once per year**, in a **chosen billing month**. Every other month shows **no** subscription charge.
+Current model: `billingMode` is `'hourly' | 'subscription'` with `monthlyRate` + `monthlyServiceTier`. Add a third mode.
+1. **Type** (`src/lib/types.ts`): add `'annual'` to `billingMode`; add `annualRate?: number` (yearly fee) + `annualBillingMonth?: number` (1–12).
+2. **Store** (`db/store.js`): `alter table clients add column if not exists annual_rate ...` + `annual_billing_month ...`; update BOTH client INSERT paths (⚠️ 31-col alignment), SELECT list, read mapping. Verify `sanitizeAppData` keeps them.
+3. **Invoice** (`src/lib/utils.ts`, `getInvoice`): when `billingMode === 'annual'`, emit the annual fee line **only** when the period's month === `annualBillingMonth`; otherwise no subscription line. Hourly/time lines unaffected.
+4. **UI:** `BillingSectionBody` in `src/pages/ClientDetailPage.tsx` — add "Annual" option + `annualRate` + `annualBillingMonth` (month picker), using SectionKit save controls. Show annual line in invoice display.
+
+### #6 Group time billing — spec & plan (biggest item)
+Confirmed semantics: when logging time, pick **"Group"** → select **multiple clients** → choose a **per-entry allocation**: **split evenly / full duration to each / custom split** ("option for each full flexibility" = expose all three).
+1. **Model** (`src/lib/types.ts`): **recommended** — materialize one child `TimeEntry` per client at save time, each tagged with a shared `groupId` (so they can be edited/deleted together) + the chosen allocation. Materializing keeps `getInvoice` simple (each client's invoice just sums its own entries) and avoids double-count risk.
+2. **Store** (`db/store.js`): persist chosen shape in both backends (migration if new column/table).
+3. **UI:** time-entry form — add "Group" target, multi-client picker, allocation-mode selector; for "custom", per-client hours/percent that must sum to the total duration.
+4. **Invoice** (`src/lib/utils.ts`): each client gets only its allocated share; never double-count; estimated-hours rule still holds.
+5. **⚠️ CONFIRM WITH USER BEFORE BUILDING:** does Brittany need to edit/delete the group entry **as one unit** later, or is recording the split once enough? Decides materialize-vs-keep-as-group (default rec: materialize + `groupId`).
+
+**Suggested order:** #1 annual billing first (smaller, self-contained), then #6 group time (confirm the edit-as-group question first). User's stated default was annual billing first.
+
+---
 
 ## Project identity
 
@@ -17,7 +52,7 @@ _Last updated: 2026-05-30_
 ## Workflow (follow this exactly)
 
 1. Make the change.
-2. **Verify:** `npm run verify` (= `eslint .` + `tsc -b && vite build` + `vitest run`). Tests must stay green (currently **171 tests / 15 files**).
+2. **Verify:** `npm run verify` (= `eslint .` + `tsc -b && vite build` + `vitest run`). Tests must stay green (currently **172 tests**).
 3. Commit with a descriptive multi-line message ending with the `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>` trailer. One feature per commit.
 4. Push to `main` → Railway auto-deploys.
 5. **Confirm the deploy** by diffing the bundle hash:
@@ -65,6 +100,12 @@ _Last updated: 2026-05-30_
 
 ## Recent work (this batch of sessions) — what a fresh context won't know
 
+- **6-item feedback batch, items #2–#5 shipped** (commit `ea5c5f5`; see ⭐ ACTIVE TASK above for the 2 remaining):
+  - **#3 lock-scoping:** moved `SectionScopeContext` into its own file `src/components/sectionScope.ts` (fast-refresh lint). `CollapsibleSection` reads it and keys localStorage as `pbj.section.<scope><storageKey|title>`. `ClientDetailPage` wraps its tree in `<SectionScopeContext.Provider value={\`client:${client.id}:\`}>` so locks/collapse are per-client.
+  - **#4 edit checklists under clients:** `ChecklistCard` (+ `NewTaskForm`) now `export`ed from `ChecklistsPage.tsx`; `ClientDetailPage`'s `ActiveChecklistsBody` renders a real `<ChecklistCard>` per active checklist (pulls ~16 handlers from `useAppContext`, `focused={false} focusRef={null}`).
+  - **#5 "waiting on":** new `waiting_on text` column on `checklist_items` (full dual-backend pattern: type `ChecklistItem.waitingOn?`, migration, both INSERTs `$9`/sub_items→`$10::jsonb`, SELECT, read map, `updateChecklistItem` update path, `server.js` PATCH handler). UI: amber `.task-row-waiting` badge + `.item-waiting-input` in `DraggableTaskList`; `updateChecklistItem` patch type widened to include `waitingOn?: string | null` across `api.ts`/`AppContext.tsx`/`App.tsx`.
+  - **#2 group repeating tasks by client:** `RepeatingTasksManager` now groups templates into collapsible per-client sections (`collapsedClients` Set, `clientGroups` Map, `.repeating-client-group/-header/-count/-body`, focus auto-expands the focused client).
+
 - **Shared UI kit:** `src/components/SectionKit.tsx` + `src/lib/useSaveFlash.ts`. Exports `CollapsibleSection` (collapse + optional lock, **unlocked by default**, state persisted to `localStorage` keyed by section title — `pbj.section.<title>.{locked,collapsed}`), `SaveBadge`, `SavingTextInput/SavingNumberInput/SavingTextarea`, and field wrappers (`SaveTextField`, `SaveNumberField`, `SaveSelectField`, `SaveTextareaField`, `SaveToggleField`).
 - **Save confidence:** per-field "Saving… / Saved ✓ / Couldn't save" badges (tied to `dataSyncState`), plus an always-on header sync banner ("All changes saved / Saving… / Couldn't save — retrying / Offline") in `AppLayout` (`syncMessage` computed in `App.tsx`).
 - Applied collapse/lock + reliable inputs to **Client detail, Contacts, Plans, Settings (firm fields), Team**. (Time + Checklists pages were intentionally left — they're explicit-submit / already commit-on-change; Checklists already has its own collapse.)
@@ -103,7 +144,9 @@ Live: https://pbjbillingapp-production.up.railway.app
 
 Read HANDOFF.md fully first — especially "Workflow", "Data flow", and "Gotchas".
 
-Workflow: make change → `npm run verify` (must stay green, 171 tests) → commit (descriptive, Co-Authored-By trailer) → push main → confirm Railway deploy via bundle-hash diff (watch for intermediate builds; wait for a stable hash). Never commit package-lock.json.
+Two billing features remain in the active batch: #1 annual billing and #6 group time (see "⭐ ACTIVE TASK" at the top of HANDOFF.md for full specs). Start with #1; confirm the edit-as-group question before building #6.
+
+Workflow: make change → `npm run verify` (must stay green, 172 tests) → commit (descriptive, Co-Authored-By trailer) → push main → confirm Railway deploy via bundle-hash diff (watch for intermediate builds; wait for a stable hash). Never commit package-lock.json.
 
 When changing the data model, update BOTH the Postgres and file-fallback paths in db/store.js (type + INSERT alignment + read mapping + add-column migration), and make sure normalizers (ensureTemplateStages / normalizeSubItems / sanitizeAppData) preserve the new field.
 

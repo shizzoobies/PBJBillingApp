@@ -653,6 +653,7 @@ function ClientDefaultsSection({
           >
             <option value="hourly">Hourly</option>
             <option value="subscription">Monthly</option>
+            <option value="annual">Annual</option>
           </select>
         </label>
         <label className="field">

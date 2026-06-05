@@ -96,6 +96,9 @@ function getServiceLabel(client: Client) {
   if (client.billingMode === 'subscription') {
     return client.monthlyServiceTier || 'Monthly service'
   }
+  if (client.billingMode === 'annual') {
+    return client.monthlyServiceTier || 'Annual service'
+  }
   return 'Billable hours'
 }
 
@@ -763,8 +766,12 @@ function BillingQueue({
               <div>
                 <strong>{client.name}</strong>
                 <span>
-                  {client.billingMode === 'subscription' ? 'Subscription plan' : 'Billable hours'} ·{' '}
-                  {formatHours(invoice.billableMinutes)}
+                  {client.billingMode === 'subscription'
+                    ? 'Subscription plan'
+                    : client.billingMode === 'annual'
+                      ? 'Annual plan'
+                      : 'Billable hours'}{' '}
+                  · {formatHours(invoice.billableMinutes)}
                 </span>
               </div>
               <strong>{currency.format(invoice.total)}</strong>
@@ -816,7 +823,9 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
       : ''
     : billingClient.billingMode === 'subscription'
       ? 'Subscription plan'
-      : 'Billable hours'
+      : billingClient.billingMode === 'annual'
+        ? 'Annual plan'
+        : 'Billable hours'
   const footerText = custom
     ? custom.include.footerNote
       ? custom.footer

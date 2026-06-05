@@ -1,5 +1,5 @@
 export type Role = 'employee' | 'owner'
-export type BillingMode = 'hourly' | 'subscription'
+export type BillingMode = 'hourly' | 'subscription' | 'annual'
 
 /**
  * The firm's named monthly service packages. Picked per-client when billing
@@ -66,6 +66,17 @@ export type Client = {
    * generic "Monthly service" line.
    */
   monthlyServiceTier?: string
+  /**
+   * Flat yearly fee (dollars) billed ONCE per year. Only meaningful when
+   * `billingMode` is 'annual'. The invoice shows this amount only in the
+   * client's `annualBillingMonth`; every other month has no subscription line.
+   */
+  annualRate?: number
+  /**
+   * Calendar month (1–12) the annual fee is billed in. Only meaningful when
+   * `billingMode` is 'annual'. Defaults to January (1) when unset.
+   */
+  annualBillingMonth?: number
   /**
    * @deprecated Legacy single informational estimated-monthly-hours field.
    * Superseded by the per-role fields below (`estimatedBookkeeperHours`,
