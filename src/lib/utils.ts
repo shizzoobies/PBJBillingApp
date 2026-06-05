@@ -164,6 +164,65 @@ export function normalizeBillingMonth(value: unknown): number {
   return Math.floor(month)
 }
 
+/**
+ * How a block of "group time" is allocated across the selected clients:
+ * - `even`   — split the duration as evenly as possible.
+ * - `full`   — bill every client the full duration (e.g. a meeting that serves
+ *              several clients where each is charged the whole hour).
+ * - `custom` — the owner sets each client's minutes by hand (full flexibility).
+ */
+export type GroupAllocationMode = 'even' | 'full' | 'custom'
+
+/**
+ * Allocate `totalMinutes` of work across `clientIds` per the chosen mode and
+ * return a map of clientId → minutes. Pure + deterministic so it can be unit
+ * tested independently of the form.
+ *
+ * - `even`: integer minutes that sum to EXACTLY `totalMinutes` (the remainder
+ *   is handed out one minute at a time to the first clients).
+ * - `full`: every client gets `totalMinutes`.
+ * - `custom`: each client gets its own `custom[clientId]` value (rounded; a
+ *   missing / non-positive value becomes 0). The parts are NOT forced to sum to
+ *   `totalMinutes` — the owner has full control.
+ *
+ * Duplicate / empty ids are ignored. Callers decide whether to drop 0-minute
+ * clients before persisting.
+ */
+export function allocateGroupMinutes(
+  totalMinutes: number,
+  clientIds: string[],
+  mode: GroupAllocationMode,
+  custom: Record<string, number> = {},
+): Record<string, number> {
+  const ids = clientIds.filter((id, index) => Boolean(id) && clientIds.indexOf(id) === index)
+  const result: Record<string, number> = {}
+  if (ids.length === 0) return result
+
+  if (mode === 'full') {
+    const each = Math.max(0, Math.round(totalMinutes))
+    for (const id of ids) result[id] = each
+    return result
+  }
+
+  if (mode === 'custom') {
+    for (const id of ids) {
+      const value = Number(custom[id])
+      result[id] = Number.isFinite(value) && value > 0 ? Math.round(value) : 0
+    }
+    return result
+  }
+
+  // even — distribute the remainder so the parts sum to exactly totalMinutes.
+  const total = Math.max(0, Math.round(totalMinutes))
+  const base = Math.floor(total / ids.length)
+  let remainder = total - base * ids.length
+  for (const id of ids) {
+    result[id] = base + (remainder > 0 ? 1 : 0)
+    if (remainder > 0) remainder -= 1
+  }
+  return result
+}
+
 export function getAssignedEmployeeIds(client: Client) {
   return client.assignedEmployeeIds ?? []
 }

@@ -217,6 +217,14 @@ export type TimeEntry = {
    * Still optional — admin/internal time may have no task.
    */
   taskId?: string | null
+  /**
+   * Ties this entry to a "group time" batch — one block of work the owner
+   * allocated across MULTIPLE clients at once. Every entry created from the
+   * same group-time submission shares this id (each client still gets its own
+   * independent, separately-billed entry). Absent on ordinary single-client
+   * and administrative entries.
+   */
+  groupId?: string
   /** Approval lifecycle. New entries start `pending`; legacy data is `approved`. */
   approvalStatus: TimeApprovalStatus
   /** Rejection reason — set when status is `rejected`. */

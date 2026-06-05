@@ -574,6 +574,37 @@ function App() {
     }
   }
 
+  // Group time: create one independent entry per client (each separately
+  // billed + approved) from a single submission, all sharing a group id. The
+  // entries are created sequentially through the normal validated endpoint,
+  // then prepended in one state update so the UI updates once.
+  const logGroupTime = async (entries: Array<Omit<TimeEntry, 'id' | 'approvalStatus'>>) => {
+    if (previewActiveRef.current) return
+    if (entries.length === 0) return
+    try {
+      setDataSyncState('saving')
+      const created: TimeEntry[] = []
+      for (const entry of entries) {
+        created.push(await createTimeEntry(entry))
+      }
+      applyServerDataUpdate((current) => ({
+        ...current,
+        timeEntries: [...created, ...current.timeEntries],
+      }))
+      if (created[0]) setSelectedClientId(created[0].clientId)
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
   const stopTimer = async (descriptionOverride?: string) => {
     if (previewActiveRef.current || !timer) {
       return
@@ -2471,6 +2502,7 @@ function App() {
     startTimer,
     stopTimer,
     logTime,
+    logGroupTime,
     updateTimeEntry,
     deleteTimeEntry,
     approveTimeEntry,

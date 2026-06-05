@@ -5246,6 +5246,104 @@ h2 {
   margin: 0;
 }
 
+/* ---- Group time billing (manual entry modal) -------------------------- */
+.group-time-block {
+  gap: 8px;
+}
+
+.group-client-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.group-client-chip {
+  align-items: center;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #d9e1e8);
+  border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  transition: border-color 0.15s var(--ease, ease), background 0.15s var(--ease, ease);
+}
+
+.group-client-chip:hover {
+  border-color: var(--accent, #ff43a4);
+}
+
+.group-client-chip.is-selected {
+  background: rgba(255, 67, 164, 0.08);
+  border-color: var(--accent, #ff43a4);
+  font-weight: 600;
+}
+
+.group-client-chip input {
+  margin: 0;
+}
+
+.group-client-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-allocation-preview {
+  background: rgba(19, 52, 74, 0.04);
+  border-radius: 10px;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.group-allocation-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.group-allocation-list li {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.group-allocation-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-allocation-amount {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.group-allocation-input {
+  max-width: 110px;
+  text-align: right;
+}
+
+.group-allocation-total {
+  border-top: 1px solid var(--border, #d9e1e8);
+  font-weight: 700;
+  margin: 0;
+  padding-top: 8px;
+}
+
+/* "Group" tag shown on a recent time entry that was part of a group batch. */
+.entry-group-tag {
+  background: rgba(255, 67, 164, 0.12);
+  border-radius: 999px;
+  color: #b3286f;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 1px 8px;
+}
+
 .entry-sessions,
 .approval-sessions {
   display: grid;

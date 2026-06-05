@@ -1161,6 +1161,12 @@ const server = createServer(async (request, response) => {
           : typeof taskIdRaw === 'string' && taskIdRaw.trim()
             ? taskIdRaw.trim()
             : null
+        // Group-time tag: shared across the per-client entries created from one
+        // "group" submission. Only meaningful for client-bound (non-admin) time.
+        const groupId =
+          !isAdministrative && typeof payload?.groupId === 'string' && payload.groupId.trim()
+            ? payload.groupId.trim().slice(0, 64)
+            : null
         // Audit timestamps: exact start/stop of the work, normalized to ISO.
         // Optional — invalid/absent values are simply dropped.
         const toIsoTimestamp = (value) => {
@@ -1286,6 +1292,7 @@ const server = createServer(async (request, response) => {
           startAt: finalStartAt,
           endAt: finalEndAt,
           sessions: finalSessions,
+          groupId,
         })
 
         // Manual entries are deliberately gated: log the submission and ping

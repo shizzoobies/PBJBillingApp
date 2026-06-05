@@ -22,6 +22,7 @@ import type {
   WorkSession,
 } from '../lib/types'
 import {
+  allocateGroupMinutes,
   clientName,
   currentBillingPeriod,
   currentWeekStart,
@@ -30,6 +31,7 @@ import {
   formatHours,
   formatHoursMinutes,
   getWeekLabel,
+  type GroupAllocationMode,
   sessionMinutes,
   shiftWeek,
   weekRangeOf,
@@ -104,6 +106,7 @@ export function TimePage() {
     startTimer,
     stopTimer,
     logTime,
+    logGroupTime,
     updateTimeEntry,
     deleteTimeEntry,
     previewMode,
@@ -213,6 +216,7 @@ export function TimePage() {
           employees={data.employees}
           role={role}
           onLog={logTime}
+          onLogGroup={logGroupTime}
           onClose={() => setManualOpen(false)}
         />
       ) : null}
@@ -673,6 +677,7 @@ function ManualEntryModal({
   employees,
   role,
   onLog,
+  onLogGroup,
   onClose,
 }: {
   activeEmployeeId: string
@@ -681,9 +686,20 @@ function ManualEntryModal({
   employees: Employee[]
   role: Role
   onLog: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
+  onLogGroup: (entries: Array<Omit<TimeEntry, 'id' | 'approvalStatus'>>) => Promise<void>
   onClose: () => void
 }) {
   const [step, setStep] = useState<'confirm' | 'form'>('confirm')
+  // Group billing (owner-only): allocate one block of time across MULTIPLE
+  // clients at once, each billed independently. Brittany picks "Group", selects
+  // the clients, and chooses how to split the time (even / full to each /
+  // custom per-client amounts).
+  const canGroup = role === 'owner'
+  const [billTo, setBillTo] = useState<'single' | 'group'>('single')
+  const [groupClientIds, setGroupClientIds] = useState<string[]>([])
+  const [allocationMode, setAllocationMode] = useState<GroupAllocationMode>('even')
+  // Per-client minute strings for the 'custom' allocation mode (keyed by id).
+  const [customMinutes, setCustomMinutes] = useState<Record<string, string>>({})
   // Exact start/stop the employee enters, so the owner can audit. Default to a
   // one-hour block ending now; duration is derived from the span.
   const [startLocal, setStartLocal] = useState(() => {
@@ -730,6 +746,46 @@ function ManualEntryModal({
   )
   const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
 
+  // Group-billing helpers (owner-only). When active, the single client/task
+  // selection is replaced by a multi-client picker + allocation controls.
+  const groupMode = canGroup && billTo === 'group' && !isAdministrative
+
+  const startMsPreview = startLocal ? new Date(startLocal).getTime() : NaN
+  const stopMsPreview = stopLocal ? new Date(stopLocal).getTime() : NaN
+  const previewTotalMinutes =
+    !Number.isNaN(startMsPreview) && !Number.isNaN(stopMsPreview) && stopMsPreview > startMsPreview
+      ? Math.round((stopMsPreview - startMsPreview) / 60000)
+      : 0
+
+  const customMinutesNumeric = useMemo(() => {
+    const out: Record<string, number> = {}
+    for (const id of groupClientIds) out[id] = Number(customMinutes[id])
+    return out
+  }, [groupClientIds, customMinutes])
+
+  const groupAllocation = useMemo(
+    () =>
+      groupMode
+        ? allocateGroupMinutes(
+            previewTotalMinutes,
+            groupClientIds,
+            allocationMode,
+            customMinutesNumeric,
+          )
+        : {},
+    [groupMode, previewTotalMinutes, groupClientIds, allocationMode, customMinutesNumeric],
+  )
+  const groupTotalBilled = Object.values(groupAllocation).reduce(
+    (sum, minutes) => sum + (minutes || 0),
+    0,
+  )
+
+  const toggleGroupClient = (id: string) => {
+    setGroupClientIds((current) =>
+      current.includes(id) ? current.filter((existing) => existing !== id) : [...current, id],
+    )
+  }
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const startMs = startLocal ? new Date(startLocal).getTime() : NaN
@@ -757,6 +813,59 @@ function ManualEntryModal({
     }
     if (!reason.trim()) {
       setSubmitError('A reason is required for manual entries.')
+      return
+    }
+
+    // Group billing: one block of time split across several clients. Each
+    // selected client gets its own independent, separately-billed entry that
+    // shares a group id. taskId is null (a task belongs to a single client).
+    if (groupMode) {
+      if (groupClientIds.length === 0) {
+        setSubmitError('Pick at least one client to bill for the group.')
+        return
+      }
+      const allocation = allocateGroupMinutes(
+        totalMinutes,
+        groupClientIds,
+        allocationMode,
+        customMinutesNumeric,
+      )
+      const allocatedEntries = groupClientIds
+        .map((id) => ({ id, minutes: allocation[id] ?? 0 }))
+        .filter((row) => row.minutes > 0)
+      if (allocatedEntries.length === 0) {
+        setSubmitError(
+          allocationMode === 'custom'
+            ? 'Enter minutes greater than 0 for at least one client.'
+            : 'The duration is too short to split across the selected clients.',
+        )
+        return
+      }
+      const groupId = `grp-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+      setSubmitPending(true)
+      setSubmitError('')
+      try {
+        await onLogGroup(
+          allocatedEntries.map((row) => ({
+            employeeId: effectiveEmployeeId,
+            clientId: row.id,
+            isAdministrative: false,
+            date: startLocal.slice(0, 10),
+            minutes: row.minutes,
+            description,
+            billable,
+            taskId: null,
+            entryMethod: 'manual' as const,
+            manualReason: reason.trim(),
+            groupId,
+          })),
+        )
+        setSuccess(true)
+      } catch {
+        setSubmitError('Group time could not be saved.')
+      } finally {
+        setSubmitPending(false)
+      }
       return
     }
 
@@ -881,15 +990,113 @@ function ManualEntryModal({
                   </select>
                 </label>
               )}
-              <label className="check-row full-span">
-                <input
-                  checked={isAdministrative}
-                  onChange={(event) => setIsAdministrative(event.target.checked)}
-                  type="checkbox"
-                />
-                <span>Administrative work (company meeting, internal — no client or task)</span>
-              </label>
-              {isAdministrative ? null : (
+              {canGroup && !isAdministrative ? (
+                <label className="field full-span">
+                  <span>Bill to</span>
+                  <select
+                    className="input"
+                    value={billTo}
+                    onChange={(event) => setBillTo(event.target.value as 'single' | 'group')}
+                  >
+                    <option value="single">A single client</option>
+                    <option value="group">A group (multiple clients)</option>
+                  </select>
+                </label>
+              ) : null}
+              {billTo === 'single' ? (
+                <label className="check-row full-span">
+                  <input
+                    checked={isAdministrative}
+                    onChange={(event) => setIsAdministrative(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Administrative work (company meeting, internal — no client or task)</span>
+                </label>
+              ) : null}
+              {groupMode ? (
+                <>
+                  <div className="field full-span group-time-block">
+                    <span>Clients in this group</span>
+                    <div className="group-client-grid">
+                      {clients.map((client) => {
+                        const selected = groupClientIds.includes(client.id)
+                        return (
+                          <label
+                            key={client.id}
+                            className={`group-client-chip${selected ? ' is-selected' : ''}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={() => toggleGroupClient(client.id)}
+                            />
+                            <span>{client.name}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </div>
+                  <label className="field full-span">
+                    <span>How should the time be split?</span>
+                    <select
+                      className="input"
+                      value={allocationMode}
+                      onChange={(event) =>
+                        setAllocationMode(event.target.value as GroupAllocationMode)
+                      }
+                    >
+                      <option value="even">Split evenly across clients</option>
+                      <option value="full">Full duration to each client</option>
+                      <option value="custom">Custom — set each client&apos;s time</option>
+                    </select>
+                  </label>
+                  {groupClientIds.length > 0 ? (
+                    <div className="field full-span group-allocation-preview">
+                      <span>
+                        {allocationMode === 'custom' ? 'Minutes per client' : 'Allocation'}
+                      </span>
+                      <ul className="group-allocation-list">
+                        {groupClientIds.map((id) => (
+                          <li key={id}>
+                            <span className="group-allocation-name">{clientName(clients, id)}</span>
+                            {allocationMode === 'custom' ? (
+                              <input
+                                className="input group-allocation-input"
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={customMinutes[id] ?? ''}
+                                onChange={(event) =>
+                                  setCustomMinutes((prev) => ({ ...prev, [id]: event.target.value }))
+                                }
+                                placeholder="min"
+                              />
+                            ) : (
+                              <span className="group-allocation-amount">
+                                {formatHoursMinutes(groupAllocation[id] ?? 0)}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="group-allocation-total">
+                        Total billed: {formatHoursMinutes(groupTotalBilled)}
+                        {allocationMode === 'full' && groupClientIds.length > 1
+                          ? ` — ${formatHoursMinutes(previewTotalMinutes)} to each of ${groupClientIds.length} clients`
+                          : ''}
+                      </p>
+                    </div>
+                  ) : null}
+                  <label className="check-row full-span">
+                    <input
+                      checked={billable}
+                      onChange={(event) => setBillable(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>Billable</span>
+                  </label>
+                </>
+              ) : isAdministrative ? null : (
                 <>
                   <label className="field">
                     <span>Client</span>
@@ -1378,7 +1585,10 @@ function TimeEntryRow({
   return (
     <article className="entry-row" key={entry.id}>
       <div>
-        <strong>{clientLabel}</strong>
+        <strong>
+          {clientLabel}
+          {entry.groupId ? <span className="entry-group-tag">Group</span> : null}
+        </strong>
         <span>{entry.description}</span>
         <small>
           {entry.date} · {employeeLabel}
