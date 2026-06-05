@@ -1,4 +1,4 @@
-import { Plus, Trash2, Upload } from 'lucide-react'
+import { Lock, Plus, Trash2, Unlock, Upload } from 'lucide-react'
 import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import { CollapsibleSection, SavingTextInput, SavingTextarea } from '../components/SectionKit'
@@ -13,6 +13,29 @@ import {
   type ImportRow,
   type ParsedRow,
 } from '../lib/contactImport'
+
+// Per-contact lock state lives in the browser (like the section lock) so each
+// person can protect the contacts they're done editing without touching the
+// shared data. Keyed by contact id; default unlocked.
+const CONTACT_LOCK_KEY = 'pbj.contactlock.v1'
+
+function readLockedContactIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(CONTACT_LOCK_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function writeLockedContactIds(ids: Set<string>) {
+  try {
+    localStorage.setItem(CONTACT_LOCK_KEY, JSON.stringify([...ids]))
+  } catch {
+    // Ignore storage failures (private mode, quota) — locking is a convenience.
+  }
+}
 
 export function ContactsPage() {
   const { data, addContact, updateContact, deleteContact, ownerMode } = useAppContext()
@@ -130,6 +153,18 @@ function ContactLibrary({
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importText, setImportText] = useState<string | null>(null)
+  // Per-contact locks (browser-persisted). A locked contact shows read-only
+  // until unlocked right on its row — no need to lock the whole section.
+  const [lockedIds, setLockedIds] = useState<Set<string>>(() => readLockedContactIds())
+  const toggleLock = (contactId: string) => {
+    setLockedIds((current) => {
+      const next = new Set(current)
+      if (next.has(contactId)) next.delete(contactId)
+      else next.add(contactId)
+      writeLockedContactIds(next)
+      return next
+    })
+  }
 
   const handleDelete = (contact: Contact) => {
     const attached = clients.filter((client) => (client.contactIds ?? []).includes(contact.id))
@@ -198,58 +233,92 @@ function ContactLibrary({
           const attachedCount = clients.filter((client) =>
             (client.contactIds ?? []).includes(contact.id),
           ).length
+          const locked = lockedIds.has(contact.id)
           return (
-            <article className="plan-row" key={contact.id}>
+            <article
+              className={`plan-row${locked ? ' contact-locked' : ''}`}
+              key={contact.id}
+            >
               <div className="contact-edit-fields">
-                <ContactTextInput
-                  ariaLabel={`${contact.name} name`}
-                  canonical={contact.name}
-                  onCommit={(value) => {
-                    const trimmed = value.trim()
-                    if (trimmed) onUpdate(contact.id, { name: trimmed })
-                  }}
-                />
-                <ContactTextInput
-                  ariaLabel={`${contact.name} title`}
-                  canonical={contact.title ?? ''}
-                  placeholder="Title"
-                  onCommit={(value) => onUpdate(contact.id, { title: value })}
-                />
-                <ContactTextInput
-                  ariaLabel={`${contact.name} email`}
-                  canonical={contact.email ?? ''}
-                  placeholder="Email"
-                  onCommit={(value) => onUpdate(contact.id, { email: value })}
-                />
-                <ContactTextInput
-                  ariaLabel={`${contact.name} phone`}
-                  canonical={contact.phone ?? ''}
-                  placeholder="Phone"
-                  onCommit={(value) => onUpdate(contact.id, { phone: value })}
-                />
-                <ContactNotesInput
-                  ariaLabel={`${contact.name} notes`}
-                  canonical={contact.notes ?? ''}
-                  placeholder="Notes"
-                  onCommit={(value) => onUpdate(contact.id, { notes: value })}
-                />
+                {locked ? (
+                  <div className="contact-locked-view">
+                    <strong className="contact-locked-name">{contact.name}</strong>
+                    {contact.title ? <span>{contact.title}</span> : null}
+                    {contact.email ? <span>{contact.email}</span> : null}
+                    {contact.phone ? <span>{contact.phone}</span> : null}
+                    {contact.notes ? (
+                      <p className="contact-locked-notes">{contact.notes}</p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <>
+                    <ContactTextInput
+                      ariaLabel={`${contact.name} name`}
+                      canonical={contact.name}
+                      onCommit={(value) => {
+                        const trimmed = value.trim()
+                        if (trimmed) onUpdate(contact.id, { name: trimmed })
+                      }}
+                    />
+                    <ContactTextInput
+                      ariaLabel={`${contact.name} title`}
+                      canonical={contact.title ?? ''}
+                      placeholder="Title"
+                      onCommit={(value) => onUpdate(contact.id, { title: value })}
+                    />
+                    <ContactTextInput
+                      ariaLabel={`${contact.name} email`}
+                      canonical={contact.email ?? ''}
+                      placeholder="Email"
+                      onCommit={(value) => onUpdate(contact.id, { email: value })}
+                    />
+                    <ContactTextInput
+                      ariaLabel={`${contact.name} phone`}
+                      canonical={contact.phone ?? ''}
+                      placeholder="Phone"
+                      onCommit={(value) => onUpdate(contact.id, { phone: value })}
+                    />
+                    <ContactNotesInput
+                      ariaLabel={`${contact.name} notes`}
+                      canonical={contact.notes ?? ''}
+                      placeholder="Notes"
+                      onCommit={(value) => onUpdate(contact.id, { notes: value })}
+                    />
+                  </>
+                )}
                 {attachedCount > 0 ? (
                   <span className="checklist-meta-line">
                     On {attachedCount} client{attachedCount === 1 ? '' : 's'}
                   </span>
                 ) : null}
               </div>
-              {ownerMode ? (
+              <div className="contact-row-actions">
                 <button
-                  className="item-delete-btn"
+                  className={`contact-lock-btn${locked ? ' is-locked' : ''}`}
                   type="button"
-                  aria-label={`Delete ${contact.name}`}
-                  title="Delete this contact"
-                  onClick={() => handleDelete(contact)}
+                  aria-pressed={locked}
+                  aria-label={locked ? `Unlock ${contact.name}` : `Lock ${contact.name}`}
+                  title={
+                    locked
+                      ? 'Locked — click to unlock and edit'
+                      : 'Lock to protect this contact from edits'
+                  }
+                  onClick={() => toggleLock(contact.id)}
                 >
-                  <Trash2 size={14} />
+                  {locked ? <Lock size={14} /> : <Unlock size={14} />}
                 </button>
-              ) : null}
+                {ownerMode && !locked ? (
+                  <button
+                    className="item-delete-btn"
+                    type="button"
+                    aria-label={`Delete ${contact.name}`}
+                    title="Delete this contact"
+                    onClick={() => handleDelete(contact)}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                ) : null}
+              </div>
             </article>
           )
         })}

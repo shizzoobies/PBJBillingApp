@@ -1008,6 +1008,64 @@ textarea.input {
   grid-column: 1 / -1;
 }
 
+/* Per-contact lock: read-only view + the lock toggle on the row. */
+.plan-row.contact-locked {
+  background: var(--surface-2, rgba(19, 52, 74, 0.04));
+  border-style: dashed;
+}
+
+.contact-locked-view {
+  display: grid;
+  gap: 2px;
+  grid-column: 1 / -1;
+}
+
+.contact-locked-name {
+  font-size: 1rem;
+}
+
+.contact-locked-view span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.contact-locked-notes {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+}
+
+.contact-row-actions {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.contact-lock-btn {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  justify-content: center;
+  padding: 5px 7px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.contact-lock-btn:hover {
+  border-color: var(--accent, #ff43a4);
+  color: var(--accent, #ff43a4);
+}
+
+.contact-lock-btn.is-locked {
+  background: rgba(19, 52, 74, 0.08);
+  color: var(--ink, #13344a);
+}
+
 .entry-row strong,
 .entry-row span,
 .entry-row small,
@@ -5665,30 +5723,33 @@ button.repeating-task-toggle-pill {
 
 /* The "waiting on" toggle button on the right of an item / sub-item. */
 .item-waiting-toggle {
-  background: transparent;
+  background: rgba(211, 155, 42, 0.07);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 999px;
+  color: #8a6d1a;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
+  font-weight: 600;
   line-height: 1;
-  opacity: 0.55;
-  padding: 3px 6px;
-  transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  padding: 4px 9px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
 }
 
 .item-waiting-toggle:hover {
-  opacity: 1;
+  background: rgba(211, 155, 42, 0.16);
+  border-color: rgba(211, 155, 42, 0.5);
 }
 
 .item-waiting-toggle.is-waiting {
-  background: rgba(211, 155, 42, 0.16);
-  border-color: rgba(211, 155, 42, 0.5);
-  opacity: 1;
+  background: rgba(211, 155, 42, 0.22);
+  border-color: rgba(211, 155, 42, 0.6);
+  color: #6f5510;
 }
 
 .sub-item-waiting-toggle {
-  font-size: 12px;
-  padding: 1px 5px;
+  font-size: 11px;
+  padding: 2px 7px;
 }
 
 .sub-waiting-badge {

@@ -1398,7 +1398,7 @@ function DraggableTaskList({
                         }
                       }}
                     >
-                      ⏳
+                      ⏳ Waiting
                     </button>
                     {item.waiting ? (
                       <input
@@ -1501,7 +1501,7 @@ function DraggableTaskList({
                               }
                             }}
                           >
-                            ⏳
+                            ⏳ Waiting
                           </button>
                         ) : null}
                         {canEdit ? (
