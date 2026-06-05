@@ -5344,6 +5344,28 @@ h2 {
   padding: 1px 8px;
 }
 
+.group-split-hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+/* An unsplit group holding entry awaiting a split, in the Recent time list. */
+.entry-row-holding {
+  background: rgba(255, 67, 164, 0.05);
+  border: 1px dashed rgba(255, 67, 164, 0.4);
+}
+
+.entry-needs-split {
+  background: rgba(211, 155, 42, 0.14);
+  border-radius: 999px;
+  color: #8a6d1a;
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-left: 8px;
+  padding: 1px 8px;
+}
+
 .entry-sessions,
 .approval-sessions {
   display: grid;

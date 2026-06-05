@@ -220,11 +220,19 @@ export type TimeEntry = {
   /**
    * Ties this entry to a "group time" batch — one block of work the owner
    * allocated across MULTIPLE clients at once. Every entry created from the
-   * same group-time submission shares this id (each client still gets its own
+   * same group-time split shares this id (each client still gets its own
    * independent, separately-billed entry). Absent on ordinary single-client
    * and administrative entries.
    */
   groupId?: string
+  /**
+   * Present only on an UNSPLIT group-time holding entry: the member client ids
+   * this tracked block will be split across later. While set (and `clientId`
+   * is empty) the entry is a draft — not billable and on no invoice — until the
+   * owner splits it, which replaces it with one billed entry per client. The
+   * resulting per-client entries carry `groupId` instead, never this field.
+   */
+  groupClientIds?: string[]
   /** Approval lifecycle. New entries start `pending`; legacy data is `approved`. */
   approvalStatus: TimeApprovalStatus
   /** Rejection reason — set when status is `rejected`. */
@@ -612,6 +620,13 @@ export type TimerState = {
   taskId?: string | null
   /** Administrative / internal timing — no client or task. */
   isAdministrative?: boolean
+  /**
+   * Group timing: the member client ids this block will be split across for
+   * billing later. When set, the timer is tracking against a group — on stop it
+   * saves a single unsplit holding entry (no single client) the owner splits
+   * afterward. Mutually exclusive with `clientId` / `isAdministrative`.
+   */
+  groupClientIds?: string[]
   /**
    * When set, this timer is RESUMING an existing pending entry: stopping it
    * appends a new session to that entry (keeping it pending) instead of

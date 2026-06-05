@@ -1167,6 +1167,18 @@ const server = createServer(async (request, response) => {
           !isAdministrative && typeof payload?.groupId === 'string' && payload.groupId.trim()
             ? payload.groupId.trim().slice(0, 64)
             : null
+        // Unsplit group holding entry: the member clients were chosen up front
+        // on the timer; the block is split across them for billing later. Such
+        // an entry has NO single client (clientId empty) and is not billable
+        // until split. `isGroupPending` relaxes the "client required" rule below.
+        const groupClientIds =
+          !isAdministrative && Array.isArray(payload?.groupClientIds)
+            ? [...new Set(payload.groupClientIds.filter((id) => typeof id === 'string' && id))].slice(
+                0,
+                50,
+              )
+            : []
+        const isGroupPending = !isAdministrative && !clientId && groupClientIds.length > 0
         // Audit timestamps: exact start/stop of the work, normalized to ISO.
         // Optional — invalid/absent values are simply dropped.
         const toIsoTimestamp = (value) => {
@@ -1183,10 +1195,11 @@ const server = createServer(async (request, response) => {
         const { entryMethod, manualReason, error: methodError } =
           normalizeTimeEntryMethod(payload)
 
-        // Admin time needs no client, but a client-bound entry still does.
+        // Admin time needs no client; an unsplit group holding entry needs no
+        // single client (it has members instead); every other entry does.
         if (
           !employeeId ||
-          (!isAdministrative && !clientId) ||
+          (!isAdministrative && !isGroupPending && !clientId) ||
           !date ||
           Number.isNaN(minutes) ||
           minutes <= 0
@@ -1250,7 +1263,14 @@ const server = createServer(async (request, response) => {
         // they have visibility on. Administrative time has no client, so this
         // check is skipped for it.
         const allData = await appDataStore.read()
-        if (!isAdministrative) {
+        if (isGroupPending) {
+          // Every member of a group holding entry must be visible to the user.
+          const allowed = visibleClientIdSet(session, allData.clients ?? [])
+          if (!groupClientIds.every((id) => allowed.has(id))) {
+            sendJson(response, 403, { error: 'A group client is not visible to this user' })
+            return
+          }
+        } else if (!isAdministrative) {
           const allowed = visibleClientIdSet(session, allData.clients ?? [])
           if (!allowed.has(clientId)) {
             sendJson(response, 403, { error: 'Client not visible to this user' })
@@ -1293,6 +1313,7 @@ const server = createServer(async (request, response) => {
           endAt: finalEndAt,
           sessions: finalSessions,
           groupId,
+          groupClientIds,
         })
 
         // Manual entries are deliberately gated: log the submission and ping

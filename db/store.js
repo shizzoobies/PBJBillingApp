@@ -1712,6 +1712,11 @@ export class AppDataStore {
       // clients. Each client gets its own entry, all sharing this group id so
       // the batch can be recognized (and managed) together. Additive + nullable.
       await this.pool.query(`alter table time_entries add column if not exists group_id text`)
+      // Member client ids on an UNSPLIT group holding entry (the tracked block
+      // waiting to be split). Empty on ordinary + already-split entries.
+      await this.pool.query(
+        `alter table time_entries add column if not exists group_client_ids text[] not null default '{}'`,
+      )
 
       // Month-end timesheet locks: one per employee per 'YYYY-MM' period.
       await this.pool.query(`
@@ -2503,7 +2508,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                    approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                   is_administrative, started_at, ended_at, sessions, group_id
+                   is_administrative, started_at, ended_at, sessions, group_id, group_client_ids
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -2792,6 +2797,9 @@ export class AppDataStore {
           endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
           sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
           groupId: row.group_id ?? undefined,
+          groupClientIds: Array.isArray(row.group_client_ids)
+            ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
+            : [],
         })),
         checklists: allChecklists.filter((checklist) => !checklist.deletedAt),
         recycledChecklists: allChecklists.filter((checklist) => Boolean(checklist.deletedAt)),
@@ -3270,8 +3278,8 @@ export class AppDataStore {
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                                         approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative,
-                                        started_at, ended_at, sessions, group_id, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, now())
+                                        started_at, ended_at, sessions, group_id, group_client_ids, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21, now())
             `,
             [
               entry.id,
@@ -3295,6 +3303,9 @@ export class AppDataStore {
               entry.endAt ?? null,
               JSON.stringify(Array.isArray(entry.sessions) ? entry.sessions : []),
               entry.groupId ? String(entry.groupId) : null,
+              Array.isArray(entry.groupClientIds)
+                ? entry.groupClientIds.filter((id) => typeof id === 'string' && id)
+                : [],
             ],
           )
         }
@@ -3571,8 +3582,8 @@ export class AppDataStore {
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, group_id, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, now())
         `,
         [
           nextEntry.id,
@@ -3594,6 +3605,9 @@ export class AppDataStore {
           nextEntry.endAt ?? null,
           JSON.stringify(Array.isArray(nextEntry.sessions) ? nextEntry.sessions : []),
           nextEntry.groupId ? String(nextEntry.groupId) : null,
+          Array.isArray(nextEntry.groupClientIds)
+            ? nextEntry.groupClientIds.filter((id) => typeof id === 'string' && id)
+            : [],
         ],
       )
 
@@ -3615,7 +3629,7 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                 approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                is_administrative, started_at, ended_at, sessions, group_id
+                is_administrative, started_at, ended_at, sessions, group_id, group_client_ids
          from time_entries where id = $1`,
         [entryId],
       )
@@ -3642,6 +3656,9 @@ export class AppDataStore {
         endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
         sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
         groupId: row.group_id ?? undefined,
+        groupClientIds: Array.isArray(row.group_client_ids)
+          ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
+          : [],
       }
     }
 

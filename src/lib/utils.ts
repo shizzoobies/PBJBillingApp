@@ -165,6 +165,20 @@ export function normalizeBillingMonth(value: unknown): number {
 }
 
 /**
+ * True for an UNSPLIT group holding entry — a tracked block (no single client)
+ * carrying its member clients, waiting to be split for billing. Such entries
+ * are drafts: not billable, on no invoice, and kept out of the approval queue
+ * until the owner splits them into per-client entries.
+ */
+export function isGroupHoldingEntry(entry: {
+  clientId: string
+  isAdministrative?: boolean
+  groupClientIds?: string[]
+}): boolean {
+  return !entry.clientId && !entry.isAdministrative && (entry.groupClientIds?.length ?? 0) > 0
+}
+
+/**
  * How a block of "group time" is allocated across the selected clients:
  * - `even`   — split the duration as evenly as possible.
  * - `full`   — bill every client the full duration (e.g. a meeting that serves

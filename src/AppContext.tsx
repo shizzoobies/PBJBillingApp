@@ -1,4 +1,5 @@
 import { createContext, useContext } from 'react'
+import type { GroupAllocationMode } from './lib/utils'
 import type {
   AppData,
   BillingMode,
@@ -45,7 +46,11 @@ export type AppContextValue = {
   startTimer: (timer: TimerState) => void
   stopTimer: (descriptionOverride?: string) => Promise<void>
   logTime: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
-  logGroupTime: (entries: Array<Omit<TimeEntry, 'id' | 'approvalStatus'>>) => Promise<void>
+  splitGroupEntry: (
+    holding: TimeEntry,
+    mode: GroupAllocationMode,
+    customMinutes: Record<string, number>,
+  ) => Promise<void>
   updateTimeEntry: (
     entryId: string,
     patch: {

@@ -16,6 +16,7 @@ import {
   formatHoursMinutes,
   getBillingPeriodLabel,
   getWeekLabel,
+  isGroupHoldingEntry,
   sessionMinutes,
   weekRangeOf,
 } from '../lib/utils'
@@ -317,8 +318,11 @@ function ApprovalQueue({
   onReassign: (entryId: string, employeeId: string) => Promise<void>
 }) {
   const filtered = useMemo(() => {
-    if (statusFilter === 'all') return entries
-    return entries.filter((entry) => entry.approvalStatus === statusFilter)
+    // Unsplit group holding entries are drafts — keep them out of approvals
+    // until the owner splits them into per-client billable entries.
+    const approvable = entries.filter((entry) => !isGroupHoldingEntry(entry))
+    if (statusFilter === 'all') return approvable
+    return approvable.filter((entry) => entry.approvalStatus === statusFilter)
   }, [entries, statusFilter])
 
   const groups = useMemo(() => {

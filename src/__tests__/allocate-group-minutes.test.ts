@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { allocateGroupMinutes } from '../lib/utils'
+import { allocateGroupMinutes, isGroupHoldingEntry } from '../lib/utils'
 
 /**
  * allocateGroupMinutes splits one block of "group time" across multiple
@@ -56,5 +56,29 @@ describe('allocateGroupMinutes', () => {
     expect(allocateGroupMinutes(90, ['solo'], 'even')).toEqual({ solo: 90 })
     expect(allocateGroupMinutes(90, ['solo'], 'full')).toEqual({ solo: 90 })
     expect(allocateGroupMinutes(90, ['solo'], 'custom', { solo: 15 })).toEqual({ solo: 15 })
+  })
+})
+
+describe('isGroupHoldingEntry', () => {
+  it('is true only for an unsplit group entry (no client, has members)', () => {
+    expect(isGroupHoldingEntry({ clientId: '', groupClientIds: ['a', 'b'] })).toBe(true)
+  })
+
+  it('is false for an ordinary client entry', () => {
+    expect(isGroupHoldingEntry({ clientId: 'client-1' })).toBe(false)
+  })
+
+  it('is false for administrative time', () => {
+    expect(
+      isGroupHoldingEntry({ clientId: '', isAdministrative: true, groupClientIds: [] }),
+    ).toBe(false)
+  })
+
+  it('is false for an already-split per-client entry (has a client + no members)', () => {
+    expect(isGroupHoldingEntry({ clientId: 'client-1', groupClientIds: [] })).toBe(false)
+  })
+
+  it('is false when there are no members', () => {
+    expect(isGroupHoldingEntry({ clientId: '', groupClientIds: [] })).toBe(false)
   })
 })

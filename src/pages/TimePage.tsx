@@ -106,7 +106,7 @@ export function TimePage() {
     startTimer,
     stopTimer,
     logTime,
-    logGroupTime,
+    splitGroupEntry,
     updateTimeEntry,
     deleteTimeEntry,
     previewMode,
@@ -126,6 +126,8 @@ export function TimePage() {
   // locked or an owner is previewing — exactly like the timer inputs.
   const inputsDisabled = lockedThisPeriod || previewMode
   const [manualOpen, setManualOpen] = useState(false)
+  // The unsplit group entry the owner is currently splitting (null = none).
+  const [splitTarget, setSplitTarget] = useState<TimeEntry | null>(null)
 
   // Resume a pending entry: start a fresh timer bound to it. Stopping appends a
   // new session to that entry instead of creating a new one. Blocked while a
@@ -205,6 +207,7 @@ export function TimePage() {
           onUpdate={updateTimeEntry}
           onDelete={deleteTimeEntry}
           onResume={handleResume}
+          onSplitGroup={(entry) => setSplitTarget(entry)}
         />
       </div>
 
@@ -216,8 +219,16 @@ export function TimePage() {
           employees={data.employees}
           role={role}
           onLog={logTime}
-          onLogGroup={logGroupTime}
           onClose={() => setManualOpen(false)}
+        />
+      ) : null}
+
+      {splitTarget ? (
+        <GroupSplitModal
+          entry={splitTarget}
+          clients={data.clients}
+          onSplit={splitGroupEntry}
+          onClose={() => setSplitTarget(null)}
         />
       ) : null}
     </section>
@@ -467,6 +478,17 @@ function TimeCapture({
   const [taskId, setTaskId] = useState<string>('')
   const [isAdministrative, setIsAdministrative] = useState(false)
   const [busy, setBusy] = useState(false)
+  // Group timing (owner-only): track one block against several clients, chosen
+  // up front, then split it for billing later.
+  const canGroup = role === 'owner'
+  const [billTo, setBillTo] = useState<'single' | 'group'>('single')
+  const [groupClientIds, setGroupClientIds] = useState<string[]>([])
+  const groupMode = canGroup && billTo === 'group' && !isAdministrative
+  const toggleGroupClient = (id: string) => {
+    setGroupClientIds((current) =>
+      current.includes(id) ? current.filter((existing) => existing !== id) : [...current, id],
+    )
+  }
   const effectiveClientId = clients.some((client) => client.id === clientId)
     ? clientId
     : clients[0]?.id ?? ''
@@ -492,6 +514,19 @@ function TimeCapture({
   const inputsDisabled = locked || previewMode
 
   const handleStartTimer = () => {
+    if (groupMode) {
+      if (groupClientIds.length === 0) return
+      onStartTimer({
+        employeeId: effectiveEmployeeId,
+        clientId: '',
+        description: description || 'Group time',
+        startedAt: Date.now(),
+        taskId: null,
+        isAdministrative: false,
+        groupClientIds,
+      })
+      return
+    }
     if (!isAdministrative && !effectiveClientId) {
       return
     }
@@ -576,16 +611,61 @@ function TimeCapture({
             </select>
           </label>
         )}
-        <label className="check-row full-span">
-          <input
-            checked={isAdministrative}
-            onChange={(event) => setIsAdministrative(event.target.checked)}
-            type="checkbox"
-            disabled={inputsDisabled || Boolean(timer)}
-          />
-          <span>Administrative work (company meeting, internal — no client or task)</span>
-        </label>
-        {isAdministrative ? null : (
+        {canGroup && !isAdministrative ? (
+          <label className="field full-span">
+            <span>Track time for</span>
+            <select
+              className="input"
+              value={billTo}
+              onChange={(event) => setBillTo(event.target.value as 'single' | 'group')}
+              disabled={inputsDisabled || Boolean(timer)}
+            >
+              <option value="single">A single client</option>
+              <option value="group">A group (split for billing later)</option>
+            </select>
+          </label>
+        ) : null}
+        {billTo === 'single' ? (
+          <label className="check-row full-span">
+            <input
+              checked={isAdministrative}
+              onChange={(event) => setIsAdministrative(event.target.checked)}
+              type="checkbox"
+              disabled={inputsDisabled || Boolean(timer)}
+            />
+            <span>Administrative work (company meeting, internal — no client or task)</span>
+          </label>
+        ) : null}
+        {groupMode ? (
+          <>
+            <div className="field full-span group-time-block">
+              <span>Clients in this group</span>
+              <div className="group-client-grid">
+                {clients.map((client) => {
+                  const selected = groupClientIds.includes(client.id)
+                  return (
+                    <label
+                      key={client.id}
+                      className={`group-client-chip${selected ? ' is-selected' : ''}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => toggleGroupClient(client.id)}
+                        disabled={inputsDisabled || Boolean(timer)}
+                      />
+                      <span>{client.name}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+            <p className="field full-span group-split-hint">
+              Track normally, then <strong>Split across clients</strong> on the saved entry to
+              divide the time for billing.
+            </p>
+          </>
+        ) : isAdministrative ? null : (
           <>
             <label className="field">
               <span>Client</span>
@@ -649,7 +729,13 @@ function TimeCapture({
           ) : (
             <button
               className="primary-action"
-              disabled={busy || inputsDisabled || (!isAdministrative && !effectiveClientId)}
+              disabled={
+                busy ||
+                inputsDisabled ||
+                (groupMode
+                  ? groupClientIds.length === 0
+                  : !isAdministrative && !effectiveClientId)
+              }
               onClick={handleStartTimer}
               type="button"
             >
@@ -677,7 +763,6 @@ function ManualEntryModal({
   employees,
   role,
   onLog,
-  onLogGroup,
   onClose,
 }: {
   activeEmployeeId: string
@@ -686,7 +771,6 @@ function ManualEntryModal({
   employees: Employee[]
   role: Role
   onLog: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
-  onLogGroup: (entries: Array<Omit<TimeEntry, 'id' | 'approvalStatus'>>) => Promise<void>
   onClose: () => void
 }) {
   const [step, setStep] = useState<'confirm' | 'form'>('confirm')
@@ -697,9 +781,6 @@ function ManualEntryModal({
   const canGroup = role === 'owner'
   const [billTo, setBillTo] = useState<'single' | 'group'>('single')
   const [groupClientIds, setGroupClientIds] = useState<string[]>([])
-  const [allocationMode, setAllocationMode] = useState<GroupAllocationMode>('even')
-  // Per-client minute strings for the 'custom' allocation mode (keyed by id).
-  const [customMinutes, setCustomMinutes] = useState<Record<string, string>>({})
   // Exact start/stop the employee enters, so the owner can audit. Default to a
   // one-hour block ending now; duration is derived from the span.
   const [startLocal, setStartLocal] = useState(() => {
@@ -746,39 +827,10 @@ function ManualEntryModal({
   )
   const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
 
-  // Group-billing helpers (owner-only). When active, the single client/task
-  // selection is replaced by a multi-client picker + allocation controls.
+  // Group billing (owner-only): track ONE block against multiple clients, then
+  // split it for billing later. Here she just picks the member clients; the
+  // split (even / full / custom) happens afterward via the Split action.
   const groupMode = canGroup && billTo === 'group' && !isAdministrative
-
-  const startMsPreview = startLocal ? new Date(startLocal).getTime() : NaN
-  const stopMsPreview = stopLocal ? new Date(stopLocal).getTime() : NaN
-  const previewTotalMinutes =
-    !Number.isNaN(startMsPreview) && !Number.isNaN(stopMsPreview) && stopMsPreview > startMsPreview
-      ? Math.round((stopMsPreview - startMsPreview) / 60000)
-      : 0
-
-  const customMinutesNumeric = useMemo(() => {
-    const out: Record<string, number> = {}
-    for (const id of groupClientIds) out[id] = Number(customMinutes[id])
-    return out
-  }, [groupClientIds, customMinutes])
-
-  const groupAllocation = useMemo(
-    () =>
-      groupMode
-        ? allocateGroupMinutes(
-            previewTotalMinutes,
-            groupClientIds,
-            allocationMode,
-            customMinutesNumeric,
-          )
-        : {},
-    [groupMode, previewTotalMinutes, groupClientIds, allocationMode, customMinutesNumeric],
-  )
-  const groupTotalBilled = Object.values(groupAllocation).reduce(
-    (sum, minutes) => sum + (minutes || 0),
-    0,
-  )
 
   const toggleGroupClient = (id: string) => {
     setGroupClientIds((current) =>
@@ -816,50 +868,33 @@ function ManualEntryModal({
       return
     }
 
-    // Group billing: one block of time split across several clients. Each
-    // selected client gets its own independent, separately-billed entry that
-    // shares a group id. taskId is null (a task belongs to a single client).
+    // Group billing: save ONE unsplit holding entry carrying the member
+    // clients (no single client, not billable). The owner splits it across the
+    // members for billing later via the "Split across clients" action.
     if (groupMode) {
       if (groupClientIds.length === 0) {
-        setSubmitError('Pick at least one client to bill for the group.')
+        setSubmitError('Pick at least one client for the group.')
         return
       }
-      const allocation = allocateGroupMinutes(
-        totalMinutes,
-        groupClientIds,
-        allocationMode,
-        customMinutesNumeric,
-      )
-      const allocatedEntries = groupClientIds
-        .map((id) => ({ id, minutes: allocation[id] ?? 0 }))
-        .filter((row) => row.minutes > 0)
-      if (allocatedEntries.length === 0) {
-        setSubmitError(
-          allocationMode === 'custom'
-            ? 'Enter minutes greater than 0 for at least one client.'
-            : 'The duration is too short to split across the selected clients.',
-        )
-        return
-      }
-      const groupId = `grp-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
       setSubmitPending(true)
       setSubmitError('')
       try {
-        await onLogGroup(
-          allocatedEntries.map((row) => ({
-            employeeId: effectiveEmployeeId,
-            clientId: row.id,
-            isAdministrative: false,
-            date: startLocal.slice(0, 10),
-            minutes: row.minutes,
-            description,
-            billable,
-            taskId: null,
-            entryMethod: 'manual' as const,
-            manualReason: reason.trim(),
-            groupId,
-          })),
-        )
+        await onLog({
+          employeeId: effectiveEmployeeId,
+          clientId: '',
+          isAdministrative: false,
+          groupClientIds,
+          date: startLocal.slice(0, 10),
+          minutes: totalMinutes,
+          description,
+          billable: false,
+          taskId: null,
+          entryMethod: 'manual',
+          manualReason: reason.trim(),
+          startAt: localInputToIso(startLocal),
+          endAt: localInputToIso(stopLocal),
+          sessions: [{ startAt: localInputToIso(startLocal), endAt: localInputToIso(stopLocal) }],
+        })
         setSuccess(true)
       } catch {
         setSubmitError('Group time could not be saved.')
@@ -1036,65 +1071,11 @@ function ManualEntryModal({
                       })}
                     </div>
                   </div>
-                  <label className="field full-span">
-                    <span>How should the time be split?</span>
-                    <select
-                      className="input"
-                      value={allocationMode}
-                      onChange={(event) =>
-                        setAllocationMode(event.target.value as GroupAllocationMode)
-                      }
-                    >
-                      <option value="even">Split evenly across clients</option>
-                      <option value="full">Full duration to each client</option>
-                      <option value="custom">Custom — set each client&apos;s time</option>
-                    </select>
-                  </label>
-                  {groupClientIds.length > 0 ? (
-                    <div className="field full-span group-allocation-preview">
-                      <span>
-                        {allocationMode === 'custom' ? 'Minutes per client' : 'Allocation'}
-                      </span>
-                      <ul className="group-allocation-list">
-                        {groupClientIds.map((id) => (
-                          <li key={id}>
-                            <span className="group-allocation-name">{clientName(clients, id)}</span>
-                            {allocationMode === 'custom' ? (
-                              <input
-                                className="input group-allocation-input"
-                                type="number"
-                                min="0"
-                                step="1"
-                                value={customMinutes[id] ?? ''}
-                                onChange={(event) =>
-                                  setCustomMinutes((prev) => ({ ...prev, [id]: event.target.value }))
-                                }
-                                placeholder="min"
-                              />
-                            ) : (
-                              <span className="group-allocation-amount">
-                                {formatHoursMinutes(groupAllocation[id] ?? 0)}
-                              </span>
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                      <p className="group-allocation-total">
-                        Total billed: {formatHoursMinutes(groupTotalBilled)}
-                        {allocationMode === 'full' && groupClientIds.length > 1
-                          ? ` — ${formatHoursMinutes(previewTotalMinutes)} to each of ${groupClientIds.length} clients`
-                          : ''}
-                      </p>
-                    </div>
-                  ) : null}
-                  <label className="check-row full-span">
-                    <input
-                      checked={billable}
-                      onChange={(event) => setBillable(event.target.checked)}
-                      type="checkbox"
-                    />
-                    <span>Billable</span>
-                  </label>
+                  <p className="field full-span group-split-hint">
+                    Saved as one un-split group entry. Use{' '}
+                    <strong>Split across clients</strong> on it (in Recent time) to divide the time
+                    for billing — evenly, the full duration to each, or a custom split.
+                  </p>
                 </>
               ) : isAdministrative ? null : (
                 <>
@@ -1182,6 +1163,161 @@ function ManualEntryModal({
   )
 }
 
+/**
+ * Splits an unsplit group holding entry across its member clients. The owner
+ * picks how to divide the tracked block — evenly, the full duration to each, or
+ * a custom per-client split — sees a live preview, and confirms. On confirm the
+ * holding entry is replaced by one billable entry per client.
+ */
+function GroupSplitModal({
+  entry,
+  clients,
+  onSplit,
+  onClose,
+}: {
+  entry: TimeEntry
+  clients: Client[]
+  onSplit: (
+    holding: TimeEntry,
+    mode: GroupAllocationMode,
+    customMinutes: Record<string, number>,
+  ) => Promise<void>
+  onClose: () => void
+}) {
+  const memberIds = useMemo(
+    () => (Array.isArray(entry.groupClientIds) ? entry.groupClientIds : []),
+    [entry.groupClientIds],
+  )
+  const [mode, setMode] = useState<GroupAllocationMode>('even')
+  const [customMinutes, setCustomMinutes] = useState<Record<string, string>>({})
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const customMinutesNumeric = useMemo(() => {
+    const out: Record<string, number> = {}
+    for (const id of memberIds) out[id] = Number(customMinutes[id])
+    return out
+  }, [memberIds, customMinutes])
+
+  const allocation = useMemo(
+    () => allocateGroupMinutes(entry.minutes, memberIds, mode, customMinutesNumeric),
+    [entry.minutes, memberIds, mode, customMinutesNumeric],
+  )
+  const totalBilled = Object.values(allocation).reduce((sum, minutes) => sum + (minutes || 0), 0)
+
+  const handleConfirm = async () => {
+    const hasAny = memberIds.some((id) => (allocation[id] ?? 0) > 0)
+    if (!hasAny) {
+      setError(
+        mode === 'custom'
+          ? 'Enter minutes greater than 0 for at least one client.'
+          : 'The tracked time is too short to split.',
+      )
+      return
+    }
+    setPending(true)
+    setError('')
+    try {
+      await onSplit(entry, mode, customMinutesNumeric)
+      onClose()
+    } catch {
+      setError('Could not split this group entry.')
+      setPending(false)
+    }
+  }
+
+  return (
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="modal-panel" role="dialog" aria-modal="true" aria-label="Split group time">
+        <div className="modal-body">
+          <h2 className="modal-title">Split group time</h2>
+          <p className="modal-intro">
+            {formatHoursMinutes(entry.minutes)} tracked across {memberIds.length}{' '}
+            {memberIds.length === 1 ? 'client' : 'clients'}. Choose how to bill it — this replaces
+            the group entry with one billable entry per client.
+          </p>
+          <div className="form-grid">
+            <label className="field full-span">
+              <span>How should the time be split?</span>
+              <select
+                className="input"
+                value={mode}
+                onChange={(event) => setMode(event.target.value as GroupAllocationMode)}
+              >
+                <option value="even">Split evenly across clients</option>
+                <option value="full">Full duration to each client</option>
+                <option value="custom">Custom — set each client&apos;s time</option>
+              </select>
+            </label>
+            <div className="field full-span group-allocation-preview">
+              <span>{mode === 'custom' ? 'Minutes per client' : 'Allocation'}</span>
+              <ul className="group-allocation-list">
+                {memberIds.map((id) => (
+                  <li key={id}>
+                    <span className="group-allocation-name">{clientName(clients, id)}</span>
+                    {mode === 'custom' ? (
+                      <input
+                        className="input group-allocation-input"
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={customMinutes[id] ?? ''}
+                        onChange={(event) =>
+                          setCustomMinutes((prev) => ({ ...prev, [id]: event.target.value }))
+                        }
+                        placeholder="min"
+                      />
+                    ) : (
+                      <span className="group-allocation-amount">
+                        {formatHoursMinutes(allocation[id] ?? 0)}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <p className="group-allocation-total">
+                Total billed: {formatHoursMinutes(totalBilled)}
+                {mode === 'full' && memberIds.length > 1
+                  ? ` — ${formatHoursMinutes(entry.minutes)} to each of ${memberIds.length} clients`
+                  : ''}
+              </p>
+            </div>
+          </div>
+          {error ? <p className="auth-error">{error}</p> : null}
+          <div className="button-row">
+            <button type="button" className="secondary-action" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-action"
+              disabled={pending}
+              onClick={() => void handleConfirm()}
+            >
+              <Clock3 size={16} />
+              {pending ? 'Splitting...' : 'Split & bill'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function RecentTimeEntries({
   checklists,
   clients,
@@ -1193,6 +1329,7 @@ function RecentTimeEntries({
   onUpdate,
   onDelete,
   onResume,
+  onSplitGroup,
 }: {
   checklists: Checklist[]
   clients: Client[]
@@ -1215,6 +1352,7 @@ function RecentTimeEntries({
   ) => Promise<void>
   onDelete: (entryId: string) => Promise<void>
   onResume: (entry: TimeEntry) => void
+  onSplitGroup: (entry: TimeEntry) => void
 }) {
   return (
     <section className="panel">
@@ -1236,22 +1374,29 @@ function RecentTimeEntries({
               (lock) =>
                 lock.userId === entry.employeeId && lock.period === entry.date.slice(0, 7),
             )
+          const memberCount = entry.groupClientIds?.length ?? 0
+          const isHolding = !entry.clientId && !entry.isAdministrative && memberCount > 0
+          const clientLabel = isHolding
+            ? `Group · ${memberCount} ${memberCount === 1 ? 'client' : 'clients'}`
+            : entry.isAdministrative
+              ? 'Administrative'
+              : clientName(clients, entry.clientId)
           return (
             <TimeEntryRow
               key={entry.id}
               entry={entry}
-              clientLabel={
-                entry.isAdministrative ? 'Administrative' : clientName(clients, entry.clientId)
-              }
+              clientLabel={clientLabel}
               employeeLabel={employeeName(employees, entry.employeeId)}
               taskTitle={linkedTask ? linkedTask.title : null}
               locked={monthLocked}
               timerRunning={timerRunning}
               employees={employees}
               isOwner={role === 'owner'}
+              isHolding={isHolding}
               onUpdate={onUpdate}
               onDelete={onDelete}
               onResume={onResume}
+              onSplitGroup={onSplitGroup}
             />
           )
         })}
@@ -1272,9 +1417,11 @@ function TimeEntryRow({
   timerRunning,
   employees,
   isOwner,
+  isHolding,
   onUpdate,
   onDelete,
   onResume,
+  onSplitGroup,
 }: {
   entry: TimeEntry
   clientLabel: string
@@ -1284,6 +1431,7 @@ function TimeEntryRow({
   timerRunning: boolean
   employees: Employee[]
   isOwner: boolean
+  isHolding: boolean
   onUpdate: (
     entryId: string,
     patch: {
@@ -1299,6 +1447,7 @@ function TimeEntryRow({
   ) => Promise<void>
   onDelete: (entryId: string) => Promise<void>
   onResume: (entry: TimeEntry) => void
+  onSplitGroup: (entry: TimeEntry) => void
 }) {
   // Entries captured with exact start/stop (timer + new manual entries) edit
   // via a sessions editor; legacy entries without timestamps keep the simpler
@@ -1577,6 +1726,60 @@ function TimeEntryRow({
               Cancel
             </button>
           </div>
+        </div>
+      </article>
+    )
+  }
+
+  // Unsplit group holding entry: a tracked block waiting to be split across its
+  // member clients for billing. Shown compactly with a Split action (owner).
+  if (isHolding) {
+    const memberCount = entry.groupClientIds?.length ?? 0
+    return (
+      <article className="entry-row entry-row-holding" key={entry.id}>
+        <div>
+          <strong>
+            {clientLabel}
+            <span className="entry-needs-split">Needs split</span>
+          </strong>
+          <span>{entry.description}</span>
+          <small>
+            {entry.date} · {employeeLabel} · {formatHoursMinutes(entry.minutes)} across{' '}
+            {memberCount} {memberCount === 1 ? 'client' : 'clients'}
+          </small>
+          {error ? <small className="auth-error">{error}</small> : null}
+        </div>
+        <div className="entry-meta">
+          {isOwner ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy || locked}
+              onClick={() => onSplitGroup(entry)}
+            >
+              Split across clients
+            </button>
+          ) : null}
+          {canEdit ? (
+            <button
+              type="button"
+              className="link-button danger"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true)
+                setError('')
+                try {
+                  await onDelete(entry.id)
+                } catch {
+                  setError('Could not delete.')
+                } finally {
+                  setBusy(false)
+                }
+              }}
+            >
+              <Trash2 size={14} />
+            </button>
+          ) : null}
         </div>
       </article>
     )
