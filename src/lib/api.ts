@@ -625,6 +625,29 @@ export async function removeChecklistSubItemRequest(
   return (await response.json()) as Checklist
 }
 
+/** Update a sub-item's "waiting on" flag + note on a live-checklist item. */
+export async function updateChecklistSubItemRequest(
+  checklistId: string,
+  itemId: string,
+  subItemId: string,
+  patch: { waiting?: boolean; waitingOn?: string | null },
+) {
+  const response = await apiFetch(
+    `/api/checklists/${checklistId}/items/${itemId}/sub-items/${subItemId}`,
+    {
+      credentials: 'same-origin',
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to update sub-item (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
 /** Add a sub-sub-item (the deepest level) under a sub-item of a live checklist. */
 export async function addChecklistSubSubItemRequest(
   checklistId: string,
@@ -905,7 +928,13 @@ export async function appendChecklistItemsRequest(checklistId: string, titles: s
 export async function updateChecklistItemRequest(
   checklistId: string,
   itemId: string,
-  patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
+  patch: {
+    title?: string
+    dueDate?: string | null
+    assigneeId?: string | null
+    waitingOn?: string | null
+    waiting?: boolean
+  },
 ) {
   const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}`, {
     credentials: 'same-origin',

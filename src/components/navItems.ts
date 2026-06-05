@@ -1,5 +1,6 @@
 import {
   Activity,
+  AlarmClock,
   BarChart3,
   BookUser,
   Building2,
@@ -27,6 +28,7 @@ export const navItems: Array<{
   { to: '/timesheet', label: 'Timesheet', icon: CalendarRange },
   { to: '/time-approvals', label: 'Time Approvals', icon: ClipboardCheck, ownerOnly: true },
   { to: '/checklists', label: 'Checklists', icon: ListChecks },
+  { to: '/delayed', label: 'Delayed', icon: AlarmClock, ownerOnly: true },
   { to: '/clients', label: 'Clients', icon: Building2 },
   { to: '/contacts', label: 'Contacts', icon: BookUser, ownerOnly: true },
   { to: '/reports', label: 'Reports', icon: FolderKanban, ownerOnly: true },

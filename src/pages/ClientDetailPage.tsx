@@ -639,6 +639,7 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
     toggleSubItem,
     toggleSubSubItem,
     updateChecklistItem,
+    updateSubItemWaiting,
   } = useAppContext()
   const today = new Date().toISOString().slice(0, 10)
   // "Work in flight" = currently active checklists only. A checklist whose
@@ -681,6 +682,7 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
           onSetViewers={setChecklistViewers}
           onToggle={toggleChecklistItem}
           onToggleSubItem={toggleSubItem}
+          onUpdateSubItemWaiting={updateSubItemWaiting}
           onToggleSubSubItem={toggleSubSubItem}
           onUpdateItem={updateChecklistItem}
           ownerMode={ownerMode}

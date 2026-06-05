@@ -2465,6 +2465,33 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // --- PATCH: update a sub-item's "waiting on" flag + note ---
+      if (subItemId && request.method === 'PATCH') {
+        const payload = await readJsonBody(request)
+        const patch = {}
+        if ('waiting' in (payload ?? {})) patch.waiting = Boolean(payload.waiting)
+        if ('waitingOn' in (payload ?? {})) {
+          patch.waitingOn = payload.waitingOn === null ? '' : String(payload.waitingOn ?? '')
+        }
+        const updated = await appDataStore.updateChecklistSubItem(
+          checklistId,
+          itemId,
+          subItemId,
+          patch,
+        )
+        if (!updated) {
+          sendJson(response, 404, { error: 'Sub-item not found' })
+          return
+        }
+        await appDataStore.recordActivity(
+          session.user.id,
+          'checklist_item_edited',
+          `${checklist.title}: ${targetItem.label}`,
+        )
+        sendJson(response, 200, updated)
+        return
+      }
+
       sendJson(response, 405, { error: 'Method not allowed' })
       return
     }
@@ -2627,6 +2654,11 @@ const server = createServer(async (request, response) => {
         if ('waitingOn' in payload) {
           // null or empty string clears the "waiting on" note.
           patch.waitingOn = payload.waitingOn === null ? '' : String(payload.waitingOn ?? '')
+        }
+
+        if ('waiting' in payload) {
+          // The "waiting on" toggle — flags the item as blocked/delayed.
+          patch.waiting = Boolean(payload.waiting)
         }
 
         const updated = await appDataStore.updateChecklistItem(checklistId, itemId, patch)

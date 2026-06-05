@@ -55,6 +55,7 @@ import {
   toggleChecklistItemRequest,
   unlockTimesheetRequest,
   updateChecklistItemRequest,
+  updateChecklistSubItemRequest,
   updateTimeEntryRequest,
 } from './lib/api'
 import { createEmptyAppData } from './lib/seed'
@@ -88,6 +89,7 @@ import {
 } from './lib/utils'
 import { CaseDetailPage } from './pages/CaseDetailPage'
 import { ChecklistsPage } from './pages/ChecklistsPage'
+import { DelayedPage } from './pages/DelayedPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { ClientDetailPage } from './pages/ClientDetailPage'
 import { ClientsPage } from './pages/ClientsPage'
@@ -1925,12 +1927,48 @@ function App() {
   const updateChecklistItem = async (
     checklistId: string,
     itemId: string,
-    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
+    patch: {
+      title?: string
+      dueDate?: string | null
+      assigneeId?: string | null
+      waitingOn?: string | null
+      waiting?: boolean
+    },
   ) => {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const updated = await updateChecklistItemRequest(checklistId, itemId, patch)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updated : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  // Update a sub-item's "waiting on" flag + note on a live checklist (the only
+  // editable sub-item fields). Dedicated endpoint + server-confirmed merge.
+  const updateSubItemWaiting = async (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    patch: { waiting?: boolean; waitingOn?: string | null },
+  ) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updated = await updateChecklistSubItemRequest(checklistId, itemId, subItemId, patch)
       applyServerDataUpdate((current) => ({
         ...current,
         checklists: current.checklists.map((checklist) =>
@@ -2615,6 +2653,7 @@ function App() {
     bulkAddChecklistItems,
     createChecklist,
     updateChecklistItem,
+    updateSubItemWaiting,
     deleteChecklistItem,
     deleteChecklist,
     restoreChecklist,
@@ -2672,6 +2711,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   useEffect(() => {
     const ownerOnly = [
       '/time-approvals',
+      '/delayed',
       '/reports',
       '/productivity',
       '/gantt',
@@ -2708,6 +2748,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           }
         />
         <Route path="/checklists" element={<ChecklistsPage />} />
+        <Route
+          path="/delayed"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <DelayedPage />
+            </OwnerOnly>
+          }
+        />
         <Route path="/clients" element={<ClientsPage />} />
         <Route
           path="/contacts"

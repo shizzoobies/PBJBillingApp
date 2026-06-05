@@ -181,6 +181,7 @@ export function ChecklistsPage() {
     bulkAddChecklistItems,
     createChecklist,
     updateChecklistItem,
+    updateSubItemWaiting,
     deleteChecklistItem,
     deleteChecklist,
     restoreChecklist,
@@ -350,6 +351,7 @@ export function ChecklistsPage() {
           onSetViewers={setChecklistViewers}
           onToggle={toggleChecklistItem}
           onToggleSubItem={toggleSubItem}
+          onUpdateSubItemWaiting={updateSubItemWaiting}
           onToggleSubSubItem={toggleSubSubItem}
           onUpdateItem={updateChecklistItem}
           ownerMode={ownerMode}
@@ -571,6 +573,7 @@ function ChecklistInProgressSection({
   onSetViewers,
   onToggle,
   onToggleSubItem,
+  onUpdateSubItemWaiting,
   onToggleSubSubItem,
   onUpdateItem,
   ownerMode,
@@ -606,6 +609,12 @@ function ChecklistInProgressSection({
   ) => Promise<void> | void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
   onToggleSubItem: (checklistId: string, itemId: string, subItemId: string) => void
+  onUpdateSubItemWaiting: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    patch: { waiting?: boolean; waitingOn?: string | null },
+  ) => void
   onToggleSubSubItem: (
     checklistId: string,
     itemId: string,
@@ -615,7 +624,13 @@ function ChecklistInProgressSection({
   onUpdateItem: (
     checklistId: string,
     itemId: string,
-    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
+    patch: {
+      title?: string
+      dueDate?: string | null
+      assigneeId?: string | null
+      waitingOn?: string | null
+      waiting?: boolean
+    },
   ) => Promise<void>
   ownerMode: boolean
   role: Role
@@ -721,6 +736,7 @@ function ChecklistInProgressSection({
       onSetViewers={onSetViewers}
       onToggle={onToggle}
       onToggleSubItem={onToggleSubItem}
+      onUpdateSubItemWaiting={onUpdateSubItemWaiting}
       onToggleSubSubItem={onToggleSubSubItem}
       onUpdateItem={onUpdateItem}
       ownerMode={ownerMode}
@@ -855,6 +871,7 @@ export function ChecklistCard({
   onSetViewers,
   onToggle,
   onToggleSubItem,
+  onUpdateSubItemWaiting,
   onToggleSubSubItem,
   onUpdateItem,
   ownerMode,
@@ -892,6 +909,12 @@ export function ChecklistCard({
   ) => Promise<void> | void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
   onToggleSubItem: (checklistId: string, itemId: string, subItemId: string) => void
+  onUpdateSubItemWaiting: (
+    checklistId: string,
+    itemId: string,
+    subItemId: string,
+    patch: { waiting?: boolean; waitingOn?: string | null },
+  ) => void
   onToggleSubSubItem: (
     checklistId: string,
     itemId: string,
@@ -901,7 +924,13 @@ export function ChecklistCard({
   onUpdateItem: (
     checklistId: string,
     itemId: string,
-    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
+    patch: {
+      title?: string
+      dueDate?: string | null
+      assigneeId?: string | null
+      waitingOn?: string | null
+      waiting?: boolean
+    },
   ) => Promise<void>
   ownerMode: boolean
   role: Role
@@ -1120,6 +1149,9 @@ export function ChecklistCard({
         onToggleSubItem={(itemId, subItemId) =>
           onToggleSubItem(checklist.id, itemId, subItemId)
         }
+        onUpdateSubItemWaiting={(itemId, subItemId, patch) =>
+          onUpdateSubItemWaiting(checklist.id, itemId, subItemId, patch)
+        }
         onToggleSubSubItem={(itemId, subItemId, subSubItemId) =>
           onToggleSubSubItem(checklist.id, itemId, subItemId, subSubItemId)
         }
@@ -1168,6 +1200,7 @@ function DraggableTaskList({
   onReorderItems,
   onToggle,
   onToggleSubItem,
+  onUpdateSubItemWaiting,
   onToggleSubSubItem,
   onUpdateItem,
   todayDateOnly,
@@ -1186,10 +1219,21 @@ function DraggableTaskList({
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
   onToggle: (checklistId: string, itemId: string) => Promise<void> | void
   onToggleSubItem: (itemId: string, subItemId: string) => void
+  onUpdateSubItemWaiting: (
+    itemId: string,
+    subItemId: string,
+    patch: { waiting?: boolean; waitingOn?: string | null },
+  ) => void
   onToggleSubSubItem: (itemId: string, subItemId: string, subSubItemId: string) => void
   onUpdateItem: (
     itemId: string,
-    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
+    patch: {
+      title?: string
+      dueDate?: string | null
+      assigneeId?: string | null
+      waitingOn?: string | null
+      waiting?: boolean
+    },
   ) => Promise<void>
   todayDateOnly: string
 }) {
@@ -1299,9 +1343,9 @@ function DraggableTaskList({
                     </span>
                   ) : null}
                 </span>
-                {item.waitingOn ? (
+                {item.waiting ? (
                   <span className="task-row-waiting" title="Why this step isn't done yet">
-                    Waiting on: {item.waitingOn}
+                    {item.waitingOn ? `Waiting on: ${item.waitingOn}` : 'Waiting'}
                   </span>
                 ) : null}
                 {canEdit ? (
@@ -1336,21 +1380,43 @@ function DraggableTaskList({
                         </option>
                       ))}
                     </select>
-                    <input
-                      key={item.waitingOn ?? ''}
-                      aria-label="Waiting on"
-                      className="item-waiting-input"
-                      title="Waiting on — note why this step is blocked"
-                      type="text"
-                      placeholder="Waiting on…"
-                      defaultValue={item.waitingOn ?? ''}
-                      onBlur={(e) => {
-                        const next = e.target.value.trim()
-                        if (next !== (item.waitingOn ?? '')) {
-                          void onUpdateItem(item.id, { waitingOn: next === '' ? null : next })
+                    <button
+                      type="button"
+                      aria-label="Toggle waiting on"
+                      aria-pressed={item.waiting ?? false}
+                      className={`item-waiting-toggle${item.waiting ? ' is-waiting' : ''}`}
+                      title={
+                        item.waiting
+                          ? 'Waiting on — click to clear'
+                          : 'Flag as waiting on something'
+                      }
+                      onClick={() => {
+                        if (item.waiting) {
+                          void onUpdateItem(item.id, { waiting: false, waitingOn: null })
+                        } else {
+                          void onUpdateItem(item.id, { waiting: true })
                         }
                       }}
-                    />
+                    >
+                      ⏳
+                    </button>
+                    {item.waiting ? (
+                      <input
+                        key={item.waitingOn ?? ''}
+                        aria-label="Waiting on"
+                        className="item-waiting-input"
+                        title="What is this step waiting on?"
+                        type="text"
+                        placeholder="Waiting on…"
+                        defaultValue={item.waitingOn ?? ''}
+                        onBlur={(e) => {
+                          const next = e.target.value.trim()
+                          if (next !== (item.waitingOn ?? '')) {
+                            void onUpdateItem(item.id, { waitingOn: next === '' ? null : next })
+                          }
+                        }}
+                      />
+                    ) : null}
                     <button
                       type="button"
                       aria-label="Delete item"
@@ -1403,6 +1469,41 @@ function DraggableTaskList({
                             {subSubDoneCount}/{subSubItems.length}
                           </span>
                         ) : null}
+                        {sub.waiting ? (
+                          <span
+                            className="task-row-waiting sub-waiting-badge"
+                            title="Why this sub-step isn't done yet"
+                          >
+                            {sub.waitingOn ? `Waiting on: ${sub.waitingOn}` : 'Waiting'}
+                          </span>
+                        ) : null}
+                        {canEdit ? (
+                          <button
+                            type="button"
+                            aria-label="Toggle waiting on"
+                            aria-pressed={sub.waiting ?? false}
+                            className={`item-waiting-toggle sub-item-waiting-toggle${
+                              sub.waiting ? ' is-waiting' : ''
+                            }`}
+                            title={
+                              sub.waiting
+                                ? 'Waiting on — click to clear'
+                                : 'Flag as waiting on something'
+                            }
+                            onClick={() => {
+                              if (sub.waiting) {
+                                void onUpdateSubItemWaiting(item.id, sub.id, {
+                                  waiting: false,
+                                  waitingOn: null,
+                                })
+                              } else {
+                                void onUpdateSubItemWaiting(item.id, sub.id, { waiting: true })
+                              }
+                            }}
+                          >
+                            ⏳
+                          </button>
+                        ) : null}
                         {canEdit ? (
                           <button
                             type="button"
@@ -1415,6 +1516,25 @@ function DraggableTaskList({
                           </button>
                         ) : null}
                       </div>
+                      {canEdit && sub.waiting ? (
+                        <input
+                          key={sub.waitingOn ?? ''}
+                          aria-label="Waiting on"
+                          className="item-waiting-input sub-item-waiting-input"
+                          title="What is this sub-step waiting on?"
+                          type="text"
+                          placeholder="Waiting on…"
+                          defaultValue={sub.waitingOn ?? ''}
+                          onBlur={(e) => {
+                            const next = e.target.value.trim()
+                            if (next !== (sub.waitingOn ?? '')) {
+                              void onUpdateSubItemWaiting(item.id, sub.id, {
+                                waitingOn: next === '' ? null : next,
+                              })
+                            }
+                          }}
+                        />
+                      ) : null}
                       {(hasSubSubItems || canEdit) ? (
                         <div className="sub-sub-item-list">
                           {subSubItems.map((subSub) => (

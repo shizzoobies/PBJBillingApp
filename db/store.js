@@ -551,6 +551,14 @@ function normalizeSubItems(raw, { withDone = true } = {}) {
       if (typeof sub.dueDayOfMonth === 'number' && sub.dueDayOfMonth >= 1) {
         base.dueDayOfMonth = sub.dueDayOfMonth
       }
+      // Preserve the "waiting on" flag + note on live sub-items so they survive
+      // the JSONB round-trip (drives the owner's Delayed page).
+      if (withDone) {
+        if (sub.waiting) base.waiting = true
+        if (typeof sub.waitingOn === 'string' && sub.waitingOn.trim()) {
+          base.waitingOn = sub.waitingOn.trim()
+        }
+      }
       const subSubItems = normalizeSubSubItems(sub.subItems, { withDone })
       if (subSubItems.length > 0) {
         base.subItems = subSubItems
@@ -1844,6 +1852,11 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_items add column if not exists waiting_on text`,
       )
+      // "Waiting on" flag (the toggle): when true the item is blocked/delayed
+      // and surfaces on the owner's Delayed page. Additive + defaulted.
+      await this.pool.query(
+        `alter table checklist_items add column if not exists waiting boolean not null default false`,
+      )
       // Sub-bullets: one level of nested sub-items, stored as a JSONB array
       // ({ id, title, done }[]) directly on the item row. Least-invasive
       // choice given the existing schema; mirrors the `payload jsonb` pattern.
@@ -2519,7 +2532,7 @@ export class AppDataStore {
             order by due_date asc, id asc
           `),
           this.pool.query(`
-            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, sub_items
+            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, sub_items
             from checklist_items
             order by checklist_id asc, sort_order asc, id asc
           `),
@@ -2598,6 +2611,11 @@ export class AppDataStore {
         }
         if (row.waiting_on) {
           item.waitingOn = row.waiting_on
+        }
+        // An item flagged waiting OR carrying a legacy "waiting on" note (from
+        // before the toggle existed) is treated as waiting.
+        if (row.waiting || row.waiting_on) {
+          item.waiting = true
         }
         if (subItems.length > 0) {
           item.subItems = subItems
@@ -3494,8 +3512,8 @@ export class AppDataStore {
               subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
             await client.query(
               `
-                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, sub_items, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, now())
+                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, sub_items, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, now())
               `,
               [
                 item.id,
@@ -3509,6 +3527,7 @@ export class AppDataStore {
                   : null,
                 item.assigneeId ?? null,
                 item.waitingOn ? String(item.waitingOn) : null,
+                Boolean(item.waiting),
                 JSON.stringify(subItems),
               ],
             )
@@ -4649,8 +4668,8 @@ export class AppDataStore {
         for (const item of nextChecklist.items) {
           await client.query(
             `
-              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, sub_items, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, now())
+              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, sub_items, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, now())
             `,
             [
               item.id,
@@ -4664,6 +4683,7 @@ export class AppDataStore {
                 : null,
               item.assigneeId ?? null,
               item.waitingOn ? String(item.waitingOn) : null,
+              Boolean(item.waiting),
               JSON.stringify(Array.isArray(item.subItems) ? item.subItems : []),
             ],
           )
@@ -5045,7 +5065,7 @@ export class AppDataStore {
   }
 
   async updateChecklistItem(checklistId, itemId, patch) {
-    const { title, dueDate, assigneeId, waitingOn } = patch ?? {}
+    const { title, dueDate, assigneeId, waitingOn, waiting } = patch ?? {}
 
     if (this.pool) {
       const setClauses = []
@@ -5066,6 +5086,10 @@ export class AppDataStore {
       if (waitingOn !== undefined) {
         params.push(waitingOn === '' || waitingOn === null ? null : String(waitingOn))
         setClauses.push(`waiting_on = $${params.length}`)
+      }
+      if (waiting !== undefined) {
+        params.push(Boolean(waiting))
+        setClauses.push(`waiting = $${params.length}`)
       }
 
       if (setClauses.length === 0) {
@@ -5120,6 +5144,13 @@ export class AppDataStore {
             delete next.waitingOn
           } else {
             next.waitingOn = String(waitingOn)
+          }
+        }
+        if (waiting !== undefined) {
+          if (waiting) {
+            next.waiting = true
+          } else {
+            delete next.waiting
           }
         }
         return next
@@ -5498,6 +5529,68 @@ export class AppDataStore {
             ? nextSubItems.every((sub) => sub.done)
             : Boolean(item.done)
         return { ...item, subItems: nextSubItems, done: nextDone }
+      })
+      updatedChecklist = { ...checklist, items }
+      return updatedChecklist
+    })
+    if (!subItemFound || !updatedChecklist) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  /**
+   * Patch a sub-item's "waiting on" flag + note (the only editable sub-item
+   * fields on a live checklist). Rewrites the parent item's `sub_items` JSONB.
+   * `waiting` toggles the blocked flag; `waitingOn` is the free-text note
+   * (empty/null clears it). Returns the updated checklist or null when not found.
+   */
+  async updateChecklistSubItem(checklistId, itemId, subItemId, patch) {
+    const { waiting, waitingOn } = patch ?? {}
+    const applyPatch = (sub) => {
+      const next = { ...sub }
+      if (waiting !== undefined) {
+        if (waiting) next.waiting = true
+        else delete next.waiting
+      }
+      if (waitingOn !== undefined) {
+        if (waitingOn === '' || waitingOn === null) delete next.waitingOn
+        else next.waitingOn = String(waitingOn)
+      }
+      return next
+    }
+
+    if (this.pool) {
+      const itemResult = await this.pool.query(
+        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
+        [checklistId, itemId],
+      )
+      if (!itemResult.rowCount) return null
+      const subItems = normalizeSubItems(itemResult.rows[0].sub_items, { withDone: true })
+      if (!subItems.some((sub) => sub.id === subItemId)) return null
+      const nextSubItems = subItems.map((sub) => (sub.id === subItemId ? applyPatch(sub) : sub))
+      await this.pool.query(
+        `update checklist_items set sub_items = $3::jsonb, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+        [checklistId, itemId, JSON.stringify(nextSubItems)],
+      )
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    let subItemFound = false
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) return checklist
+      const items = checklist.items.map((item) => {
+        if (item.id !== itemId) return item
+        const subItems = normalizeSubItems(item.subItems, { withDone: true })
+        if (!subItems.some((sub) => sub.id === subItemId)) return item
+        subItemFound = true
+        const nextSubItems = subItems.map((sub) =>
+          sub.id === subItemId ? applyPatch(sub) : sub,
+        )
+        return { ...item, subItems: nextSubItems }
       })
       updatedChecklist = { ...checklist, items }
       return updatedChecklist

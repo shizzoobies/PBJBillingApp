@@ -326,6 +326,13 @@ export type SubChecklistItem = {
   done: boolean
   /** Concrete resolved due date (ISO yyyy-mm-dd), computed at materialization. */
   dueDate?: string
+  /**
+   * Flagged as blocked/delayed (the "waiting on" toggle). When true the step is
+   * stalled and surfaces on the owner's Delayed page; `waitingOn` says why.
+   */
+  waiting?: boolean
+  /** Free-text note explaining what this sub-step is waiting on. */
+  waitingOn?: string
   /** One deeper level of nested sub-sub-items. Empty/undefined when flat. */
   subItems?: SubSubChecklistItem[]
 }
@@ -354,6 +361,11 @@ export type ChecklistItem = {
   done: boolean
   dueDate?: string
   assigneeId?: string
+  /**
+   * Flagged as blocked/delayed (the "waiting on" toggle). When true the step is
+   * stalled and surfaces on the owner's Delayed page; `waitingOn` says why.
+   */
+  waiting?: boolean
   /**
    * Free-text "waiting on" note explaining why an unfinished item is blocked
    * (e.g. "client to send Q2 bank statements"). Owner-visible context for why
