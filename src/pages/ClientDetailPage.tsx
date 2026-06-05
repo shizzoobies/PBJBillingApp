@@ -2,7 +2,8 @@ import { ArrowLeft, Copy, ExternalLink, Pencil, Plus, Trash2 } from 'lucide-reac
 import { useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
-import { NewTaskForm } from './ChecklistsPage'
+import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
+import { SectionScopeContext } from '../components/sectionScope'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
@@ -37,7 +38,6 @@ import {
   employeeName,
   formatHours,
   getChecklistFrequencyLabel,
-  isChecklistItemDone,
   isSafeImageSrc,
   shortDate,
   sortChecklists,
@@ -115,6 +115,7 @@ export function ClientDetailPage() {
   ).slice(0, 8)
 
   return (
+    <SectionScopeContext.Provider value={`client:${client.id}:`}>
     <section className="client-detail">
       <div className="client-detail-header">
         <Link className="back-link" to="/clients">
@@ -225,6 +226,7 @@ export function ClientDetailPage() {
         </div>
       </CollapsibleSection>
     </section>
+    </SectionScopeContext.Provider>
   )
 }
 
@@ -595,6 +597,24 @@ function ChipField({
 /* -------------------------------------------------------------------------- */
 
 function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData }) {
+  const {
+    activeEmployeeId,
+    role,
+    ownerMode,
+    addSubItem,
+    addSubSubItem,
+    bulkAddChecklistItems,
+    deleteChecklist,
+    deleteChecklistItem,
+    removeSubItem,
+    removeSubSubItem,
+    reorderChecklistItems,
+    setChecklistViewers,
+    toggleChecklistItem,
+    toggleSubItem,
+    toggleSubSubItem,
+    updateChecklistItem,
+  } = useAppContext()
   const today = new Date().toISOString().slice(0, 10)
   // "Work in flight" = currently active checklists only. A checklist whose
   // every item is done (status 'Done') is finished, not in flight, so it's
@@ -612,49 +632,38 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
     return <p className="muted-text">No active checklists for this client.</p>
   }
 
+  // Full editable checklist cards — the same editor as the Checklists tab, so
+  // an owner can toggle/add/reorder items and edit details right here.
   return (
-    <ul className="active-checklist-list">
-      {checklists.map((checklist) => {
-        const total = checklist.items.length
-        const done = checklist.items.filter((item) => isChecklistItemDone(item)).length
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0
-        const status = deriveChecklistStatus(checklist, today)
-        const statusClass = status.toLowerCase().replace(/\s+/g, '-')
-        const stageLabel =
-          checklist.stageCount && checklist.stageCount > 1
-            ? `Step ${(checklist.stageIndex ?? 0) + 1} of ${checklist.stageCount}`
-            : null
-        const frequencyLabel = checklist.frequency
-          ? getChecklistFrequencyLabel(checklist.frequency)
-          : null
-        return (
-          <li className="active-checklist-row" key={checklist.id}>
-            <div className="active-checklist-main">
-              {checklist.caseId ? (
-                <Link
-                  to={`/cases/${encodeURIComponent(checklist.caseId)}`}
-                  className="active-checklist-link"
-                >
-                  <strong>{checklist.title}</strong>
-                </Link>
-              ) : (
-                <strong>{checklist.title}</strong>
-              )}
-              <span className={`status-badge status-${statusClass}`}>{status}</span>
-            </div>
-            <div className="active-checklist-meta">
-              <span>Assignee: {employeeName(data.employees, checklist.assigneeId)}</span>
-              <span>
-                {done} / {total} steps ({pct}%)
-              </span>
-              <span>Due {shortDate.format(new Date(`${checklist.dueDate}T12:00:00`))}</span>
-              {stageLabel ? <span>{stageLabel}</span> : null}
-              {frequencyLabel ? <span>{frequencyLabel}</span> : null}
-            </div>
-          </li>
-        )
-      })}
-    </ul>
+    <div className="client-checklist-cards">
+      {checklists.map((checklist) => (
+        <ChecklistCard
+          key={checklist.id}
+          activeEmployeeId={activeEmployeeId}
+          checklist={checklist}
+          clients={data.clients}
+          employees={data.employees}
+          focused={false}
+          focusRef={null}
+          onAddSubItem={addSubItem}
+          onAddSubSubItem={addSubSubItem}
+          onBulkAddItems={bulkAddChecklistItems}
+          onDeleteChecklist={deleteChecklist}
+          onDeleteItem={deleteChecklistItem}
+          onRemoveSubItem={removeSubItem}
+          onRemoveSubSubItem={removeSubSubItem}
+          onReorderItems={reorderChecklistItems}
+          onSetViewers={setChecklistViewers}
+          onToggle={toggleChecklistItem}
+          onToggleSubItem={toggleSubItem}
+          onToggleSubSubItem={toggleSubSubItem}
+          onUpdateItem={updateChecklistItem}
+          ownerMode={ownerMode}
+          role={role}
+          timeEntries={data.timeEntries}
+        />
+      ))}
+    </div>
   )
 }
 

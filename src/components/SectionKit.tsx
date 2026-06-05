@@ -1,6 +1,7 @@
 import { Check, ChevronDown, ChevronRight, Lock, Pencil } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSaveFlash, type SaveFlashState } from '../lib/useSaveFlash'
+import { SectionScopeContext } from './sectionScope'
 
 // Persist a section's lock / collapse state across refreshes. These are local
 // UI preferences (not workspace data), so localStorage is the right home.
@@ -77,7 +78,8 @@ export function CollapsibleSection({
   bodyClassName?: string
   children: ReactNode
 }) {
-  const persistBase = `pbj.section.${storageKey ?? title}`
+  const scope = useContext(SectionScopeContext)
+  const persistBase = `pbj.section.${scope}${storageKey ?? title}`
   const collapseKey = `${persistBase}.collapsed`
   const lockKey = `${persistBase}.locked`
   const [collapsed, setCollapsed] = useState(() => readStoredBool(collapseKey, defaultCollapsed))

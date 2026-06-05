@@ -837,7 +837,7 @@ function ChecklistGroup({
   )
 }
 
-function ChecklistCard({
+export function ChecklistCard({
   activeEmployeeId,
   checklist,
   clients,

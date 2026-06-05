@@ -5516,6 +5516,12 @@ button.repeating-task-toggle-pill {
   padding: 0;
 }
 
+/* Editable checklist cards embedded on the client page */
+.client-checklist-cards {
+  display: grid;
+  gap: 14px;
+}
+
 /* Sessions editor (inline on a time entry) */
 .session-editor {
   background: var(--soft);
