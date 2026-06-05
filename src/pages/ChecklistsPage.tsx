@@ -615,7 +615,7 @@ function ChecklistInProgressSection({
   onUpdateItem: (
     checklistId: string,
     itemId: string,
-    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
   ) => Promise<void>
   ownerMode: boolean
   role: Role
@@ -901,7 +901,7 @@ export function ChecklistCard({
   onUpdateItem: (
     checklistId: string,
     itemId: string,
-    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
   ) => Promise<void>
   ownerMode: boolean
   role: Role
@@ -1189,7 +1189,7 @@ function DraggableTaskList({
   onToggleSubSubItem: (itemId: string, subItemId: string, subSubItemId: string) => void
   onUpdateItem: (
     itemId: string,
-    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
   ) => Promise<void>
   todayDateOnly: string
 }) {
@@ -1299,6 +1299,11 @@ function DraggableTaskList({
                     </span>
                   ) : null}
                 </span>
+                {item.waitingOn ? (
+                  <span className="task-row-waiting" title="Why this step isn't done yet">
+                    Waiting on: {item.waitingOn}
+                  </span>
+                ) : null}
                 {canEdit ? (
                   <span className="task-row-inline-controls">
                     <input
@@ -1331,6 +1336,21 @@ function DraggableTaskList({
                         </option>
                       ))}
                     </select>
+                    <input
+                      key={item.waitingOn ?? ''}
+                      aria-label="Waiting on"
+                      className="item-waiting-input"
+                      title="Waiting on — note why this step is blocked"
+                      type="text"
+                      placeholder="Waiting on…"
+                      defaultValue={item.waitingOn ?? ''}
+                      onBlur={(e) => {
+                        const next = e.target.value.trim()
+                        if (next !== (item.waitingOn ?? '')) {
+                          void onUpdateItem(item.id, { waitingOn: next === '' ? null : next })
+                        }
+                      }}
+                    />
                     <button
                       type="button"
                       aria-label="Delete item"
@@ -2368,6 +2388,8 @@ type RepeatingTasksManagerProps = {
  */
 function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   const [openId, setOpenId] = useState<string | null>(null)
+  // Per-client groups collapse independently to cut clutter; default expanded.
+  const [collapsedClients, setCollapsedClients] = useState<Set<string>>(new Set())
   const [searchParams, setSearchParams] = useSearchParams()
   const focusTemplateId = searchParams.get('focusTemplate')
   const focusRef = useRef<HTMLElement | null>(null)
@@ -2375,10 +2397,35 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   const toggleOpen = (templateId: string) => {
     setOpenId((current) => (current === templateId ? null : templateId))
   }
+  const toggleClient = (clientId: string) => {
+    setCollapsedClients((prev) => {
+      const next = new Set(prev)
+      if (next.has(clientId)) next.delete(clientId)
+      else next.add(clientId)
+      return next
+    })
+  }
 
   // Client-bound repeating tasks only — standard (client-agnostic) templates
   // live in their own section.
   const regularTemplates = props.templates.filter((template) => !template.isStandard)
+
+  // Group the repeating tasks under their client so the list stays organized.
+  const clientGroups = (() => {
+    const byClient = new Map<string, ChecklistTemplate[]>()
+    for (const template of regularTemplates) {
+      const list = byClient.get(template.clientId) ?? []
+      list.push(template)
+      byClient.set(template.clientId, list)
+    }
+    return [...byClient.entries()]
+      .map(([clientId, templates]) => ({
+        clientId,
+        label: clientName(props.clients, clientId),
+        templates: templates.slice().sort((a, b) => a.title.localeCompare(b.title)),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label))
+  })()
 
   // Deep-link support: another page (e.g. the client detail "Recurring
   // checklists" card) can navigate here with ?focusTemplate=<id> to open and
@@ -2392,6 +2439,16 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
     // setState-in-effect) and gives the row a tick to expand before scrolling.
     const scrollTimer = window.setTimeout(() => {
       setOpenId(focusTemplateId)
+      // Make sure the focused task's client group is expanded so it's visible.
+      const focusTemplate = regularTemplates.find((t) => t.id === focusTemplateId)
+      if (focusTemplate) {
+        setCollapsedClients((prev) => {
+          if (!prev.has(focusTemplate.clientId)) return prev
+          const next = new Set(prev)
+          next.delete(focusTemplate.clientId)
+          return next
+        })
+      }
       focusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }, 50)
     const clearTimer = window.setTimeout(() => {
@@ -2416,16 +2473,37 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
         {regularTemplates.length === 0 ? (
           <p className="empty-state">No repeating tasks yet. Hit + New to add one.</p>
         ) : null}
-        {regularTemplates.map((template) => (
-          <RepeatingTaskRow
-            key={template.id}
-            {...props}
-            template={template}
-            open={openId === template.id}
-            onToggleOpen={() => toggleOpen(template.id)}
-            rowRef={template.id === focusTemplateId ? focusRef : undefined}
-          />
-        ))}
+        {clientGroups.map((group) => {
+          const collapsed = collapsedClients.has(group.clientId)
+          return (
+            <div className="repeating-client-group" key={group.clientId}>
+              <button
+                type="button"
+                className="repeating-client-header"
+                aria-expanded={!collapsed}
+                onClick={() => toggleClient(group.clientId)}
+              >
+                {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                <strong>{group.label}</strong>
+                <span className="repeating-client-count">{group.templates.length}</span>
+              </button>
+              {collapsed ? null : (
+                <div className="repeating-client-body">
+                  {group.templates.map((template) => (
+                    <RepeatingTaskRow
+                      key={template.id}
+                      {...props}
+                      template={template}
+                      open={openId === template.id}
+                      onToggleOpen={() => toggleOpen(template.id)}
+                      rowRef={template.id === focusTemplateId ? focusRef : undefined}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
     </section>
   )

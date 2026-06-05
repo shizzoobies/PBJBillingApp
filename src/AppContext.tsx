@@ -277,7 +277,7 @@ export type AppContextValue = {
   updateChecklistItem: (
     checklistId: string,
     itemId: string,
-    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
   ) => Promise<void>
   deleteChecklistItem: (checklistId: string, itemId: string) => Promise<void>
   /**

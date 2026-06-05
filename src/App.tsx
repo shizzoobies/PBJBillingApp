@@ -1836,7 +1836,7 @@ function App() {
   const updateChecklistItem = async (
     checklistId: string,
     itemId: string,
-    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+    patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
   ) => {
     if (previewActiveRef.current) return
     try {

@@ -5522,6 +5522,71 @@ button.repeating-task-toggle-pill {
   gap: 14px;
 }
 
+/* "Waiting on" note on a checklist item */
+.task-row-waiting {
+  background: rgba(211, 155, 42, 0.12);
+  border-radius: 6px;
+  color: #8a6d1a;
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 3px;
+  padding: 2px 8px;
+}
+
+.item-waiting-input {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  max-width: 170px;
+  padding: 3px 7px;
+}
+
+/* Repeating tasks grouped by client */
+.repeating-client-group {
+  display: grid;
+  gap: 8px;
+}
+
+.repeating-client-header {
+  align-items: center;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  gap: 8px;
+  padding: 8px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.repeating-client-header:hover {
+  border-color: var(--line-strong);
+}
+
+.repeating-client-header strong {
+  font-size: 14px;
+}
+
+.repeating-client-count {
+  background: var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  margin-left: auto;
+  padding: 1px 9px;
+}
+
+.repeating-client-body {
+  display: grid;
+  gap: 8px;
+  padding-left: 6px;
+}
+
 /* Sessions editor (inline on a time entry) */
 .session-editor {
   background: var(--soft);

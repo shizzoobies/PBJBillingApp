@@ -2596,6 +2596,11 @@ const server = createServer(async (request, response) => {
           patch.assigneeId = incoming
         }
 
+        if ('waitingOn' in payload) {
+          // null or empty string clears the "waiting on" note.
+          patch.waitingOn = payload.waitingOn === null ? '' : String(payload.waitingOn ?? '')
+        }
+
         const updated = await appDataStore.updateChecklistItem(checklistId, itemId, patch)
         if (!updated) {
           sendJson(response, 404, { error: 'Checklist item not found' })

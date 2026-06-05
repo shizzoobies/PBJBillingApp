@@ -1807,6 +1807,10 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_items add column if not exists due_day_of_month int`,
       )
+      // Free-text "waiting on" note: why an unfinished item is blocked.
+      await this.pool.query(
+        `alter table checklist_items add column if not exists waiting_on text`,
+      )
       // Sub-bullets: one level of nested sub-items, stored as a JSONB array
       // ({ id, title, done }[]) directly on the item row. Least-invasive
       // choice given the existing schema; mirrors the `payload jsonb` pattern.
@@ -2481,7 +2485,7 @@ export class AppDataStore {
             order by due_date asc, id asc
           `),
           this.pool.query(`
-            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, sub_items
+            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, sub_items
             from checklist_items
             order by checklist_id asc, sort_order asc, id asc
           `),
@@ -2557,6 +2561,9 @@ export class AppDataStore {
         }
         if (row.assignee_id) {
           item.assigneeId = row.assignee_id
+        }
+        if (row.waiting_on) {
+          item.waitingOn = row.waiting_on
         }
         if (subItems.length > 0) {
           item.subItems = subItems
@@ -3429,8 +3436,8 @@ export class AppDataStore {
               subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
             await client.query(
               `
-                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, sub_items, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now())
+                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, sub_items, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, now())
               `,
               [
                 item.id,
@@ -3443,6 +3450,7 @@ export class AppDataStore {
                   ? item.dueDayOfMonth
                   : null,
                 item.assigneeId ?? null,
+                item.waitingOn ? String(item.waitingOn) : null,
                 JSON.stringify(subItems),
               ],
             )
@@ -4575,8 +4583,8 @@ export class AppDataStore {
         for (const item of nextChecklist.items) {
           await client.query(
             `
-              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, sub_items, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now())
+              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, sub_items, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, now())
             `,
             [
               item.id,
@@ -4589,6 +4597,7 @@ export class AppDataStore {
                 ? item.dueDayOfMonth
                 : null,
               item.assigneeId ?? null,
+              item.waitingOn ? String(item.waitingOn) : null,
               JSON.stringify(Array.isArray(item.subItems) ? item.subItems : []),
             ],
           )
@@ -4970,7 +4979,7 @@ export class AppDataStore {
   }
 
   async updateChecklistItem(checklistId, itemId, patch) {
-    const { title, dueDate, assigneeId } = patch ?? {}
+    const { title, dueDate, assigneeId, waitingOn } = patch ?? {}
 
     if (this.pool) {
       const setClauses = []
@@ -4987,6 +4996,10 @@ export class AppDataStore {
       if (assigneeId !== undefined) {
         params.push(assigneeId === '' || assigneeId === null ? null : assigneeId)
         setClauses.push(`assignee_id = $${params.length}`)
+      }
+      if (waitingOn !== undefined) {
+        params.push(waitingOn === '' || waitingOn === null ? null : String(waitingOn))
+        setClauses.push(`waiting_on = $${params.length}`)
       }
 
       if (setClauses.length === 0) {
@@ -5034,6 +5047,13 @@ export class AppDataStore {
             delete next.assigneeId
           } else {
             next.assigneeId = assigneeId
+          }
+        }
+        if (waitingOn !== undefined) {
+          if (waitingOn === '' || waitingOn === null) {
+            delete next.waitingOn
+          } else {
+            next.waitingOn = String(waitingOn)
           }
         }
         return next

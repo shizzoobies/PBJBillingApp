@@ -327,6 +327,12 @@ export type ChecklistItem = {
   done: boolean
   dueDate?: string
   assigneeId?: string
+  /**
+   * Free-text "waiting on" note explaining why an unfinished item is blocked
+   * (e.g. "client to send Q2 bank statements"). Owner-visible context for why
+   * a step hasn't been completed.
+   */
+  waitingOn?: string
   /** One level of nested sub-items. Empty/undefined when the item is flat. */
   subItems?: SubChecklistItem[]
 }

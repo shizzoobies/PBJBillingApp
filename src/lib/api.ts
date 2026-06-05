@@ -905,7 +905,7 @@ export async function appendChecklistItemsRequest(checklistId: string, titles: s
 export async function updateChecklistItemRequest(
   checklistId: string,
   itemId: string,
-  patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+  patch: { title?: string; dueDate?: string | null; assigneeId?: string | null; waitingOn?: string | null },
 ) {
   const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}`, {
     credentials: 'same-origin',
