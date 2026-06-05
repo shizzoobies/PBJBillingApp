@@ -1509,6 +1509,10 @@ export class AppDataStore {
           updated_at timestamptz not null default now()
         )
       `)
+      // Per-contact lock (read-only protection) — shared + persisted.
+      await this.pool.query(
+        `alter table contacts add column if not exists locked boolean not null default false`,
+      )
 
       await this.pool.query(`
         create table if not exists clients (
@@ -2494,7 +2498,7 @@ export class AppDataStore {
             order by name asc
           `),
           this.pool.query(`
-            select id, name, email, phone, title, notes
+            select id, name, email, phone, title, notes, locked
             from contacts
             order by name asc
           `),
@@ -2719,6 +2723,7 @@ export class AppDataStore {
           phone: row.phone ?? '',
           title: row.title ?? '',
           notes: row.notes ?? '',
+          ...(row.locked ? { locked: true } : {}),
         })),
         clients: clientsResult.rows.map((row) => {
           // Back-compat normalization. The frontend always gets
@@ -3176,8 +3181,8 @@ export class AppDataStore {
         for (const contact of data.contacts ?? []) {
           await client.query(
             `
-              insert into contacts (id, name, email, phone, title, notes, updated_at)
-              values ($1, $2, $3, $4, $5, $6, now())
+              insert into contacts (id, name, email, phone, title, notes, locked, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, now())
             `,
             [
               contact.id,
@@ -3186,6 +3191,7 @@ export class AppDataStore {
               contact.phone ?? null,
               contact.title ?? null,
               contact.notes ?? null,
+              Boolean(contact.locked),
             ],
           )
         }

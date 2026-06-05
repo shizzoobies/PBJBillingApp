@@ -160,6 +160,12 @@ export type Contact = {
   phone?: string
   title?: string
   notes?: string
+  /**
+   * When true the contact is locked — shown read-only on the Contacts page
+   * until unlocked, to protect a finished record from accidental edits.
+   * Persisted (shared) so the lock survives reloads and other devices.
+   */
+  locked?: boolean
 }
 
 export type TimeApprovalStatus = 'pending' | 'approved' | 'rejected'

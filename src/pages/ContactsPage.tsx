@@ -14,29 +14,6 @@ import {
   type ParsedRow,
 } from '../lib/contactImport'
 
-// Per-contact lock state lives in the browser (like the section lock) so each
-// person can protect the contacts they're done editing without touching the
-// shared data. Keyed by contact id; default unlocked.
-const CONTACT_LOCK_KEY = 'pbj.contactlock.v1'
-
-function readLockedContactIds(): Set<string> {
-  try {
-    const raw = localStorage.getItem(CONTACT_LOCK_KEY)
-    const parsed = raw ? JSON.parse(raw) : []
-    return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : [])
-  } catch {
-    return new Set()
-  }
-}
-
-function writeLockedContactIds(ids: Set<string>) {
-  try {
-    localStorage.setItem(CONTACT_LOCK_KEY, JSON.stringify([...ids]))
-  } catch {
-    // Ignore storage failures (private mode, quota) — locking is a convenience.
-  }
-}
-
 export function ContactsPage() {
   const { data, addContact, updateContact, deleteContact, ownerMode } = useAppContext()
   return (
@@ -153,18 +130,6 @@ function ContactLibrary({
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importText, setImportText] = useState<string | null>(null)
-  // Per-contact locks (browser-persisted). A locked contact shows read-only
-  // until unlocked right on its row — no need to lock the whole section.
-  const [lockedIds, setLockedIds] = useState<Set<string>>(() => readLockedContactIds())
-  const toggleLock = (contactId: string) => {
-    setLockedIds((current) => {
-      const next = new Set(current)
-      if (next.has(contactId)) next.delete(contactId)
-      else next.add(contactId)
-      writeLockedContactIds(next)
-      return next
-    })
-  }
 
   const handleDelete = (contact: Contact) => {
     const attached = clients.filter((client) => (client.contactIds ?? []).includes(contact.id))
@@ -233,7 +198,7 @@ function ContactLibrary({
           const attachedCount = clients.filter((client) =>
             (client.contactIds ?? []).includes(contact.id),
           ).length
-          const locked = lockedIds.has(contact.id)
+          const locked = Boolean(contact.locked)
           return (
             <article
               className={`plan-row${locked ? ' contact-locked' : ''}`}
@@ -303,7 +268,7 @@ function ContactLibrary({
                       ? 'Locked — click to unlock and edit'
                       : 'Lock to protect this contact from edits'
                   }
-                  onClick={() => toggleLock(contact.id)}
+                  onClick={() => onUpdate(contact.id, { locked: !locked })}
                 >
                   {locked ? <Lock size={14} /> : <Unlock size={14} />}
                 </button>
