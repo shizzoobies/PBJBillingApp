@@ -2,20 +2,27 @@
 
 _Last updated: 2026-06-05_
 
-## ⭐ ACTIVE TASK (start here) — 6-item client feedback batch
+## ⭐ ACTIVE TASK — 6-item client feedback batch (ALL SHIPPED ✅)
 
-Working through a 6-item feedback batch from Brittany. **4 of 6 shipped & live; 2 remain** (both billing/data-model features).
+The full 6-item feedback batch from Brittany is **complete and pushed**. Awaiting her live testing / further feedback.
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | **Annual billing method** — flat yearly fee, billed once in a chosen month | ⏳ **PENDING** |
+| 1 | **Annual billing method** — flat yearly fee, billed once in a chosen month | ✅ Pushed (`db078f8`) |
 | 2 | Organize repeating tasks → group by client (collapsible headers) | ✅ Live |
 | 3 | Lock bug (locks affected all clients) → now scoped per-client | ✅ Live |
 | 4 | Edit checklists under clients (full editor on client page) | ✅ Live |
 | 5 | "Waiting on" note per checklist item (amber badge) | ✅ Live |
-| 6 | **Group time billing** — pick Group → multiple clients, flexible split | ⏳ **PENDING** |
+| 6 | **Group time billing** — pick Group → multiple clients, flexible split | ✅ Pushed (`d27262a`) |
 
-Last stable deploy: bundle `index-wnH_9WAC.js` (HTTP 200; `waiting_on` migration ran). Last commit: `ea5c5f5`. **172 tests** green.
+Last commit: `d27262a`. **186 tests** green. Annual billing went live as `index-XMkNv5UW.js`; group-time deploy was pushed right after (watch the live bundle hash to confirm it landed). Both shipped DB migrations (annual_rate/annual_billing_month + billing_mode CHECK swap; time_entries.group_id).
+
+### #6 as built (group time)
+- `TimeEntry.groupId` ties the per-client entries from one group submission together.
+- `allocateGroupMinutes(total, ids, mode, custom)` in utils.ts is the pure allocator (even / full / custom). Unit-tested.
+- Owner-only "Bill to: A group" in the **manual** time modal → multi-client picker + allocation mode + live preview. Each client gets its own independent, separately-approved entry; a "Group" tag shows on recent entries.
+- `logGroupTime()` in App.tsx loops the validated `createTimeEntry` endpoint (one entry per client) then does a single state update.
+- Group entries carry no startAt/endAt/sessions (so the server preserves the allocated `minutes` instead of recomputing from the session envelope) and no taskId (a task belongs to one client).
 
 ### #1 Annual billing — spec & plan
 Confirmed semantics: **"Flat yearly fee, billed once."** A flat yearly fee that appears on the invoice **once per year**, in a **chosen billing month**. Every other month shows **no** subscription charge.
