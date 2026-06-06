@@ -1201,20 +1201,43 @@ function WaitingEditor({
   onSetNote: (next: string | null) => void
   onClear: () => void
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const { state, flash } = useSaveFlash()
+
+  // Save the note (trimmed); null clears it. Flashes the "Saved" badge.
+  const save = (value: string) => {
+    const next = value.trim()
+    if (next !== (note ?? '')) {
+      onSetNote(next === '' ? null : next)
+      flash()
+    }
+  }
+
+  // Picking a person APPENDS their name to whatever's already typed, so you can
+  // have "Brittany to review" — person AND note together — not one or the other.
+  const addPerson = (name: string) => {
+    const current = textareaRef.current?.value ?? note ?? ''
+    const combined = current.trim() ? `${current.trim()} ${name}` : name
+    if (textareaRef.current) textareaRef.current.value = combined
+    onSetNote(combined)
+    flash()
+  }
+
   return (
     <div className="waiting-editor">
       <div className="waiting-editor-row">
         <span className="waiting-editor-label">⏳ Waiting on</span>
+        <SaveBadge state={state} />
         <select
           className="waiting-person-select"
-          aria-label="Waiting on a person"
+          aria-label="Add a person to the waiting note"
           value=""
           onChange={(event) => {
             const name = event.target.value
-            if (name) onSetNote(name)
+            if (name) addPerson(name)
           }}
         >
-          <option value="">Waiting on a person…</option>
+          <option value="">+ Add a person…</option>
           {employees.map((emp) => (
             <option key={emp.id} value={emp.name}>
               {emp.name}
@@ -1226,15 +1249,13 @@ function WaitingEditor({
         </button>
       </div>
       <textarea
+        ref={textareaRef}
         key={note}
         className="waiting-note-textarea"
         rows={2}
-        placeholder="…or write a note — a person, a document, the client, etc."
+        placeholder="e.g. Brittany to review, or the client to send statements"
         defaultValue={note}
-        onBlur={(event) => {
-          const next = event.target.value.trim()
-          if (next !== note) onSetNote(next === '' ? null : next)
-        }}
+        onBlur={(event) => save(event.target.value)}
       />
     </div>
   )
