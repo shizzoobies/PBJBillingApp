@@ -1185,6 +1185,61 @@ export function ChecklistCard({
   )
 }
 
+/**
+ * The editor shown under a checklist item / sub-item once it's flagged
+ * "waiting". Gives a roomy note textarea, a quick "waiting on a person" picker
+ * (fills the note with a team member's name), and a Clear button to un-flag it.
+ */
+function WaitingEditor({
+  note,
+  employees,
+  onSetNote,
+  onClear,
+}: {
+  note: string
+  employees: Employee[]
+  onSetNote: (next: string | null) => void
+  onClear: () => void
+}) {
+  return (
+    <div className="waiting-editor">
+      <div className="waiting-editor-row">
+        <span className="waiting-editor-label">⏳ Waiting on</span>
+        <select
+          className="waiting-person-select"
+          aria-label="Waiting on a person"
+          value=""
+          onChange={(event) => {
+            const name = event.target.value
+            if (name) onSetNote(name)
+          }}
+        >
+          <option value="">Waiting on a person…</option>
+          {employees.map((emp) => (
+            <option key={emp.id} value={emp.name}>
+              {emp.name}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="waiting-clear-btn" onClick={onClear}>
+          Clear
+        </button>
+      </div>
+      <textarea
+        key={note}
+        className="waiting-note-textarea"
+        rows={2}
+        placeholder="…or write a note — a person, a document, the client, etc."
+        defaultValue={note}
+        onBlur={(event) => {
+          const next = event.target.value.trim()
+          if (next !== note) onSetNote(next === '' ? null : next)
+        }}
+      />
+    </div>
+  )
+}
+
 function DraggableTaskList({
   canEdit,
   canReorder,
@@ -1400,23 +1455,6 @@ function DraggableTaskList({
                     >
                       ⏳ Waiting
                     </button>
-                    {item.waiting ? (
-                      <input
-                        key={item.waitingOn ?? ''}
-                        aria-label="Waiting on"
-                        className="item-waiting-input"
-                        title="What is this step waiting on?"
-                        type="text"
-                        placeholder="Waiting on…"
-                        defaultValue={item.waitingOn ?? ''}
-                        onBlur={(e) => {
-                          const next = e.target.value.trim()
-                          if (next !== (item.waitingOn ?? '')) {
-                            void onUpdateItem(item.id, { waitingOn: next === '' ? null : next })
-                          }
-                        }}
-                      />
-                    ) : null}
                     <button
                       type="button"
                       aria-label="Delete item"
@@ -1443,6 +1481,14 @@ function DraggableTaskList({
                 )}
               </span>
             </div>
+            {canEdit && item.waiting ? (
+              <WaitingEditor
+                note={item.waitingOn ?? ''}
+                employees={employees}
+                onSetNote={(next) => void onUpdateItem(item.id, { waitingOn: next })}
+                onClear={() => void onUpdateItem(item.id, { waiting: false, waitingOn: null })}
+              />
+            ) : null}
             {(hasSubItems || canEdit) ? (
               <div className="sub-item-list">
                 {subItems.map((sub) => {
@@ -1517,22 +1563,18 @@ function DraggableTaskList({
                         ) : null}
                       </div>
                       {canEdit && sub.waiting ? (
-                        <input
-                          key={sub.waitingOn ?? ''}
-                          aria-label="Waiting on"
-                          className="item-waiting-input sub-item-waiting-input"
-                          title="What is this sub-step waiting on?"
-                          type="text"
-                          placeholder="Waiting on…"
-                          defaultValue={sub.waitingOn ?? ''}
-                          onBlur={(e) => {
-                            const next = e.target.value.trim()
-                            if (next !== (sub.waitingOn ?? '')) {
-                              void onUpdateSubItemWaiting(item.id, sub.id, {
-                                waitingOn: next === '' ? null : next,
-                              })
-                            }
-                          }}
+                        <WaitingEditor
+                          note={sub.waitingOn ?? ''}
+                          employees={employees}
+                          onSetNote={(next) =>
+                            void onUpdateSubItemWaiting(item.id, sub.id, { waitingOn: next })
+                          }
+                          onClear={() =>
+                            void onUpdateSubItemWaiting(item.id, sub.id, {
+                              waiting: false,
+                              waitingOn: null,
+                            })
+                          }
                         />
                       ) : null}
                       {(hasSubSubItems || canEdit) ? (

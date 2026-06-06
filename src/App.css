@@ -5712,13 +5712,67 @@ button.repeating-task-toggle-pill {
   padding: 2px 8px;
 }
 
-.item-waiting-input {
+/* The roomy "waiting on" editor shown under a flagged item / sub-item. */
+.waiting-editor {
+  background: rgba(211, 155, 42, 0.08);
+  border: 1px solid rgba(211, 155, 42, 0.3);
+  border-radius: 8px;
+  display: grid;
+  gap: 7px;
+  margin: 4px 0 6px;
+  padding: 9px 11px;
+}
+
+.waiting-editor-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.waiting-editor-label {
+  color: #8a6d1a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.waiting-person-select {
+  background: #fff;
   border: 1px solid var(--line);
   border-radius: 6px;
   font: inherit;
   font-size: 12px;
-  max-width: 170px;
-  padding: 3px 7px;
+  padding: 4px 7px;
+}
+
+.waiting-clear-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: auto;
+  padding: 4px 10px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.waiting-clear-btn:hover {
+  background: rgba(19, 52, 74, 0.06);
+  border-color: var(--ink, #13344a);
+  color: var(--ink, #13344a);
+}
+
+.waiting-note-textarea {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+  min-height: 3rem;
+  padding: 7px 9px;
+  resize: vertical;
+  width: 100%;
 }
 
 /* The "waiting on" toggle button on the right of an item / sub-item. */
@@ -5754,10 +5808,6 @@ button.repeating-task-toggle-pill {
 
 .sub-waiting-badge {
   margin-top: 0;
-}
-
-.sub-item-waiting-input {
-  margin: 2px 0 4px 26px;
 }
 
 /* ---- Delayed page (owner) -------------------------------------------- */
