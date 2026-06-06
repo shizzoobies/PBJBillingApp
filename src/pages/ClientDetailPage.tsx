@@ -43,6 +43,7 @@ import {
   normalizeBillingMonth,
   shortDate,
   sortChecklists,
+  stageNameFor,
 } from '../lib/utils'
 
 /* -------------------------------------------------------------------------- */
@@ -667,6 +668,7 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
           key={checklist.id}
           activeEmployeeId={activeEmployeeId}
           checklist={checklist}
+          stageName={stageNameFor(data.checklistTemplates, checklist)}
           clients={data.clients}
           employees={data.employees}
           focused={false}

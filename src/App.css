@@ -3689,6 +3689,33 @@ td strong {
   text-transform: none;
   letter-spacing: 0;
 }
+
+/* Progress chip on a single-stage checklist card ("3/7 done"). */
+.checklist-progress-badge {
+  background: var(--surface-2, rgba(19, 52, 74, 0.06));
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 8px;
+  padding: 2px 8px;
+}
+
+/* Relative due cue after the due date ("due in 3 days" / "4 days overdue"). */
+.checklist-due-cue {
+  background: rgba(33, 122, 78, 0.1);
+  border-radius: 999px;
+  color: #1c6b46;
+  font-weight: 600;
+  margin-left: 6px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.checklist-due-cue.overdue {
+  background: rgba(200, 52, 52, 0.12);
+  color: #b3261e;
+}
 .stages-accordion {
   display: flex;
   flex-direction: column;

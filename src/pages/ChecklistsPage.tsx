@@ -33,6 +33,8 @@ import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import {
   checklistFrequencies,
   clientName,
+  daysUntilDue,
+  dueDateLabel,
   employeeName,
   formatHours,
   getChecklistFrequencyLabel,
@@ -40,9 +42,10 @@ import {
   makeId,
   monthShortNames,
   shortDate,
+  stageNameFor,
 } from '../lib/utils'
 
-type Group = 'today' | 'week' | 'later' | 'completed'
+type Group = 'overdue' | 'week' | 'month' | 'later' | 'completed'
 type GroupByMode = 'status' | 'client'
 type CreateMode = 'one-time' | 'repeating' | null
 
@@ -57,12 +60,12 @@ function groupChecklist(checklist: Checklist, todayDateOnly: string): Group {
   const completed = checklist.items.filter((item) => item.done).length
   const total = checklist.items.length
   if (total > 0 && completed === total) return 'completed'
-  if (checklist.dueDate <= todayDateOnly) return 'today'
-  // within next 7 days
-  const today = new Date(`${todayDateOnly}T12:00:00`)
-  const due = new Date(`${checklist.dueDate}T12:00:00`)
-  const days = Math.round((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
-  if (days <= 7) return 'week'
+  const due = checklist.dueDate
+  if (due < todayDateOnly) return 'overdue'
+  // Due today through the next 7 days.
+  if (daysUntilDue(due, todayDateOnly) <= 7) return 'week'
+  // Beyond a week but still inside the current calendar month.
+  if (due.slice(0, 7) === todayDateOnly.slice(0, 7)) return 'month'
   return 'later'
 }
 
@@ -338,6 +341,7 @@ export function ChecklistsPage() {
         <ChecklistInProgressSection
           activeEmployeeId={activeEmployeeId}
           checklists={visibleChecklists}
+          checklistTemplates={data.checklistTemplates}
           clients={data.clients}
           employees={data.employees}
           onAddSubItem={addSubItem}
@@ -560,6 +564,7 @@ function RecycleBinSection({
 function ChecklistInProgressSection({
   activeEmployeeId,
   checklists,
+  checklistTemplates,
   clients,
   employees,
   onAddSubItem,
@@ -582,6 +587,7 @@ function ChecklistInProgressSection({
 }: {
   activeEmployeeId: string
   checklists: Checklist[]
+  checklistTemplates: ChecklistTemplate[]
   clients: Client[]
   employees: Employee[]
   onAddSubItem: (checklistId: string, itemId: string, title: string) => void
@@ -682,18 +688,24 @@ function ChecklistInProgressSection({
 
   // Status grouping (current behavior, unchanged).
   const groupedByStatus: Record<Group, Checklist[]> = {
-    today: [],
+    overdue: [],
     week: [],
+    month: [],
     later: [],
     completed: [],
   }
   for (const checklist of filtered) {
     groupedByStatus[groupChecklist(checklist, todayDateOnly)].push(checklist)
   }
+  // Within each bucket, soonest-due first (most overdue first in Overdue).
+  for (const key of Object.keys(groupedByStatus) as Group[]) {
+    groupedByStatus[key].sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+  }
 
   const groupConfig: Array<{ key: Group; label: string; defaultOpen: boolean }> = [
-    { key: 'today', label: 'Due today / overdue', defaultOpen: true },
-    { key: 'week', label: 'This week', defaultOpen: true },
+    { key: 'overdue', label: 'Overdue', defaultOpen: true },
+    { key: 'week', label: 'Due this week', defaultOpen: true },
+    { key: 'month', label: 'Due this month', defaultOpen: true },
     { key: 'later', label: 'Later', defaultOpen: false },
     { key: 'completed', label: 'Completed', defaultOpen: false },
   ]
@@ -721,6 +733,7 @@ function ChecklistInProgressSection({
       key={checklist.id}
       activeEmployeeId={activeEmployeeId}
       checklist={checklist}
+      stageName={stageNameFor(checklistTemplates, checklist)}
       clients={clients}
       employees={employees}
       focused={checklist.id === focusId}
@@ -757,7 +770,7 @@ function ChecklistInProgressSection({
             aria-pressed={groupBy === 'status'}
             onClick={() => setGroupBy('status')}
           >
-            Status
+            Due date
           </button>
           <button
             type="button"
@@ -856,6 +869,7 @@ function ChecklistGroup({
 export function ChecklistCard({
   activeEmployeeId,
   checklist,
+  stageName,
   clients,
   employees,
   focused,
@@ -880,6 +894,8 @@ export function ChecklistCard({
 }: {
   activeEmployeeId: string
   checklist: Checklist
+  /** Current stage's name for multi-stage checklists (resolved from template). */
+  stageName?: string
   clients: Client[]
   employees: Employee[]
   focused: boolean
@@ -1051,6 +1067,8 @@ export function ChecklistCard({
               {showStageBadge ? (
                 <span className="stage-badge">
                   Step {stageNumber} of {stageCount}
+                  {stageName ? ` · ${stageName}` : ''} ·{' '}
+                  {completed}/{checklist.items.length} done
                   {checklist.caseId && ownerMode ? (
                     <Link
                       className="stage-badge-link"
@@ -1060,6 +1078,10 @@ export function ChecklistCard({
                     </Link>
                   ) : null}
                 </span>
+              ) : checklist.items.length > 0 ? (
+                <span className="checklist-progress-badge">
+                  {completed}/{checklist.items.length} done
+                </span>
               ) : null}
               <span className="checklist-meta-line">
                 {clientName(clients, checklist.clientId)} ·{' '}
@@ -1068,6 +1090,15 @@ export function ChecklistCard({
                 {checklist.frequency
                   ? ` · ${getChecklistFrequencyLabel(checklist.frequency)}`
                   : ''}
+                {!allDone ? (
+                  <span
+                    className={`checklist-due-cue${
+                      checklist.dueDate < todayDateOnly ? ' overdue' : ''
+                    }`}
+                  >
+                    {dueDateLabel(checklist.dueDate, todayDateOnly)}
+                  </span>
+                ) : null}
               </span>
             </>
           )}

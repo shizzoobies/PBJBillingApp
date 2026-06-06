@@ -140,6 +140,42 @@ export function isInBillingPeriod(entry: TimeEntry, period: string) {
   return entry.date.startsWith(period)
 }
 
+/**
+ * Whole-day difference between a due date and today (both ISO yyyy-mm-dd).
+ * Positive = days until due, negative = days overdue, 0 = due today.
+ */
+export function daysUntilDue(dueDate: string, todayDateOnly: string): number {
+  const today = new Date(`${todayDateOnly}T12:00:00`)
+  const due = new Date(`${dueDate}T12:00:00`)
+  return Math.round((due.getTime() - today.getTime()) / 86_400_000)
+}
+
+/** Friendly relative due-date cue: "due today", "due in 3 days", "4 days overdue". */
+export function dueDateLabel(dueDate: string, todayDateOnly: string): string {
+  const days = daysUntilDue(dueDate, todayDateOnly)
+  if (days === 0) return 'due today'
+  if (days === 1) return 'due tomorrow'
+  if (days > 1) return `due in ${days} days`
+  if (days === -1) return '1 day overdue'
+  return `${Math.abs(days)} days overdue`
+}
+
+/**
+ * The name of the stage a (possibly multi-stage) checklist instance is on,
+ * resolved live from its template. Returns undefined for single-stage / one-off
+ * checklists or when the template no longer exists.
+ */
+export function stageNameFor(
+  templates: ChecklistTemplate[],
+  checklist: Pick<Checklist, 'templateId' | 'stageIndex'>,
+): string | undefined {
+  if (!checklist.templateId || typeof checklist.stageIndex !== 'number') return undefined
+  const template = templates.find((entry) => entry.id === checklist.templateId)
+  const stage = template?.stages?.[checklist.stageIndex]
+  const name = stage?.name?.trim()
+  return name ? name : undefined
+}
+
 /** Full English month names indexed 1–12 (index 0 unused). */
 export const MONTH_NAMES = [
   '',
