@@ -691,8 +691,15 @@ export function ensureRecurringChecklists(data: AppData) {
       continue
     }
 
+    // Lead time: surface an upcoming instance up to `leadDays` BEFORE its due
+    // date (so the team can start early), instead of only once it's due.
+    const leadDays =
+      typeof template.leadDays === 'number' && template.leadDays > 0
+        ? Math.min(Math.floor(template.leadDays), 120)
+        : 0
+    const horizon = leadDays > 0 ? addDays(today, leadDays) : today
     let safetyCounter = 0
-    while (template.nextDueDate <= today && safetyCounter < 60) {
+    while (template.nextDueDate <= horizon && safetyCounter < 60) {
       const instanceKey = `${template.id}:${template.nextDueDate}:0`
       if (!existingKeys.has(instanceKey)) {
         const stageOne = stages[0]

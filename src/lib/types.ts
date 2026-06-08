@@ -432,6 +432,14 @@ export type ChecklistTemplate = {
   nextDueDate: string
   active: boolean
   /**
+   * Lead time: how many days BEFORE its due date a recurring instance should
+   * appear, so the team can start it early instead of it popping up only when
+   * it's already due. 0 / unset = appears on the due date (legacy behavior).
+   * Applies to the cadence frequencies (daily…annually); specific-months
+   * already generates at the start of each designated month.
+   */
+  leadDays?: number
+  /**
    * Only meaningful when `frequency === 'specific-months'`: the designated
    * month numbers (1–12) the checklist runs in. `nextDueDate` advance logic is
    * ignored in that mode.

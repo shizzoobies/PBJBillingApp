@@ -85,6 +85,22 @@ describe('ensureRecurringChecklists', () => {
     expect(result.data.checklists.filter((c) => c.templateId === 'tmpl-1')).toHaveLength(0)
   })
 
+  it('materializes early when a future due date is within the template lead time', () => {
+    // Due in 10 days, but lead time of 14 days surfaces it now.
+    const data = makeData([makeTemplate({ nextDueDate: dateOffset(10), leadDays: 14 })])
+    const result = ensureRecurringChecklists(data)
+
+    expect(result.data.checklists.filter((c) => c.templateId === 'tmpl-1')).toHaveLength(1)
+  })
+
+  it('does NOT materialize a future template when its due date is beyond the lead time', () => {
+    // Due in 30 days, lead time only 7 days — still too early.
+    const data = makeData([makeTemplate({ nextDueDate: dateOffset(30), leadDays: 7 })])
+    const result = ensureRecurringChecklists(data)
+
+    expect(result.data.checklists.filter((c) => c.templateId === 'tmpl-1')).toHaveLength(0)
+  })
+
   it('never materializes a standard (client-agnostic blueprint) template', () => {
     const data = makeData([
       makeTemplate({

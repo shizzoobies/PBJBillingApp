@@ -1951,6 +1951,13 @@ export class AppDataStore {
           add column if not exists schedule_year int
       `)
 
+      // Lead time: how many days before its due date a recurring instance
+      // appears. Default 0 = legacy (appears on the due date).
+      await this.pool.query(`
+        alter table checklist_templates
+          add column if not exists lead_days int not null default 0
+      `)
+
       await this.pool.query(`
         create table if not exists checklist_template_items (
           id text primary key,
@@ -2542,7 +2549,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
-                   scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year
+                   scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days
             from checklist_templates
             order by title asc
           `),
@@ -2851,6 +2858,9 @@ export class AppDataStore {
             ? true
             : Boolean(row.repeat_annually),
           ...(typeof row.schedule_year === 'number' ? { scheduleYear: row.schedule_year } : {}),
+          ...(typeof row.lead_days === 'number' && row.lead_days > 0
+            ? { leadDays: row.lead_days }
+            : {}),
           stages: stagesByTemplate.get(row.id) ?? [],
           items: templateItemsByTemplate.get(row.id) ?? [],
         })),
@@ -3400,8 +3410,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
             `,
             [
               template.id,
@@ -3426,6 +3436,9 @@ export class AppDataStore {
               // Defaults to true (repeat every year) when unset.
               template.repeatAnnually === false ? false : true,
               typeof template.scheduleYear === 'number' ? template.scheduleYear : null,
+              typeof template.leadDays === 'number' && template.leadDays > 0
+                ? Math.min(Math.floor(template.leadDays), 120)
+                : 0,
             ],
           )
 

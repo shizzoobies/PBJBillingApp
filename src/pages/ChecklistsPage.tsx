@@ -2836,10 +2836,10 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
                 className="primary-action"
                 onClick={() => void props.onGenerateNow?.(template.id)}
                 type="button"
-                title="Create a checkable checklist from this template right now, without waiting for the schedule"
+                title="Pull the next occurrence forward — create a checkable checklist now without waiting for the schedule"
               >
                 <Plus size={14} />
-                Generate a checklist now
+                Start now
               </button>
             ) : null}
             <ApplyToClientControl
@@ -2967,6 +2967,25 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
               }
               type="date"
               value={template.nextDueDate}
+            />
+          </label>
+        )}
+        {template.frequency === 'specific-months' ? null : (
+          <label className="field">
+            <span>Show before due (days)</span>
+            <input
+              className="input"
+              type="number"
+              min="0"
+              max="120"
+              title="How many days before its due date this task appears, so the team can start it early. 0 = appears on the due date."
+              value={template.leadDays ?? 0}
+              onChange={(event) => {
+                const value = Number(event.target.value)
+                const leadDays =
+                  Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), 120) : 0
+                props.onUpdateTemplate(template.id, (current) => ({ ...current, leadDays }))
+              }}
             />
           </label>
         )}
