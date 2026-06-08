@@ -35,6 +35,7 @@ import {
   clientName,
   daysUntilDue,
   dueDateLabel,
+  effectiveChecklistDue,
   employeeName,
   formatHours,
   getChecklistFrequencyLabel,
@@ -60,7 +61,8 @@ function groupChecklist(checklist: Checklist, todayDateOnly: string): Group {
   const completed = checklist.items.filter((item) => item.done).length
   const total = checklist.items.length
   if (total > 0 && completed === total) return 'completed'
-  const due = checklist.dueDate
+  // Bucket by the soonest of the overall deadline and any incomplete step's due.
+  const due = effectiveChecklistDue(checklist)
   if (due < todayDateOnly) return 'overdue'
   // Due today through the next 7 days.
   if (daysUntilDue(due, todayDateOnly) <= 7) return 'week'
@@ -697,9 +699,12 @@ function ChecklistInProgressSection({
   for (const checklist of filtered) {
     groupedByStatus[groupChecklist(checklist, todayDateOnly)].push(checklist)
   }
-  // Within each bucket, soonest-due first (most overdue first in Overdue).
+  // Within each bucket, soonest-due first (by effective due — same basis as
+  // the bucketing — so the most urgent task is at the top).
   for (const key of Object.keys(groupedByStatus) as Group[]) {
-    groupedByStatus[key].sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+    groupedByStatus[key].sort((a, b) =>
+      effectiveChecklistDue(a).localeCompare(effectiveChecklistDue(b)),
+    )
   }
 
   const groupConfig: Array<{ key: Group; label: string; defaultOpen: boolean }> = [
@@ -1090,15 +1095,20 @@ export function ChecklistCard({
                 {checklist.frequency
                   ? ` · ${getChecklistFrequencyLabel(checklist.frequency)}`
                   : ''}
-                {!allDone ? (
-                  <span
-                    className={`checklist-due-cue${
-                      checklist.dueDate < todayDateOnly ? ' overdue' : ''
-                    }`}
-                  >
-                    {dueDateLabel(checklist.dueDate, todayDateOnly)}
-                  </span>
-                ) : null}
+                {!allDone
+                  ? (() => {
+                      const effDue = effectiveChecklistDue(checklist)
+                      const fromStep = effDue !== checklist.dueDate
+                      return (
+                        <span
+                          className={`checklist-due-cue${effDue < todayDateOnly ? ' overdue' : ''}`}
+                        >
+                          {fromStep ? 'next step ' : ''}
+                          {dueDateLabel(effDue, todayDateOnly)}
+                        </span>
+                      )
+                    })()
+                  : null}
               </span>
             </>
           )}
@@ -1470,9 +1480,9 @@ function DraggableTaskList({
                       }}
                     />
                     <select
-                      aria-label="Assignee"
+                      aria-label="Who does this step"
                       className="item-assignee-select"
-                      title="Assign to (optional)"
+                      title="Who does this step — defaults to the checklist's assignee"
                       value={item.assigneeId ?? ''}
                       onChange={(e) => {
                         void onUpdateItem(item.id, {
@@ -1480,7 +1490,7 @@ function DraggableTaskList({
                         })
                       }}
                     >
-                      <option value="">Inherits</option>
+                      <option value="">Same as checklist</option>
                       {employees.map((emp) => (
                         <option key={emp.id} value={emp.id}>
                           {emp.name.split(' ')[0]}
@@ -3491,12 +3501,13 @@ function DraggableTemplateItems({
                 value={item.dueDate ?? ''}
               />
               <select
-                aria-label="Item assignee"
+                aria-label="Who does this step"
                 className="compact-input"
+                title="Who does this step — defaults to the checklist's assignee"
                 onChange={(event) => onSetItemAssignee(item.id, event.target.value)}
                 value={item.assigneeId ?? ''}
               >
-                <option value="">Inherits</option>
+                <option value="">Same as checklist</option>
                 {employees.map((employee) => (
                   <option key={employee.id} value={employee.id}>
                     {employee.name}

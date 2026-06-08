@@ -150,6 +150,29 @@ export function daysUntilDue(dueDate: string, todayDateOnly: string): number {
   return Math.round((due.getTime() - today.getTime()) / 86_400_000)
 }
 
+/**
+ * The date a checklist effectively needs attention by: the EARLIEST of its own
+ * due date and any incomplete step / sub-step / sub-sub-step due date. A task
+ * whose overall deadline is month-end but has a sub-step due the 15th should
+ * surface as due the 15th, so nothing slips. Returns ISO yyyy-mm-dd.
+ */
+export function effectiveChecklistDue(checklist: Checklist): string {
+  let earliest = checklist.dueDate
+  const consider = (done: boolean, dueDate?: string) => {
+    if (!done && dueDate && dueDate < earliest) earliest = dueDate
+  }
+  for (const item of checklist.items) {
+    consider(item.done, item.dueDate)
+    for (const sub of item.subItems ?? []) {
+      consider(sub.done, sub.dueDate)
+      for (const subSub of sub.subItems ?? []) {
+        consider(subSub.done, subSub.dueDate)
+      }
+    }
+  }
+  return earliest
+}
+
 /** Friendly relative due-date cue: "due today", "due in 3 days", "4 days overdue". */
 export function dueDateLabel(dueDate: string, todayDateOnly: string): string {
   const days = daysUntilDue(dueDate, todayDateOnly)
