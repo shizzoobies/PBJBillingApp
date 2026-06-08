@@ -751,12 +751,20 @@ export function formatHours(minutes: number) {
  * time the user logged.
  */
 export function formatHoursMinutes(minutes: number) {
-  const total = Math.max(0, Math.round(minutes))
-  const h = Math.floor(total / 60)
-  const m = total % 60
-  if (h === 0) return `${m}m`
-  if (m === 0) return `${h}h`
-  return `${h}h ${m}m`
+  // Work in whole seconds so sub-minute durations (exact-seconds timer stops)
+  // read e.g. "45s" or "1m 30s" instead of being rounded away.
+  const totalSeconds = Math.max(0, Math.round(minutes * 60))
+  const h = Math.floor(totalSeconds / 3600)
+  const m = Math.floor((totalSeconds % 3600) / 60)
+  const s = totalSeconds % 60
+  if (h === 0 && m === 0) return `${s}s`
+  // Once it's at least a minute we round to the minute (the historical display)
+  // unless it's a sub-minute remainder worth showing.
+  const parts: string[] = []
+  if (h > 0) parts.push(`${h}h`)
+  if (m > 0) parts.push(`${m}m`)
+  if (h === 0 && s > 0) parts.push(`${s}s`)
+  return parts.join(' ')
 }
 
 /**
@@ -780,7 +788,8 @@ export function sessionMinutes(session: WorkSession): number {
   const startMs = new Date(session.startAt).getTime()
   const endMs = new Date(session.endAt).getTime()
   if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs <= startMs) return 0
-  return Math.round((endMs - startMs) / 60000)
+  // Seconds-precise (fractional minutes) so sub-minute spans aren't lost.
+  return Math.round((endMs - startMs) / 1000) / 60
 }
 
 /** Total minutes across all sessions. */

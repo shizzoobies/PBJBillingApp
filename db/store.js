@@ -1731,6 +1731,20 @@ export class AppDataStore {
       )
       // Free-text task name, used when the client has no active checklist task.
       await this.pool.query(`alter table time_entries add column if not exists task_label text`)
+      // Sub-minute precision: store minutes as numeric (fractional, e.g. 0.75 =
+      // 45s) so an exact-seconds timer stop isn't rounded away. Guarded so the
+      // table rewrite happens only once (while the column is still integer).
+      await this.pool.query(`
+        do $$
+        begin
+          if (
+            select data_type from information_schema.columns
+            where table_name = 'time_entries' and column_name = 'minutes'
+          ) = 'integer' then
+            alter table time_entries alter column minutes type numeric using minutes::numeric;
+          end if;
+        end $$;
+      `)
 
       // Month-end timesheet locks: one per employee per 'YYYY-MM' period.
       await this.pool.query(`
@@ -2814,7 +2828,7 @@ export class AppDataStore {
           clientId: row.client_id ?? '',
           isAdministrative: Boolean(row.is_administrative),
           date: row.entry_date.toISOString().slice(0, 10),
-          minutes: row.minutes,
+          minutes: Number(row.minutes),
           category: row.category,
           description: row.description,
           billable: row.billable,
@@ -3684,7 +3698,7 @@ export class AppDataStore {
         clientId: row.client_id ?? '',
         isAdministrative: Boolean(row.is_administrative),
         date: row.entry_date.toISOString().slice(0, 10),
-        minutes: row.minutes,
+        minutes: Number(row.minutes),
         category: row.category,
         description: row.description,
         billable: row.billable,

@@ -750,7 +750,9 @@ function App() {
       clientId: timer.clientId,
       isAdministrative,
       date: new Date(timer.startedAt).toISOString().slice(0, 10),
-      minutes: Math.max(1, Math.round((stoppedAtMs - timer.startedAt) / 60000)),
+      // Seconds-precise (min 1 second). The server recomputes this from the
+      // session span; this is just the optimistic value shown until it returns.
+      minutes: Math.max(1, Math.round((stoppedAtMs - timer.startedAt) / 1000)) / 60,
       description,
       startAt: session.startAt,
       endAt: session.endAt,
