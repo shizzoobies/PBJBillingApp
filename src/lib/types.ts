@@ -224,6 +224,12 @@ export type TimeEntry = {
    */
   taskId?: string | null
   /**
+   * Free-text task name, used when the client has no active checklist to pick
+   * (so the user can still say what they worked on). Only meaningful when
+   * `taskId` is empty; ignored otherwise.
+   */
+  taskLabel?: string
+  /**
    * Ties this entry to a "group time" batch — one block of work the owner
    * allocated across MULTIPLE clients at once. Every entry created from the
    * same group-time split shares this id (each client still gets its own
@@ -644,6 +650,8 @@ export type TimerState = {
   startedAt: number
   /** Optional task this timed work is attached to. */
   taskId?: string | null
+  /** Free-text task name when the client has no active checklist to pick. */
+  taskLabel?: string
   /** Administrative / internal timing — no client or task. */
   isAdministrative?: boolean
   /**

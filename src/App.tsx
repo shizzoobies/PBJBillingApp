@@ -758,6 +758,7 @@ function App() {
       // Administrative time is never billable; the server enforces this too.
       billable: !isAdministrative,
       taskId: timer.taskId ?? null,
+      taskLabel: timer.taskId ? undefined : timer.taskLabel,
       entryMethod: 'timer',
     })
     setTimer(null)

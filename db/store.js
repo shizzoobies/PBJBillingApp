@@ -1729,6 +1729,8 @@ export class AppDataStore {
       await this.pool.query(
         `alter table time_entries add column if not exists group_client_ids text[] not null default '{}'`,
       )
+      // Free-text task name, used when the client has no active checklist task.
+      await this.pool.query(`alter table time_entries add column if not exists task_label text`)
 
       // Month-end timesheet locks: one per employee per 'YYYY-MM' period.
       await this.pool.query(`
@@ -2532,7 +2534,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                    approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                   is_administrative, started_at, ended_at, sessions, group_id, group_client_ids
+                   is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -2830,6 +2832,7 @@ export class AppDataStore {
           groupClientIds: Array.isArray(row.group_client_ids)
             ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
             : [],
+          ...(row.task_label ? { taskLabel: row.task_label } : {}),
         })),
         checklists: allChecklists.filter((checklist) => !checklist.deletedAt),
         recycledChecklists: allChecklists.filter((checklist) => Boolean(checklist.deletedAt)),
@@ -3312,8 +3315,8 @@ export class AppDataStore {
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                                         approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative,
-                                        started_at, ended_at, sessions, group_id, group_client_ids, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21, now())
+                                        started_at, ended_at, sessions, group_id, group_client_ids, task_label, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21, $22, now())
             `,
             [
               entry.id,
@@ -3340,6 +3343,7 @@ export class AppDataStore {
               Array.isArray(entry.groupClientIds)
                 ? entry.groupClientIds.filter((id) => typeof id === 'string' && id)
                 : [],
+              entry.taskId ? null : entry.taskLabel ? String(entry.taskLabel) : null,
             ],
           )
         }
@@ -3620,8 +3624,8 @@ export class AppDataStore {
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, now())
         `,
         [
           nextEntry.id,
@@ -3646,6 +3650,7 @@ export class AppDataStore {
           Array.isArray(nextEntry.groupClientIds)
             ? nextEntry.groupClientIds.filter((id) => typeof id === 'string' && id)
             : [],
+          nextEntry.taskId ? null : nextEntry.taskLabel ? String(nextEntry.taskLabel) : null,
         ],
       )
 
@@ -3667,7 +3672,7 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                 approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                is_administrative, started_at, ended_at, sessions, group_id, group_client_ids
+                is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label
          from time_entries where id = $1`,
         [entryId],
       )
@@ -3697,6 +3702,7 @@ export class AppDataStore {
         groupClientIds: Array.isArray(row.group_client_ids)
           ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
           : [],
+        ...(row.task_label ? { taskLabel: row.task_label } : {}),
       }
     }
 

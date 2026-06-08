@@ -1170,6 +1170,12 @@ const server = createServer(async (request, response) => {
           : typeof taskIdRaw === 'string' && taskIdRaw.trim()
             ? taskIdRaw.trim()
             : null
+        // Free-text task name — only kept when there's no checklist task and the
+        // entry is client-bound (not admin). Length-capped.
+        const taskLabel =
+          !isAdministrative && !taskId && typeof payload?.taskLabel === 'string' && payload.taskLabel.trim()
+            ? payload.taskLabel.trim().slice(0, 200)
+            : undefined
         // Group-time tag: shared across the per-client entries created from one
         // "group" submission. Only meaningful for client-bound (non-admin) time.
         const groupId =
@@ -1356,6 +1362,7 @@ const server = createServer(async (request, response) => {
           sessions: finalSessions,
           groupId,
           groupClientIds,
+          taskLabel,
         })
 
         // Manual entries are deliberately gated: log the submission and ping

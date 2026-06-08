@@ -485,6 +485,7 @@ function TimeCapture({
   const [employeeId, setEmployeeId] = useState(activeEmployeeId)
   const [description, setDescription] = useState('Reviewed transactions and added client notes.')
   const [taskId, setTaskId] = useState<string>('')
+  const [taskLabel, setTaskLabel] = useState('')
   const [isAdministrative, setIsAdministrative] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopError, setStopError] = useState('')
@@ -540,6 +541,7 @@ function TimeCapture({
   const shownGroupIds = isRunning ? timer?.groupClientIds ?? [] : groupClientIds
   const shownDescription = isRunning ? timer?.description ?? '' : description
   const shownEmployeeId = isRunning ? timer?.employeeId ?? employeeId : employeeId
+  const shownTaskLabel = isRunning ? timer?.taskLabel ?? '' : taskLabel
 
   const handleStartTimer = () => {
     if (groupMode) {
@@ -566,6 +568,10 @@ function TimeCapture({
         description || (isAdministrative ? 'Administrative time' : 'Timed bookkeeping work'),
       startedAt: Date.now(),
       taskId: isAdministrative ? null : effectiveTaskId || null,
+      taskLabel:
+        !isAdministrative && eligibleTasks.length === 0 && taskLabel.trim()
+          ? taskLabel.trim()
+          : undefined,
       isAdministrative,
     })
   }
@@ -728,23 +734,37 @@ function TimeCapture({
             </label>
             <label className="field">
               <span>Task</span>
-              <select
-                className="input"
-                onChange={(event) => {
-                  const value = event.target.value
-                  if (isRunning) onUpdateTimer({ taskId: value || null })
-                  else setTaskId(value)
-                }}
-                value={shownTaskId}
-                disabled={inputsDisabled || eligibleTasks.length === 0}
-              >
-                <option value="">(none / general)</option>
-                {eligibleTasks.map((task) => (
-                  <option key={task.id} value={task.id}>
-                    {task.title}
-                  </option>
-                ))}
-              </select>
+              {eligibleTasks.length > 0 ? (
+                <select
+                  className="input"
+                  onChange={(event) => {
+                    const value = event.target.value
+                    if (isRunning) onUpdateTimer({ taskId: value || null })
+                    else setTaskId(value)
+                  }}
+                  value={shownTaskId}
+                  disabled={inputsDisabled}
+                >
+                  <option value="">(none / general)</option>
+                  {eligibleTasks.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {task.title}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="No active task — type what you're working on"
+                  value={shownTaskLabel}
+                  onChange={(event) => {
+                    if (isRunning) onUpdateTimer({ taskLabel: event.target.value })
+                    else setTaskLabel(event.target.value)
+                  }}
+                  disabled={inputsDisabled}
+                />
+              )}
             </label>
           </>
         )}
@@ -857,6 +877,7 @@ function ManualEntryModal({
   const [description, setDescription] = useState('')
   const [billable, setBillable] = useState(true)
   const [taskId, setTaskId] = useState<string>('')
+  const [taskLabel, setTaskLabel] = useState('')
   const [isAdministrative, setIsAdministrative] = useState(false)
   const [reason, setReason] = useState('')
   const [submitError, setSubmitError] = useState('')
@@ -983,6 +1004,10 @@ function ManualEntryModal({
         description,
         billable: isAdministrative ? false : billable,
         taskId: isAdministrative ? null : effectiveTaskId || null,
+        taskLabel:
+          !isAdministrative && eligibleTasks.length === 0 && taskLabel.trim()
+            ? taskLabel.trim()
+            : undefined,
         entryMethod: 'manual',
         manualReason: reason.trim(),
         startAt: localInputToIso(startLocal),
@@ -1165,19 +1190,28 @@ function ManualEntryModal({
                   </label>
                   <label className="field">
                     <span>Task</span>
-                    <select
-                      className="input"
-                      value={effectiveTaskId}
-                      onChange={(event) => setTaskId(event.target.value)}
-                      disabled={eligibleTasks.length === 0}
-                    >
-                      <option value="">(none / general)</option>
-                      {eligibleTasks.map((task) => (
-                        <option key={task.id} value={task.id}>
-                          {task.title}
-                        </option>
-                      ))}
-                    </select>
+                    {eligibleTasks.length > 0 ? (
+                      <select
+                        className="input"
+                        value={effectiveTaskId}
+                        onChange={(event) => setTaskId(event.target.value)}
+                      >
+                        <option value="">(none / general)</option>
+                        {eligibleTasks.map((task) => (
+                          <option key={task.id} value={task.id}>
+                            {task.title}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        className="input"
+                        type="text"
+                        placeholder="No active task — type what you worked on"
+                        value={taskLabel}
+                        onChange={(event) => setTaskLabel(event.target.value)}
+                      />
+                    )}
                   </label>
                   <label className="check-row full-span">
                     <input
@@ -1462,7 +1496,7 @@ function RecentTimeEntries({
               entry={entry}
               clientLabel={clientLabel}
               employeeLabel={employeeName(employees, entry.employeeId)}
-              taskTitle={linkedTask ? linkedTask.title : null}
+              taskTitle={linkedTask ? linkedTask.title : entry.taskLabel ?? null}
               locked={monthLocked}
               timerRunning={timerRunning}
               employees={employees}
