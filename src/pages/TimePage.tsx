@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
+import { ApiError } from '../lib/types'
 import type {
   Checklist,
   Client,
@@ -486,6 +487,7 @@ function TimeCapture({
   const [taskId, setTaskId] = useState<string>('')
   const [isAdministrative, setIsAdministrative] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [stopError, setStopError] = useState('')
   // Group timing (owner-only): track one block against several clients, chosen
   // up front, then split it for billing later.
   const canGroup = role === 'owner'
@@ -570,10 +572,15 @@ function TimeCapture({
 
   const handleStopTimer = async () => {
     setBusy(true)
+    setStopError('')
     try {
       // The live notes are kept on the running timer now, so stop with no
       // override and let it use the timer's own (persisted) description.
       await onStopTimer()
+    } catch (error) {
+      // Surface a server block (e.g. "submit last week first") instead of a
+      // silent failure — the timer stays running so no time is lost.
+      setStopError(error instanceof ApiError ? error.message : 'Could not log this time.')
     } finally {
       setBusy(false)
     }
@@ -756,6 +763,7 @@ function TimeCapture({
             disabled={inputsDisabled}
           />
         </label>
+        {stopError ? <p className="auth-error full-span">{stopError}</p> : null}
         <div className="button-row full-span">
           {timer ? (
             <>
@@ -951,8 +959,10 @@ function ManualEntryModal({
           sessions: [{ startAt: localInputToIso(startLocal), endAt: localInputToIso(stopLocal) }],
         })
         setSuccess(true)
-      } catch {
-        setSubmitError('Group time could not be saved.')
+      } catch (error) {
+        setSubmitError(
+          error instanceof ApiError ? error.message : 'Group time could not be saved.',
+        )
       } finally {
         setSubmitPending(false)
       }
@@ -982,8 +992,10 @@ function ManualEntryModal({
         ],
       })
       setSuccess(true)
-    } catch {
-      setSubmitError('Manual entry could not be saved.')
+    } catch (error) {
+      setSubmitError(
+        error instanceof ApiError ? error.message : 'Manual entry could not be saved.',
+      )
     } finally {
       setSubmitPending(false)
     }

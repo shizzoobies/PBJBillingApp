@@ -267,6 +267,15 @@ function isCrossSiteOrigin(request) {
  * everything. Non-owners see only clients where their user id appears in the
  * client's `assignedBookkeeperIds` array.
  */
+// The Sunday (yyyy-mm-dd) that anchors the US Sun–Sat work week containing
+// `dateStr`. Noon avoids any DST/timezone boundary flip; getDay() of a calendar
+// date's weekday is timezone-independent.
+function weekStartOf(dateStr) {
+  const d = new Date(`${dateStr}T12:00:00`)
+  d.setDate(d.getDate() - d.getDay())
+  return d.toISOString().slice(0, 10)
+}
+
 function visibleClientIdSet(session, clients) {
   if (session.user.role === 'owner') {
     return new Set(clients.map((client) => client.id))
@@ -1263,6 +1272,39 @@ const server = createServer(async (request, response) => {
         // they have visibility on. Administrative time has no client, so this
         // check is skipped for it.
         const allData = await appDataStore.read()
+
+        // Force weekly submission: a non-owner must submit LAST week's timesheet
+        // for review before logging time in a newer week. Find the most recent
+        // prior week (before this entry's week) in which they logged time — it
+        // must carry a pending/approved submission. They can still add to /
+        // fix that prior week itself; only logging in a NEWER week is blocked.
+        if (session.user.role !== 'owner') {
+          const entryWeekStart = weekStartOf(date)
+          const priorWeeksWithTime = [
+            ...new Set(
+              (allData.timeEntries ?? [])
+                .filter((entry) => entry.employeeId === employeeId)
+                .map((entry) => weekStartOf(entry.date))
+                .filter((weekStart) => weekStart < entryWeekStart),
+            ),
+          ].sort()
+          const lastPriorWeek = priorWeeksWithTime[priorWeeksWithTime.length - 1]
+          if (lastPriorWeek) {
+            const submission = (allData.weeklySubmissions ?? []).find(
+              (entry) => entry.userId === employeeId && entry.weekStart === lastPriorWeek,
+            )
+            const submitted =
+              submission &&
+              (submission.status === 'pending' || submission.status === 'approved')
+            if (!submitted) {
+              sendJson(response, 423, {
+                error: `Submit your timesheet for the week of ${lastPriorWeek} for review before logging time in a new week.`,
+              })
+              return
+            }
+          }
+        }
+
         if (isGroupPending) {
           // Every member of a group holding entry must be visible to the user.
           const allowed = visibleClientIdSet(session, allData.clients ?? [])
