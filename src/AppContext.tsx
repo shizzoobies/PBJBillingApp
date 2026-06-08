@@ -44,6 +44,8 @@ export type AppContextValue = {
   timer: TimerState | null
   timerElapsed: string
   startTimer: (timer: TimerState) => void
+  updateTimer: (patch: Partial<TimerState>) => void
+  cancelTimer: () => void
   stopTimer: (descriptionOverride?: string) => Promise<void>
   logTime: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
   splitGroupEntry: (

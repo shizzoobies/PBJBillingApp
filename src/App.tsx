@@ -126,6 +126,40 @@ function OwnerOnly({
   return children
 }
 
+// The running timer is persisted in the browser so a refresh or a tab switch
+// doesn't lose it (the elapsed time is recomputed from `startedAt`). Cleared on
+// stop / cancel.
+const TIMER_STORAGE_KEY = 'pbj.activeTimer.v1'
+
+function readStoredTimer(): TimerState | null {
+  try {
+    const raw = localStorage.getItem(TIMER_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as TimerState
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof parsed.employeeId === 'string' &&
+      typeof parsed.startedAt === 'number' &&
+      Number.isFinite(parsed.startedAt)
+    ) {
+      return parsed
+    }
+  } catch {
+    // ignore malformed / unavailable storage
+  }
+  return null
+}
+
+function writeStoredTimer(timer: TimerState | null) {
+  try {
+    if (timer) localStorage.setItem(TIMER_STORAGE_KEY, JSON.stringify(timer))
+    else localStorage.removeItem(TIMER_STORAGE_KEY)
+  } catch {
+    // ignore storage failures
+  }
+}
+
 function App() {
   // Empty workspace until the server fetch resolves — avoids the flash
   // of stale demo clients / checklists on reload that made just-deleted
@@ -139,8 +173,10 @@ function App() {
   const [previewUserId, setPreviewUserId] = useState<string | null>(null)
   const [selectedClientId, setSelectedClientId] = useState('client-northstar')
   const [billingPeriod, setBillingPeriod] = useState(currentBillingPeriod())
-  const [timer, setTimer] = useState<TimerState | null>(null)
-  const [now, setNow] = useState(0)
+  const [timer, setTimer] = useState<TimerState | null>(() => readStoredTimer())
+  // Lazily seed "now" to the current time so a restored timer shows the right
+  // elapsed on first paint (the interval keeps it ticking while a timer runs).
+  const [now, setNow] = useState(() => new Date().getTime())
   const [firmSettings, setFirmSettings] = useState<FirmSettings>(DEFAULT_FIRM_SETTINGS)
   const [publicFirmSettings, setPublicFirmSettings] = useState<PublicFirmSettings>({
     name: DEFAULT_FIRM_SETTINGS.name,
@@ -484,6 +520,11 @@ function App() {
 
     const intervalId = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(intervalId)
+  }, [timer])
+
+  // Persist the running timer to the browser so refresh / tab-switch keeps it.
+  useEffect(() => {
+    writeStoredTimer(timer)
   }, [timer])
 
   const visibleChecklists = useMemo(() => {
@@ -2474,6 +2515,19 @@ function App() {
     setTimer(nextTimer)
   }
 
+  // Patch the running timer (live description edits, client/task changes) so the
+  // change survives a tab switch / refresh via the persisted timer.
+  const updateTimer = (patch: Partial<TimerState>) => {
+    if (previewActiveRef.current) return
+    setTimer((current) => (current ? { ...current, ...patch } : current))
+  }
+
+  // Discard the running timer without logging any time.
+  const cancelTimer = () => {
+    if (previewActiveRef.current) return
+    setTimer(null)
+  }
+
   const handleLogout = async () => {
     try {
       await logoutSession()
@@ -2596,6 +2650,8 @@ function App() {
     timer,
     timerElapsed: timer ? formatTimeFromMs(now - timer.startedAt) : '0:00',
     startTimer,
+    updateTimer,
+    cancelTimer,
     stopTimer,
     logTime,
     splitGroupEntry,

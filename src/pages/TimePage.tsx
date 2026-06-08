@@ -104,6 +104,8 @@ export function TimePage() {
     timer,
     timerElapsed,
     startTimer,
+    updateTimer,
+    cancelTimer,
     stopTimer,
     logTime,
     splitGroupEntry,
@@ -189,6 +191,8 @@ export function TimePage() {
           employees={data.employees}
           onStartTimer={startTimer}
           onStopTimer={stopTimer}
+          onUpdateTimer={updateTimer}
+          onCancelTimer={cancelTimer}
           role={role}
           timer={timer}
           timerElapsed={timer ? timerElapsed : '0:00'}
@@ -452,6 +456,8 @@ function TimeCapture({
   employees,
   onStartTimer,
   onStopTimer,
+  onUpdateTimer,
+  onCancelTimer,
   role,
   timer,
   timerElapsed,
@@ -465,6 +471,8 @@ function TimeCapture({
   employees: Employee[]
   onStartTimer: (timer: TimerState) => void
   onStopTimer: (descriptionOverride?: string) => Promise<void>
+  onUpdateTimer: (patch: Partial<TimerState>) => void
+  onCancelTimer: () => void
   role: Role
   timer: TimerState | null
   timerElapsed: string
@@ -501,9 +509,16 @@ function TimeCapture({
         : activeEmployeeId
       : activeEmployeeId
 
+  // A timer is running for this user. While running, the form DISPLAYS the
+  // timer's own state (so a tab switch / refresh restores client + notes), and
+  // client / task / notes edits update the running timer instead of the
+  // compose-state. Structural choices (employee, admin, group) are locked.
+  const isRunning = Boolean(timer)
+  const taskClientId = isRunning ? timer?.clientId ?? '' : effectiveClientId
+
   const eligibleTasks = useMemo(
-    () => eligibleChecklistsFor(checklists, effectiveClientId, effectiveEmployeeId, role),
-    [checklists, effectiveClientId, effectiveEmployeeId, role],
+    () => eligibleChecklistsFor(checklists, taskClientId, effectiveEmployeeId, role),
+    [checklists, taskClientId, effectiveEmployeeId, role],
   )
 
   // Reset taskId if the previously-chosen task isn't valid for the new client.
@@ -512,6 +527,17 @@ function TimeCapture({
   // The timer panel is read-only when the timesheet is locked OR an owner is
   // previewing this person — preview mode must never be able to time work.
   const inputsDisabled = locked || previewMode
+
+  const runningGroup = (timer?.groupClientIds?.length ?? 0) > 0
+  const runningAdmin = Boolean(timer?.isAdministrative)
+  const shownBillTo = isRunning ? (runningGroup ? 'group' : 'single') : billTo
+  const shownAdmin = isRunning ? runningAdmin : isAdministrative
+  const shownGroupMode = isRunning ? runningGroup : groupMode
+  const shownClientId = isRunning ? timer?.clientId ?? '' : effectiveClientId
+  const shownTaskId = isRunning ? timer?.taskId ?? '' : effectiveTaskId
+  const shownGroupIds = isRunning ? timer?.groupClientIds ?? [] : groupClientIds
+  const shownDescription = isRunning ? timer?.description ?? '' : description
+  const shownEmployeeId = isRunning ? timer?.employeeId ?? employeeId : employeeId
 
   const handleStartTimer = () => {
     if (groupMode) {
@@ -545,7 +571,9 @@ function TimeCapture({
   const handleStopTimer = async () => {
     setBusy(true)
     try {
-      await onStopTimer(description)
+      // The live notes are kept on the running timer now, so stop with no
+      // override and let it use the timer's own (persisted) description.
+      await onStopTimer()
     } finally {
       setBusy(false)
     }
@@ -598,8 +626,8 @@ function TimeCapture({
             <select
               className="input"
               onChange={(event) => setEmployeeId(event.target.value)}
-              value={employeeId}
-              disabled={inputsDisabled || Boolean(timer)}
+              value={shownEmployeeId}
+              disabled={inputsDisabled || isRunning}
             >
               {/* Owners do billable work too — include everyone so an owner can
                   log their OWN time, not just a staff member's. */}
@@ -611,38 +639,38 @@ function TimeCapture({
             </select>
           </label>
         )}
-        {canGroup && !isAdministrative ? (
+        {canGroup && !shownAdmin ? (
           <label className="field full-span">
             <span>Track time for</span>
             <select
               className="input"
-              value={billTo}
+              value={shownBillTo}
               onChange={(event) => setBillTo(event.target.value as 'single' | 'group')}
-              disabled={inputsDisabled || Boolean(timer)}
+              disabled={inputsDisabled || isRunning}
             >
               <option value="single">A single client</option>
               <option value="group">A group (split for billing later)</option>
             </select>
           </label>
         ) : null}
-        {billTo === 'single' ? (
+        {shownBillTo === 'single' ? (
           <label className="check-row full-span">
             <input
-              checked={isAdministrative}
+              checked={shownAdmin}
               onChange={(event) => setIsAdministrative(event.target.checked)}
               type="checkbox"
-              disabled={inputsDisabled || Boolean(timer)}
+              disabled={inputsDisabled || isRunning}
             />
             <span>Administrative work (company meeting, internal — no client or task)</span>
           </label>
         ) : null}
-        {groupMode ? (
+        {shownGroupMode ? (
           <>
             <div className="field full-span group-time-block">
               <span>Clients in this group</span>
               <div className="group-client-grid">
                 {clients.map((client) => {
-                  const selected = groupClientIds.includes(client.id)
+                  const selected = shownGroupIds.includes(client.id)
                   return (
                     <label
                       key={client.id}
@@ -652,7 +680,7 @@ function TimeCapture({
                         type="checkbox"
                         checked={selected}
                         onChange={() => toggleGroupClient(client.id)}
-                        disabled={inputsDisabled || Boolean(timer)}
+                        disabled={inputsDisabled || isRunning}
                       />
                       <span>{client.name}</span>
                     </label>
@@ -665,18 +693,24 @@ function TimeCapture({
               divide the time for billing.
             </p>
           </>
-        ) : isAdministrative ? null : (
+        ) : shownAdmin ? null : (
           <>
             <label className="field">
               <span>Client</span>
               <select
                 className="input"
                 onChange={(event) => {
-                  setClientId(event.target.value)
+                  // Mid-timer client change ("saw a squirrel") updates the
+                  // running timer; otherwise it sets the compose-state.
+                  if (isRunning) {
+                    onUpdateTimer({ clientId: event.target.value, taskId: null })
+                  } else {
+                    setClientId(event.target.value)
+                  }
                   setTaskId('')
                 }}
-                value={effectiveClientId}
-                disabled={inputsDisabled || Boolean(timer)}
+                value={shownClientId}
+                disabled={inputsDisabled}
               >
                 {clients.map((client) => (
                   <option key={client.id} value={client.id}>
@@ -689,9 +723,13 @@ function TimeCapture({
               <span>Task</span>
               <select
                 className="input"
-                onChange={(event) => setTaskId(event.target.value)}
-                value={effectiveTaskId}
-                disabled={inputsDisabled || Boolean(timer) || eligibleTasks.length === 0}
+                onChange={(event) => {
+                  const value = event.target.value
+                  if (isRunning) onUpdateTimer({ taskId: value || null })
+                  else setTaskId(value)
+                }}
+                value={shownTaskId}
+                disabled={inputsDisabled || eligibleTasks.length === 0}
               >
                 <option value="">(none / general)</option>
                 {eligibleTasks.map((task) => (
@@ -704,28 +742,45 @@ function TimeCapture({
           </>
         )}
         <label className="field full-span">
-          <span>{isAdministrative ? 'Notes (what was this for?)' : 'What did you do?'}</span>
-          {/* Editable while the timer runs — the latest text is what gets
-              logged on stop. Only locked timesheets / preview mode disable it. */}
+          <span>{shownAdmin ? 'Notes (what was this for?)' : 'What did you do?'}</span>
+          {/* While a timer runs the notes live on the timer itself (persisted),
+              so a tab switch / refresh keeps them. */}
           <textarea
             className="input"
-            onChange={(event) => setDescription(event.target.value)}
+            onChange={(event) => {
+              if (isRunning) onUpdateTimer({ description: event.target.value })
+              else setDescription(event.target.value)
+            }}
             rows={4}
-            value={description}
+            value={shownDescription}
             disabled={inputsDisabled}
           />
         </label>
         <div className="button-row full-span">
           {timer ? (
-            <button
-              className="primary-action danger"
-              disabled={busy || inputsDisabled}
-              onClick={() => void handleStopTimer()}
-              type="button"
-            >
-              <TimerReset size={16} />
-              {busy ? 'Saving...' : 'Stop & log'}
-            </button>
+            <>
+              <button
+                className="primary-action danger"
+                disabled={busy || inputsDisabled}
+                onClick={() => void handleStopTimer()}
+                type="button"
+              >
+                <TimerReset size={16} />
+                {busy ? 'Saving...' : 'Stop & log'}
+              </button>
+              <button
+                className="secondary-action"
+                disabled={busy || inputsDisabled}
+                onClick={() => {
+                  if (window.confirm('Discard this timer without logging the time?')) {
+                    onCancelTimer()
+                  }
+                }}
+                type="button"
+              >
+                Cancel
+              </button>
+            </>
           ) : (
             <button
               className="primary-action"
@@ -1354,6 +1409,14 @@ function RecentTimeEntries({
   onResume: (entry: TimeEntry) => void
   onSplitGroup: (entry: TimeEntry) => void
 }) {
+  // Most-recently-worked first, so "what I just did" sits at the top and is
+  // easy to find / edit. Falls back endAt -> startAt -> date.
+  const recencyKey = (entry: TimeEntry) => {
+    const sessions = entry.sessions ?? []
+    const lastSession = sessions.length > 0 ? sessions[sessions.length - 1] : null
+    return lastSession?.endAt ?? entry.endAt ?? entry.startAt ?? `${entry.date}T00:00:00`
+  }
+  const sortedEntries = [...entries].sort((a, b) => recencyKey(b).localeCompare(recencyKey(a)))
   return (
     <section className="panel">
       <div className="section-heading">
@@ -1363,7 +1426,7 @@ function RecentTimeEntries({
         </div>
       </div>
       <div className="entry-list">
-        {entries.slice(0, 6).map((entry) => {
+        {sortedEntries.slice(0, 8).map((entry) => {
           const linkedTask = entry.taskId
             ? checklists.find((checklist) => checklist.id === entry.taskId)
             : null
