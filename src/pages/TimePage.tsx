@@ -785,6 +785,10 @@ function TimeCapture({
                       if (newId) {
                         if (isRunning) onUpdateTimer({ taskId: newId })
                         else setTaskId(newId)
+                      } else {
+                        window.alert(
+                          "Couldn't start that upcoming task right now — try again in a moment.",
+                        )
                       }
                       return
                     }
@@ -1276,6 +1280,10 @@ function ManualEntryModal({
                               value.slice('template:'.length),
                             )
                             if (newId) setTaskId(newId)
+                            else
+                              window.alert(
+                                "Couldn't start that upcoming task right now — try again in a moment.",
+                              )
                             return
                           }
                           setTaskId(value)

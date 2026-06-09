@@ -3405,10 +3405,6 @@ const server = createServer(async (request, response) => {
     if (templateGenerateMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return
-      if (session.user.role !== 'owner') {
-        sendJson(response, 403, { error: 'Only owners can generate tasks' })
-        return
-      }
       const templateId = templateGenerateMatch[1]
       const payload = await readJsonBody(request)
       const dueDate = typeof payload?.dueDate === 'string' ? payload.dueDate : undefined
@@ -3423,6 +3419,18 @@ const server = createServer(async (request, response) => {
           error: 'Standard templates cannot generate tasks — apply to a client first',
         })
         return
+      }
+      // Owners can generate any template; a non-owner can generate a recurring
+      // task for a client they're assigned to — so staff can "get ahead" and
+      // log time against an upcoming task before its instance exists.
+      if (session.user.role !== 'owner') {
+        const allowedClients = visibleClientIdSet(session, data.clients ?? [])
+        if (!template.clientId || !allowedClients.has(template.clientId)) {
+          sendJson(response, 403, {
+            error: 'You can only generate tasks for your assigned clients',
+          })
+          return
+        }
       }
       const checklist = await appDataStore.generateChecklistFromTemplate(templateId, { dueDate })
       if (!checklist) {
