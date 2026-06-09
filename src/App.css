@@ -5887,6 +5887,86 @@ button.repeating-task-toggle-pill {
   text-align: right;
 }
 
+/* Expandable entry inside the weekly review modal. */
+.week-review-entry + .week-review-entry {
+  border-top: 1px solid var(--line);
+}
+
+.week-review-row-toggle {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.week-review-row-toggle:hover {
+  background: rgba(19, 52, 74, 0.04);
+}
+
+.week-review-entry.is-open .week-review-row-toggle {
+  background: rgba(19, 52, 74, 0.05);
+}
+
+.week-review-caret {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.week-review-detail {
+  background: var(--surface-2, rgba(19, 52, 74, 0.03));
+  border-top: 1px dashed var(--line);
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.week-review-detail-meta {
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  gap: 14px;
+}
+
+.week-review-sessions {
+  color: var(--muted);
+  display: grid;
+  font-size: 0.8rem;
+  gap: 2px;
+}
+
+.week-review-edit {
+  align-items: end;
+  display: grid;
+  grid-template-columns: 90px 90px auto;
+  gap: 10px;
+}
+
+.week-review-edit .full-span {
+  grid-column: 1 / -1;
+}
+
+.week-review-edit .check-row {
+  align-self: center;
+}
+
+.week-review-saved {
+  align-self: center;
+  color: #1c6b46;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-right: auto;
+}
+
+@media (max-width: 640px) {
+  .week-review-edit {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 @media (max-width: 640px) {
   .week-review-row {
     grid-template-columns: 48px 1fr 1fr;

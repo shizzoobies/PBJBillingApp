@@ -1,4 +1,4 @@
-import { CheckCircle2, Eye, Lock, LockOpen, XCircle } from 'lucide-react'
+import { CheckCircle2, ChevronDown, ChevronRight, Eye, Lock, LockOpen, XCircle } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import type {
@@ -88,6 +88,7 @@ export function TimeApprovalsPage() {
         entries={data.timeEntries}
         onApprove={approveWeeklySubmission}
         onReject={rejectWeeklySubmission}
+        onUpdateEntry={updateTimeEntry}
       />
 
       <ApprovalQueue
@@ -134,6 +135,7 @@ function WeeklyReviewSection({
   entries,
   onApprove,
   onReject,
+  onUpdateEntry,
 }: {
   submissions: WeeklySubmission[]
   employees: Employee[]
@@ -142,6 +144,10 @@ function WeeklyReviewSection({
   entries: TimeEntry[]
   onApprove: (submissionId: string) => Promise<void>
   onReject: (submissionId: string, note: string) => Promise<void>
+  onUpdateEntry: (
+    entryId: string,
+    patch: { minutes?: number; description?: string; billable?: boolean },
+  ) => Promise<void>
 }) {
   const [pendingId, setPendingId] = useState<string | null>(null)
   // The submission whose entries are open in the final-review modal (null = none).
@@ -309,6 +315,7 @@ function WeeklyReviewSection({
           clients={clients}
           checklists={checklists}
           entries={entries}
+          onUpdateEntry={onUpdateEntry}
           onApprove={async () => {
             await handleApprove(reviewSubmission.id)
             setReviewSubmission(null)
@@ -330,6 +337,7 @@ function WeekReviewModal({
   clients,
   checklists,
   entries,
+  onUpdateEntry,
   onApprove,
   onClose,
 }: {
@@ -338,6 +346,10 @@ function WeekReviewModal({
   clients: Client[]
   checklists: Checklist[]
   entries: TimeEntry[]
+  onUpdateEntry: (
+    entryId: string,
+    patch: { minutes?: number; description?: string; billable?: boolean },
+  ) => Promise<void>
   onApprove: () => Promise<void>
   onClose: () => void
 }) {
@@ -405,27 +417,14 @@ function WeekReviewModal({
                 <span>Status</span>
               </div>
               {weekEntries.map((entry) => (
-                <div className="week-review-row" role="row" key={entry.id}>
-                  <span>{entry.date.slice(5)}</span>
-                  <span>
-                    {entry.isAdministrative ? '—' : clientName(clients, entry.clientId)}
-                  </span>
-                  <span>{taskLabelFor(entry)}</span>
-                  <span className="week-review-notes" title={entry.description}>
-                    {entry.description || '—'}
-                  </span>
-                  <span className="week-review-num">
-                    {formatHoursMinutes(entry.minutes)}
-                    {entry.billable ? '' : ' · int'}
-                  </span>
-                  <span className={`time-status-pill time-status-${entry.approvalStatus}`}>
-                    {entry.approvalStatus === 'approved'
-                      ? 'Approved'
-                      : entry.approvalStatus === 'rejected'
-                        ? 'Rejected'
-                        : 'Pending'}
-                  </span>
-                </div>
+                <WeekReviewEntryRow
+                  key={entry.id}
+                  entry={entry}
+                  clientLabel={entry.isAdministrative ? '—' : clientName(clients, entry.clientId)}
+                  taskLabel={taskLabelFor(entry)}
+                  employeeLabel={employeeName(employees, entry.employeeId)}
+                  onUpdateEntry={onUpdateEntry}
+                />
               ))}
             </div>
           )}
@@ -453,6 +452,186 @@ function WeekReviewModal({
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * One row in the weekly review modal. Click to expand it into the full entry —
+ * who/method/manual reason, the audit session times — plus a quick inline
+ * editor (time, notes, billable) so the owner can fix an entry during review.
+ */
+function WeekReviewEntryRow({
+  entry,
+  clientLabel,
+  taskLabel,
+  employeeLabel,
+  onUpdateEntry,
+}: {
+  entry: TimeEntry
+  clientLabel: string
+  taskLabel: string
+  employeeLabel: string
+  onUpdateEntry: (
+    entryId: string,
+    patch: { minutes?: number; description?: string; billable?: boolean },
+  ) => Promise<void>
+}) {
+  const [open, setOpen] = useState(false)
+  const [hours, setHours] = useState(String(Math.floor(entry.minutes / 60)))
+  const [mins, setMins] = useState(String(Math.round(entry.minutes % 60)))
+  const [description, setDescription] = useState(entry.description)
+  const [billable, setBillable] = useState(entry.billable)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [saved, setSaved] = useState(false)
+  const sessions = entry.sessions ?? []
+
+  const dirty = () => setSaved(false)
+
+  const handleSave = async () => {
+    const h = hours.trim() === '' ? 0 : Number(hours)
+    const m = mins.trim() === '' ? 0 : Number(mins)
+    if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || m < 0) {
+      setError('Enter valid hours and minutes.')
+      return
+    }
+    const totalMinutes = Math.round(h * 60 + m)
+    if (totalMinutes <= 0) {
+      setError('Time must be greater than zero.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      await onUpdateEntry(entry.id, { minutes: totalMinutes, description, billable })
+      setSaved(true)
+    } catch {
+      setError('Could not save — the month may be locked.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const statusLabel =
+    entry.approvalStatus === 'approved'
+      ? 'Approved'
+      : entry.approvalStatus === 'rejected'
+        ? 'Rejected'
+        : 'Pending'
+
+  return (
+    <div className={`week-review-entry${open ? ' is-open' : ''}`}>
+      <button
+        type="button"
+        className="week-review-row week-review-row-toggle"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <span className="week-review-caret">
+          {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          {entry.date.slice(5)}
+        </span>
+        <span>{clientLabel}</span>
+        <span>{taskLabel}</span>
+        <span className="week-review-notes">{entry.description || '—'}</span>
+        <span className="week-review-num">
+          {formatHoursMinutes(entry.minutes)}
+          {entry.billable ? '' : ' · int'}
+        </span>
+        <span className={`time-status-pill time-status-${entry.approvalStatus}`}>{statusLabel}</span>
+      </button>
+      {open ? (
+        <div className="week-review-detail">
+          <div className="week-review-detail-meta">
+            <span>
+              <strong>Logged by:</strong> {employeeLabel}
+            </span>
+            <span>
+              <strong>Method:</strong> {entry.entryMethod === 'manual' ? 'Manual' : 'Timer'}
+            </span>
+            {entry.manualReason ? (
+              <span>
+                <strong>Manual reason:</strong> {entry.manualReason}
+              </span>
+            ) : null}
+          </div>
+          {sessions.length > 0 ? (
+            <div className="week-review-sessions">
+              {sessions.map((session, index) => (
+                <small key={`${session.startAt}-${index}`}>
+                  {formatAuditStamp(session.startAt)} → {formatAuditStamp(session.endAt)} ·{' '}
+                  {formatHoursMinutes(sessionMinutes(session))}
+                </small>
+              ))}
+            </div>
+          ) : null}
+          <div className="week-review-edit">
+            <label className="field">
+              <span>Hours</span>
+              <input
+                className="input"
+                type="number"
+                min="0"
+                value={hours}
+                onChange={(event) => {
+                  setHours(event.target.value)
+                  dirty()
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>Minutes</span>
+              <input
+                className="input"
+                type="number"
+                min="0"
+                max="59"
+                value={mins}
+                onChange={(event) => {
+                  setMins(event.target.value)
+                  dirty()
+                }}
+              />
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={billable}
+                onChange={(event) => {
+                  setBillable(event.target.checked)
+                  dirty()
+                }}
+              />
+              <span>Billable</span>
+            </label>
+            <label className="field full-span">
+              <span>Notes</span>
+              <textarea
+                className="input"
+                rows={2}
+                value={description}
+                onChange={(event) => {
+                  setDescription(event.target.value)
+                  dirty()
+                }}
+              />
+            </label>
+          </div>
+          {error ? <p className="auth-error">{error}</p> : null}
+          <div className="button-row">
+            {saved ? <span className="week-review-saved">Saved ✓</span> : null}
+            <button
+              type="button"
+              className="primary-action"
+              disabled={busy}
+              onClick={() => void handleSave()}
+            >
+              {busy ? 'Saving…' : 'Save changes'}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
