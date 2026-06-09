@@ -88,7 +88,8 @@ export function TimeApprovalsPage() {
         entries={data.timeEntries}
         onApprove={approveWeeklySubmission}
         onReject={rejectWeeklySubmission}
-        onUpdateEntry={updateTimeEntry}
+        onApproveEntry={approveTimeEntry}
+        onRejectEntry={rejectTimeEntry}
       />
 
       <ApprovalQueue
@@ -135,7 +136,8 @@ function WeeklyReviewSection({
   entries,
   onApprove,
   onReject,
-  onUpdateEntry,
+  onApproveEntry,
+  onRejectEntry,
 }: {
   submissions: WeeklySubmission[]
   employees: Employee[]
@@ -144,10 +146,8 @@ function WeeklyReviewSection({
   entries: TimeEntry[]
   onApprove: (submissionId: string) => Promise<void>
   onReject: (submissionId: string, note: string) => Promise<void>
-  onUpdateEntry: (
-    entryId: string,
-    patch: { minutes?: number; description?: string; billable?: boolean },
-  ) => Promise<void>
+  onApproveEntry: (entryId: string) => Promise<void>
+  onRejectEntry: (entryId: string, note: string) => Promise<void>
 }) {
   const [pendingId, setPendingId] = useState<string | null>(null)
   // The submission whose entries are open in the final-review modal (null = none).
@@ -315,7 +315,8 @@ function WeeklyReviewSection({
           clients={clients}
           checklists={checklists}
           entries={entries}
-          onUpdateEntry={onUpdateEntry}
+          onApproveEntry={onApproveEntry}
+          onRejectEntry={onRejectEntry}
           onApprove={async () => {
             await handleApprove(reviewSubmission.id)
             setReviewSubmission(null)
@@ -337,7 +338,8 @@ function WeekReviewModal({
   clients,
   checklists,
   entries,
-  onUpdateEntry,
+  onApproveEntry,
+  onRejectEntry,
   onApprove,
   onClose,
 }: {
@@ -346,10 +348,8 @@ function WeekReviewModal({
   clients: Client[]
   checklists: Checklist[]
   entries: TimeEntry[]
-  onUpdateEntry: (
-    entryId: string,
-    patch: { minutes?: number; description?: string; billable?: boolean },
-  ) => Promise<void>
+  onApproveEntry: (entryId: string) => Promise<void>
+  onRejectEntry: (entryId: string, note: string) => Promise<void>
   onApprove: () => Promise<void>
   onClose: () => void
 }) {
@@ -423,7 +423,8 @@ function WeekReviewModal({
                   clientLabel={entry.isAdministrative ? '—' : clientName(clients, entry.clientId)}
                   taskLabel={taskLabelFor(entry)}
                   employeeLabel={employeeName(employees, entry.employeeId)}
-                  onUpdateEntry={onUpdateEntry}
+                  onApproveEntry={onApproveEntry}
+                  onRejectEntry={onRejectEntry}
                 />
               ))}
             </div>
@@ -466,48 +467,46 @@ function WeekReviewEntryRow({
   clientLabel,
   taskLabel,
   employeeLabel,
-  onUpdateEntry,
+  onApproveEntry,
+  onRejectEntry,
 }: {
   entry: TimeEntry
   clientLabel: string
   taskLabel: string
   employeeLabel: string
-  onUpdateEntry: (
-    entryId: string,
-    patch: { minutes?: number; description?: string; billable?: boolean },
-  ) => Promise<void>
+  onApproveEntry: (entryId: string) => Promise<void>
+  onRejectEntry: (entryId: string, note: string) => Promise<void>
 }) {
   const [open, setOpen] = useState(false)
-  const [hours, setHours] = useState(String(Math.floor(entry.minutes / 60)))
-  const [mins, setMins] = useState(String(Math.round(entry.minutes % 60)))
-  const [description, setDescription] = useState(entry.description)
-  const [billable, setBillable] = useState(entry.billable)
+  const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [saved, setSaved] = useState(false)
   const sessions = entry.sessions ?? []
 
-  const dirty = () => setSaved(false)
-
-  const handleSave = async () => {
-    const h = hours.trim() === '' ? 0 : Number(hours)
-    const m = mins.trim() === '' ? 0 : Number(mins)
-    if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || m < 0) {
-      setError('Enter valid hours and minutes.')
-      return
-    }
-    const totalMinutes = Math.round(h * 60 + m)
-    if (totalMinutes <= 0) {
-      setError('Time must be greater than zero.')
+  const handleReject = async () => {
+    const trimmed = note.trim()
+    if (!trimmed) {
+      setError('Add a note so the bookkeeper knows why it was sent back.')
       return
     }
     setBusy(true)
     setError('')
     try {
-      await onUpdateEntry(entry.id, { minutes: totalMinutes, description, billable })
-      setSaved(true)
+      await onRejectEntry(entry.id, trimmed)
     } catch {
-      setError('Could not save — the month may be locked.')
+      setError('Could not send back — the month may be locked.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleApprove = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      await onApproveEntry(entry.id)
+    } catch {
+      setError('Could not approve this entry.')
     } finally {
       setBusy(false)
     }
@@ -566,68 +565,49 @@ function WeekReviewEntryRow({
               ))}
             </div>
           ) : null}
-          <div className="week-review-edit">
-            <label className="field">
-              <span>Hours</span>
-              <input
-                className="input"
-                type="number"
-                min="0"
-                value={hours}
-                onChange={(event) => {
-                  setHours(event.target.value)
-                  dirty()
-                }}
-              />
-            </label>
-            <label className="field">
-              <span>Minutes</span>
-              <input
-                className="input"
-                type="number"
-                min="0"
-                max="59"
-                value={mins}
-                onChange={(event) => {
-                  setMins(event.target.value)
-                  dirty()
-                }}
-              />
-            </label>
-            <label className="check-row">
-              <input
-                type="checkbox"
-                checked={billable}
-                onChange={(event) => {
-                  setBillable(event.target.checked)
-                  dirty()
-                }}
-              />
-              <span>Billable</span>
-            </label>
-            <label className="field full-span">
-              <span>Notes</span>
-              <textarea
-                className="input"
-                rows={2}
-                value={description}
-                onChange={(event) => {
-                  setDescription(event.target.value)
-                  dirty()
-                }}
-              />
-            </label>
+          <div className="week-review-fullnote">
+            <strong>Notes:</strong> {entry.description || '— none —'} ·{' '}
+            <strong>{formatHoursMinutes(entry.minutes)}</strong>
+            {entry.billable ? ' billable' : ' internal'}
           </div>
+          {entry.approvalStatus === 'rejected' && entry.approvalNote ? (
+            <p className="week-review-existing-note">
+              Already sent back: “{entry.approvalNote}”
+            </p>
+          ) : null}
+          <label className="field full-span">
+            <span>Note to the bookkeeper (required to send back)</span>
+            <textarea
+              className="input"
+              rows={2}
+              value={note}
+              placeholder="Why this entry needs another look — e.g. wrong client, missing detail, time looks off"
+              onChange={(event) => {
+                setNote(event.target.value)
+                setError('')
+              }}
+            />
+          </label>
           {error ? <p className="auth-error">{error}</p> : null}
           <div className="button-row">
-            {saved ? <span className="week-review-saved">Saved ✓</span> : null}
             <button
               type="button"
-              className="primary-action"
+              className="secondary-action danger"
               disabled={busy}
-              onClick={() => void handleSave()}
+              onClick={() => void handleReject()}
             >
-              {busy ? 'Saving…' : 'Save changes'}
+              <XCircle size={14} />
+              Send back with note
+            </button>
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy}
+              onClick={() => void handleApprove()}
+              title="Approve just this entry"
+            >
+              <CheckCircle2 size={14} />
+              Approve this entry
             </button>
           </div>
         </div>

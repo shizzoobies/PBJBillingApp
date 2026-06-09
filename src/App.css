@@ -5938,33 +5938,17 @@ button.repeating-task-toggle-pill {
   gap: 2px;
 }
 
-.week-review-edit {
-  align-items: end;
-  display: grid;
-  grid-template-columns: 90px 90px auto;
-  gap: 10px;
+.week-review-fullnote {
+  font-size: 0.9rem;
 }
 
-.week-review-edit .full-span {
-  grid-column: 1 / -1;
-}
-
-.week-review-edit .check-row {
-  align-self: center;
-}
-
-.week-review-saved {
-  align-self: center;
-  color: #1c6b46;
+.week-review-existing-note {
+  background: rgba(200, 52, 52, 0.08);
+  border-radius: 6px;
+  color: #b3261e;
   font-size: 0.85rem;
-  font-weight: 600;
-  margin-right: auto;
-}
-
-@media (max-width: 640px) {
-  .week-review-edit {
-    grid-template-columns: 1fr 1fr;
-  }
+  margin: 0;
+  padding: 6px 10px;
 }
 
 @media (max-width: 640px) {
