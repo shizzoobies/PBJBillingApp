@@ -5802,6 +5802,19 @@ button.repeating-task-toggle-pill {
   width: 100%;
 }
 
+.waiting-for-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.waiting-for-row > span {
+  color: #8a6d1a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 /* The "waiting on" toggle button on the right of an item / sub-item. */
 .item-waiting-toggle {
   background: rgba(211, 155, 42, 0.07);

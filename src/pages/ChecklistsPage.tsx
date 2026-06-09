@@ -621,7 +621,7 @@ function ChecklistInProgressSection({
     checklistId: string,
     itemId: string,
     subItemId: string,
-    patch: { waiting?: boolean; waitingOn?: string | null },
+    patch: { waiting?: boolean; waitingOn?: string | null; waitingForChecklistId?: string | null },
   ) => void
   onToggleSubSubItem: (
     checklistId: string,
@@ -638,6 +638,7 @@ function ChecklistInProgressSection({
       assigneeId?: string | null
       waitingOn?: string | null
       waiting?: boolean
+      waitingForChecklistId?: string | null
     },
   ) => Promise<void>
   ownerMode: boolean
@@ -934,7 +935,7 @@ export function ChecklistCard({
     checklistId: string,
     itemId: string,
     subItemId: string,
-    patch: { waiting?: boolean; waitingOn?: string | null },
+    patch: { waiting?: boolean; waitingOn?: string | null; waitingForChecklistId?: string | null },
   ) => void
   onToggleSubSubItem: (
     checklistId: string,
@@ -951,6 +952,7 @@ export function ChecklistCard({
       assigneeId?: string | null
       waitingOn?: string | null
       waiting?: boolean
+      waitingForChecklistId?: string | null
     },
   ) => Promise<void>
   ownerMode: boolean
@@ -1234,12 +1236,18 @@ export function ChecklistCard({
 function WaitingEditor({
   note,
   employees,
+  availableTasks,
+  waitingForChecklistId,
   onSetNote,
+  onSetWaitingFor,
   onClear,
 }: {
   note: string
   employees: Employee[]
+  availableTasks: Array<{ id: string; title: string }>
+  waitingForChecklistId?: string
   onSetNote: (next: string | null) => void
+  onSetWaitingFor: (next: string | null) => void
   onClear: () => void
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -1298,6 +1306,26 @@ function WaitingEditor({
         defaultValue={note}
         onBlur={(event) => save(event.target.value)}
       />
+      {availableTasks.length > 0 ? (
+        <label className="waiting-for-row">
+          <span>Waiting for another task to finish? (we'll notify you when it's done)</span>
+          <select
+            className="waiting-person-select"
+            value={waitingForChecklistId ?? ''}
+            onChange={(event) => {
+              onSetWaitingFor(event.target.value || null)
+              flash()
+            }}
+          >
+            <option value="">— not waiting on a task —</option>
+            {availableTasks.map((task) => (
+              <option key={task.id} value={task.id}>
+                {task.title}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
     </div>
   )
 }
@@ -1339,7 +1367,7 @@ function DraggableTaskList({
   onUpdateSubItemWaiting: (
     itemId: string,
     subItemId: string,
-    patch: { waiting?: boolean; waitingOn?: string | null },
+    patch: { waiting?: boolean; waitingOn?: string | null; waitingForChecklistId?: string | null },
   ) => void
   onToggleSubSubItem: (itemId: string, subItemId: string, subSubItemId: string) => void
   onUpdateItem: (
@@ -1350,12 +1378,26 @@ function DraggableTaskList({
       assigneeId?: string | null
       waitingOn?: string | null
       waiting?: boolean
+      waitingForChecklistId?: string | null
     },
   ) => Promise<void>
   todayDateOnly: string
 }) {
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
+  // Other checklists for this client — candidates to "wait on" (notified when
+  // that one is completed). Pulled from context to avoid prop-drilling.
+  const { data: appData } = useAppContext()
+  const availableTasks = useMemo(() => {
+    const current = appData.checklists.find((entry) => entry.id === checklistId)
+    if (!current) return []
+    return appData.checklists
+      .filter(
+        (entry) =>
+          entry.id !== checklistId && !entry.deletedAt && entry.clientId === current.clientId,
+      )
+      .map((entry) => ({ id: entry.id, title: entry.title }))
+  }, [appData.checklists, checklistId])
 
   const handleDragStart = (event: DragEvent<HTMLDivElement>, itemId: string) => {
     if (!canReorder) return
@@ -1547,8 +1589,19 @@ function DraggableTaskList({
               <WaitingEditor
                 note={item.waitingOn ?? ''}
                 employees={employees}
+                availableTasks={availableTasks}
+                waitingForChecklistId={item.waitingForChecklistId}
                 onSetNote={(next) => void onUpdateItem(item.id, { waitingOn: next })}
-                onClear={() => void onUpdateItem(item.id, { waiting: false, waitingOn: null })}
+                onSetWaitingFor={(next) =>
+                  void onUpdateItem(item.id, { waitingForChecklistId: next })
+                }
+                onClear={() =>
+                  void onUpdateItem(item.id, {
+                    waiting: false,
+                    waitingOn: null,
+                    waitingForChecklistId: null,
+                  })
+                }
               />
             ) : null}
             {(hasSubItems || canEdit) ? (
@@ -1628,13 +1681,21 @@ function DraggableTaskList({
                         <WaitingEditor
                           note={sub.waitingOn ?? ''}
                           employees={employees}
+                          availableTasks={availableTasks}
+                          waitingForChecklistId={sub.waitingForChecklistId}
                           onSetNote={(next) =>
                             void onUpdateSubItemWaiting(item.id, sub.id, { waitingOn: next })
+                          }
+                          onSetWaitingFor={(next) =>
+                            void onUpdateSubItemWaiting(item.id, sub.id, {
+                              waitingForChecklistId: next,
+                            })
                           }
                           onClear={() =>
                             void onUpdateSubItemWaiting(item.id, sub.id, {
                               waiting: false,
                               waitingOn: null,
+                              waitingForChecklistId: null,
                             })
                           }
                         />

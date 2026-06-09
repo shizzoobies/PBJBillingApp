@@ -630,7 +630,7 @@ export async function updateChecklistSubItemRequest(
   checklistId: string,
   itemId: string,
   subItemId: string,
-  patch: { waiting?: boolean; waitingOn?: string | null },
+  patch: { waiting?: boolean; waitingOn?: string | null; waitingForChecklistId?: string | null },
 ) {
   const response = await apiFetch(
     `/api/checklists/${checklistId}/items/${itemId}/sub-items/${subItemId}`,
@@ -934,6 +934,7 @@ export async function updateChecklistItemRequest(
     assigneeId?: string | null
     waitingOn?: string | null
     waiting?: boolean
+    waitingForChecklistId?: string | null
   },
 ) {
   const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}`, {

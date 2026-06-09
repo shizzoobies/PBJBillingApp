@@ -291,13 +291,14 @@ export type AppContextValue = {
       assigneeId?: string | null
       waitingOn?: string | null
       waiting?: boolean
+      waitingForChecklistId?: string | null
     },
   ) => Promise<void>
   updateSubItemWaiting: (
     checklistId: string,
     itemId: string,
     subItemId: string,
-    patch: { waiting?: boolean; waitingOn?: string | null },
+    patch: { waiting?: boolean; waitingOn?: string | null; waitingForChecklistId?: string | null },
   ) => Promise<void>
   deleteChecklistItem: (checklistId: string, itemId: string) => Promise<void>
   /**

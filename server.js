@@ -2266,6 +2266,50 @@ const server = createServer(async (request, response) => {
         `${updatedChecklist.title}: ${toggledItem?.label ?? ''}`.trim(),
       )
 
+      // "Waiting on a task" notifications: if this toggle just COMPLETED the
+      // whole checklist, notify the assignee of any step elsewhere that was
+      // flagged waiting on it (so they know they're unblocked).
+      const justCompleted =
+        updatedChecklist.items.length > 0 && updatedChecklist.items.every((entry) => entry.done)
+      if (justCompleted) {
+        const allData = await appDataStore.read()
+        const notified = new Set()
+        for (const other of allData.checklists ?? []) {
+          if (other.id === updatedChecklist.id || other.deletedAt) continue
+          const fallbackAssignee = other.assigneeId
+          const waiters = []
+          for (const item of other.items ?? []) {
+            if (item.waiting && !item.done && item.waitingForChecklistId === updatedChecklist.id) {
+              waiters.push({ label: item.label, assigneeId: item.assigneeId || fallbackAssignee })
+            }
+            for (const sub of item.subItems ?? []) {
+              if (
+                sub.waiting &&
+                !sub.done &&
+                sub.waitingForChecklistId === updatedChecklist.id
+              ) {
+                waiters.push({
+                  label: `${item.label} › ${sub.title}`,
+                  assigneeId: item.assigneeId || fallbackAssignee,
+                })
+              }
+            }
+          }
+          for (const waiter of waiters) {
+            if (!waiter.assigneeId || waiter.assigneeId === session.user.id) continue
+            const key = `${waiter.assigneeId}:${other.id}:${waiter.label}`
+            if (notified.has(key)) continue
+            notified.add(key)
+            await notify(appDataStore, waiter.assigneeId, 'waiting_cleared', {
+              checklistId: other.id,
+              message: `Ready to continue: “${waiter.label}” was waiting on “${updatedChecklist.title}”, now done.`,
+              link: `/checklists?focus=${other.id}`,
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+        }
+      }
+
       // Phase 3 stage progression activity logging.
       if (toggleResult.spawned) {
         const fromIdx = (updatedChecklist.stageIndex ?? 0) + 1
@@ -2522,6 +2566,12 @@ const server = createServer(async (request, response) => {
         if ('waitingOn' in (payload ?? {})) {
           patch.waitingOn = payload.waitingOn === null ? '' : String(payload.waitingOn ?? '')
         }
+        if ('waitingForChecklistId' in (payload ?? {})) {
+          patch.waitingForChecklistId =
+            payload.waitingForChecklistId === null
+              ? ''
+              : String(payload.waitingForChecklistId ?? '')
+        }
         const updated = await appDataStore.updateChecklistSubItem(
           checklistId,
           itemId,
@@ -2708,6 +2758,14 @@ const server = createServer(async (request, response) => {
         if ('waiting' in payload) {
           // The "waiting on" toggle — flags the item as blocked/delayed.
           patch.waiting = Boolean(payload.waiting)
+        }
+
+        if ('waitingForChecklistId' in payload) {
+          // The checklist this step is waiting on (null/empty clears it).
+          patch.waitingForChecklistId =
+            payload.waitingForChecklistId === null
+              ? ''
+              : String(payload.waitingForChecklistId ?? '')
         }
 
         const updated = await appDataStore.updateChecklistItem(checklistId, itemId, patch)

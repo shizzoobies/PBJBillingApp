@@ -351,6 +351,8 @@ export type SubChecklistItem = {
   waiting?: boolean
   /** Free-text note explaining what this sub-step is waiting on. */
   waitingOn?: string
+  /** Optional id of a checklist this sub-step is waiting on (see ChecklistItem). */
+  waitingForChecklistId?: string
   /** One deeper level of nested sub-sub-items. Empty/undefined when flat. */
   subItems?: SubSubChecklistItem[]
 }
@@ -390,6 +392,12 @@ export type ChecklistItem = {
    * a step hasn't been completed.
    */
   waitingOn?: string
+  /**
+   * Optional id of another checklist (task) this step is waiting on. When that
+   * checklist is completed, this step's assignee is notified that they're no
+   * longer blocked. Only meaningful while `waiting` is true.
+   */
+  waitingForChecklistId?: string
   /** One level of nested sub-items. Empty/undefined when the item is flat. */
   subItems?: SubChecklistItem[]
 }
@@ -832,6 +840,7 @@ export type NotificationEvent =
   | 'case_completed'
   | 'invoice_ready'
   | 'time_entry_manual'
+  | 'waiting_cleared'
 
 export type NotificationEntry = {
   id: string

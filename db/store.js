@@ -558,6 +558,9 @@ function normalizeSubItems(raw, { withDone = true } = {}) {
         if (typeof sub.waitingOn === 'string' && sub.waitingOn.trim()) {
           base.waitingOn = sub.waitingOn.trim()
         }
+        if (typeof sub.waitingForChecklistId === 'string' && sub.waitingForChecklistId) {
+          base.waitingForChecklistId = sub.waitingForChecklistId
+        }
       }
       const subSubItems = normalizeSubSubItems(sub.subItems, { withDone })
       if (subSubItems.length > 0) {
@@ -1877,6 +1880,11 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_items add column if not exists waiting boolean not null default false`,
       )
+      // The checklist (task) this item is waiting on — when that one is
+      // completed, this item's assignee is notified. Additive + nullable.
+      await this.pool.query(
+        `alter table checklist_items add column if not exists waiting_for_checklist_id text`,
+      )
       // Sub-bullets: one level of nested sub-items, stored as a JSONB array
       // ({ id, title, done }[]) directly on the item row. Least-invasive
       // choice given the existing schema; mirrors the `payload jsonb` pattern.
@@ -2559,7 +2567,7 @@ export class AppDataStore {
             order by due_date asc, id asc
           `),
           this.pool.query(`
-            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, sub_items
+            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, sub_items
             from checklist_items
             order by checklist_id asc, sort_order asc, id asc
           `),
@@ -2643,6 +2651,9 @@ export class AppDataStore {
         // before the toggle existed) is treated as waiting.
         if (row.waiting || row.waiting_on) {
           item.waiting = true
+        }
+        if (row.waiting_for_checklist_id) {
+          item.waitingForChecklistId = row.waiting_for_checklist_id
         }
         if (subItems.length > 0) {
           item.subItems = subItems
@@ -3553,8 +3564,8 @@ export class AppDataStore {
               subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
             await client.query(
               `
-                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, sub_items, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, now())
+                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, sub_items, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, now())
               `,
               [
                 item.id,
@@ -3569,6 +3580,7 @@ export class AppDataStore {
                 item.assigneeId ?? null,
                 item.waitingOn ? String(item.waitingOn) : null,
                 Boolean(item.waiting),
+                item.waitingForChecklistId ? String(item.waitingForChecklistId) : null,
                 JSON.stringify(subItems),
               ],
             )
@@ -4714,8 +4726,8 @@ export class AppDataStore {
         for (const item of nextChecklist.items) {
           await client.query(
             `
-              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, sub_items, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, now())
+              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, sub_items, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, now())
             `,
             [
               item.id,
@@ -4730,6 +4742,7 @@ export class AppDataStore {
               item.assigneeId ?? null,
               item.waitingOn ? String(item.waitingOn) : null,
               Boolean(item.waiting),
+              item.waitingForChecklistId ? String(item.waitingForChecklistId) : null,
               JSON.stringify(Array.isArray(item.subItems) ? item.subItems : []),
             ],
           )
@@ -5111,7 +5124,7 @@ export class AppDataStore {
   }
 
   async updateChecklistItem(checklistId, itemId, patch) {
-    const { title, dueDate, assigneeId, waitingOn, waiting } = patch ?? {}
+    const { title, dueDate, assigneeId, waitingOn, waiting, waitingForChecklistId } = patch ?? {}
 
     if (this.pool) {
       const setClauses = []
@@ -5136,6 +5149,14 @@ export class AppDataStore {
       if (waiting !== undefined) {
         params.push(Boolean(waiting))
         setClauses.push(`waiting = $${params.length}`)
+      }
+      if (waitingForChecklistId !== undefined) {
+        params.push(
+          waitingForChecklistId === '' || waitingForChecklistId === null
+            ? null
+            : String(waitingForChecklistId),
+        )
+        setClauses.push(`waiting_for_checklist_id = $${params.length}`)
       }
 
       if (setClauses.length === 0) {
@@ -5197,6 +5218,13 @@ export class AppDataStore {
             next.waiting = true
           } else {
             delete next.waiting
+          }
+        }
+        if (waitingForChecklistId !== undefined) {
+          if (waitingForChecklistId === '' || waitingForChecklistId === null) {
+            delete next.waitingForChecklistId
+          } else {
+            next.waitingForChecklistId = String(waitingForChecklistId)
           }
         }
         return next
@@ -5591,7 +5619,7 @@ export class AppDataStore {
    * (empty/null clears it). Returns the updated checklist or null when not found.
    */
   async updateChecklistSubItem(checklistId, itemId, subItemId, patch) {
-    const { waiting, waitingOn } = patch ?? {}
+    const { waiting, waitingOn, waitingForChecklistId } = patch ?? {}
     const applyPatch = (sub) => {
       const next = { ...sub }
       if (waiting !== undefined) {
@@ -5601,6 +5629,13 @@ export class AppDataStore {
       if (waitingOn !== undefined) {
         if (waitingOn === '' || waitingOn === null) delete next.waitingOn
         else next.waitingOn = String(waitingOn)
+      }
+      if (waitingForChecklistId !== undefined) {
+        if (waitingForChecklistId === '' || waitingForChecklistId === null) {
+          delete next.waitingForChecklistId
+        } else {
+          next.waitingForChecklistId = String(waitingForChecklistId)
+        }
       }
       return next
     }

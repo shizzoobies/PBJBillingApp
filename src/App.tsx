@@ -1977,6 +1977,7 @@ function App() {
       assigneeId?: string | null
       waitingOn?: string | null
       waiting?: boolean
+      waitingForChecklistId?: string | null
     },
   ) => {
     if (previewActiveRef.current) return
@@ -2007,7 +2008,7 @@ function App() {
     checklistId: string,
     itemId: string,
     subItemId: string,
-    patch: { waiting?: boolean; waitingOn?: string | null },
+    patch: { waiting?: boolean; waitingOn?: string | null; waitingForChecklistId?: string | null },
   ) => {
     if (previewActiveRef.current) return
     try {
