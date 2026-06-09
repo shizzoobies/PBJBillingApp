@@ -2548,7 +2548,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                    approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                   is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label
+                   is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label, created_at
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -2847,6 +2847,7 @@ export class AppDataStore {
             ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
             : [],
           ...(row.task_label ? { taskLabel: row.task_label } : {}),
+          ...(row.created_at ? { createdAt: row.created_at.toISOString() } : {}),
         })),
         checklists: allChecklists.filter((checklist) => !checklist.deletedAt),
         recycledChecklists: allChecklists.filter((checklist) => Boolean(checklist.deletedAt)),
@@ -3329,8 +3330,8 @@ export class AppDataStore {
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                                         approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative,
-                                        started_at, ended_at, sessions, group_id, group_client_ids, task_label, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21, $22, now())
+                                        started_at, ended_at, sessions, group_id, group_client_ids, task_label, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21, $22, $23, now())
             `,
             [
               entry.id,
@@ -3358,6 +3359,9 @@ export class AppDataStore {
                 ? entry.groupClientIds.filter((id) => typeof id === 'string' && id)
                 : [],
               entry.taskId ? null : entry.taskLabel ? String(entry.taskLabel) : null,
+              // Preserve the original creation time across the wipe-and-rewrite
+              // so "most recently logged" ordering survives a bulk save.
+              entry.createdAt ? new Date(entry.createdAt) : nowIso(),
             ],
           )
         }
@@ -3633,13 +3637,14 @@ export class AppDataStore {
       approvalStatus: 'pending',
       entryMethod,
       manualReason,
+      createdAt: entry.createdAt ?? nowIso(),
     }
 
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label, created_at, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, now())
         `,
         [
           nextEntry.id,
@@ -3665,6 +3670,7 @@ export class AppDataStore {
             ? nextEntry.groupClientIds.filter((id) => typeof id === 'string' && id)
             : [],
           nextEntry.taskId ? null : nextEntry.taskLabel ? String(nextEntry.taskLabel) : null,
+          new Date(nextEntry.createdAt),
         ],
       )
 
@@ -3686,7 +3692,7 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                 approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label
+                is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label, created_at
          from time_entries where id = $1`,
         [entryId],
       )
@@ -3717,6 +3723,7 @@ export class AppDataStore {
           ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
           : [],
         ...(row.task_label ? { taskLabel: row.task_label } : {}),
+        ...(row.created_at ? { createdAt: row.created_at.toISOString() } : {}),
       }
     }
 

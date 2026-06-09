@@ -5837,6 +5837,67 @@ button.repeating-task-toggle-pill {
   margin-top: 0;
 }
 
+/* ---- Weekly final-review modal --------------------------------------- */
+.week-review-modal {
+  max-width: 760px;
+  width: 92vw;
+}
+
+.week-review-table {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  margin: 8px 0 14px;
+  overflow: hidden;
+}
+
+.week-review-row {
+  align-items: center;
+  display: grid;
+  grid-template-columns: 56px 1.2fr 1.2fr 2fr 80px 84px;
+  gap: 10px;
+  padding: 7px 12px;
+}
+
+.week-review-row + .week-review-row {
+  border-top: 1px solid var(--line);
+}
+
+.week-review-head {
+  background: var(--surface-2, rgba(19, 52, 74, 0.05));
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.week-review-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.week-review-notes {
+  color: var(--muted);
+}
+
+.week-review-num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+@media (max-width: 640px) {
+  .week-review-row {
+    grid-template-columns: 48px 1fr 1fr;
+  }
+  .week-review-row span:nth-child(4),
+  .week-review-row span:nth-child(5),
+  .week-review-row span:nth-child(6) {
+    display: none;
+  }
+}
+
 /* ---- Delayed page (owner) -------------------------------------------- */
 .delayed-total {
   align-items: center;

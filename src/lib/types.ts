@@ -245,6 +245,12 @@ export type TimeEntry = {
    * resulting per-client entries carry `groupId` instead, never this field.
    */
   groupClientIds?: string[]
+  /**
+   * ISO timestamp the entry was first logged/submitted (created). Preserved
+   * across saves so the time page can show the most-recently-logged entry at
+   * the top ("what I did last"). Absent only on very old legacy rows.
+   */
+  createdAt?: string
   /** Approval lifecycle. New entries start `pending`; legacy data is `approved`. */
   approvalStatus: TimeApprovalStatus
   /** Rejection reason — set when status is `rejected`. */

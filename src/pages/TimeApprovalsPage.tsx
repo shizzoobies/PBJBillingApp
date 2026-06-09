@@ -1,4 +1,4 @@
-import { CheckCircle2, Lock, LockOpen, XCircle } from 'lucide-react'
+import { CheckCircle2, Eye, Lock, LockOpen, XCircle } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import type {
@@ -83,6 +83,8 @@ export function TimeApprovalsPage() {
       <WeeklyReviewSection
         submissions={data.weeklySubmissions ?? []}
         employees={data.employees}
+        clients={data.clients}
+        checklists={data.checklists}
         entries={data.timeEntries}
         onApprove={approveWeeklySubmission}
         onReject={rejectWeeklySubmission}
@@ -127,17 +129,23 @@ export function TimeApprovalsPage() {
 function WeeklyReviewSection({
   submissions,
   employees,
+  clients,
+  checklists,
   entries,
   onApprove,
   onReject,
 }: {
   submissions: WeeklySubmission[]
   employees: Employee[]
+  clients: Client[]
+  checklists: Checklist[]
   entries: TimeEntry[]
   onApprove: (submissionId: string) => Promise<void>
   onReject: (submissionId: string, note: string) => Promise<void>
 }) {
   const [pendingId, setPendingId] = useState<string | null>(null)
+  // The submission whose entries are open in the final-review modal (null = none).
+  const [reviewSubmission, setReviewSubmission] = useState<WeeklySubmission | null>(null)
   // Map<submissionId, draftNote> — local state for each pending row's
   // rejection-note textarea. Cleared on approve/reject success.
   const [notes, setNotes] = useState<Record<string, string>>({})
@@ -250,6 +258,16 @@ function WeeklyReviewSection({
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button
                       type="button"
+                      className="secondary-action"
+                      disabled={inFlight}
+                      onClick={() => setReviewSubmission(submission)}
+                      title="Open every entry in this week for one last look before approving"
+                    >
+                      <Eye size={14} />
+                      Review entries
+                    </button>
+                    <button
+                      type="button"
                       className="primary-action"
                       disabled={inFlight}
                       onClick={() => void handleApprove(submission.id)}
@@ -284,7 +302,158 @@ function WeeklyReviewSection({
           })}
         </ul>
       )}
+      {reviewSubmission ? (
+        <WeekReviewModal
+          submission={reviewSubmission}
+          employees={employees}
+          clients={clients}
+          checklists={checklists}
+          entries={entries}
+          onApprove={async () => {
+            await handleApprove(reviewSubmission.id)
+            setReviewSubmission(null)
+          }}
+          onClose={() => setReviewSubmission(null)}
+        />
+      ) : null}
     </section>
+  )
+}
+
+/**
+ * Final-review modal: lists every time entry in a submitted week so an owner
+ * can do one last look before sealing it. Approve right from here.
+ */
+function WeekReviewModal({
+  submission,
+  employees,
+  clients,
+  checklists,
+  entries,
+  onApprove,
+  onClose,
+}: {
+  submission: WeeklySubmission
+  employees: Employee[]
+  clients: Client[]
+  checklists: Checklist[]
+  entries: TimeEntry[]
+  onApprove: () => Promise<void>
+  onClose: () => void
+}) {
+  const [approving, setApproving] = useState(false)
+  const { start, end } = weekRangeOf(submission.weekStart)
+  const weekEntries = useMemo(
+    () =>
+      entries
+        .filter(
+          (entry) =>
+            entry.employeeId === submission.userId &&
+            entry.date >= start &&
+            entry.date <= end,
+        )
+        .sort((a, b) => a.date.localeCompare(b.date)),
+    [entries, submission.userId, start, end],
+  )
+  const totalMinutes = weekEntries.reduce((sum, entry) => sum + entry.minutes, 0)
+  const billableMinutes = weekEntries
+    .filter((entry) => entry.billable)
+    .reduce((sum, entry) => sum + entry.minutes, 0)
+
+  const taskLabelFor = (entry: TimeEntry) => {
+    if (entry.isAdministrative) return 'Administrative'
+    if (entry.taskId) {
+      return checklists.find((checklist) => checklist.id === entry.taskId)?.title ?? '—'
+    }
+    return entry.taskLabel ?? '—'
+  }
+
+  return (
+    <div
+      className="modal-overlay"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div
+        className="modal-panel week-review-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Weekly time review"
+      >
+        <div className="modal-body">
+          <h2 className="modal-title">
+            {employeeName(employees, submission.userId)} — {getWeekLabel(submission.weekStart)}
+          </h2>
+          <p className="modal-intro">
+            {weekEntries.length} {weekEntries.length === 1 ? 'entry' : 'entries'} ·{' '}
+            {formatHoursMinutes(totalMinutes)} logged · {formatHoursMinutes(billableMinutes)}{' '}
+            billable
+          </p>
+
+          {weekEntries.length === 0 ? (
+            <p className="checklist-empty-hint">No entries in this week.</p>
+          ) : (
+            <div className="week-review-table" role="table">
+              <div className="week-review-row week-review-head" role="row">
+                <span>Date</span>
+                <span>Client</span>
+                <span>Task</span>
+                <span>Notes</span>
+                <span className="week-review-num">Time</span>
+                <span>Status</span>
+              </div>
+              {weekEntries.map((entry) => (
+                <div className="week-review-row" role="row" key={entry.id}>
+                  <span>{entry.date.slice(5)}</span>
+                  <span>
+                    {entry.isAdministrative ? '—' : clientName(clients, entry.clientId)}
+                  </span>
+                  <span>{taskLabelFor(entry)}</span>
+                  <span className="week-review-notes" title={entry.description}>
+                    {entry.description || '—'}
+                  </span>
+                  <span className="week-review-num">
+                    {formatHoursMinutes(entry.minutes)}
+                    {entry.billable ? '' : ' · int'}
+                  </span>
+                  <span className={`time-status-pill time-status-${entry.approvalStatus}`}>
+                    {entry.approvalStatus === 'approved'
+                      ? 'Approved'
+                      : entry.approvalStatus === 'rejected'
+                        ? 'Rejected'
+                        : 'Pending'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="button-row">
+            <button type="button" className="secondary-action" onClick={onClose}>
+              Close
+            </button>
+            <button
+              type="button"
+              className="primary-action"
+              disabled={approving}
+              onClick={async () => {
+                setApproving(true)
+                try {
+                  await onApprove()
+                } finally {
+                  setApproving(false)
+                }
+              }}
+            >
+              <CheckCircle2 size={16} />
+              {approving ? 'Approving…' : 'Approve week'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
 

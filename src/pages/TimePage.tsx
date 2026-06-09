@@ -13,6 +13,7 @@ import { useAppContext } from '../AppContext'
 import { ApiError } from '../lib/types'
 import type {
   Checklist,
+  ChecklistTemplate,
   Client,
   Employee,
   Role,
@@ -112,9 +113,22 @@ export function TimePage() {
     splitGroupEntry,
     updateTimeEntry,
     deleteTimeEntry,
+    generateChecklistFromTemplate,
     previewMode,
     submitWeeklyTimesheet,
   } = useAppContext()
+
+  // Pick a recurring template in the timer's task list to "get ahead": this
+  // generates that template's instance now and returns its checklist id so the
+  // time attaches to a real task.
+  const generateInstanceFromTemplate = async (templateId: string): Promise<string | null> => {
+    try {
+      const created = await generateChecklistFromTemplate(templateId)
+      return created?.id ?? null
+    } catch {
+      return null
+    }
+  }
 
   // The viewed period is the current month. A bookkeeper whose timesheet is
   // locked for it loses add/edit/delete on this page.
@@ -189,6 +203,8 @@ export function TimePage() {
           activeEmployeeId={activeEmployeeId}
           clients={timeTrackingClients}
           checklists={data.checklists}
+          templates={data.checklistTemplates}
+          onGenerateFromTemplate={generateInstanceFromTemplate}
           employees={data.employees}
           onStartTimer={startTimer}
           onStopTimer={stopTimer}
@@ -221,6 +237,8 @@ export function TimePage() {
           activeEmployeeId={activeEmployeeId}
           clients={timeTrackingClients}
           checklists={data.checklists}
+          templates={data.checklistTemplates}
+          onGenerateFromTemplate={generateInstanceFromTemplate}
           employees={data.employees}
           role={role}
           onLog={logTime}
@@ -454,6 +472,8 @@ function TimeCapture({
   activeEmployeeId,
   clients,
   checklists,
+  templates,
+  onGenerateFromTemplate,
   employees,
   onStartTimer,
   onStopTimer,
@@ -469,6 +489,8 @@ function TimeCapture({
   activeEmployeeId: string
   clients: Client[]
   checklists: Checklist[]
+  templates: ChecklistTemplate[]
+  onGenerateFromTemplate: (templateId: string) => Promise<string | null>
   employees: Employee[]
   onStartTimer: (timer: TimerState) => void
   onStopTimer: (descriptionOverride?: string) => Promise<void>
@@ -523,6 +545,23 @@ function TimeCapture({
     () => eligibleChecklistsFor(checklists, taskClientId, effectiveEmployeeId, role),
     [checklists, taskClientId, effectiveEmployeeId, role],
   )
+
+  // Recurring tasks for this client that don't have an open instance yet — so
+  // you can "get ahead" and pick one before it's generated. Picking it creates
+  // the instance now.
+  const upcomingTemplates = useMemo(() => {
+    if (!taskClientId) return []
+    const haveInstance = new Set(
+      eligibleTasks.map((task) => task.templateId).filter(Boolean) as string[],
+    )
+    return templates.filter(
+      (template) =>
+        template.clientId === taskClientId &&
+        template.active &&
+        !template.isStandard &&
+        !haveInstance.has(template.id),
+    )
+  }, [templates, taskClientId, eligibleTasks])
 
   // Reset taskId if the previously-chosen task isn't valid for the new client.
   const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
@@ -734,11 +773,21 @@ function TimeCapture({
             </label>
             <label className="field">
               <span>Task</span>
-              {eligibleTasks.length > 0 ? (
+              {eligibleTasks.length > 0 || upcomingTemplates.length > 0 ? (
                 <select
                   className="input"
-                  onChange={(event) => {
+                  onChange={async (event) => {
                     const value = event.target.value
+                    // Picking an upcoming recurring task generates its instance
+                    // now, then attaches the time to that real checklist.
+                    if (value.startsWith('template:')) {
+                      const newId = await onGenerateFromTemplate(value.slice('template:'.length))
+                      if (newId) {
+                        if (isRunning) onUpdateTimer({ taskId: newId })
+                        else setTaskId(newId)
+                      }
+                      return
+                    }
                     if (isRunning) onUpdateTimer({ taskId: value || null })
                     else setTaskId(value)
                   }}
@@ -751,6 +800,15 @@ function TimeCapture({
                       {task.title}
                     </option>
                   ))}
+                  {upcomingTemplates.length > 0 ? (
+                    <optgroup label="Get ahead — start a recurring task">
+                      {upcomingTemplates.map((template) => (
+                        <option key={template.id} value={`template:${template.id}`}>
+                          {template.title} (upcoming)
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
                 </select>
               ) : (
                 <input
@@ -843,6 +901,8 @@ function ManualEntryModal({
   activeEmployeeId,
   clients,
   checklists,
+  templates,
+  onGenerateFromTemplate,
   employees,
   role,
   onLog,
@@ -851,6 +911,8 @@ function ManualEntryModal({
   activeEmployeeId: string
   clients: Client[]
   checklists: Checklist[]
+  templates: ChecklistTemplate[]
+  onGenerateFromTemplate: (templateId: string) => Promise<string | null>
   employees: Employee[]
   role: Role
   onLog: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
@@ -909,6 +971,19 @@ function ManualEntryModal({
     () => eligibleChecklistsFor(checklists, effectiveClientId, effectiveEmployeeId, role),
     [checklists, effectiveClientId, effectiveEmployeeId, role],
   )
+  const upcomingTemplates = useMemo(() => {
+    if (!effectiveClientId) return []
+    const haveInstance = new Set(
+      eligibleTasks.map((task) => task.templateId).filter(Boolean) as string[],
+    )
+    return templates.filter(
+      (template) =>
+        template.clientId === effectiveClientId &&
+        template.active &&
+        !template.isStandard &&
+        !haveInstance.has(template.id),
+    )
+  }, [templates, effectiveClientId, eligibleTasks])
   const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
 
   // Group billing (owner-only): track ONE block against multiple clients, then
@@ -1190,11 +1265,21 @@ function ManualEntryModal({
                   </label>
                   <label className="field">
                     <span>Task</span>
-                    {eligibleTasks.length > 0 ? (
+                    {eligibleTasks.length > 0 || upcomingTemplates.length > 0 ? (
                       <select
                         className="input"
                         value={effectiveTaskId}
-                        onChange={(event) => setTaskId(event.target.value)}
+                        onChange={async (event) => {
+                          const value = event.target.value
+                          if (value.startsWith('template:')) {
+                            const newId = await onGenerateFromTemplate(
+                              value.slice('template:'.length),
+                            )
+                            if (newId) setTaskId(newId)
+                            return
+                          }
+                          setTaskId(value)
+                        }}
                       >
                         <option value="">(none / general)</option>
                         {eligibleTasks.map((task) => (
@@ -1202,6 +1287,15 @@ function ManualEntryModal({
                             {task.title}
                           </option>
                         ))}
+                        {upcomingTemplates.length > 0 ? (
+                          <optgroup label="Get ahead — start a recurring task">
+                            {upcomingTemplates.map((template) => (
+                              <option key={template.id} value={`template:${template.id}`}>
+                                {template.title} (upcoming)
+                              </option>
+                            ))}
+                          </optgroup>
+                        ) : null}
                       </select>
                     ) : (
                       <input
@@ -1455,14 +1549,19 @@ function RecentTimeEntries({
   onResume: (entry: TimeEntry) => void
   onSplitGroup: (entry: TimeEntry) => void
 }) {
-  // Most-recently-worked first, so "what I just did" sits at the top and is
-  // easy to find / edit. Falls back endAt -> startAt -> date.
-  const recencyKey = (entry: TimeEntry) => {
+  // Most-recently-LOGGED first, so "what I just submitted" sits at the top and
+  // is easy to find / edit. Prefer the creation time (when it was logged);
+  // fall back to the worked time for legacy rows without one.
+  const workedKey = (entry: TimeEntry) => {
     const sessions = entry.sessions ?? []
     const lastSession = sessions.length > 0 ? sessions[sessions.length - 1] : null
     return lastSession?.endAt ?? entry.endAt ?? entry.startAt ?? `${entry.date}T00:00:00`
   }
-  const sortedEntries = [...entries].sort((a, b) => recencyKey(b).localeCompare(recencyKey(a)))
+  const recencyKey = (entry: TimeEntry) => entry.createdAt ?? workedKey(entry)
+  const sortedEntries = [...entries].sort((a, b) => {
+    const byCreated = recencyKey(b).localeCompare(recencyKey(a))
+    return byCreated !== 0 ? byCreated : workedKey(b).localeCompare(workedKey(a))
+  })
   return (
     <section className="panel">
       <div className="section-heading">
@@ -1859,6 +1958,17 @@ function TimeEntryRow({
           {error ? <small className="auth-error">{error}</small> : null}
         </div>
         <div className="entry-meta">
+          {canEdit ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy || locked}
+              onClick={() => openEditor(false)}
+              title="Edit the tracked time / notes before splitting"
+            >
+              Edit
+            </button>
+          ) : null}
           {isOwner ? (
             <button
               type="button"
