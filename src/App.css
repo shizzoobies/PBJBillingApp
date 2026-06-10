@@ -355,6 +355,12 @@ html {
   font-size: 13px;
   padding: 8px 16px;
   justify-self: center;
+  transition: background var(--ease), border-color var(--ease);
+}
+
+.auth-secondary:hover {
+  background: var(--soft);
+  border-color: var(--line-strong);
 }
 
 .auth-secondary:hover {
@@ -462,6 +468,12 @@ html {
   color: var(--ink);
   min-height: 40px;
   padding: 0 14px;
+  transition: background var(--ease), border-color var(--ease);
+}
+
+.logout-button:hover {
+  background: var(--soft);
+  border-color: var(--line-strong);
 }
 
 /* ---- Phase 5: notification bell + dropdown ---- */
@@ -1390,14 +1402,19 @@ textarea.input {
   flex-wrap: wrap;
 }
 
+/* Inline per-step controls rest in a quiet, low-contrast state so the
+   step text stays the loudest thing in the row; they sharpen to full
+   contrast the moment you hover or focus them. min-height pins the
+   compact size against the 34px global control baseline. */
 .item-date-input {
   font-size: 12px;
   padding: 2px 6px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: var(--surface);
-  color: var(--ink);
+  background: transparent;
+  color: var(--muted);
   height: 26px;
+  min-height: 26px;
   min-width: 140px;
   font-family: inherit;
 }
@@ -1409,15 +1426,25 @@ textarea.input {
 
 .item-assignee-select {
   font-size: 12px;
-  padding: 2px 6px;
-  border: 1px solid var(--line-strong);
+  padding: 2px 24px 2px 6px;
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: var(--surface);
-  color: var(--ink);
+  background-color: transparent;
+  color: var(--muted);
   height: 26px;
+  min-height: 26px;
   min-width: 120px;
   max-width: 160px;
   font-family: inherit;
+}
+
+.item-date-input:hover,
+.item-date-input:focus-visible,
+.item-assignee-select:hover,
+.item-assignee-select:focus-visible {
+  background-color: var(--surface);
+  border-color: var(--line-strong);
+  color: var(--ink);
 }
 
 .item-delete-btn {
@@ -1425,7 +1452,7 @@ textarea.input {
   line-height: 1;
   padding: 0 7px;
   height: 26px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: 4px;
   background: transparent;
   color: var(--muted);
@@ -2385,6 +2412,7 @@ td strong {
   display: inline-flex;
   height: 34px;
   justify-content: center;
+  transition: border-color var(--ease), color var(--ease);
   width: 34px;
 }
 
@@ -2576,10 +2604,19 @@ td strong {
   border-radius: 6px;
   height: 28px;
   position: relative;
+  transition: border-color var(--ease), background var(--ease);
+}
+
+/* Rows open the underlying checklist — light up the track on hover so
+   the whole row reads as clickable, not just the bar. */
+.gantt-row-clickable:hover .gantt-track {
+  background: color-mix(in srgb, var(--berry) 5%, var(--soft));
+  border-color: color-mix(in srgb, var(--berry) 35%, var(--line));
 }
 
 .gantt-bar {
   border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
   color: #fff;
   font-size: 11px;
   font-weight: 760;
@@ -4482,6 +4519,10 @@ td strong {
   font-size: 13px;
   font-weight: 600;
 }
+
+.dashboard-section-more:hover {
+  text-decoration: underline;
+}
 .dashboard-queue {
   display: flex;
   flex-direction: column;
@@ -5024,17 +5065,18 @@ td strong {
 .productivity-heatmap-row {
   align-items: center;
   display: grid;
-  gap: 3px;
-  grid-template-columns: 140px repeat(var(--cols, auto-fill), minmax(18px, 1fr));
+  gap: 4px;
+  grid-template-columns: 140px repeat(var(--cols, auto-fill), minmax(24px, 1fr));
 }
 
 .productivity-heatmap-header {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 10.5px;
 }
 
 .productivity-heatmap-tick {
   overflow: hidden;
+  text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5046,10 +5088,17 @@ td strong {
 
 .productivity-heatmap-cell {
   background: var(--soft);
-  border-radius: 3px;
+  border-radius: 4px;
   display: block;
-  height: 22px;
-  min-width: 18px;
+  height: 26px;
+  min-width: 24px;
+}
+
+/* The cell's title attribute carries the exact numbers — give pointer
+   users a visible cue that the cells respond to hover. */
+.productivity-heatmap-cell:hover {
+  outline: 1px solid var(--berry);
+  outline-offset: -1px;
 }
 
 @media (max-width: 760px) {
