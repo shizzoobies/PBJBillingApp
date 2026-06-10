@@ -5,9 +5,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import { AppDataStore } from './db/store.js'
-import { runAssistantChat } from './lib/assistant.js'
+import { executeAssistantAction, runAssistantChat } from './lib/assistant.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
-import { notify, sendFeatureRequestEmail, sendLoginLinkEmail } from './lib/notify.js'
+import { notify, sendDigestEmail, sendFeatureRequestEmail, sendLoginLinkEmail } from './lib/notify.js'
 import { normalizeTimeEntryMethod, normalizeWorkSessions } from './lib/time-entry.js'
 import {
   generateBackupCodes,
@@ -677,21 +677,127 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // Stream the reply as Server-Sent Events over this POST response: the
+      // client reads the body incrementally (delta events) and applies the
+      // final structured payload (done event). All auth/CSRF/rate-limit
+      // checks above run before we commit to a 200 stream head; after that,
+      // failures can only be reported in-band as an `error` event.
+      response.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      })
+      const sendEvent = (obj) => {
+        try {
+          response.write(`data: ${JSON.stringify(obj)}\n\n`)
+        } catch {
+          // Client hung up mid-stream — nothing more to do.
+        }
+      }
+
       try {
-        const result = await runAssistantChat(history, {
-          getSnapshot: async () => buildWorkspaceSnapshot(await appDataStore.read()),
-          getUsagePatterns: async () => detectUsagePatterns(await appDataStore.read()),
+        const result = await runAssistantChat(
+          history,
+          {
+            getSnapshot: async () => buildWorkspaceSnapshot(await appDataStore.read()),
+            getUsagePatterns: async () => detectUsagePatterns(await appDataStore.read()),
+          },
+          (delta) => sendEvent({ type: 'delta', text: delta }),
+        )
+        sendEvent({ type: 'done', ...result })
+        response.end()
+        // Persist only the new turn (the client already holds prior history).
+        try {
+          const turns = [history[history.length - 1]]
+          if (result.reply) turns.push({ role: 'assistant', text: result.reply })
+          await appDataStore.appendAssistantMessages(session.user.id, turns)
+        } catch (persistError) {
+          console.error('[assistant] persist failed:', persistError?.message || persistError)
+        }
+      } catch (error) {
+        const configMissing = error?.statusCode === 503
+        console.error('[assistant] chat failed:', error?.message || error)
+        sendEvent({
+          type: 'error',
+          error: configMissing
+            ? 'The assistant is not configured yet (missing ANTHROPIC_API_KEY).'
+            : 'The assistant had trouble answering — try again in a moment.',
         })
+        response.end()
+      }
+      return
+    }
+
+    // Persisted conversation (Phase 3): load saved turns on panel open, or
+    // clear the whole thread. Owner-only, same guards as the chat endpoint.
+    if (normalizedPath === '/api/assistant/history' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const messages = await appDataStore.getAssistantMessages(session.user.id, 100)
+      sendJson(response, 200, { messages })
+      return
+    }
+
+    if (normalizedPath === '/api/assistant/history' && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      await appDataStore.clearAssistantMessages(session.user.id)
+      sendJson(response, 200, { ok: true })
+      return
+    }
+
+    // Action confirm (Phase 3): runs a workspace change the assistant
+    // proposed, only after the owner clicked Run on the confirmation card.
+    // The model can only ever PROPOSE — execution lives here behind the
+    // owner gate + CSRF + an explicit server-side tool allowlist.
+    if (normalizedPath === '/api/assistant/action' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const ALLOWED_ACTIONS = new Set(['make_template_recurring', 'assign_client', 'generate_tasks_now'])
+      const body = await readJsonBody(request)
+      const tool = String(body?.tool ?? '')
+      const params = body?.params && typeof body.params === 'object' ? body.params : {}
+      if (!ALLOWED_ACTIONS.has(tool)) {
+        sendJson(response, 400, { error: 'Unknown action' })
+        return
+      }
+      try {
+        const data = await appDataStore.read()
+        const result = await executeAssistantAction(tool, params, appDataStore, data)
+        if (result.ok) {
+          await appDataStore.recordActivity(session.user.id, `assistant_action:${tool}`, result.message)
+          broadcastDataChanged()
+        }
         sendJson(response, 200, result)
       } catch (error) {
-        const status = error?.statusCode === 503 ? 503 : 502
-        console.error('[assistant] chat failed:', error?.message || error)
-        sendJson(response, status, {
-          error:
-            status === 503
-              ? 'The assistant is not configured yet (missing ANTHROPIC_API_KEY).'
-              : 'The assistant had trouble answering — try again in a moment.',
-        })
+        console.error('[assistant] action failed:', error?.message || error)
+        sendJson(response, 502, { ok: false, message: 'That action could not be completed.' })
       }
       return
     }
@@ -4134,3 +4240,47 @@ await appDataStore.applyOwnerBootstrapPassword()
 server.listen(port, '0.0.0.0', () => {
   console.log(`PBJ Strategic Accounting app listening on ${port}`)
 })
+
+// ---- Weekly digest scheduler (assistant Phase 3) ----
+// Deterministic (no model call): on the configured weekday, email the owner
+// the top automation opportunities from detectUsagePatterns, once per ISO
+// week. A per-user marker (assistant_digest_state) prevents a second send if
+// the process restarts. No-op unless Resend is configured; opt out with
+// ASSISTANT_DIGEST=off. The weekday is ASSISTANT_DIGEST_DOW (0=Sun..6=Sat,
+// default 1=Mon).
+const DIGEST_WEEKDAY = Number.isFinite(Number(process.env.ASSISTANT_DIGEST_DOW))
+  ? Math.max(0, Math.min(6, Number(process.env.ASSISTANT_DIGEST_DOW)))
+  : 1
+async function maybeSendWeeklyDigest() {
+  try {
+    if (String(process.env.ASSISTANT_DIGEST || '').toLowerCase() === 'off') return
+    if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) return
+    const now = new Date()
+    if (now.getDay() !== DIGEST_WEEKDAY) return
+    const weekKey = weekStartOf(now.toISOString().slice(0, 10))
+    const members = await appDataStore.getTeamMembers()
+    const owner = members.find((member) => member.role === 'owner')
+    if (!owner?.email) return
+    if ((await appDataStore.getLastDigestWeek(owner.id)) === weekKey) return
+    const suggestions = detectUsagePatterns(await appDataStore.read()).slice(0, 3)
+    if (suggestions.length === 0) return // retry next tick; only mark once actually sent
+    const firm = await appDataStore.getFirmSettings().catch(() => null)
+    const sent = await sendDigestEmail({
+      to: owner.email,
+      firmName: firm?.firmName,
+      suggestions,
+      appBaseUrl: process.env.APP_PUBLIC_URL,
+    })
+    if (sent) {
+      await appDataStore.markDigestSent(owner.id, weekKey)
+      console.log(`[assistant] weekly digest sent to owner (${suggestions.length} items)`)
+    }
+  } catch (error) {
+    console.error('[assistant] weekly digest error:', error?.message || error)
+  }
+}
+// Check hourly; the per-week marker keeps it to one send. First check shortly
+// after boot so a restart on digest day still delivers.
+const digestTimer = setInterval(maybeSendWeeklyDigest, 60 * 60 * 1000)
+digestTimer.unref?.()
+setTimeout(() => void maybeSendWeeklyDigest(), 30 * 1000).unref?.()

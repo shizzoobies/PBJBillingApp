@@ -6808,6 +6808,46 @@ button.repeating-task-toggle-pill {
   color: var(--ink);
 }
 
+.assistant-panel-actions {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.assistant-panel-clear {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  transition: border-color var(--ease), color var(--ease);
+  width: 28px;
+}
+
+.assistant-panel-clear:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.assistant-panel-clear:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Action proposals (assistant doing things) — berry tint sets them apart
+   from the gold feature-request drafts. */
+.assistant-action-card {
+  background: color-mix(in srgb, var(--berry) 6%, var(--surface));
+  border-color: color-mix(in srgb, var(--berry) 32%, var(--line));
+}
+
+.assistant-action-card .assistant-draft-kicker {
+  color: var(--plum);
+}
+
 .assistant-thread {
   display: flex;
   flex-direction: column;

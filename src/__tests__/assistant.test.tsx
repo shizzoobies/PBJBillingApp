@@ -10,19 +10,28 @@ vi.mock('../lib/api', () => ({
   assistantFeatureRequestSend: vi.fn(),
   assistantInsightsRequest: vi.fn(),
   assistantDismissSuggestion: vi.fn(),
+  assistantHistoryRequest: vi.fn(),
+  assistantClearHistory: vi.fn(),
+  assistantRunAction: vi.fn(),
 }))
 
 import {
   assistantChatRequest,
+  assistantClearHistory,
   assistantDismissSuggestion,
   assistantFeatureRequestSend,
+  assistantHistoryRequest,
   assistantInsightsRequest,
+  assistantRunAction,
 } from '../lib/api'
 
 const mockedChat = vi.mocked(assistantChatRequest)
 const mockedSend = vi.mocked(assistantFeatureRequestSend)
 const mockedInsights = vi.mocked(assistantInsightsRequest)
 const mockedDismiss = vi.mocked(assistantDismissSuggestion)
+const mockedHistory = vi.mocked(assistantHistoryRequest)
+const mockedClear = vi.mocked(assistantClearHistory)
+const mockedRunAction = vi.mocked(assistantRunAction)
 
 describe('capability manifest', () => {
   const manifest = readFileSync(
@@ -64,8 +73,13 @@ describe('AssistantPanel', () => {
     mockedSend.mockReset()
     mockedInsights.mockReset()
     mockedDismiss.mockReset()
+    mockedHistory.mockReset()
+    mockedClear.mockReset()
+    mockedRunAction.mockReset()
     mockedInsights.mockResolvedValue({ suggestions: [] })
     mockedDismiss.mockResolvedValue({ ok: true })
+    mockedHistory.mockResolvedValue({ messages: [] })
+    mockedClear.mockResolvedValue({ ok: true })
   })
 
   const openPanel = () => {
@@ -106,6 +120,7 @@ describe('AssistantPanel', () => {
     mockedChat.mockResolvedValue({
       reply: 'Yes — use the timer on the Time page.',
       featureRequestDraft: null,
+      actionProposals: [],
     })
     openPanel()
 
@@ -117,7 +132,82 @@ describe('AssistantPanel', () => {
     await waitFor(() =>
       expect(screen.getByText('Yes — use the timer on the Time page.')).toBeInTheDocument(),
     )
-    expect(mockedChat).toHaveBeenCalledWith([{ role: 'user', text: 'Can I track time?' }])
+    expect(mockedChat).toHaveBeenCalledWith(
+      [{ role: 'user', text: 'Can I track time?' }],
+      expect.any(Function),
+    )
+  })
+
+  it('proposes an action and only runs it on confirm', async () => {
+    mockedChat.mockResolvedValue({
+      reply: "Sure — I've set up a card to make that recurring.",
+      featureRequestDraft: null,
+      actionProposals: [
+        {
+          id: 'make_template_recurring:0',
+          tool: 'make_template_recurring',
+          label: 'Make a recurring template',
+          summary: 'Attach “Payroll” to Clover as a monthly recurring template.',
+          params: { templateTitle: 'Payroll', clientName: 'Clover', frequency: 'monthly' },
+        },
+      ],
+    })
+    mockedRunAction.mockResolvedValue({
+      ok: true,
+      message: '“Payroll” now recurs monthly for Clover.',
+    })
+    openPanel()
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the app…'), {
+      target: { value: 'Make payroll recurring for Clover' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() =>
+      expect(
+        screen.getByText('Attach “Payroll” to Clover as a monthly recurring template.'),
+      ).toBeInTheDocument(),
+    )
+    // Nothing runs until the owner confirms.
+    expect(mockedRunAction).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run it' }))
+    await waitFor(() =>
+      expect(mockedRunAction).toHaveBeenCalledWith(
+        expect.objectContaining({ tool: 'make_template_recurring' }),
+      ),
+    )
+    await waitFor(() =>
+      expect(screen.getByText('“Payroll” now recurs monthly for Clover. ✓')).toBeInTheDocument(),
+    )
+  })
+
+  it('cancels an action without running it', async () => {
+    mockedChat.mockResolvedValue({
+      reply: 'Want me to assign that client?',
+      featureRequestDraft: null,
+      actionProposals: [
+        {
+          id: 'assign_client:0',
+          tool: 'assign_client',
+          label: 'Assign a client',
+          summary: 'Give Avery access to Clover.',
+          params: { clientName: 'Clover', bookkeeperName: 'Avery' },
+        },
+      ],
+    })
+    openPanel()
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the app…'), {
+      target: { value: 'Assign Clover to Avery' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(screen.getByText('Give Avery access to Clover.')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() => expect(screen.getByText('Cancelled')).toBeInTheDocument())
+    expect(mockedRunAction).not.toHaveBeenCalled()
   })
 
   it('shows a confirmation card for a feature-request draft and only sends on confirm', async () => {
@@ -127,6 +217,7 @@ describe('AssistantPanel', () => {
         title: 'Client portal',
         description: 'Owner wants clients to view their invoices online.',
       },
+      actionProposals: [],
     })
     mockedSend.mockResolvedValue({ ok: true, id: 'featreq-1', emailSent: true })
     openPanel()
@@ -154,6 +245,7 @@ describe('AssistantPanel', () => {
     mockedChat.mockResolvedValue({
       reply: 'Want me to ask Alex?',
       featureRequestDraft: { title: 'Payroll', description: 'Run payroll in-app.' },
+      actionProposals: [],
     })
     openPanel()
 

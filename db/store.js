@@ -1502,6 +1502,35 @@ export class AppDataStore {
         )
       `)
 
+      // Persisted assistant conversation (Phase 3). One row per turn so the
+      // owner's chat history survives reloads and follows her across devices.
+      // Only role + text are stored — ephemeral feature-request drafts and
+      // action proposals are NOT persisted (they shouldn't re-fire on reload).
+      await this.pool.query(`
+        create table if not exists assistant_messages (
+          id text primary key,
+          user_id text not null,
+          role text not null,
+          text text not null,
+          created_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists assistant_messages_user_idx
+           on assistant_messages (user_id, created_at)`,
+      )
+
+      // Weekly-digest bookkeeping (Phase 3): one row per user recording the
+      // ISO week (yyyy-mm-dd Monday) of the last digest sent, so the daily
+      // scheduler never emails the same week's digest twice.
+      await this.pool.query(`
+        create table if not exists assistant_digest_state (
+          user_id text primary key,
+          last_week_start text not null,
+          updated_at timestamptz not null default now()
+        )
+      `)
+
       // TOTP two-factor: per-user secret + enable flag + backup codes.
       // Stored as plaintext for v1 — encryption-at-rest at the DB layer is
       // the right defense (see lib/totp.js header). Backup codes are stored
@@ -6692,6 +6721,169 @@ export class AppDataStore {
       })
       await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     }
+  }
+
+  /**
+   * Persisted assistant conversation (Phase 3). Returns the user's chat
+   * turns oldest-first, capped to the most recent `limit` rows. Only
+   * role + text are stored.
+   */
+  async getAssistantMessages(userId, limit = 100) {
+    if (!userId) return []
+    const cap = Math.max(1, Math.min(500, Number(limit) || 100))
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, role, text, created_at
+           from assistant_messages
+          where user_id = $1
+          order by created_at desc
+          limit $2`,
+        [userId, cap],
+      )
+      return result.rows
+        .map((row) => ({
+          id: row.id,
+          role: row.role,
+          text: row.text,
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : nowIso(),
+        }))
+        .reverse()
+    }
+
+    const authState = await readJson(localAuthPath)
+    return (authState.assistantMessages ?? [])
+      .filter((entry) => entry.userId === userId)
+      .slice(-cap)
+      .map((entry) => ({
+        id: entry.id,
+        role: entry.role,
+        text: entry.text,
+        createdAt: entry.createdAt,
+      }))
+  }
+
+  /**
+   * Append one or more turns to a user's persisted conversation. Each entry
+   * is `{ role: 'user'|'assistant', text }`. Trims the stored history to the
+   * most recent 200 turns per user so it can't grow without bound.
+   */
+  async appendAssistantMessages(userId, entries) {
+    if (!userId || !Array.isArray(entries) || entries.length === 0) return
+    const clean = entries
+      .filter(
+        (entry) =>
+          entry &&
+          (entry.role === 'user' || entry.role === 'assistant') &&
+          typeof entry.text === 'string' &&
+          entry.text.trim() !== '',
+      )
+      .map((entry) => ({
+        id: `amsg-${randomUUID().slice(0, 8)}`,
+        userId,
+        role: entry.role,
+        text: String(entry.text).slice(0, 8000),
+        createdAt: nowIso(),
+      }))
+    if (clean.length === 0) return
+
+    if (this.pool) {
+      for (const entry of clean) {
+        await this.pool.query(
+          `insert into assistant_messages (id, user_id, role, text, created_at)
+           values ($1, $2, $3, $4, $5)`,
+          [entry.id, entry.userId, entry.role, entry.text, entry.createdAt],
+        )
+      }
+      // Keep only the most recent 200 turns for this user.
+      await this.pool.query(
+        `delete from assistant_messages
+          where user_id = $1
+            and id not in (
+              select id from assistant_messages
+              where user_id = $1
+              order by created_at desc
+              limit 200
+            )`,
+        [userId],
+      )
+      return
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.assistantMessages)) authState.assistantMessages = []
+    authState.assistantMessages.push(...clean)
+    // Trim to the most recent 200 turns for this user, preserving others.
+    const mine = authState.assistantMessages.filter((entry) => entry.userId === userId)
+    if (mine.length > 200) {
+      const keep = new Set(mine.slice(-200).map((entry) => entry.id))
+      authState.assistantMessages = authState.assistantMessages.filter(
+        (entry) => entry.userId !== userId || keep.has(entry.id),
+      )
+    }
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+
+  /** Clear a user's persisted assistant conversation. */
+  async clearAssistantMessages(userId) {
+    if (!userId) return
+    if (this.pool) {
+      await this.pool.query(`delete from assistant_messages where user_id = $1`, [userId])
+      return
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.assistantMessages)) return
+    authState.assistantMessages = authState.assistantMessages.filter(
+      (entry) => entry.userId !== userId,
+    )
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+
+  /**
+   * Weekly-digest dedupe (Phase 3). Returns the ISO week (yyyy-mm-dd Monday)
+   * of the last digest sent to this user, or null if none.
+   */
+  async getLastDigestWeek(userId) {
+    if (!userId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select last_week_start from assistant_digest_state where user_id = $1`,
+        [userId],
+      )
+      return result.rowCount ? result.rows[0].last_week_start : null
+    }
+    const authState = await readJson(localAuthPath)
+    const entry = (authState.assistantDigestState ?? []).find((row) => row.userId === userId)
+    return entry ? entry.lastWeekStart : null
+  }
+
+  /** Record that this user's digest for `weekStart` has been sent. */
+  async markDigestSent(userId, weekStart) {
+    if (!userId || !weekStart) return
+    if (this.pool) {
+      await this.pool.query(
+        `insert into assistant_digest_state (user_id, last_week_start, updated_at)
+         values ($1, $2, now())
+         on conflict (user_id) do update
+           set last_week_start = excluded.last_week_start, updated_at = now()`,
+        [userId, weekStart],
+      )
+      return
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.assistantDigestState)) authState.assistantDigestState = []
+    const existing = authState.assistantDigestState.find((row) => row.userId === userId)
+    if (existing) {
+      existing.lastWeekStart = weekStart
+      existing.updatedAt = nowIso()
+    } else {
+      authState.assistantDigestState.push({
+        userId,
+        lastWeekStart: weekStart,
+        updatedAt: nowIso(),
+      })
+    }
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
   }
 
   async recordActivity(userId, action, target = '') {

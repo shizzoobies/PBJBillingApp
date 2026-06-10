@@ -211,6 +211,20 @@ sit in the top bar on every page.
   recurring templates whose schedule looks stalled. Each card deep-links to
   the right page; "Don't show again" dismisses it permanently. The owner can
   also just ask "what do I do repeatedly?" in chat.
+- Replies stream in as they're written. The conversation is saved, so it's
+  still there on reload and on another device; the trash icon in the panel
+  header clears it.
+- Can DO a few things directly, each behind a confirmation card (nothing
+  happens until the owner clicks "Run it"):
+  - Make a template recurring for a client (attach an existing template on a
+    weekly / monthly / quarterly / annual schedule).
+  - Assign a client to a team member (give them access).
+  - Generate a task list now from a template.
+  For anything else the app can't do, it still offers a feature request to
+  Alex rather than pretending to act.
+- Optional weekly digest email: on Mondays (configurable) the owner gets an
+  email summarizing the top automation opportunities, when email is
+  configured. It's deterministic — the same patterns shown in the panel.
 
 ## NOT supported (yet) — common asks
 

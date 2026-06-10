@@ -1,11 +1,15 @@
-import { Lightbulb, Send, Sparkles, X } from 'lucide-react'
+import { Lightbulb, Send, Sparkles, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   assistantChatRequest,
+  assistantClearHistory,
   assistantDismissSuggestion,
   assistantFeatureRequestSend,
+  assistantHistoryRequest,
   assistantInsightsRequest,
+  assistantRunAction,
+  type AssistantActionProposal,
   type AssistantChatMessage,
   type AssistantFeatureRequestDraft,
   type AssistantSuggestion,
@@ -14,29 +18,59 @@ import {
 type ThreadEntry =
   | { kind: 'message'; role: 'user' | 'assistant'; text: string }
   | { kind: 'draft'; draft: AssistantFeatureRequestDraft; status: 'pending' | 'sent' | 'dismissed' }
+  | {
+      kind: 'action'
+      action: AssistantActionProposal
+      status: 'pending' | 'done' | 'dismissed'
+      result?: string
+    }
 
 const GREETING =
   'Hi! Ask me anything about the app — how to do something, whether a ' +
-  "feature exists, or what's set up for a client. If we can't do it yet, " +
-  'I can send Alex a feature request.'
+  "feature exists, or what's set up for a client. I can also set things up " +
+  'for you (recurring tasks, client assignments) or send Alex a feature request.'
 
 /**
- * Owner-only floating AI assistant. The chat history lives in component
- * state (capped server-side); feature-request drafts render as a
- * confirmation card and only send when the owner clicks Send to Alex.
+ * Owner-only floating AI assistant. The chat history is persisted server-side
+ * (loaded on open, saved per turn) so it survives reloads and follows the
+ * owner across devices. Replies stream in. Feature-request drafts and action
+ * proposals render as confirmation cards that only act when the owner clicks.
  */
 export function AssistantPanel() {
   const [open, setOpen] = useState(false)
   const [thread, setThread] = useState<ThreadEntry[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [streamText, setStreamText] = useState('')
   const [suggestions, setSuggestions] = useState<AssistantSuggestion[]>([])
   const insightsLoadedRef = useRef(false)
+  const historyLoadedRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
   useEffect(() => {
     if (open) inputRef.current?.focus()
+  }, [open])
+
+  // Load the persisted conversation once, on first open.
+  useEffect(() => {
+    if (!open || historyLoadedRef.current) return
+    historyLoadedRef.current = true
+    assistantHistoryRequest()
+      .then((result) => {
+        if (result.messages.length > 0) {
+          setThread(
+            result.messages.map((message) => ({
+              kind: 'message',
+              role: message.role,
+              text: message.text,
+            })),
+          )
+        }
+      })
+      .catch(() => {
+        // No saved history is fine — the panel works from empty.
+      })
   }, [open])
 
   // Watch-and-learn cards: fetched once per panel mount, on first open.
@@ -61,7 +95,7 @@ export function AssistantPanel() {
   useEffect(() => {
     const node = scrollRef.current
     if (node) node.scrollTop = node.scrollHeight
-  }, [thread, busy])
+  }, [thread, busy, streamText])
 
   const historyForApi = (entries: ThreadEntry[]): AssistantChatMessage[] =>
     entries
@@ -75,8 +109,11 @@ export function AssistantPanel() {
     const nextThread: ThreadEntry[] = [...thread, { kind: 'message', role: 'user', text }]
     setThread(nextThread)
     setBusy(true)
+    setStreamText('')
     try {
-      const result = await assistantChatRequest(historyForApi(nextThread))
+      const result = await assistantChatRequest(historyForApi(nextThread), (delta) =>
+        setStreamText((current) => current + delta),
+      )
       setThread((current) => {
         const updated: ThreadEntry[] = [
           ...current,
@@ -85,6 +122,9 @@ export function AssistantPanel() {
         if (result.featureRequestDraft) {
           updated.push({ kind: 'draft', draft: result.featureRequestDraft, status: 'pending' })
         }
+        for (const action of result.actionProposals ?? []) {
+          updated.push({ kind: 'action', action, status: 'pending' })
+        }
         return updated
       })
     } catch (error) {
@@ -92,6 +132,7 @@ export function AssistantPanel() {
         error instanceof Error ? error.message : 'Something went wrong — try again in a moment.'
       setThread((current) => [...current, { kind: 'message', role: 'assistant', text: message }])
     } finally {
+      setStreamText('')
       setBusy(false)
     }
   }
@@ -132,6 +173,48 @@ export function AssistantPanel() {
     }
   }
 
+  const resolveAction = async (index: number, choice: 'run' | 'dismiss') => {
+    const entry = thread[index]
+    if (!entry || entry.kind !== 'action' || entry.status !== 'pending') return
+    if (choice === 'dismiss') {
+      setThread((current) =>
+        current.map((item, i) =>
+          i === index && item.kind === 'action' ? { ...item, status: 'dismissed' } : item,
+        ),
+      )
+      return
+    }
+    setBusy(true)
+    try {
+      const result = await assistantRunAction(entry.action)
+      setThread((current) =>
+        current.map((item, i) =>
+          i === index && item.kind === 'action'
+            ? { ...item, status: result.ok ? 'done' : 'pending', result: result.message }
+            : item,
+        ),
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not run that — try again.'
+      setThread((current) =>
+        current.map((item, i) =>
+          i === index && item.kind === 'action' ? { ...item, result: message } : item,
+        ),
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clearConversation = async () => {
+    setThread([])
+    try {
+      await assistantClearHistory()
+    } catch {
+      // Best-effort; the local thread is already cleared.
+    }
+  }
+
   return (
     <>
       <button
@@ -151,14 +234,28 @@ export function AssistantPanel() {
               <strong>Assistant</strong>
               <span>Owner only</span>
             </div>
-            <button
-              type="button"
-              className="assistant-panel-close"
-              aria-label="Close assistant"
-              onClick={() => setOpen(false)}
-            >
-              <X size={16} />
-            </button>
+            <div className="assistant-panel-actions">
+              {thread.length > 0 ? (
+                <button
+                  type="button"
+                  className="assistant-panel-clear"
+                  aria-label="Clear conversation"
+                  title="Clear conversation"
+                  disabled={busy}
+                  onClick={() => void clearConversation()}
+                >
+                  <Trash2 size={15} />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="assistant-panel-close"
+                aria-label="Close assistant"
+                onClick={() => setOpen(false)}
+              >
+                <X size={16} />
+              </button>
+            </div>
           </header>
           <div className="assistant-thread" ref={scrollRef}>
             <div className="assistant-bubble assistant-bubble-bot">{GREETING}</div>
@@ -202,39 +299,80 @@ export function AssistantPanel() {
                   </div>
                 )
               }
+              if (entry.kind === 'draft') {
+                return (
+                  <div key={index} className="assistant-draft-card">
+                    <p className="assistant-draft-kicker">Feature request for Alex</p>
+                    <strong>{entry.draft.title}</strong>
+                    <p>{entry.draft.description}</p>
+                    {entry.status === 'pending' ? (
+                      <div className="assistant-draft-actions">
+                        <button
+                          type="button"
+                          className="primary-action"
+                          disabled={busy}
+                          onClick={() => void resolveDraft(index, 'send')}
+                        >
+                          Send to Alex
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-action"
+                          disabled={busy}
+                          onClick={() => void resolveDraft(index, 'dismiss')}
+                        >
+                          Don’t send
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="assistant-draft-status">
+                        {entry.status === 'sent' ? 'Sent to Alex ✓' : 'Not sent'}
+                      </p>
+                    )}
+                  </div>
+                )
+              }
               return (
-                <div key={index} className="assistant-draft-card">
-                  <p className="assistant-draft-kicker">Feature request for Alex</p>
-                  <strong>{entry.draft.title}</strong>
-                  <p>{entry.draft.description}</p>
+                <div key={index} className="assistant-draft-card assistant-action-card">
+                  <p className="assistant-draft-kicker">{entry.action.label}</p>
+                  <p>{entry.action.summary}</p>
                   {entry.status === 'pending' ? (
-                    <div className="assistant-draft-actions">
-                      <button
-                        type="button"
-                        className="primary-action"
-                        disabled={busy}
-                        onClick={() => void resolveDraft(index, 'send')}
-                      >
-                        Send to Alex
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary-action"
-                        disabled={busy}
-                        onClick={() => void resolveDraft(index, 'dismiss')}
-                      >
-                        Don’t send
-                      </button>
-                    </div>
+                    <>
+                      <div className="assistant-draft-actions">
+                        <button
+                          type="button"
+                          className="primary-action"
+                          disabled={busy}
+                          onClick={() => void resolveAction(index, 'run')}
+                        >
+                          Run it
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-action"
+                          disabled={busy}
+                          onClick={() => void resolveAction(index, 'dismiss')}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      {entry.result ? (
+                        <p className="assistant-draft-status">{entry.result}</p>
+                      ) : null}
+                    </>
                   ) : (
                     <p className="assistant-draft-status">
-                      {entry.status === 'sent' ? 'Sent to Alex ✓' : 'Not sent'}
+                      {entry.status === 'done' ? `${entry.result ?? 'Done'} ✓` : 'Cancelled'}
                     </p>
                   )}
                 </div>
               )
             })}
-            {busy ? <div className="assistant-bubble assistant-bubble-bot">Thinking…</div> : null}
+            {busy ? (
+              <div className="assistant-bubble assistant-bubble-bot">
+                {streamText || 'Thinking…'}
+              </div>
+            ) : null}
           </div>
           <form
             className="assistant-input-row"

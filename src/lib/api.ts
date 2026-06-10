@@ -1430,26 +1430,118 @@ export async function teamTotpReset(userId: string) {
 
 export type AssistantChatMessage = { role: 'user' | 'assistant'; text: string }
 export type AssistantFeatureRequestDraft = { title: string; description: string }
+export type AssistantActionProposal = {
+  id: string
+  tool: string
+  label: string
+  summary: string
+  params: Record<string, unknown>
+}
 export type AssistantChatResult = {
   reply: string
   featureRequestDraft: AssistantFeatureRequestDraft | null
+  actionProposals: AssistantActionProposal[]
 }
 
-export async function assistantChatRequest(messages: AssistantChatMessage[]) {
+/**
+ * Send a chat turn and stream the reply. The server responds with
+ * Server-Sent Events over the POST body: `delta` events carry incremental
+ * text (forwarded to onDelta as it arrives), and a final `done` event
+ * carries the structured result. Pre-stream failures come back as JSON.
+ */
+export async function assistantChatRequest(
+  messages: AssistantChatMessage[],
+  onDelta?: (text: string) => void,
+): Promise<AssistantChatResult> {
   const response = await apiFetch('/api/assistant/chat', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ messages }),
   })
-  if (!response.ok) {
+  if (!response.ok || !response.body) {
     const body = (await response.json().catch(() => null)) as { error?: string } | null
     throw new ApiError(
       response.status,
       body?.error ?? `Assistant request failed (${response.status})`,
     )
   }
-  return (await response.json()) as AssistantChatResult
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: AssistantChatResult = { reply: '', featureRequestDraft: null, actionProposals: [] }
+
+  const handleEvent = (raw: string) => {
+    const line = raw.split('\n').find((l) => l.startsWith('data:'))
+    if (!line) return
+    let event: { type?: string; text?: string; error?: string } & Partial<AssistantChatResult>
+    try {
+      event = JSON.parse(line.slice(5).trim())
+    } catch {
+      return
+    }
+    if (event.type === 'delta' && typeof event.text === 'string') {
+      onDelta?.(event.text)
+    } else if (event.type === 'done') {
+      result = {
+        reply: event.reply ?? '',
+        featureRequestDraft: event.featureRequestDraft ?? null,
+        actionProposals: event.actionProposals ?? [],
+      }
+    } else if (event.type === 'error') {
+      throw new ApiError(502, event.error ?? 'The assistant had trouble answering.')
+    }
+  }
+
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let boundary = buffer.indexOf('\n\n')
+    while (boundary !== -1) {
+      handleEvent(buffer.slice(0, boundary))
+      buffer = buffer.slice(boundary + 2)
+      boundary = buffer.indexOf('\n\n')
+    }
+  }
+  if (buffer.trim()) handleEvent(buffer)
+  return result
+}
+
+export type AssistantHistoryMessage = { id: string; role: 'user' | 'assistant'; text: string }
+
+export async function assistantHistoryRequest() {
+  const response = await apiFetch('/api/assistant/history', { credentials: 'same-origin' })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load conversation (${response.status})`)
+  }
+  return (await response.json()) as { messages: AssistantHistoryMessage[] }
+}
+
+export async function assistantClearHistory() {
+  const response = await apiFetch('/api/assistant/history', {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to clear conversation (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean }
+}
+
+export async function assistantRunAction(proposal: AssistantActionProposal) {
+  const response = await apiFetch('/api/assistant/action', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tool: proposal.tool, params: proposal.params }),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { message?: string } | null
+    throw new ApiError(response.status, body?.message ?? `Action failed (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; message: string }
 }
 
 export async function assistantFeatureRequestSend(draft: AssistantFeatureRequestDraft) {
