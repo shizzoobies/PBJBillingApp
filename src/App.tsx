@@ -84,6 +84,7 @@ import {
   formatTimeFromMs,
   getAssignedEmployeeIds,
   type GroupAllocationMode,
+  legibleSidebarText,
   makeId,
   sortChecklists,
 } from './lib/utils'
@@ -376,23 +377,26 @@ function App() {
     document.documentElement.style.setProperty('--sidebar-bg', color)
   }, [publicFirmSettings.brandColor])
 
-  // Sidebar text color — kept as a separate variable so any brand color
-  // can still have legible text on top of it. Defaults to white so the
-  // existing styles (designed for a plum background) keep working when
-  // no value is set.
+  // Sidebar text colors — kept as separate variables so any brand color
+  // can still have legible text on top of it. Both run through the
+  // contrast guard: a configured color is honored as long as it reads
+  // against the sidebar background (≥3:1), otherwise we swap in
+  // warm-white or near-black, whichever scores better. This means no
+  // color combination a firm picks can ever render the nav illegible.
   useEffect(() => {
-    const color = publicFirmSettings.sidebarTextColor || '#ffffff'
-    document.documentElement.style.setProperty('--sidebar-text', color)
-  }, [publicFirmSettings.sidebarTextColor])
-
-  // Active sidebar nav-item color — distinct from the regular sidebar
-  // text color so the currently-open page can stand out from the rest.
-  // Defaults to white so unconfigured workspaces look the same as
-  // before.
-  useEffect(() => {
-    const color = publicFirmSettings.sidebarActiveTextColor || '#ffffff'
-    document.documentElement.style.setProperty('--sidebar-active-text', color)
-  }, [publicFirmSettings.sidebarActiveTextColor])
+    const background = publicFirmSettings.brandColor || '#3c2044'
+    const text = legibleSidebarText(publicFirmSettings.sidebarTextColor || '#ffffff', background)
+    document.documentElement.style.setProperty('--sidebar-text', text)
+    const active = legibleSidebarText(
+      publicFirmSettings.sidebarActiveTextColor || '#ffffff',
+      background,
+    )
+    document.documentElement.style.setProperty('--sidebar-active-text', active)
+  }, [
+    publicFirmSettings.brandColor,
+    publicFirmSettings.sidebarTextColor,
+    publicFirmSettings.sidebarActiveTextColor,
+  ])
 
   // Invoice printing: the report-print CSS keeps the whole app shell visible,
   // which would otherwise leak the entire Invoices screen (billing queue +

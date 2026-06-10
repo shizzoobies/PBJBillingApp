@@ -1202,3 +1202,66 @@ export function isSafeImageSrc(value: string | null | undefined): boolean {
   if (value.startsWith('data:image/')) return true
   return isSafeHttpUrl(value)
 }
+
+/**
+ * Parse a CSS hex color (#abc or #aabbcc) into RGB. Returns null for
+ * anything else (named colors, rgb(), invalid input) — callers should
+ * treat null as "can't reason about this color, leave it alone".
+ */
+function parseHexColor(value: string): { r: number; g: number; b: number } | null {
+  const hex = value.trim().replace(/^#/, '')
+  const full =
+    hex.length === 3
+      ? hex
+          .split('')
+          .map((c) => c + c)
+          .join('')
+      : hex
+  if (!/^[0-9a-fA-F]{6}$/.test(full)) return null
+  return {
+    r: parseInt(full.slice(0, 2), 16),
+    g: parseInt(full.slice(2, 4), 16),
+    b: parseInt(full.slice(4, 6), 16),
+  }
+}
+
+/** WCAG relative luminance (0 = black, 1 = white). */
+function relativeLuminance(rgb: { r: number; g: number; b: number }): number {
+  const lin = (channel: number) => {
+    const s = channel / 255
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
+  }
+  return 0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b)
+}
+
+/**
+ * WCAG contrast ratio between two hex colors (1–21), or null if either
+ * color isn't a parseable hex value.
+ */
+export function contrastRatio(a: string, b: string): number | null {
+  const ca = parseHexColor(a)
+  const cb = parseHexColor(b)
+  if (!ca || !cb) return null
+  const la = relativeLuminance(ca)
+  const lb = relativeLuminance(cb)
+  const lighter = Math.max(la, lb)
+  const darker = Math.min(la, lb)
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+/**
+ * Contrast guard for the customizable sidebar colors: keep the user's
+ * preferred text color whenever it's at least readable (3:1, the WCAG
+ * large-text floor) against the sidebar background; otherwise swap in
+ * whichever of warm-white / near-black reads better on that background.
+ * Non-hex values pass through untouched — we can't score them.
+ */
+export function legibleSidebarText(preferred: string, background: string): string {
+  const ratio = contrastRatio(preferred, background)
+  if (ratio === null || ratio >= 3) return preferred
+  const light = '#fffaf3'
+  const dark = '#25131e'
+  return (contrastRatio(light, background) ?? 0) >= (contrastRatio(dark, background) ?? 0)
+    ? light
+    : dark
+}

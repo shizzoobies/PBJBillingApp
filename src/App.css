@@ -55,6 +55,96 @@ button {
   cursor: pointer;
 }
 
+/* ---- Base form controls ----
+   Native selects and date/month inputs never got app styling, so they
+   rendered as raw OS widgets next to the styled cards. This gives every
+   one of them the card language (surface, hairline border, soft radius,
+   berry focus ring) without touching any component-specific overrides,
+   which still win on specificity/order. */
+select:not([multiple]):not([size]) {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23695f71' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-position: right 9px center;
+  background-repeat: no-repeat;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  min-height: 34px;
+  padding: 5px 28px 5px 10px;
+  transition:
+    border-color var(--ease),
+    box-shadow var(--ease);
+}
+
+input[type='date'],
+input[type='month'],
+input[type='time'] {
+  background-color: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  min-height: 34px;
+  padding: 5px 10px;
+  transition:
+    border-color var(--ease),
+    box-shadow var(--ease);
+}
+
+select:not([multiple]):not([size]):hover,
+input[type='date']:hover,
+input[type='month']:hover,
+input[type='time']:hover {
+  border-color: color-mix(in srgb, var(--berry) 35%, var(--line-strong));
+}
+
+select:focus-visible,
+input[type='date']:focus-visible,
+input[type='month']:focus-visible,
+input[type='time']:focus-visible {
+  border-color: var(--berry);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--berry) 16%, transparent);
+  outline: none;
+}
+
+/* Visible keyboard-focus ring on interactive elements. Mouse clicks don't
+   trigger :focus-visible, so this only shows for keyboard users. */
+a:focus-visible,
+button:focus-visible,
+[role='button']:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--berry) 70%, transparent);
+  outline-offset: 2px;
+}
+
+/* Money and hour columns line up digit-for-digit. */
+table {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Slim, neutral page scrollbars (Chromium/WebKit) instead of the chunky
+   native ones. Firefox gets the thin variant via scrollbar-width. */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(60, 32, 68, 0.3) transparent;
+}
+::-webkit-scrollbar {
+  height: 12px;
+  width: 12px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(60, 32, 68, 0.25);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(60, 32, 68, 0.45);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 #root {
   min-height: 100vh;
 }
@@ -170,10 +260,15 @@ button {
   border-radius: 8px;
   color: color-mix(in srgb, var(--sidebar-text, #fffaf3) 76%, transparent);
   display: flex;
+  font-weight: 500;
   gap: 10px;
   min-height: 42px;
   padding: 10px 12px;
   text-align: left;
+  text-decoration: none;
+  transition:
+    background var(--ease),
+    color var(--ease);
   width: 100%;
 }
 
@@ -202,6 +297,10 @@ button {
 }
 
 .workspace {
+  /* `start` stops the grid from distributing leftover viewport height
+     across rows on short pages — that stretch inflated the topbar to
+     ~350px tall and scattered dead space between header and content. */
+  align-content: start;
   display: grid;
   gap: 18px;
   padding: 28px;
@@ -1147,8 +1246,12 @@ textarea.input {
 }
 
 .empty-state {
+  background: color-mix(in srgb, var(--soft) 70%, transparent);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
   color: var(--muted);
   margin: 0;
+  padding: 14px 16px;
 }
 
 .checklist-meta {
@@ -2514,6 +2617,9 @@ td strong {
 
 .gantt-diamond {
   background: var(--plum);
+  border: 2px solid var(--surface);
+  border-radius: 2px;
+  box-shadow: var(--shadow-sm);
   height: 12px;
   position: absolute;
   top: 8px;
@@ -4327,8 +4433,12 @@ td strong {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+/* Status accents: the border blends toward the neutral hairline and the
+   surface picks up a faint tint, so the cards read as calm status chips
+   instead of four loud color outlines fighting for attention. */
 .alert-red {
-  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 3%, var(--surface));
+  border-color: color-mix(in srgb, var(--red) 38%, var(--line));
   color: var(--red);
 }
 .alert-red small {
@@ -4336,7 +4446,8 @@ td strong {
   opacity: 0.7;
 }
 .alert-amber {
-  border-color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 4%, var(--surface));
+  border-color: color-mix(in srgb, var(--gold) 42%, var(--line));
   color: var(--gold);
 }
 .alert-amber small {
@@ -4344,7 +4455,8 @@ td strong {
   opacity: 0.75;
 }
 .alert-info {
-  border-color: var(--bluegray);
+  background: color-mix(in srgb, var(--bluegray) 3%, var(--surface));
+  border-color: color-mix(in srgb, var(--bluegray) 32%, var(--line));
   color: var(--bluegray);
 }
 .alert-info small {

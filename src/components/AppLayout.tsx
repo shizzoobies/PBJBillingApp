@@ -5,6 +5,7 @@ import {
   ListChecks,
   ShieldCheck,
 } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import {
@@ -44,6 +45,22 @@ export function AppLayout() {
     .map((part) => part[0]?.toUpperCase() ?? '')
     .join('')
     .slice(0, 3) || 'PB'
+
+  // Grace period before alarming: transient blips (an SSE reconnect during
+  // navigation, one failed poll) flip dataSyncState to offline/error for a
+  // moment and recover on their own. The red banner only appears if the bad
+  // state persists past the grace window; until then we show a calm
+  // "Saving…" (which is what's really happening — the client is retrying).
+  const isSyncAlarm = dataSyncState === 'offline' || dataSyncState === 'error'
+  const [syncAlarmVisible, setSyncAlarmVisible] = useState(false)
+  useEffect(() => {
+    const delay = !isSyncAlarm ? 0 : dataSyncState === 'offline' ? 4000 : 1500
+    const timer = window.setTimeout(() => setSyncAlarmVisible(isSyncAlarm), delay)
+    return () => window.clearTimeout(timer)
+  }, [isSyncAlarm, dataSyncState])
+  const inSyncGrace = isSyncAlarm && !syncAlarmVisible
+  const displayedSyncState = inSyncGrace ? 'saving' : dataSyncState
+  const displayedSyncMessage = inSyncGrace ? 'Saving…' : syncMessage
 
   const location = useLocation()
   const showSummaryStrip = !ownerMode && location.pathname.startsWith('/time')
@@ -133,7 +150,7 @@ export function AppLayout() {
           <div>
             <p className="eyeline">{firmName}</p>
             <h1>Time, checklists, and client billing</h1>
-            <p className={`sync-banner sync-${dataSyncState}`}>{syncMessage}</p>
+            <p className={`sync-banner sync-${displayedSyncState}`}>{displayedSyncMessage}</p>
           </div>
           <div className="topbar-actions">
             <label className="period-control">
