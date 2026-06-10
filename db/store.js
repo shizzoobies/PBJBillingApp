@@ -1477,6 +1477,20 @@ export class AppDataStore {
         create index if not exists user_sessions_user_idx on user_sessions(user_id)
       `)
 
+      // Feature requests the owner sends to the developer via the AI
+      // assistant. The in-app record is the source of truth; the email is
+      // best-effort delivery on top.
+      await this.pool.query(`
+        create table if not exists feature_requests (
+          id text primary key,
+          user_id text not null,
+          title text not null,
+          description text not null,
+          status text not null default 'sent',
+          created_at timestamptz not null default now()
+        )
+      `)
+
       // TOTP two-factor: per-user secret + enable flag + backup codes.
       // Stored as plaintext for v1 — encryption-at-rest at the DB layer is
       // the right defense (see lib/totp.js header). Backup codes are stored
@@ -6590,6 +6604,38 @@ export class AppDataStore {
     if (mutated) {
       await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     }
+  }
+
+  /**
+   * Record a feature request sent to the developer via the AI assistant.
+   * Returns the created record.
+   */
+  async createFeatureRequest(userId, title, description) {
+    const id = `featreq-${randomUUID().slice(0, 8)}`
+    const createdAt = nowIso()
+    const record = {
+      id,
+      userId,
+      title: String(title ?? '').slice(0, 120),
+      description: String(description ?? '').slice(0, 2000),
+      status: 'sent',
+      createdAt,
+    }
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into feature_requests (id, user_id, title, description, status, created_at)
+         values ($1, $2, $3, $4, $5, $6)`,
+        [record.id, record.userId, record.title, record.description, record.status, createdAt],
+      )
+      return record
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
+    authState.featureRequests.push(record)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return record
   }
 
   async recordActivity(userId, action, target = '') {

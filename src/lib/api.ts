@@ -1425,3 +1425,46 @@ export async function teamTotpReset(userId: string) {
   }
   return (await response.json()) as { ok: boolean }
 }
+
+// ---- AI assistant (owner only) ----
+
+export type AssistantChatMessage = { role: 'user' | 'assistant'; text: string }
+export type AssistantFeatureRequestDraft = { title: string; description: string }
+export type AssistantChatResult = {
+  reply: string
+  featureRequestDraft: AssistantFeatureRequestDraft | null
+}
+
+export async function assistantChatRequest(messages: AssistantChatMessage[]) {
+  const response = await apiFetch('/api/assistant/chat', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages }),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Assistant request failed (${response.status})`,
+    )
+  }
+  return (await response.json()) as AssistantChatResult
+}
+
+export async function assistantFeatureRequestSend(draft: AssistantFeatureRequestDraft) {
+  const response = await apiFetch('/api/assistant/feature-request', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(draft),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Could not send the request (${response.status})`,
+    )
+  }
+  return (await response.json()) as { ok: boolean; id: string; emailSent: boolean }
+}

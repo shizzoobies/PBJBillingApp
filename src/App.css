@@ -6727,3 +6727,227 @@ button.repeating-task-toggle-pill {
   width: 1px;
 }
 
+
+/* ---- AI assistant (owner only) ---- */
+
+.assistant-fab {
+  align-items: center;
+  background: linear-gradient(135deg, var(--berry), var(--jam));
+  border: 0;
+  border-radius: 999px;
+  bottom: 22px;
+  box-shadow: 0 6px 18px rgba(142, 47, 82, 0.35);
+  color: #fff;
+  display: inline-flex;
+  height: 52px;
+  justify-content: center;
+  position: fixed;
+  right: 22px;
+  transition: box-shadow var(--ease), transform var(--ease);
+  width: 52px;
+  z-index: 28;
+}
+
+.assistant-fab:hover {
+  box-shadow: 0 9px 24px rgba(142, 47, 82, 0.42);
+  transform: translateY(-2px);
+}
+
+.assistant-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  bottom: 86px;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  max-height: min(560px, calc(100vh - 120px));
+  position: fixed;
+  right: 22px;
+  width: min(390px, calc(100vw - 44px));
+  z-index: 28;
+}
+
+.assistant-panel-header {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  padding: 12px 14px;
+}
+
+.assistant-panel-title {
+  align-items: center;
+  color: var(--plum);
+  display: flex;
+  gap: 8px;
+}
+
+.assistant-panel-title span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.assistant-panel-close {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  transition: border-color var(--ease), color var(--ease);
+  width: 28px;
+}
+
+.assistant-panel-close:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.assistant-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding: 14px;
+  scrollbar-width: thin;
+}
+
+.assistant-bubble {
+  border-radius: 12px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  max-width: 85%;
+  padding: 9px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.assistant-bubble-bot {
+  align-self: flex-start;
+  background: var(--soft);
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  color: var(--ink);
+}
+
+.assistant-bubble-user {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--berry) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--berry) 22%, var(--line));
+  color: var(--ink);
+}
+
+.assistant-draft-card {
+  background: color-mix(in srgb, var(--gold) 5%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--gold) 38%, var(--line));
+  border-radius: 12px;
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+}
+
+.assistant-draft-kicker {
+  color: #8a6d1a;
+  font-size: 10.5px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.assistant-draft-card strong {
+  font-size: 13.5px;
+}
+
+.assistant-draft-card p {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.assistant-draft-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.assistant-draft-actions .primary-action,
+.assistant-draft-actions .secondary-action {
+  font-size: 12.5px;
+  min-height: 32px;
+  padding: 5px 12px;
+}
+
+.assistant-draft-status {
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.assistant-input-row {
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.assistant-input-row textarea {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  flex: 1;
+  font-size: 13.5px;
+  max-height: 90px;
+  padding: 8px 10px;
+  resize: none;
+}
+
+.assistant-input-row textarea:focus-visible {
+  border-color: var(--berry);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--berry) 16%, transparent);
+  outline: none;
+}
+
+.assistant-input-row button[type='submit'] {
+  align-items: center;
+  background: linear-gradient(135deg, var(--berry), var(--jam));
+  border: 0;
+  border-radius: 10px;
+  color: #fff;
+  display: inline-flex;
+  height: 36px;
+  justify-content: center;
+  width: 40px;
+}
+
+.assistant-input-row button[type='submit']:disabled {
+  opacity: 0.5;
+}
+
+@media (max-width: 640px) {
+  .assistant-panel {
+    border-radius: 16px 16px 0 0;
+    bottom: 0;
+    max-height: 78vh;
+    right: 0;
+    width: 100vw;
+  }
+
+  .assistant-fab {
+    bottom: 16px;
+    right: 16px;
+  }
+}
+
+@media print {
+  .assistant-fab,
+  .assistant-panel {
+    display: none !important;
+  }
+}

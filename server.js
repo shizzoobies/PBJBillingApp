@@ -5,7 +5,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import { AppDataStore } from './db/store.js'
-import { notify, sendLoginLinkEmail } from './lib/notify.js'
+import { runAssistantChat } from './lib/assistant.js'
+import { notify, sendFeatureRequestEmail, sendLoginLinkEmail } from './lib/notify.js'
 import { normalizeTimeEntryMethod, normalizeWorkSessions } from './lib/time-entry.js'
 import {
   generateBackupCodes,
@@ -241,6 +242,51 @@ function getPublicAppUrl(request) {
  * blocked. A request with no Origin header (direct API / tooling) is allowed,
  * matching the prior behavior.
  */
+// Assistant rate limit: in-memory sliding window per user (20 messages per
+// 5 minutes). A runaway client (or a stuck retry loop) can't burn API spend.
+const assistantRateWindows = new Map()
+function consumeAssistantRateSlot(userId) {
+  const now = Date.now()
+  const windowMs = 5 * 60 * 1000
+  const recent = (assistantRateWindows.get(userId) ?? []).filter((t) => now - t < windowMs)
+  if (recent.length >= 20) {
+    assistantRateWindows.set(userId, recent)
+    return false
+  }
+  recent.push(now)
+  assistantRateWindows.set(userId, recent)
+  return true
+}
+
+// Compact, token-cheap snapshot of the firm's setup for the assistant's
+// get_workspace_snapshot tool. Names and config only — no time-entry or
+// billing line detail.
+function buildWorkspaceSnapshot(data) {
+  return {
+    clients: (data.clients ?? []).map((client) => ({
+      name: client.name,
+      billing: client.billingMode,
+      plan: client.planId
+        ? ((data.plans ?? []).find((plan) => plan.id === client.planId)?.name ?? null)
+        : null,
+      assignedTeam: (client.assignedBookkeeperIds ?? [])
+        .map((id) => (data.employees ?? []).find((emp) => emp.id === id)?.name)
+        .filter(Boolean),
+    })),
+    recurringTemplates: (data.checklistTemplates ?? []).map((template) => ({
+      title: template.title,
+      frequency: template.frequency,
+      client: (data.clients ?? []).find((client) => client.id === template.clientId)?.name ?? null,
+      active: template.active !== false,
+    })),
+    plans: (data.plans ?? []).map((plan) => ({ name: plan.name, monthlyFee: plan.monthlyFee })),
+    team: (data.employees ?? []).map((emp) => ({ name: emp.name, role: emp.role })),
+    openTaskCount: (data.checklists ?? []).filter(
+      (checklist) => !checklist.deletedAt && (checklist.items ?? []).some((item) => !item.done),
+    ).length,
+  }
+}
+
 function isCrossSiteOrigin(request) {
   const origin = request.headers.origin
   if (!origin) return false
@@ -580,6 +626,117 @@ const server = createServer(async (request, response) => {
         appendSetCookie(response, buildSessionCookie(session.sessionId))
       }
       sendJson(response, 200, { user: session?.user ?? null })
+      return
+    }
+
+    // ---- AI assistant (owner only) ----
+    // Chat proxy: validates and caps the client-held history, runs the
+    // tool-use loop in lib/assistant.js, and returns the final text plus any
+    // feature-request draft awaiting the owner's confirmation. The Anthropic
+    // API key lives server-side only — the browser never sees it.
+    if (normalizedPath === '/api/assistant/chat' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!consumeAssistantRateSlot(session.user.id)) {
+        sendJson(response, 429, {
+          error: 'Slow down a moment — too many assistant messages at once.',
+        })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const rawMessages = Array.isArray(payload?.messages) ? payload.messages : []
+      const history = rawMessages
+        .filter(
+          (entry) =>
+            entry &&
+            (entry.role === 'user' || entry.role === 'assistant') &&
+            typeof entry.text === 'string' &&
+            entry.text.trim() !== '',
+        )
+        .slice(-24)
+        .map((entry) => ({ role: entry.role, text: String(entry.text).slice(0, 4000) }))
+      if (history.length === 0 || history[history.length - 1].role !== 'user') {
+        sendJson(response, 400, { error: 'messages must end with a user message' })
+        return
+      }
+
+      try {
+        const result = await runAssistantChat(history, async () =>
+          buildWorkspaceSnapshot(await appDataStore.read()),
+        )
+        sendJson(response, 200, result)
+      } catch (error) {
+        const status = error?.statusCode === 503 ? 503 : 502
+        console.error('[assistant] chat failed:', error?.message || error)
+        sendJson(response, status, {
+          error:
+            status === 503
+              ? 'The assistant is not configured yet (missing ANTHROPIC_API_KEY).'
+              : 'The assistant had trouble answering — try again in a moment.',
+        })
+      }
+      return
+    }
+
+    // Feature-request confirm: records + emails the draft the owner approved
+    // in the UI. A separate endpoint so sending is always an explicit human
+    // action — the model can only draft, never send.
+    if (normalizedPath === '/api/assistant/feature-request' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const title = String(payload?.title ?? '')
+        .trim()
+        .slice(0, 120)
+      const description = String(payload?.description ?? '')
+        .trim()
+        .slice(0, 2000)
+      if (!title || !description) {
+        sendJson(response, 400, { error: 'title and description are required' })
+        return
+      }
+
+      const record = await appDataStore.createFeatureRequest(session.user.id, title, description)
+      let emailSent = false
+      try {
+        emailSent = await sendFeatureRequestEmail({
+          fromName: session.user.name,
+          title,
+          description,
+        })
+      } catch (error) {
+        console.error('[assistant] feature-request email failed:', error?.message || error)
+      }
+      await appDataStore.recordActivity(session.user.id, 'feature_request_sent', title)
+      sendJson(response, 200, { ok: true, id: record.id, emailSent })
       return
     }
 

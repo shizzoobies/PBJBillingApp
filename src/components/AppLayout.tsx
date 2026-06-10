@@ -15,6 +15,7 @@ import {
   isInBillingPeriod,
   isSafeImageSrc,
 } from '../lib/utils'
+import { AssistantPanel } from './AssistantPanel'
 import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
 import { navItems } from './navItems'
@@ -222,6 +223,10 @@ export function AppLayout() {
 
         <Outlet />
       </main>
+
+      {/* Owner-only AI assistant. ownerMode is the EFFECTIVE role, so the
+          panel also disappears while previewing a bookkeeper's view. */}
+      {ownerMode ? <AssistantPanel /> : null}
     </div>
   )
 }
