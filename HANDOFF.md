@@ -44,7 +44,9 @@ Set and required: `DATABASE_URL`, `ANTHROPIC_API_KEY` (assistant — confirmed
 set), `RESEND_API_KEY` + `EMAIL_FROM` (email — confirmed set), `APP_PUBLIC_URL`,
 `JWT_SECRET`, `OWNER_EMAIL`, `ADMIN_EMAIL`, `OWNER_BOOTSTRAP_PASSWORD`,
 `NODE_ENV`. Optional: `FEATURE_REQUEST_EMAIL` (defaults asoalexander@gmail.com),
-`ASSISTANT_MODEL` (defaults `claude-opus-4-8`).
+`ASSISTANT_MODEL` (defaults `claude-opus-4-8`), `ASSISTANT_DIGEST` (set `off`
+to disable the weekly digest email), `ASSISTANT_DIGEST_DOW` (0=Sun..6=Sat,
+default 1=Mon — the day the digest sends).
 
 ---
 
@@ -114,6 +116,19 @@ set), `RESEND_API_KEY` + `EMAIL_FROM` (email — confirmed set), `APP_PUBLIC_URL
 
 All on `main`, all **live** (verified 200/200/200). Commit → summary:
 
+- **`facb0b8` Assistant Phase 3 — streaming + persistence + action tools +
+  weekly digest.** (1) Chat now streams as SSE over the POST body
+  (`runModel` seam in `lib/assistant.js`; client parses delta/done/error;
+  pre-stream auth/CSRF/rate errors still JSON). (2) Conversation persisted:
+  `assistant_messages` (both backends, 200-turn cap) + GET/DELETE
+  `/api/assistant/history`; panel loads on open, trash icon clears. (3) Action
+  tools — the assistant DOES things, confirm-gated: `make_template_recurring`,
+  `assign_client`, `generate_tasks_now`. The model only PROPOSES (speaks
+  names); `POST /api/assistant/action` (owner + CSRF + server-side allowlist)
+  resolves names→ids and mutates only after the owner clicks "Run it". (4)
+  Deterministic Monday digest email (top automation opportunities, deduped per
+  ISO week via `assistant_digest_state`, no-op without Resend; `ASSISTANT_DIGEST`
+  /`ASSISTANT_DIGEST_DOW`). 232/232 tests (new `lib/assistant.test.mjs`).
 - **`b5c10ab` Team visibility — DEPLOYED GREEN.** A bookkeeper assigned to a
   client now sees + can log time against ALL that client's tasks (was: only
   their own), fixing "can't save a future get-ahead task." Widened 3 assignee
@@ -170,10 +185,11 @@ in memory `ai-assistant.md`.) Owner-only, forever. Tests in
 
 ## Backlog / next ideas
 
-- **Assistant Phase 3 (planned, not built):** streaming responses over the
-  existing SSE channel, cross-device conversation persistence, "do it for me"
-  action tools (e.g. "make this recurring") with the same confirm-first
-  pattern, weekly digest email. See `.omc/plans/ai-assistant-plan.md`.
+- **Assistant Phase 3 — SHIPPED (`facb0b8`).** Streaming, persistence, action
+  tools, weekly digest all built. Possible Phase 4: more action tools (the
+  set is just 3 — see `ACTION_TOOLS` in `lib/assistant.js`; each needs a store
+  method + manifest line + a line in the server allowlist), action undo, and
+  conversation search.
 - **More watch-and-learn patterns** (e.g. "you reassign this to X every month —
   change the default assignee?").
 - **Security backlog** (from memory `security-notes.md`): deferred Batches 4–7
