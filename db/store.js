@@ -1,5 +1,37 @@
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile as fsWriteFile } from 'node:fs/promises'
+
+/**
+ * Per-file operation queue for the JSON file backend. A plain
+ * fsWriteFile truncates the target before writing, so a concurrent
+ * readFile (every request reads these files fresh) could observe an
+ * empty or half-written file and crash with "Unexpected end of JSON
+ * input". Atomic rename is not an option here — Windows refuses to
+ * rename over a file another handle has open. Instead, all reads and
+ * writes to the same path are chained onto one promise queue, so a read
+ * can never overlap a write in this process. Production (Postgres)
+ * never touches this path.
+ */
+const fileOperationQueues = new Map()
+function enqueueFileOperation(filePath, operation) {
+  const tail = fileOperationQueues.get(filePath) ?? Promise.resolve()
+  const run = tail.then(operation, operation)
+  const tracked = run.finally(() => {
+    if (fileOperationQueues.get(filePath) === tracked) {
+      fileOperationQueues.delete(filePath)
+    }
+  })
+  fileOperationQueues.set(filePath, tracked)
+  return run
+}
+
+/**
+ * Shadows the fs/promises name on purpose so every existing
+ * writeFile(localDataPath/localAuthPath, …) call site is serialized.
+ */
+function writeFile(filePath, content) {
+  return enqueueFileOperation(filePath, () => fsWriteFile(filePath, content))
+}
 import path from 'node:path'
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -165,9 +197,10 @@ const seededUsers = [
   },
 ]
 
-async function readJson(filePath) {
-  const content = await readFile(filePath, 'utf8')
-  return JSON.parse(content)
+function readJson(filePath) {
+  return enqueueFileOperation(filePath, async () =>
+    JSON.parse(await readFile(filePath, 'utf8')),
+  )
 }
 
 function hashPassword(password, salt = randomUUID()) {

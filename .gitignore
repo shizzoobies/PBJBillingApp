@@ -34,3 +34,4 @@ package-lock.json
 # Emergency-only ops script that forges a sign-in token (bypasses 2FA).
 # Keep out of the repo so it can't be committed/deployed by accident.
 scripts/rescue-login.mjs
+.playwright-mcp/
