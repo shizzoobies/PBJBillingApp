@@ -1,10 +1,14 @@
-import { Send, Sparkles, X } from 'lucide-react'
+import { Lightbulb, Send, Sparkles, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   assistantChatRequest,
+  assistantDismissSuggestion,
   assistantFeatureRequestSend,
+  assistantInsightsRequest,
   type AssistantChatMessage,
   type AssistantFeatureRequestDraft,
+  type AssistantSuggestion,
 } from '../lib/api'
 
 type ThreadEntry =
@@ -26,12 +30,33 @@ export function AssistantPanel() {
   const [thread, setThread] = useState<ThreadEntry[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [suggestions, setSuggestions] = useState<AssistantSuggestion[]>([])
+  const insightsLoadedRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
   useEffect(() => {
     if (open) inputRef.current?.focus()
   }, [open])
+
+  // Watch-and-learn cards: fetched once per panel mount, on first open.
+  // Detection is deterministic and server-side; dismissed keys never return.
+  useEffect(() => {
+    if (!open || insightsLoadedRef.current) return
+    insightsLoadedRef.current = true
+    assistantInsightsRequest()
+      .then((result) => setSuggestions(result.suggestions))
+      .catch(() => {
+        // Insights are a bonus — chat works fine without them.
+      })
+  }, [open])
+
+  const dismissSuggestion = (key: string) => {
+    setSuggestions((current) => current.filter((item) => item.key !== key))
+    void assistantDismissSuggestion(key).catch(() => {
+      // Best-effort: if persisting fails it may reappear next session.
+    })
+  }
 
   useEffect(() => {
     const node = scrollRef.current
@@ -137,6 +162,31 @@ export function AssistantPanel() {
           </header>
           <div className="assistant-thread" ref={scrollRef}>
             <div className="assistant-bubble assistant-bubble-bot">{GREETING}</div>
+            {suggestions.map((suggestion) => (
+              <div key={suggestion.key} className="assistant-insight-card">
+                <p className="assistant-insight-kicker">
+                  <Lightbulb size={12} /> Noticed something
+                </p>
+                <strong>{suggestion.title}</strong>
+                <p>{suggestion.body}</p>
+                <div className="assistant-draft-actions">
+                  <Link
+                    to={suggestion.link}
+                    className="secondary-action"
+                    onClick={() => setOpen(false)}
+                  >
+                    Take me there
+                  </Link>
+                  <button
+                    type="button"
+                    className="assistant-insight-dismiss"
+                    onClick={() => dismissSuggestion(suggestion.key)}
+                  >
+                    Don’t show again
+                  </button>
+                </div>
+              </div>
+            ))}
             {thread.map((entry, index) => {
               if (entry.kind === 'message') {
                 return (

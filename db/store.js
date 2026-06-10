@@ -1491,6 +1491,17 @@ export class AppDataStore {
         )
       `)
 
+      // Assistant suggestions the owner dismissed — keyed by a stable
+      // pattern key so the same suggestion never nags twice.
+      await this.pool.query(`
+        create table if not exists assistant_dismissed_suggestions (
+          user_id text not null,
+          suggestion_key text not null,
+          dismissed_at timestamptz not null default now(),
+          primary key (user_id, suggestion_key)
+        )
+      `)
+
       // TOTP two-factor: per-user secret + enable flag + backup codes.
       // Stored as plaintext for v1 — encryption-at-rest at the DB layer is
       // the right defense (see lib/totp.js header). Backup codes are stored
@@ -6636,6 +6647,51 @@ export class AppDataStore {
     authState.featureRequests.push(record)
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return record
+  }
+
+  /** Suggestion keys this user has dismissed (assistant insights). */
+  async listDismissedSuggestions(userId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select suggestion_key from assistant_dismissed_suggestions where user_id = $1`,
+        [userId],
+      )
+      return result.rows.map((row) => row.suggestion_key)
+    }
+    const authState = await readJson(localAuthPath)
+    return (authState.dismissedSuggestions ?? [])
+      .filter((entry) => entry.userId === userId)
+      .map((entry) => entry.suggestionKey)
+  }
+
+  /** Permanently dismiss one assistant suggestion for this user. */
+  async dismissSuggestion(userId, suggestionKey) {
+    const key = String(suggestionKey ?? '').slice(0, 300)
+    if (!userId || !key) return
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into assistant_dismissed_suggestions (user_id, suggestion_key)
+         values ($1, $2)
+         on conflict (user_id, suggestion_key) do nothing`,
+        [userId, key],
+      )
+      return
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.dismissedSuggestions)) authState.dismissedSuggestions = []
+    const exists = authState.dismissedSuggestions.some(
+      (entry) => entry.userId === userId && entry.suggestionKey === key,
+    )
+    if (!exists) {
+      authState.dismissedSuggestions.push({
+        userId,
+        suggestionKey: key,
+        dismissedAt: nowIso(),
+      })
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
   }
 
   async recordActivity(userId, action, target = '') {

@@ -17,7 +17,9 @@ export default defineConfig({
     globals: true,
     // Loads @testing-library/jest-dom matchers once before any test runs.
     setupFiles: ['./src/test/setup.ts'],
-    // Only pick up the project's own tests — never node_modules.
-    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // Only pick up the project's own tests — never node_modules. Plain-JS
+    // server-side libs get .test.mjs files (outside tsc's reach, so a TS
+    // test can never import a JS lib and break the clean build).
+    include: ['src/**/*.{test,spec}.{ts,tsx}', 'lib/**/*.test.mjs'],
   },
 })

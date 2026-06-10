@@ -199,6 +199,12 @@ sit in the top bar on every page.
 - Can draft a feature request to Alex (the developer) when something isn't
   supported — the owner reviews the draft and confirms before any email is
   sent. Sent requests are recorded in the activity log.
+- Watches for repeated manual work and shows up to 3 suggestion cards when
+  the panel opens: tasks created by hand month after month (recurring
+  template candidates), the same time entry logged manually 3+ times, and
+  recurring templates whose schedule looks stalled. Each card deep-links to
+  the right page; "Don't show again" dismisses it permanently. The owner can
+  also just ask "what do I do repeatedly?" in chat.
 
 ## NOT supported (yet) — common asks
 

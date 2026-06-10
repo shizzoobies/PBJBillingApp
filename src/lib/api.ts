@@ -1468,3 +1468,32 @@ export async function assistantFeatureRequestSend(draft: AssistantFeatureRequest
   }
   return (await response.json()) as { ok: boolean; id: string; emailSent: boolean }
 }
+
+export type AssistantSuggestion = {
+  key: string
+  kind: string
+  title: string
+  body: string
+  link: string
+}
+
+export async function assistantInsightsRequest() {
+  const response = await apiFetch('/api/assistant/insights', { credentials: 'same-origin' })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load insights (${response.status})`)
+  }
+  return (await response.json()) as { suggestions: AssistantSuggestion[] }
+}
+
+export async function assistantDismissSuggestion(key: string) {
+  const response = await apiFetch('/api/assistant/insights/dismiss', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key }),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to dismiss suggestion (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean }
+}

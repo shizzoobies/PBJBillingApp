@@ -1,18 +1,28 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AssistantPanel } from '../components/AssistantPanel'
 
 vi.mock('../lib/api', () => ({
   assistantChatRequest: vi.fn(),
   assistantFeatureRequestSend: vi.fn(),
+  assistantInsightsRequest: vi.fn(),
+  assistantDismissSuggestion: vi.fn(),
 }))
 
-import { assistantChatRequest, assistantFeatureRequestSend } from '../lib/api'
+import {
+  assistantChatRequest,
+  assistantDismissSuggestion,
+  assistantFeatureRequestSend,
+  assistantInsightsRequest,
+} from '../lib/api'
 
 const mockedChat = vi.mocked(assistantChatRequest)
 const mockedSend = vi.mocked(assistantFeatureRequestSend)
+const mockedInsights = vi.mocked(assistantInsightsRequest)
+const mockedDismiss = vi.mocked(assistantDismissSuggestion)
 
 describe('capability manifest', () => {
   const manifest = readFileSync(
@@ -52,12 +62,45 @@ describe('AssistantPanel', () => {
   beforeEach(() => {
     mockedChat.mockReset()
     mockedSend.mockReset()
+    mockedInsights.mockReset()
+    mockedDismiss.mockReset()
+    mockedInsights.mockResolvedValue({ suggestions: [] })
+    mockedDismiss.mockResolvedValue({ ok: true })
   })
 
   const openPanel = () => {
-    render(<AssistantPanel />)
+    render(
+      <MemoryRouter>
+        <AssistantPanel />
+      </MemoryRouter>,
+    )
     fireEvent.click(screen.getByRole('button', { name: 'Open assistant' }))
   }
+
+  it('shows watch-and-learn insight cards and dismisses permanently', async () => {
+    mockedInsights.mockResolvedValue({
+      suggestions: [
+        {
+          key: 'recurring_template:client-a:payroll',
+          kind: 'recurring_template',
+          title: 'Make “Payroll June” a recurring template?',
+          body: "You've created this task by hand in 2 different months.",
+          link: '/checklists',
+        },
+      ],
+    })
+    openPanel()
+
+    await waitFor(() =>
+      expect(screen.getByText('Make “Payroll June” a recurring template?')).toBeInTheDocument(),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Don’t show again' }))
+
+    await waitFor(() =>
+      expect(mockedDismiss).toHaveBeenCalledWith('recurring_template:client-a:payroll'),
+    )
+    expect(screen.queryByText('Make “Payroll June” a recurring template?')).toBeNull()
+  })
 
   it('sends a question and renders the reply', async () => {
     mockedChat.mockResolvedValue({

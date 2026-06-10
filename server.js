@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import { AppDataStore } from './db/store.js'
 import { runAssistantChat } from './lib/assistant.js'
+import { detectUsagePatterns } from './lib/usage-patterns.js'
 import { notify, sendFeatureRequestEmail, sendLoginLinkEmail } from './lib/notify.js'
 import { normalizeTimeEntryMethod, normalizeWorkSessions } from './lib/time-entry.js'
 import {
@@ -675,9 +676,10 @@ const server = createServer(async (request, response) => {
       }
 
       try {
-        const result = await runAssistantChat(history, async () =>
-          buildWorkspaceSnapshot(await appDataStore.read()),
-        )
+        const result = await runAssistantChat(history, {
+          getSnapshot: async () => buildWorkspaceSnapshot(await appDataStore.read()),
+          getUsagePatterns: async () => detectUsagePatterns(await appDataStore.read()),
+        })
         sendJson(response, 200, result)
       } catch (error) {
         const status = error?.statusCode === 503 ? 503 : 502
@@ -689,6 +691,53 @@ const server = createServer(async (request, response) => {
               : 'The assistant had trouble answering — try again in a moment.',
         })
       }
+      return
+    }
+
+    // Watch-and-learn insights: deterministic pattern detection over the
+    // workspace (no model call — lib/usage-patterns.js), minus anything the
+    // owner already dismissed. The panel fetches this when it opens.
+    if (normalizedPath === '/api/assistant/insights' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const data = await appDataStore.read()
+      const dismissed = new Set(await appDataStore.listDismissedSuggestions(session.user.id))
+      const suggestions = detectUsagePatterns(data)
+        .filter((suggestion) => !dismissed.has(suggestion.key))
+        .slice(0, 3)
+      sendJson(response, 200, { suggestions })
+      return
+    }
+
+    // Dismiss one insight permanently (per user, by stable pattern key).
+    if (normalizedPath === '/api/assistant/insights/dismiss' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const key = String(payload?.key ?? '').trim()
+      if (!key) {
+        sendJson(response, 400, { error: 'key is required' })
+        return
+      }
+      await appDataStore.dismissSuggestion(session.user.id, key)
+      sendJson(response, 200, { ok: true })
       return
     }
 
