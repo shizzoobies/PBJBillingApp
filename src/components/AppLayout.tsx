@@ -3,6 +3,7 @@ import {
   CircleDollarSign,
   Clock3,
   ListChecks,
+  Menu,
   ShieldCheck,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -62,6 +63,11 @@ export function AppLayout() {
   const displayedSyncState = inSyncGrace ? 'saving' : dataSyncState
   const displayedSyncMessage = inSyncGrace ? 'Saving…' : syncMessage
 
+  // Mobile nav drawer. Closed via the backdrop, the Escape-free X-less
+  // pattern of tapping any nav link, or toggling the hamburger again.
+  // Desktop ignores all of this — the sidebar is permanently visible.
+  const [navOpen, setNavOpen] = useState(false)
+
   const location = useLocation()
   const showSummaryStrip = !ownerMode && location.pathname.startsWith('/time')
 
@@ -84,7 +90,15 @@ export function AppLayout() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar" aria-label="Primary navigation">
+      {navOpen ? (
+        <button
+          type="button"
+          className="nav-backdrop"
+          aria-label="Close navigation"
+          onClick={() => setNavOpen(false)}
+        />
+      ) : null}
+      <aside className={navOpen ? 'sidebar open' : 'sidebar'} aria-label="Primary navigation">
         {isSafeImageSrc(firmLogoUrl) ? (
           // Logo-only header: the firm's name is assumed to be baked
           // into the image, so we drop the text lockup entirely. The
@@ -116,6 +130,7 @@ export function AppLayout() {
                   className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
                   key={item.to}
                   to={item.to}
+                  onClick={() => setNavOpen(false)}
                 >
                   <Icon size={17} />
                   <span>{item.label}</span>
@@ -147,9 +162,17 @@ export function AppLayout() {
           </div>
         ) : null}
         <header className="topbar">
-          <div>
+          <button
+            type="button"
+            className="nav-toggle"
+            aria-label="Open navigation"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen((current) => !current)}
+          >
+            <Menu size={18} />
+          </button>
+          <div className="topbar-heading">
             <p className="eyeline">{firmName}</p>
-            <h1>Time, checklists, and client billing</h1>
             <p className={`sync-banner sync-${displayedSyncState}`}>{displayedSyncMessage}</p>
           </div>
           <div className="topbar-actions">

@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Copy, GripVertical, Plus } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, GripVertical, MoreHorizontal, Plus } from 'lucide-react'
 import {
   useEffect,
   useMemo,
@@ -1126,22 +1126,11 @@ export function ChecklistCard({
         <div className="checklist-meta">
           {handedOff ? <span className="status-pill">Handed off</span> : null}
           {isViewerOnly ? <span className="status-pill">View only</span> : null}
-          {ownerMode && !editingMeta ? (
-            <button
-              type="button"
-              className="secondary-action"
-              title="Edit this task's title, due date, and assignee."
-              onClick={openMetaEditor}
-            >
-              Edit details
-            </button>
-          ) : null}
           {ownerMode ? (
-            <button
-              type="button"
-              className="secondary-action danger"
-              title="Delete this task (owner only). Time entries are preserved."
-              onClick={() => {
+            <CardActionsMenu
+              showEdit={!editingMeta}
+              onEdit={openMetaEditor}
+              onDelete={() => {
                 // Deletion moves the task to the owner-only recycle bin (it's
                 // recoverable until the bin is emptied). The confirm names the
                 // task and calls out that billing data survives — the common
@@ -1153,9 +1142,7 @@ export function ChecklistCard({
                   void onDeleteChecklist(checklist.id)
                 }
               }}
-            >
-              Delete task
-            </button>
+            />
           ) : null}
         </div>
       </header>
@@ -1233,6 +1220,87 @@ export function ChecklistCard({
  * "waiting". Gives a roomy note textarea, a quick "waiting on a person" picker
  * (fills the note with a team member's name), and a Clear button to un-flag it.
  */
+/**
+ * "…" overflow menu for a task card's owner actions (edit / delete).
+ * Same handlers the two standalone buttons used to call — only the
+ * presentation moved behind a menu so every card isn't shouting a
+ * Delete button. Click-outside and Escape both close it.
+ */
+function CardActionsMenu({
+  showEdit,
+  onEdit,
+  onDelete,
+}: {
+  showEdit: boolean
+  onEdit: () => void
+  onDelete: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onPointer = (event: globalThis.MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false)
+      }
+    }
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('mousedown', onPointer)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', onPointer)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div className="card-menu" ref={containerRef}>
+      <button
+        type="button"
+        className="card-menu-trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Task actions"
+        title="Task actions"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <MoreHorizontal size={16} />
+      </button>
+      {open ? (
+        <div className="card-menu-list" role="menu">
+          {showEdit ? (
+            <button
+              type="button"
+              role="menuitem"
+              className="card-menu-item"
+              onClick={() => {
+                setOpen(false)
+                onEdit()
+              }}
+            >
+              Edit details
+            </button>
+          ) : null}
+          <button
+            type="button"
+            role="menuitem"
+            className="card-menu-item danger"
+            onClick={() => {
+              setOpen(false)
+              onDelete()
+            }}
+          >
+            Delete task
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function WaitingEditor({
   note,
   employees,
