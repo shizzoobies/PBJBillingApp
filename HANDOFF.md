@@ -1,173 +1,188 @@
-# PB&J Strategic Accounting — Cross-Agent Handoff
+# PB&J Strategic Accounting — Handoff
 
-_Last updated: 2026-06-05_
+_Last updated: 2026-06-10. This supersedes earlier handoffs; git history has the old one._
 
-## ⭐ LATEST — "Waiting on" toggle + Delayed page (`695c1ae`, pushed)
-
-A new feature on top of the 6-item batch. **Per item AND sub-item ⏳ toggle** that flags a step as blocked/delayed and reveals a free-text "waiting on" note; plus a new **owner-only `/delayed` page** that lists every flagged step **grouped by client** (collapsible cards: checklist → item/sub-item → note + assignee + due date, with deep-links).
-- **Data:** `ChecklistItem.waiting`; `SubChecklistItem.waiting` + `waitingOn`. New `checklist_items.waiting boolean` column (migration; threaded through SELECT/read-map + BOTH full INSERTs). `normalizeSubItems` now preserves `waiting`/`waitingOn` on sub-items through the JSONB round-trip. Legacy `waiting_on` notes auto-flag as waiting on read.
-- **Top-level item:** reuses the existing `updateChecklistItem` path (PATCH gained `waiting`). **Sub-item:** new `updateChecklistSubItem` store method + **PATCH on the sub-item route** + `updateChecklistSubItemRequest` (api) + `updateSubItemWaiting` (App/context), threaded ChecklistInProgressSection → ChecklistCard → DraggableTaskList (+ ClientDetailPage's ChecklistCard).
-- **Page:** `src/pages/DelayedPage.tsx`; `/delayed` route wrapped in `OwnerOnly`; owner-only nav item in `navItems.ts`; added to the redirect-guard array in App.tsx.
-- 191 tests green; lint + tsc + build clean. Migration runs on deploy (only exercised against live Postgres; dev uses the file fallback).
+A time-tracking, checklist, and client-billing web app for a small bookkeeping
+firm. This doc is written so a fresh session (or another dev) can resume cold.
 
 ---
 
-## ⭐ ACTIVE TASK — 6-item client feedback batch (ALL SHIPPED ✅)
+## Who's who
 
-The full 6-item feedback batch from Brittany is **complete and pushed**. Awaiting her live testing / further feedback.
+- **Alex** (asoalexander@gmail.com) — the developer/owner of the codebase. "Push"
+  from Alex is the go-signal to deploy. Feature requests from the in-app
+  assistant email Alex.
+- **Brittany Ferguson** — the firm **owner** (the app's primary user / "the
+  client"). Owner role sees everything.
+- **Team members / staff** — bookkeepers (e.g. Avery, Jordan). Reduced view:
+  their assigned clients only. There is exactly **one owner**.
 
-| # | Item | Status |
-|---|------|--------|
-| 1 | **Annual billing method** — flat yearly fee, billed once in a chosen month | ✅ Pushed (`db078f8`) |
-| 2 | Organize repeating tasks → group by client (collapsible headers) | ✅ Live |
-| 3 | Lock bug (locks affected all clients) → now scoped per-client | ✅ Live |
-| 4 | Edit checklists under clients (full editor on client page) | ✅ Live |
-| 5 | "Waiting on" note per checklist item (amber badge) | ✅ Live |
-| 6 | **Group time billing** — pick Group → multiple clients, flexible split | ✅ Pushed (`d27262a`) |
+## Live + deploy
 
-Last commit: `9298b3d`. **191 tests** green. Annual billing live as `index-XMkNv5UW.js`; first group-time version `index-Dt4D6Wir.js`; group-time **rework** (`9298b3d`) pushed after — watch the live bundle hash to confirm it landed. DB migrations shipped: annual_rate/annual_billing_month + billing_mode CHECK swap; time_entries.group_id; **time_entries.group_client_ids**.
+- **Live:** https://pbjbillingapp-production.up.railway.app
+- **Host:** Railway, project **"PB&J App"**, service **PBJBillingApp** (+ a
+  Postgres service). Auto-deploys `main` on push. Build = `npm run build`,
+  start = `npm start`, healthcheck = `/health`.
+- **Railway CLI is authenticated in this environment** as asoalexander@gmail.com
+  (`npx @railway/cli@latest ...`, project linked). Use it to inspect/fix vars
+  and watch deploys:
+  - Watch a deploy: `npx @railway/cli@latest deployment list --service PBJBillingApp --json`
+  - Audit vars: `... variables --service PBJBillingApp --json`
+  - Trigger a deploy: `... redeploy --service PBJBillingApp --yes`
+  - **Control-plane calls use the account login, not env keys.**
+- **Deploy gotcha (hit 2026-06-10):** a malformed variable — a row literally
+  named ` to Railway's Variables ` (a sentence fragment pasted into the name
+  field) — caused every build to fail with `secret ID missing for ""
+  environment variable`. The fix was deleting that row via CLI. **If builds
+  fail with that error, audit variable _names_ for empty/whitespace/garbage**
+  (the pretty list view hides them; use `--json` or the Raw Editor). Deleting a
+  var does NOT auto-redeploy — trigger one explicitly.
 
-### #6 as built — REWORKED to "track on the timer, split later" (current model, `9298b3d`)
-Per Brittany's follow-up: she wanted to select **Group** while tracking time *normally*, then split for billing *later* (clients chosen up front, ad-hoc groups, splitting **replaces** the holding entry).
-- **Track:** the **timer** (and manual entry) have an owner-only "Track time for" choice — *A single client* or *A group*. For a group she ticks member clients up front (`TimerState.groupClientIds`), tracks normally.
-- **Holding entry:** on stop/submit, ONE unsplit entry is saved — `clientId: ''`, `billable: false`, `groupClientIds: [...]`. `isGroupHoldingEntry(entry)` (utils) identifies it. It's kept OFF invoices (no clientId) and OUT of the approvals queue (filtered in `TimeApprovalsPage`). Shows in Recent time as "Group · N clients · Needs split" with a **Split across clients** button.
-- **Split:** `GroupSplitModal` (TimePage) → even / full / custom + live preview → `splitGroupEntry()` (App.tsx) creates one billable entry per client (shared fresh `groupId` via `makeId('grp')`) then **deletes** the holding entry.
-- `allocateGroupMinutes(total, ids, mode, custom)` (utils, unit-tested) is the pure allocator; reused by the Split modal.
-- Server: `POST /api/time-entries` accepts `groupClientIds`, allows a client-less holding entry (`isGroupPending`), visibility-checks every member. Store: `group_client_ids text[]` threaded through create/read/bulk paths in both backends.
-- The earlier immediate-split path (`logGroupTime`, allocation-at-entry) was **removed** in this rework.
+## Env vars (Railway)
 
-### #1 Annual billing — spec & plan
-Confirmed semantics: **"Flat yearly fee, billed once."** A flat yearly fee that appears on the invoice **once per year**, in a **chosen billing month**. Every other month shows **no** subscription charge.
-Current model: `billingMode` is `'hourly' | 'subscription'` with `monthlyRate` + `monthlyServiceTier`. Add a third mode.
-1. **Type** (`src/lib/types.ts`): add `'annual'` to `billingMode`; add `annualRate?: number` (yearly fee) + `annualBillingMonth?: number` (1–12).
-2. **Store** (`db/store.js`): `alter table clients add column if not exists annual_rate ...` + `annual_billing_month ...`; update BOTH client INSERT paths (⚠️ 31-col alignment), SELECT list, read mapping. Verify `sanitizeAppData` keeps them.
-3. **Invoice** (`src/lib/utils.ts`, `getInvoice`): when `billingMode === 'annual'`, emit the annual fee line **only** when the period's month === `annualBillingMonth`; otherwise no subscription line. Hourly/time lines unaffected.
-4. **UI:** `BillingSectionBody` in `src/pages/ClientDetailPage.tsx` — add "Annual" option + `annualRate` + `annualBillingMonth` (month picker), using SectionKit save controls. Show annual line in invoice display.
-
-### #6 Group time billing — spec & plan (biggest item)
-Confirmed semantics: when logging time, pick **"Group"** → select **multiple clients** → choose a **per-entry allocation**: **split evenly / full duration to each / custom split** ("option for each full flexibility" = expose all three).
-1. **Model** (`src/lib/types.ts`): **recommended** — materialize one child `TimeEntry` per client at save time, each tagged with a shared `groupId` (so they can be edited/deleted together) + the chosen allocation. Materializing keeps `getInvoice` simple (each client's invoice just sums its own entries) and avoids double-count risk.
-2. **Store** (`db/store.js`): persist chosen shape in both backends (migration if new column/table).
-3. **UI:** time-entry form — add "Group" target, multi-client picker, allocation-mode selector; for "custom", per-client hours/percent that must sum to the total duration.
-4. **Invoice** (`src/lib/utils.ts`): each client gets only its allocated share; never double-count; estimated-hours rule still holds.
-5. **⚠️ CONFIRM WITH USER BEFORE BUILDING:** does Brittany need to edit/delete the group entry **as one unit** later, or is recording the split once enough? Decides materialize-vs-keep-as-group (default rec: materialize + `groupId`).
-
-**Suggested order:** #1 annual billing first (smaller, self-contained), then #6 group time (confirm the edit-as-group question first). User's stated default was annual billing first.
+Set and required: `DATABASE_URL`, `ANTHROPIC_API_KEY` (assistant — confirmed
+set), `RESEND_API_KEY` + `EMAIL_FROM` (email — confirmed set), `APP_PUBLIC_URL`,
+`JWT_SECRET`, `OWNER_EMAIL`, `ADMIN_EMAIL`, `OWNER_BOOTSTRAP_PASSWORD`,
+`NODE_ENV`. Optional: `FEATURE_REQUEST_EMAIL` (defaults asoalexander@gmail.com),
+`ASSISTANT_MODEL` (defaults `claude-opus-4-8`).
 
 ---
 
-## Project identity
+## Architecture (the load-bearing facts)
 
-- App: **PB&J Strategic Accounting** — a bookkeeping/time-tracking/billing SaaS for an accounting firm.
-- Local workspace: `D:\PBJ Accounting Work\AP For Time Stuff`
-- GitHub repo: `https://github.com/shizzoobies/PBJBillingApp.git` (branch `main`)
-- Live app (Railway, auto-deploys on push to `main`): `https://pbjbillingapp-production.up.railway.app`
-- People: **Alex Anderson** (`asoalexander@gmail.com`) is the developer + an Owner. **Brittany Ferguson** (`emp-patrice`) is the firm owner/client the work is for. "push" / "go ahead" is the go signal to ship.
+- **Frontend:** React 19 + TypeScript + Vite. **Backend:** plain Node `http`
+  server in `server.js` (no framework). **Store:** `db/store.js` is a dual
+  backend — **Postgres when `DATABASE_URL` is set, JSON-file fallback
+  otherwise** (`tmp/app-data.json`, `tmp/auth-state.json` locally).
+- **EVERY data-model change must touch BOTH backends** in `db/store.js`: the
+  pg path (migration `alter table ... add column if not exists` / `create table
+  if not exists`, SELECT, read-map, INSERT(s), update path) AND the JSON-file
+  path. Miss one and prod (pg) or dev (file) silently diverges.
+- **Auth:** magic-link (15-min single-use) + password + optional TOTP 2FA.
+  Sessions in `user_sessions` (NOT the legacy `sessions` — see security memory).
+- **Notifications:** `notify(store, userId, event, payload)` in `lib/notify.js`
+  — always writes the in-app bell row; also emails via **Resend** if
+  `RESEND_API_KEY`+`EMAIL_FROM` set. Add new event types to `KNOWN_EVENTS` +
+  `defaultSubject`.
+- **Data scoping for staff:** `scopeAppDataForSession` in server.js strips a
+  non-owner down to their assigned clients. **As of 2026-06-10, staff receive
+  ALL checklists for assigned clients** (not just ones assigned to them);
+  edit/complete rights stay gated to assignee/editor.
 
-## Current reality (IMPORTANT — differs from the old handoff)
+## Build / verify / deploy process (DO THIS)
 
-**GitHub `main` is the single source of truth and is fully current.** Every change is committed and pushed immediately, and Railway auto-deploys `main`. The old "GitHub is behind local" note is obsolete — ignore it. Start from the repo; the local workspace and remote are in sync.
+1. `npm run verify` = lint + build + test. **Before pushing schema/test
+   changes, clear the stale tsbuildinfo cache first** or a clean Railway build
+   can fail where local passed:
+   ```
+   find . -name "*.tsbuildinfo" -not -path "./node_modules/*" -delete
+   rm -f node_modules/.tmp/*.tsbuildinfo
+   npm run verify
+   ```
+2. **TS tests must not import plain-JS `lib/*.js`** (no `allowJs`) — it breaks
+   the clean build. Test JS libs with `lib/**/*.test.mjs` (already in the vitest
+   `include`; runs under vitest, invisible to tsc). TS/TSX tests live in `src/`.
+3. Commit on `main`. Push only on Alex's "push". Commit message footer:
+   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+4. After push, watch the deploy (CLI above or poll the bundle hash at the live
+   URL), then health-check `/`, `/api/firm-settings/public`, `/health` (expect
+   200/200/200).
 
-## Workflow (follow this exactly)
+## Local dev quirks (important for verification)
 
-1. Make the change.
-2. **Verify:** `npm run verify` (= `eslint .` + `tsc -b && vite build` + `vitest run`). Tests must stay green (currently **172 tests**).
-3. Commit with a descriptive multi-line message ending with the `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>` trailer. One feature per commit.
-4. Push to `main` → Railway auto-deploys.
-5. **Confirm the deploy** by diffing the bundle hash:
-   `curl -s https://pbjbillingapp-production.up.railway.app/ | grep -o 'index-[A-Za-z0-9_-]*\.js'`
-   Poll until the hash **changes** from the previous one. **Gotcha:** Railway often briefly serves an *intermediate* build — after the hash changes, `sleep 20` and re-check that it's the **same** (stable) hash before trusting it. Then optionally `curl` the `/assets/<hash>.js|.css` and `grep` for a string unique to your change to confirm it's really live.
-6. Tell the user what to test, and remind them to hard-refresh (Ctrl+Shift+R) since Railway may serve the prior build for ~a minute.
+- `npm run dev` runs Vite (5173) + `node server.js` (4173) concurrently. Vite
+  proxies `/api` + `/health` → 4173.
+- **The Vite dev proxy rewrites Host, so same-origin POSTs guarded by
+  `isCrossSiteOrigin` get 403'd through 5173.** Verify POST flows against
+  `node server.js` on **4173 directly** (serves `dist` same-origin like prod),
+  or add an `Origin: http://localhost:4173` header in curl.
+- **Vite's file watcher sometimes serves stale modules** after edits (saw it
+  this session). If changes don't appear, stop/restart the preview server.
+- **Local login for testing:** forge a session row in `tmp/auth-state.json`
+  (`userSessions.push({id: <uuid>, userId, createdAt, lastSeenAt, ...})`) and
+  set cookie `pbj_session=<id>`. Owner is Brittany (role owner); staff are
+  emp-avery (senior_bookkeeper) / emp-jordan (bookkeeper). Then drive flows with
+  curl or Playwright. NOTE: dev-data may be mutated from this session's testing
+  (Jordan assigned to Clover, some entries cleared) — it's gitignored scratch,
+  reseed from `prototype-data.json` if you want it pristine.
+- Don't commit `tmp/*` (gitignored), `package-lock.json` (gitignored on
+  purpose), `rescue-login.mjs`, or `.playwright-mcp/`.
 
-### Hard constraints
-- **Never commit `package-lock.json`** (gitignored on purpose; committing it breaks Railway `npm ci`). Never run `npm install` casually.
-- `rescue-login.mjs` stays gitignored.
-- Estimated-hours fields are **informational only** — must NEVER affect invoice totals.
-- Don't push `--force` to main; don't skip hooks.
+---
 
-## Stack & architecture
+## What shipped 2026-06-10 (newest first)
 
-- **Frontend:** React 19 + TypeScript + Vite. Entry `src/App.tsx` (large — holds the context provider + all the mutation handlers). Pages in `src/pages/`. Shared UI in `src/components/`. Styles all in `src/App.css` (one big file). Types in `src/lib/types.ts`. Pure logic in `src/lib/utils.ts`. API client in `src/lib/api.ts`.
-- **Server:** `server.js` (plain Node http server, route-matched by path/method).
-- **Persistence:** `db/store.js` — **dual backend**: Postgres (when `DATABASE_URL` is set, i.e. on Railway) AND a local JSON file fallback for dev. **Any data-model change must update BOTH paths.** Schema lives in the migration blocks inside `store.js` (`create table if not exists` + `alter table ... add column if not exists` — idempotent, run on every boot) and `db/schema.sql`.
-- **Auth:** email magic-link + password + optional TOTP 2FA. Sessions cookie `pbj_session`. Gotcha: there's a `user_sessions` table (current) vs a legacy `sessions` table — use `user_sessions`.
+All on `main`, all **live** (verified 200/200/200). Commit → summary:
 
-### Data flow (critical mental model)
-- `GET /api/app-data` returns the whole workspace, **scoped per session** (`scopeAppDataForSession` in `server.js`): owners get everything; non-owners get only their assigned clients/checklists/own time entries, with billing rates stripped.
-- **Most workspace edits (clients, plans, contacts, templates) persist via a bulk autosave**: the frontend mutates local `data` via `updateWorkspaceData`, which debounces (~250ms) and `PUT`s the entire `data` to `/api/app-data` (`saveAppData`). There is **no per-field endpoint** for these — the bulk save is the only persistence path. `forceNextSaveRef` guarantees workspace edits aren't skipped.
-- **Some operations use dedicated endpoints** (and `applyServerDataUpdate`, which increments a skip-counter so the echo doesn't re-save): time entries (`POST /api/time-entries`), checklist item toggles, reimbursements CRUD, checklist-template create/apply/duplicate, assigned-team, firm settings (`PUT /api/firm-settings`).
-- **Bulk write is wipe-and-rewrite inside one transaction** (`store.write`): it deletes and re-inserts every table from the payload. It's **all-or-nothing** — one bad row throws and the whole save 500s (frontend shows "Couldn't save"). `filterBulkSaveOrphans` pre-drops rows whose `clientId`/`templateId` FK no longer exists (note: empty/`''` clientId is falsy → skipped → kept, which is how administrative time entries survive).
+- **`b5c10ab` Team visibility — DEPLOYED GREEN.** A bookkeeper assigned to a
+  client now sees + can log time against ALL that client's tasks (was: only
+  their own), fixing "can't save a future get-ahead task." Widened 3 assignee
+  gates (server scoping, server time-entry `allowedToLog`, client
+  `eligibleChecklistsFor` → moved to `lib/utils.ts`, unit-tested). Edit/complete
+  still assignee-only; queue + summary counts stay "mine". Verified: staff
+  logged against a teammate's task → 201 (was 403). 223/223 tests.
+- **`23a99e1` Assistant Phase 2 — watch-and-learn.** `lib/usage-patterns.js`
+  (deterministic, no model call) detects (a) tasks created by hand 2+ months
+  w/o a template, (b) same manual time entry 3+×/90d, (c) stalled active
+  templates. `GET /api/assistant/insights` (top-3, minus dismissed) +
+  `POST .../insights/dismiss` (persisted per-user). Panel shows "Noticed
+  something" cards; chat got a `get_usage_patterns` tool.
+- **`7f20fa4` Assistant Phase 1 — chat + feature requests.** Owner-only
+  floating sparkle button → chat grounded in `docs/capability-manifest.md`;
+  `send_feature_request` tool DRAFTS only, owner confirms, emails Alex via
+  Resend + logs it. `lib/assistant.js`, `POST /api/assistant/chat` (owner-only,
+  20/5min rate limit, friendly 503 if no key).
+- **`da91bc9` dev file-store race fix.** Serialized JSON read/write in the file
+  backend (per-path promise queue) — fixed local "Unexpected end of JSON input"
+  500s. Postgres (prod) never hit it.
+- **`464d237` / `ff85e1d` / `43fd522` Visual polish batches 1–3.** Sidebar
+  contrast guard (auto-legible nav text vs any brand color, unit-tested),
+  styled native selects/date inputs, dead-space fix, offline-banner grace,
+  softer stat cards; quiet checklist row controls + heatmap/Gantt legibility +
+  hover states; compact sticky header + mobile drawer nav + "…" overflow menu
+  on task cards.
+- **`3084885` / `97d0721` Waiting-on notifications.** A checklist step can name
+  the specific task it's waiting on (`waitingForChecklistId` on item +
+  sub-item); when that task completes, the blocked step's assignee gets an
+  in-app + email `waiting_cleared` notification.
+- **`a062431` Get-ahead generate fix** (earlier): the
+  `POST /api/checklist-templates/:id/generate` endpoint was owner-only; now
+  staff can generate for assigned clients.
 
-### Gotchas that have bitten us (read before touching data)
-- **Adding a `Client` field** requires, in lockstep: (1) `Client` type in `types.ts`; (2) the clients **bulk INSERT** in `store.js` (column list + `$N` placeholder + value array must stay aligned — currently **31 columns**); (3) the clients **read mapping**; (4) an `alter table clients add column if not exists ...` migration. Miss any and the field silently doesn't persist while the save still returns 200 (the "green save, gone after refresh" bug class).
-- **Normalizers silently drop new fields.** `ensureTemplateStages`, `normalizeSubItems`/`normalizeSubSubItems` (store), and `sanitizeAppData` rebuild objects — if you add a field to a checklist node/template and don't carry it through these, it vanishes on save. (This caused the "subtask due dates reset" and "day-of-month wouldn't engage" bugs.)
-- **`sanitizeAppData`** (store) clamps numbers / drops bad dates before write; it keeps unknown fields (spreads), so plain new fields pass through, but it does coerce known numeric fields.
-- **Frontend input reliability:** use the shared `SectionKit` controls. Plain blur-only inputs lose data if you type then refresh/navigate without clicking away. The shared `SavingTextInput`/`SavingNumberInput`/`SavingTextarea` commit on **debounce (700ms) + Enter + blur**, and resync to the canonical value when idle. They use a **focus `useState`, NOT a ref** — the `react-hooks/refs` lint rule forbids reading `.current` during render, and `react-hooks/set-state-in-effect` forbids sync setState in effects (mirror sync state into a ref inside a `useEffect` instead).
-- `SaveNumberField` passes `null` through on clear (don't swallow it) so clearing a number actually persists.
-- Locked sections use the `inert` attribute on the body (React 19 supports it) so the whole subtree is non-interactive without threading `disabled` everywhere.
+## The AI assistant — STANDING RULE
 
-## What's built (current feature set)
+**`docs/capability-manifest.md` is the assistant's only source of truth. ANY
+commit that adds/changes/removes a user-facing feature MUST update the manifest
+in the SAME commit** — otherwise the assistant lies to Brittany. (Also recorded
+in memory `ai-assistant.md`.) Owner-only, forever. Tests in
+`src/__tests__/assistant.test.tsx` assert manifest coverage + panel behavior.
 
-- **Auth & team:** magic-link/password login + 2FA, owner-managed team (invite, roles, sessions, soft-delete inactive members).
-- **Clients:** profile, contacts (multi-select from a shared Contacts directory), address, billing (hourly **or** monthly), per-role estimated hours (Bookkeeper/Accountant/CFO, informational), plans/services chips, invoice settings (payment terms, footer, toggles), logo. **Monthly service package** dropdown (7 named tiers in `MONTHLY_SERVICE_TIERS`) drives the invoice line label when on monthly billing.
-- **Checklists:** one-time + recurring templates → materialized live instances ("cases" for multi-stage). Per-node due dates (specific date or day-of-month) at item/sub-item/sub-sub-item level. Recycle bin. Standard (client-agnostic) blueprint templates + "apply to client".
-- **Time tracking:** live timer + gated manual entry, approval workflow (pending → approved/rejected), weekly submissions, month-end timesheet locks. **Administrative time** (company meetings/internal): a checkbox on both timer and manual forms — no client/task, not billable, notes required (`TimeEntry.isAdministrative`, nullable `client_id` + `is_administrative` column).
-- **Invoices / billing:** monthly period selector; subscription + hourly; one-off + recurring reimbursements (auto-populated on matching periods); reimbursements have inline edit.
-- **Reports / productivity / gantt / dashboard:** owner analytics.
-- **Settings (owner):** firm branding (name, tagline, logo, sidebar colors), address/contact/business identifiers, **"Default values for new clients"** (`FirmSettings.clientDefaults` → `client_defaults` JSON column) that pre-fill the Add-client form, plus 2FA + password management.
-- **Contacts:** shared directory with CSV import (dedupe/merge), inline-editable fields incl. notes.
+---
 
-## Recent work (this batch of sessions) — what a fresh context won't know
+## Collaboration workflow
 
-- **6-item feedback batch, items #2–#5 shipped** (commit `ea5c5f5`; see ⭐ ACTIVE TASK above for the 2 remaining):
-  - **#3 lock-scoping:** moved `SectionScopeContext` into its own file `src/components/sectionScope.ts` (fast-refresh lint). `CollapsibleSection` reads it and keys localStorage as `pbj.section.<scope><storageKey|title>`. `ClientDetailPage` wraps its tree in `<SectionScopeContext.Provider value={\`client:${client.id}:\`}>` so locks/collapse are per-client.
-  - **#4 edit checklists under clients:** `ChecklistCard` (+ `NewTaskForm`) now `export`ed from `ChecklistsPage.tsx`; `ClientDetailPage`'s `ActiveChecklistsBody` renders a real `<ChecklistCard>` per active checklist (pulls ~16 handlers from `useAppContext`, `focused={false} focusRef={null}`).
-  - **#5 "waiting on":** new `waiting_on text` column on `checklist_items` (full dual-backend pattern: type `ChecklistItem.waitingOn?`, migration, both INSERTs `$9`/sub_items→`$10::jsonb`, SELECT, read map, `updateChecklistItem` update path, `server.js` PATCH handler). UI: amber `.task-row-waiting` badge + `.item-waiting-input` in `DraggableTaskList`; `updateChecklistItem` patch type widened to include `waitingOn?: string | null` across `api.ts`/`AppContext.tsx`/`App.tsx`.
-  - **#2 group repeating tasks by client:** `RepeatingTasksManager` now groups templates into collapsible per-client sections (`collapsedClients` Set, `clientGroups` Map, `.repeating-client-group/-header/-count/-body`, focus auto-expands the focused client).
+- **Plan first, get approval, then build; "push" = deploy.** Use AskUserQuestion
+  for genuine product/permission decisions. Build + verify locally, present a
+  summary, wait for "push" before deploying.
+- **Hard constraints:** never commit `package-lock.json`; `rescue-login.mjs`
+  stays gitignored; estimated-hours fields are informational only (never affect
+  invoices); never `push --force` to main; never skip hooks/signing.
 
-- **Shared UI kit:** `src/components/SectionKit.tsx` + `src/lib/useSaveFlash.ts`. Exports `CollapsibleSection` (collapse + optional lock, **unlocked by default**, state persisted to `localStorage` keyed by section title — `pbj.section.<title>.{locked,collapsed}`), `SaveBadge`, `SavingTextInput/SavingNumberInput/SavingTextarea`, and field wrappers (`SaveTextField`, `SaveNumberField`, `SaveSelectField`, `SaveTextareaField`, `SaveToggleField`).
-- **Save confidence:** per-field "Saving… / Saved ✓ / Couldn't save" badges (tied to `dataSyncState`), plus an always-on header sync banner ("All changes saved / Saving… / Couldn't save — retrying / Offline") in `AppLayout` (`syncMessage` computed in `App.tsx`).
-- Applied collapse/lock + reliable inputs to **Client detail, Contacts, Plans, Settings (firm fields), Team**. (Time + Checklists pages were intentionally left — they're explicit-submit / already commit-on-change; Checklists already has its own collapse.)
-- **Premium UI pass v1** (global, CSS-only in `App.css`): elevation tokens (`--shadow-sm/md/lg/hover`, `--radius`, `--ease`), softer floating panels, gradient primary buttons with hover/press lift, restyled tables (rounded container, tinted uppercase header, row hover, tabular figures), refined inputs/focus rings, summary **stat cards** with tinted icon badge, hover lifts on list rows.
-- **Sidebar:** now sticky (`align-self:start; height:100vh; position:sticky; top:0; overflow-y:auto`) + elevated (right-edge shadow, z-index) — follows scroll instead of being flat.
-- **Time approvals:** owners are now included in the queue, so an owner can see + approve their **own** logged time (server already allowed it; the UI was filtering owners out).
-- Recurring-checklists card on the client page (search + "View" deep-link via `?focusTemplate=<id>` which auto-expands/scrolls the template on the Checklists page).
-- Number-input spinners hidden globally.
+## Backlog / next ideas
 
-## Known backlog / parked
+- **Assistant Phase 3 (planned, not built):** streaming responses over the
+  existing SSE channel, cross-device conversation persistence, "do it for me"
+  action tools (e.g. "make this recurring") with the same confirm-first
+  pattern, weekly digest email. See `.omc/plans/ai-assistant-plan.md`.
+- **More watch-and-learn patterns** (e.g. "you reassign this to X every month —
+  change the default assignee?").
+- **Security backlog** (from memory `security-notes.md`): deferred Batches 4–7
+  + H3 — review before any auth/session work.
+- **Optional polish:** P3 from the visual review (skeleton loaders, save
+  toasts, per-route page titles, favicon, login-page CTA).
 
-- **Security backlog is parked** until the user says "pick up the security backlog" (after EOM). Items live in the user's memory file `security-notes.md`: deferred H3, Batch 6 (H5/M1), Batch 7 (M7/L4). Shipped: Batches 1–5 + the Origin same-origin fix.
-- **Premium UI next layers** (discussed, not done): dashboard "hero", invoice-as-premium-document (letterhead/emphasized totals), empty states (icon + prompt), loading skeletons. Intensity chosen: "noticeably elevated."
-- Possible future: extract more owner-only mutations off the bulk `PUT /api/app-data`; split `App.tsx`; CSV/date-range report exports.
+## Memory pointers
 
-## Important files
-
-- `src/App.tsx` — context provider + all mutation handlers (timer, logTime, updateClient, template/checklist CRUD, autosave effect, sync state).
-- `src/App.css` — all styles + the design tokens (`:root`).
-- `src/components/SectionKit.tsx`, `src/lib/useSaveFlash.ts` — the shared save/lock/collapse kit.
-- `src/components/AppLayout.tsx` — shell, sidebar, header sync banner.
-- `src/lib/types.ts` — all types + `DEFAULT_FIRM_SETTINGS`, `MONTHLY_SERVICE_TIERS`.
-- `src/lib/utils.ts` — `getInvoice`, materializer (`materializeRecurringChecklists`, `ensureTemplateStages`, due-date resolvers), status helpers.
-- `server.js` — all API routes + `scopeAppDataForSession`.
-- `db/store.js` — dual-backend persistence, schema migrations, bulk write/read.
-- `src/pages/` — `ClientDetailPage`, `ClientsPage`, `TimePage`, `TimeApprovalsPage`, `ContactsPage`, `PlansPage`, `SettingsPage`, `ChecklistsPage`, `CaseDetailPage`, etc.
-
-## Prompt for the next agent
-
-```text
-Continue the PB&J Strategic Accounting app.
-
-GitHub repo (source of truth, auto-deploys to Railway): https://github.com/shizzoobies/PBJBillingApp.git
-Local workspace: D:\PBJ Accounting Work\AP For Time Stuff
-Live: https://pbjbillingapp-production.up.railway.app
-
-Read HANDOFF.md fully first — especially "Workflow", "Data flow", and "Gotchas".
-
-Two billing features remain in the active batch: #1 annual billing and #6 group time (see "⭐ ACTIVE TASK" at the top of HANDOFF.md for full specs). Start with #1; confirm the edit-as-group question before building #6.
-
-Workflow: make change → `npm run verify` (must stay green, 172 tests) → commit (descriptive, Co-Authored-By trailer) → push main → confirm Railway deploy via bundle-hash diff (watch for intermediate builds; wait for a stable hash). Never commit package-lock.json.
-
-When changing the data model, update BOTH the Postgres and file-fallback paths in db/store.js (type + INSERT alignment + read mapping + add-column migration), and make sure normalizers (ensureTemplateStages / normalizeSubItems / sanitizeAppData) preserve the new field.
-
-For editable UI, reuse src/components/SectionKit.tsx controls so fields save reliably (debounce+Enter+blur) and show save badges.
-```
+Auto-memory lives at `~/.claude/projects/.../memory/` — see `MEMORY.md` index:
+`project-overview`, `railway-deploy`, `collaboration-workflow`,
+`due-date-mechanics`, `security-notes`, `ai-assistant`.
