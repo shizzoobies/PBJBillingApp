@@ -80,7 +80,13 @@ export function AppLayout() {
   const billableMinutes = periodVisibleEntries
     .filter((entry) => entry.billable)
     .reduce((total, entry) => total + entry.minutes, 0)
-  const openChecklistItems = visibleChecklists.reduce(
+  // Staff now receive every task for their assigned clients, so scope this
+  // summary to tasks actually assigned to this person — the label says
+  // "assigned checklist items", and it should stay literally that.
+  const myChecklists = visibleChecklists.filter(
+    (checklist) => checklist.assigneeId === effectiveUser?.id,
+  )
+  const openChecklistItems = myChecklists.reduce(
     (total, checklist) => total + checklist.items.filter((item) => !item.done).length,
     0,
   )
@@ -210,7 +216,7 @@ export function AppLayout() {
               icon={ListChecks}
               label="Assigned checklist items"
               value={openChecklistItems.toString()}
-              detail={`${visibleChecklists.length} assigned checklists`}
+              detail={`${myChecklists.length} assigned checklists`}
             />
             <SummaryItem
               icon={CircleDollarSign}

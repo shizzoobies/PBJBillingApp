@@ -394,6 +394,22 @@ export function deriveChecklistStatus(
   return 'Not started'
 }
 
+// Tasks you can log time against for a client: every open (not fully
+// complete) task for that client. The server already scopes a non-owner's
+// data to clients they're assigned to, so "all of this client's tasks" is
+// exactly the shared-client board — no per-assignee filtering here. A team
+// member can therefore log time against any task on a client they're
+// assigned to, including get-ahead tasks assigned to a teammate.
+export function eligibleChecklistsFor(checklists: Checklist[], clientId: string): Checklist[] {
+  if (!clientId) return []
+  return checklists.filter((checklist) => {
+    if (checklist.clientId !== clientId) return false
+    const total = checklist.items.length
+    const done = checklist.items.filter((item) => item.done).length
+    return !(total > 0 && done === total)
+  })
+}
+
 export function sortChecklists(checklists: Checklist[]) {
   return [...checklists].sort((left, right) => {
     if (left.dueDate !== right.dueDate) {

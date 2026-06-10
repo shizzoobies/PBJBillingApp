@@ -28,6 +28,7 @@ import {
   clientName,
   currentBillingPeriod,
   currentWeekStart,
+  eligibleChecklistsFor,
   employeeName,
   formatAuditStamp,
   formatHours,
@@ -434,24 +435,6 @@ function WeeklySubmissionWidget({
  * Pick checklists eligible for time-attach: same client, not yet completed,
  * and either the user is assignee/editor (or owner — owners see all).
  */
-function eligibleChecklistsFor(
-  checklists: Checklist[],
-  clientId: string,
-  userId: string,
-  role: Role,
-): Checklist[] {
-  if (!clientId) return []
-  return checklists.filter((checklist) => {
-    if (checklist.clientId !== clientId) return false
-    const total = checklist.items.length
-    const done = checklist.items.filter((item) => item.done).length
-    if (total > 0 && done === total) return false
-    if (role === 'owner') return true
-    const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
-    return checklist.assigneeId === userId || editorIds.includes(userId)
-  })
-}
-
 function StatusPill({ status }: { status: TimeEntry['approvalStatus'] }) {
   const label =
     status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Pending'
@@ -542,8 +525,8 @@ function TimeCapture({
   const taskClientId = isRunning ? timer?.clientId ?? '' : effectiveClientId
 
   const eligibleTasks = useMemo(
-    () => eligibleChecklistsFor(checklists, taskClientId, effectiveEmployeeId, role),
-    [checklists, taskClientId, effectiveEmployeeId, role],
+    () => eligibleChecklistsFor(checklists, taskClientId),
+    [checklists, taskClientId],
   )
 
   // Recurring tasks for this client that don't have an open instance yet — so
@@ -972,8 +955,8 @@ function ManualEntryModal({
       : activeEmployeeId
 
   const eligibleTasks = useMemo(
-    () => eligibleChecklistsFor(checklists, effectiveClientId, effectiveEmployeeId, role),
-    [checklists, effectiveClientId, effectiveEmployeeId, role],
+    () => eligibleChecklistsFor(checklists, effectiveClientId),
+    [checklists, effectiveClientId],
   )
   const upcomingTemplates = useMemo(() => {
     if (!effectiveClientId) return []

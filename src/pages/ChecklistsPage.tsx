@@ -966,8 +966,11 @@ export function ChecklistCard({
   const editorIds = checklist.editorIds ?? []
   const isAssignee = checklist.assigneeId === activeEmployeeId
   const isEditor = editorIds.includes(activeEmployeeId)
-  const isViewerOnly =
-    role !== 'owner' && !isAssignee && viewerIds.includes(activeEmployeeId) && !isEditor
+  // A non-owner who is neither the assignee nor an editor sees the task
+  // read-only. This now covers any task on a client they're assigned to
+  // (not just ones they were explicitly added to as a viewer), so the
+  // "View only" pill correctly labels a teammate's task on a shared client.
+  const isViewerOnly = role !== 'owner' && !isAssignee && !isEditor
   // Whether the current viewer can edit checklist structure (reorder, bulk add)
   const canEditStructure = role === 'owner' || isAssignee || isEditor
 

@@ -89,7 +89,11 @@ sit in the top bar on every page.
 - Task card actions (owner): Edit details (title, due date, assignee),
   Delete task — deletion moves it to the owner-only Recycle bin; time entries
   logged against it are preserved. Restore from the bin anytime until emptied.
-- Sharing/visibility: staff see tasks for clients they're assigned to.
+- Sharing/visibility: a team member assigned to a client sees ALL of that
+  client's tasks (the whole shared board), not just tasks assigned to them
+  personally. They can log time against any of those tasks, including
+  upcoming/get-ahead ones. Editing and completing steps stays limited to the
+  task's assignee/editor — other tasks show as "View only".
 - Time logged against a task shows on the card.
 
 ## Delayed page (owner only)
@@ -160,8 +164,10 @@ sit in the top bar on every page.
   sends a sign-in link by email.
 - Roster: each member's role and last login; expand for details; reorder.
 - Resend sign-in link; revoke access.
-- Roles: owner has everything; staff see assigned clients, their own time,
-  and their tasks. There is exactly one owner.
+- Roles: owner has everything; staff see their assigned clients, their own
+  time, and ALL tasks for those clients (logging time against any of them),
+  while editing/completing stays limited to tasks assigned to them. There is
+  exactly one owner.
 
 ## Settings (owner only)
 
