@@ -223,7 +223,7 @@ async function main() {
   const updateBody = {
     conversation_config: {
       agent: {
-        first_message: 'Hi {{owner_name}} — what can I help you with?',
+        first_message: 'Hey {{owner_name}}! What can I help with?',
         prompt: {
           prompt: systemPrompt,
           knowledge_base: [

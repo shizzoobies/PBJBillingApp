@@ -1123,7 +1123,8 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, {
           signedUrl: data.signed_url,
           dynamicVariables: {
-            owner_name: session.user.name || 'Brittany',
+            // First name only — the agent addresses the owner casually.
+            owner_name: String(session.user.name || 'Brittany').trim().split(/\s+/)[0],
             today: todayIso(),
             memory_digest: buildMemoryDigest(memories),
           },
