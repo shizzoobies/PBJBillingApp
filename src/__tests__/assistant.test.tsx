@@ -14,6 +14,19 @@ vi.mock('../lib/api', () => ({
   assistantClearHistory: vi.fn(),
   assistantRunAction: vi.fn(),
   assistantEmailReportSend: vi.fn(),
+  fetchVoiceSignedUrl: vi.fn(),
+}))
+
+// Stub the ElevenLabs voice SDK — no real audio/WebRTC in jsdom. The panel
+// renders the same; voice itself is verified live on deploy.
+vi.mock('@elevenlabs/react', () => ({
+  ConversationProvider: ({ children }: { children?: unknown }) => children,
+  useConversation: () => ({
+    status: 'disconnected',
+    isSpeaking: false,
+    startSession: vi.fn(),
+    endSession: vi.fn(),
+  }),
 }))
 
 import {

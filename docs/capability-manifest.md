@@ -206,6 +206,10 @@ sit in the top bar on every page.
 
 - Owner-only chat: answers questions about how to use the app, grounded in
   this manifest.
+- Voice: the assistant panel has a microphone button — tap it to TALK to the
+  assistant out loud (real-time voice) and tap again to end. It speaks back.
+  Voice is owner-only and, for now, answers and advises (it doesn't change app
+  data by voice yet). Typing still works alongside it.
 - Can draft a feature request to Alex (the developer / admin) when something
   isn't supported — the owner reviews the draft and confirms before any email
   is sent. It goes to the admin email; sent requests are recorded in the

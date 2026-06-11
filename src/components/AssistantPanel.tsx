@@ -1,4 +1,5 @@
-import { Lightbulb, Send, Trash2, X } from 'lucide-react'
+import { useConversation } from '@elevenlabs/react'
+import { Lightbulb, Mic, PhoneOff, Send, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import assistantAvatar from '../assets/pbj-assistant.png'
@@ -11,6 +12,7 @@ import {
   assistantHistoryRequest,
   assistantInsightsRequest,
   assistantRunAction,
+  fetchVoiceSignedUrl,
   type AssistantActionProposal,
   type AssistantChatMessage,
   type AssistantEmailReportDraft,
@@ -56,6 +58,69 @@ export function AssistantPanel() {
   const historyLoadedRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
+
+  // --- Voice (ElevenLabs) ---
+  const [voiceError, setVoiceError] = useState('')
+  const [voiceConnecting, setVoiceConnecting] = useState(false)
+  const conversation = useConversation({
+    onConnect: () => setVoiceError(''),
+    onError: (message: unknown) =>
+      setVoiceError(typeof message === 'string' && message ? message : 'Voice error — try again.'),
+    onMessage: (payload: unknown) => {
+      // Surface spoken turns as text in the thread when the shape is known.
+      const source = (payload as { source?: string })?.source
+      const text = (payload as { message?: string })?.message
+      if (typeof text === 'string' && text.trim() && (source === 'user' || source === 'ai')) {
+        setThread((current) => [
+          ...current,
+          { kind: 'message', role: source === 'user' ? 'user' : 'assistant', text },
+        ])
+      }
+    },
+  })
+  const voiceStatus = conversation.status // 'connected' | 'connecting' | 'disconnected'
+  const voiceActive = voiceStatus === 'connected' || voiceStatus === 'connecting'
+
+  const startVoice = async () => {
+    if (voiceActive || voiceConnecting) return
+    setVoiceError('')
+    setVoiceConnecting(true)
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true })
+      const { signedUrl } = await fetchVoiceSignedUrl()
+      await conversation.startSession({ signedUrl })
+    } catch (error) {
+      setVoiceError(
+        error instanceof Error && error.name === 'NotAllowedError'
+          ? 'Microphone access was blocked — allow it in your browser to talk.'
+          : error instanceof Error
+            ? error.message
+            : 'Could not start voice — try again.',
+      )
+    } finally {
+      setVoiceConnecting(false)
+    }
+  }
+
+  const stopVoice = async () => {
+    try {
+      await conversation.endSession()
+    } catch {
+      // Already disconnected — nothing to do.
+    }
+  }
+
+  // End any live voice session when the panel closes or unmounts so the mic
+  // is never left hot in the background.
+  useEffect(() => {
+    if (!open && voiceActive) conversation.endSession()
+  }, [open, voiceActive, conversation])
+  useEffect(
+    () => () => {
+      conversation.endSession()
+    },
+    [conversation],
+  )
 
   useEffect(() => {
     if (open) inputRef.current?.focus()
@@ -280,6 +345,16 @@ export function AssistantPanel() {
               <span>Owner only</span>
             </div>
             <div className="assistant-panel-actions">
+              <button
+                type="button"
+                className={voiceActive ? 'assistant-mic-btn is-active' : 'assistant-mic-btn'}
+                aria-label={voiceActive ? 'End voice call' : 'Talk to the assistant'}
+                title={voiceActive ? 'End voice' : 'Talk'}
+                disabled={voiceConnecting}
+                onClick={() => (voiceActive ? void stopVoice() : void startVoice())}
+              >
+                {voiceActive ? <PhoneOff size={15} /> : <Mic size={15} />}
+              </button>
               {thread.length > 0 ? (
                 <button
                   type="button"
@@ -304,6 +379,31 @@ export function AssistantPanel() {
           </header>
           <div className="assistant-thread" ref={scrollRef}>
             <div className="assistant-bubble assistant-bubble-bot">{GREETING}</div>
+            {voiceActive || voiceConnecting || voiceError ? (
+              <div
+                className={`assistant-voice-bar${conversation.isSpeaking ? ' is-speaking' : ''}${voiceError ? ' is-error' : ''}`}
+              >
+                <img src={assistantAvatar} alt="" className="assistant-voice-avatar" />
+                <span className="assistant-voice-status">
+                  {voiceError
+                    ? voiceError
+                    : voiceConnecting || voiceStatus === 'connecting'
+                      ? 'Connecting…'
+                      : conversation.isSpeaking
+                        ? 'Speaking…'
+                        : 'Listening…'}
+                </span>
+                {voiceActive ? (
+                  <button
+                    type="button"
+                    className="assistant-voice-end"
+                    onClick={() => void stopVoice()}
+                  >
+                    End
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {suggestions.map((suggestion) => (
               <div key={suggestion.key} className="assistant-insight-card">
                 <p className="assistant-insight-kicker">

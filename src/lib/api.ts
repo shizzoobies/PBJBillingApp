@@ -1588,6 +1588,16 @@ export async function assistantFeatureRequestSend(draft: AssistantFeatureRequest
   return (await response.json()) as { ok: boolean; id: string; emailSent: boolean }
 }
 
+/** Owner-only: get a short-lived signed URL to open a voice session with the agent. */
+export async function fetchVoiceSignedUrl() {
+  const response = await apiFetch('/api/assistant/voice/signed-url', { credentials: 'same-origin' })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Voice unavailable (${response.status})`)
+  }
+  return (await response.json()) as { signedUrl: string }
+}
+
 /** Owner confirms: email an assistant-generated report to herself (OWNER_EMAIL). */
 export async function assistantEmailReportSend(draft: AssistantEmailReportDraft) {
   const response = await apiFetch('/api/assistant/email-report', {

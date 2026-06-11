@@ -1023,6 +1023,42 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Voice (ElevenLabs Conversational AI): mint a short-lived signed URL so
+    // the owner's browser can open a realtime voice session to our agent. The
+    // API key stays server-side — the browser only ever sees the signed URL.
+    if (normalizedPath === '/api/assistant/voice/signed-url' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const apiKey = process.env.ELEVENLABS_API_KEY
+      const agentId = process.env.ELEVENLABS_AGENT_ID
+      if (!apiKey || !agentId) {
+        sendJson(response, 503, { error: 'Voice is not configured yet.' })
+        return
+      }
+      try {
+        const elResp = await fetch(
+          `https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(agentId)}`,
+          { headers: { 'xi-api-key': apiKey } },
+        )
+        if (!elResp.ok) {
+          const body = await elResp.text().catch(() => '')
+          console.error(`[voice] signed-url ${elResp.status}: ${body}`)
+          sendJson(response, 502, { error: 'Could not start a voice session right now.' })
+          return
+        }
+        const data = await elResp.json()
+        sendJson(response, 200, { signedUrl: data.signed_url })
+      } catch (error) {
+        console.error('[voice] signed-url failed:', error?.message || error)
+        sendJson(response, 502, { error: 'Could not start a voice session right now.' })
+      }
+      return
+    }
+
     // Server-Sent Events stream: the client subscribes here and refetches the
     // workspace whenever a "data-changed" ping arrives (see broadcastDataChanged).
     if (normalizedPath === '/api/events' && request.method === 'GET') {

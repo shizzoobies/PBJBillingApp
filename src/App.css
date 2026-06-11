@@ -6811,6 +6811,92 @@ button.repeating-task-toggle-pill {
   width: 24px;
 }
 
+.assistant-mic-btn {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--plum);
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  transition: border-color var(--ease), color var(--ease), background var(--ease);
+  width: 28px;
+}
+
+.assistant-mic-btn:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.assistant-mic-btn:disabled {
+  cursor: progress;
+  opacity: 0.5;
+}
+
+.assistant-mic-btn.is-active {
+  background: var(--berry);
+  border-color: var(--berry);
+  color: #fff;
+}
+
+.assistant-voice-bar {
+  align-items: center;
+  background: color-mix(in srgb, var(--berry) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--berry) 26%, var(--line));
+  border-radius: 12px;
+  display: flex;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.assistant-voice-bar.is-error {
+  background: color-mix(in srgb, #c0392b 8%, var(--surface));
+  border-color: color-mix(in srgb, #c0392b 30%, var(--line));
+}
+
+.assistant-voice-avatar {
+  border-radius: 999px;
+  flex: 0 0 auto;
+  height: 32px;
+  object-fit: cover;
+  width: 32px;
+}
+
+.assistant-voice-bar.is-speaking .assistant-voice-avatar {
+  animation: assistant-voice-pulse 1s ease-in-out infinite;
+}
+
+@keyframes assistant-voice-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--berry) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--berry) 0%, transparent);
+  }
+}
+
+.assistant-voice-status {
+  color: var(--ink);
+  flex: 1 1 auto;
+  font-size: 13px;
+}
+
+.assistant-voice-end {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.assistant-voice-end:hover {
+  background: var(--soft);
+}
+
 .assistant-panel {
   background: var(--surface);
   border: 1px solid var(--line);

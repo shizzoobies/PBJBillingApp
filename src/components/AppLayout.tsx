@@ -15,6 +15,7 @@ import {
   isInBillingPeriod,
   isSafeImageSrc,
 } from '../lib/utils'
+import { ConversationProvider } from '@elevenlabs/react'
 import { AssistantPanel } from './AssistantPanel'
 import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
@@ -231,8 +232,13 @@ export function AppLayout() {
       </main>
 
       {/* Owner-only AI assistant. ownerMode is the EFFECTIVE role, so the
-          panel also disappears while previewing a bookkeeper's view. */}
-      {ownerMode ? <AssistantPanel /> : null}
+          panel also disappears while previewing a bookkeeper's view. The
+          ConversationProvider scopes the ElevenLabs voice session to it. */}
+      {ownerMode ? (
+        <ConversationProvider>
+          <AssistantPanel />
+        </ConversationProvider>
+      ) : null}
     </div>
   )
 }
