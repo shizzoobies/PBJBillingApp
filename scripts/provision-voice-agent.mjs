@@ -132,6 +132,40 @@ function toolDefinitions() {
       'Search saved memories from previous conversations. Use before saying you do not know something the owner may have told you before.',
       { topic: { type: 'string', description: 'Keyword(s) to search for. Omit to get the most recent memories.' } },
     ),
+    // ---- Action proposals (PROPOSE-ONLY) ----
+    // These file a confirmation card in the app; they execute NOTHING. The
+    // server endpoint behind them can only validate + park a proposal — the
+    // change runs solely when the owner taps "Run it" in her signed-in panel.
+    def(
+      'make_template_recurring',
+      'PROPOSE attaching an existing checklist template to a client on a recurring schedule. This only files a confirmation card in the app — nothing changes until the owner taps "Run it" there. Use exact names from workspace_snapshot.',
+      {
+        templateTitle: { type: 'string', description: 'Exact title of the existing template to copy.' },
+        clientName: { type: 'string', description: 'Exact client name to attach it to.' },
+        frequency: { type: 'string', description: 'One of weekly, monthly, quarterly, annually.' },
+        firstDueDate: { type: 'string', description: 'Optional first due date yyyy-mm-dd.' },
+      },
+      ['templateTitle', 'clientName', 'frequency'],
+    ),
+    def(
+      'assign_client',
+      'PROPOSE giving a team member access to a client. Only files a confirmation card — nothing changes until the owner taps "Run it". Use exact names from workspace_snapshot.',
+      {
+        clientName: { type: 'string', description: 'Exact client name.' },
+        bookkeeperName: { type: 'string', description: 'Exact team member name.' },
+      },
+      ['clientName', 'bookkeeperName'],
+    ),
+    def(
+      'generate_tasks_now',
+      'PROPOSE generating a task list right now from an existing template. Only files a confirmation card — nothing changes until the owner taps "Run it".',
+      {
+        templateTitle: { type: 'string', description: 'Exact template title.' },
+        clientName: { type: 'string', description: 'Optional client name to disambiguate.' },
+        dueDate: { type: 'string', description: 'Optional due date yyyy-mm-dd.' },
+      },
+      ['templateTitle'],
+    ),
   ]
 }
 

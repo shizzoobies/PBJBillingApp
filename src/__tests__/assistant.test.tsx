@@ -15,6 +15,8 @@ vi.mock('../lib/api', () => ({
   assistantRunAction: vi.fn(),
   assistantEmailReportSend: vi.fn(),
   fetchVoiceSignedUrl: vi.fn(),
+  fetchPendingVoiceActions: vi.fn().mockResolvedValue({ proposals: [] }),
+  resolvePendingVoiceAction: vi.fn().mockResolvedValue({ ok: true, removed: false }),
 }))
 
 // Stub the ElevenLabs voice SDK — no real audio/WebRTC in jsdom. The panel

@@ -12,7 +12,9 @@ import {
   assistantHistoryRequest,
   assistantInsightsRequest,
   assistantRunAction,
+  fetchPendingVoiceActions,
   fetchVoiceSignedUrl,
+  resolvePendingVoiceAction,
   type AssistantActionProposal,
   type AssistantChatMessage,
   type AssistantEmailReportDraft,
@@ -109,6 +111,32 @@ export function AssistantPanel() {
       // Already disconnected — nothing to do.
     }
   }
+
+  // While a voice call is live, poll for action proposals the agent filed so
+  // they appear as confirm cards mid-conversation. The agent can only ever
+  // PROPOSE — these cards run nothing until the owner taps "Run it" (the
+  // same owner-session /api/assistant/action gate the text assistant uses).
+  const seenProposalIdsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!voiceActive) return
+    const poll = async () => {
+      try {
+        const { proposals } = await fetchPendingVoiceActions()
+        const fresh = proposals.filter((p) => !seenProposalIdsRef.current.has(p.id))
+        if (fresh.length === 0) return
+        for (const p of fresh) seenProposalIdsRef.current.add(p.id)
+        setThread((current) => [
+          ...current,
+          ...fresh.map((p) => ({ kind: 'action' as const, action: p, status: 'pending' as const })),
+        ])
+      } catch {
+        // Polling is best-effort; the next tick retries.
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 2000)
+    return () => window.clearInterval(timer)
+  }, [voiceActive])
 
   // End any live voice session when the panel closes or unmounts so the mic
   // is never left hot in the background. Both effects go through a ref:
@@ -293,6 +321,9 @@ export function AssistantPanel() {
   const resolveAction = async (index: number, choice: 'run' | 'dismiss') => {
     const entry = thread[index]
     if (!entry || entry.kind !== 'action' || entry.status !== 'pending') return
+    // Voice-filed proposals also live server-side until handled; clear them so
+    // they don't re-appear on the next poll. No-op for text-chat proposals.
+    void resolvePendingVoiceAction(entry.action.id).catch(() => {})
     if (choice === 'dismiss') {
       setThread((current) =>
         current.map((item, i) =>

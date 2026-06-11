@@ -1571,6 +1571,32 @@ export async function assistantRunAction(proposal: AssistantActionProposal) {
   return (await response.json()) as { ok: boolean; message: string }
 }
 
+/**
+ * Owner-only: action proposals filed by the VOICE agent, awaiting her tap.
+ * The panel polls this during a live call; each renders as a confirm card.
+ */
+export async function fetchPendingVoiceActions() {
+  const response = await apiFetch('/api/assistant/pending-actions', { credentials: 'same-origin' })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load pending actions (${response.status})`)
+  }
+  return (await response.json()) as { proposals: AssistantActionProposal[] }
+}
+
+/** Remove a pending voice proposal once its card was run or dismissed. */
+export async function resolvePendingVoiceAction(id: string) {
+  const response = await apiFetch('/api/assistant/pending-actions/resolve', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to resolve pending action (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; removed: boolean }
+}
+
 export async function assistantFeatureRequestSend(draft: AssistantFeatureRequestDraft) {
   const response = await apiFetch('/api/assistant/feature-request', {
     method: 'POST',

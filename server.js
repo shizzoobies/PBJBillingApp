@@ -5,7 +5,13 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import { AppDataStore } from './db/store.js'
-import { executeAssistantAction, runAssistantChat } from './lib/assistant.js'
+import {
+  buildActionProposal,
+  executeAssistantAction,
+  runAssistantChat,
+  validateAssistantAction,
+} from './lib/assistant.js'
+import { createPendingActionStore } from './lib/pending-actions.js'
 import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
 import { buildMemoryDigest, safeEqual, verifyElevenLabsSignature } from './lib/voice.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
@@ -267,6 +273,11 @@ function getPublicAppUrl(request) {
  * blocked. A request with no Origin header (direct API / tooling) is allowed,
  * matching the prior behavior.
  */
+// Action proposals filed by the VOICE agent, awaiting the owner's tap on a
+// confirm card. The voice surface can only ever ADD here — execution lives
+// solely behind the owner-session /api/assistant/action endpoint.
+const pendingVoiceActions = createPendingActionStore()
+
 // Assistant rate limit: in-memory sliding window per user (20 messages per
 // 5 minutes). A runaway client (or a stuck retry loop) can't burn API spend.
 const assistantRateWindows = new Map()
@@ -841,6 +852,43 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Pending voice-action proposals: the panel polls this during a live
+    // voice call and renders each as a confirm card. Listing is read-only;
+    // executing still goes through /api/assistant/action below.
+    if (normalizedPath === '/api/assistant/pending-actions' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      sendJson(response, 200, { proposals: pendingVoiceActions.list(session.user.id) })
+      return
+    }
+
+    // Remove one pending proposal (after the owner ran or dismissed its card).
+    if (normalizedPath === '/api/assistant/pending-actions/resolve' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const removed = pendingVoiceActions.resolve(session.user.id, String(payload?.id ?? ''))
+      sendJson(response, 200, { ok: true, removed })
+      return
+    }
+
     // Action confirm (Phase 3): runs a workspace change the assistant
     // proposed, only after the owner clicked Run on the confirmation card.
     // The model can only ever PROPOSE — execution lives here behind the
@@ -1141,6 +1189,40 @@ const server = createServer(async (request, response) => {
           result = {
             count: matched.length,
             memories: matched.map((m) => ({ fact: m.fact, noted: m.createdAt.slice(0, 10) })),
+          }
+        } else if (
+          toolName === 'make_template_recurring' ||
+          toolName === 'assign_client' ||
+          toolName === 'generate_tasks_now'
+        ) {
+          // PROPOSE-ONLY, by design. This branch validates and parks a card
+          // for the owner; it must never call executeAssistantAction. The
+          // voice surface has no execute path — approval is her tap in the
+          // panel, not anything the model says or hears.
+          const proposal = buildActionProposal(toolName, input)
+          if (!proposal) {
+            result = {
+              proposed: false,
+              note: 'A required detail (name or frequency) was missing — ask the owner to clarify.',
+            }
+          } else {
+            const data = await appDataStore.read()
+            const check = validateAssistantAction(toolName, proposal.params, data)
+            if (!check.ok) {
+              result = { proposed: false, note: check.message }
+            } else if (!owner) {
+              result = { proposed: false, note: 'Could not find the owner account.' }
+            } else {
+              pendingVoiceActions.add(owner.id, proposal)
+              result = {
+                proposed: true,
+                summary: proposal.summary,
+                note:
+                  'Proposal filed. A confirmation card just appeared in the assistant ' +
+                  'panel; NOTHING runs unless the owner taps "Run it" there. Tell her ' +
+                  'to check the card — never claim the change is done.',
+              }
+            }
           }
         } else {
           sendJson(response, 404, { error: `Unknown tool: ${toolName}` })

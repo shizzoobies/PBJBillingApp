@@ -208,8 +208,13 @@ sit in the top bar on every page.
   this manifest.
 - Voice: the assistant panel has a microphone button — tap it to TALK to the
   assistant out loud (real-time voice) and tap again to end. It speaks back.
-  Voice is owner-only and, for now, answers and advises (it doesn't change app
-  data by voice yet). Typing still works alongside it.
+  Voice is owner-only. Typing still works alongside it.
+- Voice can set things up too — with the same guardrail as text: asking by
+  voice only FILES A CONFIRMATION CARD in the panel (make a template
+  recurring, assign a client to a team member, generate a task list now).
+  Nothing changes until the owner taps "Run it" on the card. The assistant
+  never takes an action on its own, by voice or by text — every change
+  requires the owner's explicit confirmation on a card.
 - The voice assistant pulls LIVE firm data when asked: client profitability,
   hours by client/staff, what's overdue or due soon, who's at capacity, and
   the current workspace setup — same numbers as the app's reports.
