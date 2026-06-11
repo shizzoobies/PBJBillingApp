@@ -116,6 +116,18 @@ default 1=Mon — the day the digest sends).
 
 All on `main`, all **live** (verified 200/200/200). Commit → summary:
 
+- **`2358921` Assistant Phase 4 Track A — analytical Q&A.** The assistant now
+  answers business questions (owner-only, read-only, pre-aggregated): client
+  profitability for a month (revenue, hours, realized rate = fee ÷ hours, and
+  true margin where cost rates are set), hours by client/staff, what's overdue
+  / due soon, and who's over capacity. New pure engine `lib/firm-analytics.js`
+  (4 aggregators) wired in as 4 read tools via a generalized `readTools`
+  handler map in `lib/assistant.js`. Added an OPTIONAL per-employee **cost
+  rate** (`users.cost_rate`, both backends; `setEmployeeCostRate`; owner-only
+  `PUT /api/team/cost-rate`; field in the Team page member detail) — margin
+  only, NEVER billed; without it the assistant reports realization only.
+  Tests: `lib/firm-analytics.test.mjs`. 238/238. Phase 4 plan +
+  Tracks B/C/D in `.omc/plans/ai-assistant-phase4-plan.md`.
 - **`facb0b8` Assistant Phase 3 — streaming + persistence + action tools +
   weekly digest.** (1) Chat now streams as SSE over the POST body
   (`runModel` seam in `lib/assistant.js`; client parses delta/done/error;
@@ -186,10 +198,19 @@ in memory `ai-assistant.md`.) Owner-only, forever. Tests in
 ## Backlog / next ideas
 
 - **Assistant Phase 3 — SHIPPED (`facb0b8`).** Streaming, persistence, action
-  tools, weekly digest all built. Possible Phase 4: more action tools (the
-  set is just 3 — see `ACTION_TOOLS` in `lib/assistant.js`; each needs a store
-  method + manifest line + a line in the server allowlist), action undo, and
-  conversation search.
+  tools, weekly digest.
+- **Assistant Phase 4 — IN PROGRESS.** Track A (analytics) shipped (`2358921`).
+  Remaining, approved + spec'd in `.omc/plans/ai-assistant-phase4-plan.md`:
+  - **Track B (actions)** — 5 confirm-gated tools: `reassign_task`,
+    `set_task_due_date`, `create_contact`, `create_client`, `draft_invoice`
+    (draft only). Decided: ship all 5; hold complete/delete/approve for later.
+  - **Track C (briefing)** — daily morning-briefing card + new insight types,
+    composing Track A's aggregators.
+  - **Track D (staff)** — read-only, own-clients-only assistant for
+    bookkeepers (no actions, no feature requests); reuse
+    `scopeAppDataForSession`; needs a focused data-scoping security pass.
+  Decided: profitability uses realization + the new optional per-employee cost
+  rate for true margin.
 - **More watch-and-learn patterns** (e.g. "you reassign this to X every month —
   change the default assignee?").
 - **Security backlog** (from memory `security-notes.md`): deferred Batches 4–7
