@@ -1531,6 +1531,31 @@ export class AppDataStore {
         )
       `)
 
+      // Voice agent cross-call memory (voice V2): durable facts the owner
+      // tells the voice assistant ("remember that…"), recalled on later calls
+      // and injected as a digest at session start.
+      await this.pool.query(`
+        create table if not exists voice_memories (
+          id text primary key,
+          user_id text not null,
+          fact text not null,
+          source text not null default 'voice',
+          created_at timestamptz not null default now()
+        )
+      `)
+
+      // Voice call transcripts (voice V2): summary + turns delivered by the
+      // ElevenLabs post-call webhook, kept for history (trimmed to last 50).
+      await this.pool.query(`
+        create table if not exists voice_transcripts (
+          id text primary key,
+          conversation_id text not null,
+          summary text not null default '',
+          transcript text not null default '[]',
+          created_at timestamptz not null default now()
+        )
+      `)
+
       // TOTP two-factor: per-user secret + enable flag + backup codes.
       // Stored as plaintext for v1 — encryption-at-rest at the DB layer is
       // the right defense (see lib/totp.js header). Backup codes are stored
@@ -6918,6 +6943,130 @@ export class AppDataStore {
       })
     }
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+
+  /**
+   * Voice memory (V2): save one durable fact the owner told the voice agent.
+   * Trims the store to the most recent 200 facts. Returns the record.
+   */
+  async addVoiceMemory(userId, fact, source = 'voice') {
+    const text = String(fact ?? '').trim().slice(0, 500)
+    if (!userId || !text) return null
+    const record = {
+      id: `vmem-${randomUUID().slice(0, 8)}`,
+      userId,
+      fact: text,
+      source: String(source).slice(0, 40),
+      createdAt: nowIso(),
+    }
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into voice_memories (id, user_id, fact, source, created_at)
+         values ($1, $2, $3, $4, $5)`,
+        [record.id, record.userId, record.fact, record.source, record.createdAt],
+      )
+      await this.pool.query(
+        `delete from voice_memories
+          where user_id = $1
+            and id not in (
+              select id from voice_memories
+              where user_id = $1
+              order by created_at desc
+              limit 200
+            )`,
+        [userId],
+      )
+      return record
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.voiceMemories)) authState.voiceMemories = []
+    authState.voiceMemories.push(record)
+    const mine = authState.voiceMemories.filter((m) => m.userId === userId)
+    if (mine.length > 200) {
+      const keep = new Set(mine.slice(-200).map((m) => m.id))
+      authState.voiceMemories = authState.voiceMemories.filter(
+        (m) => m.userId !== userId || keep.has(m.id),
+      )
+    }
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return record
+  }
+
+  /** Voice memory (V2): newest-first facts for this user. */
+  async listVoiceMemories(userId, limit = 50) {
+    if (!userId) return []
+    const cap = Math.max(1, Math.min(200, Number(limit) || 50))
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, fact, source, created_at
+           from voice_memories
+          where user_id = $1
+          order by created_at desc
+          limit $2`,
+        [userId, cap],
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        fact: row.fact,
+        source: row.source,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : nowIso(),
+      }))
+    }
+
+    const authState = await readJson(localAuthPath)
+    return (authState.voiceMemories ?? [])
+      .filter((m) => m.userId === userId)
+      .slice(-cap)
+      .reverse()
+      .map((m) => ({ id: m.id, fact: m.fact, source: m.source, createdAt: m.createdAt }))
+  }
+
+  /**
+   * Voice transcripts (V2): persist one post-call summary + turns. Keeps the
+   * most recent 50 calls. `transcript` is an array of {role, message}.
+   */
+  async saveVoiceTranscript({ conversationId, summary, transcript }) {
+    const convId = String(conversationId ?? '').slice(0, 120)
+    if (!convId) return null
+    const record = {
+      id: `vcall-${randomUUID().slice(0, 8)}`,
+      conversationId: convId,
+      summary: String(summary ?? '').slice(0, 4000),
+      transcript: (Array.isArray(transcript) ? transcript : [])
+        .slice(0, 400)
+        .map((turn) => ({
+          role: turn?.role === 'user' ? 'user' : 'agent',
+          message: String(turn?.message ?? '').slice(0, 2000),
+        })),
+      createdAt: nowIso(),
+    }
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into voice_transcripts (id, conversation_id, summary, transcript, created_at)
+         values ($1, $2, $3, $4, $5)`,
+        [record.id, record.conversationId, record.summary, JSON.stringify(record.transcript), record.createdAt],
+      )
+      await this.pool.query(
+        `delete from voice_transcripts
+          where id not in (
+            select id from voice_transcripts order by created_at desc limit 50
+          )`,
+      )
+      return record
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.voiceTranscripts)) authState.voiceTranscripts = []
+    authState.voiceTranscripts.push(record)
+    if (authState.voiceTranscripts.length > 50) {
+      authState.voiceTranscripts = authState.voiceTranscripts.slice(-50)
+    }
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return record
   }
 
   async recordActivity(userId, action, target = '') {

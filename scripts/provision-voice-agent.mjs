@@ -28,6 +28,12 @@ if (!apiKey || !agentId) {
   process.exit(1)
 }
 
+// Live-data tools (V2). Optional: skipped (with a warning) when the webhook
+// base URL or shared secret isn't provided, so V1-style prompt/KB syncs still
+// work standalone.
+const appBaseUrl = (process.env.APP_PUBLIC_URL || '').replace(/\/$/, '')
+const toolSecret = process.env.VOICE_TOOL_SECRET || ''
+
 const headers = { 'xi-api-key': apiKey, 'Content-Type': 'application/json' }
 
 async function call(method, url, body) {
@@ -60,6 +66,103 @@ function extractSystemPrompt(md) {
   return body
 }
 
+/**
+ * The agent's live-data tools (V2): each is a webhook ElevenLabs POSTs to on
+ * our server, authenticated by the shared x-voice-secret header. Read-only
+ * analytics + the two memory tools.
+ */
+function toolDefinitions() {
+  const def = (name, description, properties = {}, required = []) => ({
+    tool_config: {
+      type: 'webhook',
+      name,
+      description,
+      response_timeout_secs: 15,
+      api_schema: {
+        url: `${appBaseUrl}/api/voice/tools/${name}`,
+        method: 'POST',
+        content_type: 'application/json',
+        request_headers: { 'x-voice-secret': toolSecret },
+        request_body_schema: {
+          type: 'object',
+          properties,
+          required,
+        },
+      },
+    },
+  })
+
+  return [
+    def(
+      'client_profitability',
+      'Get per-client economics for a month: revenue, hours logged, realized rate (fee divided by hours), and margin where cost rates are set. Use for "how profitable is…", "which clients eat the most time".',
+      { month: { type: 'string', description: 'Month as yyyy-mm. Omit for the current month.' } },
+    ),
+    def(
+      'time_summary',
+      'Get hours logged grouped by client and staff over a date range, split billable vs administrative. Use for "how many hours did X log on Y".',
+      {
+        from: { type: 'string', description: 'Start date yyyy-mm-dd. Omit for the start of this month.' },
+        to: { type: 'string', description: 'End date yyyy-mm-dd. Omit for today.' },
+        groupBy: { type: 'string', description: "One of 'client', 'staff', or 'both'. Defaults to both." },
+      },
+    ),
+    def(
+      'deadlines',
+      'Get open tasks that are overdue or due soon, with client and assignee. Use for "what is overdue", "what is due this week".',
+      { horizonDays: { type: 'number', description: 'Days ahead that count as due soon. Defaults to 7.' } },
+    ),
+    def(
+      'capacity',
+      'Get hours logged per team member this week versus the weekly target, flagging who is over or near capacity.',
+      { targetHours: { type: 'number', description: 'Weekly target hours. Omit for the firm default.' } },
+    ),
+    def(
+      'workspace_snapshot',
+      "Get the firm's current setup: client names and billing modes, recurring template names and frequencies, plans, and team members.",
+    ),
+    def(
+      'remember_fact',
+      'Save one durable fact or preference the owner just told you, so future calls remember it. Use only for things worth keeping, not chit-chat.',
+      { fact: { type: 'string', description: 'The fact to remember, as one self-contained sentence.' } },
+      ['fact'],
+    ),
+    def(
+      'recall_memory',
+      'Search saved memories from previous conversations. Use before saying you do not know something the owner may have told you before.',
+      { topic: { type: 'string', description: 'Keyword(s) to search for. Omit to get the most recent memories.' } },
+    ),
+  ]
+}
+
+/** Create the tools, replacing any same-name tools from a previous run. */
+async function syncTools() {
+  const existing = await call('GET', `${API}/tools`)
+  const byName = new Map(
+    (existing.tools ?? []).map((t) => [t.tool_config?.name, t.id]).filter(([n]) => n),
+  )
+  const ids = []
+  for (const definition of toolDefinitions()) {
+    const name = definition.tool_config.name
+    const previousId = byName.get(name)
+    if (previousId) {
+      try {
+        const updated = await call('PATCH', `${API}/tools/${previousId}`, definition)
+        ids.push(updated.id || previousId)
+        console.log(`     updated tool ${name} (${previousId})`)
+        continue
+      } catch {
+        console.log(`     could not update ${name}; recreating…`)
+        await call('DELETE', `${API}/tools/${previousId}`).catch(() => {})
+      }
+    }
+    const created = await call('POST', `${API}/tools`, definition)
+    ids.push(created.id)
+    console.log(`     created tool ${name} (${created.id})`)
+  }
+  return ids
+}
+
 async function main() {
   const personaMd = await readFile(path.join(root, 'docs', 'voice-agent-persona.md'), 'utf8')
   const manifest = await readFile(path.join(root, 'docs', 'capability-manifest.md'), 'utf8')
@@ -67,23 +170,32 @@ async function main() {
   console.log(`System prompt: ${systemPrompt.length} chars`)
   console.log(`Manifest: ${manifest.length} chars`)
 
-  console.log('\n1/2  Uploading the capability manifest to the knowledge base…')
+  console.log('\n1/3  Uploading the capability manifest to the knowledge base…')
   const kb = await call('POST', `${API}/knowledge-base/text`, {
     name: 'PB&J app knowledge (capability manifest)',
     text: manifest,
   })
   console.log(`     knowledge-base doc id: ${kb.id}`)
 
-  console.log('\n2/2  Updating the agent (prompt + knowledge base + greeting)…')
+  let toolIds = null
+  if (appBaseUrl && toolSecret) {
+    console.log('\n2/3  Syncing live-data + memory tools…')
+    toolIds = await syncTools()
+  } else {
+    console.log('\n2/3  SKIPPING tools (set APP_PUBLIC_URL + VOICE_TOOL_SECRET to enable).')
+  }
+
+  console.log('\n3/3  Updating the agent (prompt + knowledge base + greeting + tools)…')
   const updateBody = {
     conversation_config: {
       agent: {
-        first_message: 'Hi Brittany — what can I help you with?',
+        first_message: 'Hi {{owner_name}} — what can I help you with?',
         prompt: {
           prompt: systemPrompt,
           knowledge_base: [
             { type: 'text', name: 'PB&J app knowledge (capability manifest)', id: kb.id },
           ],
+          ...(toolIds ? { tool_ids: toolIds } : {}),
         },
       },
     },
@@ -91,7 +203,7 @@ async function main() {
   const updated = await call('PATCH', `${API}/agents/${agentId}`, updateBody)
   console.log(`     agent updated: ${updated.agent_id || agentId}`)
 
-  console.log('\nDone. The voice agent now has the PB&J persona + app knowledge.')
+  console.log('\nDone. Persona + knowledge base synced' + (toolIds ? ` + ${toolIds.length} tools attached.` : '.'))
   console.log('Voice and LLM were left as configured in the dashboard.')
 }
 

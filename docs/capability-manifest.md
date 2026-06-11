@@ -210,6 +210,12 @@ sit in the top bar on every page.
   assistant out loud (real-time voice) and tap again to end. It speaks back.
   Voice is owner-only and, for now, answers and advises (it doesn't change app
   data by voice yet). Typing still works alongside it.
+- The voice assistant pulls LIVE firm data when asked: client profitability,
+  hours by client/staff, what's overdue or due soon, who's at capacity, and
+  the current workspace setup — same numbers as the app's reports.
+- The voice assistant REMEMBERS across calls: say "remember that…" and it
+  saves the fact for future conversations (it also recalls older memories on
+  request). Call summaries are kept after each conversation.
 - Can draft a feature request to Alex (the developer / admin) when something
   isn't supported — the owner reviews the draft and confirms before any email
   is sent. It goes to the admin email; sent requests are recorded in the

@@ -7,6 +7,7 @@ import QRCode from 'qrcode'
 import { AppDataStore } from './db/store.js'
 import { executeAssistantAction, runAssistantChat } from './lib/assistant.js'
 import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
+import { buildMemoryDigest, safeEqual, verifyElevenLabsSignature } from './lib/voice.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
 import {
   notify,
@@ -175,6 +176,22 @@ async function readJsonBody(request) {
 
   const body = Buffer.concat(chunks).toString('utf8')
   return body ? JSON.parse(body) : null
+}
+
+// Raw-body variant for webhook endpoints that must verify an HMAC signature
+// computed over the exact bytes sent (parse AFTER verification).
+async function readRawBody(request) {
+  const chunks = []
+  let total = 0
+  for await (const chunk of request) {
+    total += chunk.length
+    if (total > MAX_JSON_BODY_BYTES) {
+      request.destroy()
+      throw Object.assign(new Error('Request body too large'), { statusCode: 413 })
+    }
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 async function requireSession(request, response) {
@@ -1051,10 +1068,125 @@ const server = createServer(async (request, response) => {
           return
         }
         const data = await elResp.json()
-        sendJson(response, 200, { signedUrl: data.signed_url })
+        // Per-session context the agent's prompt references as {{owner_name}},
+        // {{today}}, {{memory_digest}} — this is how memory follows her into
+        // each new call without a tool round-trip.
+        const memories = await appDataStore.listVoiceMemories(session.user.id, 50)
+        sendJson(response, 200, {
+          signedUrl: data.signed_url,
+          dynamicVariables: {
+            owner_name: session.user.name || 'Brittany',
+            today: todayIso(),
+            memory_digest: buildMemoryDigest(memories),
+          },
+        })
       } catch (error) {
         console.error('[voice] signed-url failed:', error?.message || error)
         sendJson(response, 502, { error: 'Could not start a voice session right now.' })
+      }
+      return
+    }
+
+    // Voice tool webhooks (V2): ElevenLabs calls these mid-conversation when
+    // the agent needs live data. No session cookie (the caller is ElevenLabs,
+    // not a browser) — authenticated by a shared secret header configured on
+    // each tool at provisioning time. Read-only + memory writes only.
+    if (normalizedPath.startsWith('/api/voice/tools/') && request.method === 'POST') {
+      const secret = process.env.VOICE_TOOL_SECRET
+      const presented = String(request.headers['x-voice-secret'] || '')
+      if (!secret || !safeEqual(presented, secret)) {
+        sendJson(response, 401, { error: 'Unauthorized' })
+        return
+      }
+      const toolName = normalizedPath.slice('/api/voice/tools/'.length)
+      let input = {}
+      try {
+        input = (await readJsonBody(request)) ?? {}
+      } catch {
+        input = {}
+      }
+      try {
+        // The single owner is the memory subject — voice is owner-only.
+        const members = await appDataStore.getTeamMembers()
+        const owner = members.find((member) => member.role === 'owner')
+        const readTools = assistantReadTools()
+        const analyticsMap = {
+          client_profitability: 'get_client_profitability',
+          time_summary: 'get_time_summary',
+          deadlines: 'get_deadlines',
+          capacity: 'get_capacity',
+        }
+
+        let result
+        if (analyticsMap[toolName]) {
+          result = await readTools[analyticsMap[toolName]](input)
+        } else if (toolName === 'workspace_snapshot') {
+          result = buildWorkspaceSnapshot(await appDataStore.read())
+        } else if (toolName === 'remember_fact') {
+          const fact = String(input.fact ?? '').trim()
+          if (!fact) {
+            sendJson(response, 400, { error: 'fact is required' })
+            return
+          }
+          const saved = owner ? await appDataStore.addVoiceMemory(owner.id, fact, 'voice') : null
+          result = saved
+            ? { saved: true, fact: saved.fact }
+            : { saved: false, note: 'Could not save right now.' }
+        } else if (toolName === 'recall_memory') {
+          const topic = String(input.topic ?? '').trim().toLowerCase()
+          const memories = owner ? await appDataStore.listVoiceMemories(owner.id, 100) : []
+          const matched = topic
+            ? memories.filter((m) => m.fact.toLowerCase().includes(topic))
+            : memories.slice(0, 25)
+          result = {
+            count: matched.length,
+            memories: matched.map((m) => ({ fact: m.fact, noted: m.createdAt.slice(0, 10) })),
+          }
+        } else {
+          sendJson(response, 404, { error: `Unknown tool: ${toolName}` })
+          return
+        }
+        sendJson(response, 200, result)
+      } catch (error) {
+        console.error(`[voice] tool ${toolName} failed:`, error?.message || error)
+        sendJson(response, 500, { error: 'Tool failed' })
+      }
+      return
+    }
+
+    // Post-call webhook (V2): ElevenLabs delivers the transcript + summary
+    // after each call. HMAC-verified against ELEVENLABS_WEBHOOK_SECRET (set
+    // when the webhook is created in the ElevenLabs dashboard); 503 until
+    // configured so misconfiguration is loud, not silent.
+    if (normalizedPath === '/api/voice/post-call' && request.method === 'POST') {
+      const secret = process.env.ELEVENLABS_WEBHOOK_SECRET
+      if (!secret) {
+        sendJson(response, 503, { error: 'Post-call webhook not configured' })
+        return
+      }
+      const rawBody = await readRawBody(request)
+      const signature = String(request.headers['elevenlabs-signature'] || '')
+      if (!verifyElevenLabsSignature(rawBody, signature, secret)) {
+        sendJson(response, 401, { error: 'Invalid signature' })
+        return
+      }
+      try {
+        const payload = JSON.parse(rawBody)
+        if (payload?.type === 'post_call_transcription') {
+          const turns = (payload.data?.transcript ?? []).map((turn) => ({
+            role: turn?.role === 'user' ? 'user' : 'agent',
+            message: turn?.message ?? '',
+          }))
+          await appDataStore.saveVoiceTranscript({
+            conversationId: payload.data?.conversation_id || payload.conversation_id || 'unknown',
+            summary: payload.data?.analysis?.transcript_summary || '',
+            transcript: turns,
+          })
+        }
+        sendJson(response, 200, { ok: true })
+      } catch (error) {
+        console.error('[voice] post-call failed:', error?.message || error)
+        sendJson(response, 500, { error: 'Post-call processing failed' })
       }
       return
     }

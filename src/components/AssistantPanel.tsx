@@ -87,8 +87,8 @@ export function AssistantPanel() {
     setVoiceConnecting(true)
     try {
       await navigator.mediaDevices.getUserMedia({ audio: true })
-      const { signedUrl } = await fetchVoiceSignedUrl()
-      await conversation.startSession({ signedUrl })
+      const { signedUrl, dynamicVariables } = await fetchVoiceSignedUrl()
+      await conversation.startSession({ signedUrl, dynamicVariables })
     } catch (error) {
       setVoiceError(
         error instanceof Error && error.name === 'NotAllowedError'
