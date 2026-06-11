@@ -1,6 +1,7 @@
-import { Lightbulb, Send, Sparkles, Trash2, X } from 'lucide-react'
+import { Lightbulb, Send, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
+import assistantAvatar from '../assets/pbj-assistant.png'
 import {
   assistantChatRequest,
   assistantClearHistory,
@@ -268,13 +269,13 @@ export function AssistantPanel() {
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
-        <Sparkles size={20} />
+        <img src={assistantAvatar} alt="" className="assistant-fab-avatar" />
       </button>
       {open ? (
         <section className="assistant-panel" aria-label="AI assistant">
           <header className="assistant-panel-header">
             <div className="assistant-panel-title">
-              <Sparkles size={15} />
+              <img src={assistantAvatar} alt="" className="assistant-title-avatar" />
               <strong>Assistant</strong>
               <span>Owner only</span>
             </div>

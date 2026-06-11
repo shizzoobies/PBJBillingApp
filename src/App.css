@@ -6786,9 +6786,29 @@ button.repeating-task-toggle-pill {
   z-index: 28;
 }
 
+.assistant-fab {
+  overflow: hidden;
+  padding: 0;
+}
+
+.assistant-fab-avatar {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
 .assistant-fab:hover {
   box-shadow: 0 9px 24px rgba(142, 47, 82, 0.42);
   transform: translateY(-2px);
+}
+
+.assistant-title-avatar {
+  border-radius: 999px;
+  flex: 0 0 auto;
+  height: 24px;
+  object-fit: cover;
+  width: 24px;
 }
 
 .assistant-panel {
