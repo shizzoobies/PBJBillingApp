@@ -111,15 +111,22 @@ export function AssistantPanel() {
   }
 
   // End any live voice session when the panel closes or unmounts so the mic
-  // is never left hot in the background.
+  // is never left hot in the background. Both effects go through a ref:
+  // useConversation returns a NEW object identity every render, so depending
+  // on it directly would re-run the cleanup mid-call and hang up the moment
+  // the session connects (status change → re-render → teardown → endSession).
+  const conversationRef = useRef(conversation)
   useEffect(() => {
-    if (!open && voiceActive) conversation.endSession()
-  }, [open, voiceActive, conversation])
+    conversationRef.current = conversation
+  })
+  useEffect(() => {
+    if (!open) conversationRef.current.endSession()
+  }, [open])
   useEffect(
     () => () => {
-      conversation.endSession()
+      conversationRef.current.endSession()
     },
-    [conversation],
+    [],
   )
 
   useEffect(() => {
