@@ -8,7 +8,13 @@ import { AppDataStore } from './db/store.js'
 import { executeAssistantAction, runAssistantChat } from './lib/assistant.js'
 import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
-import { notify, sendDigestEmail, sendFeatureRequestEmail, sendLoginLinkEmail } from './lib/notify.js'
+import {
+  notify,
+  sendDigestEmail,
+  sendFeatureRequestEmail,
+  sendLoginLinkEmail,
+  sendReportEmail,
+} from './lib/notify.js'
 import { normalizeTimeEntryMethod, normalizeWorkSessions } from './lib/time-entry.js'
 import {
   generateBackupCodes,
@@ -953,6 +959,67 @@ const server = createServer(async (request, response) => {
       }
       await appDataStore.recordActivity(session.user.id, 'feature_request_sent', title)
       sendJson(response, 200, { ok: true, id: record.id, emailSent })
+      return
+    }
+
+    // Email-report confirm: emails an assistant-generated report to the firm
+    // owner (OWNER_EMAIL), only after the owner approved the draft on a card.
+    // Outward-facing ⇒ explicit human confirm, like feature requests.
+    if (normalizedPath === '/api/assistant/email-report' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const ownerEmail = process.env.OWNER_EMAIL?.trim()
+      if (!ownerEmail) {
+        sendJson(response, 200, {
+          ok: false,
+          emailSent: false,
+          message: 'No owner email is configured (OWNER_EMAIL), so I can’t email it.',
+        })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const subject = String(payload?.subject ?? '').trim().slice(0, 150)
+      const body = String(payload?.body ?? '').trim().slice(0, 8000)
+      if (!subject || !body) {
+        sendJson(response, 400, { error: 'subject and body are required' })
+        return
+      }
+      let emailSent = false
+      try {
+        const firm = await appDataStore.getFirmSettings().catch(() => null)
+        emailSent = await sendReportEmail({
+          to: ownerEmail,
+          firmName: firm?.firmName,
+          subject,
+          body,
+          appBaseUrl: process.env.APP_PUBLIC_URL,
+        })
+      } catch (error) {
+        console.error('[assistant] report email failed:', error?.message || error)
+      }
+      if (emailSent) {
+        await appDataStore.recordActivity(session.user.id, 'assistant_report_emailed', subject)
+      }
+      sendJson(response, 200, {
+        ok: true,
+        emailSent,
+        message: emailSent
+          ? `Emailed to ${ownerEmail}.`
+          : 'I couldn’t get that email to send — the report is still here in chat.',
+      })
       return
     }
 

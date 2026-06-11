@@ -206,9 +206,14 @@ sit in the top bar on every page.
 
 - Owner-only chat: answers questions about how to use the app, grounded in
   this manifest.
-- Can draft a feature request to Alex (the developer) when something isn't
-  supported — the owner reviews the draft and confirms before any email is
-  sent. Sent requests are recorded in the activity log.
+- Can draft a feature request to Alex (the developer / admin) when something
+  isn't supported — the owner reviews the draft and confirms before any email
+  is sent. It goes to the admin email; sent requests are recorded in the
+  activity log.
+- After producing a report or analysis, offers to email it to the owner.
+  On "yes" it shows a confirm card; only on confirm does it email the report
+  to the owner's address. It tells the truth about whether the email actually
+  went out (it never claims "sent" when the email pipeline rejected it).
 - Watches for repeated manual work and shows up to 3 suggestion cards when
   the panel opens: tasks created by hand month after month (recurring
   template candidates), the same time entry logged manually 3+ times, and

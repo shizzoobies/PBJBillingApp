@@ -1449,6 +1449,7 @@ export async function teamTotpReset(userId: string) {
 
 export type AssistantChatMessage = { role: 'user' | 'assistant'; text: string }
 export type AssistantFeatureRequestDraft = { title: string; description: string }
+export type AssistantEmailReportDraft = { subject: string; body: string }
 export type AssistantActionProposal = {
   id: string
   tool: string
@@ -1459,6 +1460,7 @@ export type AssistantActionProposal = {
 export type AssistantChatResult = {
   reply: string
   featureRequestDraft: AssistantFeatureRequestDraft | null
+  emailReportDraft: AssistantEmailReportDraft | null
   actionProposals: AssistantActionProposal[]
 }
 
@@ -1489,7 +1491,12 @@ export async function assistantChatRequest(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  let result: AssistantChatResult = { reply: '', featureRequestDraft: null, actionProposals: [] }
+  let result: AssistantChatResult = {
+    reply: '',
+    featureRequestDraft: null,
+    emailReportDraft: null,
+    actionProposals: [],
+  }
 
   const handleEvent = (raw: string) => {
     const line = raw.split('\n').find((l) => l.startsWith('data:'))
@@ -1506,6 +1513,7 @@ export async function assistantChatRequest(
       result = {
         reply: event.reply ?? '',
         featureRequestDraft: event.featureRequestDraft ?? null,
+        emailReportDraft: event.emailReportDraft ?? null,
         actionProposals: event.actionProposals ?? [],
       }
     } else if (event.type === 'error') {
@@ -1578,6 +1586,24 @@ export async function assistantFeatureRequestSend(draft: AssistantFeatureRequest
     )
   }
   return (await response.json()) as { ok: boolean; id: string; emailSent: boolean }
+}
+
+/** Owner confirms: email an assistant-generated report to herself (OWNER_EMAIL). */
+export async function assistantEmailReportSend(draft: AssistantEmailReportDraft) {
+  const response = await apiFetch('/api/assistant/email-report', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(draft),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Could not email the report (${response.status})`,
+    )
+  }
+  return (await response.json()) as { ok: boolean; emailSent: boolean; message: string }
 }
 
 export type AssistantSuggestion = {

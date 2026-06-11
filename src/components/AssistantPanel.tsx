@@ -5,12 +5,14 @@ import {
   assistantChatRequest,
   assistantClearHistory,
   assistantDismissSuggestion,
+  assistantEmailReportSend,
   assistantFeatureRequestSend,
   assistantHistoryRequest,
   assistantInsightsRequest,
   assistantRunAction,
   type AssistantActionProposal,
   type AssistantChatMessage,
+  type AssistantEmailReportDraft,
   type AssistantFeatureRequestDraft,
   type AssistantSuggestion,
 } from '../lib/api'
@@ -18,6 +20,12 @@ import {
 type ThreadEntry =
   | { kind: 'message'; role: 'user' | 'assistant'; text: string }
   | { kind: 'draft'; draft: AssistantFeatureRequestDraft; status: 'pending' | 'sent' | 'dismissed' }
+  | {
+      kind: 'emailReport'
+      draft: AssistantEmailReportDraft
+      status: 'pending' | 'sent' | 'dismissed'
+      result?: string
+    }
   | {
       kind: 'action'
       action: AssistantActionProposal
@@ -122,6 +130,9 @@ export function AssistantPanel() {
         if (result.featureRequestDraft) {
           updated.push({ kind: 'draft', draft: result.featureRequestDraft, status: 'pending' })
         }
+        if (result.emailReportDraft) {
+          updated.push({ kind: 'emailReport', draft: result.emailReportDraft, status: 'pending' })
+        }
         for (const action of result.actionProposals ?? []) {
           updated.push({ kind: 'action', action, status: 'pending' })
         }
@@ -160,7 +171,7 @@ export function AssistantPanel() {
           role: 'assistant',
           text: result.emailSent
             ? 'Sent! Alex will get the request by email, and it’s logged in the activity feed.'
-            : 'Recorded! Email isn’t configured on this server, but the request is logged in the activity feed.',
+            : 'Recorded in the activity feed — but I couldn’t confirm the email went out, so check with Alex if it’s urgent.',
         })
         return updated
       })
@@ -168,6 +179,39 @@ export function AssistantPanel() {
       const message =
         error instanceof Error ? error.message : 'Could not send — try again in a moment.'
       setThread((current) => [...current, { kind: 'message', role: 'assistant', text: message }])
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const resolveEmailReport = async (index: number, choice: 'send' | 'dismiss') => {
+    const entry = thread[index]
+    if (!entry || entry.kind !== 'emailReport' || entry.status !== 'pending') return
+    if (choice === 'dismiss') {
+      setThread((current) =>
+        current.map((item, i) =>
+          i === index && item.kind === 'emailReport' ? { ...item, status: 'dismissed' } : item,
+        ),
+      )
+      return
+    }
+    setBusy(true)
+    try {
+      const result = await assistantEmailReportSend(entry.draft)
+      setThread((current) =>
+        current.map((item, i) =>
+          i === index && item.kind === 'emailReport'
+            ? { ...item, status: result.emailSent ? 'sent' : 'pending', result: result.message }
+            : item,
+        ),
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not email it — try again.'
+      setThread((current) =>
+        current.map((item, i) =>
+          i === index && item.kind === 'emailReport' ? { ...item, result: message } : item,
+        ),
+      )
     } finally {
       setBusy(false)
     }
@@ -327,6 +371,43 @@ export function AssistantPanel() {
                     ) : (
                       <p className="assistant-draft-status">
                         {entry.status === 'sent' ? 'Sent to Alex ✓' : 'Not sent'}
+                      </p>
+                    )}
+                  </div>
+                )
+              }
+              if (entry.kind === 'emailReport') {
+                return (
+                  <div key={index} className="assistant-draft-card assistant-action-card">
+                    <p className="assistant-draft-kicker">Email this report</p>
+                    <strong>{entry.draft.subject}</strong>
+                    {entry.status === 'pending' ? (
+                      <>
+                        <div className="assistant-draft-actions">
+                          <button
+                            type="button"
+                            className="primary-action"
+                            disabled={busy}
+                            onClick={() => void resolveEmailReport(index, 'send')}
+                          >
+                            Email it to me
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-action"
+                            disabled={busy}
+                            onClick={() => void resolveEmailReport(index, 'dismiss')}
+                          >
+                            No thanks
+                          </button>
+                        </div>
+                        {entry.result ? (
+                          <p className="assistant-draft-status">{entry.result}</p>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p className="assistant-draft-status">
+                        {entry.status === 'sent' ? `${entry.result ?? 'Emailed'} ✓` : 'Not emailed'}
                       </p>
                     )}
                   </div>

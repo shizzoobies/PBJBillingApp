@@ -13,12 +13,14 @@ vi.mock('../lib/api', () => ({
   assistantHistoryRequest: vi.fn(),
   assistantClearHistory: vi.fn(),
   assistantRunAction: vi.fn(),
+  assistantEmailReportSend: vi.fn(),
 }))
 
 import {
   assistantChatRequest,
   assistantClearHistory,
   assistantDismissSuggestion,
+  assistantEmailReportSend,
   assistantFeatureRequestSend,
   assistantHistoryRequest,
   assistantInsightsRequest,
@@ -32,6 +34,7 @@ const mockedDismiss = vi.mocked(assistantDismissSuggestion)
 const mockedHistory = vi.mocked(assistantHistoryRequest)
 const mockedClear = vi.mocked(assistantClearHistory)
 const mockedRunAction = vi.mocked(assistantRunAction)
+const mockedEmailReport = vi.mocked(assistantEmailReportSend)
 
 describe('capability manifest', () => {
   const manifest = readFileSync(
@@ -76,6 +79,7 @@ describe('AssistantPanel', () => {
     mockedHistory.mockReset()
     mockedClear.mockReset()
     mockedRunAction.mockReset()
+    mockedEmailReport.mockReset()
     mockedInsights.mockResolvedValue({ suggestions: [] })
     mockedDismiss.mockResolvedValue({ ok: true })
     mockedHistory.mockResolvedValue({ messages: [] })
@@ -120,6 +124,7 @@ describe('AssistantPanel', () => {
     mockedChat.mockResolvedValue({
       reply: 'Yes — use the timer on the Time page.',
       featureRequestDraft: null,
+      emailReportDraft: null,
       actionProposals: [],
     })
     openPanel()
@@ -142,6 +147,7 @@ describe('AssistantPanel', () => {
     mockedChat.mockResolvedValue({
       reply: "Sure — I've set up a card to make that recurring.",
       featureRequestDraft: null,
+      emailReportDraft: null,
       actionProposals: [
         {
           id: 'make_template_recurring:0',
@@ -186,6 +192,7 @@ describe('AssistantPanel', () => {
     mockedChat.mockResolvedValue({
       reply: 'Want me to assign that client?',
       featureRequestDraft: null,
+      emailReportDraft: null,
       actionProposals: [
         {
           id: 'assign_client:0',
@@ -210,6 +217,46 @@ describe('AssistantPanel', () => {
     expect(mockedRunAction).not.toHaveBeenCalled()
   })
 
+  it('offers to email a report and only sends on confirm', async () => {
+    mockedChat.mockResolvedValue({
+      reply: 'Here is June profitability. Want me to email this to you?',
+      featureRequestDraft: null,
+      emailReportDraft: {
+        subject: 'June client profitability',
+        body: 'Clover: $145/h realized…',
+      },
+      actionProposals: [],
+    })
+    mockedEmailReport.mockResolvedValue({
+      ok: true,
+      emailSent: true,
+      message: 'Emailed to brittany@example.com.',
+    })
+    openPanel()
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the app…'), {
+      target: { value: 'How profitable are my clients?' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() =>
+      expect(screen.getByText('June client profitability')).toBeInTheDocument(),
+    )
+    // Nothing emailed until she confirms.
+    expect(mockedEmailReport).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Email it to me' }))
+    await waitFor(() =>
+      expect(mockedEmailReport).toHaveBeenCalledWith({
+        subject: 'June client profitability',
+        body: 'Clover: $145/h realized…',
+      }),
+    )
+    await waitFor(() =>
+      expect(screen.getByText('Emailed to brittany@example.com. ✓')).toBeInTheDocument(),
+    )
+  })
+
   it('shows a confirmation card for a feature-request draft and only sends on confirm', async () => {
     mockedChat.mockResolvedValue({
       reply: "We can't do that yet — here's a draft for Alex.",
@@ -217,6 +264,7 @@ describe('AssistantPanel', () => {
         title: 'Client portal',
         description: 'Owner wants clients to view their invoices online.',
       },
+      emailReportDraft: null,
       actionProposals: [],
     })
     mockedSend.mockResolvedValue({ ok: true, id: 'featreq-1', emailSent: true })
@@ -245,6 +293,7 @@ describe('AssistantPanel', () => {
     mockedChat.mockResolvedValue({
       reply: 'Want me to ask Alex?',
       featureRequestDraft: { title: 'Payroll', description: 'Run payroll in-app.' },
+      emailReportDraft: null,
       actionProposals: [],
     })
     openPanel()
