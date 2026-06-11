@@ -13,6 +13,7 @@ import {
   revokeAllTeamSessions,
   revokeTeamSession,
   setClientAssignedTeamRequest,
+  setTeamMemberCostRate,
   teamTotpReset,
 } from '../lib/api'
 import {
@@ -47,6 +48,33 @@ export function TeamPage() {
   const [sessionsLoading, setSessionsLoading] = useState<string | null>(null)
   const [resendingId, setResendingId] = useState<string | null>(null)
   const [resendStatus, setResendStatus] = useState<Record<string, 'sent' | 'error'>>({})
+  const [costDraft, setCostDraft] = useState<Record<string, string>>({})
+  const [costSavingId, setCostSavingId] = useState<string | null>(null)
+
+  const handleSaveCostRate = async (member: TeamMember) => {
+    const raw = costDraft[member.id]
+    const value = raw === undefined ? '' : raw.trim()
+    const costRate = value === '' ? null : Number(value)
+    if (costRate !== null && (!Number.isFinite(costRate) || costRate < 0)) return
+    setCostSavingId(member.id)
+    try {
+      const result = await setTeamMemberCostRate(member.id, costRate)
+      setMembers((current) =>
+        current.map((entry) =>
+          entry.id === member.id ? { ...entry, costRate: result.costRate } : entry,
+        ),
+      )
+      setCostDraft((current) => {
+        const next = { ...current }
+        delete next[member.id]
+        return next
+      })
+    } catch {
+      // Keep the draft so the owner can retry.
+    } finally {
+      setCostSavingId(null)
+    }
+  }
 
   useEffect(() => {
     let active = true
@@ -360,6 +388,44 @@ export function TeamPage() {
                           )}
                         </p>
                       ) : null}
+                      {ownerMode && member.staffRole !== 'Owner' ? (
+                        <div className="team-cost-rate">
+                          <label htmlFor={`cost-${member.id}`}>
+                            <strong>Cost rate</strong>
+                            <span className="team-cost-hint">$/hour — for margin reports only, never billed</span>
+                          </label>
+                          <div className="team-cost-input-row">
+                            <span className="team-cost-prefix">$</span>
+                            <input
+                              id={`cost-${member.id}`}
+                              type="number"
+                              min="0"
+                              step="1"
+                              inputMode="decimal"
+                              placeholder="—"
+                              value={
+                                costDraft[member.id] ??
+                                (member.costRate != null ? String(member.costRate) : '')
+                              }
+                              onChange={(event) =>
+                                setCostDraft((current) => ({
+                                  ...current,
+                                  [member.id]: event.target.value,
+                                }))
+                              }
+                            />
+                            <button
+                              type="button"
+                              className="team-icon-button"
+                              disabled={costSavingId === member.id || costDraft[member.id] === undefined}
+                              onClick={() => void handleSaveCostRate(member)}
+                            >
+                              {costSavingId === member.id ? 'Saving…' : 'Save'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+
                       <div className="team-actions">
                         {ownerMode && member.staffRole !== 'Owner' ? (
                           <button

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import { AppDataStore } from './db/store.js'
 import { executeAssistantAction, runAssistantChat } from './lib/assistant.js'
+import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
 import { notify, sendDigestEmail, sendFeatureRequestEmail, sendLoginLinkEmail } from './lib/notify.js'
 import { normalizeTimeEntryMethod, normalizeWorkSessions } from './lib/time-entry.js'
@@ -285,6 +286,63 @@ function buildWorkspaceSnapshot(data) {
     openTaskCount: (data.checklists ?? []).filter(
       (checklist) => !checklist.deletedAt && (checklist.items ?? []).some((item) => !item.done),
     ).length,
+  }
+}
+
+// Default weekly hours target for the assistant's capacity analytics; the
+// model can override per-call. Configurable via env.
+const CAPACITY_TARGET_HOURS =
+  Number(process.env.ASSISTANT_CAPACITY_TARGET) > 0
+    ? Number(process.env.ASSISTANT_CAPACITY_TARGET)
+    : 40
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+// Cost rates live on the user record (owner-only, informational). Analytics
+// keys them by employee id, which matches user id in both backends.
+async function buildCostRateMap() {
+  const members = await appDataStore.getTeamMembers()
+  const map = {}
+  for (const member of members) {
+    map[member.id] = typeof member.costRate === 'number' ? member.costRate : null
+  }
+  return map
+}
+
+// Read-only analytics tools handed to the assistant loop (Phase 4, Track A).
+// Each fills sensible date defaults the model omitted, then calls a pure
+// aggregator in lib/firm-analytics.js. All owner-only via the chat endpoint.
+function assistantReadTools() {
+  return {
+    get_client_profitability: async (input) => {
+      const data = await appDataStore.read()
+      const month = /^\d{4}-\d{2}$/.test(String(input.month || ''))
+        ? input.month
+        : todayIso().slice(0, 7)
+      return clientProfitability(data, { month, costRates: await buildCostRateMap() })
+    },
+    get_time_summary: async (input) => {
+      const data = await appDataStore.read()
+      const today = todayIso()
+      const from = /^\d{4}-\d{2}-\d{2}$/.test(String(input.from || ''))
+        ? input.from
+        : `${today.slice(0, 7)}-01`
+      const to = /^\d{4}-\d{2}-\d{2}$/.test(String(input.to || '')) ? input.to : today
+      const groupBy = ['client', 'staff', 'both'].includes(input.groupBy) ? input.groupBy : 'both'
+      return timeSummary(data, { from, to, groupBy })
+    },
+    get_deadlines: async (input) => {
+      const data = await appDataStore.read()
+      const horizonDays = Number(input.horizonDays) > 0 ? Number(input.horizonDays) : 7
+      return deadlines(data, { asOf: todayIso(), horizonDays })
+    },
+    get_capacity: async (input) => {
+      const data = await appDataStore.read()
+      const targetHours = Number(input.targetHours) > 0 ? Number(input.targetHours) : CAPACITY_TARGET_HOURS
+      return capacity(data, { weekStart: weekStartOf(todayIso()), targetHours })
+    },
   }
 }
 
@@ -702,6 +760,7 @@ const server = createServer(async (request, response) => {
           {
             getSnapshot: async () => buildWorkspaceSnapshot(await appDataStore.read()),
             getUsagePatterns: async () => detectUsagePatterns(await appDataStore.read()),
+            readTools: assistantReadTools(),
           },
           (delta) => sendEvent({ type: 'delta', text: delta }),
         )
@@ -3305,6 +3364,40 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, {
         users: members.map((member) => decorateTeamMember(member)),
       })
+      return
+    }
+
+    // Owner-only: set/clear a team member's cost rate (assistant Phase 4
+    // analytics). Informational — never affects invoices. costRate null clears.
+    if (normalizedPath === '/api/team/cost-rate' && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can set cost rates' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const userId = String(payload?.userId ?? '')
+      if (!userId) {
+        sendJson(response, 400, { error: 'userId is required' })
+        return
+      }
+      const raw = payload?.costRate
+      if (raw !== null && raw !== '' && !(Number.isFinite(Number(raw)) && Number(raw) >= 0)) {
+        sendJson(response, 400, { error: 'costRate must be a non-negative number or null' })
+        return
+      }
+      const costRate = await appDataStore.setEmployeeCostRate(userId, raw === '' ? null : raw)
+      sendJson(response, 200, { ok: true, userId, costRate })
       return
     }
 

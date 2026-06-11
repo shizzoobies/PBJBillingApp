@@ -800,6 +800,11 @@ export type TeamMember = {
   createdAt: string | null
   /** TOTP two-factor enrollment flag. */
   totpEnabled?: boolean
+  /**
+   * Optional cost/pay rate ($/hour) — owner-only, informational, powers the
+   * assistant's margin analytics. Never affects invoices. Null = not set.
+   */
+  costRate?: number | null
 }
 
 export type TotpStatus = {

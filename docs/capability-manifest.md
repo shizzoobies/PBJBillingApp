@@ -164,6 +164,10 @@ sit in the top bar on every page.
   sends a sign-in link by email.
 - Roster: each member's role and last login; expand for details; reorder.
 - Resend sign-in link; revoke access.
+- Cost rate (expand a member): optional $/hour pay/cost rate per member. Owner-
+  only, informational — it powers the assistant's margin analytics and is
+  NEVER billed or shown to staff. Leave blank to skip; the assistant then
+  reports realization only.
 - Roles: owner has everything; staff see their assigned clients, their own
   time, and ALL tasks for those clients (logging time against any of them),
   while editing/completing stays limited to tasks assigned to them. There is
@@ -225,6 +229,17 @@ sit in the top bar on every page.
 - Optional weekly digest email: on Mondays (configurable) the owner gets an
   email summarizing the top automation opportunities, when email is
   configured. It's deterministic — the same patterns shown in the panel.
+- Answers analytical questions about the firm's real data (owner-only,
+  read-only, pre-aggregated):
+  - Client profitability for a month — revenue, hours, realized rate
+    (fee ÷ hours), and true margin where team cost rates are set. Surfaces
+    which fixed-fee clients eat more time than their fee implies.
+  - Hours logged by client and/or staff over any date range (billable vs
+    administrative).
+  - What's overdue or due soon, with the client and assignee.
+  - Who's over or near capacity this week (hours vs a weekly target).
+  Numbers come straight from time entries and billing settings — it reports,
+  it doesn't change anything, and it never alters invoices.
 
 ## NOT supported (yet) — common asks
 

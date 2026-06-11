@@ -1535,6 +1535,10 @@ export class AppDataStore {
       // Stored as plaintext for v1 — encryption-at-rest at the DB layer is
       // the right defense (see lib/totp.js header). Backup codes are stored
       // pre-hashed (sha-256) so a DB read alone does not yield usable codes.
+      // Optional per-employee cost/pay rate (assistant Phase 4). Owner-only,
+      // informational — it powers the assistant's margin analytics and NEVER
+      // affects invoices (same rule as estimated hours). Null = not set.
+      await this.pool.query(`alter table users add column if not exists cost_rate numeric`)
       await this.pool.query(`alter table users add column if not exists totp_secret text`)
       await this.pool.query(`alter table users add column if not exists totp_enabled boolean not null default false`)
       await this.pool.query(`alter table users add column if not exists totp_backup_codes text[] not null default '{}'`)
@@ -6095,7 +6099,7 @@ export class AppDataStore {
       // admin page. Owner re-adds with a fresh invite to undo a removal.
       const result = await this.pool.query(`
         select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at, created_at,
-               totp_enabled
+               totp_enabled, cost_rate
         from users
         where inactive_at is null
         order by sort_order asc nulls last, name asc
@@ -6112,6 +6116,7 @@ export class AppDataStore {
         lastActiveAt: row.last_active_at ? new Date(row.last_active_at).toISOString() : null,
         createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
         totpEnabled: Boolean(row.totp_enabled),
+        costRate: row.cost_rate == null ? null : Number(row.cost_rate),
       }))
     }
 
@@ -6127,7 +6132,36 @@ export class AppDataStore {
       lastActiveAt: user.lastActiveAt ?? null,
       createdAt: user.createdAt ?? null,
       totpEnabled: Boolean(user.totpEnabled),
+      costRate: typeof user.costRate === 'number' ? user.costRate : null,
     }))
+  }
+
+  /**
+   * Owner-only: set or clear a team member's cost/pay rate (assistant Phase 4).
+   * `rate` is a non-negative number, or null to clear. Informational only —
+   * never affects invoices. Returns the normalized rate (or null).
+   */
+  async setEmployeeCostRate(userId, rate) {
+    if (!userId) return null
+    let normalized = null
+    if (rate !== null && rate !== undefined && rate !== '') {
+      const n = Number(rate)
+      if (!Number.isFinite(n) || n < 0) return null
+      normalized = Math.round(n * 100) / 100
+    }
+
+    if (this.pool) {
+      await this.pool.query(`update users set cost_rate = $2 where id = $1`, [userId, normalized])
+      return normalized
+    }
+
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((u) => u.id === userId)
+    if (!user) return null
+    if (normalized === null) delete user.costRate
+    else user.costRate = normalized
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return normalized
   }
 
   async getTeamMember(userId) {

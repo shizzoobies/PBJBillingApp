@@ -740,6 +740,25 @@ export async function reorderTeamMembersRequest(userIds: string[]) {
   return (await response.json()) as { users: TeamMember[] }
 }
 
+/**
+ * Owner-only: set or clear a team member's cost rate ($/hour). Pass null to
+ * clear. Informational only — powers assistant margin analytics, never
+ * touches invoices.
+ */
+export async function setTeamMemberCostRate(userId: string, costRate: number | null) {
+  const response = await apiFetch('/api/team/cost-rate', {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, costRate }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to set cost rate (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; userId: string; costRate: number | null }
+}
+
 export async function inviteTeamMember(payload: { name: string; email: string; role: string }) {
   const response = await apiFetch('/api/team/invite', {
     credentials: 'same-origin',
