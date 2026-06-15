@@ -93,6 +93,7 @@ import { ChecklistsPage } from './pages/ChecklistsPage'
 import { DelayedPage } from './pages/DelayedPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { ClientDetailPage } from './pages/ClientDetailPage'
+import { ClientRecapPage } from './pages/ClientRecapPage'
 import { ClientsPage } from './pages/ClientsPage'
 import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
@@ -2821,6 +2822,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           }
         />
         <Route path="/clients" element={<ClientsPage />} />
+        <Route path="/client-recap" element={<ClientRecapPage />} />
         <Route
           path="/contacts"
           element={

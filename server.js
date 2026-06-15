@@ -14,6 +14,8 @@ import {
 import { createPendingActionStore } from './lib/pending-actions.js'
 import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
 import { buildMemoryDigest, safeEqual, verifyElevenLabsSignature } from './lib/voice.js'
+import { buildClientRecap } from './lib/client-recap.js'
+import { currentPeriod, isValidPeriod, isValidPeriodType } from './lib/periods.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
 import {
   notify,
@@ -1689,6 +1691,97 @@ const server = createServer(async (request, response) => {
       }
 
       sendJson(response, 405, { error: 'Method not allowed' })
+      return
+    }
+
+    // ---- Client Recap (per-client monthly/quarterly review) ----
+    // Access is scoped server-side: a user can only recap a client in their
+    // visible set (403 otherwise). Financials (billing, profitability, sales-
+    // tax dollar figures) are owner-only and omitted from the payload entirely
+    // for staff — not just hidden in the UI.
+    if (normalizedPath === '/api/client-recap' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const clientId = requestUrl.searchParams.get('clientId') || ''
+      const periodType = requestUrl.searchParams.get('periodType') || 'month'
+      const periodParam = requestUrl.searchParams.get('period') || ''
+      if (!isValidPeriodType(periodType)) {
+        sendJson(response, 400, { error: 'Invalid periodType' })
+        return
+      }
+      const data = await appDataStore.read()
+      const allowed = visibleClientIdSet(session, data.clients ?? [])
+      if (!clientId || !allowed.has(clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const period = isValidPeriod(periodType, periodParam)
+        ? periodParam
+        : currentPeriod(periodType, todayIso())
+      const includeFinancials = session.user.role === 'owner'
+      const costRates = includeFinancials ? await buildCostRateMap() : {}
+      const salesTaxRecord = includeFinancials
+        ? await appDataStore.getSalesTaxRecord(clientId, period)
+        : null
+      const recap = buildClientRecap(data, {
+        clientId,
+        periodType,
+        period,
+        today: todayIso(),
+        includeFinancials,
+        costRates,
+        salesTaxRecord,
+      })
+      if (!recap) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      sendJson(response, 200, recap)
+      return
+    }
+
+    // Owner-only: record/upsert sales-tax figures for a client + period.
+    if (normalizedPath === '/api/client-recap/sales-tax' && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can record sales tax' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const clientId = String(payload?.clientId ?? '')
+      const periodType = String(payload?.periodType ?? 'month')
+      const period = String(payload?.period ?? '')
+      if (!isValidPeriodType(periodType) || !isValidPeriod(periodType, period)) {
+        sendJson(response, 400, { error: 'Invalid period' })
+        return
+      }
+      const data = await appDataStore.read()
+      const allowed = visibleClientIdSet(session, data.clients ?? [])
+      if (!clientId || !allowed.has(clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const record = await appDataStore.upsertSalesTaxRecord({
+        clientId,
+        period,
+        taxableSales: payload?.taxableSales,
+        taxCollected: payload?.taxCollected,
+        taxOwed: payload?.taxOwed,
+        notes: payload?.notes,
+        updatedBy: session.user.id,
+      })
+      await appDataStore.recordActivity(session.user.id, 'sales_tax_recorded', `${clientId} · ${period}`)
+      sendJson(response, 200, { ok: true, record })
       return
     }
 

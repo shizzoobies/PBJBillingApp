@@ -1556,6 +1556,25 @@ export class AppDataStore {
         )
       `)
 
+      // Sales-tax figures recorded per client + period (Client Recap page).
+      // Owner-only financial data, deliberately endpoint-managed (NOT part of
+      // the bulk /api/app-data wipe-and-reinsert) so it can't be clobbered.
+      // `period` is the recap key: "2026-08" (monthly) or "2026-Q3" (quarterly).
+      await this.pool.query(`
+        create table if not exists sales_tax_records (
+          id text primary key,
+          client_id text not null,
+          period text not null,
+          taxable_sales numeric,
+          tax_collected numeric,
+          tax_owed numeric,
+          notes text not null default '',
+          updated_by text,
+          updated_at timestamptz not null default now(),
+          unique (client_id, period)
+        )
+      `)
+
       // TOTP two-factor: per-user secret + enable flag + backup codes.
       // Stored as plaintext for v1 — encryption-at-rest at the DB layer is
       // the right defense (see lib/totp.js header). Backup codes are stored
@@ -7064,6 +7083,104 @@ export class AppDataStore {
     authState.voiceTranscripts.push(record)
     if (authState.voiceTranscripts.length > 50) {
       authState.voiceTranscripts = authState.voiceTranscripts.slice(-50)
+    }
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return record
+  }
+
+  /**
+   * Sales-tax figures for one client + period (Client Recap). Returns the
+   * record or null. Owner-only financial data — caller enforces auth.
+   */
+  async getSalesTaxRecord(clientId, period) {
+    if (!clientId || !period) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select client_id, period, taxable_sales, tax_collected, tax_owed, notes, updated_by, updated_at
+           from sales_tax_records where client_id = $1 and period = $2`,
+        [clientId, period],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      const num = (v) => (v == null ? null : Number(v))
+      return {
+        clientId: row.client_id,
+        period: row.period,
+        taxableSales: num(row.taxable_sales),
+        taxCollected: num(row.tax_collected),
+        taxOwed: num(row.tax_owed),
+        notes: row.notes ?? '',
+        updatedBy: row.updated_by ?? null,
+        updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+      }
+    }
+    const authState = await readJson(localAuthPath)
+    return (
+      (authState.salesTaxRecords ?? []).find(
+        (r) => r.clientId === clientId && r.period === period,
+      ) ?? null
+    )
+  }
+
+  /**
+   * Upsert sales-tax figures for a client + period. Figures are non-negative
+   * numbers or null (cleared). Returns the saved record. Owner-only — caller
+   * enforces auth.
+   */
+  async upsertSalesTaxRecord({ clientId, period, taxableSales, taxCollected, taxOwed, notes, updatedBy }) {
+    if (!clientId || !period) return null
+    const money = (v) => {
+      if (v === null || v === undefined || v === '') return null
+      const n = Number(v)
+      if (!Number.isFinite(n) || n < 0) return null
+      return Math.round(n * 100) / 100
+    }
+    const record = {
+      clientId,
+      period,
+      taxableSales: money(taxableSales),
+      taxCollected: money(taxCollected),
+      taxOwed: money(taxOwed),
+      notes: String(notes ?? '').slice(0, 2000),
+      updatedBy: updatedBy ?? null,
+      updatedAt: nowIso(),
+    }
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into sales_tax_records
+           (id, client_id, period, taxable_sales, tax_collected, tax_owed, notes, updated_by, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, now())
+         on conflict (client_id, period) do update set
+           taxable_sales = excluded.taxable_sales,
+           tax_collected = excluded.tax_collected,
+           tax_owed = excluded.tax_owed,
+           notes = excluded.notes,
+           updated_by = excluded.updated_by,
+           updated_at = now()`,
+        [
+          `stax-${randomUUID().slice(0, 8)}`,
+          clientId,
+          period,
+          record.taxableSales,
+          record.taxCollected,
+          record.taxOwed,
+          record.notes,
+          record.updatedBy,
+        ],
+      )
+      return record
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.salesTaxRecords)) authState.salesTaxRecords = []
+    const existing = authState.salesTaxRecords.find(
+      (r) => r.clientId === clientId && r.period === period,
+    )
+    if (existing) {
+      Object.assign(existing, record)
+    } else {
+      authState.salesTaxRecords.push({ id: `stax-${randomUUID().slice(0, 8)}`, ...record })
     }
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return record

@@ -1597,6 +1597,109 @@ export async function resolvePendingVoiceAction(id: string) {
   return (await response.json()) as { ok: boolean; removed: boolean }
 }
 
+// ---- Client Recap (per-client monthly/quarterly review) ----
+
+export type ClientRecapPeriodType = 'month' | 'quarter'
+export type ClientRecapStaffRow = { name: string; hours: number; billableHours: number }
+export type ClientRecapTask = {
+  title: string
+  dueDate: string
+  assignee: string | null
+  done: boolean
+  overdue: boolean
+}
+export type SalesTaxFigures = {
+  taxableSales: number | null
+  taxCollected: number | null
+  taxOwed: number | null
+  notes: string
+  updatedAt: string | null
+}
+export type ClientRecap = {
+  client: { id: string; name: string; billingMode: string }
+  periodType: ClientRecapPeriodType
+  period: string
+  periodLabel: string
+  range: { start: string; end: string }
+  includeFinancials: boolean
+  time: {
+    totalHours: number
+    billableHours: number
+    adminHours: number
+    priorHours: number
+    deltaHours: number
+    byStaff: ClientRecapStaffRow[]
+  }
+  tasks: {
+    dueThisPeriod: ClientRecapTask[]
+    dueCount: number
+    completedCount: number
+    overdueCount: number
+    openCount: number
+  }
+  salesTax: {
+    status: 'not_started' | 'open' | 'overdue' | 'done'
+    taskTitle: string | null
+    dueDate: string | null
+    figures: SalesTaxFigures | null
+  }
+  billing: {
+    billingMode: string
+    hourlyRate: number | null
+    monthlyRate: number | null
+    monthsInPeriod: number
+    planNames: string[]
+    revenue: number
+    reimbursements: Array<{ date: string; description: string; amount: number }>
+    reimbursementTotal: number
+  } | null
+  profitability: {
+    realizedRate: number | null
+    marginAvailable: boolean
+    laborCost: number | null
+    margin: number | null
+  } | null
+}
+
+export async function fetchClientRecap(
+  clientId: string,
+  periodType: ClientRecapPeriodType,
+  period: string,
+) {
+  const params = new URLSearchParams({ clientId, periodType, period })
+  const response = await apiFetch(`/api/client-recap?${params.toString()}`, {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to load recap (${response.status})`)
+  }
+  return (await response.json()) as ClientRecap
+}
+
+/** Owner-only: record sales-tax figures for a client + period. */
+export async function saveSalesTaxRecord(input: {
+  clientId: string
+  periodType: ClientRecapPeriodType
+  period: string
+  taxableSales: number | null
+  taxCollected: number | null
+  taxOwed: number | null
+  notes: string
+}) {
+  const response = await apiFetch('/api/client-recap/sales-tax', {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to save sales tax (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; record: unknown }
+}
+
 export async function assistantFeatureRequestSend(draft: AssistantFeatureRequestDraft) {
   const response = await apiFetch('/api/assistant/feature-request', {
     method: 'POST',

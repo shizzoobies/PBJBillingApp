@@ -113,6 +113,24 @@ sit in the top bar on every page.
   notes, billing.
 - Assigned team controls which staff can see/log time for the client.
 
+## Client Recap
+
+- A per-client review page (sidebar: "Client Recap") with a Monthly / Quarterly
+  toggle and prev/next period navigation. Pick a client and see a full
+  breakdown for the period.
+- Scoped: a user only sees clients they have access to (owner = all; staff =
+  their assigned clients). Picking a client you don't have access to is blocked.
+- Sections everyone sees: Time & hours (total / billable / administrative, by
+  staff, vs. the prior period); Tasks & workflow (due / completed / overdue
+  this period); Sales-tax filing status for the period (from the sales-tax
+  task).
+- Owner-only sections: Billing (revenue for the period, rate/plan,
+  reimbursements); Profitability (realized rate = fee ÷ hours, and margin when
+  team cost rates are set); and the recorded sales-tax dollar figures.
+- Sales tax: the owner can RECORD per-client, per-period figures here — taxable
+  sales, tax collected, tax owed, and notes. Staff see the filing status but
+  not the dollar figures.
+
 ## Contacts
 
 - Shared contact directory: name, title, email, phone, notes; linked to

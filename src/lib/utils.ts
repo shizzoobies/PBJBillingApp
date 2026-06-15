@@ -141,6 +141,36 @@ export function isInBillingPeriod(entry: TimeEntry, period: string) {
 }
 
 /**
+ * Client Recap period helpers (UI-side mirror of lib/periods.js). The server
+ * validates and labels periods; these just drive the page's selector. A period
+ * is "2026-08" (month) or "2026-Q3" (quarter).
+ */
+export function currentReviewPeriod(type: 'month' | 'quarter'): string {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = now.getMonth() + 1
+  if (type === 'quarter') return `${year}-Q${Math.ceil(month / 3)}`
+  return `${year}-${String(month).padStart(2, '0')}`
+}
+
+export function shiftReviewPeriod(
+  type: 'month' | 'quarter',
+  period: string,
+  dir: number,
+): string {
+  if (type === 'quarter') {
+    const year = Number(period.slice(0, 4))
+    const q = Number(period.slice(6))
+    const index = year * 4 + (q - 1) + dir
+    return `${Math.floor(index / 4)}-Q${(index % 4) + 1}`
+  }
+  const year = Number(period.slice(0, 4))
+  const month = Number(period.slice(5, 7))
+  const index = year * 12 + (month - 1) + dir
+  return `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, '0')}`
+}
+
+/**
  * Whole-day difference between a due date and today (both ISO yyyy-mm-dd).
  * Positive = days until due, negative = days overdue, 0 = due today.
  */
