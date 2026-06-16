@@ -25,7 +25,11 @@ import {
   sendLoginLinkEmail,
   sendReportEmail,
 } from './lib/notify.js'
-import { normalizeTimeEntryMethod, normalizeWorkSessions } from './lib/time-entry.js'
+import {
+  findBlockingRejectedWeek,
+  normalizeTimeEntryMethod,
+  normalizeWorkSessions,
+} from './lib/time-entry.js'
 import {
   generateBackupCodes,
   generateSecret,
@@ -2261,35 +2265,29 @@ const server = createServer(async (request, response) => {
         // check is skipped for it.
         const allData = await appDataStore.read()
 
-        // Force weekly submission: a non-owner must submit LAST week's timesheet
-        // for review before logging time in a newer week. Find the most recent
-        // prior week (before this entry's week) in which they logged time — it
-        // must carry a pending/approved submission. They can still add to /
-        // fix that prior week itself; only logging in a NEWER week is blocked.
+        // Weekly-submission gate: a non-owner is blocked from logging NEW time
+        // only when a PRIOR week's timesheet has been REJECTED and sent back
+        // for changes — resubmitting it is the one thing in their control.
+        // Un-submitted and still-pending prior weeks no longer block (firm
+        // owners asked for this: an awaiting-approval week is out of staff's
+        // hands and was locking them out of the timer). See
+        // `findBlockingRejectedWeek` for the rule. They can always add to / fix
+        // a prior week itself.
         if (session.user.role !== 'owner') {
           const entryWeekStart = weekStartOf(date)
-          const priorWeeksWithTime = [
-            ...new Set(
-              (allData.timeEntries ?? [])
-                .filter((entry) => entry.employeeId === employeeId)
-                .map((entry) => weekStartOf(entry.date))
-                .filter((weekStart) => weekStart < entryWeekStart),
-            ),
-          ].sort()
-          const lastPriorWeek = priorWeeksWithTime[priorWeeksWithTime.length - 1]
-          if (lastPriorWeek) {
-            const submission = (allData.weeklySubmissions ?? []).find(
-              (entry) => entry.userId === employeeId && entry.weekStart === lastPriorWeek,
-            )
-            const submitted =
-              submission &&
-              (submission.status === 'pending' || submission.status === 'approved')
-            if (!submitted) {
-              sendJson(response, 423, {
-                error: `Submit your timesheet for the week of ${lastPriorWeek} for review before logging time in a new week.`,
-              })
-              return
-            }
+          const priorWeeksWithTime = (allData.timeEntries ?? [])
+            .filter((entry) => entry.employeeId === employeeId)
+            .map((entry) => weekStartOf(entry.date))
+          const rejectedWeek = findBlockingRejectedWeek(
+            entryWeekStart,
+            priorWeeksWithTime,
+            (allData.weeklySubmissions ?? []).filter((entry) => entry.userId === employeeId),
+          )
+          if (rejectedWeek) {
+            sendJson(response, 423, {
+              error: `Your timesheet for the week of ${rejectedWeek} was sent back for changes. Fix and resubmit it before logging more time.`,
+            })
+            return
           }
         }
 

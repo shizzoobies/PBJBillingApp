@@ -16,4 +16,9 @@ declare module '*/lib/time-entry.js' {
     manualReason: string | undefined
     error: string | null
   }
+  export function findBlockingRejectedWeek(
+    entryWeekStart: string,
+    priorWeekStarts: Iterable<string>,
+    submissions: ReadonlyArray<{ weekStart: string; status: string }>,
+  ): string | null
 }

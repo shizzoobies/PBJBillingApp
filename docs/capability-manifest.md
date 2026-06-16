@@ -44,6 +44,10 @@ sit in the top bar on every page.
   against it. Staff can do this for their assigned clients.
 - Recent time list: edit or delete your recent entries (until approved/locked).
 - Billable vs non-billable is determined by the client's billing setup.
+- Staff can always log time, with one exception: if an owner sent a prior
+  week's timesheet back for changes (rejected), that week must be fixed and
+  resubmitted before more time can be logged. A week that's simply
+  un-submitted or still awaiting approval never blocks logging.
 
 ## Timesheet page
 
