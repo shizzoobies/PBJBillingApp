@@ -1170,6 +1170,10 @@ const server = createServer(async (request, response) => {
             owner_name: String(session.user.name || 'Brittany').trim().split(/\s+/)[0],
             today: todayIso(),
             memory_digest: buildMemoryDigest(memories),
+            // The signed-in user's id, relayed back by each tool as caller_id
+            // so the webhook parks memory/actions/reports under THIS user —
+            // not just "the first owner" (the firm can have more than one).
+            user_id: session.user.id,
           },
         })
       } catch (error) {
@@ -1198,9 +1202,15 @@ const server = createServer(async (request, response) => {
         input = {}
       }
       try {
-        // The single owner is the memory subject — voice is owner-only.
+        // Route memory/actions/reports to the ACTUAL signed-in user (relayed
+        // as caller_id from the user_id dynamic variable), not just "the first
+        // owner" — the firm can have more than one owner-role account, and the
+        // panel polls under the logged-in user. Fall back to the first owner
+        // if caller_id is missing/unknown. Only owner-role ids are honored.
         const members = await appDataStore.getTeamMembers()
-        const owner = members.find((member) => member.role === 'owner')
+        const owners = members.filter((member) => member.role === 'owner')
+        const callerId = String(input.caller_id ?? '')
+        const owner = owners.find((member) => member.id === callerId) || owners[0] || null
         const readTools = assistantReadTools()
         const analyticsMap = {
           client_profitability: 'get_client_profitability',
