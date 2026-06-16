@@ -172,7 +172,44 @@ Railway var → revoke the old).
 
 ---
 
-## What shipped 2026-06-16 (newest first)
+## What shipped 2026-06-16 — Active Checklists board (newest first)
+
+On `main`, **live** (deploy green, 200/200/200). Built from Brittany's PDF
+feedback: show the active checklists as **columns by service type**, with
+collapsible client rows, a period toggle, completed clients dropping off, and
+an at-a-glance view of who's still open per task.
+
+- **`fb19867` Active Checklists board (`/board`).** New sidebar page **Board**
+  (not owner-only — staff see it, scoped to assigned clients). One **column per
+  service category** (the columns); each column lists clients with OPEN work of
+  that type; a client row expands to the live `ChecklistCard`. Completing a
+  client's checklist drops it off automatically. **Period toggle** (week / month
+  / quarter, default month) is a *horizon* — shows work due on/before the end of
+  the period, so overdue stays visible and the view widens. Owner-only **"Manage
+  columns"** (add/rename/reorder/delete; delete → its checklists become
+  "Uncategorized"). Where a checklist lands = its **"Board column"** picker on
+  the repeating-template editor and the new-task form; generated checklists
+  inherit it.
+  - **Data model (BOTH backends):** new **`service_categories`** store
+    (endpoint-managed like `sales_tax_records` — NOT in the bulk app-data write,
+    so autosave can't clobber it; seeded with Monthly/Quarterly Bookkeeping,
+    Sales Tax, Payroll) + **`categoryId`** on `checklist_templates` and
+    `checklists`, threaded through every pg read/SELECT/INSERT path (the file
+    backend rides along since it stores objects verbatim).
+  - **Server/API:** `/api/service-categories` GET (any session) + POST/PUT/
+    DELETE (owner + CSRF). `categoryId` accepted on one-time checklist create.
+    Categories load into `AppContext` via a dedicated fetch (separate from the
+    bulk workspace data), with add/rename/reorder/delete mutators.
+  - **Pure engine:** `src/lib/activeBoard.ts` (frontend TS — the board is a view
+    over data the client already holds; period math is self-contained so it
+    doesn't touch the shared `lib/periods.js` validators Client Recap relies on)
+    + `src/__tests__/activeBoard.test.ts`. NOTE the frontend convention:
+    shared pure logic lives in **`src/lib/*.ts`** (TS), not root `lib/*.js`
+    (which is server-only and can't be imported from TS — no `allowJs`).
+  - Manifest updated (same-commit rule) **and the voice agent re-provisioned**
+    after deploy, so both assistant surfaces know about the Board.
+
+## What shipped 2026-06-16 — voice agent + reports + Client Recap (newest first)
 
 All on `main`, all **live**. The session's arc: the **voice agent** + an
 **assistant report generator** + a **Client Recap page**. (Phase 4 Tracks
