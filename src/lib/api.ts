@@ -1634,6 +1634,33 @@ export async function resolvePendingReport(id: string) {
   return (await response.json()) as { ok: boolean; removed: boolean }
 }
 
+/** Owner-only: feature-request drafts the VOICE agent created, awaiting a tap. */
+export async function fetchPendingFeatureRequests() {
+  const response = await apiFetch('/api/assistant/pending-feature-requests', {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load pending requests (${response.status})`)
+  }
+  return (await response.json()) as {
+    drafts: Array<{ id: string; draft: AssistantFeatureRequestDraft }>
+  }
+}
+
+/** Remove a pending voice feature-request draft once it has been shown. */
+export async function resolvePendingFeatureRequest(id: string) {
+  const response = await apiFetch('/api/assistant/pending-feature-requests/resolve', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to resolve pending request (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; removed: boolean }
+}
+
 // ---- Client Recap (per-client monthly/quarterly review) ----
 
 export type ClientRecapPeriodType = 'month' | 'quarter'

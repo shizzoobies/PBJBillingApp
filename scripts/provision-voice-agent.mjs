@@ -201,6 +201,19 @@ function toolDefinitions() {
       },
       ['title', 'sections'],
     ),
+    def(
+      'send_feature_request',
+      'Draft a feature request to Alex, the developer — use this when the owner wants something the app cannot do yet (e.g. a report whose data the app does not track). It only DRAFTS: a card appears in the panel and the owner taps "Send to Alex" to send. Call only after she says yes; never claim it was sent until she taps.',
+      {
+        title: { type: 'string', description: 'Short imperative summary of the request (under 80 chars).' },
+        description: {
+          type: 'string',
+          description:
+            'What she wants and why, in 2-5 sentences a developer can act on — for a report, name the report and the data/infrastructure it needs.',
+        },
+      },
+      ['title', 'description'],
+    ),
     // ---- Action proposals (PROPOSE-ONLY) ----
     // These file a confirmation card in the app; they execute NOTHING. The
     // server endpoint behind them can only validate + park a proposal — the

@@ -248,7 +248,9 @@ sit in the top bar on every page.
   e.g. "give me a Q2 profitability report" — and it assembles a structured
   report (sections, key figures, tables) and opens it in a modal you can read
   and "Save as PDF". Works by text chat and by voice (the report pops up on
-  screen during a call). Owner-only.
+  screen during a call). Owner-only. If you ask for a report the app doesn't
+  have the data for, it says so and offers to send Alex a feature request to
+  build it (you confirm before it sends).
 - After producing a report or analysis, offers to email it to the owner.
   On "yes" it shows a confirm card; only on confirm does it email the report
   to the owner's address. It tells the truth about whether the email actually

@@ -12,9 +12,11 @@ import {
   assistantHistoryRequest,
   assistantInsightsRequest,
   assistantRunAction,
+  fetchPendingFeatureRequests,
   fetchPendingReports,
   fetchPendingVoiceActions,
   fetchVoiceSignedUrl,
+  resolvePendingFeatureRequest,
   resolvePendingReport,
   resolvePendingVoiceAction,
   type AssistantActionProposal,
@@ -163,6 +165,33 @@ export function AssistantPanel() {
           ...fresh.map((r) => ({ kind: 'report' as const, report: r.report })),
         ])
         setActiveReport(fresh[fresh.length - 1].report)
+      } catch {
+        // Best-effort; the next tick retries.
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 2000)
+    return () => window.clearInterval(timer)
+  }, [voiceActive])
+
+  // During a voice call, poll for feature-request drafts the agent created and
+  // show each as the usual confirm card (sending still needs the owner's tap).
+  const seenFeatureReqIdsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!voiceActive) return
+    const poll = async () => {
+      try {
+        const { drafts } = await fetchPendingFeatureRequests()
+        const fresh = drafts.filter((d) => !seenFeatureReqIdsRef.current.has(d.id))
+        if (fresh.length === 0) return
+        for (const d of fresh) {
+          seenFeatureReqIdsRef.current.add(d.id)
+          void resolvePendingFeatureRequest(d.id).catch(() => {})
+        }
+        setThread((current) => [
+          ...current,
+          ...fresh.map((d) => ({ kind: 'draft' as const, draft: d.draft, status: 'pending' as const })),
+        ])
       } catch {
         // Best-effort; the next tick retries.
       }

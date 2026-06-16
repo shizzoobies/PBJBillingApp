@@ -282,6 +282,8 @@ function getPublicAppUrl(request) {
 const pendingVoiceActions = createPendingActionStore()
 // Reports the VOICE agent generated, awaiting the panel to pop them in a modal.
 const pendingVoiceReports = createPendingActionStore()
+// Feature-request drafts the VOICE agent created, awaiting the owner's tap.
+const pendingVoiceFeatureRequests = createPendingActionStore()
 
 // Assistant rate limit: in-memory sliding window per user (20 messages per
 // 5 minutes). A runaway client (or a stuck retry loop) can't burn API spend.
@@ -932,6 +934,48 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Feature-request drafts the voice agent created, awaiting the owner's tap.
+    // The panel polls this during a call and shows each as a confirm card;
+    // sending still goes through POST /api/assistant/feature-request.
+    if (normalizedPath === '/api/assistant/pending-feature-requests' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const drafts = pendingVoiceFeatureRequests
+        .list(session.user.id)
+        .map((entry) => ({ id: entry.id, draft: entry.params }))
+      sendJson(response, 200, { drafts })
+      return
+    }
+
+    if (
+      normalizedPath === '/api/assistant/pending-feature-requests/resolve' &&
+      request.method === 'POST'
+    ) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const removed = pendingVoiceFeatureRequests.resolve(session.user.id, String(payload?.id ?? ''))
+      sendJson(response, 200, { ok: true, removed })
+      return
+    }
+
     // Action confirm (Phase 3): runs a workspace change the assistant
     // proposed, only after the owner clicked Run on the confirmation card.
     // The model can only ever PROPOSE — execution lives here behind the
@@ -1293,6 +1337,28 @@ const server = createServer(async (request, response) => {
                 'Report built. It just opened in a modal in the assistant panel on ' +
                 'her screen, where she can read it and save a PDF. Tell her it is ' +
                 'ready — do not read the whole report aloud.',
+            }
+          }
+        } else if (toolName === 'send_feature_request') {
+          // PROPOSE-ONLY: parks a draft card the owner taps to actually send.
+          const title = String(input.title ?? '').trim().slice(0, 120)
+          const description = String(input.description ?? '').trim().slice(0, 2000)
+          if (!title || !description) {
+            result = { drafted: false, note: 'Need a short title and a description.' }
+          } else if (!owner) {
+            result = { drafted: false, note: 'Could not find the owner account.' }
+          } else {
+            pendingVoiceFeatureRequests.add(owner.id, {
+              tool: 'feature_request',
+              label: title,
+              params: { title, description },
+            })
+            result = {
+              drafted: true,
+              note:
+                'A feature-request card just appeared in the assistant panel. She ' +
+                'taps "Send to Alex" to send it — do not claim it was sent until she ' +
+                'has.',
             }
           }
         } else {
