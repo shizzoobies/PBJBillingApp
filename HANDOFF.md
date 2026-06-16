@@ -1,6 +1,6 @@
 # PB&J Strategic Accounting — Handoff
 
-_Last updated: 2026-06-10. This supersedes earlier handoffs; git history has the old one._
+_Last updated: 2026-06-16. This supersedes earlier handoffs; git history has the old one._
 
 A time-tracking, checklist, and client-billing web app for a small bookkeeping
 firm. This doc is written so a fresh session (or another dev) can resume cold.
@@ -46,7 +46,17 @@ set), `RESEND_API_KEY` + `EMAIL_FROM` (email — confirmed set), `APP_PUBLIC_URL
 `NODE_ENV`. Optional: `FEATURE_REQUEST_EMAIL` (defaults asoalexander@gmail.com),
 `ASSISTANT_MODEL` (defaults `claude-opus-4-8`), `ASSISTANT_DIGEST` (set `off`
 to disable the weekly digest email), `ASSISTANT_DIGEST_DOW` (0=Sun..6=Sat,
-default 1=Mon — the day the digest sends).
+default 1=Mon — the day the digest sends), `ASSISTANT_CAPACITY_TARGET`
+(weekly-hours target for the capacity analytics, default 40).
+
+**Voice agent (ElevenLabs) — all set in Railway:** `ELEVENLABS_API_KEY`,
+`ELEVENLABS_AGENT_ID` (agent_7701ktt20z3qf06bwytj27bgya62),
+`ELEVENLABS_WEBHOOK_SECRET` (HMAC for the post-call webhook — created in the
+ElevenLabs dashboard's workspace webhook "pbj-billing post-call"),
+`VOICE_TOOL_SECRET` (random; the shared `x-voice-secret` header on every voice
+tool webhook). ⚠️ **The `ELEVENLABS_API_KEY` was pasted into chat during
+setup — rotate it when convenient** (new key in ElevenLabs → update the
+Railway var → revoke the old).
 
 ---
 
@@ -69,7 +79,51 @@ default 1=Mon — the day the digest sends).
 - **Data scoping for staff:** `scopeAppDataForSession` in server.js strips a
   non-owner down to their assigned clients. **As of 2026-06-10, staff receive
   ALL checklists for assigned clients** (not just ones assigned to them);
-  edit/complete rights stay gated to assignee/editor.
+  edit/complete rights stay gated to assignee/editor. Per-client access checks
+  reuse `visibleClientIdSet(session, clients)`.
+
+## The AI assistant + voice agent (load-bearing facts)
+
+- **Text assistant brain:** Anthropic Messages API in `lib/assistant.js`
+  (`runAssistantChat`), streamed as SSE over `POST /api/assistant/chat`.
+  Persona = the PERSONA constant in `lib/assistant.js` + the capability
+  manifest. Tools: read tools (snapshot, usage patterns, the 4 analytics),
+  draft-only tools (`send_feature_request`, `email_report`, `build_report`),
+  and propose-only action tools (`make_template_recurring`, `assign_client`,
+  `generate_tasks_now`). Drafts/proposals/reports come back on the chat result
+  and render as cards/modal; **nothing mutates or sends without the owner's
+  click** (e.g. `POST /api/assistant/action` is the only execute path).
+- **Voice agent (ElevenLabs Conversational AI):** owner-only, in the assistant
+  panel (mic button). `@elevenlabs/react` `useConversation` (wrapped in
+  `ConversationProvider` in AppLayout). The browser opens a session via a
+  signed URL minted by `GET /api/assistant/voice/signed-url` (key stays
+  server-side). That endpoint also returns **dynamic variables**: `owner_name`
+  (first name), `today`, `memory_digest`, and `user_id` (the caller).
+- **Voice tools are webhooks** ElevenLabs calls at `POST /api/voice/tools/:name`
+  (authed by the shared `x-voice-secret` header). Read tools return data;
+  write-ish tools (memory, actions, reports, feature requests) PARK a pending
+  item — the panel polls it during a call and renders the card/modal; the owner
+  still confirms. Persisted memory: `voice_memories`; transcripts via
+  `POST /api/voice/post-call` (HMAC-verified) → `voice_transcripts`.
+- **`scripts/provision-voice-agent.mjs`** is the source of truth for the
+  agent's config. It uploads the manifest to the agent's knowledge base, syncs
+  the 12 tools, and PATCHes the agent (system prompt from
+  `docs/voice-agent-persona.md`, greeting, knowledge base, tool ids). It
+  deliberately leaves the **voice and LLM** as set in the dashboard. Run:
+  `ELEVENLABS_API_KEY=… ELEVENLABS_AGENT_ID=… APP_PUBLIC_URL=… VOICE_TOOL_SECRET=… node scripts/provision-voice-agent.mjs`
+  (pull `VOICE_TOOL_SECRET` from Railway `variables --json`).
+- **ElevenLabs schema gotchas (both cost a 422):** in a tool's
+  `request_body_schema`, EVERY node (including nested array/object item
+  properties) must set one of `description` / `dynamic_variable` /
+  `is_system_provided` / `constant_value` / `is_omitted`; and a property may set
+  **only one** of those (a `dynamic_variable` prop must NOT also have a
+  `description`). The `caller_id` field on every tool is bound to the `user_id`
+  dynamic variable so the webhook parks under the actual signed-in user (the
+  firm has >1 owner-role account, so "first owner" routing was wrong).
+- **`pending-*` stores** (`lib/pending-actions.js`, `createPendingActionStore`)
+  are in-memory, per-user, TTL'd — used for voice-parked actions, reports, and
+  feature-request drafts. Ephemeral by design (a restart drops them; she asks
+  again).
 
 ## Build / verify / deploy process (DO THIS)
 
@@ -89,6 +143,12 @@ default 1=Mon — the day the digest sends).
 4. After push, watch the deploy (CLI above or poll the bundle hash at the live
    URL), then health-check `/`, `/api/firm-settings/public`, `/health` (expect
    200/200/200).
+5. **Voice changes need a re-provision AFTER deploy** — if you touched
+   `docs/voice-agent-persona.md`, the voice tool list, or anything the agent
+   relies on (new `/api/voice/tools/*` route), run
+   `scripts/provision-voice-agent.mjs` (see above) once the deploy is green, so
+   the agent's tools point at routes that now exist and its prompt/KB are
+   current. Sequencing matters: deploy first (route exists), then provision.
 
 ## Local dev quirks (important for verification)
 
@@ -111,6 +171,54 @@ default 1=Mon — the day the digest sends).
   purpose), `rescue-login.mjs`, or `.playwright-mcp/`.
 
 ---
+
+## What shipped 2026-06-16 (newest first)
+
+All on `main`, all **live**. The session's arc: the **voice agent** + an
+**assistant report generator** + a **Client Recap page**. (Phase 4 Tracks
+B/C/D were NOT built — we did this instead; they're still open below.)
+
+- **`145962e` Feature request when a report's data is missing.** If a requested
+  report needs data the app doesn't track, the assistant (text + voice) says so
+  and offers to `send_feature_request` to Alex (confirm-first). Voice gained the
+  `send_feature_request` tool (it had none) via a parked draft →
+  `/api/assistant/pending-feature-requests` → panel card.
+- **`9483b29` Reports are visual-first.** The assistant doesn't read a report
+  aloud (one-line "it's on your screen"), and asks one clarifying question when
+  a report request is vague. Persona-only (voice + text).
+- **`5ff06a7` Caller-id routing (important fix).** Voice memory/actions/reports
+  were parked under "first owner" but the panel polls under the logged-in user;
+  with two owner-role accounts (Alex + Brittany) they mismatched → "nothing on
+  screen." Now the signed-url passes `user_id`, every tool relays it as
+  `caller_id`, and the webhook parks under that caller.
+- **`3c94305` (+ `fb49bd8` schema fix) Report generator.** New `build_report`
+  tool: the assistant composes any report (sections/stats/tables) from its read
+  tools → `AssistantReportModal` with **Save as PDF** (browser print; reuses
+  the app's print system — `body.printing-report`). Text returns it on the chat
+  result; voice parks it → `/api/assistant/pending-reports` → modal pops.
+- **`4f560f0` Client Recap page** (`/client-recap`, NOT owner-only). Per-client
+  Monthly/Quarterly review: time, tasks, sales-tax filing status (everyone);
+  Billing, Profitability, and recorded sales-tax figures (owner only). Access
+  is server-scoped (403 for a client you're not on; financials stripped from
+  staff payloads). New `sales_tax_records` store (both backends),
+  endpoint-only (NOT in the bulk autosave). `lib/periods.js` +
+  `lib/client-recap.js` (pure, tested). Plan: `.omc/plans/client-recap-plan.md`.
+- **`b63ac2a` Voice V2 — memory + live tools + transcripts.** `voice_memories`
+  (remember/recall + a per-session digest), the analytics as voice webhooks,
+  and post-call transcripts (`voice_transcripts`, HMAC-verified webhook).
+- **`7694c6b` Voice hang-up fix.** The cleanup effect depended on the
+  `useConversation` object (new identity each render) → it hung up the moment a
+  call connected. Routed cleanup through a ref.
+- **`dfec6a4` Voice actions, propose-only.** Voice can propose the 3 action
+  tools; they only ever FILE a confirm card (`pending-actions`) — the owner's
+  tap in the panel is the ONLY execute path. "THE RULE THAT NEVER BENDS" added
+  to both personas.
+- **`8e5826f` Casual + personal.** First-name-only address (enforced
+  server-side); occasional family check-in for Brittany (3 daughters, husband
+  Mark), gated to when she's the caller.
+- **`f54b503` Voice V1.** Talk to the assistant: signed-URL transport, mic
+  button + live voice bar (avatar pulse), persona authored
+  (`docs/voice-agent-persona.md`), manifest synced to the agent's KB.
 
 ## What shipped 2026-06-10 (newest first)
 
@@ -183,6 +291,10 @@ commit that adds/changes/removes a user-facing feature MUST update the manifest
 in the SAME commit** — otherwise the assistant lies to Brittany. (Also recorded
 in memory `ai-assistant.md`.) Owner-only, forever. Tests in
 `src/__tests__/assistant.test.tsx` assert manifest coverage + panel behavior.
+The manifest is ALSO the voice agent's knowledge base — so a manifest change
+isn't fully live for voice until the agent is re-provisioned (step 5 above).
+Behavior rules for both surfaces live in two personas: `lib/assistant.js`
+PERSONA (text) and `docs/voice-agent-persona.md` (voice) — keep them in sync.
 
 ---
 
@@ -199,18 +311,34 @@ in memory `ai-assistant.md`.) Owner-only, forever. Tests in
 
 - **Assistant Phase 3 — SHIPPED (`facb0b8`).** Streaming, persistence, action
   tools, weekly digest.
-- **Assistant Phase 4 — IN PROGRESS.** Track A (analytics) shipped (`2358921`).
-  Remaining, approved + spec'd in `.omc/plans/ai-assistant-phase4-plan.md`:
+- **Assistant Phase 4 — Track A shipped (`2358921`); B/C/D still NOT built.**
+  Approved + spec'd in `.omc/plans/ai-assistant-phase4-plan.md`:
   - **Track B (actions)** — 5 confirm-gated tools: `reassign_task`,
     `set_task_due_date`, `create_contact`, `create_client`, `draft_invoice`
     (draft only). Decided: ship all 5; hold complete/delete/approve for later.
+    NOTE: the existing 3 action tools already use the propose→card→tap pattern
+    (`buildActionProposal`/`executeAssistantAction` in `lib/assistant.js` +
+    `pending-actions`); new ones follow it + a voice tool in the provision
+    script.
   - **Track C (briefing)** — daily morning-briefing card + new insight types,
     composing Track A's aggregators.
   - **Track D (staff)** — read-only, own-clients-only assistant for
     bookkeepers (no actions, no feature requests); reuse
     `scopeAppDataForSession`; needs a focused data-scoping security pass.
-  Decided: profitability uses realization + the new optional per-employee cost
-  rate for true margin.
+- **OPEN — "can't save future tasks" (Brittany report, not yet root-caused).**
+  Investigated 2026-06-16: future-dated time entries AND get-ahead tasks
+  PERSIST through every server path (dedicated endpoints, the read
+  materializer, AND the bulk autosave round-trip) — **data is safe**, it's a
+  client DISPLAY issue. The exact screen wasn't pinned (Brittany to confirm:
+  Time "Recent" list cap? weekly Timesheet is week-scoped? Checklists "Later"
+  bucket defaults collapsed?). Resume with her exact steps/screen.
+- **OPEN — verify the voice report modal end-to-end with Brittany** now that
+  caller-id routing is fixed (`5ff06a7`). If it still doesn't pop, pull the
+  ElevenLabs conversation log (CLI with the API key) to see the tool call.
+- **Side observation (unconfirmed):** generating a get-ahead task once appeared
+  to create a duplicate instance for the same due date — possible glitch in the
+  generate + materializer dedup. Not chased; verify before relying on it.
+- **Rotate `ELEVENLABS_API_KEY`** — it passed through chat during setup.
 - **More watch-and-learn patterns** (e.g. "you reassign this to X every month —
   change the default assignee?").
 - **Security backlog** (from memory `security-notes.md`): deferred Batches 4–7
