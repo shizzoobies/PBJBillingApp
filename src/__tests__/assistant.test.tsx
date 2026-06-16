@@ -17,6 +17,8 @@ vi.mock('../lib/api', () => ({
   fetchVoiceSignedUrl: vi.fn(),
   fetchPendingVoiceActions: vi.fn().mockResolvedValue({ proposals: [] }),
   resolvePendingVoiceAction: vi.fn().mockResolvedValue({ ok: true, removed: false }),
+  fetchPendingReports: vi.fn().mockResolvedValue({ reports: [] }),
+  resolvePendingReport: vi.fn().mockResolvedValue({ ok: true, removed: false }),
 }))
 
 // Stub the ElevenLabs voice SDK — no real audio/WebRTC in jsdom. The panel
@@ -29,6 +31,11 @@ vi.mock('@elevenlabs/react', () => ({
     startSession: vi.fn(),
     endSession: vi.fn(),
   }),
+}))
+
+// The report modal reads firm settings from context.
+vi.mock('../AppContext', () => ({
+  useAppContext: () => ({ firmSettings: { name: 'PB&J Strategic Accounting', logoUrl: '' } }),
 }))
 
 import {
@@ -140,6 +147,7 @@ describe('AssistantPanel', () => {
       reply: 'Yes — use the timer on the Time page.',
       featureRequestDraft: null,
       emailReportDraft: null,
+      report: null,
       actionProposals: [],
     })
     openPanel()
@@ -163,6 +171,7 @@ describe('AssistantPanel', () => {
       reply: "Sure — I've set up a card to make that recurring.",
       featureRequestDraft: null,
       emailReportDraft: null,
+      report: null,
       actionProposals: [
         {
           id: 'make_template_recurring:0',
@@ -208,6 +217,7 @@ describe('AssistantPanel', () => {
       reply: 'Want me to assign that client?',
       featureRequestDraft: null,
       emailReportDraft: null,
+      report: null,
       actionProposals: [
         {
           id: 'assign_client:0',
@@ -240,6 +250,7 @@ describe('AssistantPanel', () => {
         subject: 'June client profitability',
         body: 'Clover: $145/h realized…',
       },
+      report: null,
       actionProposals: [],
     })
     mockedEmailReport.mockResolvedValue({
@@ -280,6 +291,7 @@ describe('AssistantPanel', () => {
         description: 'Owner wants clients to view their invoices online.',
       },
       emailReportDraft: null,
+      report: null,
       actionProposals: [],
     })
     mockedSend.mockResolvedValue({ ok: true, id: 'featreq-1', emailSent: true })
@@ -309,6 +321,7 @@ describe('AssistantPanel', () => {
       reply: 'Want me to ask Alex?',
       featureRequestDraft: { title: 'Payroll', description: 'Run payroll in-app.' },
       emailReportDraft: null,
+      report: null,
       actionProposals: [],
     })
     openPanel()
@@ -323,5 +336,38 @@ describe('AssistantPanel', () => {
 
     await waitFor(() => expect(screen.getByText('Not sent')).toBeInTheDocument())
     expect(mockedSend).not.toHaveBeenCalled()
+  })
+
+  it('opens a report modal with a Save as PDF option when the assistant builds one', async () => {
+    mockedChat.mockResolvedValue({
+      reply: 'Your report is ready — open it to read or save a PDF.',
+      featureRequestDraft: null,
+      emailReportDraft: null,
+      report: {
+        title: 'Q2 Profitability',
+        subtitle: 'Apr–Jun 2026',
+        sections: [{ heading: 'Summary', paragraphs: ['Clover leads.'] }],
+      },
+      actionProposals: [],
+    })
+    openPanel()
+
+    fireEvent.change(screen.getByPlaceholderText('Ask about the app…'), {
+      target: { value: 'Give me a Q2 profitability report' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    // Modal opens automatically with the report + a Save as PDF action.
+    await waitFor(() =>
+      expect(screen.getByRole('dialog', { name: 'Q2 Profitability' })).toBeInTheDocument(),
+    )
+    expect(screen.getByRole('button', { name: /Save as PDF/i })).toBeInTheDocument()
+    // Rendered in both the on-screen modal and the hidden print sheet.
+    expect(screen.getAllByText('Clover leads.').length).toBeGreaterThan(0)
+
+    // Closing returns to chat, where an "Open report" card lets her reopen it.
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByRole('button', { name: 'Open report' })).toBeInTheDocument()
   })
 })

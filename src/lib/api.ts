@@ -1457,10 +1457,22 @@ export type AssistantActionProposal = {
   summary: string
   params: Record<string, unknown>
 }
+export type AssistantReportSection = {
+  heading: string
+  paragraphs?: string[]
+  stats?: Array<{ label: string; value: string }>
+  table?: { columns: string[]; rows: string[][] }
+}
+export type AssistantReport = {
+  title: string
+  subtitle?: string
+  sections: AssistantReportSection[]
+}
 export type AssistantChatResult = {
   reply: string
   featureRequestDraft: AssistantFeatureRequestDraft | null
   emailReportDraft: AssistantEmailReportDraft | null
+  report: AssistantReport | null
   actionProposals: AssistantActionProposal[]
 }
 
@@ -1495,6 +1507,7 @@ export async function assistantChatRequest(
     reply: '',
     featureRequestDraft: null,
     emailReportDraft: null,
+    report: null,
     actionProposals: [],
   }
 
@@ -1514,6 +1527,7 @@ export async function assistantChatRequest(
         reply: event.reply ?? '',
         featureRequestDraft: event.featureRequestDraft ?? null,
         emailReportDraft: event.emailReportDraft ?? null,
+        report: event.report ?? null,
         actionProposals: event.actionProposals ?? [],
       }
     } else if (event.type === 'error') {
@@ -1593,6 +1607,29 @@ export async function resolvePendingVoiceAction(id: string) {
   })
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to resolve pending action (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; removed: boolean }
+}
+
+/** Owner-only: reports the VOICE agent generated, awaiting display in the modal. */
+export async function fetchPendingReports() {
+  const response = await apiFetch('/api/assistant/pending-reports', { credentials: 'same-origin' })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load pending reports (${response.status})`)
+  }
+  return (await response.json()) as { reports: Array<{ id: string; report: AssistantReport }> }
+}
+
+/** Remove a pending voice report once it has been shown. */
+export async function resolvePendingReport(id: string) {
+  const response = await apiFetch('/api/assistant/pending-reports/resolve', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to resolve pending report (${response.status})`)
   }
   return (await response.json()) as { ok: boolean; removed: boolean }
 }

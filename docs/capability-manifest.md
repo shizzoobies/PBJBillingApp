@@ -243,6 +243,12 @@ sit in the top bar on every page.
   isn't supported — the owner reviews the draft and confirms before any email
   is sent. It goes to the admin email; sent requests are recorded in the
   activity log.
+- Generates reports on request from any data it can read (profitability,
+  hours, deadlines, capacity, clients, workspace setup). Ask for a report —
+  e.g. "give me a Q2 profitability report" — and it assembles a structured
+  report (sections, key figures, tables) and opens it in a modal you can read
+  and "Save as PDF". Works by text chat and by voice (the report pops up on
+  screen during a call). Owner-only.
 - After producing a report or analysis, offers to email it to the owner.
   On "yes" it shows a confirm card; only on confirm does it email the report
   to the owner's address. It tells the truth about whether the email actually

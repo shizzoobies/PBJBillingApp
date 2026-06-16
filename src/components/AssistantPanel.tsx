@@ -1,5 +1,5 @@
 import { useConversation } from '@elevenlabs/react'
-import { Lightbulb, Mic, PhoneOff, Send, Trash2, X } from 'lucide-react'
+import { FileText, Lightbulb, Mic, PhoneOff, Send, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import assistantAvatar from '../assets/pbj-assistant.png'
@@ -12,15 +12,19 @@ import {
   assistantHistoryRequest,
   assistantInsightsRequest,
   assistantRunAction,
+  fetchPendingReports,
   fetchPendingVoiceActions,
   fetchVoiceSignedUrl,
+  resolvePendingReport,
   resolvePendingVoiceAction,
   type AssistantActionProposal,
   type AssistantChatMessage,
   type AssistantEmailReportDraft,
   type AssistantFeatureRequestDraft,
+  type AssistantReport,
   type AssistantSuggestion,
 } from '../lib/api'
+import { AssistantReportModal } from './AssistantReportModal'
 
 type ThreadEntry =
   | { kind: 'message'; role: 'user' | 'assistant'; text: string }
@@ -37,6 +41,7 @@ type ThreadEntry =
       status: 'pending' | 'done' | 'dismissed'
       result?: string
     }
+  | { kind: 'report'; report: AssistantReport }
 
 const GREETING =
   'Hi! Ask me anything about the app — how to do something, whether a ' +
@@ -55,6 +60,7 @@ export function AssistantPanel() {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [streamText, setStreamText] = useState('')
+  const [activeReport, setActiveReport] = useState<AssistantReport | null>(null)
   const [suggestions, setSuggestions] = useState<AssistantSuggestion[]>([])
   const insightsLoadedRef = useRef(false)
   const historyLoadedRef = useRef(false)
@@ -131,6 +137,34 @@ export function AssistantPanel() {
         ])
       } catch {
         // Polling is best-effort; the next tick retries.
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 2000)
+    return () => window.clearInterval(timer)
+  }, [voiceActive])
+
+  // During a voice call, poll for reports the agent generated and pop them
+  // into the report modal (the voice surface has no screen of its own).
+  const seenReportIdsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!voiceActive) return
+    const poll = async () => {
+      try {
+        const { reports } = await fetchPendingReports()
+        const fresh = reports.filter((r) => !seenReportIdsRef.current.has(r.id))
+        if (fresh.length === 0) return
+        for (const r of fresh) {
+          seenReportIdsRef.current.add(r.id)
+          void resolvePendingReport(r.id).catch(() => {})
+        }
+        setThread((current) => [
+          ...current,
+          ...fresh.map((r) => ({ kind: 'report' as const, report: r.report })),
+        ])
+        setActiveReport(fresh[fresh.length - 1].report)
+      } catch {
+        // Best-effort; the next tick retries.
       }
     }
     void poll()
@@ -237,8 +271,12 @@ export function AssistantPanel() {
         for (const action of result.actionProposals ?? []) {
           updated.push({ kind: 'action', action, status: 'pending' })
         }
+        if (result.report) {
+          updated.push({ kind: 'report', report: result.report })
+        }
         return updated
       })
+      if (result.report) setActiveReport(result.report)
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Something went wrong — try again in a moment.'
@@ -552,6 +590,26 @@ export function AssistantPanel() {
                   </div>
                 )
               }
+              if (entry.kind === 'report') {
+                return (
+                  <div key={index} className="assistant-draft-card assistant-report-card">
+                    <p className="assistant-draft-kicker">
+                      <FileText size={12} /> Report ready
+                    </p>
+                    <strong>{entry.report.title}</strong>
+                    {entry.report.subtitle ? <p>{entry.report.subtitle}</p> : null}
+                    <div className="assistant-draft-actions">
+                      <button
+                        type="button"
+                        className="primary-action"
+                        onClick={() => setActiveReport(entry.report)}
+                      >
+                        Open report
+                      </button>
+                    </div>
+                  </div>
+                )
+              }
               return (
                 <div key={index} className="assistant-draft-card assistant-action-card">
                   <p className="assistant-draft-kicker">{entry.action.label}</p>
@@ -619,6 +677,9 @@ export function AssistantPanel() {
             </button>
           </form>
         </section>
+      ) : null}
+      {activeReport ? (
+        <AssistantReportModal report={activeReport} onClose={() => setActiveReport(null)} />
       ) : null}
     </>
   )

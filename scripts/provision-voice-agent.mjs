@@ -132,6 +132,42 @@ function toolDefinitions() {
       'Search saved memories from previous conversations. Use before saying you do not know something the owner may have told you before.',
       { topic: { type: 'string', description: 'Keyword(s) to search for. Omit to get the most recent memories.' } },
     ),
+    def(
+      'build_report',
+      'Generate a structured report from data you gathered and display it to the owner in a modal she can read and save as a PDF. Compose any report she asks for using sections of paragraphs, stat blocks, and/or tables. Use ONLY real numbers from your data tools. Gather the data first, then call this; do not read the whole report aloud.',
+      {
+        title: { type: 'string', description: 'Report title.' },
+        subtitle: { type: 'string', description: 'Optional scope line, e.g. the period or client.' },
+        sections: {
+          type: 'array',
+          description: 'Ordered report sections.',
+          items: {
+            type: 'object',
+            properties: {
+              heading: { type: 'string' },
+              paragraphs: { type: 'array', items: { type: 'string' } },
+              stats: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: { label: { type: 'string' }, value: { type: 'string' } },
+                  required: ['label', 'value'],
+                },
+              },
+              table: {
+                type: 'object',
+                properties: {
+                  columns: { type: 'array', items: { type: 'string' } },
+                  rows: { type: 'array', items: { type: 'array', items: { type: 'string' } } },
+                },
+              },
+            },
+            required: ['heading'],
+          },
+        },
+      },
+      ['title', 'sections'],
+    ),
     // ---- Action proposals (PROPOSE-ONLY) ----
     // These file a confirmation card in the app; they execute NOTHING. The
     // server endpoint behind them can only validate + park a proposal — the

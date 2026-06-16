@@ -9,6 +9,7 @@ import {
   buildActionProposal,
   executeAssistantAction,
   runAssistantChat,
+  sanitizeReport,
   validateAssistantAction,
 } from './lib/assistant.js'
 import { createPendingActionStore } from './lib/pending-actions.js'
@@ -279,6 +280,8 @@ function getPublicAppUrl(request) {
 // confirm card. The voice surface can only ever ADD here — execution lives
 // solely behind the owner-session /api/assistant/action endpoint.
 const pendingVoiceActions = createPendingActionStore()
+// Reports the VOICE agent generated, awaiting the panel to pop them in a modal.
+const pendingVoiceReports = createPendingActionStore()
 
 // Assistant rate limit: in-memory sliding window per user (20 messages per
 // 5 minutes). A runaway client (or a stuck retry loop) can't burn API spend.
@@ -891,6 +894,44 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Reports the voice agent generated, awaiting display. The panel polls
+    // this during a live call and pops each into the report modal.
+    if (normalizedPath === '/api/assistant/pending-reports' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const reports = pendingVoiceReports
+        .list(session.user.id)
+        .map((entry) => ({ id: entry.id, report: entry.params }))
+      sendJson(response, 200, { reports })
+      return
+    }
+
+    if (normalizedPath === '/api/assistant/pending-reports/resolve' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The assistant is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const removed = pendingVoiceReports.resolve(session.user.id, String(payload?.id ?? ''))
+      sendJson(response, 200, { ok: true, removed })
+      return
+    }
+
     // Action confirm (Phase 3): runs a workspace change the assistant
     // proposed, only after the owner clicked Run on the confirmation card.
     // The model can only ever PROPOSE — execution lives here behind the
@@ -1225,6 +1266,23 @@ const server = createServer(async (request, response) => {
                   'panel; NOTHING runs unless the owner taps "Run it" there. Tell her ' +
                   'to check the card — never claim the change is done.',
               }
+            }
+          }
+        } else if (toolName === 'build_report') {
+          const built = sanitizeReport(input)
+          if (!built) {
+            result = { built: false, note: 'Need a title and at least one section.' }
+          } else if (!owner) {
+            result = { built: false, note: 'Could not find the owner account.' }
+          } else {
+            pendingVoiceReports.add(owner.id, { tool: 'report', label: built.title, params: built })
+            result = {
+              built: true,
+              title: built.title,
+              note:
+                'Report built. It just opened in a modal in the assistant panel on ' +
+                'her screen, where she can read it and save a PDF. Tell her it is ' +
+                'ready — do not read the whole report aloud.',
             }
           }
         } else {
