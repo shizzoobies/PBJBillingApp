@@ -143,22 +143,45 @@ function toolDefinitions() {
           description: 'Ordered report sections.',
           items: {
             type: 'object',
+            description: 'One report section.',
             properties: {
-              heading: { type: 'string' },
-              paragraphs: { type: 'array', items: { type: 'string' } },
+              heading: { type: 'string', description: 'Section heading.' },
+              paragraphs: {
+                type: 'array',
+                description: 'Plain-text paragraphs for this section.',
+                items: { type: 'string', description: 'A paragraph of text.' },
+              },
               stats: {
                 type: 'array',
+                description: 'Key figures shown as label/value tiles.',
                 items: {
                   type: 'object',
-                  properties: { label: { type: 'string' }, value: { type: 'string' } },
+                  description: 'One key figure.',
+                  properties: {
+                    label: { type: 'string', description: 'The figure label.' },
+                    value: { type: 'string', description: 'The figure value, e.g. "$1,500".' },
+                  },
                   required: ['label', 'value'],
                 },
               },
               table: {
                 type: 'object',
+                description: 'Optional table for this section.',
                 properties: {
-                  columns: { type: 'array', items: { type: 'string' } },
-                  rows: { type: 'array', items: { type: 'array', items: { type: 'string' } } },
+                  columns: {
+                    type: 'array',
+                    description: 'Column headers.',
+                    items: { type: 'string', description: 'A column header.' },
+                  },
+                  rows: {
+                    type: 'array',
+                    description: 'Table rows.',
+                    items: {
+                      type: 'array',
+                      description: 'One row of cells, aligned to the columns.',
+                      items: { type: 'string', description: 'A cell value.' },
+                    },
+                  },
                 },
               },
             },
