@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BrowserRouter,
   Navigate,
@@ -31,6 +31,10 @@ import {
   fetchFirmSettings,
   fetchPublicFirmSettings,
   fetchSession,
+  fetchServiceCategories,
+  createServiceCategory as createServiceCategoryRequest,
+  updateServiceCategory as updateServiceCategoryRequest,
+  deleteServiceCategory as deleteServiceCategoryRequest,
   generateChecklistFromTemplateRequest,
   addRecurringReimbursementRequest,
   addReimbursementRequest,
@@ -72,6 +76,7 @@ import {
   type DataSyncState,
   type FirmSettings,
   type PublicFirmSettings,
+  type ServiceCategory,
   type SessionUser,
   type SubscriptionPlan,
   type TimeEntry,
@@ -88,6 +93,7 @@ import {
   makeId,
   sortChecklists,
 } from './lib/utils'
+import { ActiveChecklistsBoardPage } from './pages/ActiveChecklistsBoardPage'
 import { CaseDetailPage } from './pages/CaseDetailPage'
 import { ChecklistsPage } from './pages/ChecklistsPage'
 import { DelayedPage } from './pages/DelayedPage'
@@ -171,6 +177,10 @@ function App() {
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null)
   const [dataSyncState, setDataSyncState] = useState<DataSyncState>('loading')
   const [serverPersistenceEnabled, setServerPersistenceEnabled] = useState(false)
+  // Active Checklists board columns. Endpoint-managed (separate from the bulk
+  // workspace data) so they survive autosaves; fetched once the user is signed
+  // in and refreshed after any owner edit.
+  const [serviceCategories, setServiceCategories] = useState<ServiceCategory[]>([])
   const [activeEmployeeId, setActiveEmployeeId] = useState('emp-avery')
   const [previewUserId, setPreviewUserId] = useState<string | null>(null)
   const [selectedClientId, setSelectedClientId] = useState('client-northstar')
@@ -228,6 +238,67 @@ function App() {
   // shared workspace whenever ANOTHER session edits it, so two owners see each
   // other's changes within a moment. The refetch defers while THIS session has
   // an unsaved / in-flight edit, so it never clobbers local work.
+  // Active Checklists board columns. Endpoint-managed, so they're loaded and
+  // mutated independently of the bulk workspace data/autosave.
+  const refreshServiceCategories = useCallback(async () => {
+    try {
+      setServiceCategories(await fetchServiceCategories())
+    } catch {
+      /* non-fatal — the board falls back to a single Uncategorized column */
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!sessionUser) return
+    let cancelled = false
+    // setState happens after the await (not synchronously in the effect body).
+    void (async () => {
+      try {
+        const categories = await fetchServiceCategories()
+        if (!cancelled) setServiceCategories(categories)
+      } catch {
+        /* non-fatal — board falls back to a single Uncategorized column */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [sessionUser])
+
+  const addServiceCategory = useCallback(
+    async (name: string) => {
+      const created = await createServiceCategoryRequest(name)
+      await refreshServiceCategories()
+      return created
+    },
+    [refreshServiceCategories],
+  )
+
+  const updateServiceCategory = useCallback(
+    async (id: string, patch: { name?: string; sortOrder?: number }) => {
+      await updateServiceCategoryRequest(id, patch)
+      await refreshServiceCategories()
+    },
+    [refreshServiceCategories],
+  )
+
+  const deleteServiceCategory = useCallback(
+    async (id: string) => {
+      await deleteServiceCategoryRequest(id)
+      await refreshServiceCategories()
+      // A deleted column clears categoryId on its templates/checklists server-
+      // side; pull a fresh workspace snapshot so the board reflects that too.
+      try {
+        const remote = await fetchAppData(new AbortController().signal, null)
+        skipAutosaveRef.current += 1
+        setData(remote)
+      } catch {
+        /* the next cross-session refetch will reconcile */
+      }
+    },
+    [refreshServiceCategories],
+  )
+
   useEffect(() => {
     if (!sessionUser) return
     // EventSource is unavailable in some test/SSR environments — degrade
@@ -1569,7 +1640,7 @@ function App() {
   // checklist-level fields ride the bulk autosave like other workspace edits.
   const updateChecklist = (
     checklistId: string,
-    patch: { title?: string; dueDate?: string; assigneeId?: string },
+    patch: { title?: string; dueDate?: string; assigneeId?: string; categoryId?: string | null },
   ) => {
     updateWorkspaceData((current) => ({
       ...current,
@@ -1948,6 +2019,7 @@ function App() {
     clientId: string
     assigneeId: string
     dueDate: string
+    categoryId?: string | null
     /** Items may carry a nested `subItems` tree built in the outliner. */
     items: Array<Pick<ChecklistTemplateItem, 'label' | 'subItems'>>
   }) => {
@@ -2693,6 +2765,10 @@ function App() {
     updateChecklistTemplate,
     updateChecklist,
     deleteChecklistTemplate,
+    serviceCategories,
+    addServiceCategory,
+    updateServiceCategory,
+    deleteServiceCategory,
     addChecklistTemplateItem,
     updateChecklistTemplateItem,
     setChecklistTemplateItemDueDate,
@@ -2813,6 +2889,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           }
         />
         <Route path="/checklists" element={<ChecklistsPage />} />
+        <Route path="/board" element={<ActiveChecklistsBoardPage />} />
         <Route
           path="/delayed"
           element={

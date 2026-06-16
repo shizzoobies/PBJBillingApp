@@ -10,7 +10,7 @@ see a reduced version of the app — owner-only abilities are marked.
 
 ## Navigation map
 
-Sidebar pages: Dashboard, Time, Timesheet, Time Approvals, Checklists,
+Sidebar pages: Dashboard, Time, Timesheet, Time Approvals, Checklists, Board,
 Delayed, Clients, Contacts, Reports, Productivity, Gantt, Invoices, Plans,
 Team, Settings. A billing-month picker, notification bell, and account menu
 sit in the top bar on every page.
@@ -95,6 +95,29 @@ sit in the top bar on every page.
   upcoming/get-ahead ones. Editing and completing steps stays limited to the
   task's assignee/editor — other tasks show as "View only".
 - Time logged against a task shows on the card.
+
+## Board — Active Checklists (sidebar: "Board")
+
+- A second view of the active checklists, laid out as **columns by service
+  type** (the columns are "service categories" — e.g. Monthly Bookkeeping,
+  Quarterly Bookkeeping, Sales Tax, Payroll). Each column lists the **clients
+  that still have open work** of that type; a count badge shows how many.
+- Each client row is **collapsible** — expand it to see and work the client's
+  live checklist(s) for that column (same checkboxes/cards as the Checklists
+  page). Completing a client's checklist **removes that client from the column**
+  automatically, so the board always shows what's still open.
+- **Period toggle** at the top: This week / This month / This quarter. It's a
+  horizon — a checklist shows when it's due on or before the end of the selected
+  period, so overdue work stays visible and the view widens week → month →
+  quarter.
+- **Scoping:** staff see only the clients they're assigned to (same as the rest
+  of the app). The board is available to everyone, not owner-only.
+- **Which column a checklist lands in:** set its "Board column" on the repeating
+  template (or one-time task) — generated checklists inherit it. Anything with no
+  column shows in an "Uncategorized" column.
+- **Managing columns (owner only):** "Manage columns" on the board lets the owner
+  add, rename, reorder, or delete columns. Deleting a column doesn't delete its
+  checklists — they move to "Uncategorized" until re-tagged.
 
 ## Delayed page (owner only)
 

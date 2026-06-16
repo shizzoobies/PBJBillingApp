@@ -47,6 +47,16 @@ const localDataPath = path.join(projectRoot, 'tmp', 'app-data.json')
 const localAuthPath = path.join(projectRoot, 'tmp', 'auth-state.json')
 const sessionTtlMs = 1000 * 60 * 60 * 24 * 7
 
+// Seed columns for the Active Checklists board, created once when the
+// service_categories store is empty (matches the client's sketch). Order here
+// is the initial left-to-right column order; the owner can rename/reorder/add.
+const SEED_SERVICE_CATEGORIES = [
+  'Monthly Bookkeeping',
+  'Quarterly Bookkeeping',
+  'Sales Tax',
+  'Payroll',
+]
+
 const demoPassword = process.env.AUTH_DEMO_PASSWORD || 'pbj-demo'
 
 const DEFAULT_FIRM_SETTINGS = {
@@ -721,6 +731,8 @@ function buildChecklistFromStage({
     stageId: stage.id,
     stageIndex,
     stageCount,
+    // Inherit the template's board column so generated instances sort correctly.
+    categoryId: template.categoryId ?? null,
     items: stage.items.map((item) => {
       const itemDue = resolveNodeDueDate(item, cycleYear, cycleMonth)
       return {
@@ -1574,6 +1586,35 @@ export class AppDataStore {
           unique (client_id, period)
         )
       `)
+
+      // Active Checklists board: per-template/per-checklist service category
+      // (the board's columns) + the categories table itself. The column is a
+      // plain text id (NOT a FK) so deleting a category leaves rows readable as
+      // "Uncategorized". Seeded below when the table is empty.
+      await this.pool.query(`alter table checklists add column if not exists category_id text`)
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists category_id text`,
+      )
+      await this.pool.query(`
+        create table if not exists service_categories (
+          id text primary key,
+          name text not null,
+          sort_order int not null default 0,
+          updated_at timestamptz not null default now()
+        )
+      `)
+      const existingCategories = await this.pool.query(
+        `select count(*)::int as n from service_categories`,
+      )
+      if ((existingCategories.rows[0]?.n ?? 0) === 0) {
+        for (const [index, name] of SEED_SERVICE_CATEGORIES.entries()) {
+          await this.pool.query(
+            `insert into service_categories (id, name, sort_order, updated_at)
+             values ($1, $2, $3, now())`,
+            [`cat-${randomUUID().slice(0, 8)}`, name, index],
+          )
+        }
+      }
 
       // TOTP two-factor: per-user secret + enable flag + backup codes.
       // Stored as plaintext for v1 — encryption-at-rest at the DB layer is
@@ -2697,7 +2738,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
-                   case_id, stage_id, stage_index, stage_count, deleted_at
+                   case_id, stage_id, stage_index, stage_count, category_id, deleted_at
             from checklists
             order by due_date asc, id asc
           `),
@@ -2708,7 +2749,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
-                   scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days
+                   scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id
             from checklist_templates
             order by title asc
           `),
@@ -2870,6 +2911,7 @@ export class AppDataStore {
         stageId: row.stage_id ?? null,
         stageIndex: typeof row.stage_index === 'number' ? row.stage_index : 0,
         stageCount: typeof row.stage_count === 'number' ? row.stage_count : 1,
+        categoryId: row.category_id ?? null,
         items: itemsByChecklist.get(row.id) ?? [],
         deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
       }))
@@ -3006,6 +3048,7 @@ export class AppDataStore {
           nextDueDate: row.next_due_date ? row.next_due_date.toISOString().slice(0, 10) : '',
           active: row.active,
           isStandard: Boolean(row.is_standard),
+          categoryId: row.category_id ?? null,
           viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
           editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
           // Specific-months scheduling fields (only meaningful for that frequency).
@@ -3578,8 +3621,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
             `,
             [
               template.id,
@@ -3607,6 +3650,7 @@ export class AppDataStore {
               typeof template.leadDays === 'number' && template.leadDays > 0
                 ? Math.min(Math.floor(template.leadDays), 120)
                 : 0,
+              template.categoryId ? template.categoryId : null,
             ],
           )
 
@@ -3670,8 +3714,8 @@ export class AppDataStore {
         for (const checklist of checklistsToWrite) {
           await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, deleted_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
             `,
             [
               checklist.id,
@@ -3687,6 +3731,7 @@ export class AppDataStore {
               checklist.stageId ?? null,
               typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0,
               typeof checklist.stageCount === 'number' ? checklist.stageCount : 1,
+              checklist.categoryId ? checklist.categoryId : null,
               checklist.deletedAt ?? null,
             ],
           )
@@ -4838,8 +4883,8 @@ export class AppDataStore {
         await client.query('begin')
         await client.query(
           `
-            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, updated_at)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, updated_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
           `,
           [
             nextChecklist.id,
@@ -4855,6 +4900,7 @@ export class AppDataStore {
             nextChecklist.stageId,
             nextChecklist.stageIndex,
             nextChecklist.stageCount,
+            nextChecklist.categoryId ? nextChecklist.categoryId : null,
           ],
         )
 
@@ -7184,6 +7230,143 @@ export class AppDataStore {
     }
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return record
+  }
+
+  // ---- Active Checklists board: service categories (the columns) ----
+  //
+  // Endpoint-managed (NOT part of the bulk /api/app-data write), like
+  // sales-tax records — so the board's columns can't be clobbered by an
+  // autosave. Stored in auth-state on the file backend, service_categories on
+  // pg. Always returned sorted by sort_order then name.
+
+  /** Every service category, sorted for left-to-right column display. */
+  async listServiceCategories() {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, name, sort_order from service_categories order by sort_order asc, name asc`,
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        sortOrder: Number(row.sort_order) || 0,
+      }))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.serviceCategories) ? authState.serviceCategories : null
+    if (!list || list.length === 0) {
+      // Seed once (mirrors the pg seed in initialize()).
+      const seeded = SEED_SERVICE_CATEGORIES.map((name, index) => ({
+        id: `cat-${randomUUID().slice(0, 8)}`,
+        name,
+        sortOrder: index,
+      }))
+      authState.serviceCategories = seeded
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return seeded
+    }
+    return [...list]
+      .map((c) => ({ id: c.id, name: c.name, sortOrder: Number(c.sortOrder) || 0 }))
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+  }
+
+  /** Create a category at the end of the column order. Returns it. */
+  async createServiceCategory(name) {
+    const clean = String(name ?? '').trim().slice(0, 80)
+    if (!clean) return null
+    const existing = await this.listServiceCategories()
+    const sortOrder = existing.length
+    const category = { id: `cat-${randomUUID().slice(0, 8)}`, name: clean, sortOrder }
+    if (this.pool) {
+      await this.pool.query(
+        `insert into service_categories (id, name, sort_order, updated_at) values ($1, $2, $3, now())`,
+        [category.id, category.name, category.sortOrder],
+      )
+      return category
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.serviceCategories)) authState.serviceCategories = existing
+    authState.serviceCategories.push(category)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return category
+  }
+
+  /** Patch a category's name and/or sortOrder. Returns the updated category. */
+  async updateServiceCategory(id, patch = {}) {
+    if (!id) return null
+    const nextName =
+      typeof patch.name === 'string' ? patch.name.trim().slice(0, 80) : undefined
+    const nextOrder =
+      typeof patch.sortOrder === 'number' && Number.isFinite(patch.sortOrder)
+        ? Math.max(0, Math.floor(patch.sortOrder))
+        : undefined
+    if (nextName === undefined && nextOrder === undefined) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update service_categories
+            set name = coalesce($2, name),
+                sort_order = coalesce($3, sort_order),
+                updated_at = now()
+          where id = $1
+        returning id, name, sort_order`,
+        [id, nextName ?? null, nextOrder ?? null],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return { id: row.id, name: row.name, sortOrder: Number(row.sort_order) || 0 }
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.serviceCategories)) {
+      authState.serviceCategories = await this.listServiceCategories()
+    }
+    const existing = authState.serviceCategories.find((c) => c.id === id)
+    if (!existing) return null
+    if (nextName !== undefined && nextName) existing.name = nextName
+    if (nextOrder !== undefined) existing.sortOrder = nextOrder
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return { id: existing.id, name: existing.name, sortOrder: Number(existing.sortOrder) || 0 }
+  }
+
+  /**
+   * Delete a category and clear it from any template/checklist that referenced
+   * it (those fall back to the "Uncategorized" column). Returns true if a row
+   * was removed.
+   */
+  async deleteServiceCategory(id) {
+    if (!id) return false
+    if (this.pool) {
+      const result = await this.pool.query(`delete from service_categories where id = $1`, [id])
+      await this.pool.query(
+        `update checklist_templates set category_id = null where category_id = $1`,
+        [id],
+      )
+      await this.pool.query(`update checklists set category_id = null where category_id = $1`, [id])
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.serviceCategories)) {
+      authState.serviceCategories = await this.listServiceCategories()
+    }
+    const before = authState.serviceCategories.length
+    authState.serviceCategories = authState.serviceCategories.filter((c) => c.id !== id)
+    const removed = authState.serviceCategories.length < before
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    if (removed) {
+      // Clear dangling references in app-data so the board reads them as
+      // Uncategorized rather than pointing at a missing column.
+      const data = await readJson(localDataPath)
+      let touched = false
+      for (const list of [data.checklists, data.recycledChecklists, data.checklistTemplates]) {
+        if (!Array.isArray(list)) continue
+        for (const entry of list) {
+          if (entry && entry.categoryId === id) {
+            entry.categoryId = null
+            touched = true
+          }
+        }
+      }
+      if (touched) await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    return removed
   }
 
   async recordActivity(userId, action, target = '') {

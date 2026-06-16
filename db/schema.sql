@@ -224,6 +224,21 @@ alter table checklists add column if not exists stage_id text;
 alter table checklists add column if not exists stage_index int;
 alter table checklists add column if not exists stage_count int;
 
+-- Active Checklists board: service category (column) a checklist/template
+-- belongs to. References service_categories(id); intentionally NOT a FK so a
+-- deleted category leaves rows as "Uncategorized" rather than cascading.
+alter table checklists add column if not exists category_id text;
+alter table checklist_templates add column if not exists category_id text;
+
+-- The columns of the Active Checklists board. Owner-managed; seeded once in
+-- store.js initialize() when empty.
+create table if not exists service_categories (
+  id text primary key,
+  name text not null,
+  sort_order int not null default 0,
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists invoice_drafts (
   id text primary key,
   client_id text not null references clients(id) on delete restrict,

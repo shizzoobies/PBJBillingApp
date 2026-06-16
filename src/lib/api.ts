@@ -9,6 +9,7 @@
   type FirmSettings,
   type NotificationEntry,
   type PublicFirmSettings,
+  type ServiceCategory,
   type SessionUser,
   type TeamMember,
   type TeamSession,
@@ -908,6 +909,8 @@ export async function createChecklistRequest(payload: {
   clientId: string
   assigneeId: string
   dueDate: string
+  /** Active Checklists board column; omit/null for Uncategorized. */
+  categoryId?: string | null
   /**
    * Checklist items. May carry a nested `subItems` tree (sub-steps and
    * sub-sub-steps) built in the outliner-style create form — the server
@@ -1762,6 +1765,67 @@ export async function saveSalesTaxRecord(input: {
     throw new ApiError(response.status, body?.error ?? `Failed to save sales tax (${response.status})`)
   }
   return (await response.json()) as { ok: boolean; record: unknown }
+}
+
+// ---- Active Checklists board: service categories (the columns) ----
+
+/** Every service category (board column), sorted for display. Any signed-in user. */
+export async function fetchServiceCategories() {
+  const response = await apiFetch('/api/service-categories', { credentials: 'same-origin' })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to load board columns (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { categories: ServiceCategory[] }).categories
+}
+
+/** Owner-only: create a new board column. */
+export async function createServiceCategory(name: string) {
+  const response = await apiFetch('/api/service-categories', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to add column (${response.status})`)
+  }
+  return ((await response.json()) as { category: ServiceCategory }).category
+}
+
+/** Owner-only: rename and/or reorder a board column. */
+export async function updateServiceCategory(
+  id: string,
+  patch: { name?: string; sortOrder?: number },
+) {
+  const response = await apiFetch(`/api/service-categories/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to update column (${response.status})`)
+  }
+  return ((await response.json()) as { category: ServiceCategory }).category
+}
+
+/** Owner-only: delete a board column (its checklists become Uncategorized). */
+export async function deleteServiceCategory(id: string) {
+  const response = await apiFetch(`/api/service-categories/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to delete column (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean }
 }
 
 export async function assistantFeatureRequestSend(draft: AssistantFeatureRequestDraft) {

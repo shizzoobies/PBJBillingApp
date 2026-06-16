@@ -10,6 +10,7 @@ import type {
   Contact,
   FirmSettings,
   Role,
+  ServiceCategory,
   SessionUser,
   SubscriptionPlan,
   TemplateStage,
@@ -170,8 +171,23 @@ export type AppContextValue = {
   deleteChecklistTemplate: (templateId: string) => void
   updateChecklist: (
     checklistId: string,
-    patch: { title?: string; dueDate?: string; assigneeId?: string },
+    patch: { title?: string; dueDate?: string; assigneeId?: string; categoryId?: string | null },
   ) => void
+  /**
+   * The Active Checklists board columns (service categories), loaded from the
+   * server independently of the bulk workspace data. Empty until the first
+   * fetch resolves.
+   */
+  serviceCategories: ServiceCategory[]
+  /** Owner-only: create a board column. Resolves to the created category. */
+  addServiceCategory: (name: string) => Promise<ServiceCategory>
+  /** Owner-only: rename and/or reorder a board column. */
+  updateServiceCategory: (
+    id: string,
+    patch: { name?: string; sortOrder?: number },
+  ) => Promise<void>
+  /** Owner-only: delete a board column (its checklists become Uncategorized). */
+  deleteServiceCategory: (id: string) => Promise<void>
   addChecklistTemplateItem: (templateId: string, stageId: string) => void
   updateChecklistTemplateItem: (
     templateId: string,
@@ -279,6 +295,7 @@ export type AppContextValue = {
     clientId: string
     assigneeId: string
     dueDate: string
+    categoryId?: string | null
     /** Items may carry a nested `subItems` tree built in the outliner. */
     items: Array<Pick<ChecklistTemplateItem, 'label' | 'subItems'>>
   }) => Promise<Checklist | null>

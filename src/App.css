@@ -7533,3 +7533,179 @@ button.repeating-task-toggle-pill {
 .assistant-insight-dismiss:hover {
   color: var(--ink);
 }
+
+/* ── Active Checklists board ───────────────────────────────────────────── */
+.section-subtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.board-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Horizontal column scroller — one column per service category. */
+.board-scroll {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  padding: 8px 2px 16px;
+  align-items: flex-start;
+}
+
+.board-column {
+  flex: 0 0 320px;
+  max-width: 320px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 220px);
+}
+
+.board-column[data-uncategorized='true'] {
+  border-style: dashed;
+}
+
+.board-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+}
+
+.board-column-header strong {
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+.board-column-body {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.board-column-empty {
+  margin: 6px 4px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+/* A collapsible client row inside a column. */
+.board-client {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.board-client-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  color: var(--ink);
+}
+
+.board-client-toggle:hover {
+  background: var(--soft);
+}
+
+.board-client-name {
+  flex: 1;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.board-client-count {
+  min-width: 22px;
+  text-align: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.board-client-cards {
+  padding: 4px 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Owner-only column manager. */
+.manage-columns {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: var(--soft);
+}
+
+.manage-columns-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.manage-columns-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.manage-columns-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.manage-columns-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.manage-columns-grip {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+.manage-columns-row .input {
+  flex: 1;
+}
+
+.manage-columns-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.manage-columns-add {
+  display: flex;
+  gap: 8px;
+}
+
+.manage-columns-add .input {
+  flex: 1;
+}

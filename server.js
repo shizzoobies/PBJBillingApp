@@ -1919,6 +1919,70 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Active Checklists board: the service categories that make up the board's
+    // columns. Read is open to any signed-in user (staff need them to render
+    // the board); create/rename/reorder/delete are owner-only + CSRF-guarded.
+    if (normalizedPath === '/api/service-categories' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const categories = await appDataStore.listServiceCategories()
+      sendJson(response, 200, { categories })
+      return
+    }
+
+    if (normalizedPath === '/api/service-categories' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can manage board columns' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const category = await appDataStore.createServiceCategory(payload?.name)
+      if (!category) {
+        sendJson(response, 400, { error: 'A column name is required' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'service_category_created', category.name)
+      sendJson(response, 201, { category })
+      return
+    }
+
+    const serviceCategoryMatch = normalizedPath.match(/^\/api\/service-categories\/([^/]+)$/)
+    if (serviceCategoryMatch && (request.method === 'PUT' || request.method === 'DELETE')) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can manage board columns' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const categoryId = decodeURIComponent(serviceCategoryMatch[1])
+      if (request.method === 'DELETE') {
+        const removed = await appDataStore.deleteServiceCategory(categoryId)
+        sendJson(response, removed ? 200 : 404, removed ? { ok: true } : { error: 'Column not found' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const updated = await appDataStore.updateServiceCategory(categoryId, {
+        name: payload?.name,
+        sortOrder: payload?.sortOrder,
+      })
+      if (!updated) {
+        sendJson(response, 400, { error: 'Nothing to update' })
+        return
+      }
+      sendJson(response, 200, { category: updated })
+      return
+    }
+
     if (normalizedPath === '/api/app-data') {
       const session = await requireSession(request, response)
       if (!session) {
@@ -2904,6 +2968,8 @@ const server = createServer(async (request, response) => {
         const clientId = typeof payload?.clientId === 'string' ? payload.clientId : ''
         const assigneeId = typeof payload?.assigneeId === 'string' ? payload.assigneeId : ''
         const dueDate = typeof payload?.dueDate === 'string' ? payload.dueDate : ''
+        const categoryId =
+          typeof payload?.categoryId === 'string' && payload.categoryId ? payload.categoryId : null
         const items = Array.isArray(payload?.items)
           ? payload.items
               .map((item) => ({
@@ -2942,6 +3008,7 @@ const server = createServer(async (request, response) => {
           clientId,
           assigneeId,
           dueDate,
+          categoryId,
           items,
         })
 

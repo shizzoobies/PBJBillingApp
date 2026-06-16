@@ -502,6 +502,12 @@ export type ChecklistTemplate = {
   viewerIds: string[]
   editorIds: string[]
   stages: TemplateStage[]
+  /**
+   * Optional service category (column) this template belongs to on the Active
+   * Checklists board — references a {@link ServiceCategory} id. Checklists
+   * generated/applied from this template inherit it. Unset = "Uncategorized".
+   */
+  categoryId?: string | null
   /** @deprecated Kept transiently for backwards-compat reads; new writes serialize `stages`. */
   items?: ChecklistTemplateItem[]
 }
@@ -523,12 +529,30 @@ export type Checklist = {
   stageIndex?: number
   stageCount?: number
   /**
+   * Optional service category (column) for the Active Checklists board —
+   * references a {@link ServiceCategory} id. Inherited from the template when
+   * generated/applied. Unset = "Uncategorized".
+   */
+  categoryId?: string | null
+  /**
    * ISO timestamp set when an owner soft-deletes the checklist; the row is
    * moved to `AppData.recycledChecklists` and excluded from the active
    * `AppData.checklists` list. Cleared on restore, removed entirely when
    * the bin is emptied. Unset on every active checklist.
    */
   deletedAt?: string | null
+}
+
+/**
+ * A service category = one column on the Active Checklists board (e.g.
+ * "Monthly Bookkeeping", "Sales Tax", "Payroll"). Owner-managed; templates and
+ * checklists reference it by id via `categoryId`. `sortOrder` drives left-to-
+ * right column order.
+ */
+export type ServiceCategory = {
+  id: string
+  name: string
+  sortOrder: number
 }
 
 /**

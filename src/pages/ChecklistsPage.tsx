@@ -227,6 +227,7 @@ export function ChecklistsPage() {
     clientId: string
     assigneeId: string
     dueDate: string
+    categoryId?: string | null
     items: Array<Pick<ChecklistTemplateItem, 'label' | 'subItems'>>
   }) => {
     const created = await createChecklist(payload)
@@ -2147,6 +2148,7 @@ export function NewTaskForm({
     clientId: string
     assigneeId: string
     dueDate: string
+    categoryId?: string | null
     items: Array<Pick<ChecklistTemplateItem, 'label' | 'subItems'>>
   }) => Promise<void>
   onCreateRepeating: (
@@ -2154,6 +2156,9 @@ export function NewTaskForm({
     startFirstNow: boolean,
   ) => void
 }) {
+  // Board columns (service categories), so a new task can be filed into one.
+  const { serviceCategories } = useAppContext()
+
   // Owners can pick any employee. Non-owners are filtered out at the panel
   // level today (server only permits owners to create), but keep this guard
   // so that if the server later allows employees, they only see themselves.
@@ -2176,6 +2181,7 @@ export function NewTaskForm({
   const [clientId, setClientId] = useState(sortedClients[0]?.id ?? '')
   const [assigneeId, setAssigneeId] = useState(defaultAssigneeId)
   const [dueDate, setDueDate] = useState(lastDayOfCurrentMonth())
+  const [categoryId, setCategoryId] = useState('')
   const [frequency, setFrequency] = useState<ChecklistFrequency>('monthly')
   const [scheduledMonths, setScheduledMonths] = useState<number[]>([])
   const [monthlyDueDays, setMonthlyDueDays] = useState<Record<string, number>>({})
@@ -2281,6 +2287,7 @@ export function NewTaskForm({
           clientId,
           assigneeId,
           dueDate,
+          categoryId: categoryId || null,
           items,
         })
         setTitle('')
@@ -2317,6 +2324,7 @@ export function NewTaskForm({
         active: true,
         viewerIds: [],
         editorIds: [],
+        categoryId: categoryId || null,
         stages: [firstStage, ...extraStages],
         ...(isSpecificMonths
           ? {
@@ -2380,6 +2388,23 @@ export function NewTaskForm({
             {assignableEmployees.map((employee) => (
               <option key={employee.id} value={employee.id}>
                 {employee.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="new-task-field">
+          <span>Board column</span>
+          <select
+            className="input"
+            title="Which column on the Active Checklists board this appears in"
+            value={categoryId}
+            onChange={(event) => setCategoryId(event.target.value)}
+          >
+            <option value="">Uncategorized</option>
+            {serviceCategories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
               </option>
             ))}
           </select>
@@ -2945,6 +2970,9 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
 
 function TemplateEditor(props: RepeatingTaskRowProps) {
   const { template } = props
+  // The Active Checklists board columns — lets the owner sort this template
+  // (and the checklists it generates) into a board column.
+  const { serviceCategories } = useAppContext()
   const stages = template.stages ?? []
   return (
     <div className="repeating-task-body">
@@ -3056,6 +3084,27 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
             {props.employees.map((employee) => (
               <option key={employee.id} value={employee.id}>
                 {employee.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Board column</span>
+          <select
+            className="input"
+            title="Which column on the Active Checklists board this lands in"
+            value={template.categoryId ?? ''}
+            onChange={(event) =>
+              props.onUpdateTemplate(template.id, (current) => ({
+                ...current,
+                categoryId: event.target.value === '' ? null : event.target.value,
+              }))
+            }
+          >
+            <option value="">Uncategorized</option>
+            {serviceCategories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
               </option>
             ))}
           </select>
