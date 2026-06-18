@@ -1090,6 +1090,37 @@ export function filterBulkSaveOrphans(rows, { validClientIds, validTemplateIds, 
   return kept
 }
 
+/**
+ * Filter a client's subscription-plan references down to plans that actually
+ * exist (are being written in the same payload). Returns the FK-safe scalar
+ * `planId` (derived from `planIds[0]` or the legacy `planId`, but only when it
+ * still exists) and the cleaned `planIds` array.
+ *
+ * The `clients.plan_id` column has a foreign key to `subscription_plans`, but
+ * the `plan_ids[]` array column does NOT — so a plan deleted while still listed
+ * in a client's `plan_ids` leaves a dangling id behind. Because the scalar
+ * `plan_id` is re-derived from `planIds[0]` on write, that dangling id would
+ * violate the FK and abort the ENTIRE bulk write, 500-ing every read and taking
+ * the whole app offline (this exact orphan caused a full outage on 2026-06-16).
+ * This mirrors the FK's `on delete set null` intent so one orphaned reference
+ * can never wedge the write again.
+ *
+ * @param {{ planIds?: unknown, planId?: unknown }} client
+ * @param {Set<string>} validPlanIds - ids present in the payload's plans
+ * @returns {{ planId: string | null, planIds: string[] }}
+ */
+export function sanitizeClientPlanRefs(client, validPlanIds) {
+  const planIds = (Array.isArray(client?.planIds) ? client.planIds : []).filter(
+    (id) => typeof id === 'string' && id && validPlanIds.has(id),
+  )
+  const legacy =
+    Array.isArray(client?.planIds) && client.planIds.length > 0
+      ? client.planIds[0]
+      : client?.planId ?? null
+  const planId = typeof legacy === 'string' && validPlanIds.has(legacy) ? legacy : null
+  return { planId, planIds }
+}
+
 export function materializeRecurringChecklists(data) {
   const templates = Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []
   if (templates.length === 0) {
@@ -3316,6 +3347,16 @@ export class AppDataStore {
       // it'll surface via the diagnostic in server.js.
       const safeClients = Array.isArray(data.clients) ? data.clients : []
 
+      // Valid plan ids for this payload. Used to strip dangling plan
+      // references off clients before insert (see `sanitizeClientPlanRefs` —
+      // an orphaned plan_ids entry once 500-ed every read and took the app
+      // offline).
+      const validPlanIds = new Set(
+        (Array.isArray(data.plans) ? data.plans : [])
+          .map((plan) => plan?.id)
+          .filter((id) => typeof id === 'string' && id),
+      )
+
       try {
         await client.query('begin')
         await client.query('delete from checklist_items')
@@ -3414,6 +3455,9 @@ export class AppDataStore {
         }
 
         for (const clientRecord of safeClients) {
+          // FK-safe plan references: drop any plan id not present in this
+          // payload's plans (see sanitizeClientPlanRefs).
+          const planRefs = sanitizeClientPlanRefs(clientRecord, validPlanIds)
           await client.query(
             `
               insert into clients (
@@ -3437,11 +3481,10 @@ export class AppDataStore {
               clientRecord.contact,
               clientRecord.billingMode,
               clientRecord.hourlyRate,
-              // Legacy single plan_id: keep writing it from planIds[0] (or the
-              // legacy field) so old-shaped reads / the FK stay coherent.
-              Array.isArray(clientRecord.planIds) && clientRecord.planIds.length > 0
-                ? clientRecord.planIds[0]
-                : clientRecord.planId ?? null,
+              // Legacy single plan_id: derived from planIds[0] (or the legacy
+              // field), but only when that plan still exists — a dangling id
+              // here would violate the FK and abort the whole write.
+              planRefs.planId,
               clientRecord.customMonthlyFee === undefined || clientRecord.customMonthlyFee === null
                 ? null
                 : Number(clientRecord.customMonthlyFee),
@@ -3452,9 +3495,7 @@ export class AppDataStore {
               clientRecord.estimatedMonthlyHours === null
                 ? null
                 : Number(clientRecord.estimatedMonthlyHours),
-              Array.isArray(clientRecord.planIds)
-                ? clientRecord.planIds.filter((id) => typeof id === 'string' && id)
-                : [],
+              planRefs.planIds,
               Array.isArray(clientRecord.contactIds)
                 ? clientRecord.contactIds.filter((id) => typeof id === 'string' && id)
                 : [],
