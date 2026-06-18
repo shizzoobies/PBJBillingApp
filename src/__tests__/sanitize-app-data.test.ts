@@ -188,6 +188,60 @@ describe('sanitizeAppData — array & record shape', () => {
   })
 })
 
+describe('sanitizeAppData — duplicate id de-duplication', () => {
+  // Every reinsert loop in write() except `users` is a bare INSERT (no ON
+  // CONFLICT), so a duplicated id in the payload would raise a duplicate-key
+  // error and abort the WHOLE transaction — 500-ing every read. sanitizeAppData
+  // must collapse duplicates so one repeated record can't wedge the save.
+  it('collapses duplicate ids within an array, keeping the last occurrence', () => {
+    const data = {
+      clients: [
+        { id: 'client-1', name: 'Old name' },
+        { id: 'client-2', name: 'Other' },
+        { id: 'client-1', name: 'New name' },
+      ],
+    }
+    const cleaned = sanitizeAppData(data)
+    expect(cleaned.clients).toHaveLength(2)
+    const c1 = cleaned.clients.find((c: { id: string }) => c.id === 'client-1')
+    expect(c1.name).toBe('New name')
+  })
+
+  it('de-dupes across every reinserted array, not just clients', () => {
+    const data = {
+      timeEntries: [
+        { id: 't-1', clientId: 'client-1', minutes: 60, date: '2026-04-29' },
+        { id: 't-1', clientId: 'client-1', minutes: 90, date: '2026-04-29' },
+      ],
+      checklistTemplates: [
+        { id: 'tpl-1', nextDueDate: '2026-04-28' },
+        { id: 'tpl-1', nextDueDate: '2026-05-28' },
+      ],
+    }
+    const cleaned = sanitizeAppData(data)
+    expect(cleaned.timeEntries).toHaveLength(1)
+    expect(cleaned.timeEntries[0].minutes).toBe(90)
+    expect(cleaned.checklistTemplates).toHaveLength(1)
+    expect(cleaned.checklistTemplates[0].nextDueDate).toBe('2026-05-28')
+  })
+
+  it('leaves an array of all-unique ids untouched', () => {
+    const data = {
+      clients: [
+        { id: 'client-1', name: 'A' },
+        { id: 'client-2', name: 'B' },
+        { id: 'client-3', name: 'C' },
+      ],
+    }
+    const cleaned = sanitizeAppData(data)
+    expect(cleaned.clients.map((c: { id: string }) => c.id)).toEqual([
+      'client-1',
+      'client-2',
+      'client-3',
+    ])
+  })
+})
+
 describe('sanitizeAppData — normal save is left untouched', () => {
   it('passes a clean, realistic blob through with values intact', () => {
     const data = {

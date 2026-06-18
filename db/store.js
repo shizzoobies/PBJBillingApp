@@ -993,6 +993,20 @@ export function sanitizeAppData(data) {
     keepValidRecords(key)
   }
 
+  // De-duplicate each array by `id`. Every reinsert loop in write() except
+  // `users` is a bare INSERT (no ON CONFLICT), so two records sharing an id in
+  // the payload would raise a duplicate-key error and abort the WHOLE
+  // transaction — 500-ing every read via the materialize-on-read path. Keep the
+  // last occurrence (latest client state wins).
+  const dedupeById = (key) => {
+    const byId = new Map()
+    for (const record of data[key]) byId.set(record.id, record)
+    data[key] = [...byId.values()]
+  }
+  for (const key of ARRAY_KEYS) {
+    dedupeById(key)
+  }
+
   for (const client of data.clients) {
     if ('hourlyRate' in client) client.hourlyRate = clampMoney(client.hourlyRate)
     if ('monthlyRate' in client) client.monthlyRate = clampMoney(client.monthlyRate)
@@ -2699,6 +2713,20 @@ export class AppDataStore {
     return readJson(seedDataPath)
   }
 
+  /**
+   * How many clients currently exist. Cheap (a COUNT, never the full read()).
+   * Used by the bulk-save guard to refuse a payload that would wipe a
+   * populated workspace down to zero clients.
+   */
+  async clientCount() {
+    if (this.pool) {
+      const result = await this.pool.query('select count(*)::int as count from clients')
+      return result.rows[0]?.count ?? 0
+    }
+    const data = await readJson(localDataPath)
+    return Array.isArray(data.clients) ? data.clients.length : 0
+  }
+
   async read() {
     if (this.pool) {
       const [
@@ -3160,7 +3188,17 @@ export class AppDataStore {
 
       const materialized = materializeRecurringChecklists(data)
       if (materialized.changed) {
-        await this.write(materialized.data)
+        // Persist the freshly-materialized checklists — but NEVER let a failure
+        // here 500 the read. read() runs on every page load; if this write-back
+        // throws (e.g. a constraint violation on one bad row), an unguarded
+        // throw turns a single bad record into a TOTAL outage for every user
+        // (the 2026-06-17 incident). Serve the in-memory materialized data and
+        // let the next read retry the persistence.
+        try {
+          await this.write(materialized.data)
+        } catch (error) {
+          console.error('[read] materialize write-back failed; serving in-memory data:', error)
+        }
         return materialized.data
       }
 
@@ -3357,6 +3395,24 @@ export class AppDataStore {
           .filter((id) => typeof id === 'string' && id),
       )
 
+      // Valid user ids for FK-bearing user references. The bulk write NEVER
+      // deletes users (it upserts), so the live set is everyone already in
+      // `users` plus everyone in this payload's employees. A client_assignment
+      // or weekly_submission pointing at a user in neither would violate its FK
+      // and abort the whole transaction; we drop those orphans below (a
+      // genuinely-deleted user would have cascade-removed them anyway). Users
+      // aren't deleted in normal operation (deleteTeamMember soft-deletes), so
+      // this is defensive — but one orphan must never wedge the save again.
+      const existingUserIds = (await this.pool.query('select id from users')).rows.map(
+        (row) => row.id,
+      )
+      const validUserIds = new Set([
+        ...existingUserIds,
+        ...(Array.isArray(data.employees) ? data.employees : [])
+          .map((employee) => employee?.id)
+          .filter((id) => typeof id === 'string' && id),
+      ])
+
       try {
         await client.query('begin')
         await client.query('delete from checklist_items')
@@ -3544,7 +3600,9 @@ export class AppDataStore {
             ],
           )
 
-          for (const employeeId of clientRecord.assignedEmployeeIds ?? []) {
+          for (const employeeId of (clientRecord.assignedEmployeeIds ?? []).filter((id) =>
+            validUserIds.has(id),
+          )) {
             await client.query(
               `
                 insert into client_assignments (client_id, user_id)
@@ -3606,7 +3664,9 @@ export class AppDataStore {
           )
         }
 
-        for (const submission of data.weeklySubmissions ?? []) {
+        for (const submission of (data.weeklySubmissions ?? []).filter(
+          (submission) => submission && validUserIds.has(submission.userId),
+        )) {
           await client.query(
             `
               insert into weekly_submissions (id, user_id, week_start, submitted_at, status, reviewed_by, reviewed_at, review_note)

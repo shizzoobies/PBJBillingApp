@@ -2030,6 +2030,32 @@ const server = createServer(async (request, response) => {
         }
 
         const data = await readJsonBody(request)
+
+        // Wipe guard: write() wipes-and-reinserts every table from this
+        // payload, so a structurally-empty body (a client glitch, or an
+        // autosave that raced an unfinished load) would erase the whole
+        // workspace. Refuse a payload that is missing `clients`, or that would
+        // drop a populated workspace to zero clients. A brand-new firm (0
+        // clients in the DB) can still legitimately save an empty list.
+        if (!data || typeof data !== 'object' || !Array.isArray(data.clients)) {
+          sendJson(response, 400, {
+            error: 'bad_payload',
+            message: 'Workspace update was malformed — nothing was saved.',
+          })
+          return
+        }
+        if (data.clients.length === 0 && (await appDataStore.clientCount()) > 0) {
+          console.error(
+            '[bulk-save] REFUSED empty-clients payload that would have wiped a populated workspace',
+          )
+          sendJson(response, 409, {
+            error: 'refused_empty',
+            message:
+              'That update looked empty and would have erased your data, so it was not saved. Nothing changed — please reload and try again.',
+          })
+          return
+        }
+
         try {
           await appDataStore.write(data)
         } catch (error) {
