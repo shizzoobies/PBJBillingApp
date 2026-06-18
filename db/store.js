@@ -4560,20 +4560,25 @@ export class AppDataStore {
   }
 
   /**
-   * Delete a subscription plan. Postgres mode lets the `clients.plan_id`
-   * FK (`on delete set null`) handle unlinking — any client currently on
-   * this plan flips to `plan_id = null`, which the app interprets as
-   * billed-hourly. Returns the ids of clients that were unlinked so the
-   * caller can mirror the change on local state without a full refetch.
+   * Delete a subscription plan and unlink it from every client.
+   *
+   * Postgres mode: the `clients.plan_id` FK (`on delete set null`) clears the
+   * legacy SCALAR link, but the multi-plan `plan_ids[]` array column has NO
+   * foreign key — so we must strip the id from it EXPLICITLY. Failing to do so
+   * leaves a dangling reference in `plan_ids[]` that later crashes the bulk
+   * write (the scalar plan_id is re-derived from planIds[0]) and takes the app
+   * offline — the 2026-06-17 outage. Returns the ids of clients that were
+   * unlinked (via either link) so the caller can mirror the change without a
+   * full refetch.
    */
   async deletePlan(id) {
     if (!id) return null
     if (this.pool) {
-      // Capture the soon-to-be-unlinked clients BEFORE the delete so the
-      // returned id list reflects what changed. The FK cascade does the
-      // null update for us; no separate UPDATE needed.
+      // Capture every client linked to this plan BEFORE the delete — via the
+      // scalar plan_id OR the plan_ids[] array — so the returned id list
+      // reflects everything that changed.
       const affected = await this.pool.query(
-        `select id from clients where plan_id = $1`,
+        `select id from clients where plan_id = $1 or $1 = any(plan_ids)`,
         [id],
       )
       const result = await this.pool.query(
@@ -4581,6 +4586,14 @@ export class AppDataStore {
         [id],
       )
       if (!result.rowCount) return null
+      // The FK cleared the scalar plan_id for us; the array has no FK, so
+      // remove the id from every client's plan_ids[] here. No dangling ref left.
+      await this.pool.query(
+        `update clients
+            set plan_ids = array_remove(plan_ids, $1), updated_at = now()
+          where $1 = any(plan_ids)`,
+        [id],
+      )
       return {
         removedPlanId: id,
         unlinkedClientIds: affected.rows.map((row) => row.id),
