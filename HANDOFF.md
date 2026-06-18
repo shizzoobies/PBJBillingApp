@@ -1,6 +1,6 @@
 # PB&J Strategic Accounting — Handoff
 
-_Last updated: 2026-06-16. This supersedes earlier handoffs; git history has the old one._
+_Last updated: 2026-06-18. This supersedes earlier handoffs; git history has the old one._
 
 A time-tracking, checklist, and client-billing web app for a small bookkeeping
 firm. This doc is written so a fresh session (or another dev) can resume cold.
@@ -171,6 +171,68 @@ Railway var → revoke the old).
   purpose), `rescue-login.mjs`, or `.playwright-mcp/`.
 
 ---
+
+## What shipped 2026-06-18 — Outage recovery + hardening + bug pass (newest first)
+
+A subscription-plan deletion took the **whole app offline**; the session was
+incident recovery, then a full hardening + audit pass. All on `main`, all
+**live** (each deploy verified 200/200/200). See memory `plan-refs-outage` and
+`audit-backlog` for the durable detail.
+
+- **THE OUTAGE (root cause + fix).** On Wed 2026-06-17 ~7:57 PM ET, Brittany
+  (owner; user id `emp-patrice`) deleted subscription plan `plan-9zqirio` while
+  invoicing. `clients.plan_id` has an FK (`on delete set null`) but the
+  multi-plan **`clients.plan_ids[]` array has NO FK**, so the deleted id
+  lingered there. `write()` re-derives the scalar `plan_id` from `planIds[0]`,
+  so the orphan violated the FK and aborted the ENTIRE wipe-and-reinsert
+  transaction — and since `read()` calls `write()` when recurring checklists
+  materialize, **every read 500'd → total offline for all users**. No data was
+  lost (rollback); Brittany's ~30 min of unsaved invoicing never persisted
+  (acceptable per her). Prod data repaired by clearing the orphan; then three
+  fixes: `6b822f3` write() strips dangling plan refs (`sanitizeClientPlanRefs`);
+  `dfa0150` `deletePlan` now `array_remove`s the id from `plan_ids[]` (root
+  cause — pg path had diverged from the file path); `d8479e4` read()'s
+  materialize write-back is wrapped in try/catch (a bad row can never 500 every
+  read again).
+- **`80708d7` Tier C authz.** Time-entry PATCH/DELETE now enforce client
+  visibility for non-owners + re-validate a new `taskId` belongs to the entry's
+  client; `previewAs` role mapping is case-insensitive; out-of-scope
+  `GET /api/cases/:id` returns 404 (no id enumeration); `limit` clamped on the
+  4 list endpoints; voice tools don't fall back to `owners[0]` on missing
+  `caller_id`.
+- **`b7f3684` Tier B dates.** Every user-facing "today"/"this month" now uses
+  the LOCAL day via `localDateOnly()` (Checklists overdue/due-soon + create
+  defaults, Dashboard buckets, Active board horizon, Gantt, Productivity,
+  Time Approvals month, reimbursement defaults, `currentBillingPeriod`,
+  `currentWeekStart`). Was UTC → showed "overdue"/"due today" a day early after
+  ~6pm and could misassign a reimbursement to the next month. **Left on UTC**
+  (server parity): the client recurring materializer's `today` + `createdAt`
+  in `src/lib/utils.ts`, and `dateOffset` (seed/test only).
+- **`d8479e4` Tier A hardening.** (1) Empty-payload **wipe guard** on
+  `PUT /api/app-data` — refuses a body missing `clients` or one that would drop
+  a populated workspace to zero clients (new `clientCount()`). (2) read() write
+  -back try/catch backstop. (3) `sanitizeAppData` **de-dupes ids** (a duplicate
+  id would abort the bare-INSERT bulk write). (4) `validUserIds` guard drops
+  orphan `client_assignments` / `weekly_submissions`.
+- **`e05d2eb` Timer local day.** The live timer logged the entry date in UTC;
+  now uses `localDateOnly(timer.startedAt)` so it matches the manual form +
+  wall clock.
+- **`9f8caac` Offline alarm.** Big, sticky, pulsing red bar at the top of the
+  workspace when sync is offline/error past the 4s grace — tells Brittany work
+  is NOT saving and to contact Alex (`asoalexander@gmail.com`, mailto). Was
+  only a small topbar pill before. (`AppLayout.tsx` + `.sync-alarm-bar` CSS.)
+- **`2a18cb4` Weekly gate softened.** The timer-stop 423 ("submit last week
+  first") now fires ONLY when a prior week was **rejected** by an owner — an
+  un-submitted or still-pending prior week no longer blocks logging.
+  `findBlockingRejectedWeek` in `lib/time-entry.js`.
+
+**Prod read-only diagnosis tooling (used this session):** the prod Postgres is
+reachable from local via the PUBLIC proxy —
+`DATABASE_URL=$(railway variables --service Postgres --json | grep DATABASE_PUBLIC_URL)` +
+append `?sslmode=no-verify`. The `activity_log` table (cols: id, user_id,
+action, target, created_at) is the audit trail and pinpointed the outage
+trigger to the second. Railway `logs` only keeps a tiny recent buffer — useless
+for historical timing; use `activity_log`.
 
 ## What shipped 2026-06-16 — Active Checklists board (newest first)
 
@@ -362,13 +424,21 @@ PERSONA (text) and `docs/voice-agent-persona.md` (voice) — keep them in sync.
   - **Track D (staff)** — read-only, own-clients-only assistant for
     bookkeepers (no actions, no feature requests); reuse
     `scopeAppDataForSession`; needs a focused data-scoping security pass.
-- **OPEN — "can't save future tasks" (Brittany report, not yet root-caused).**
-  Investigated 2026-06-16: future-dated time entries AND get-ahead tasks
-  PERSIST through every server path (dedicated endpoints, the read
-  materializer, AND the bulk autosave round-trip) — **data is safe**, it's a
-  client DISPLAY issue. The exact screen wasn't pinned (Brittany to confirm:
-  Time "Recent" list cap? weekly Timesheet is week-scoped? Checklists "Later"
-  bucket defaults collapsed?). Resume with her exact steps/screen.
+- **LIKELY RESOLVED — "can't save time" (the bookkeeper timer report).**
+  2026-06-18 root-caused two contributing bugs, both now fixed + live: (1) the
+  weekly-submission gate 423'd on timer-stop whenever a prior week wasn't
+  pending/approved — softened so only a **rejected** week blocks (`2a18cb4`);
+  (2) the timer dated entries in **UTC**, landing evening work on the wrong
+  day/week (`e05d2eb`). Confirm with the affected bookkeeper that start/stop now
+  works. (The older, separate "can't see future-dated tasks" DISPLAY question —
+  Recent list cap / week-scoped Timesheet / collapsed "Later" bucket — was never
+  pinned; revisit only if she re-reports it.)
+- **OPEN — audit backlog (memory `audit-backlog`).** The 2026-06-18 audit's
+  leftover LOW/MED items, deliberately deferred: M3 CSRF uniformity (its own
+  task — SameSite=Lax already mitigates; dev-proxy 403 caveat), M2/L2
+  content-type 415 guards + firm-settings field whitelist, L3 checklist-item
+  visibility, store-7 file-backend sanitize parity (dev-only), store-8 cleanup
+  counts. Tier A/B/C high-value items already shipped (see 2026-06-18 section).
 - **OPEN — verify the voice report modal end-to-end with Brittany** now that
   caller-id routing is fixed (`5ff06a7`). If it still doesn't pop, pull the
   ElevenLabs conversation log (CLI with the API key) to see the tool call.
@@ -387,4 +457,6 @@ PERSONA (text) and `docs/voice-agent-persona.md` (voice) — keep them in sync.
 
 Auto-memory lives at `~/.claude/projects/.../memory/` — see `MEMORY.md` index:
 `project-overview`, `railway-deploy`, `collaboration-workflow`,
-`due-date-mechanics`, `security-notes`, `ai-assistant`.
+`due-date-mechanics`, `security-notes`, `ai-assistant`, `plan-refs-outage`
+(the 2026-06-17 outage: cause + fixes + prod read-only diagnosis tooling),
+`audit-backlog` (deferred low-priority audit items).
