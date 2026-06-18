@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   CalendarDays,
   CircleDollarSign,
   Clock3,
@@ -20,6 +21,12 @@ import { AssistantPanel } from './AssistantPanel'
 import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
 import { navItems } from './navItems'
+
+// Who the user should contact when the app can't save. Surfaced in the big
+// red "not connected" alarm so Brittany knows exactly who to reach out to
+// (Alex owns/maintains the app).
+const SUPPORT_CONTACT_NAME = 'Alex'
+const SUPPORT_CONTACT_EMAIL = 'asoalexander@gmail.com'
 
 export function AppLayout() {
   const {
@@ -154,6 +161,20 @@ export function AppLayout() {
       </aside>
 
       <main className="workspace">
+        {syncAlarmVisible ? (
+          <div className="sync-alarm-bar" role="alert" aria-live="assertive">
+            <AlertTriangle size={30} className="sync-alarm-icon" aria-hidden="true" />
+            <div className="sync-alarm-copy">
+              <strong>Not connected — your work is NOT being saved.</strong>
+              <span>
+                The app can’t reach the server right now, so anything you change may be
+                lost. Please stop editing and reach out to {SUPPORT_CONTACT_NAME} right
+                away so he can fix it:{' '}
+                <a href={`mailto:${SUPPORT_CONTACT_EMAIL}`}>{SUPPORT_CONTACT_EMAIL}</a>.
+              </span>
+            </div>
+          </div>
+        ) : null}
         {previewMode ? (
           <div className="preview-banner" role="status">
             <div>

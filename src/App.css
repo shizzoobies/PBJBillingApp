@@ -489,6 +489,66 @@ html {
   color: #b23535;
 }
 
+/* Big, unmissable alarm when the app can't save / is offline. Gated behind a
+   grace period in AppLayout so transient blips never trigger it. Sticky so it
+   stays on screen as the page scrolls. */
+.sync-alarm-bar {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 22px;
+  background: #c0271f;
+  color: #fff;
+  border-bottom: 4px solid #7d140f;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+  animation: sync-alarm-pulse 1.6s ease-in-out infinite;
+}
+
+.sync-alarm-icon {
+  flex: 0 0 auto;
+}
+
+.sync-alarm-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.sync-alarm-copy strong {
+  font-size: 1.18rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.sync-alarm-copy span {
+  font-size: 0.97rem;
+  line-height: 1.45;
+}
+
+.sync-alarm-copy a {
+  color: #fff;
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+@keyframes sync-alarm-pulse {
+  0%,
+  100% {
+    background: #c0271f;
+  }
+  50% {
+    background: #d8362d;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sync-alarm-bar {
+    animation: none;
+  }
+}
+
 .account-pill {
   background: #ebe3ec;
   border: 1px solid var(--line);
