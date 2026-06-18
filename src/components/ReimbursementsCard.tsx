@@ -3,7 +3,7 @@ import { useMemo, useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import type { Reimbursement } from '../lib/types'
 import { ApiError } from '../lib/types'
-import { currency } from '../lib/utils'
+import { currency, localDateOnly } from '../lib/utils'
 
 /**
  * Owner-only "Expenses & reimbursements" card. Lists every reimbursement
@@ -36,7 +36,7 @@ export function ReimbursementsCard({
   const { data, ownerMode, addReimbursement, updateReimbursement, deleteReimbursement } =
     useAppContext()
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDateOnly()
   const [date, setDate] = useState(today)
   const [description, setDescription] = useState('')
   const [amount, setAmount] = useState('')

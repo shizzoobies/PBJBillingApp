@@ -6,7 +6,7 @@ import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
 import type { ActivityEntry, Employee, TeamMember } from '../lib/types'
-import { formatHours, relativeTime } from '../lib/utils'
+import { formatHours, localDateOnly, relativeTime } from '../lib/utils'
 import {
   bucketByPeriod,
   businessDaysIn,
@@ -48,7 +48,7 @@ type EmployeeStats = {
   lastActiveAt: string | null
 }
 
-const TODAY_ISO = new Date().toISOString().slice(0, 10)
+const TODAY_ISO = localDateOnly()
 
 export function ProductivityPage() {
   const { data, ownerMode } = useAppContext()

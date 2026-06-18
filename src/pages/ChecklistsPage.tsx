@@ -40,6 +40,7 @@ import {
   formatHours,
   getChecklistFrequencyLabel,
   lastDayOfCurrentMonth,
+  localDateOnly,
   makeId,
   monthShortNames,
   shortDate,
@@ -256,7 +257,7 @@ export function ChecklistsPage() {
     if (startFirstNow) {
       const stageOne = template.stages[0]
       if (stageOne && stageOne.items.length > 0) {
-        const today = new Date().toISOString().slice(0, 10)
+        const today = localDateOnly()
         const firstDue = template.nextDueDate < today ? template.nextDueDate : today
         try {
           const created = await createChecklist({
@@ -646,7 +647,7 @@ function ChecklistInProgressSection({
   role: Role
   timeEntries: TimeEntry[]
 }) {
-  const todayDateOnly = new Date().toISOString().slice(0, 10)
+  const todayDateOnly = localDateOnly()
   const { assignee, client, status } = useFilters()
   const [searchParams, setSearchParams] = useSearchParams()
   const focusId = searchParams.get('focus')
@@ -960,7 +961,7 @@ export function ChecklistCard({
   role: Role
   timeEntries: TimeEntry[]
 }) {
-  const todayDateOnly = new Date().toISOString().slice(0, 10)
+  const todayDateOnly = localDateOnly()
   const completed = checklist.items.filter((item) => item.done).length
   const allDone = checklist.items.length > 0 && completed === checklist.items.length
   const viewerIds = checklist.viewerIds ?? []
@@ -2048,7 +2049,7 @@ function SpecificMonthsPicker({
   }
 
   const currentYear = new Date().getFullYear()
-  const todayStr = new Date().toISOString().slice(0, 10)
+  const todayStr = localDateOnly()
 
   return (
     <div className="specific-months">
@@ -3562,7 +3563,7 @@ function StageScheduleControl({
             checked={mode === 'date'}
             onChange={() =>
               emit({
-                dueDate: dueDate || new Date().toISOString().slice(0, 10),
+                dueDate: dueDate || localDateOnly(),
                 dueDayOfMonth: undefined,
               })
             }

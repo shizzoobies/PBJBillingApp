@@ -27,11 +27,12 @@ import {
   formatActivityTimestamp,
   formatHours,
   isInBillingPeriod,
+  localDateOnly,
   normalizeBillingMonth,
   relativeTime,
 } from '../lib/utils'
 
-const today = () => new Date().toISOString().slice(0, 10)
+const today = () => localDateOnly()
 const addDays = (iso: string, days: number) => {
   const d = new Date(iso + 'T00:00:00')
   d.setDate(d.getDate() + days)

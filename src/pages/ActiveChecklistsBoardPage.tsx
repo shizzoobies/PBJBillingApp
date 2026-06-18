@@ -9,7 +9,7 @@ import {
 } from '../lib/activeBoard'
 import { useAppContext } from '../AppContext'
 import { ChecklistCard } from './ChecklistsPage'
-import { stageNameFor } from '../lib/utils'
+import { localDateOnly, stageNameFor } from '../lib/utils'
 import type { Checklist, ServiceCategory } from '../lib/types'
 
 const PERIOD_OPTIONS: Array<{ value: PeriodType; label: string }> = [
@@ -40,7 +40,7 @@ export function ActiveChecklistsBoardPage() {
   const [periodType, setPeriodType] = useState<PeriodType>('month')
   const [managingColumns, setManagingColumns] = useState(false)
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDateOnly()
 
   const clientNameById = useMemo(
     () => Object.fromEntries(data.clients.map((client) => [client.id, client.name])),

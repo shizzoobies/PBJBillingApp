@@ -62,7 +62,9 @@ export function dateOffset(days: number) {
 }
 
 export function currentBillingPeriod() {
-  return new Date().toISOString().slice(0, 7)
+  // LOCAL month (YYYY-MM). UTC would roll to next month on the last evening of
+  // the month for US users, defaulting selectors to the wrong billing period.
+  return localDateOnly().slice(0, 7)
 }
 
 /**
@@ -108,7 +110,9 @@ export function weekRangeOf(dateString: string): { start: string; end: string } 
 
 /** Today's week-start ('YYYY-MM-DD' Sunday) — small convenience wrapper. */
 export function currentWeekStart(): string {
-  return weekStartOf(new Date().toISOString().slice(0, 10))
+  // Seed from the LOCAL day so "this week" matches the user's wall clock; on a
+  // Saturday evening UTC is already Sunday and would open next week.
+  return weekStartOf(localDateOnly())
 }
 
 /**

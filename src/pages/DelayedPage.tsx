@@ -2,7 +2,7 @@ import { AlarmClock, ChevronDown, ChevronRight } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
-import { clientName, employeeName, shortDate } from '../lib/utils'
+import { clientName, employeeName, localDateOnly, shortDate } from '../lib/utils'
 
 /**
  * Owner-only "Delayed" page. Surfaces every checklist step that's been flagged
@@ -39,7 +39,7 @@ type ClientGroup = {
 export function DelayedPage() {
   const { data } = useAppContext()
   const { clients, employees, checklists } = data
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDateOnly()
 
   const groups = useMemo<ClientGroup[]>(() => {
     const byClient = new Map<string, Map<string, ChecklistGroup>>()

@@ -17,6 +17,7 @@ import {
   getBillingPeriodLabel,
   getWeekLabel,
   isGroupHoldingEntry,
+  localDateOnly,
   sessionMinutes,
   weekRangeOf,
 } from '../lib/utils'
@@ -1046,7 +1047,7 @@ function MonthEndSection({
   onLock: (userId: string, period: string) => Promise<void>
   onUnlock: (userId: string, period: string) => Promise<void>
 }) {
-  const defaultPeriod = previousPeriod(new Date().toISOString().slice(0, 7))
+  const defaultPeriod = previousPeriod(localDateOnly().slice(0, 7))
   const [period, setPeriod] = useState(defaultPeriod)
   const [busy, setBusy] = useState(false)
 

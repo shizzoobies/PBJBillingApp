@@ -3,7 +3,7 @@ import { useAppContext } from '../AppContext'
 import { FilterBar } from '../components/FilterBar'
 import { useFilters, type StatusFilter } from '../components/useFilters'
 import type { Checklist, Client, Employee } from '../lib/types'
-import { clientName, employeeName } from '../lib/utils'
+import { clientName, employeeName, localDateOnly } from '../lib/utils'
 
 function checklistStatus(checklist: Checklist, todayDateOnly: string): StatusFilter {
   const completed = checklist.items.filter((item) => item.done).length
@@ -42,7 +42,7 @@ function GanttView({
   const { assignee, client, status } = useFilters()
 
   const today = new Date()
-  const todayDateOnly = today.toISOString().slice(0, 10)
+  const todayDateOnly = localDateOnly(today)
   const rangeStart = new Date(today.getFullYear(), today.getMonth(), 1)
   const rangeEnd = new Date(today.getFullYear(), today.getMonth() + 2, 0)
   const totalDays = Math.max(

@@ -3,7 +3,7 @@ import { useMemo, useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import type { RecurringReimbursement, RecurringReimbursementFrequency } from '../lib/types'
 import { ApiError } from '../lib/types'
-import { currency } from '../lib/utils'
+import { currency, localDateOnly } from '../lib/utils'
 
 /**
  * Owner-only "Recurring reimbursements" card. Each row auto-populates the
@@ -59,7 +59,7 @@ export function RecurringReimbursementsCard({
     deleteRecurringReimbursement,
   } = useAppContext()
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDateOnly()
   const [startDate, setStartDate] = useState(today)
   const [description, setDescription] = useState('')
   const [amount, setAmount] = useState('')

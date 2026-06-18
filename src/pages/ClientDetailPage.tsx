@@ -39,6 +39,7 @@ import {
   formatHours,
   getChecklistFrequencyLabel,
   isSafeImageSrc,
+  localDateOnly,
   MONTH_NAMES,
   normalizeBillingMonth,
   shortDate,
@@ -642,7 +643,7 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
     updateChecklistItem,
     updateSubItemWaiting,
   } = useAppContext()
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDateOnly()
   // "Work in flight" = currently active checklists only. A checklist whose
   // every item is done (status 'Done') is finished, not in flight, so it's
   // excluded here. Overdue / In progress / Not started all remain.
@@ -875,7 +876,7 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
     if (startFirstNow) {
       const stageOne = template.stages[0]
       if (stageOne && stageOne.items.length > 0) {
-        const today = new Date().toISOString().slice(0, 10)
+        const today = localDateOnly()
         const firstDue =
           template.nextDueDate && template.nextDueDate < today ? template.nextDueDate : today
         try {

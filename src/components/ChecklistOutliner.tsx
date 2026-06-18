@@ -11,6 +11,7 @@ import {
   outdentItem,
   type OutlineRow,
 } from '../lib/checklistTree'
+import { localDateOnly } from '../lib/utils'
 import type {
   ChecklistTemplateItem,
   SubChecklistTemplateItem,
@@ -508,7 +509,7 @@ function OutlinerDueControl({
             emit({ dueDate: undefined, dueDayOfMonth: dueDayOfMonth ?? 1 })
           } else if (next === 'date') {
             emit({
-              dueDate: dueDate || new Date().toISOString().slice(0, 10),
+              dueDate: dueDate || localDateOnly(),
               dueDayOfMonth: undefined,
             })
           } else {
