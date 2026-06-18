@@ -1253,12 +1253,15 @@ const server = createServer(async (request, response) => {
         // Route memory/actions/reports to the ACTUAL signed-in user (relayed
         // as caller_id from the user_id dynamic variable), not just "the first
         // owner" — the firm can have more than one owner-role account, and the
-        // panel polls under the logged-in user. Fall back to the first owner
-        // if caller_id is missing/unknown. Only owner-role ids are honored.
+        // panel polls under the logged-in user. If caller_id is missing or not
+        // a known owner we DO NOT fall back to owners[0] — that would park one
+        // owner's memory/action/report card under another owner's panel. The
+        // write-ish branches below already refuse cleanly when `owner` is null;
+        // read-only tools don't need it. Only owner-role ids are honored.
         const members = await appDataStore.getTeamMembers()
         const owners = members.filter((member) => member.role === 'owner')
         const callerId = String(input.caller_id ?? '')
-        const owner = owners.find((member) => member.id === callerId) || owners[0] || null
+        const owner = owners.find((member) => member.id === callerId) || null
         const readTools = assistantReadTools()
         const analyticsMap = {
           client_profitability: 'get_client_profitability',
@@ -2014,7 +2017,10 @@ const server = createServer(async (request, response) => {
               user: {
                 ...session.user,
                 id: target.id,
-                role: target.role === 'Owner' ? 'owner' : 'employee',
+                // Case-insensitive: employee roles are display-cased
+                // ('Owner'), but a stored 'owner' must map the same way or the
+                // preview scopes an owner as staff (or vice-versa).
+                role: String(target.role).toLowerCase() === 'owner' ? 'owner' : 'employee',
               },
             }
           }
@@ -2516,6 +2522,18 @@ const server = createServer(async (request, response) => {
           sendJson(response, 403, { error: 'You can only edit your own time entries' })
           return
         }
+        // Non-owners may only edit entries for a client they currently have
+        // visibility on (parity with the create path) — being un-assigned from
+        // a client also removes the ability to mutate its time entries.
+        // Administrative entries have no client, so the check is skipped.
+        let scopeData = null
+        if (!isOwner && entry.clientId) {
+          scopeData = await appDataStore.read()
+          if (!visibleClientIdSet(session, scopeData.clients ?? []).has(entry.clientId)) {
+            sendJson(response, 403, { error: 'That client is not in your assigned list.' })
+            return
+          }
+        }
         const payload = await readJsonBody(request)
         const patch = {}
         if (typeof payload?.minutes === 'number' || typeof payload?.minutes === 'string') {
@@ -2533,6 +2551,19 @@ const server = createServer(async (request, response) => {
             typeof payload.taskId === 'string' && payload.taskId.trim()
               ? payload.taskId.trim()
               : null
+          // A re-targeted task must belong to THIS entry's client (parity with
+          // the create path, which validates taskId->client). Without this a
+          // caller could attach an entry to any checklist id firm-wide.
+          if (patch.taskId) {
+            const taskData = scopeData ?? (await appDataStore.read())
+            const checklist = (taskData.checklists ?? []).find((c) => c.id === patch.taskId)
+            if (!checklist || checklist.clientId !== entry.clientId) {
+              sendJson(response, 400, {
+                error: 'That task does not belong to this entry’s client.',
+              })
+              return
+            }
+          }
         }
         if (typeof payload?.date === 'string' && payload.date) patch.date = payload.date
         // Reassign to another team member — owner only. Validate the target is
@@ -2620,6 +2651,16 @@ const server = createServer(async (request, response) => {
         if (!isOwner && entry.employeeId !== session.user.id) {
           sendJson(response, 403, { error: 'You can only delete your own time entries' })
           return
+        }
+        // Same client-visibility gate as edit: a non-owner can't delete an
+        // entry for a client they're no longer assigned to (admin entries have
+        // no client and are exempt).
+        if (!isOwner && entry.clientId) {
+          const delScopeData = await appDataStore.read()
+          if (!visibleClientIdSet(session, delScopeData.clients ?? []).has(entry.clientId)) {
+            sendJson(response, 403, { error: 'That client is not in your assigned list.' })
+            return
+          }
         }
         if (!isOwner) {
           const period = String(entry.date).slice(0, 7)
@@ -4235,7 +4276,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Only owners can view global activity' })
         return
       }
-      const limit = Number(requestUrl.searchParams.get('limit')) || 15
+      const limit = Math.min(Math.max(1, Number(requestUrl.searchParams.get('limit')) || 15), 500)
       const entries = await appDataStore.getGlobalActivity(limit)
       sendJson(response, 200, { entries })
       return
@@ -4252,7 +4293,7 @@ const server = createServer(async (request, response) => {
       }
       const from = requestUrl.searchParams.get('from') || ''
       const to = requestUrl.searchParams.get('to') || ''
-      const limit = Number(requestUrl.searchParams.get('limit')) || 2000
+      const limit = Math.min(Math.max(1, Number(requestUrl.searchParams.get('limit')) || 2000), 5000)
       const entries = await appDataStore.getActivityRange(from, to, limit)
       sendJson(response, 200, { entries })
       return
@@ -4270,7 +4311,7 @@ const server = createServer(async (request, response) => {
       }
 
       const userId = teamActivityMatch[1]
-      const limit = Number(requestUrl.searchParams.get('limit')) || 20
+      const limit = Math.min(Math.max(1, Number(requestUrl.searchParams.get('limit')) || 20), 500)
       const entries = await appDataStore.getRecentActivity(userId, limit)
       sendJson(response, 200, { entries })
       return
@@ -4290,7 +4331,9 @@ const server = createServer(async (request, response) => {
         const allData = await appDataStore.read()
         const allowed = visibleClientIdSet(session, allData.clients ?? [])
         if (!caseRecord.client || !allowed.has(caseRecord.client.id)) {
-          sendJson(response, 403, { error: 'Case not visible to this user' })
+          // Return 404 (not 403) so a non-owner can't distinguish "no such
+          // case" from "exists but not yours" and enumerate firm-wide case ids.
+          sendJson(response, 404, { error: 'Case not found' })
           return
         }
         // Scrub activity entries that mention clients the user can't see.
@@ -4556,7 +4599,7 @@ const server = createServer(async (request, response) => {
       const session = await requireSession(request, response)
       if (!session) return
       const unreadOnly = requestUrl.searchParams.get('unreadOnly') === 'true'
-      const limit = Number(requestUrl.searchParams.get('limit')) || 50
+      const limit = Math.min(Math.max(1, Number(requestUrl.searchParams.get('limit')) || 50), 500)
       const entries = await appDataStore.listNotifications(session.user.id, {
         limit,
         unreadOnly,
