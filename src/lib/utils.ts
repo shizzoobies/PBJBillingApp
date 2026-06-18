@@ -66,6 +66,23 @@ export function currentBillingPeriod() {
 }
 
 /**
+ * The LOCAL calendar date ('YYYY-MM-DD') for a timestamp/Date — using the
+ * browser's own time zone, NOT UTC. `new Date(ms).toISOString().slice(0,10)`
+ * gives the UTC day, which rolls forward for US users working in the evening
+ * (e.g. 8pm CDT logs as tomorrow), landing time entries on the wrong day and
+ * sometimes the wrong week. Use this whenever a user-facing "what day did this
+ * happen" date is derived from a timestamp, so it matches the wall clock the
+ * user is looking at (the manual time-entry form already uses the local day).
+ */
+export function localDateOnly(input: number | Date = new Date()): string {
+  const date = typeof input === 'number' ? new Date(input) : input
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+/**
  * Sunday-anchored "start of week" for a YYYY-MM-DD date. US convention:
  * Sun = 0 ... Sat = 6, so subtracting `getDay()` lands on the Sunday that
  * begins the week. Returns 'YYYY-MM-DD' (same shape as the input). The

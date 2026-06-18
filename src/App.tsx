@@ -90,6 +90,7 @@ import {
   getAssignedEmployeeIds,
   type GroupAllocationMode,
   legibleSidebarText,
+  localDateOnly,
   makeId,
   sortChecklists,
 } from './lib/utils'
@@ -806,7 +807,9 @@ function App() {
         clientId: '',
         isAdministrative: false,
         groupClientIds,
-        date: new Date(timer.startedAt).toISOString().slice(0, 10),
+        // The LOCAL day the work started (matches the manual form + the user's
+        // wall clock); UTC would roll an evening entry to the next day/week.
+        date: localDateOnly(timer.startedAt),
         minutes: Math.max(1, Math.round((stoppedAtMs - timer.startedAt) / 60000)),
         description,
         startAt: session.startAt,
@@ -825,7 +828,8 @@ function App() {
       employeeId: timer.employeeId,
       clientId: timer.clientId,
       isAdministrative,
-      date: new Date(timer.startedAt).toISOString().slice(0, 10),
+      // Local start day (see the group path above) — never the UTC day.
+      date: localDateOnly(timer.startedAt),
       // Seconds-precise (min 1 second). The server recomputes this from the
       // session span; this is just the optimistic value shown until it returns.
       minutes: Math.max(1, Math.round((stoppedAtMs - timer.startedAt) / 1000)) / 60,
