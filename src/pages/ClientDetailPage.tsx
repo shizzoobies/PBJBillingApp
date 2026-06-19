@@ -473,21 +473,21 @@ function EstimatedRoleHours({
       <div className="form-grid two-col">
         <SaveNumberField
           label="Bookkeeper"
-          step="0.5"
+          step="any"
           min="0"
           value={client.estimatedBookkeeperHours ?? null}
           onCommit={(next) => onCommit({ estimatedBookkeeperHours: next ?? undefined })}
         />
         <SaveNumberField
           label="Accountant"
-          step="0.5"
+          step="any"
           min="0"
           value={client.estimatedAccountantHours ?? null}
           onCommit={(next) => onCommit({ estimatedAccountantHours: next ?? undefined })}
         />
         <SaveNumberField
           label="CFO"
-          step="0.5"
+          step="any"
           min="0"
           value={client.estimatedCfoHours ?? null}
           onCommit={(next) => onCommit({ estimatedCfoHours: next ?? undefined })}

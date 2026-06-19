@@ -294,7 +294,7 @@ function ClientBuilder({
                 className="input"
                 min="0"
                 onChange={(event) => setEstimatedBookkeeperHours(event.target.value)}
-                step="0.5"
+                step="any"
                 type="number"
                 value={estimatedBookkeeperHours}
               />
@@ -305,7 +305,7 @@ function ClientBuilder({
                 className="input"
                 min="0"
                 onChange={(event) => setEstimatedAccountantHours(event.target.value)}
-                step="0.5"
+                step="any"
                 type="number"
                 value={estimatedAccountantHours}
               />
@@ -316,7 +316,7 @@ function ClientBuilder({
                 className="input"
                 min="0"
                 onChange={(event) => setEstimatedCfoHours(event.target.value)}
-                step="0.5"
+                step="any"
                 type="number"
                 value={estimatedCfoHours}
               />
