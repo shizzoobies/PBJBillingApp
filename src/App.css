@@ -7830,3 +7830,75 @@ button.repeating-task-toggle-pill {
 .manage-columns-add .input {
   flex: 1;
 }
+
+/* "To 100%" setup checklist page */
+.setup-all-clear {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #1f7d4d;
+}
+.setup-all-clear strong {
+  display: block;
+  color: var(--ink, #1f2430);
+}
+.setup-issue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.setup-issue {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--hairline, #e6e3ea);
+  border-left-width: 4px;
+  border-radius: 10px;
+  background: var(--surface, #fff);
+}
+.setup-issue--high {
+  border-left-color: #c0392b;
+}
+.setup-issue--medium {
+  border-left-color: #d98a1f;
+}
+.setup-issue--low {
+  border-left-color: #b9b4c2;
+}
+.setup-issue-icon {
+  flex: none;
+  color: var(--muted-ink, #6b6577);
+}
+.setup-issue-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.setup-issue-body .muted-text {
+  font-size: 0.85rem;
+}
+.setup-issue-sev {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-ink, #8a8494);
+}
+.setup-issue-fix {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+  color: var(--plum, #3c2044);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.setup-issue-fix:hover {
+  text-decoration: underline;
+}

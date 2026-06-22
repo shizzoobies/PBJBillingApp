@@ -11,9 +11,9 @@ see a reduced version of the app — owner-only abilities are marked.
 ## Navigation map
 
 Sidebar pages: Dashboard, Time, Timesheet, Time Approvals, Checklists, Board,
-Delayed, Clients, Contacts, Reports, Productivity, Gantt, Invoices, Plans,
-Team, Settings. A billing-month picker, notification bell, and account menu
-sit in the top bar on every page.
+Delayed, Clients, Client Recap, Contacts, Reports, Productivity, Gantt,
+Invoices, Plans, Team, To 100%, Settings. A billing-month picker, notification
+bell, and account menu sit in the top bar on every page.
 
 ## Dashboard
 
@@ -224,6 +224,17 @@ sit in the top bar on every page.
   missing ones to the client. Because templates carry a board column, the new
   checklists land in the right Active-Checklists-board column automatically —
   connecting plans → checklists → board.
+
+## To 100% (setup checklist, owner only)
+
+- A live "Setup checklist" page (sidebar: "To 100%") that lists everything still
+  missing for the workspace to be fully set up, grouped by category and updating
+  itself as you fill things in. Each item deep-links to where it's fixed.
+- Checks: Monthly/Annual clients with no rate; clients missing a billing email,
+  an assigned team member, or a contact; clients on a plan whose plan checklists
+  aren't set up yet; team members with no bill rate; plans with no checklist
+  templates; contacts not linked to any client. Shows "You're all set — 100%"
+  when nothing is outstanding.
 
 ## Team (owner only)
 

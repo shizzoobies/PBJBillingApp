@@ -5,6 +5,7 @@ import {
   BookUser,
   Building2,
   CalendarRange,
+  CircleCheckBig,
   ClipboardCheck,
   Clock3,
   FileBarChart,
@@ -41,5 +42,6 @@ export const navItems: Array<{
   { to: '/invoices', label: 'Invoices', icon: ReceiptText, ownerOnly: true },
   { to: '/plans', label: 'Plans', icon: WalletCards, ownerOnly: true },
   { to: '/team', label: 'Team', icon: Users, ownerOnly: true },
+  { to: '/setup', label: 'To 100%', icon: CircleCheckBig, ownerOnly: true },
   { to: '/settings', label: 'Settings', icon: Settings, ownerOnly: true },
 ]
