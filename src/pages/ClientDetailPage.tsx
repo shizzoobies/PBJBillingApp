@@ -1,6 +1,6 @@
 import { ArrowLeft, Check, Copy, ExternalLink, Pencil, Plus, Trash2 } from 'lucide-react'
-import { useMemo, useRef, useState } from 'react'
-import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
 import { SectionScopeContext } from '../components/sectionScope'
@@ -18,7 +18,13 @@ import {
   SaveToggleField,
   SavingTextInput,
 } from '../components/SectionKit'
-import { recordClientProfileActivity, setClientAssignedTeamRequest } from '../lib/api'
+import {
+  addClientNote,
+  deleteClientNote,
+  listClientNotes,
+  recordClientProfileActivity,
+  setClientAssignedTeamRequest,
+} from '../lib/api'
 import { useSaveFlash } from '../lib/useSaveFlash'
 import {
   ApiError,
@@ -28,6 +34,7 @@ import {
   type ChecklistFrequency,
   type ChecklistTemplate,
   type Client,
+  type ClientNote,
   type Contact,
   type Employee,
   type SubscriptionPlan,
@@ -40,6 +47,7 @@ import {
   employeeName,
   formatHours,
   getChecklistFrequencyLabel,
+  isDueThisMonth,
   isSafeImageSrc,
   localDateOnly,
   makeId,
@@ -59,7 +67,7 @@ import {
 export function ClientDetailPage() {
   const { clientId } = useParams<{ clientId: string }>()
   const navigate = useNavigate()
-  const { data, ownerMode, updateClient, deleteClient } = useAppContext()
+  const { data, ownerMode, sessionUser, updateClient, deleteClient } = useAppContext()
   const [assignedTeamError, setAssignedTeamError] = useState('')
 
   const client = useMemo(
@@ -70,16 +78,15 @@ export function ClientDetailPage() {
   // Activity-record debounce: only fire one event per ~60s of editing.
   const lastActivityRef = useRef<number>(0)
 
-  if (!ownerMode) {
-    return <Navigate to="/clients" replace />
-  }
-
+  // Staff can now reach this page (the route is no longer owner-only). Access is
+  // data-level: a non-owner's scoped /api/app-data only contains their assigned
+  // clients, so an unassigned id falls through to the "Client not found" state.
   if (!client) {
     return (
       <section className="panel">
         <div className="section-heading">
           <div>
-            <p className="section-kicker">Owner client controls</p>
+            <p className="section-kicker">Client controls</p>
             <h2>Client not found</h2>
           </div>
         </div>
@@ -133,57 +140,81 @@ export function ClientDetailPage() {
         </Link>
       </div>
 
-      <CollapsibleSection
-        kicker="Client profile"
-        title="Client name"
-        lockable
-        headerAction={
-          <button className="danger-action" onClick={handleDelete} type="button">
-            <Trash2 size={14} />
-            Delete client
-          </button>
-        }
-      >
-        <NameField client={client} onCommit={commit} />
-      </CollapsibleSection>
+      {ownerMode ? (
+        <CollapsibleSection
+          kicker="Client profile"
+          title="Client name"
+          lockable
+          headerAction={
+            <button className="danger-action" onClick={handleDelete} type="button">
+              <Trash2 size={14} />
+              Delete client
+            </button>
+          }
+        >
+          <NameField client={client} onCommit={commit} />
+        </CollapsibleSection>
+      ) : (
+        // Staff: read-only name. Renaming commits via the owner-only bulk PUT
+        // /api/app-data, which would 403 for staff — so no editor, no delete.
+        <CollapsibleSection kicker="Client profile" title="Client name">
+          <div className="field full-row">
+            <span className="field-label-row">Client name</span>
+            <h2 className="client-detail-title">{client.name}</h2>
+          </div>
+        </CollapsibleSection>
+      )}
 
-      <CollapsibleSection kicker="Contact" title="Contacts & address" lockable>
-        <ContactSectionBody client={client} contacts={data.contacts} onCommit={commit} />
-      </CollapsibleSection>
+      {ownerMode ? (
+        <CollapsibleSection kicker="Contact" title="Contacts & address" lockable>
+          <ContactSectionBody client={client} contacts={data.contacts} onCommit={commit} />
+        </CollapsibleSection>
+      ) : (
+        // Staff: display-only contacts & address (same bulk-save 403 reason).
+        <CollapsibleSection kicker="Contact" title="Contacts & address">
+          <ReadOnlyContactSectionBody client={client} contacts={data.contacts} />
+        </CollapsibleSection>
+      )}
 
-      <CollapsibleSection kicker="Visibility" title="Assigned team" lockable>
-        <AssignedTeamField
-          client={client}
-          employees={data.employees}
-          onLocalUpdate={(nextIds) => updateClient(client.id, { assignedBookkeeperIds: nextIds })}
-          onError={setAssignedTeamError}
-        />
-        {assignedTeamError ? <p className="auth-error">{assignedTeamError}</p> : null}
-      </CollapsibleSection>
+      {ownerMode ? (
+        <>
+          <CollapsibleSection kicker="Visibility" title="Assigned team" lockable>
+            <AssignedTeamField
+              client={client}
+              employees={data.employees}
+              onLocalUpdate={(nextIds) =>
+                updateClient(client.id, { assignedBookkeeperIds: nextIds })
+              }
+              onError={setAssignedTeamError}
+            />
+            {assignedTeamError ? <p className="auth-error">{assignedTeamError}</p> : null}
+          </CollapsibleSection>
 
-      <CollapsibleSection kicker="Billing" title="Rate and services" lockable>
-        <BillingSectionBody client={client} plans={data.plans} onCommit={commit} />
-      </CollapsibleSection>
+          <CollapsibleSection kicker="Billing" title="Rate and services" lockable>
+            <BillingSectionBody client={client} plans={data.plans} onCommit={commit} />
+          </CollapsibleSection>
 
-      <CollapsibleSection kicker="Billing" title="Plan checklists" lockable>
-        <PlanChecklistsBody client={client} data={data} />
-      </CollapsibleSection>
+          <CollapsibleSection kicker="Billing" title="Plan checklists" lockable>
+            <PlanChecklistsBody client={client} data={data} />
+          </CollapsibleSection>
 
-      <CollapsibleSection kicker="Expenses" title="Recurring reimbursements" lockable>
-        <RecurringReimbursementsCard clientId={client.id} bare />
-      </CollapsibleSection>
+          <CollapsibleSection kicker="Expenses" title="Recurring reimbursements" lockable>
+            <RecurringReimbursementsCard clientId={client.id} bare />
+          </CollapsibleSection>
 
-      <CollapsibleSection kicker="Expenses" title="Expenses & reimbursements" lockable>
-        <ReimbursementsCard clientId={client.id} bare />
-      </CollapsibleSection>
+          <CollapsibleSection kicker="Expenses" title="Expenses & reimbursements" lockable>
+            <ReimbursementsCard clientId={client.id} bare />
+          </CollapsibleSection>
 
-      <CollapsibleSection kicker="Branding" title="Logo" lockable>
-        <BrandingSectionBody client={client} onCommit={commit} />
-      </CollapsibleSection>
+          <CollapsibleSection kicker="Branding" title="Logo" lockable>
+            <BrandingSectionBody client={client} onCommit={commit} />
+          </CollapsibleSection>
 
-      <CollapsibleSection kicker="Invoice settings" title="Invoice customization" lockable>
-        <InvoiceSettingsSectionBody client={client} onCommit={commit} />
-      </CollapsibleSection>
+          <CollapsibleSection kicker="Invoice settings" title="Invoice customization" lockable>
+            <InvoiceSettingsSectionBody client={client} onCommit={commit} />
+          </CollapsibleSection>
+        </>
+      ) : null}
 
       <CollapsibleSection kicker="Work in flight" title="Active checklists">
         <ActiveChecklistsBody client={client} data={data} />
@@ -243,8 +274,143 @@ export function ClientDetailPage() {
           </div>
         </div>
       </CollapsibleSection>
+
+      <CollapsibleSection kicker="Notes" title="Client notes">
+        <ClientNotesBody clientId={client.id} ownerMode={ownerMode} currentUserId={sessionUser.id} />
+      </CollapsibleSection>
     </section>
     </SectionScopeContext.Provider>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Notes                                                                      */
+/* -------------------------------------------------------------------------- */
+
+const noteStamp = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+})
+
+function ClientNotesBody({
+  clientId,
+  ownerMode,
+  currentUserId,
+}: {
+  clientId: string
+  ownerMode: boolean
+  currentUserId: string
+}) {
+  const [notes, setNotes] = useState<ClientNote[]>([])
+  const [draft, setDraft] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      setLoading(true)
+      setError('')
+      try {
+        const list = await listClientNotes(clientId)
+        if (!cancelled) setNotes(list)
+      } catch {
+        if (!cancelled) setError('Could not load notes.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [clientId])
+
+  const submit = async () => {
+    const body = draft.trim()
+    if (!body || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const note = await addClientNote(clientId, body)
+      setNotes((current) => [note, ...current])
+      setDraft('')
+    } catch {
+      setError('Could not add that note — please try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (noteId: string) => {
+    setError('')
+    try {
+      await deleteClientNote(clientId, noteId)
+      setNotes((current) => current.filter((note) => note.id !== noteId))
+    } catch {
+      setError('Could not delete that note.')
+    }
+  }
+
+  return (
+    <div className="client-notes">
+      <div className="field full-row">
+        <span className="field-label-row">Add a note</span>
+        <textarea
+          className="input"
+          rows={3}
+          placeholder="Jot a note for this client…"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <div className="button-row">
+          <button
+            type="button"
+            className="primary-action"
+            disabled={busy || !draft.trim()}
+            onClick={() => void submit()}
+          >
+            {busy ? 'Adding…' : 'Add note'}
+          </button>
+        </div>
+      </div>
+
+      {error ? <p className="auth-error">{error}</p> : null}
+
+      {loading ? (
+        <p className="muted-text">Loading notes…</p>
+      ) : notes.length === 0 ? (
+        <p className="muted-text">No notes yet.</p>
+      ) : (
+        <ul className="activity-list">
+          {notes.map((note) => {
+            const canDelete = ownerMode || note.authorId === currentUserId
+            return (
+              <li key={note.id}>
+                <strong>
+                  {note.authorName || 'Unknown'}
+                  {note.createdAt ? ` · ${noteStamp.format(new Date(note.createdAt))}` : ''}
+                </strong>
+                <span className="client-note-body">{note.body}</span>
+                {canDelete ? (
+                  <button
+                    type="button"
+                    className="link-button"
+                    onClick={() => void remove(note.id)}
+                  >
+                    Delete
+                  </button>
+                ) : null}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
   )
 }
 
@@ -360,6 +526,64 @@ function ContactSectionBody({
         onCommit={(value) => onCommit({ postalCode: value })}
         value={client.postalCode ?? ''}
       />
+    </div>
+  )
+}
+
+// Display-only contacts & address for staff. Editing commits via the owner-only
+// bulk PUT /api/app-data (403 for staff), so non-owners get values, not editors.
+function ReadOnlyContactSectionBody({
+  client,
+  contacts,
+}: {
+  client: Client
+  contacts: Contact[]
+}) {
+  const selectedIds = client.contactIds ?? []
+  const selectedContacts = selectedIds
+    .map((id) => contacts.find((entry) => entry.id === id))
+    .filter((entry): entry is Contact => Boolean(entry))
+  const addressLines = [
+    client.addressLine1,
+    client.addressLine2,
+    [client.city, client.state, client.postalCode].filter(Boolean).join(', '),
+  ].filter((line) => line && line.trim())
+
+  return (
+    <div className="form-grid two-col">
+      <div className="field full-row">
+        <span className="field-label-row">Contacts</span>
+        {selectedContacts.length === 0 ? (
+          <p className="muted-text">No contacts selected.</p>
+        ) : (
+          <ul className="client-contact-email-list">
+            {selectedContacts.map((entry) => {
+              const email = emailForClient(entry, client.id)
+              return (
+                <li key={entry.id} className="client-contact-email-row">
+                  <strong>{entry.name}</strong>
+                  <span className="muted-text">{email || 'No email'}</span>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+      <div className="field full-row">
+        <span className="field-label-row">Address</span>
+        {addressLines.length === 0 ? (
+          <p className="muted-text">No address on file.</p>
+        ) : (
+          <p>
+            {addressLines.map((line, index) => (
+              <span key={index}>
+                {line}
+                {index < addressLines.length - 1 ? <br /> : null}
+              </span>
+            ))}
+          </p>
+        )}
+      </div>
     </div>
   )
 }
@@ -830,6 +1054,7 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
     updateChecklistItem,
     updateSubItemWaiting,
   } = useAppContext()
+  const [dueThisMonthOnly, setDueThisMonthOnly] = useState(false)
   const today = localDateOnly()
   // "Work in flight" = currently active checklists only. A checklist whose
   // every item is done (status 'Done') is finished, not in flight, so it's
@@ -843,6 +1068,15 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
     ),
   )
 
+  // "Due this month": a checklist's effective due = its dueDate (same field the
+  // page already shows). Count is computed regardless so the label is accurate.
+  const dueThisMonthCount = checklists.filter((entry) =>
+    isDueThisMonth(entry.dueDate, today),
+  ).length
+  const shownChecklists = dueThisMonthOnly
+    ? checklists.filter((entry) => isDueThisMonth(entry.dueDate, today))
+    : checklists
+
   if (checklists.length === 0) {
     return <p className="muted-text">No active checklists for this client.</p>
   }
@@ -850,8 +1084,25 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
   // Full editable checklist cards — the same editor as the Checklists tab, so
   // an owner can toggle/add/reorder items and edit details right here.
   return (
-    <div className="client-checklist-cards">
-      {checklists.map((checklist) => (
+    <div>
+      <div className="client-checklist-toolbar">
+        <label className="inline-toggle">
+          <input
+            type="checkbox"
+            checked={dueThisMonthOnly}
+            onChange={(event) => setDueThisMonthOnly(event.target.checked)}
+          />
+          Due this month
+        </label>
+        <span className="muted-text">
+          {dueThisMonthCount} due this month
+        </span>
+      </div>
+      {shownChecklists.length === 0 ? (
+        <p className="muted-text">No active checklists due this month.</p>
+      ) : (
+        <div className="client-checklist-cards">
+          {shownChecklists.map((checklist) => (
         <ChecklistCard
           key={checklist.id}
           activeEmployeeId={activeEmployeeId}
@@ -879,7 +1130,9 @@ function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData 
           role={role}
           timeEntries={data.timeEntries}
         />
-      ))}
+          ))}
+        </div>
+      )}
     </div>
   )
 }

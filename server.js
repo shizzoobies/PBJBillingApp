@@ -463,6 +463,9 @@ function scopeAppDataForSession(session, data) {
       customMonthlyFee: null,
       planId: null,
       planIds: [],
+      annualRate: undefined,
+      annualBillingMonth: undefined,
+      monthlyServiceTier: undefined,
     }))
   // A team member sees every task for a client they're assigned to — not
   // only tasks assigned to them personally — so a shared client's whole
@@ -1987,6 +1990,95 @@ const server = createServer(async (request, response) => {
         return
       }
       sendJson(response, 200, { category: updated })
+      return
+    }
+
+    // Client notes: a timestamped, attributed, append-only log per client.
+    // Visible to (and addable by) the owner AND a client's assigned staff —
+    // endpoint-managed (NOT the owner-only bulk /api/app-data) so staff can
+    // write notes. Access is gated by visibleClientIdSet, same as client recap.
+    const clientNotesMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/notes$/)
+    if (clientNotesMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const clientId = decodeURIComponent(clientNotesMatch[1])
+      const data = await appDataStore.read()
+      const allowed = visibleClientIdSet(session, data.clients ?? [])
+      if (!allowed.has(clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const notes = await appDataStore.listClientNotes(clientId)
+      sendJson(response, 200, { notes })
+      return
+    }
+
+    if (clientNotesMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const clientId = decodeURIComponent(clientNotesMatch[1])
+      const data = await appDataStore.read()
+      const allowed = visibleClientIdSet(session, data.clients ?? [])
+      if (!allowed.has(clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const body = String(payload?.body ?? '').trim()
+      if (!body) {
+        sendJson(response, 400, { error: 'A note body is required' })
+        return
+      }
+      // Author name from the team roster (same lookup other handlers use), so
+      // the note keeps a readable byline even if the user is later renamed.
+      const member = await appDataStore.getTeamMember(session.user.id)
+      const authorName = member?.name ?? session.user.name ?? null
+      const note = await appDataStore.addClientNote(clientId, {
+        authorId: session.user.id,
+        authorName,
+        body,
+      })
+      if (!note) {
+        sendJson(response, 400, { error: 'A note body is required' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'client_note_added', clientId)
+      sendJson(response, 201, { note })
+      return
+    }
+
+    const clientNoteDeleteMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/notes\/([^/]+)$/,
+    )
+    if (clientNoteDeleteMatch && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const noteId = decodeURIComponent(clientNoteDeleteMatch[2])
+      const note = await appDataStore.getClientNote(noteId)
+      if (!note) {
+        sendJson(response, 404, { error: 'Note not found' })
+        return
+      }
+      // Owner can delete any note; everyone else only their own.
+      if (session.user.role !== 'owner' && note.authorId !== session.user.id) {
+        sendJson(response, 403, { error: 'You can only delete your own notes' })
+        return
+      }
+      const removed = await appDataStore.deleteClientNote(noteId)
+      sendJson(response, removed ? 200 : 404, removed ? { ok: true } : { error: 'Note not found' })
       return
     }
 

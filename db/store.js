@@ -1659,6 +1659,25 @@ export class AppDataStore {
         )
       `)
 
+      // Per-client notes log: a timestamped, attributed, append-only history.
+      // Owner AND a client's assigned staff can view + add. Deliberately
+      // endpoint-managed (NOT part of the bulk /api/app-data wipe-and-reinsert)
+      // — exactly like sales_tax_records — so staff can write notes without the
+      // owner-only bulk save, and so notes can never be clobbered by an autosave.
+      await this.pool.query(`
+        create table if not exists client_notes (
+          id text primary key,
+          client_id text not null,
+          author_id text,
+          author_name text,
+          body text not null,
+          created_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists client_notes_client_idx on client_notes (client_id)`,
+      )
+
       // Active Checklists board: per-template/per-checklist service category
       // (the board's columns) + the categories table itself. The column is a
       // plain text id (NOT a FK) so deleting a category leaves rows readable as
@@ -7573,6 +7592,108 @@ export class AppDataStore {
     }
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return record
+  }
+
+  // ---- Client notes: a timestamped, attributed, append-only log per client ----
+  //
+  // Endpoint-managed (NOT part of the bulk /api/app-data write), like sales-tax
+  // records — so staff (who can't do the owner-only bulk save) can still add
+  // notes, and notes can't be clobbered by an autosave. Stored in auth-state on
+  // the file backend, client_notes on pg. Always returned newest-first.
+
+  /** Notes for one client, newest first. */
+  async listClientNotes(clientId) {
+    if (!clientId) return []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, author_id, author_name, body, created_at
+           from client_notes where client_id = $1 order by created_at desc`,
+        [clientId],
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        clientId: row.client_id,
+        authorId: row.author_id ?? null,
+        authorName: row.author_name ?? null,
+        body: row.body,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+      }))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientNotes) ? authState.clientNotes : []
+    return list
+      .filter((note) => note.clientId === clientId)
+      .slice()
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+  }
+
+  /** Append a note to a client's log. Returns the created note. */
+  async addClientNote(clientId, { authorId, authorName, body } = {}) {
+    if (!clientId) return null
+    const clean = String(body ?? '').trim().slice(0, 5000)
+    if (!clean) return null
+    const note = {
+      id: `cnote-${randomUUID().slice(0, 8)}`,
+      clientId,
+      authorId: authorId ?? null,
+      authorName: authorName ?? null,
+      body: clean,
+      createdAt: nowIso(),
+    }
+    if (this.pool) {
+      await this.pool.query(
+        `insert into client_notes (id, client_id, author_id, author_name, body, created_at)
+         values ($1, $2, $3, $4, $5, now())`,
+        [note.id, note.clientId, note.authorId, note.authorName, note.body],
+      )
+      return note
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.clientNotes)) authState.clientNotes = []
+    authState.clientNotes.push(note)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return note
+  }
+
+  /** Look up a single note by id (used to authorize deletes). */
+  async getClientNote(noteId) {
+    if (!noteId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, author_id, author_name, body, created_at
+           from client_notes where id = $1`,
+        [noteId],
+      )
+      if (!result.rowCount) return null
+      const row = result.rows[0]
+      return {
+        id: row.id,
+        clientId: row.client_id,
+        authorId: row.author_id ?? null,
+        authorName: row.author_name ?? null,
+        body: row.body,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+      }
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientNotes) ? authState.clientNotes : []
+    return list.find((note) => note.id === noteId) ?? null
+  }
+
+  /** Delete a note by id. Returns true if a row was removed. */
+  async deleteClientNote(noteId) {
+    if (!noteId) return false
+    if (this.pool) {
+      const result = await this.pool.query(`delete from client_notes where id = $1`, [noteId])
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.clientNotes)) authState.clientNotes = []
+    const before = authState.clientNotes.length
+    authState.clientNotes = authState.clientNotes.filter((note) => note.id !== noteId)
+    const removed = authState.clientNotes.length < before
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return removed
   }
 
   // ---- Active Checklists board: service categories (the columns) ----

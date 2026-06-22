@@ -609,6 +609,21 @@ export type ServiceCategory = {
 }
 
 /**
+ * One entry in a client's notes log — a timestamped, attributed, append-only
+ * history. Owner and a client's assigned staff can view + add. Endpoint-managed
+ * (NOT part of the bulk app-data save), so staff can write without the
+ * owner-only bulk save.
+ */
+export type ClientNote = {
+  id: string
+  clientId: string
+  authorId: string | null
+  authorName: string | null
+  body: string
+  createdAt: string | null
+}
+
+/**
  * Owner-configurable defaults applied when creating a NEW client. Lets the
  * firm set its house rate / terms / invoice prefs once instead of retyping
  * them on every new client. Only affects the Add-client form's starting

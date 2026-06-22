@@ -145,8 +145,20 @@ bell, and account menu sit in the top bar on every page.
   only — never affects invoices), assigned bookkeeper(s), plans/services. NOTE:
   there is no per-client hourly rate anymore — Hourly clients are billed off
   each team member's own bill rate (set on the Team page).
-- Client detail page: everything about one client — tasks, time, contacts,
-  notes, billing.
+- Client detail page (owner): everything about one client — tasks, time,
+  contacts, billing, branding, invoice settings, notes.
+- Client detail page (staff): assigned bookkeepers/accountants can open their
+  assigned clients in a scoped view — client name + contacts (read-only), active
+  & recurring checklists, recent work, and notes. Owner-only sections (billing
+  rates, plan checklists, reimbursements/expenses, branding, invoice settings,
+  assigned team) and the Delete-client action are hidden, and financial fields
+  are stripped from their data server-side.
+- Client notes: a timestamped, attributed notes log on each client. The owner
+  and the client's assigned staff can read and add notes; you can delete your
+  own note (the owner can delete any). Notes persist independently of the bulk
+  autosave so staff can add them.
+- The client's "Active checklists" section has a "Due this month" toggle that
+  filters to checklists due in the current calendar month (with a count).
 - Assigned team controls which staff can see/log time for the client.
 
 ## Client Recap (owner only)

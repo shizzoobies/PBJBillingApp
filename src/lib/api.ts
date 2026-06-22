@@ -6,6 +6,7 @@
   type ChecklistTemplate,
   type ChecklistTemplateItem,
   type Client,
+  type ClientNote,
   type FirmSettings,
   type NotificationEntry,
   type PublicFirmSettings,
@@ -1880,6 +1881,49 @@ export async function deleteServiceCategory(id: string) {
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { error?: string } | null
     throw new ApiError(response.status, body?.error ?? `Failed to delete column (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean }
+}
+
+// ---- Client notes: a timestamped, attributed, append-only log per client ----
+
+/** Notes for a client, newest first. Owner or the client's assigned staff. */
+export async function listClientNotes(clientId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/notes`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to load notes (${response.status})`)
+  }
+  return ((await response.json()) as { notes: ClientNote[] }).notes
+}
+
+/** Append a note to a client's log. Returns the created note. */
+export async function addClientNote(clientId: string, body: string) {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/notes`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body }),
+  })
+  if (!response.ok) {
+    const errorBody = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, errorBody?.error ?? `Failed to add note (${response.status})`)
+  }
+  return ((await response.json()) as { note: ClientNote }).note
+}
+
+/** Delete a note. Owner can delete any note; staff only their own. */
+export async function deleteClientNote(clientId: string, noteId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/notes/${encodeURIComponent(noteId)}`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to delete note (${response.status})`)
   }
   return (await response.json()) as { ok: boolean }
 }

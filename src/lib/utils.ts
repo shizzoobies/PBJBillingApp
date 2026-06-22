@@ -86,6 +86,16 @@ export function localDateOnly(input: number | Date = new Date()): string {
 }
 
 /**
+ * True when a YYYY-MM-DD due date falls within the same calendar month as
+ * `today` (also YYYY-MM-DD). Pure string comparison on the year-month prefix,
+ * so it's timezone-safe and avoids Date math. Empty/invalid dates are not due.
+ */
+export function isDueThisMonth(dueDate: string, today: string = localDateOnly()): boolean {
+  if (!dueDate || dueDate.length < 7) return false
+  return dueDate.slice(0, 7) === today.slice(0, 7)
+}
+
+/**
  * Sunday-anchored "start of week" for a YYYY-MM-DD date. US convention:
  * Sun = 0 ... Sat = 6, so subtracting `getDay()` lands on the Sunday that
  * begins the week. Returns 'YYYY-MM-DD' (same shape as the input). The

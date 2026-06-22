@@ -3155,11 +3155,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
         />
         <Route
           path="/clients/:clientId"
-          element={
-            <OwnerOnly ownerMode={ownerMode}>
-              <ClientDetailPage />
-            </OwnerOnly>
-          }
+          element={<ClientDetailPage />}
         />
         <Route
           path="/reports"
