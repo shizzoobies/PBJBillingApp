@@ -64,6 +64,11 @@ import {
 } from './lib/api'
 import { createEmptyAppData } from './lib/seed'
 import {
+  isEditableElementTag,
+  shouldDeferRefetch,
+  workspaceSnapshot,
+} from './lib/sync'
+import {
   ApiError,
   DEFAULT_FIRM_SETTINGS,
   type AppData,
@@ -169,6 +174,16 @@ function writeStoredTimer(timer: TimerState | null) {
   }
 }
 
+// True when the user currently has a text input / textarea / select /
+// contenteditable focused — i.e. is mid-edit. A cross-session refetch defers
+// while this holds so it can never re-paint stale server data over a field the
+// user is actively typing in.
+function isEditableElementFocused(): boolean {
+  if (typeof document === 'undefined') return false
+  const el = document.activeElement as HTMLElement | null
+  return isEditableElementTag(el?.tagName, el?.isContentEditable ?? false)
+}
+
 function App() {
   // Empty workspace until the server fetch resolves — avoids the flash
   // of stale demo clients / checklists on reload that made just-deleted
@@ -199,15 +214,20 @@ function App() {
     sidebarTextColor: DEFAULT_FIRM_SETTINGS.sidebarTextColor ?? '#ffffff',
     sidebarActiveTextColor: DEFAULT_FIRM_SETTINGS.sidebarActiveTextColor ?? '#ffffff',
   })
-  const skipAutosaveRef = useRef(0)
-  // Latched flag that forces the next autosave to fire even when
-  // `skipAutosaveRef` is positive. Set by `updateWorkspaceData` (the
-  // legacy local-only mutators like `deleteClient` / `addClient` /
-  // `addPlan` rely on autosave to actually persist their change). Cleared
-  // the moment the autosave effect honors it. Fixes the race where an
-  // API-backed mutation incremented the skip counter in the same render
-  // window as a local-only delete, swallowing the delete forever.
-  const forceNextSaveRef = useRef(false)
+  // Autosave dirtiness. `dirtyRef` is the single source of truth for "there are
+  // local-only workspace edits not yet confirmed by a successful bulk PUT." It
+  // is set ONLY by `updateWorkspaceData` (the local-only mutators whose only
+  // persistence path is the bulk autosave) and cleared ONLY after a PUT that
+  // covered the current data. This replaced a fragile skip-counter that assumed
+  // exactly one autosave-effect firing per server-confirmed setData — React
+  // batching could make it both (a) report "All changes saved" while silently
+  // dropping a real edit and (b) swallow a local edit that interleaved with an
+  // API-backed mutation. A boolean that only a successful PUT can clear is
+  // immune to both. `saveInFlightRef` serializes the bulk PUT so two saves never
+  // race; `dataRef` mirrors the latest `data` for the debounced/retry savers.
+  const dirtyRef = useRef(false)
+  const saveInFlightRef = useRef(false)
+  const dataRef = useRef(data)
   // Real-time sync support: timestamp of the last local workspace edit (so an
   // incoming refetch never clobbers an in-flight edit), plus a live mirror of
   // the sync state readable inside the SSE refetch timer.
@@ -234,6 +254,12 @@ function App() {
   useEffect(() => {
     dataSyncStateRef.current = dataSyncState
   }, [dataSyncState])
+
+  // Mirror the latest workspace into a ref so the debounced + retry savers (and
+  // the refetch guard) always read current data, not a stale closure capture.
+  useEffect(() => {
+    dataRef.current = data
+  }, [data])
 
   // Real-time sync: subscribe to the server's change stream and refetch the
   // shared workspace whenever ANOTHER session edits it, so two owners see each
@@ -291,7 +317,9 @@ function App() {
       // side; pull a fresh workspace snapshot so the board reflects that too.
       try {
         const remote = await fetchAppData(new AbortController().signal, null)
-        skipAutosaveRef.current += 1
+        // Server-authoritative whole-workspace replacement — it IS the saved
+        // state, so it's clean (no bulk PUT echo to suppress).
+        dirtyRef.current = false
         setData(remote)
       } catch {
         /* the next cross-session refetch will reconcile */
@@ -313,8 +341,10 @@ function App() {
       try {
         const remote = await fetchAppData(new AbortController().signal, null)
         if (cancelled) return
-        // Suppress the autosave echo this setData would otherwise trigger.
-        skipAutosaveRef.current += 1
+        // Server-authoritative whole-workspace replacement = the saved state, so
+        // it's clean. (`attempt()` only reaches here when not dirty, so this
+        // never discards a local-only edit.)
+        dirtyRef.current = false
         setData(remote)
         setDataSyncState('synced')
       } catch {
@@ -324,15 +354,18 @@ function App() {
 
     const attempt = () => {
       if (cancelled) return
-      const recentlyEdited = new Date().getTime() - lastWorkspaceEditRef.current < 2500
-      const syncState = dataSyncStateRef.current
-      if (
-        previewActiveRef.current ||
-        syncState === 'saving' ||
-        syncState === 'loading' ||
-        recentlyEdited
-      ) {
-        // Don't overwrite an active edit — retry once it settles.
+      // Defer (rather than overwrite) whenever the user has unsaved or
+      // in-progress work — including text typed into a focused field that hasn't
+      // been committed to `data` yet. This is what stops a background refetch
+      // from wiping "what you were working on."
+      const defer = shouldDeferRefetch({
+        preview: previewActiveRef.current,
+        syncState: dataSyncStateRef.current,
+        recentlyEdited: new Date().getTime() - lastWorkspaceEditRef.current < 2500,
+        dirty: dirtyRef.current,
+        editingField: isEditableElementFocused(),
+      })
+      if (defer) {
         window.clearTimeout(refetchTimer)
         refetchTimer = window.setTimeout(attempt, 1500)
         return
@@ -516,7 +549,8 @@ function App() {
         const remoteData = ensureRecurringChecklists(
           await fetchAppData(controller.signal, previewAs),
         ).data
-        skipAutosaveRef.current += 1
+        // Freshly loaded server state is authoritative and clean.
+        dirtyRef.current = false
         setData(remoteData)
         setServerPersistenceEnabled(true)
         setDataSyncState('synced')
@@ -542,53 +576,99 @@ function App() {
     return () => controller.abort()
   }, [sessionUser, previewUserId])
 
+  // Persist all pending local-only edits via the bulk PUT. Drains in a loop so
+  // that edits arriving WHILE a save is in flight are still saved (the indicator
+  // only goes "synced" once the data that's actually on screen has been
+  // confirmed persisted). `dirtyRef` is cleared only when the loop fully drains,
+  // so a failure or a concurrent edit can never leave a real change unsaved
+  // while the banner claims "All changes saved."
+  const saveNow = useCallback(async () => {
+    if (!dirtyRef.current) {
+      setDataSyncState((s) => (s === 'offline' ? s : 'synced'))
+      return
+    }
+    if (saveInFlightRef.current) {
+      // A save is already running; its loop re-reads dataRef and will pick up
+      // whatever just changed (dirtyRef is still set).
+      return
+    }
+    saveInFlightRef.current = true
+    try {
+      let firstPass = true
+      while (dirtyRef.current) {
+        // Throttle re-saves when edits keep landing mid-flight so a rapidly
+        // mutating field can't trigger a burst of PUTs (the first pass is
+        // already debounced by the autosave effect).
+        if (!firstPass) {
+          await new Promise((resolve) => window.setTimeout(resolve, 250))
+        }
+        firstPass = false
+        const payloadSnapshot = workspaceSnapshot(dataRef.current)
+        setDataSyncState('saving')
+        try {
+          await saveAppData(dataRef.current)
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 401) {
+            setSessionUser(null)
+            setServerPersistenceEnabled(false)
+            setDataSyncState('offline')
+            return
+          }
+          // Leave dirtyRef set so the retry effect (and the next edit) try again
+          // — never silently drop the change or claim it was saved.
+          setDataSyncState('error')
+          return
+        }
+        // The PUT covered `payloadSnapshot`. Only declare clean/synced if no
+        // newer edit landed while it was in flight; otherwise loop and save the
+        // newer data.
+        if (workspaceSnapshot(dataRef.current) === payloadSnapshot) {
+          dirtyRef.current = false
+          setDataSyncState('synced')
+        }
+      }
+    } finally {
+      saveInFlightRef.current = false
+    }
+  }, [])
+
+  // Debounced autosave: whenever the workspace has unsaved local edits, push
+  // them after a short quiet period. When clean (e.g. a server-authoritative
+  // load/refetch/dedicated-endpoint update just landed), there's nothing to do.
   useEffect(() => {
     if (!serverPersistenceEnabled) {
       return
     }
-
     // Preview mode is strictly read-only — never autosave the previewed
     // person's scoped dataset back over the real workspace.
     if (previewUserId && sessionUser?.role === 'owner') {
       return
     }
-
-    // If a local-only mutator flagged this save as mandatory (e.g. a
-    // `deleteClient` whose only persistence path is autosave), honor it
-    // — drain the skip counter so we don't double-skip later, and fall
-    // through to the persist branch below. Otherwise, the skip counter
-    // is the normal "post-fetch echo / API-mirror" guard.
-    if (forceNextSaveRef.current) {
-      forceNextSaveRef.current = false
-      skipAutosaveRef.current = 0
-    } else if (skipAutosaveRef.current > 0) {
-      skipAutosaveRef.current -= 1
-      setDataSyncState('synced')
+    if (!dirtyRef.current) {
+      // Don't stomp an "offline" indicator (server unreachable) with a false
+      // "synced"; otherwise the data on screen matches the server, so synced.
+      setDataSyncState((s) => (s === 'offline' ? s : 'synced'))
       return
     }
-
     const timeoutId = window.setTimeout(() => {
-      const persist = async () => {
-        try {
-          setDataSyncState('saving')
-          await saveAppData(data)
-          setDataSyncState('synced')
-        } catch (error) {
-          if (error instanceof ApiError && error.status === 401) {
-            setSessionUser(null)
-            setServerPersistenceEnabled(false)
-            return
-          }
-
-          setDataSyncState('error')
-        }
-      }
-
-      void persist()
+      void saveNow()
     }, 250)
-
     return () => window.clearTimeout(timeoutId)
-  }, [data, serverPersistenceEnabled, previewUserId, sessionUser])
+  }, [data, serverPersistenceEnabled, previewUserId, sessionUser, saveNow])
+
+  // Sticky-error retry: a failed bulk PUT keeps the workspace dirty and the
+  // indicator on "error". Retry on a timer until it succeeds (or the user makes
+  // another edit, which retries sooner via the debounce above) so a transient
+  // outage can't strand unsaved work.
+  useEffect(() => {
+    if (dataSyncState !== 'error' || !serverPersistenceEnabled) {
+      return
+    }
+    const retryId = window.setTimeout(() => {
+      void saveNow()
+    }, 4000)
+    return () => window.clearTimeout(retryId)
+  }, [dataSyncState, serverPersistenceEnabled, saveNow])
 
   useEffect(() => {
     if (!timer) {
@@ -650,25 +730,28 @@ function App() {
   }, [activeEmployeeId, data.timeEntries, role])
 
   const updateWorkspaceData = (updater: (current: AppData) => AppData) => {
-    // This mutator path is local-only — there's no companion API call to
-    // persist the change. The autosave is the ONLY way it reaches the
-    // server, so flag the next autosave as mandatory regardless of any
-    // pending skip-counter increments from concurrent API mutations.
-    forceNextSaveRef.current = true
-    // Mark the moment of this edit so a real-time refetch (SSE) defers rather
-    // than overwriting an in-flight, not-yet-saved change.
-    lastWorkspaceEditRef.current = new Date().getTime()
     // Preview mode is strictly read-only: every workspace-config mutator
     // (templates, clients, plans, stages) routes through here, so a single
     // early-return neutralizes all of them at once.
     if (previewActiveRef.current) {
       return
     }
+    // This mutator path is local-only — there's no companion API call to
+    // persist the change. The bulk autosave is the ONLY way it reaches the
+    // server, so mark the workspace dirty; it stays dirty until a PUT confirms
+    // it, immune to React batching with any concurrent API-backed mutation.
+    dirtyRef.current = true
+    // Mark the moment of this edit so a real-time refetch (SSE) defers rather
+    // than overwriting an in-flight, not-yet-saved change.
+    lastWorkspaceEditRef.current = new Date().getTime()
     setData((current) => ensureRecurringChecklists(updater(current)).data)
   }
 
   const applyServerDataUpdate = (updater: (current: AppData) => AppData) => {
-    skipAutosaveRef.current += 1
+    // The change was already persisted by a dedicated endpoint, so this does
+    // NOT mark the workspace dirty (no bulk PUT echo). It DOES count as recent
+    // local activity, so a cross-session refetch defers rather than racing it.
+    lastWorkspaceEditRef.current = new Date().getTime()
     setData(updater)
   }
 

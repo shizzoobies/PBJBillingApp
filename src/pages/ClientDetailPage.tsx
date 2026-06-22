@@ -216,7 +216,12 @@ export function ClientDetailPage() {
                   const done = checklist.items.filter((item) => item.done).length
                   return (
                     <li key={checklist.id}>
-                      <strong>{checklist.title}</strong>
+                      <Link
+                        to={`/checklists?focus=${encodeURIComponent(checklist.id)}`}
+                        className="active-checklist-link"
+                      >
+                        <strong>{checklist.title}</strong>
+                      </Link>
                       <span>
                         Due {checklist.dueDate} · {done}/{total} done ·{' '}
                         {clientName(data.clients, checklist.clientId)}

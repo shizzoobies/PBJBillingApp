@@ -10,6 +10,7 @@ import type {
   Employee,
   EmployeeReportRow,
   TaskReportRow,
+  TimeEntry,
 } from '../lib/types'
 import {
   clientName,
@@ -170,7 +171,9 @@ export function ReportsPage() {
       <ReportsOverview
         activeClientCount={activeClientCount}
         billingPeriod={billingPeriod}
+        billingPeriodEntries={billingPeriodEntries}
         billingPeriodLabel={billingPeriodLabel}
+        checklists={data.checklists}
         taskRows={taskReportRows}
         clientRows={clientReportRows}
         clients={data.clients}
@@ -188,7 +191,9 @@ export function ReportsPage() {
 function ReportsOverview({
   activeClientCount,
   billingPeriod,
+  billingPeriodEntries,
   billingPeriodLabel,
+  checklists,
   taskRows,
   clientRows,
   clients,
@@ -201,7 +206,9 @@ function ReportsOverview({
 }: {
   activeClientCount: number
   billingPeriod: string
+  billingPeriodEntries: TimeEntry[]
   billingPeriodLabel: string
+  checklists: Checklist[]
   taskRows: TaskReportRow[]
   clientRows: ClientReportRow[]
   clients: Client[]
@@ -257,6 +264,32 @@ function ReportsOverview({
       ['Task', 'Hours', 'Entries'],
       taskRows.map((row) => [row.taskTitle, (row.minutes / 60).toFixed(2), row.entryCount]),
     )
+
+  const exportHoursByMonth = () => {
+    const sorted = [...billingPeriodEntries].sort((a, b) => a.date.localeCompare(b.date))
+    downloadCsv(
+      `hours-by-month-${periodSlug}.csv`,
+      ['Date', 'Employee', 'Client', 'Task', 'Hours', 'Billable', 'Description'],
+      sorted.map((entry) => {
+        const taskTitle = entry.taskId
+          ? checklists.find((checklist: Checklist) => checklist.id === entry.taskId)?.title ??
+            'Unassigned'
+          : entry.taskLabel ?? 'Unassigned'
+        const clientDisplay = entry.isAdministrative || !entry.clientId
+          ? '(Admin)'
+          : clientName(clients, entry.clientId)
+        return [
+          entry.date,
+          employeeName(employees, entry.employeeId),
+          clientDisplay,
+          taskTitle,
+          (entry.minutes / 60).toFixed(2),
+          entry.billable ? 'Yes' : 'No',
+          entry.description,
+        ]
+      }),
+    )
+  }
 
   return (
     <>
@@ -342,6 +375,19 @@ function ReportsOverview({
             currency.format(row.invoiceTotal),
           ])}
         />
+      </section>
+
+      <section className="panel report-section">
+        <div className="section-heading">
+          <div>
+            <p className="section-kicker">Raw export</p>
+            <h2>Hours by month</h2>
+          </div>
+          <button type="button" className="ghost-action no-print" onClick={exportHoursByMonth}>
+            <Download size={14} />
+            Hours by month (CSV)
+          </button>
+        </div>
       </section>
 
       <section className="panel report-section">

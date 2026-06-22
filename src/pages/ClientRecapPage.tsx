@@ -3,10 +3,8 @@ import { useEffect, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import {
   fetchClientRecap,
-  saveSalesTaxRecord,
   type ClientRecap,
   type ClientRecapPeriodType,
-  type SalesTaxFigures,
 } from '../lib/api'
 import { currentReviewPeriod, shiftReviewPeriod } from '../lib/utils'
 
@@ -14,15 +12,8 @@ const money = (n: number | null | undefined) =>
   n == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 const hrs = (n: number) => `${n}h`
 
-const SALES_TAX_LABELS: Record<ClientRecap['salesTax']['status'], string> = {
-  not_started: 'Not started',
-  open: 'In progress',
-  overdue: 'Overdue',
-  done: 'Filed',
-}
-
 export function ClientRecapPage() {
-  const { visibleClients, ownerMode } = useAppContext()
+  const { visibleClients } = useAppContext()
   const [clientId, setClientId] = useState(visibleClients[0]?.id ?? '')
   const [periodType, setPeriodType] = useState<ClientRecapPeriodType>('month')
   const [period, setPeriod] = useState(() => currentReviewPeriod('month'))
@@ -59,14 +50,6 @@ export function ClientRecapPage() {
   const changePeriodType = (next: ClientRecapPeriodType) => {
     setPeriodType(next)
     setPeriod(currentReviewPeriod(next))
-  }
-
-  const refresh = () => {
-    if (effectiveClientId) {
-      fetchClientRecap(effectiveClientId, periodType, period)
-        .then(setRecap)
-        .catch(() => {})
-    }
   }
 
   if (visibleClients.length === 0) {
@@ -234,41 +217,6 @@ export function ClientRecapPage() {
             )}
           </section>
 
-          {/* Sales tax */}
-          <section className="panel recap-card">
-            <h3>Sales tax</h3>
-            <p className="recap-tax-status">
-              Filing status:{' '}
-              <span
-                className={
-                  recap.salesTax.status === 'done'
-                    ? 'recap-badge recap-badge-done'
-                    : recap.salesTax.status === 'overdue'
-                      ? 'recap-badge recap-badge-overdue'
-                      : 'recap-badge'
-                }
-              >
-                {SALES_TAX_LABELS[recap.salesTax.status]}
-              </span>
-              {recap.salesTax.dueDate ? (
-                <span className="muted-text"> · due {recap.salesTax.dueDate}</span>
-              ) : null}
-            </p>
-            {recap.salesTax.figures ? (
-              <SalesTaxEditor
-                key={`${recap.client.id}:${recap.periodType}:${recap.period}`}
-                clientId={recap.client.id}
-                periodType={recap.periodType}
-                period={recap.period}
-                figures={recap.salesTax.figures}
-                editable={ownerMode}
-                onSaved={refresh}
-              />
-            ) : ownerMode ? null : (
-              <p className="muted-text">Recorded figures are visible to the owner only.</p>
-            )}
-          </section>
-
           {/* Billing (owner only) */}
           {recap.billing ? (
             <section className="panel recap-card">
@@ -337,124 +285,5 @@ export function ClientRecapPage() {
         </>
       ) : null}
     </section>
-  )
-}
-
-function SalesTaxEditor({
-  clientId,
-  periodType,
-  period,
-  figures,
-  editable,
-  onSaved,
-}: {
-  clientId: string
-  periodType: ClientRecapPeriodType
-  period: string
-  figures: SalesTaxFigures
-  editable: boolean
-  onSaved: () => void
-}) {
-  const toStr = (n: number | null) => (n == null ? '' : String(n))
-  const [taxableSales, setTaxableSales] = useState(toStr(figures.taxableSales))
-  const [taxCollected, setTaxCollected] = useState(toStr(figures.taxCollected))
-  const [taxOwed, setTaxOwed] = useState(toStr(figures.taxOwed))
-  const [notes, setNotes] = useState(figures.notes)
-  const [saving, setSaving] = useState(false)
-  const [status, setStatus] = useState('')
-
-  if (!editable) {
-    return (
-      <div className="recap-stats">
-        <div className="recap-stat">
-          <span className="recap-stat-value">{money(figures.taxableSales)}</span>
-          <span className="recap-stat-label">Taxable sales</span>
-        </div>
-        <div className="recap-stat">
-          <span className="recap-stat-value">{money(figures.taxCollected)}</span>
-          <span className="recap-stat-label">Tax collected</span>
-        </div>
-        <div className="recap-stat">
-          <span className="recap-stat-value">{money(figures.taxOwed)}</span>
-          <span className="recap-stat-label">Tax owed</span>
-        </div>
-      </div>
-    )
-  }
-
-  const num = (s: string) => (s.trim() === '' ? null : Number(s))
-  const handleSave = async () => {
-    setSaving(true)
-    setStatus('')
-    try {
-      await saveSalesTaxRecord({
-        clientId,
-        periodType,
-        period,
-        taxableSales: num(taxableSales),
-        taxCollected: num(taxCollected),
-        taxOwed: num(taxOwed),
-        notes: notes.trim(),
-      })
-      setStatus('Saved')
-      onSaved()
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Could not save')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="recap-tax-form">
-      <label className="field">
-        <span>Taxable sales</span>
-        <input
-          className="input"
-          type="number"
-          min="0"
-          step="0.01"
-          value={taxableSales}
-          onChange={(event) => setTaxableSales(event.target.value)}
-        />
-      </label>
-      <label className="field">
-        <span>Tax collected</span>
-        <input
-          className="input"
-          type="number"
-          min="0"
-          step="0.01"
-          value={taxCollected}
-          onChange={(event) => setTaxCollected(event.target.value)}
-        />
-      </label>
-      <label className="field">
-        <span>Tax owed</span>
-        <input
-          className="input"
-          type="number"
-          min="0"
-          step="0.01"
-          value={taxOwed}
-          onChange={(event) => setTaxOwed(event.target.value)}
-        />
-      </label>
-      <label className="field recap-tax-notes">
-        <span>Notes</span>
-        <input
-          className="input"
-          type="text"
-          value={notes}
-          onChange={(event) => setNotes(event.target.value)}
-        />
-      </label>
-      <div className="recap-tax-save">
-        <button type="button" className="primary-action" disabled={saving} onClick={() => void handleSave()}>
-          {saving ? 'Saving…' : 'Save figures'}
-        </button>
-        {status ? <span className="muted-text">{status}</span> : null}
-      </div>
-    </div>
   )
 }

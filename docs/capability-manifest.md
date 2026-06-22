@@ -149,14 +149,10 @@ sit in the top bar on every page.
   their assigned clients). Picking a client you don't have access to is blocked.
 - Sections everyone sees: Time & hours (total / billable / administrative, by
   staff, vs. the prior period); Tasks & workflow (due / completed / overdue
-  this period); Sales-tax filing status for the period (from the sales-tax
-  task).
+  this period).
 - Owner-only sections: Billing (revenue for the period, rate/plan,
   reimbursements); Profitability (realized rate = fee ÷ hours, and margin when
-  team cost rates are set); and the recorded sales-tax dollar figures.
-- Sales tax: the owner can RECORD per-client, per-period figures here — taxable
-  sales, tax collected, tax owed, and notes. Staff see the filing status but
-  not the dollar figures.
+  team cost rates are set).
 
 ## Contacts
 
@@ -169,6 +165,9 @@ sit in the top bar on every page.
   billing, employee coverage.
 - Employee report (hours by person) and Client report (hours by client),
   each with Download CSV. Print-friendly output.
+- Hours by month: a raw, line-by-line CSV export of every time entry in the
+  selected period (Date, Employee, Client, Task, Hours, Billable, Description),
+  sorted by date — for month-by-month detail / external bookkeeping.
 
 ## Productivity (owner only)
 
