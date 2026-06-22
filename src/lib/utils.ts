@@ -4,6 +4,7 @@ import type {
   ChecklistFrequency,
   ChecklistTemplate,
   Client,
+  Contact,
   Employee,
   Invoice,
   InvoiceLine,
@@ -894,6 +895,37 @@ export function employeeName(employees: Employee[], employeeId: string) {
 
 export function clientName(clients: Client[], clientId: string) {
   return clients.find((client) => client.id === clientId)?.name ?? 'Unknown client'
+}
+
+/**
+ * The email to use for a contact ON a specific client. A `companyEmails`
+ * override for that `clientId` (with a non-empty value) wins; otherwise the
+ * contact's base `email`. Returns '' when neither is set. Pure — unit-tested.
+ */
+export function emailForClient(
+  contact: Pick<Contact, 'email' | 'companyEmails'>,
+  clientId: string,
+): string {
+  const override = (contact.companyEmails ?? []).find((entry) => entry.clientId === clientId)
+  const overrideEmail = override?.email?.trim()
+  if (overrideEmail) return overrideEmail
+  return (contact.email ?? '').trim()
+}
+
+/**
+ * Contacts that are "unlinked" — not referenced by any client's `contactIds`
+ * and not archived. These are surfaced on the Contacts page so the owner can
+ * spot a contact that was added but never attached to a company. Pure —
+ * unit-tested.
+ */
+export function unlinkedContacts(contacts: Contact[], clients: Client[]): Contact[] {
+  const linkedIds = new Set<string>()
+  for (const client of clients) {
+    for (const id of client.contactIds ?? []) {
+      linkedIds.add(id)
+    }
+  }
+  return contacts.filter((contact) => !contact.archivedAt && !linkedIds.has(contact.id))
 }
 
 /**

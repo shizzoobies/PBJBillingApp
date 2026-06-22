@@ -943,6 +943,33 @@ function dropInvalidDateField(record, key) {
 }
 
 /**
+ * Coerce a contact's `company_emails` (a jsonb column, or the in-memory
+ * `companyEmails` array on a save payload) to a clean array of
+ * `{ clientId, email }` objects. node-pg usually hands back parsed jsonb, but a
+ * raw string is tolerated. Malformed entries are dropped.
+ */
+function parseCompanyEmails(value) {
+  let raw = value
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw)
+    } catch {
+      return []
+    }
+  }
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter(
+      (entry) =>
+        entry &&
+        typeof entry === 'object' &&
+        typeof entry.clientId === 'string' &&
+        typeof entry.email === 'string',
+    )
+    .map((entry) => ({ clientId: entry.clientId, email: entry.email }))
+}
+
+/**
  * Defensive, NON-REJECTING normalizer run at the very top of
  * `appDataStore.write()` before either persistence branch. The overriding
  * rule: a normal save's values pass through UNCHANGED — we only clamp/normalize
@@ -1741,6 +1768,18 @@ export class AppDataStore {
       // Per-contact lock (read-only protection) — shared + persisted.
       await this.pool.query(
         `alter table contacts add column if not exists locked boolean not null default false`,
+      )
+      // Per-company email overrides (array-of-objects → jsonb, NOT text[]).
+      await this.pool.query(
+        `alter table contacts add column if not exists company_emails jsonb not null default '[]'`,
+      )
+      // Symmetric links to other contacts.
+      await this.pool.query(
+        `alter table contacts add column if not exists linked_contact_ids text[] not null default '{}'`,
+      )
+      // Archive marker (null = active).
+      await this.pool.query(
+        `alter table contacts add column if not exists archived_at timestamptz`,
       )
 
       await this.pool.query(`
@@ -2769,7 +2808,8 @@ export class AppDataStore {
             order by name asc
           `),
           this.pool.query(`
-            select id, name, email, phone, title, notes, locked
+            select id, name, email, phone, title, notes, locked,
+                   company_emails, linked_contact_ids, archived_at
             from contacts
             order by name asc
           `),
@@ -3000,6 +3040,15 @@ export class AppDataStore {
           title: row.title ?? '',
           notes: row.notes ?? '',
           ...(row.locked ? { locked: true } : {}),
+          // jsonb: node-pg usually returns parsed objects, but tolerate a
+          // string just in case. Keep only well-formed {clientId, email} pairs.
+          companyEmails: parseCompanyEmails(row.company_emails),
+          // text[] → string[]; coerce a null/garbage value to [].
+          linkedContactIds: Array.isArray(row.linked_contact_ids)
+            ? row.linked_contact_ids.filter((id) => typeof id === 'string')
+            : [],
+          // timestamptz → ISO string (or null when active).
+          archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
         })),
         clients: clientsResult.rows.map((row) => {
           // Back-compat normalization. The frontend always gets
@@ -3527,10 +3576,22 @@ export class AppDataStore {
         }
 
         for (const contact of data.contacts ?? []) {
+          // Normalize the new fields so a malformed payload can't break the
+          // insert: company_emails as clean jsonb, linked ids as a text[],
+          // archived_at as a timestamp-or-null.
+          const companyEmails = parseCompanyEmails(contact.companyEmails)
+          const linkedContactIds = Array.isArray(contact.linkedContactIds)
+            ? contact.linkedContactIds.filter((id) => typeof id === 'string')
+            : []
+          const archivedAt =
+            typeof contact.archivedAt === 'string' && contact.archivedAt ? contact.archivedAt : null
           await client.query(
             `
-              insert into contacts (id, name, email, phone, title, notes, locked, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, now())
+              insert into contacts (
+                id, name, email, phone, title, notes, locked,
+                company_emails, linked_contact_ids, archived_at, updated_at
+              )
+              values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::text[], $10, now())
             `,
             [
               contact.id,
@@ -3540,6 +3601,9 @@ export class AppDataStore {
               contact.title ?? null,
               contact.notes ?? null,
               Boolean(contact.locked),
+              JSON.stringify(companyEmails),
+              linkedContactIds,
+              archivedAt,
             ],
           )
         }

@@ -158,8 +158,19 @@ sit in the top bar on every page.
 
 ## Contacts
 
-- Shared contact directory: name, title, email, phone, notes; linked to
-  clients ("On N clients"). Import from CSV. Lockable (owner).
+- Shared contact directory: name, title, email, phone, notes. Import from CSV.
+  Lockable (owner).
+- Each contact shows the actual client NAMES it's linked to (clickable), and a
+  "Not linked to any client" flag for contacts on no client (with an Unlinked
+  filter to find them).
+- Per-company email: a contact on multiple clients can have a client-specific
+  email override; the base email is the default. The client's contact area and
+  emails use the per-company address when set.
+- Linked contacts: relate contacts to each other (symmetric — linking A to B
+  links B to A).
+- Archive: archive old/inactive contacts into an Archived section; archived
+  contacts are hidden from the active directory and from client contact pickers.
+  Unarchive to restore.
 
 ## Reports (owner only)
 

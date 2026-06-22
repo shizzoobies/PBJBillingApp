@@ -366,6 +366,14 @@ export type AppContextValue = {
    * client's `contactIds` so no client references a missing contact.
    */
   deleteContact: (contactId: string) => void
+  /**
+   * Owner-only: set the full set of contacts a contact is linked to, keeping
+   * the relation symmetric (both sides updated). Local-only, persisted by the
+   * bulk autosave.
+   */
+  setContactLinks: (contactId: string, nextLinkedIds: string[]) => void
+  /** Owner-only: archive (stamp archivedAt) or unarchive (clear it) a contact. */
+  setContactArchived: (contactId: string, archived: boolean) => void
   selectedClientId: string
   setSelectedClientId: (clientId: string) => void
   printInvoice: () => void

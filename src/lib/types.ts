@@ -173,6 +173,25 @@ export type Contact = {
    * Persisted (shared) so the lock survives reloads and other devices.
    */
   locked?: boolean
+  /**
+   * Per-company email overrides. One contact can appear on many clients with a
+   * client-specific email; the base `email` is the default. Each entry maps a
+   * `clientId` to the email to use for THAT client. Use `emailForClient()`
+   * (lib/utils) to resolve the effective address. Persisted as jsonb in pg.
+   */
+  companyEmails?: Array<{ clientId: string; email: string }>
+  /**
+   * Other contacts this contact is related to. Maintained SYMMETRICALLY —
+   * linking A→B also adds A to B.linkedContactIds (and unlinking removes both
+   * sides). Persisted as text[] in pg.
+   */
+  linkedContactIds?: string[]
+  /**
+   * ISO timestamp the contact was archived, or null/undefined when active.
+   * Archived contacts are hidden from the active directory and from client
+   * contact pickers. Persisted as timestamptz in pg.
+   */
+  archivedAt?: string | null
 }
 
 export type TimeApprovalStatus = 'pending' | 'approved' | 'rejected'

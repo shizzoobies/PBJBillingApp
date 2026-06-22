@@ -2624,13 +2624,80 @@ function App() {
   const deleteContact = (contactId: string) => {
     updateWorkspaceData((current) => ({
       ...current,
-      contacts: (current.contacts ?? []).filter((contact) => contact.id !== contactId),
+      contacts: (current.contacts ?? [])
+        .filter((contact) => contact.id !== contactId)
+        // Also drop the deleted contact from any other contact's link list so
+        // no contact references a missing one (symmetric relation upkeep).
+        .map((contact) =>
+          Array.isArray(contact.linkedContactIds) && contact.linkedContactIds.includes(contactId)
+            ? {
+                ...contact,
+                linkedContactIds: contact.linkedContactIds.filter((id) => id !== contactId),
+              }
+            : contact,
+        ),
       // Strip the deleted contact from every client so none reference a
       // missing contact id.
       clients: current.clients.map((client) =>
         Array.isArray(client.contactIds) && client.contactIds.includes(contactId)
           ? { ...client, contactIds: client.contactIds.filter((id) => id !== contactId) }
           : client,
+      ),
+    }))
+  }
+
+  /**
+   * Owner-only: set the FULL set of contacts a contact is linked to, keeping
+   * the relation SYMMETRICAL. For every contact that gains `contactId` as a
+   * link we add `contactId` back to its list; for every one that loses it we
+   * remove `contactId`. Local-only (persisted by the bulk autosave). A contact
+   * never links to itself.
+   */
+  const setContactLinks = (contactId: string, nextLinkedIds: string[]) => {
+    updateWorkspaceData((current) => {
+      const contacts = current.contacts ?? []
+      const exists = new Set(contacts.map((contact) => contact.id))
+      const target = new Set(
+        nextLinkedIds.filter((id) => id !== contactId && exists.has(id)),
+      )
+      return {
+        ...current,
+        contacts: contacts.map((contact) => {
+          if (contact.id === contactId) {
+            return { ...contact, linkedContactIds: [...target] }
+          }
+          const existing = Array.isArray(contact.linkedContactIds)
+            ? contact.linkedContactIds
+            : []
+          const hasLink = existing.includes(contactId)
+          const shouldLink = target.has(contact.id)
+          if (shouldLink && !hasLink) {
+            return { ...contact, linkedContactIds: [...existing, contactId] }
+          }
+          if (!shouldLink && hasLink) {
+            return {
+              ...contact,
+              linkedContactIds: existing.filter((id) => id !== contactId),
+            }
+          }
+          return contact
+        }),
+      }
+    })
+  }
+
+  /**
+   * Owner-only: archive / unarchive a contact. Archiving stamps `archivedAt`
+   * with the current time; unarchiving clears it to null. Hidden from the
+   * active list + client pickers by the consuming pages. Local-only.
+   */
+  const setContactArchived = (contactId: string, archived: boolean) => {
+    updateWorkspaceData((current) => ({
+      ...current,
+      contacts: (current.contacts ?? []).map((contact) =>
+        contact.id === contactId
+          ? { ...contact, archivedAt: archived ? new Date().toISOString() : null }
+          : contact,
       ),
     }))
   }
@@ -2897,6 +2964,8 @@ function App() {
     addContact,
     updateContact,
     deleteContact,
+    setContactLinks,
+    setContactArchived,
     selectedClientId,
     setSelectedClientId,
     printInvoice,

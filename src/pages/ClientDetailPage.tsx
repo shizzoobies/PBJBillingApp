@@ -35,6 +35,7 @@ import {
 import {
   clientName,
   deriveChecklistStatus,
+  emailForClient,
   employeeName,
   formatHours,
   getChecklistFrequencyLabel,
@@ -287,16 +288,45 @@ function ContactSectionBody({
   contacts: Contact[]
   onCommit: (patch: Partial<Client>) => void
 }) {
+  // Archived contacts are hidden from the picker. A contact already attached to
+  // this client (e.g. attached before it was archived) stays selectable so its
+  // chip still renders, but no archived contact can be newly added.
+  const selectedIds = client.contactIds ?? []
+  const pickerOptions = contacts
+    .filter((entry) => !entry.archivedAt || selectedIds.includes(entry.id))
+    .map((entry) => ({ id: entry.id, label: entry.name }))
+  // The contacts on this client, with the email to use FOR this client
+  // (per-company override if set, else the base email).
+  const selectedContacts = selectedIds
+    .map((id) => contacts.find((entry) => entry.id === id))
+    .filter((entry): entry is Contact => Boolean(entry))
+
   return (
     <div className="form-grid two-col">
       <ChipField
         label="Contacts"
-        selectedIds={client.contactIds ?? []}
-        options={contacts.map((entry) => ({ id: entry.id, label: entry.name }))}
+        selectedIds={selectedIds}
+        options={pickerOptions}
         onCommit={(nextIds) => onCommit({ contactIds: nextIds })}
         addLabel="+ Add contact"
         emptyHelper="No contacts selected. Manage the shared list on the Contacts page."
       />
+      {selectedContacts.length > 0 ? (
+        <div className="field full-row client-contact-emails">
+          <span className="field-label-row">Contact emails (for this client)</span>
+          <ul className="client-contact-email-list">
+            {selectedContacts.map((entry) => {
+              const email = emailForClient(entry, client.id)
+              return (
+                <li key={entry.id} className="client-contact-email-row">
+                  <strong>{entry.name}</strong>
+                  <span className="muted-text">{email || 'No email'}</span>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      ) : null}
       <SaveTextField
         label="Address line 1"
         onCommit={(value) => onCommit({ addressLine1: value })}

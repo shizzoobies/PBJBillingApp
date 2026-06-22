@@ -1,8 +1,11 @@
-import { Lock, Plus, Trash2, Unlock, Upload } from 'lucide-react'
+import { Archive, ArchiveRestore, Lock, Plus, Trash2, Unlock, Upload } from 'lucide-react'
 import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { CollapsibleSection, SavingTextInput, SavingTextarea } from '../components/SectionKit'
 import type { Client, Contact } from '../lib/types'
+import { unlinkedContacts } from '../lib/utils'
 import {
   applyMerge,
   buildImportPlan,
@@ -15,7 +18,15 @@ import {
 } from '../lib/contactImport'
 
 export function ContactsPage() {
-  const { data, addContact, updateContact, deleteContact, ownerMode } = useAppContext()
+  const {
+    data,
+    addContact,
+    updateContact,
+    deleteContact,
+    setContactLinks,
+    setContactArchived,
+    ownerMode,
+  } = useAppContext()
   return (
     <section className="content-grid two-column" id="contacts">
       <ContactBuilder onCreate={addContact} />
@@ -26,6 +37,8 @@ export function ContactsPage() {
         onUpdate={updateContact}
         onDelete={deleteContact}
         onAdd={addContact}
+        onSetLinks={setContactLinks}
+        onSetArchived={setContactArchived}
       />
     </section>
   )
@@ -120,6 +133,8 @@ function ContactLibrary({
   onUpdate,
   onDelete,
   onAdd,
+  onSetLinks,
+  onSetArchived,
 }: {
   contacts: Contact[]
   clients: Client[]
@@ -127,9 +142,41 @@ function ContactLibrary({
   onUpdate: (contactId: string, patch: Partial<Contact>) => void
   onDelete: (contactId: string) => void
   onAdd: (contact: Omit<Contact, 'id'>) => void
+  onSetLinks: (contactId: string, nextLinkedIds: string[]) => void
+  onSetArchived: (contactId: string, archived: boolean) => void
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importText, setImportText] = useState<string | null>(null)
+  // Which contact rows are expanded to reveal the per-company-email + links
+  // editor. Keyed by contact id.
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
+  // "Unlinked only" at-a-glance filter for the active list.
+  const [unlinkedOnly, setUnlinkedOnly] = useState(false)
+
+  const toggleExpanded = (id: string) => {
+    setExpandedIds((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Active = not archived; archived split out into its own collapsible section.
+  const activeContacts = useMemo(
+    () => contacts.filter((contact) => !contact.archivedAt),
+    [contacts],
+  )
+  const archivedContacts = useMemo(
+    () => contacts.filter((contact) => contact.archivedAt),
+    [contacts],
+  )
+  const unlinked = useMemo(() => unlinkedContacts(contacts, clients), [contacts, clients])
+  const unlinkedIdSet = useMemo(() => new Set(unlinked.map((c) => c.id)), [unlinked])
+
+  const visibleActive = unlinkedOnly
+    ? activeContacts.filter((contact) => unlinkedIdSet.has(contact.id))
+    : activeContacts
 
   const handleDelete = (contact: Contact) => {
     const attached = clients.filter((client) => (client.contactIds ?? []).includes(contact.id))
@@ -190,105 +237,72 @@ function ContactLibrary({
         lockable
         headerAction={importActions}
       >
-        <div className="plan-list">
-        {contacts.length === 0 ? (
-          <p className="muted-text">No contacts yet. Add one to select it on a client.</p>
-        ) : null}
-        {contacts.map((contact) => {
-          const attachedCount = clients.filter((client) =>
-            (client.contactIds ?? []).includes(contact.id),
-          ).length
-          const locked = Boolean(contact.locked)
-          return (
-            <article
-              className={`plan-row${locked ? ' contact-locked' : ''}`}
-              key={contact.id}
+        {activeContacts.length > 0 ? (
+          <div className="contacts-filter-bar">
+            <button
+              type="button"
+              className={`contacts-filter-pill${unlinkedOnly ? ' is-active' : ''}`}
+              aria-pressed={unlinkedOnly}
+              onClick={() => setUnlinkedOnly((on) => !on)}
             >
-              <div className="contact-edit-fields">
-                {locked ? (
-                  <div className="contact-locked-view">
-                    <strong className="contact-locked-name">{contact.name}</strong>
-                    {contact.title ? <span>{contact.title}</span> : null}
-                    {contact.email ? <span>{contact.email}</span> : null}
-                    {contact.phone ? <span>{contact.phone}</span> : null}
-                    {contact.notes ? (
-                      <p className="contact-locked-notes">{contact.notes}</p>
-                    ) : null}
-                  </div>
-                ) : (
-                  <>
-                    <ContactTextInput
-                      ariaLabel={`${contact.name} name`}
-                      canonical={contact.name}
-                      onCommit={(value) => {
-                        const trimmed = value.trim()
-                        if (trimmed) onUpdate(contact.id, { name: trimmed })
-                      }}
-                    />
-                    <ContactTextInput
-                      ariaLabel={`${contact.name} title`}
-                      canonical={contact.title ?? ''}
-                      placeholder="Title"
-                      onCommit={(value) => onUpdate(contact.id, { title: value })}
-                    />
-                    <ContactTextInput
-                      ariaLabel={`${contact.name} email`}
-                      canonical={contact.email ?? ''}
-                      placeholder="Email"
-                      onCommit={(value) => onUpdate(contact.id, { email: value })}
-                    />
-                    <ContactTextInput
-                      ariaLabel={`${contact.name} phone`}
-                      canonical={contact.phone ?? ''}
-                      placeholder="Phone"
-                      onCommit={(value) => onUpdate(contact.id, { phone: value })}
-                    />
-                    <ContactNotesInput
-                      ariaLabel={`${contact.name} notes`}
-                      canonical={contact.notes ?? ''}
-                      placeholder="Notes"
-                      onCommit={(value) => onUpdate(contact.id, { notes: value })}
-                    />
-                  </>
-                )}
-                {attachedCount > 0 ? (
-                  <span className="checklist-meta-line">
-                    On {attachedCount} client{attachedCount === 1 ? '' : 's'}
-                  </span>
-                ) : null}
-              </div>
-              <div className="contact-row-actions">
-                <button
-                  className={`contact-lock-btn${locked ? ' is-locked' : ''}`}
-                  type="button"
-                  aria-pressed={locked}
-                  aria-label={locked ? `Unlock ${contact.name}` : `Lock ${contact.name}`}
-                  title={
-                    locked
-                      ? 'Locked — click to unlock and edit'
-                      : 'Lock to protect this contact from edits'
-                  }
-                  onClick={() => onUpdate(contact.id, { locked: !locked })}
-                >
-                  {locked ? <Lock size={14} /> : <Unlock size={14} />}
-                </button>
-                {ownerMode && !locked ? (
-                  <button
-                    className="item-delete-btn"
-                    type="button"
-                    aria-label={`Delete ${contact.name}`}
-                    title="Delete this contact"
-                    onClick={() => handleDelete(contact)}
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                ) : null}
-              </div>
-            </article>
-          )
-        })}
+              Unlinked ({unlinked.length})
+            </button>
+            {unlinkedOnly ? (
+              <span className="muted-text">Showing only contacts not on any client.</span>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="plan-list">
+          {activeContacts.length === 0 ? (
+            <p className="muted-text">No contacts yet. Add one to select it on a client.</p>
+          ) : null}
+          {activeContacts.length > 0 && visibleActive.length === 0 ? (
+            <p className="muted-text">Every contact is linked to a client.</p>
+          ) : null}
+          {visibleActive.map((contact) => (
+            <ContactRow
+              key={contact.id}
+              contact={contact}
+              clients={clients}
+              contacts={contacts}
+              ownerMode={ownerMode}
+              isUnlinked={unlinkedIdSet.has(contact.id)}
+              expanded={expandedIds.has(contact.id)}
+              onToggleExpanded={() => toggleExpanded(contact.id)}
+              onUpdate={onUpdate}
+              onDelete={handleDelete}
+              onSetLinks={onSetLinks}
+              onSetArchived={onSetArchived}
+            />
+          ))}
         </div>
       </CollapsibleSection>
+      {archivedContacts.length > 0 ? (
+        <CollapsibleSection
+          kicker="Archived"
+          title={`Archived contacts (${archivedContacts.length})`}
+          defaultCollapsed
+        >
+          <div className="plan-list">
+            {archivedContacts.map((contact) => (
+              <ContactRow
+                key={contact.id}
+                contact={contact}
+                clients={clients}
+                contacts={contacts}
+                ownerMode={ownerMode}
+                isUnlinked={false}
+                expanded={expandedIds.has(contact.id)}
+                onToggleExpanded={() => toggleExpanded(contact.id)}
+                onUpdate={onUpdate}
+                onDelete={handleDelete}
+                onSetLinks={onSetLinks}
+                onSetArchived={onSetArchived}
+              />
+            ))}
+          </div>
+        </CollapsibleSection>
+      ) : null}
       {ownerMode && importText !== null ? (
         <ImportContactsModal
           text={importText}
@@ -299,6 +313,223 @@ function ContactLibrary({
         />
       ) : null}
     </>
+  )
+}
+
+/**
+ * A single contact in the directory (or archived) list. Shows the inline
+ * editor (or a read-only view when locked), the client NAMES the contact is
+ * linked to (each a Link to that client), an "Unlinked" / "Archived" badge,
+ * and — when expanded — per-company email overrides and a contact-to-contact
+ * link picker. Lock / archive / delete actions sit on the right.
+ */
+function ContactRow({
+  contact,
+  clients,
+  contacts,
+  ownerMode,
+  isUnlinked,
+  expanded,
+  onToggleExpanded,
+  onUpdate,
+  onDelete,
+  onSetLinks,
+  onSetArchived,
+}: {
+  contact: Contact
+  clients: Client[]
+  contacts: Contact[]
+  ownerMode: boolean
+  isUnlinked: boolean
+  expanded: boolean
+  onToggleExpanded: () => void
+  onUpdate: (contactId: string, patch: Partial<Contact>) => void
+  onDelete: (contact: Contact) => void
+  onSetLinks: (contactId: string, nextLinkedIds: string[]) => void
+  onSetArchived: (contactId: string, archived: boolean) => void
+}) {
+  const locked = Boolean(contact.locked)
+  const archived = Boolean(contact.archivedAt)
+  const linkedClients = clients.filter((client) =>
+    (client.contactIds ?? []).includes(contact.id),
+  )
+  const linkedContactIds = contact.linkedContactIds ?? []
+
+  // Set the per-company email override for `clientId`. An empty value removes
+  // the override (so the base email takes over again).
+  const setCompanyEmail = (clientId: string, value: string) => {
+    const trimmed = value.trim()
+    const rest = (contact.companyEmails ?? []).filter((entry) => entry.clientId !== clientId)
+    const next = trimmed ? [...rest, { clientId, email: trimmed }] : rest
+    onUpdate(contact.id, { companyEmails: next })
+  }
+
+  return (
+    <article className={`plan-row${locked ? ' contact-locked' : ''}${archived ? ' contact-archived' : ''}`}>
+      <div className="contact-edit-fields">
+        {locked ? (
+          <div className="contact-locked-view">
+            <strong className="contact-locked-name">{contact.name}</strong>
+            {contact.title ? <span>{contact.title}</span> : null}
+            {contact.email ? <span>{contact.email}</span> : null}
+            {contact.phone ? <span>{contact.phone}</span> : null}
+            {contact.notes ? <p className="contact-locked-notes">{contact.notes}</p> : null}
+          </div>
+        ) : (
+          <>
+            <ContactTextInput
+              ariaLabel={`${contact.name} name`}
+              canonical={contact.name}
+              onCommit={(value) => {
+                const trimmed = value.trim()
+                if (trimmed) onUpdate(contact.id, { name: trimmed })
+              }}
+            />
+            <ContactTextInput
+              ariaLabel={`${contact.name} title`}
+              canonical={contact.title ?? ''}
+              placeholder="Title"
+              onCommit={(value) => onUpdate(contact.id, { title: value })}
+            />
+            <ContactTextInput
+              ariaLabel={`${contact.name} email`}
+              canonical={contact.email ?? ''}
+              placeholder="Email (default)"
+              onCommit={(value) => onUpdate(contact.id, { email: value })}
+            />
+            <ContactTextInput
+              ariaLabel={`${contact.name} phone`}
+              canonical={contact.phone ?? ''}
+              placeholder="Phone"
+              onCommit={(value) => onUpdate(contact.id, { phone: value })}
+            />
+            <ContactNotesInput
+              ariaLabel={`${contact.name} notes`}
+              canonical={contact.notes ?? ''}
+              placeholder="Notes"
+              onCommit={(value) => onUpdate(contact.id, { notes: value })}
+            />
+          </>
+        )}
+
+        {/* Which client(s) this contact is on — by NAME, each a link. */}
+        <div className="contact-client-links">
+          {linkedClients.length === 0 ? (
+            <span className="contact-badge contact-badge-unlinked">Not linked to any client</span>
+          ) : (
+            <span className="checklist-meta-line">
+              On {linkedClients.length} client{linkedClients.length === 1 ? '' : 's'}:{' '}
+              {linkedClients.map((client, index) => (
+                <span key={client.id}>
+                  {index > 0 ? ', ' : ''}
+                  <Link className="contact-client-link" to={`/clients/${client.id}`}>
+                    {client.name}
+                  </Link>
+                </span>
+              ))}
+            </span>
+          )}
+          {isUnlinked && linkedClients.length === 0 ? null : isUnlinked ? (
+            <span className="contact-badge contact-badge-unlinked">Unlinked</span>
+          ) : null}
+          {archived ? <span className="contact-badge contact-badge-archived">Archived</span> : null}
+        </div>
+
+        {!locked ? (
+          <button
+            type="button"
+            className="contact-expand-btn"
+            aria-expanded={expanded}
+            onClick={onToggleExpanded}
+          >
+            {expanded ? 'Hide details' : 'Per-company emails & links'}
+          </button>
+        ) : null}
+
+        {expanded && !locked ? (
+          <div className="contact-expanded">
+            {linkedClients.length > 0 ? (
+              <div className="contact-company-emails">
+                <span className="section-kicker">Per-company email</span>
+                {linkedClients.map((client) => (
+                  <label className="field" key={client.id}>
+                    <span>{client.name}</span>
+                    <ContactTextInput
+                      ariaLabel={`${contact.name} email for ${client.name}`}
+                      canonical={
+                        (contact.companyEmails ?? []).find((e) => e.clientId === client.id)
+                          ?.email ?? ''
+                      }
+                      placeholder={
+                        contact.email?.trim()
+                          ? `Default: ${contact.email.trim()}`
+                          : 'Email for this company'
+                      }
+                      onCommit={(value) => setCompanyEmail(client.id, value)}
+                    />
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <p className="muted-text">
+                Link this contact to a client to set a per-company email override.
+              </p>
+            )}
+
+            <div className="contact-linked-contacts">
+              <span className="section-kicker">Linked contacts</span>
+              <ChipMultiSelect
+                selectedIds={linkedContactIds}
+                options={contacts
+                  .filter((other) => other.id !== contact.id && !other.archivedAt)
+                  .map((other) => ({ id: other.id, label: other.name }))}
+                onChange={(nextIds) => onSetLinks(contact.id, nextIds)}
+                addLabel="+ Link contact"
+                emptyHelper="Not linked to any other contact."
+              />
+            </div>
+          </div>
+        ) : null}
+      </div>
+      <div className="contact-row-actions">
+        <button
+          className={`contact-lock-btn${locked ? ' is-locked' : ''}`}
+          type="button"
+          aria-pressed={locked}
+          aria-label={locked ? `Unlock ${contact.name}` : `Lock ${contact.name}`}
+          title={
+            locked
+              ? 'Locked — click to unlock and edit'
+              : 'Lock to protect this contact from edits'
+          }
+          onClick={() => onUpdate(contact.id, { locked: !locked })}
+        >
+          {locked ? <Lock size={14} /> : <Unlock size={14} />}
+        </button>
+        {ownerMode && !locked ? (
+          <button
+            className="contact-archive-btn"
+            type="button"
+            aria-label={archived ? `Unarchive ${contact.name}` : `Archive ${contact.name}`}
+            title={archived ? 'Unarchive — return to the active list' : 'Archive — hide from active list & pickers'}
+            onClick={() => onSetArchived(contact.id, !archived)}
+          >
+            {archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+          </button>
+        ) : null}
+        {ownerMode && !locked ? (
+          <button
+            className="item-delete-btn"
+            type="button"
+            aria-label={`Delete ${contact.name}`}
+            title="Delete this contact"
+            onClick={() => onDelete(contact)}
+          >
+            <Trash2 size={14} />
+          </button>
+        ) : null}
+      </div>
+    </article>
   )
 }
 
