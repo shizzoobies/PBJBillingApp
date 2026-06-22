@@ -225,6 +225,15 @@ export function effectiveChecklistDue(checklist: Checklist): string {
   return earliest
 }
 
+/**
+ * True when a checklist has a pending staff deletion request awaiting owner
+ * approval — i.e. `deletionRequestedBy` is a non-empty string. (A request can
+ * only exist on an active checklist; the field is cleared on approve/reject.)
+ */
+export function checklistHasPendingDeletionRequest(checklist: Checklist): boolean {
+  return typeof checklist.deletionRequestedBy === 'string' && checklist.deletionRequestedBy.length > 0
+}
+
 /** Friendly relative due-date cue: "due today", "due in 3 days", "4 days overdue". */
 export function dueDateLabel(dueDate: string, todayDateOnly: string): string {
   const days = daysUntilDue(dueDate, todayDateOnly)

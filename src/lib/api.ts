@@ -1001,9 +1001,11 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
 }
 
 /**
- * Soft-delete an entire checklist (move it to the owner's recycle bin).
- * Owner-only on the server; the client also gates the UI affordance.
- * Returns `{ ok, removed }` so callers don't have to re-parse the URL.
+ * Delete an entire checklist. For an OWNER this soft-deletes it to the recycle
+ * bin and the server returns `{ ok, removed }`. For an authorized NON-owner
+ * (staff) the server instead records a deletion REQUEST and returns the
+ * updated Checklist (now carrying `deletionRequestedBy/At`) — it is NOT
+ * deleted. Callers branch on role to interpret the result.
  */
 export async function deleteChecklistRequest(checklistId: string) {
   const response = await apiFetch(`/api/checklists/${encodeURIComponent(checklistId)}`, {
@@ -1013,7 +1015,43 @@ export async function deleteChecklistRequest(checklistId: string) {
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to delete checklist (${response.status})`)
   }
+  return (await response.json()) as { ok: true; removed: string } | Checklist
+}
+
+/**
+ * Owner: approve a staff deletion request — soft-deletes the checklist to the
+ * recycle bin. Returns `{ ok, removed }` like the owner delete path.
+ */
+export async function approveChecklistDeletionRequest(checklistId: string) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/deletion/approve`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+    },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to approve deletion (${response.status})`)
+  }
   return (await response.json()) as { ok: true; removed: string }
+}
+
+/**
+ * Owner: reject a staff deletion request — clears the request fields and keeps
+ * the checklist active. Returns the freshly-updated Checklist.
+ */
+export async function rejectChecklistDeletionRequest(checklistId: string) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/deletion/reject`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+    },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to reject deletion (${response.status})`)
+  }
+  return (await response.json()) as Checklist
 }
 
 /**

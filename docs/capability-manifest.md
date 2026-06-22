@@ -90,9 +90,15 @@ bell, and account menu sit in the top bar on every page.
   stage advances the case and notifies the next assignee; the case opener is
   notified when the whole case completes. Stuck cases are flagged on the
   Dashboard.
-- Task card actions (owner): Edit details (title, due date, assignee),
-  Delete task — deletion moves it to the owner-only Recycle bin; time entries
-  logged against it are preserved. Restore from the bin anytime until emptied.
+- Task card actions: Edit details (title, due date, assignee) — available to the
+  owner and to a task's assignee/editor. Delete task — for the OWNER it moves the
+  task to the owner-only Recycle bin immediately (time entries preserved, restore
+  anytime until emptied). For STAFF, "Delete" files a deletion REQUEST that an
+  owner must approve — only deletions need approval, edits don't. The owner sees
+  a "Pending deletion requests" queue at the top of the Checklists page with
+  Approve (delete) / Reject (keep) per request, and gets a bell notification when
+  a request is filed; the requested task shows a "Deletion requested" badge to
+  staff until resolved.
 - Sharing/visibility: a team member assigned to a client sees ALL of that
   client's tasks (the whole shared board), not just tasks assigned to them
   personally. They can log time against any of those tasks, including
@@ -123,11 +129,12 @@ bell, and account menu sit in the top bar on every page.
   add, rename, reorder, or delete columns. Deleting a column doesn't delete its
   checklists — they move to "Uncategorized" until re-tagged.
 
-## Delayed page (owner only)
+## Delayed page (owner + staff)
 
-- Every step flagged "waiting on", grouped by client, so the owner sees
-  what's blocked and why across the whole firm. Clear the flag from the
-  Checklists page (or under the client) once unblocked.
+- Every step flagged "waiting on", grouped by client, so you can see what's
+  blocked and why. Staff see it scoped to their assigned clients; the owner sees
+  the whole firm. Clear the flag from the Checklists page (or under the client)
+  once unblocked.
 
 ## Clients (owner manages; staff see assigned)
 
@@ -142,19 +149,15 @@ bell, and account menu sit in the top bar on every page.
   notes, billing.
 - Assigned team controls which staff can see/log time for the client.
 
-## Client Recap
+## Client Recap (owner only)
 
 - A per-client review page (sidebar: "Client Recap") with a Monthly / Quarterly
   toggle and prev/next period navigation. Pick a client and see a full
-  breakdown for the period.
-- Scoped: a user only sees clients they have access to (owner = all; staff =
-  their assigned clients). Picking a client you don't have access to is blocked.
-- Sections everyone sees: Time & hours (total / billable / administrative, by
-  staff, vs. the prior period); Tasks & workflow (due / completed / overdue
-  this period).
-- Owner-only sections: Billing (revenue for the period, rate/plan,
-  reimbursements); Profitability (realized rate = fee ÷ hours, and margin when
-  team cost rates are set).
+  breakdown for the period: Time & hours (total / billable / administrative, by
+  staff, vs. the prior period); Tasks & workflow (due / completed / overdue this
+  period); Billing (revenue for the period, rate/plan, reimbursements); and
+  Profitability (realized rate = fee ÷ hours, and margin when team cost rates are
+  set).
 
 ## Contacts
 
@@ -190,12 +193,13 @@ bell, and account menu sit in the top bar on every page.
 - Activity heatmap: hours, items completed, cases moved per day/week.
   Hover a cell for exact numbers.
 
-## Gantt (owner only)
+## Gantt (owner + staff)
 
 - One bar per active checklist, grouped by assignee, on a month timeline:
   not started / in progress / completed / overdue colors, milestone diamonds
   for due dates. Click a row to open the underlying checklist. Filter by
-  assignee, client, status.
+  assignee, client, status. Staff see it scoped to their assigned clients; the
+  owner sees the whole firm.
 
 ## Invoices (owner only)
 

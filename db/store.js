@@ -1954,6 +1954,17 @@ export class AppDataStore {
       // the bin or restores them.
       await this.pool.query(`alter table checklists add column if not exists deleted_at timestamptz`)
 
+      // Staff deletion-request workflow. A non-owner can REQUEST a checklist be
+      // deleted; the row stays active (deleted_at null) but carries who asked
+      // and when, until an owner approves (real soft-delete) or rejects (clears
+      // these). Idempotent on every boot, mirrors the deleted_at column above.
+      await this.pool.query(
+        `alter table checklists add column if not exists deletion_requested_by text`,
+      )
+      await this.pool.query(
+        `alter table checklists add column if not exists deletion_requested_at timestamptz`,
+      )
+
       // Time approval workflow. Detect whether the column already exists BEFORE
       // adding it: if this is the first deploy of the feature, every existing
       // entry is backfilled to 'approved' so there's no pending backlog. On
@@ -2856,7 +2867,8 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
-                   case_id, stage_id, stage_index, stage_count, category_id, deleted_at
+                   case_id, stage_id, stage_index, stage_count, category_id, deleted_at,
+                   deletion_requested_by, deletion_requested_at
             from checklists
             order by due_date asc, id asc
           `),
@@ -3032,6 +3044,10 @@ export class AppDataStore {
         categoryId: row.category_id ?? null,
         items: itemsByChecklist.get(row.id) ?? [],
         deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
+        deletionRequestedBy: row.deletion_requested_by ?? null,
+        deletionRequestedAt: row.deletion_requested_at
+          ? row.deletion_requested_at.toISOString()
+          : null,
       }))
 
       const data = {
@@ -3941,8 +3957,8 @@ export class AppDataStore {
         for (const checklist of checklistsToWrite) {
           await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
             `,
             [
               checklist.id,
@@ -3960,6 +3976,8 @@ export class AppDataStore {
               typeof checklist.stageCount === 'number' ? checklist.stageCount : 1,
               checklist.categoryId ? checklist.categoryId : null,
               checklist.deletedAt ?? null,
+              checklist.deletionRequestedBy ?? null,
+              checklist.deletionRequestedAt ?? null,
             ],
           )
 
@@ -5732,6 +5750,60 @@ export class AppDataStore {
     data.recycledChecklists.push({ ...target, deletedAt })
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return checklistId
+  }
+
+  /**
+   * Flag an ACTIVE checklist as having a pending deletion request from a
+   * non-owner. Stamps `deletion_requested_by`/`deletion_requested_at` without
+   * touching `deleted_at` — the checklist stays active until an owner approves
+   * (deleteChecklist) or rejects (clearChecklistDeletionRequest). Returns the
+   * updated checklist object, or `null` when no active row matched.
+   */
+  async requestChecklistDeletion(checklistId, userId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update checklists set deletion_requested_by = $2, deletion_requested_at = now()
+         where id = $1 and deleted_at is null returning id`,
+        [checklistId, userId],
+      )
+      if (!result.rowCount) return null
+      const fresh = await this.read()
+      return fresh.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    const target = data.checklists.find((checklist) => checklist.id === checklistId)
+    if (!target) return null
+    target.deletionRequestedBy = userId
+    target.deletionRequestedAt = nowIso()
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return target
+  }
+
+  /**
+   * Clear a pending deletion request (owner rejected it). Wipes both
+   * `deletion_requested_*` columns and returns the updated checklist, or
+   * `null` when no active row matched.
+   */
+  async clearChecklistDeletionRequest(checklistId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update checklists set deletion_requested_by = null, deletion_requested_at = null
+         where id = $1 and deleted_at is null returning id`,
+        [checklistId],
+      )
+      if (!result.rowCount) return null
+      const fresh = await this.read()
+      return fresh.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    const target = data.checklists.find((checklist) => checklist.id === checklistId)
+    if (!target) return null
+    target.deletionRequestedBy = null
+    target.deletionRequestedAt = null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return target
   }
 
   /**

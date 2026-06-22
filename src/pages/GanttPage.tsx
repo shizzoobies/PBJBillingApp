@@ -16,11 +16,7 @@ function checklistStatus(checklist: Checklist, todayDateOnly: string): StatusFil
 }
 
 export function GanttPage() {
-  const { data, ownerMode } = useAppContext()
-
-  if (!ownerMode) {
-    return null
-  }
+  const { data } = useAppContext()
 
   return (
     <section className="content-grid" id="gantt">

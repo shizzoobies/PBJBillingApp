@@ -32,6 +32,7 @@ import type {
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import {
   checklistFrequencies,
+  checklistHasPendingDeletionRequest,
   clientName,
   daysUntilDue,
   dueDateLabel,
@@ -190,6 +191,8 @@ export function ChecklistsPage() {
     updateSubItemWaiting,
     deleteChecklistItem,
     deleteChecklist,
+    approveChecklistDeletion,
+    rejectChecklistDeletion,
     restoreChecklist,
     emptyChecklistRecycleBin,
   } = useAppContext()
@@ -279,6 +282,15 @@ export function ChecklistsPage() {
 
   return (
     <section className="content-grid one-column" id="checklists">
+      {ownerMode ? (
+        <PendingDeletionsSection
+          checklists={visibleChecklists}
+          clients={data.clients}
+          employees={data.employees}
+          onApprove={approveChecklistDeletion}
+          onReject={rejectChecklistDeletion}
+        />
+      ) : null}
       <section className="panel">
         <div className="section-heading">
           <div>
@@ -449,6 +461,99 @@ export function ChecklistsPage() {
  * pill in the header counts what's inside so an owner sees at a glance
  * whether there's anything to clean up.
  */
+/**
+ * Owner-only queue of checklists a staff member has asked to delete. Sits at
+ * the top of the Checklists page; each row offers Approve (soft-delete to bin)
+ * or Reject (clear the request). Hidden entirely when there are none pending.
+ */
+function PendingDeletionsSection({
+  checklists,
+  clients,
+  employees,
+  onApprove,
+  onReject,
+}: {
+  checklists: Checklist[]
+  clients: Client[]
+  employees: Employee[]
+  onApprove: (checklistId: string) => Promise<void>
+  onReject: (checklistId: string) => Promise<void>
+}) {
+  const pending = checklists
+    .filter(checklistHasPendingDeletionRequest)
+    .sort((a, b) =>
+      (b.deletionRequestedAt ?? '').localeCompare(a.deletionRequestedAt ?? ''),
+    )
+  if (pending.length === 0) return null
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <h2>Deletion requests</h2>
+          <p className="section-subtitle">
+            A bookkeeper asked to delete these tasks. Approve to move a task to the recycle bin, or
+            reject to keep it.
+          </p>
+        </div>
+        <span className="status-pill">{pending.length}</span>
+      </div>
+      <ul
+        className="pending-deletions-list"
+        style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}
+      >
+        {pending.map((checklist) => (
+          <li
+            key={checklist.id}
+            className="pending-deletion-item"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              padding: '8px 0',
+              borderTop: '1px solid var(--border-subtle, #eee)',
+            }}
+          >
+            <div>
+              <strong>{checklist.title}</strong>
+              <div className="checklist-meta-line">
+                {clientName(clients, checklist.clientId)} ·{' '}
+                Requested by{' '}
+                {checklist.deletionRequestedBy
+                  ? employeeName(employees, checklist.deletionRequestedBy)
+                  : 'a team member'}{' '}
+                ·{' '}
+                {checklist.deletionRequestedAt
+                  ? shortDate.format(new Date(checklist.deletionRequestedAt))
+                  : 'recently'}
+              </div>
+            </div>
+            <div style={{ display: 'inline-flex', gap: 8 }}>
+              <button
+                type="button"
+                className="secondary-action danger"
+                onClick={() => void onApprove(checklist.id)}
+                title="Approve — move this task to the recycle bin"
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => void onReject(checklist.id)}
+                title="Reject — keep this task active"
+              >
+                Reject
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 function RecycleBinSection({
   clients,
   employees,
@@ -975,10 +1080,13 @@ export function ChecklistCard({
   const isViewerOnly = role !== 'owner' && !isAssignee && !isEditor
   // Whether the current viewer can edit checklist structure (reorder, bulk add)
   const canEditStructure = role === 'owner' || isAssignee || isEditor
+  // A staff member has asked an owner to delete this task; surfaces a badge and
+  // (for owners) Approve / Reject actions, and disables re-requesting.
+  const pendingDeletion = checklistHasPendingDeletionRequest(checklist)
 
   // Owner-only inline edit of the active checklist's own fields (title, due
   // date, assignee). Item-level edits stay on their own controls below.
-  const { updateChecklist } = useAppContext()
+  const { updateChecklist, approveChecklistDeletion, rejectChecklistDeletion } = useAppContext()
   const [editingMeta, setEditingMeta] = useState(false)
   const [metaTitle, setMetaTitle] = useState(checklist.title)
   const [metaDue, setMetaDue] = useState(checklist.dueDate)
@@ -1131,20 +1239,60 @@ export function ChecklistCard({
         <div className="checklist-meta">
           {handedOff ? <span className="status-pill">Handed off</span> : null}
           {isViewerOnly ? <span className="status-pill">View only</span> : null}
-          {ownerMode ? (
+          {pendingDeletion ? (
+            <span className="status-pill" title="A bookkeeper asked to delete this — an owner must approve.">
+              Deletion requested
+            </span>
+          ) : null}
+          {ownerMode && pendingDeletion ? (
+            <>
+              <button
+                type="button"
+                className="secondary-action danger"
+                onClick={() => void approveChecklistDeletion(checklist.id)}
+                title="Approve the deletion request — moves the task to the recycle bin"
+              >
+                Approve deletion
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => void rejectChecklistDeletion(checklist.id)}
+                title="Reject the deletion request — keeps the task active"
+              >
+                Reject
+              </button>
+            </>
+          ) : null}
+          {/* The actions menu is available to anyone who can edit the task's
+              structure (owner, assignee, or editor). For an owner "Delete"
+              soft-deletes immediately; for staff it sends a deletion REQUEST
+              the owner approves. Re-requesting is disabled once pending. */}
+          {canEditStructure ? (
             <CardActionsMenu
-              showEdit={!editingMeta}
+              showEdit={ownerMode && !editingMeta}
+              showDelete={!pendingDeletion}
+              deleteLabel={ownerMode ? 'Delete task' : 'Request deletion'}
               onEdit={openMetaEditor}
               onDelete={() => {
-                // Deletion moves the task to the owner-only recycle bin (it's
-                // recoverable until the bin is emptied). The confirm names the
-                // task and calls out that billing data survives — the common
-                // worry when cleaning up after a departing client / employee.
-                const confirmed = window.confirm(
-                  `Move "${checklist.title}" to the recycle bin?\n\nIt will disappear from the in-progress list and any time entries logged against it stay intact. You can restore it (or empty the bin) from the Recycle bin section below.`,
-                )
-                if (confirmed) {
-                  void onDeleteChecklist(checklist.id)
+                if (ownerMode) {
+                  // Owner: deletion moves the task to the owner-only recycle bin
+                  // (recoverable until the bin is emptied). The confirm names the
+                  // task and calls out that billing data survives.
+                  const confirmed = window.confirm(
+                    `Move "${checklist.title}" to the recycle bin?\n\nIt will disappear from the in-progress list and any time entries logged against it stay intact. You can restore it (or empty the bin) from the Recycle bin section below.`,
+                  )
+                  if (confirmed) {
+                    void onDeleteChecklist(checklist.id)
+                  }
+                } else {
+                  // Staff: request deletion — needs owner approval.
+                  const confirmed = window.confirm(
+                    `Request deletion of "${checklist.title}"?\n\nAn owner must approve before it's removed. The task stays active until then.`,
+                  )
+                  if (confirmed) {
+                    void onDeleteChecklist(checklist.id)
+                  }
                 }
               }}
             />
@@ -1233,10 +1381,14 @@ export function ChecklistCard({
  */
 function CardActionsMenu({
   showEdit,
+  showDelete = true,
+  deleteLabel = 'Delete task',
   onEdit,
   onDelete,
 }: {
   showEdit: boolean
+  showDelete?: boolean
+  deleteLabel?: string
   onEdit: () => void
   onDelete: () => void
 }) {
@@ -1289,17 +1441,19 @@ function CardActionsMenu({
               Edit details
             </button>
           ) : null}
-          <button
-            type="button"
-            role="menuitem"
-            className="card-menu-item danger"
-            onClick={() => {
-              setOpen(false)
-              onDelete()
-            }}
-          >
-            Delete task
-          </button>
+          {showDelete ? (
+            <button
+              type="button"
+              role="menuitem"
+              className="card-menu-item danger"
+              onClick={() => {
+                setOpen(false)
+                onDelete()
+              }}
+            >
+              {deleteLabel}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>

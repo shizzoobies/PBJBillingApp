@@ -583,6 +583,17 @@ export type Checklist = {
    * the bin is emptied. Unset on every active checklist.
    */
   deletedAt?: string | null
+  /**
+   * Set when a NON-owner (staff bookkeeper) requests deletion of a checklist
+   * they can edit. The checklist is NOT deleted — it stays active with a
+   * "Deletion requested" badge until an owner approves (which soft-deletes it
+   * to the recycle bin) or rejects (which clears these fields). Holds the
+   * requesting user's id; null/unset when there's no pending request.
+   * Persisted alongside `deletedAt` on both store backends.
+   */
+  deletionRequestedBy?: string | null
+  /** ISO timestamp the deletion request was made. Cleared on approve/reject. */
+  deletionRequestedAt?: string | null
 }
 
 /**
@@ -920,6 +931,7 @@ export type NotificationEvent =
   | 'invoice_ready'
   | 'time_entry_manual'
   | 'waiting_cleared'
+  | 'checklist_deletion_requested'
 
 export type NotificationEntry = {
   id: string

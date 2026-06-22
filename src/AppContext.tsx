@@ -326,6 +326,16 @@ export type AppContextValue = {
    * on the server so billing history survives — they just become unlinked.
    */
   deleteChecklist: (checklistId: string) => Promise<void>
+  /**
+   * Owner-only: approve a staff deletion request — soft-deletes the checklist
+   * to the recycle bin (same end state as a direct owner delete).
+   */
+  approveChecklistDeletion: (checklistId: string) => Promise<void>
+  /**
+   * Owner-only: reject a staff deletion request — clears the request flags and
+   * leaves the checklist active.
+   */
+  rejectChecklistDeletion: (checklistId: string) => Promise<void>
   /** Owner-only: restore a recycled checklist back to the active list. */
   restoreChecklist: (checklistId: string) => Promise<void>
   /** Owner-only: permanently delete every recycled checklist. Not reversible. */

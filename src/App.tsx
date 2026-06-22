@@ -23,6 +23,8 @@ import {
   createTimeEntry,
   deleteChecklistItemRequest,
   deleteChecklistRequest,
+  approveChecklistDeletionRequest,
+  rejectChecklistDeletionRequest,
   emptyChecklistRecycleBinRequest,
   restoreChecklistRequest,
   deleteTeamMember as deleteTeamMemberRequest,
@@ -74,6 +76,7 @@ import {
   type AppData,
   type AuthState,
   type BillingMode,
+  type Checklist,
   type ChecklistTemplate,
   type ChecklistTemplateItem,
   type Client,
@@ -2221,19 +2224,68 @@ function App() {
   }
 
   /**
-   * Owner-only soft delete. The server stamps `deleted_at` on the row and
-   * `read()` sorts it into `recycledChecklists`; locally we mirror that by
-   * moving the checklist from the active list to the bin (with a deletedAt
-   * timestamp) so the UI updates without a refetch. Time entries that
-   * reference the checklist's items via `taskId` are preserved on the
-   * server so billing history survives. Preview mode is blocked the same
-   * way the rest of the write surface is, and 401s flip to offline.
+   * Delete a checklist. The server branches on the caller's REAL role:
+   *  - Owner → soft-delete: the row gets `deleted_at` and `read()` sorts it
+   *    into `recycledChecklists`. The response is `{ ok, removed }` and we
+   *    mirror it locally by moving the checklist to the bin.
+   *  - Authorized staff → deletion REQUEST: the checklist stays active and the
+   *    response is the updated Checklist (now carrying `deletionRequestedBy/At`).
+   *    We update it in place — it does NOT move to the bin.
+   * We branch on the response SHAPE (not local role) so preview mode and the
+   * server stay in lock-step. Time entries referencing items via `taskId` are
+   * preserved server-side. 401s flip to offline.
    */
   const deleteChecklist = async (checklistId: string) => {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
-      await deleteChecklistRequest(checklistId)
+      const result = await deleteChecklistRequest(checklistId)
+      if ('ok' in result && result.ok) {
+        // Owner soft-delete → move to bin.
+        const deletedAt = new Date().toISOString()
+        applyServerDataUpdate((current) => {
+          const target = current.checklists.find((checklist) => checklist.id === checklistId)
+          if (!target) return current
+          return {
+            ...current,
+            checklists: current.checklists.filter((checklist) => checklist.id !== checklistId),
+            recycledChecklists: [
+              { ...target, deletedAt },
+              ...(current.recycledChecklists ?? []),
+            ],
+          }
+        })
+      } else {
+        // Staff deletion request → update the checklist in place (keep it active).
+        const updated = result as Checklist
+        applyServerDataUpdate((current) => ({
+          ...current,
+          checklists: current.checklists.map((checklist) =>
+            checklist.id === checklistId ? updated : checklist,
+          ),
+        }))
+      }
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  /**
+   * Owner: approve a staff deletion request. The server soft-deletes the
+   * checklist; we mirror by moving it from the active list to the recycle bin.
+   */
+  const approveChecklistDeletion = async (checklistId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      await approveChecklistDeletionRequest(checklistId)
       const deletedAt = new Date().toISOString()
       applyServerDataUpdate((current) => {
         const target = current.checklists.find((checklist) => checklist.id === checklistId)
@@ -2242,11 +2294,38 @@ function App() {
           ...current,
           checklists: current.checklists.filter((checklist) => checklist.id !== checklistId),
           recycledChecklists: [
-            { ...target, deletedAt },
+            { ...target, deletedAt, deletionRequestedBy: null, deletionRequestedAt: null },
             ...(current.recycledChecklists ?? []),
           ],
         }
       })
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
+  /**
+   * Owner: reject a staff deletion request. The server clears the request
+   * fields and returns the still-active Checklist; we update it in place.
+   */
+  const rejectChecklistDeletion = async (checklistId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updated = await rejectChecklistDeletionRequest(checklistId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updated : checklist,
+        ),
+      }))
       setDataSyncState('synced')
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -2952,6 +3031,8 @@ function App() {
     updateSubItemWaiting,
     deleteChecklistItem,
     deleteChecklist,
+    approveChecklistDeletion,
+    rejectChecklistDeletion,
     restoreChecklist,
     emptyChecklistRecycleBin,
     deleteTeamMember,
@@ -3009,10 +3090,9 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   useEffect(() => {
     const ownerOnly = [
       '/time-approvals',
-      '/delayed',
+      '/client-recap',
       '/reports',
       '/productivity',
-      '/gantt',
       '/invoices',
       '/plans',
       '/contacts',
@@ -3047,16 +3127,16 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
         />
         <Route path="/checklists" element={<ChecklistsPage />} />
         <Route path="/board" element={<ActiveChecklistsBoardPage />} />
+        <Route path="/delayed" element={<DelayedPage />} />
+        <Route path="/clients" element={<ClientsPage />} />
         <Route
-          path="/delayed"
+          path="/client-recap"
           element={
             <OwnerOnly ownerMode={ownerMode}>
-              <DelayedPage />
+              <ClientRecapPage />
             </OwnerOnly>
           }
         />
-        <Route path="/clients" element={<ClientsPage />} />
-        <Route path="/client-recap" element={<ClientRecapPage />} />
         <Route
           path="/setup"
           element={
@@ -3097,14 +3177,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
             </OwnerOnly>
           }
         />
-        <Route
-          path="/gantt"
-          element={
-            <OwnerOnly ownerMode={ownerMode}>
-              <GanttPage />
-            </OwnerOnly>
-          }
-        />
+        <Route path="/gantt" element={<GanttPage />} />
         <Route
           path="/invoices"
           element={

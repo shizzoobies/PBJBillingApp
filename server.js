@@ -3164,9 +3164,73 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // DELETE /api/checklists/:id — owner-only soft delete (move to bin).
-    // The matcher's trailing `$` keeps it from poaching the more-specific
-    // /items/... routes below; those still resolve to their own handlers.
+    // POST /api/checklists/:id/deletion/(approve|reject) — owner-only.
+    // Approve = soft-delete to the bin; reject = clear the staff request.
+    // Checked BEFORE the generic `:id` matcher below so the more-specific
+    // path isn't poached by the DELETE handler.
+    const checklistDeletionDecisionMatch = normalizedPath.match(
+      /^\/api\/checklists\/([^/]+)\/deletion\/(approve|reject)$/,
+    )
+    if (checklistDeletionDecisionMatch) {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can resolve deletion requests' })
+        return
+      }
+
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      const checklistId = checklistDeletionDecisionMatch[1]
+      const decision = checklistDeletionDecisionMatch[2]
+      const existing = await appDataStore.read()
+      const target = existing.checklists.find((entry) => entry.id === checklistId)
+      if (!target) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      if (decision === 'approve') {
+        const removed = await appDataStore.deleteChecklist(checklistId)
+        if (!removed) {
+          sendJson(response, 404, { error: 'Checklist not found' })
+          return
+        }
+        await appDataStore.recordActivity(session.user.id, 'checklist_deleted', target.title)
+        sendJson(response, 200, { ok: true, removed: checklistId })
+        return
+      }
+
+      // reject
+      const cleared = await appDataStore.clearChecklistDeletionRequest(checklistId)
+      if (!cleared) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'checklist_deletion_rejected',
+        target.title,
+      )
+      sendJson(response, 200, cleared)
+      return
+    }
+
+    // DELETE /api/checklists/:id — soft delete (move to bin) for owners, or a
+    // deletion REQUEST for an authorized non-owner. The matcher's trailing `$`
+    // keeps it from poaching the more-specific /items/... routes below; those
+    // still resolve to their own handlers.
     const checklistDeleteMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)$/)
     if (checklistDeleteMatch) {
       const session = await requireSession(request, response)
@@ -3179,11 +3243,6 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      if (session.user.role !== 'owner') {
-        sendJson(response, 403, { error: 'Only owners can delete checklists' })
-        return
-      }
-
       const checklistId = checklistDeleteMatch[1]
       // Capture the title for the activity log before the row is gone.
       const existing = await appDataStore.read()
@@ -3193,6 +3252,57 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // Non-owner path: only a user who can EDIT the checklist (its client is
+      // in their visible set AND they're the assignee or an editor) may request
+      // deletion. Mirror the PATCH-item authorization. Everyone else → 403.
+      if (session.user.role !== 'owner') {
+        const visible = visibleClientIdSet(session, existing.clients ?? [])
+        const editorIds = Array.isArray(target.editorIds) ? target.editorIds : []
+        const canRequest =
+          visible.has(target.clientId) &&
+          (target.assigneeId === session.user.id || editorIds.includes(session.user.id))
+        if (!canRequest) {
+          sendJson(response, 403, { error: 'You can only request deletion of your assigned checklists' })
+          return
+        }
+
+        const requested = await appDataStore.requestChecklistDeletion(checklistId, session.user.id)
+        if (!requested) {
+          sendJson(response, 404, { error: 'Checklist not found' })
+          return
+        }
+
+        await appDataStore.recordActivity(
+          session.user.id,
+          'checklist_deletion_requested',
+          target.title,
+        )
+
+        // Notify every owner that a deletion was requested.
+        try {
+          const requesterName =
+            (existing.employees ?? []).find((e) => e.id === session.user.id)?.name ??
+            session.user.name ??
+            'A team member'
+          const members = await appDataStore.getTeamMembers()
+          const owners = members.filter((member) => member.role === 'owner')
+          for (const owner of owners) {
+            await notify(appDataStore, owner.id, 'checklist_deletion_requested', {
+              checklistId,
+              message: `${requesterName} requested deletion of "${target.title}".`,
+              link: '/checklists',
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+        } catch (err) {
+          console.error('[notify] checklist_deletion_requested dispatch failed:', err?.message || err)
+        }
+
+        sendJson(response, 200, requested)
+        return
+      }
+
+      // Owner path: immediate soft-delete to the bin (existing behavior).
       const removed = await appDataStore.deleteChecklist(checklistId)
       if (!removed) {
         // Raced with another deleter — same UX as 404 from the client's view.
