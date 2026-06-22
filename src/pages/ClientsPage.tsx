@@ -128,8 +128,12 @@ function ClientBuilder({
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    // Hourly billing is now per-EMPLOYEE (bill rate set on the Team page), so
+    // there's no per-client hourly rate to enter. We still persist a non-zero
+    // `hourlyRate` (the firm default) for back-compat with the stored column.
     const rate = Number(hourlyRate)
-    if (!name || !contact || Number.isNaN(rate) || rate <= 0 || assignedEmployeeIds.length === 0) {
+    const hourlyForStore = Number.isFinite(rate) && rate > 0 ? rate : 0
+    if (!name || !contact || assignedEmployeeIds.length === 0) {
       return
     }
 
@@ -142,7 +146,7 @@ function ClientBuilder({
       name,
       contact,
       billingMode,
-      hourlyRate: rate,
+      hourlyRate: hourlyForStore,
       planIds,
       contactIds,
       ...(billingMode === 'subscription' && monthlyRate.trim() && !Number.isNaN(parsedMonthly)
@@ -233,17 +237,10 @@ function ClientBuilder({
           </select>
         </label>
         {billingMode === 'hourly' ? (
-          <label className="field">
-            <span>Hourly rate</span>
-            <input
-              className="input"
-              min="0"
-              onChange={(event) => setHourlyRate(event.target.value)}
-              step="0.01"
-              type="number"
-              value={hourlyRate}
-            />
-          </label>
+          <p className="muted-text" style={{ gridColumn: '1 / -1', margin: 0 }}>
+            Hourly clients are billed off each team member's bill rate (set on the
+            Team page) — no per-client rate to enter.
+          </p>
         ) : billingMode === 'annual' ? (
           <>
             <label className="field">
@@ -437,7 +434,7 @@ function ClientTable({
                       ? `${currency.format(client.monthlyRate ?? 0)}/mo`
                       : client.billingMode === 'annual'
                         ? `${currency.format(client.annualRate ?? 0)}/yr`
-                        : `${currency.format(client.hourlyRate)}/hr`}
+                        : 'Per-employee'}
                   </td>
                 ) : null}
                 <td>

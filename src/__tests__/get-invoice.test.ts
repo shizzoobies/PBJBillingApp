@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { getInvoice } from '../lib/utils'
-import type { Client, SubscriptionPlan, TimeEntry } from '../lib/types'
+import type { Client, Employee, SubscriptionPlan, TimeEntry } from '../lib/types'
 
 /**
  * getInvoice billing model: a Monthly (subscription-mode) client bills its
@@ -79,11 +79,86 @@ describe('getInvoice — monthly billing', () => {
     expect(invoice.total).toBe(0)
   })
 
-  it('hourly clients still bill tracked billable hours at the hourly rate', () => {
-    const client = makeClient({ billingMode: 'hourly', hourlyRate: 100 })
-    const invoice = getInvoice(client, [entry], plans, period)
+  it('hourly clients bill tracked billable hours at the employee bill rate', () => {
+    const client = makeClient({ billingMode: 'hourly' })
+    const employees: Employee[] = [{ id: 'emp-1', name: 'Alice', role: 'Bookkeeper', billRate: 100 }]
+    const invoice = getInvoice(client, [entry], plans, period, [], [], employees, 0)
     // 600 minutes = 10h * $100 = $1000
     expect(invoice.total).toBe(1000)
+    expect(invoice.lines).toHaveLength(1)
+    expect(invoice.lines[0].label).toBe('Billable hours — Alice')
+  })
+})
+
+describe('getInvoice — hourly billing (per-employee bill rate)', () => {
+  const employees: Employee[] = [
+    { id: 'emp-1', name: 'Alice', role: 'Bookkeeper', billRate: 100 },
+    { id: 'emp-2', name: 'Bob', role: 'Accountant', billRate: 200 },
+    { id: 'emp-3', name: 'Carol', role: 'Bookkeeper', billRate: null },
+  ]
+
+  const makeEntry = (overrides: Partial<TimeEntry>): TimeEntry => ({
+    id: 'time-x',
+    employeeId: 'emp-1',
+    clientId: 'client-1',
+    date: '2026-05-10',
+    minutes: 60,
+    description: 'Work',
+    billable: true,
+    approvalStatus: 'approved',
+    entryMethod: 'timer',
+    ...overrides,
+  })
+
+  it('bills each employee at their own bill rate with one line per employee', () => {
+    const client = makeClient({ billingMode: 'hourly' })
+    const entries = [
+      makeEntry({ id: 'a', employeeId: 'emp-1', minutes: 120 }), // 2h * $100 = $200
+      makeEntry({ id: 'b', employeeId: 'emp-2', minutes: 90 }), // 1.5h * $200 = $300
+    ]
+    const invoice = getInvoice(client, entries, plans, period, [], [], employees, 50)
+    expect(invoice.total).toBe(500)
+    expect(invoice.lines).toHaveLength(2)
+    // Lines are sorted by label: Alice then Bob.
+    expect(invoice.lines[0].label).toBe('Billable hours — Alice')
+    expect(invoice.lines[0].amount).toBe(200)
+    expect(invoice.lines[1].label).toBe('Billable hours — Bob')
+    expect(invoice.lines[1].amount).toBe(300)
+  })
+
+  it('falls back to the default hourly rate for an employee with no bill rate', () => {
+    const client = makeClient({ billingMode: 'hourly' })
+    const entries = [makeEntry({ id: 'c', employeeId: 'emp-3', minutes: 120 })] // 2h * $75 default
+    const invoice = getInvoice(client, entries, plans, period, [], [], employees, 75)
+    expect(invoice.total).toBe(150)
+    expect(invoice.lines[0].label).toBe('Billable hours — Carol')
+    expect(invoice.lines[0].amount).toBe(150)
+  })
+
+  it('sums an employee\'s minutes across multiple entries into one line', () => {
+    const client = makeClient({ billingMode: 'hourly' })
+    const entries = [
+      makeEntry({ id: 'd', employeeId: 'emp-1', minutes: 60 }),
+      makeEntry({ id: 'e', employeeId: 'emp-1', minutes: 30 }),
+    ]
+    const invoice = getInvoice(client, entries, plans, period, [], [], employees, 0)
+    expect(invoice.lines).toHaveLength(1)
+    // 1.5h * $100 = $150
+    expect(invoice.total).toBe(150)
+  })
+
+  it('subscription billing ignores employee bill rates (unaffected)', () => {
+    const client = makeClient({ billingMode: 'subscription', monthlyRate: 1850, planIds: ['plan-a'] })
+    const entries = [makeEntry({ employeeId: 'emp-2', minutes: 600 })]
+    const invoice = getInvoice(client, entries, plans, period, [], [], employees, 999)
+    expect(invoice.total).toBe(1850)
+  })
+
+  it('annual billing ignores employee bill rates (unaffected)', () => {
+    const client = makeClient({ billingMode: 'annual', annualRate: 6000, annualBillingMonth: 5 })
+    const entries = [makeEntry({ employeeId: 'emp-2', minutes: 600 })]
+    const invoice = getInvoice(client, entries, plans, '2026-05', [], [], employees, 999)
+    expect(invoice.total).toBe(6000)
   })
 })
 

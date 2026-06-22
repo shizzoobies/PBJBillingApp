@@ -760,6 +760,24 @@ export async function setTeamMemberCostRate(userId: string, costRate: number | n
   return (await response.json()) as { ok: boolean; userId: string; costRate: number | null }
 }
 
+/**
+ * Owner-only: set/clear a team member's BILL rate ($/hour charged to clients
+ * for this person's time). Unlike the cost rate, this DOES feed invoices.
+ */
+export async function setTeamMemberBillRate(userId: string, billRate: number | null) {
+  const response = await apiFetch('/api/team/bill-rate', {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, billRate }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to set bill rate (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; userId: string; billRate: number | null }
+}
+
 export async function inviteTeamMember(payload: { name: string; email: string; role: string }) {
   const response = await apiFetch('/api/team/invite', {
     credentials: 'same-origin',

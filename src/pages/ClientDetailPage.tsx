@@ -415,17 +415,7 @@ function BillingSectionBody({
           onCommit={(next) => onCommit({ annualRate: next ?? undefined })}
           helper="The flat yearly fee — billed once a year in the month below."
         />
-      ) : (
-        <SaveNumberField
-          key="hourly-rate"
-          label="Hourly rate"
-          step="0.01"
-          min="0"
-          value={client.hourlyRate}
-          onCommit={(next) => onCommit({ hourlyRate: next ?? 0 })}
-          helper="Used to bill every billable hour worked for this client."
-        />
-      )}
+      ) : null}
       {isAnnual ? (
         <SaveSelectField
           label="Billing month"

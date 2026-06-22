@@ -13,6 +13,7 @@ import {
   revokeAllTeamSessions,
   revokeTeamSession,
   setClientAssignedTeamRequest,
+  setTeamMemberBillRate,
   setTeamMemberCostRate,
   teamTotpReset,
 } from '../lib/api'
@@ -50,6 +51,33 @@ export function TeamPage() {
   const [resendStatus, setResendStatus] = useState<Record<string, 'sent' | 'error'>>({})
   const [costDraft, setCostDraft] = useState<Record<string, string>>({})
   const [costSavingId, setCostSavingId] = useState<string | null>(null)
+  const [billDraft, setBillDraft] = useState<Record<string, string>>({})
+  const [billSavingId, setBillSavingId] = useState<string | null>(null)
+
+  const handleSaveBillRate = async (member: TeamMember) => {
+    const raw = billDraft[member.id]
+    const value = raw === undefined ? '' : raw.trim()
+    const billRate = value === '' ? null : Number(value)
+    if (billRate !== null && (!Number.isFinite(billRate) || billRate < 0)) return
+    setBillSavingId(member.id)
+    try {
+      const result = await setTeamMemberBillRate(member.id, billRate)
+      setMembers((current) =>
+        current.map((entry) =>
+          entry.id === member.id ? { ...entry, billRate: result.billRate } : entry,
+        ),
+      )
+      setBillDraft((current) => {
+        const next = { ...current }
+        delete next[member.id]
+        return next
+      })
+    } catch {
+      // Keep the draft so the owner can retry.
+    } finally {
+      setBillSavingId(null)
+    }
+  }
 
   const handleSaveCostRate = async (member: TeamMember) => {
     const raw = costDraft[member.id]
@@ -387,6 +415,43 @@ export function TeamPage() {
                             <span>Not enabled</span>
                           )}
                         </p>
+                      ) : null}
+                      {ownerMode ? (
+                        <div className="team-cost-rate">
+                          <label htmlFor={`bill-${member.id}`}>
+                            <strong>Bill rate</strong>
+                            <span className="team-cost-hint">$/hour billed to clients for this person's time.</span>
+                          </label>
+                          <div className="team-cost-input-row">
+                            <span className="team-cost-prefix">$</span>
+                            <input
+                              id={`bill-${member.id}`}
+                              type="number"
+                              min="0"
+                              step="1"
+                              inputMode="decimal"
+                              placeholder="—"
+                              value={
+                                billDraft[member.id] ??
+                                (member.billRate != null ? String(member.billRate) : '')
+                              }
+                              onChange={(event) =>
+                                setBillDraft((current) => ({
+                                  ...current,
+                                  [member.id]: event.target.value,
+                                }))
+                              }
+                            />
+                            <button
+                              type="button"
+                              className="team-icon-button"
+                              disabled={billSavingId === member.id || billDraft[member.id] === undefined}
+                              onClick={() => void handleSaveBillRate(member)}
+                            >
+                              {billSavingId === member.id ? 'Saving…' : 'Save'}
+                            </button>
+                          </div>
+                        </div>
                       ) : null}
                       {ownerMode && member.staffRole !== 'Owner' ? (
                         <div className="team-cost-rate">

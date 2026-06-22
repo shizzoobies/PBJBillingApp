@@ -4078,6 +4078,41 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Owner-only: set/clear a team member's BILL rate ($/hour charged to
+    // clients for this person's time). Unlike cost rate this DOES feed
+    // invoices. billRate null clears.
+    if (normalizedPath === '/api/team/bill-rate' && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can set bill rates' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const userId = String(payload?.userId ?? '')
+      if (!userId) {
+        sendJson(response, 400, { error: 'userId is required' })
+        return
+      }
+      const raw = payload?.billRate
+      if (raw !== null && raw !== '' && !(Number.isFinite(Number(raw)) && Number(raw) >= 0)) {
+        sendJson(response, 400, { error: 'billRate must be a non-negative number or null' })
+        return
+      }
+      const billRate = await appDataStore.setEmployeeBillRate(userId, raw === '' ? null : raw)
+      sendJson(response, 200, { ok: true, userId, billRate })
+      return
+    }
+
     if (normalizedPath === '/api/team/invite' && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) {

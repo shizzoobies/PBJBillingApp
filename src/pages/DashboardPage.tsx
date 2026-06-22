@@ -66,8 +66,10 @@ function OwnerDashboardView() {
     billingPeriod,
     toggleChecklistItem,
     setPreviewUserId,
+    firmSettings,
   } = useAppContext()
   const navigate = useNavigate()
+  const defaultHourlyRate = firmSettings.clientDefaults?.hourlyRate ?? 0
 
   const [activity, setActivity] = useState<ActivityEntry[]>([])
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
@@ -222,9 +224,6 @@ function OwnerDashboardView() {
     .reduce((sum, e) => sum + e.minutes, 0)
   const billablePct = hoursMinutes > 0 ? Math.round((billableMonthMinutes / hoursMinutes) * 100) : 0
   const projectedBilling = data.clients.reduce((total, client) => {
-    const minutes = monthEntries
-      .filter((entry) => entry.clientId === client.id && entry.billable)
-      .reduce((sum, e) => sum + e.minutes, 0)
     if (client.billingMode === 'subscription') {
       // Monthly billing uses the client's own monthly rate. No overage math.
       const monthlyRate =
@@ -243,7 +242,19 @@ function OwnerDashboardView() {
       const periodMonth = Number(billingPeriod.slice(5, 7))
       return total + (periodMonth === billingMonth ? annualRate : 0)
     }
-    return total + (minutes / 60) * client.hourlyRate
+    // Hourly billing is per-employee: each person's billable hours for this
+    // client are charged at their own bill rate (or the firm default).
+    const hourlyTotal = monthEntries
+      .filter((entry) => entry.clientId === client.id && entry.billable)
+      .reduce((sum, entry) => {
+        const employee = data.employees.find((e) => e.id === entry.employeeId)
+        const rate =
+          employee && typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
+            ? employee.billRate
+            : defaultHourlyRate
+        return sum + (entry.minutes / 60) * rate
+      }, 0)
+    return total + hourlyTotal
   }, 0)
   const activeClientCount = new Set(monthEntries.map((e) => e.clientId)).size
 

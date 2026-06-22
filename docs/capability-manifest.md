@@ -131,11 +131,13 @@ sit in the top bar on every page.
 
 ## Clients (owner manages; staff see assigned)
 
-- Client list: contact, billing type (Hourly / Monthly subscription), rate,
-  assigned team, plans/services.
-- Add client: name, primary contact, billing type, hourly rate or monthly
-  plan, estimated monthly hours per role (informational only — never affects
-  invoices), assigned bookkeeper(s), plans/services.
+- Client list: contact, billing type (Hourly / Monthly subscription / Annual),
+  rate, assigned team, plans/services.
+- Add client: name, primary contact, billing type, monthly/annual rate (for
+  subscription/annual clients), estimated monthly hours per role (informational
+  only — never affects invoices), assigned bookkeeper(s), plans/services. NOTE:
+  there is no per-client hourly rate anymore — Hourly clients are billed off
+  each team member's own bill rate (set on the Team page).
 - Client detail page: everything about one client — tasks, time, contacts,
   notes, billing.
 - Assigned team controls which staff can see/log time for the client.
@@ -163,8 +165,9 @@ sit in the top bar on every page.
 
 - Month summary: tracked hours, internal hours, billable mix, projected
   billing, employee coverage.
-- Employee report (hours by person) and Client report (hours by client),
-  each with Download CSV. Print-friendly output.
+- Employee report (hours by person, including billable $ = each person's
+  billable hours × their bill rate; owners are included) and Client report
+  (hours by client), each with Download CSV. Print-friendly output.
 - Hours by month: a raw, line-by-line CSV export of every time entry in the
   selected period (Date, Employee, Client, Task, Hours, Billable, Description),
   sorted by date — for month-by-month detail / external bookkeeping.
@@ -186,7 +189,9 @@ sit in the top bar on every page.
 ## Invoices (owner only)
 
 - Per-client invoice drafts for the selected billing month: subscription
-  plans and/or billable hours become line items; total due computed.
+  plans and/or billable hours become line items; total due computed. For
+  Hourly clients, billable hours are charged per team member at that person's
+  own bill rate — the invoice shows one "Billable hours — <name>" line each.
 - This invoice's reimbursements: add out-of-pocket expenses (date,
   description, amount) — each becomes a line on the invoice. Recurring
   reimbursements supported.
@@ -208,10 +213,14 @@ sit in the top bar on every page.
   sends a sign-in link by email.
 - Roster: each member's role and last login; expand for details; reorder.
 - Resend sign-in link; revoke access.
+- Bill rate (expand a member): the $/hour charged to clients for this person's
+  billable hours on Hourly-billed clients. Set for ANY member including the
+  owner (so the owner's own hours bill). Leave blank to fall back to the firm's
+  default hourly rate. Owner-only to edit.
 - Cost rate (expand a member): optional $/hour pay/cost rate per member. Owner-
   only, informational — it powers the assistant's margin analytics and is
   NEVER billed or shown to staff. Leave blank to skip; the assistant then
-  reports realization only.
+  reports realization only. (Distinct from bill rate above.)
 - Roles: owner has everything; staff see their assigned clients, their own
   time, and ALL tasks for those clients (logging time against any of them),
   while editing/completing stays limited to tasks assigned to them. There is

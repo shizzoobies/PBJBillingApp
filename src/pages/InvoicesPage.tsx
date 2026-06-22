@@ -4,6 +4,7 @@ import { useAppContext } from '../AppContext'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import type {
   Client,
+  Employee,
   Invoice,
   InvoiceLine,
   RecurringReimbursement,
@@ -326,6 +327,8 @@ export function InvoicesPage() {
             billingPeriod,
             data.reimbursements ?? [],
             data.recurringReimbursements ?? [],
+            data.employees,
+            firmSettings.clientDefaults?.hourlyRate ?? 0,
           )
         : null,
     [
@@ -335,6 +338,8 @@ export function InvoicesPage() {
       billingPeriod,
       data.reimbursements,
       data.recurringReimbursements,
+      data.employees,
+      firmSettings.clientDefaults?.hourlyRate,
     ],
   )
   const display = useMemo(
@@ -479,6 +484,8 @@ export function InvoicesPage() {
           plans={data.plans}
           reimbursements={data.reimbursements ?? []}
           recurringReimbursements={data.recurringReimbursements ?? []}
+          employees={data.employees}
+          defaultHourlyRate={firmSettings.clientDefaults?.hourlyRate ?? 0}
         />
       </section>
 
@@ -735,6 +742,8 @@ function BillingQueue({
   plans,
   reimbursements,
   recurringReimbursements,
+  employees,
+  defaultHourlyRate,
 }: {
   billingPeriod: string
   clients: Client[]
@@ -742,6 +751,8 @@ function BillingQueue({
   plans: SubscriptionPlan[]
   reimbursements: Reimbursement[]
   recurringReimbursements: RecurringReimbursement[]
+  employees: Employee[]
+  defaultHourlyRate: number
 }) {
   return (
     <section className="panel">
@@ -760,6 +771,8 @@ function BillingQueue({
             billingPeriod,
             reimbursements,
             recurringReimbursements,
+            employees,
+            defaultHourlyRate,
           )
           return (
             <article className="queue-row" key={client.id}>

@@ -954,13 +954,14 @@ export function getInvoice(
   billingPeriod: string,
   reimbursements: Reimbursement[] = [],
   recurringReimbursements: RecurringReimbursement[] = [],
+  employees: Employee[] = [],
+  defaultHourlyRate = 0,
 ): Invoice {
   const billableEntries = entries.filter(
     (entry) =>
       entry.clientId === client.id && entry.billable && isInBillingPeriod(entry, billingPeriod),
   )
   const billableMinutes = billableEntries.reduce((total, entry) => total + entry.minutes, 0)
-  const billableAmount = (billableMinutes / 60) * client.hourlyRate
   // The subscribed plans/services are now just labels (no fee). Resolve the
   // names for the monthly invoice line; the amount comes from the client's
   // own `monthlyRate`. `Invoice.plan` keeps the first matched plan for
@@ -1087,6 +1088,39 @@ export function getInvoice(
     }
   }
 
+  // Hourly billing is now per-EMPLOYEE: each person's billable hours are
+  // charged at THEIR own bill rate (set on the Team page), not a single
+  // per-client rate. Group this client's billable minutes by employee, then
+  // emit one invoice line per employee with hours. An employee with no bill
+  // rate set falls back to the firm's default hourly rate.
+  const employeeById = new Map(employees.map((employee) => [employee.id, employee]))
+  const minutesByEmployee = new Map<string, number>()
+  for (const entry of billableEntries) {
+    minutesByEmployee.set(
+      entry.employeeId,
+      (minutesByEmployee.get(entry.employeeId) ?? 0) + entry.minutes,
+    )
+  }
+
+  const employeeLines: InvoiceLine[] = Array.from(minutesByEmployee.entries())
+    .map(([employeeId, minutes]) => {
+      const employee = employeeById.get(employeeId)
+      const rate =
+        employee && typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
+          ? employee.billRate
+          : defaultHourlyRate
+      const amount = (minutes / 60) * rate
+      const name = employee?.name ?? 'Unknown'
+      return {
+        label: `Billable hours — ${name}`,
+        detail: `${formatHours(minutes)} at ${currency.format(rate)}/hr`,
+        amount,
+      }
+    })
+    .sort((a, b) => a.label.localeCompare(b.label))
+
+  const billableAmount = employeeLines.reduce((total, line) => total + line.amount, 0)
+
   return {
     client,
     plan,
@@ -1094,15 +1128,7 @@ export function getInvoice(
     entryCount: billableEntries.length,
     period: billingPeriod,
     periodLabel,
-    lines: [
-      {
-        label: 'Billable hours',
-        detail: `${formatHours(billableMinutes)} at ${currency.format(client.hourlyRate)}/hr`,
-        amount: billableAmount,
-      },
-      ...reimbursementLines,
-      ...recurringLines,
-    ],
+    lines: [...employeeLines, ...reimbursementLines, ...recurringLines],
     total: billableAmount + reimbursementTotal + recurringTotal,
   }
 }

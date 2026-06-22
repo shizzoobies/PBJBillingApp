@@ -23,7 +23,8 @@ import {
 } from '../lib/utils'
 
 export function ReportsPage() {
-  const { data, billingPeriod, ownerMode } = useAppContext()
+  const { data, billingPeriod, ownerMode, firmSettings } = useAppContext()
+  const defaultHourlyRate = firmSettings.clientDefaults?.hourlyRate ?? 0
 
   // Toggle: default ON shows only current team members; flip off to fold
   // in former (soft-deleted) team members so their historical hours are
@@ -34,9 +35,10 @@ export function ReportsPage() {
     return null
   }
 
-  const inactiveEmployees = (data.inactiveEmployees ?? []).filter(
-    (employee) => employee.role !== 'Owner',
-  )
+  // Owners ARE included in the employee report now: the firm bills the owner's
+  // own billable hours off her bill rate, so excluding owners made the team
+  // billable total read zero whenever an owner did the billable work.
+  const inactiveEmployees = data.inactiveEmployees ?? []
   const employeesForReport = currentTeamOnly
     ? data.employees
     : [...data.employees, ...inactiveEmployees]
@@ -56,6 +58,8 @@ export function ReportsPage() {
         billingPeriod,
         data.reimbursements ?? [],
         data.recurringReimbursements ?? [],
+        data.employees,
+        defaultHourlyRate,
       ).total,
     0,
   )
@@ -69,13 +73,13 @@ export function ReportsPage() {
   const activeClientCount = new Set(billingPeriodEntries.map((entry) => entry.clientId)).size
 
   const employeeReportRows: EmployeeReportRow[] = employeesForReport
-    .filter((employee) => employee.role !== 'Owner')
     .map((employee) => {
       const entries = billingPeriodEntries.filter((entry) => entry.employeeId === employee.id)
       const billableEntryMinutes = entries
         .filter((entry) => entry.billable)
         .reduce((total, entry) => total + entry.minutes, 0)
       const totalMinutes = entries.reduce((total, entry) => total + entry.minutes, 0)
+      const billRate = typeof employee.billRate === 'number' ? employee.billRate : 0
 
       return {
         employeeId: employee.id,
@@ -84,6 +88,7 @@ export function ReportsPage() {
         internalMinutes: totalMinutes - billableEntryMinutes,
         entryCount: entries.length,
         clientCount: new Set(entries.map((entry) => entry.clientId)).size,
+        billableAmount: (billableEntryMinutes / 60) * billRate,
       }
     })
     .sort((left, right) => right.minutes - left.minutes)
@@ -110,6 +115,8 @@ export function ReportsPage() {
           billingPeriod,
           data.reimbursements ?? [],
           data.recurringReimbursements ?? [],
+          data.employees,
+          defaultHourlyRate,
         ).total,
       }
     })
@@ -226,11 +233,12 @@ function ReportsOverview({
   const exportEmployees = () =>
     downloadCsv(
       `employee-report-${periodSlug}.csv`,
-      ['Employee', 'Tracked hours', 'Billable hours', 'Internal hours', 'Entries', 'Clients'],
+      ['Employee', 'Tracked hours', 'Billable hours', 'Billable $', 'Internal hours', 'Entries', 'Clients'],
       employeeRows.map((row) => [
         employeeName(employees, row.employeeId),
         (row.minutes / 60).toFixed(2),
         (row.billableMinutes / 60).toFixed(2),
+        row.billableAmount.toFixed(2),
         (row.internalMinutes / 60).toFixed(2),
         row.entryCount,
         row.clientCount,
@@ -341,11 +349,12 @@ function ReportsOverview({
           </button>
         </div>
         <ReportTable
-          columns={['Employee', 'Tracked', 'Billable', 'Internal', 'Entries', 'Clients']}
+          columns={['Employee', 'Tracked', 'Billable', 'Billable $', 'Internal', 'Entries', 'Clients']}
           rows={employeeRows.map((row) => [
             employeeName(employees, row.employeeId),
             formatHours(row.minutes),
             formatHours(row.billableMinutes),
+            currency.format(row.billableAmount),
             formatHours(row.internalMinutes),
             row.entryCount.toString(),
             row.clientCount.toString(),

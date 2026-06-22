@@ -1669,6 +1669,11 @@ export class AppDataStore {
       // informational — it powers the assistant's margin analytics and NEVER
       // affects invoices (same rule as estimated hours). Null = not set.
       await this.pool.query(`alter table users add column if not exists cost_rate numeric`)
+      // Per-employee BILL rate ($/hour charged to clients for this person's
+      // time). Separate from cost_rate (a cost/pay rate, margin-only). Unlike
+      // cost_rate, bill_rate DOES feed invoices: hourly clients are billed off
+      // each employee's bill_rate (see getInvoice). Owner-only, nullable.
+      await this.pool.query(`alter table users add column if not exists bill_rate numeric`)
       await this.pool.query(`alter table users add column if not exists totp_secret text`)
       await this.pool.query(`alter table users add column if not exists totp_enabled boolean not null default false`)
       await this.pool.query(`alter table users add column if not exists totp_backup_codes text[] not null default '{}'`)
@@ -2753,7 +2758,7 @@ export class AppDataStore {
           // can offer "current team only" vs "include former" toggles
           // without conflating the two lists.
           this.pool.query(`
-            select id, name, role
+            select id, name, role, bill_rate
             from users
             where inactive_at is null
             order by sort_order asc nulls last, name asc
@@ -2847,7 +2852,7 @@ export class AppDataStore {
           // historical team" toggle. Same Employee shape as active users
           // but with an `inactiveAt` timestamp so the UI can label them.
           this.pool.query(`
-            select id, name, role, inactive_at
+            select id, name, role, inactive_at, bill_rate
             from users
             where inactive_at is not null
             order by inactive_at desc, name asc
@@ -2980,6 +2985,7 @@ export class AppDataStore {
           id: row.id,
           name: row.name,
           role: dbRoleToEmployeeRole(row.role),
+          billRate: row.bill_rate == null ? null : Number(row.bill_rate),
         })),
         plans: plansResult.rows.map((row) => ({
           id: row.id,
@@ -3166,6 +3172,7 @@ export class AppDataStore {
           id: row.id,
           name: row.name,
           role: dbRoleToEmployeeRole(row.role),
+          billRate: row.bill_rate == null ? null : Number(row.bill_rate),
           inactiveAt: row.inactive_at ? row.inactive_at.toISOString() : null,
         })),
       }
@@ -3214,6 +3221,33 @@ export class AppDataStore {
       data.clients = data.clients.map(normalizeClientProfile)
     }
     data.firmSettings = { ...DEFAULT_FIRM_SETTINGS, ...(data.firmSettings || {}) }
+
+    // Carry each employee's BILL rate onto `data.employees` so it reaches the
+    // client (getInvoice needs it), mirroring the Postgres employees mapping
+    // above. In the file backend the rate lives in the separate auth store
+    // (set by setEmployeeBillRate); merge it in by id. Inactive employees get
+    // the same treatment so historical reports can value their hours too.
+    try {
+      const authState = await readJson(localAuthPath)
+      const billRateById = new Map(
+        (Array.isArray(authState.users) ? authState.users : [])
+          .filter((u) => u && typeof u.id === 'string')
+          .map((u) => [u.id, typeof u.billRate === 'number' ? u.billRate : null]),
+      )
+      const withBillRate = (employee) =>
+        employee && typeof employee.id === 'string'
+          ? { ...employee, billRate: billRateById.get(employee.id) ?? null }
+          : employee
+      if (Array.isArray(data.employees)) {
+        data.employees = data.employees.map(withBillRate)
+      }
+      if (Array.isArray(data.inactiveEmployees)) {
+        data.inactiveEmployees = data.inactiveEmployees.map(withBillRate)
+      }
+    } catch {
+      // A missing/malformed auth file must never block a read. Employees just
+      // carry no billRate (treated as null → defaultHourlyRate fallback).
+    }
 
     // Backfill the approval workflow for legacy file-fallback data. An entry
     // with no `approvalStatus` predates the feature, so it's treated as
@@ -6303,7 +6337,7 @@ export class AppDataStore {
       // admin page. Owner re-adds with a fresh invite to undo a removal.
       const result = await this.pool.query(`
         select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at, created_at,
-               totp_enabled, cost_rate
+               totp_enabled, cost_rate, bill_rate
         from users
         where inactive_at is null
         order by sort_order asc nulls last, name asc
@@ -6321,6 +6355,7 @@ export class AppDataStore {
         createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
         totpEnabled: Boolean(row.totp_enabled),
         costRate: row.cost_rate == null ? null : Number(row.cost_rate),
+        billRate: row.bill_rate == null ? null : Number(row.bill_rate),
       }))
     }
 
@@ -6337,6 +6372,7 @@ export class AppDataStore {
       createdAt: user.createdAt ?? null,
       totpEnabled: Boolean(user.totpEnabled),
       costRate: typeof user.costRate === 'number' ? user.costRate : null,
+      billRate: typeof user.billRate === 'number' ? user.billRate : null,
     }))
   }
 
@@ -6364,6 +6400,35 @@ export class AppDataStore {
     if (!user) return null
     if (normalized === null) delete user.costRate
     else user.costRate = normalized
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return normalized
+  }
+
+  /**
+   * Owner-only: set or clear a team member's BILL rate ($/hour charged to
+   * clients for this person's time). `rate` is a non-negative number, or null
+   * to clear. Unlike cost_rate this DOES feed invoices (hourly clients are
+   * billed off each employee's bill rate). Returns the normalized rate (or null).
+   */
+  async setEmployeeBillRate(userId, rate) {
+    if (!userId) return null
+    let normalized = null
+    if (rate !== null && rate !== undefined && rate !== '') {
+      const n = Number(rate)
+      if (!Number.isFinite(n) || n < 0) return null
+      normalized = Math.round(n * 100) / 100
+    }
+
+    if (this.pool) {
+      await this.pool.query(`update users set bill_rate = $2 where id = $1`, [userId, normalized])
+      return normalized
+    }
+
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((u) => u.id === userId)
+    if (!user) return null
+    if (normalized === null) delete user.billRate
+    else user.billRate = normalized
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return normalized
   }

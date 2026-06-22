@@ -28,6 +28,13 @@ export type Employee = {
   name: string
   role: 'Bookkeeper' | 'Accountant' | 'Owner'
   /**
+   * Optional BILL rate ($/hour) charged to clients for this person's time.
+   * Hourly clients are billed off each employee's bill rate (see getInvoice).
+   * Separate from the cost/pay rate (margin-only). Null = not set, falls back
+   * to the firm's default hourly rate at invoice time.
+   */
+  billRate?: number | null
+  /**
    * ISO timestamp set when an owner removes the team member via the
    * Team page. Only present on entries in `AppData.inactiveEmployees`;
    * absent (or null) on every active member in `AppData.employees`.
@@ -775,6 +782,8 @@ export type EmployeeReportRow = {
   internalMinutes: number
   entryCount: number
   clientCount: number
+  /** Billable $ = (billableMinutes / 60) * (employee.billRate ?? 0). */
+  billableAmount: number
 }
 
 export type ClientReportRow = {
@@ -829,6 +838,12 @@ export type TeamMember = {
    * assistant's margin analytics. Never affects invoices. Null = not set.
    */
   costRate?: number | null
+  /**
+   * Optional BILL rate ($/hour) charged to clients for this person's time.
+   * Unlike costRate this DOES feed invoices (hourly clients are billed off
+   * each employee's bill rate). Null = not set. Owner-only to edit.
+   */
+  billRate?: number | null
 }
 
 export type TotpStatus = {
