@@ -195,6 +195,14 @@ const WORKSPACE_VERSION_HEADER = 'x-workspace-version'
 // the global request handler catch turns it into a 500.
 const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024 // 10 MB
 
+// True when the request declares a JSON body. Used to return a clean 415
+// instead of letting a non-JSON body blow up inside JSON.parse → generic 500.
+function isJsonContentType(request) {
+  return String(request.headers['content-type'] || '')
+    .toLowerCase()
+    .includes('application/json')
+}
+
 async function readJsonBody(request) {
   const chunks = []
   let total = 0
@@ -423,6 +431,16 @@ function isCrossSiteOrigin(request) {
   }
   const allowedHosts = new Set()
   if (request.headers.host) allowedHosts.add(request.headers.host)
+  // Behind a reverse proxy / CDN (the app is fronted by a custom domain), the
+  // browser-facing host arrives in x-forwarded-host while `Host` may be the
+  // internal origin. Trust it for the same-origin comparison so a legitimate
+  // proxied request isn't wrongly flagged cross-site (it only ever ADDS an
+  // allowed host — it can't loosen the check for a genuinely cross-site Origin).
+  const forwardedHost = request.headers['x-forwarded-host']
+  if (forwardedHost) {
+    // x-forwarded-host can be a comma-separated list; take the first hop.
+    allowedHosts.add(String(forwardedHost).split(',')[0].trim())
+  }
   if (process.env.APP_PUBLIC_URL) {
     try {
       allowedHosts.add(new URL(process.env.APP_PUBLIC_URL).host)
@@ -2018,7 +2036,13 @@ const server = createServer(async (request, response) => {
           sendJson(response, 403, { error: 'Only owners can update firm settings' })
           return
         }
+        if (!isJsonContentType(request)) {
+          sendJson(response, 415, { error: 'application/json required' })
+          return
+        }
 
+        // The store already whitelists firm-settings keys (FIRM_SETTINGS_FIELDS
+        // + clientDefaults) and validates colors, so unknown fields are ignored.
         const payload = await readJsonBody(request)
         const updated = await appDataStore.updateFirmSettings(payload || {})
         await appDataStore.recordActivity(session.user.id, 'firm_settings_updated', 'branding')
@@ -2182,6 +2206,10 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
       const payload = await readJsonBody(request)
       const category = await appDataStore.createServiceCategory(payload?.name)
       if (!category) {
@@ -2209,6 +2237,10 @@ const server = createServer(async (request, response) => {
       if (request.method === 'DELETE') {
         const removed = await appDataStore.deleteServiceCategory(categoryId)
         sendJson(response, removed ? 200 : 404, removed ? { ok: true } : { error: 'Column not found' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
         return
       }
       const payload = await readJsonBody(request)

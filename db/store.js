@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile as fsWriteFile } from 'node:fs/promises'
 import { classifySplitTarget } from '../lib/group-allocation.js'
+import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import {
   StaleWorkspaceError,
   fileWorkspaceVersion,
@@ -11548,10 +11549,11 @@ export class AppDataStore {
         email: row.email,
         role: row.role,
         staffRole: row.staff_role,
-        totpSecret: row.totp_secret ?? null,
+        // Decrypt-at-rest (no-op passthrough for legacy plaintext / no key).
+        totpSecret: decryptSecretAtRest(row.totp_secret ?? null),
         totpEnabled: Boolean(row.totp_enabled),
         totpBackupCodes: Array.isArray(row.totp_backup_codes) ? row.totp_backup_codes : [],
-        pendingTotpSecret: row.pending_totp_secret ?? null,
+        pendingTotpSecret: decryptSecretAtRest(row.pending_totp_secret ?? null),
       }
     }
 
@@ -11564,10 +11566,10 @@ export class AppDataStore {
       email: user.email,
       role: user.role,
       staffRole: user.staffRole,
-      totpSecret: user.totpSecret ?? null,
+      totpSecret: decryptSecretAtRest(user.totpSecret ?? null),
       totpEnabled: Boolean(user.totpEnabled),
       totpBackupCodes: Array.isArray(user.totpBackupCodes) ? user.totpBackupCodes : [],
-      pendingTotpSecret: user.pendingTotpSecret ?? null,
+      pendingTotpSecret: decryptSecretAtRest(user.pendingTotpSecret ?? null),
     }
   }
 
@@ -11578,17 +11580,19 @@ export class AppDataStore {
    * `commitTotp` fires.
    */
   async savePendingTotpSecret(userId, secret) {
+    // Encrypted-at-rest when TOTP_ENC_KEY is set; unchanged plaintext otherwise.
+    const stored = secret ? encryptSecretAtRest(secret) : null
     if (this.pool) {
       await this.pool.query(
         `update users set pending_totp_secret = $2, updated_at = now() where id = $1`,
-        [userId, secret || null],
+        [userId, stored],
       )
       return
     }
 
     const authState = await readJson(localAuthPath)
     authState.users = (authState.users ?? []).map((user) =>
-      user.id === userId ? { ...user, pendingTotpSecret: secret || null } : user,
+      user.id === userId ? { ...user, pendingTotpSecret: stored } : user,
     )
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
   }
@@ -11600,6 +11604,9 @@ export class AppDataStore {
   async commitTotp(userId, secret, hashedBackupCodes) {
     if (!userId || !secret) return false
 
+    // Encrypted-at-rest when TOTP_ENC_KEY is set; unchanged plaintext otherwise.
+    const stored = encryptSecretAtRest(secret)
+
     if (this.pool) {
       const result = await this.pool.query(
         `update users
@@ -11610,7 +11617,7 @@ export class AppDataStore {
              updated_at = now()
          where id = $1
          returning id`,
-        [userId, secret, hashedBackupCodes || []],
+        [userId, stored, hashedBackupCodes || []],
       )
       return result.rowCount > 0
     }
@@ -11622,7 +11629,7 @@ export class AppDataStore {
       found = true
       return {
         ...user,
-        totpSecret: secret,
+        totpSecret: stored,
         totpEnabled: true,
         totpBackupCodes: hashedBackupCodes || [],
         pendingTotpSecret: null,
