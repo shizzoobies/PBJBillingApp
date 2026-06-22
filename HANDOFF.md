@@ -1,6 +1,6 @@
 # PB&J Strategic Accounting — Handoff
 
-_Last updated: 2026-06-18. This supersedes earlier handoffs; git history has the old one._
+_Last updated: 2026-06-19. This supersedes earlier handoffs; git history has the old one._
 
 A time-tracking, checklist, and client-billing web app for a small bookkeeping
 firm. This doc is written so a fresh session (or another dev) can resume cold.
@@ -171,6 +171,62 @@ Railway var → revoke the old).
   purpose), `rescue-login.mjs`, or `.playwright-mcp/`.
 
 ---
+
+## What shipped 2026-06-19 — Brittany + Lisa feedback batch (6 phases, newest first)
+
+A large feedback round from Brittany (owner) plus her bookkeeper Lisa, built as
+six phases in one session. All on `main`, all pushed/deployed together. Research
+maps in `.omc/research/` (autosave-bug, invoicing, checklists); decisions in
+memory `brittany-feedback-2026-06`. Owner walkthrough doc: `docs/to-100-status.md`.
+
+- **`eb4b6c4` Phase 6 — staff tabs + checklist delete-approval (Lisa).** Staff now
+  see **Delayed** + **Gantt** (scoped to assigned clients; removed their owner-only
+  route/nav guards + GanttPage's internal gate); **Client Recap is now owner-only**.
+  Staff can edit assigned checklists (edits persist), but **deleting files an
+  owner-approval request** instead of deleting: `DELETE /api/checklists/:id` →
+  owner deletes immediately, an authorized non-owner (client visible AND
+  assignee/editor) records a request + notifies owners (`checklist_deletion_requested`),
+  others 403. New owner-only `POST /api/checklists/:id/deletion/(approve|reject)`.
+  `Checklist.deletionRequestedBy/At` (BOTH backends, mirrors `deletedAt`). Owner
+  sees a "Pending deletion requests" queue atop Checklists; staff see a badge.
+- **`3d1c7f5` Phase 5 — "To 100%" setup page.** New owner-only sidebar page
+  (`/setup`) — a live, self-updating checklist of unconfigured items (clients
+  missing rate/email/team/contact, plan checklists not set up, team without bill
+  rate, plans without templates, unlinked contacts), each deep-linked to its fix.
+  Pure engine `src/lib/completeness.ts`. Plus `docs/to-100-status.md` (written
+  walkthrough for the owner review).
+- **`31c560d` Phase 4 — plans ↔ checklists ↔ board.** `SubscriptionPlan.templateIds[]`
+  (BOTH backends) links a plan to checklist templates; a client's "Plan checklists"
+  panel shows which are set up and a "Set up plan checklists" button clones the
+  missing ones (categoryId preserved → right board column). `ChecklistTemplate.sourceTemplateId`
+  added (both backends) to trace origin. FIRST-PASS interpretation — get Brittany's feedback.
+- **`c5ad6f4` Phase 3 — contacts.** Per-company email overrides
+  (`companyEmails[]`), symmetric contact linking (`linkedContactIds[]`), archive
+  (`archivedAt`) — all three new fields BOTH backends (pg: jsonb / text[] /
+  timestamptz). Contacts list shows linked client NAMES (not a count), flags
+  contacts on no client, Unlinked filter. `emailForClient()` helper.
+- **`9cebd4d` Phase 2 — per-employee bill rate + billable fix.** New `users.bill_rate`
+  (BOTH backends, mirrors cost_rate; surfaced on `data.employees`) with owner-only
+  `PUT /api/team/bill-rate`. Team page shows a Bill rate for EVERY member incl.
+  the owner (so the owner's hours bill). `getInvoice` hourly branch now bills each
+  employee at their own bill rate (fallback = firm default), one line per person;
+  the per-client `hourlyRate` UI was retired (field/column kept for back-compat).
+  Reports now INCLUDE owners (fixing the team-billable-hours-reads-zero report)
+  with a Billable $ column. cost_rate stays margin-only, never billed.
+- **`d315978` Phase 1 — SAVE-RELIABILITY FIX + quick wins.** The autosave
+  indicator could say "All changes saved" while dropping an edit, and a background
+  refetch could overwrite in-progress edits. Replaced the fragile skip-counter
+  with an explicit dirty flag cleared only by a confirmed PUT; the SSE refetch now
+  DEFERS (never overwrites) while there are unsaved/in-flight edits OR an editable
+  field is focused; failed PUTs stay sticky-error and retry. Decision logic in pure
+  `src/lib/sync.ts`. **`store.write()` wipe-and-reinsert left untouched.** Quick
+  wins: removed sales tax from Client Recap; "Hours by month" per-line CSV export
+  on Reports; recent-checklist deep-links from the client page.
+
+**Verification this round:** 353 tests pass; clean lint + build; manifest updated
+each phase; voice re-provisioned after deploy. NOTE: the "team billable hours show
+zero" fix (include owners) is the most likely cause but was UNCONFIRMED — verify
+with Brittany. Phase 4 is a first-pass for feedback.
 
 ## What shipped 2026-06-18 — Outage recovery + hardening + bug pass (newest first)
 
