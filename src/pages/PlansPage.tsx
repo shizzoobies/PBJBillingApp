@@ -1,8 +1,15 @@
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
+import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { CollapsibleSection } from '../components/SectionKit'
-import { ApiError, type Client, type SubscriptionPlan } from '../lib/types'
+import {
+  ApiError,
+  type ChecklistTemplate,
+  type Client,
+  type SubscriptionPlan,
+} from '../lib/types'
+import { planTemplates, templatePickerLabel } from '../lib/utils'
 
 export function PlansPage() {
   const { data, addPlan, updatePlan, deletePlan, ownerMode } = useAppContext()
@@ -12,6 +19,7 @@ export function PlansPage() {
       <PlanLibrary
         plans={data.plans}
         clients={data.clients}
+        templates={data.checklistTemplates}
         ownerMode={ownerMode}
         onUpdate={updatePlan}
         onDelete={deletePlan}
@@ -71,16 +79,30 @@ function PlanBuilder({
 function PlanLibrary({
   plans,
   clients,
+  templates,
   ownerMode,
   onUpdate,
   onDelete,
 }: {
   plans: SubscriptionPlan[]
   clients: Client[]
+  templates: ChecklistTemplate[]
   ownerMode: boolean
   onUpdate: (planId: string, patch: Partial<SubscriptionPlan>) => void
   onDelete: (planId: string) => Promise<void>
 }) {
+  // Templates the owner can bundle into a plan. Standard (client-agnostic)
+  // blueprints come first since they're the intended building blocks, then
+  // every other template so existing client checklists can be reused too.
+  const templateOptions = templates
+    .slice()
+    .sort((a, b) => {
+      if (Boolean(a.isStandard) !== Boolean(b.isStandard)) {
+        return a.isStandard ? -1 : 1
+      }
+      return a.title.localeCompare(b.title)
+    })
+    .map((template) => ({ id: template.id, label: templatePickerLabel(template) }))
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
@@ -187,6 +209,13 @@ function PlanLibrary({
                         {attachedCount} client{attachedCount === 1 ? '' : 's'} on this plan
                       </span>
                     ) : null}
+                    <PlanTemplatesField
+                      plan={plan}
+                      templates={templates}
+                      templateOptions={templateOptions}
+                      ownerMode={ownerMode}
+                      onUpdate={onUpdate}
+                    />
                   </div>
                   {ownerMode ? (
                     <div className="plan-row-actions">
@@ -218,5 +247,51 @@ function PlanLibrary({
         })}
       </div>
     </CollapsibleSection>
+  )
+}
+
+// The checklist templates bundled with a plan. Owners edit the set via a
+// ChipMultiSelect; non-owners (and the read view) see a plain summary. Because
+// each template carries a board category, linking templates here transitively
+// connects the plan → checklists → board.
+function PlanTemplatesField({
+  plan,
+  templates,
+  templateOptions,
+  ownerMode,
+  onUpdate,
+}: {
+  plan: SubscriptionPlan
+  templates: ChecklistTemplate[]
+  templateOptions: Array<{ id: string; label: string }>
+  ownerMode: boolean
+  onUpdate: (planId: string, patch: Partial<SubscriptionPlan>) => void
+}) {
+  const chosen = planTemplates(plan, templates)
+
+  if (!ownerMode) {
+    if (chosen.length === 0) return null
+    return (
+      <span className="checklist-meta-line">
+        Plan checklists: {chosen.map((template) => template.title).join(', ')}
+      </span>
+    )
+  }
+
+  return (
+    <div className="plan-templates-field">
+      <span className="checklist-meta-line">Plan checklists</span>
+      <ChipMultiSelect
+        selectedIds={plan.templateIds ?? []}
+        options={templateOptions}
+        onChange={(nextIds) => onUpdate(plan.id, { templateIds: nextIds })}
+        addLabel="+ Add checklist template"
+        emptyHelper={
+          templateOptions.length === 0
+            ? 'Create a recurring checklist first to bundle it into a plan.'
+            : 'No checklist templates bundled with this plan yet.'
+        }
+      />
+    </div>
   )
 }

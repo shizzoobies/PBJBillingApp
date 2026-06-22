@@ -1,4 +1,4 @@
-import { ArrowLeft, Copy, ExternalLink, Pencil, Plus, Trash2 } from 'lucide-react'
+import { ArrowLeft, Check, Copy, ExternalLink, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
@@ -36,13 +36,17 @@ import {
   clientName,
   deriveChecklistStatus,
   emailForClient,
+  ensureTemplateStages,
   employeeName,
   formatHours,
   getChecklistFrequencyLabel,
   isSafeImageSrc,
   localDateOnly,
+  makeId,
+  missingPlanTemplatesForClient,
   MONTH_NAMES,
   normalizeBillingMonth,
+  planTemplates,
   shortDate,
   sortChecklists,
   stageNameFor,
@@ -159,6 +163,10 @@ export function ClientDetailPage() {
 
       <CollapsibleSection kicker="Billing" title="Rate and services" lockable>
         <BillingSectionBody client={client} plans={data.plans} onCommit={commit} />
+      </CollapsibleSection>
+
+      <CollapsibleSection kicker="Billing" title="Plan checklists" lockable>
+        <PlanChecklistsBody client={client} data={data} />
       </CollapsibleSection>
 
       <CollapsibleSection kicker="Expenses" title="Recurring reimbursements" lockable>
@@ -477,6 +485,160 @@ function BillingSectionBody({
         addLabel="+ Add plan / service"
         emptyHelper="No plans/services selected yet."
       />
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Plan checklists                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Deep-clone a checklist template ONTO a client: fresh ids at every level
+ * (template, stage, item, sub-item) so the bulk autosave can insert the copy
+ * without colliding with the source, with `clientId` retargeted and the origin
+ * stamped via `sourceTemplateId`. Everything else — stages, items, categoryId
+ * (the board column), frequency, scheduling — is preserved. Mirrors the
+ * server-side copyTemplateToClient clone, done locally so the copy persists
+ * through the normal workspace autosave.
+ */
+function cloneTemplateForClient(
+  source: ChecklistTemplate,
+  clientId: string,
+): Omit<ChecklistTemplate, 'id'> {
+  const migrated = ensureTemplateStages(source)
+  const cloneItems = (items: ChecklistTemplate['stages'][number]['items']) =>
+    (items ?? []).map((item) => ({
+      ...item,
+      id: makeId('template-item'),
+      subItems: (item.subItems ?? []).map((sub) => ({
+        ...sub,
+        id: makeId('template-subitem'),
+      })),
+    }))
+  return {
+    title: source.title,
+    clientId,
+    assigneeId: source.assigneeId || '',
+    frequency: source.frequency,
+    nextDueDate: source.nextDueDate || localDateOnly(),
+    active: true,
+    isStandard: false,
+    sourceTemplateId: source.id,
+    categoryId: source.categoryId ?? null,
+    leadDays: source.leadDays,
+    scheduledMonths: source.scheduledMonths ? [...source.scheduledMonths] : undefined,
+    dueDayOfMonth: source.dueDayOfMonth,
+    monthlyDueDays: source.monthlyDueDays ? { ...source.monthlyDueDays } : undefined,
+    repeatAnnually: source.repeatAnnually,
+    scheduleYear: source.scheduleYear,
+    viewerIds: Array.isArray(source.viewerIds) ? [...source.viewerIds] : [],
+    editorIds: Array.isArray(source.editorIds) ? [...source.editorIds] : [],
+    stages: (migrated.stages ?? []).map((stage) => ({
+      ...stage,
+      id: makeId('stage'),
+      viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
+      editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
+      items: cloneItems(stage.items),
+    })),
+  }
+}
+
+function PlanChecklistsBody({ client, data }: { client: Client; data: AppData }) {
+  const { ownerMode, addChecklistTemplate } = useAppContext()
+
+  // The plans this client is on (planIds chips on the Billing panel).
+  const clientPlans = useMemo(
+    () =>
+      (client.planIds ?? [])
+        .map((planId) => data.plans.find((plan) => plan.id === planId))
+        .filter((plan): plan is SubscriptionPlan => Boolean(plan)),
+    [client.planIds, data.plans],
+  )
+
+  if (!ownerMode) return null
+
+  if (clientPlans.length === 0) {
+    return (
+      <p className="muted-text">
+        This client isn&apos;t on any plan yet. Add a plan under{' '}
+        <strong>Rate and services</strong> to bundle its checklists here.
+      </p>
+    )
+  }
+
+  const setUpMissing = (plan: SubscriptionPlan) => {
+    const missing = missingPlanTemplatesForClient(
+      plan,
+      data.checklistTemplates,
+      client.id,
+      data.checklistTemplates,
+    )
+    for (const template of missing) {
+      addChecklistTemplate(cloneTemplateForClient(template, client.id))
+    }
+  }
+
+  return (
+    <div className="plan-checklists">
+      {clientPlans.map((plan) => {
+        const templates = planTemplates(plan, data.checklistTemplates)
+        const missing = missingPlanTemplatesForClient(
+          plan,
+          data.checklistTemplates,
+          client.id,
+          data.checklistTemplates,
+        )
+        const missingIds = new Set(missing.map((template) => template.id))
+        return (
+          <div className="plan-checklists-group" key={plan.id}>
+            <div className="plan-checklists-head">
+              <strong>{plan.name}</strong>
+              {templates.length > 0 && missing.length > 0 ? (
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => setUpMissing(plan)}
+                >
+                  <Plus size={14} /> Set up plan checklists ({missing.length})
+                </button>
+              ) : null}
+            </div>
+            {templates.length === 0 ? (
+              <p className="muted-text">No checklists are bundled with this plan yet.</p>
+            ) : (
+              <ul className="plan-checklists-list">
+                {templates.map((template) => {
+                  const isMissing = missingIds.has(template.id)
+                  return (
+                    <li className="plan-checklists-row" key={template.id}>
+                      <span className="apply-existing-info">
+                        <strong>{template.title}</strong>
+                        <span className="apply-existing-meta">
+                          {getChecklistFrequencyLabel(template.frequency)}
+                        </span>
+                      </span>
+                      <span
+                        className={
+                          isMissing ? 'plan-checklist-status missing' : 'plan-checklist-status ready'
+                        }
+                      >
+                        {isMissing ? (
+                          'Not set up'
+                        ) : (
+                          <>
+                            <Check size={12} /> Set up
+                          </>
+                        )}
+                      </span>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

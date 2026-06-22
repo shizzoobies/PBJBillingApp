@@ -216,7 +216,14 @@ sit in the top bar on every page.
 ## Plans (owner only)
 
 - Subscription plan catalog: name + notes (e.g. "Monthly Close Essentials").
-  Attach plans to clients; plan price drives the client's monthly invoice.
+  Attach plans to clients (plans label the monthly invoice line).
+- A plan can be linked to a set of checklist TEMPLATES — the standard work that
+  comes with that plan. On a client's detail page, for each plan the client is
+  on, a "Plan checklists" panel shows that plan's templates, marks which are
+  already set up on the client, and a "Set up plan checklists" button adds the
+  missing ones to the client. Because templates carry a board column, the new
+  checklists land in the right Active-Checklists-board column automatically —
+  connecting plans → checklists → board.
 
 ## Team (owner only)
 

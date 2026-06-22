@@ -397,6 +397,83 @@ export function getChecklistFrequencyLabel(frequency: ChecklistFrequency) {
   return frequency.charAt(0).toUpperCase() + frequency.slice(1)
 }
 
+/* -------------------------------------------------------------------------- */
+/* Plans ↔ checklist-template association                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A readable picker label for a checklist template: "<title> · <frequency>"
+ * (e.g. "Monthly Bookkeeping · Monthly"). Standard blueprints are tagged so
+ * the owner can tell them apart from client-specific copies.
+ */
+export function templatePickerLabel(template: ChecklistTemplate): string {
+  const base = `${template.title} · ${getChecklistFrequencyLabel(template.frequency)}`
+  return template.isStandard ? `${base} (blueprint)` : base
+}
+
+/**
+ * The checklist templates bundled with a plan, resolved from the plan's
+ * `templateIds` against the full template list. Ids that no longer resolve to a
+ * real template (deleted since being linked) are dropped, and order follows the
+ * plan's `templateIds`. Pure — safe to use in render and in tests.
+ */
+export function planTemplates(
+  plan: Pick<SubscriptionPlan, 'templateIds'>,
+  templates: ChecklistTemplate[],
+): ChecklistTemplate[] {
+  const ids = Array.isArray(plan.templateIds) ? plan.templateIds : []
+  const byId = new Map(templates.map((template) => [template.id, template]))
+  const seen = new Set<string>()
+  const result: ChecklistTemplate[] = []
+  for (const id of ids) {
+    if (seen.has(id)) continue
+    const template = byId.get(id)
+    if (template) {
+      seen.add(id)
+      result.push(template)
+    }
+  }
+  return result
+}
+
+/**
+ * Whether a plan's template is "already set up" on a given client. A client
+ * template matches the plan's source template when it targets this client AND
+ * either was cloned from it (`sourceTemplateId` stamp) OR shares its title
+ * (case-insensitive, trimmed) — the stamp is authoritative, the title is the
+ * fallback for templates created before origin stamping existed.
+ */
+function clientHasPlanTemplate(
+  planTemplate: ChecklistTemplate,
+  clientId: string,
+  clientTemplates: ChecklistTemplate[],
+): boolean {
+  const wantTitle = planTemplate.title.trim().toLowerCase()
+  return clientTemplates.some((template) => {
+    if (template.clientId !== clientId) return false
+    if (template.sourceTemplateId && template.sourceTemplateId === planTemplate.id) {
+      return true
+    }
+    return template.title.trim().toLowerCase() === wantTitle
+  })
+}
+
+/**
+ * The plan's templates that are NOT yet set up on the given client — i.e. the
+ * ones "Set up plan checklists" would clone. `clientTemplates` is normally the
+ * full template list (it filters to the client itself). Pure.
+ */
+export function missingPlanTemplatesForClient(
+  plan: Pick<SubscriptionPlan, 'templateIds'>,
+  templates: ChecklistTemplate[],
+  clientId: string,
+  clientTemplates: ChecklistTemplate[],
+): ChecklistTemplate[] {
+  return planTemplates(plan, templates).filter(
+    (template) => !clientHasPlanTemplate(template, clientId, clientTemplates),
+  )
+}
+
 /**
  * Roll-up completion, recursing up to three levels (item → sub-item →
  * sub-sub-item). A node with children is `done` exactly when every child is

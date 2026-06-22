@@ -1667,6 +1667,12 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_templates add column if not exists category_id text`,
       )
+      // Templates cloned from another template stamp their origin id so the UI
+      // can tell a plan's checklist is "already set up" on a client. Plain text
+      // id, no FK (the source may later be deleted).
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists source_template_id text`,
+      )
       await this.pool.query(`
         create table if not exists service_categories (
           id text primary key,
@@ -1749,6 +1755,14 @@ export class AppDataStore {
       )
       await this.pool.query(
         `alter table subscription_plans alter column included_hours drop not null`,
+      )
+
+      // Plans bundle a set of checklist TEMPLATES (by id). No FK — a template
+      // can be deleted while still listed here, so reads coerce to []/string[]
+      // and the apply flow only acts on templates that still exist. Mirrors the
+      // FK-free `clients.plan_ids[]` idiom.
+      await this.pool.query(
+        `alter table subscription_plans add column if not exists template_ids text[] not null default '{}'`,
       )
 
       // Reusable contacts (shared across clients). Mirrors the plans/clients
@@ -2803,7 +2817,7 @@ export class AppDataStore {
             order by sort_order asc nulls last, name asc
           `),
           this.pool.query(`
-            select id, name, notes
+            select id, name, notes, template_ids
             from subscription_plans
             order by name asc
           `),
@@ -2853,7 +2867,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
-                   scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id
+                   scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id
             from checklist_templates
             order by title asc
           `),
@@ -3031,6 +3045,9 @@ export class AppDataStore {
           id: row.id,
           name: row.name,
           notes: row.notes,
+          templateIds: Array.isArray(row.template_ids)
+            ? row.template_ids.filter((id) => typeof id === 'string' && id)
+            : [],
         })),
         contacts: contactsResult.rows.map((row) => ({
           id: row.id,
@@ -3163,6 +3180,7 @@ export class AppDataStore {
           active: row.active,
           isStandard: Boolean(row.is_standard),
           categoryId: row.category_id ?? null,
+          ...(row.source_template_id ? { sourceTemplateId: row.source_template_id } : {}),
           viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
           editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
           // Specific-months scheduling fields (only meaningful for that frequency).
@@ -3566,12 +3584,19 @@ export class AppDataStore {
           // Pricing left the plan model — only name + notes are written now.
           // The legacy monthly_fee / included_hours columns keep their DB
           // defaults (0) and are otherwise ignored.
+          // template_ids is FK-free (a listed template may since have been
+          // deleted); coerce to a clean string[] so a malformed payload can't
+          // break the insert. The board link is transitive via each template's
+          // category, so no extra normalization is needed here.
+          const planTemplateIds = Array.isArray(plan.templateIds)
+            ? plan.templateIds.filter((id) => typeof id === 'string' && id)
+            : []
           await client.query(
             `
-              insert into subscription_plans (id, name, notes, updated_at)
-              values ($1, $2, $3, now())
+              insert into subscription_plans (id, name, notes, template_ids, updated_at)
+              values ($1, $2, $3, $4::text[], now())
             `,
-            [plan.id, plan.name, plan.notes ?? ''],
+            [plan.id, plan.name, plan.notes ?? '', planTemplateIds],
           )
         }
 
@@ -3820,8 +3845,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
             `,
             [
               template.id,
@@ -3850,6 +3875,9 @@ export class AppDataStore {
                 ? Math.min(Math.floor(template.leadDays), 120)
                 : 0,
               template.categoryId ? template.categoryId : null,
+              typeof template.sourceTemplateId === 'string' && template.sourceTemplateId
+                ? template.sourceTemplateId
+                : null,
             ],
           )
 

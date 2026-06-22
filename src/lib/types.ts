@@ -153,6 +153,15 @@ export type SubscriptionPlan = {
   id: string
   name: string
   notes: string
+  /**
+   * Checklist templates that come with this plan — references
+   * {@link ChecklistTemplate} ids (prefer standard blueprints, but any
+   * template id is allowed). Because each template carries a `categoryId`
+   * (board column), associating templates with a plan transitively connects
+   * plan → checklists → board. Unset/empty = the plan has no bundled
+   * checklists yet.
+   */
+  templateIds?: string[]
 }
 
 /**
@@ -534,6 +543,13 @@ export type ChecklistTemplate = {
    * generated/applied from this template inherit it. Unset = "Uncategorized".
    */
   categoryId?: string | null
+  /**
+   * When this template was cloned from another template (e.g. via "Set up plan
+   * checklists" or the apply/copy flow), the id of the source it was copied
+   * from. Lets the UI detect that a plan's template is "already set up" on a
+   * client without relying on a title match. Unset on hand-authored templates.
+   */
+  sourceTemplateId?: string
   /** @deprecated Kept transiently for backwards-compat reads; new writes serialize `stages`. */
   items?: ChecklistTemplateItem[]
 }
