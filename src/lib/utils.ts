@@ -244,6 +244,24 @@ export function checklistHasPendingDeletionRequest(checklist: Checklist): boolea
   return typeof checklist.deletionRequestedBy === 'string' && checklist.deletionRequestedBy.length > 0
 }
 
+/**
+ * Stable key identifying one item / sub-item / sub-sub-item across a checklist
+ * for pending item-deletion-request lookup. Empty path segments collapse to ''
+ * so a top-level item, a sub-item, and a sub-sub-item never collide:
+ *   `${checklistId}:${itemId}:${subItemId||''}:${subSubItemId||''}`
+ * Pure — the client builds a Set of these from the request list and the server
+ * dedupes against the same shape. `null`/`undefined` path parts are treated as
+ * absent.
+ */
+export function itemDeletionKey(
+  checklistId: string,
+  itemId: string,
+  subItemId?: string | null,
+  subSubItemId?: string | null,
+): string {
+  return `${checklistId}:${itemId}:${subItemId || ''}:${subSubItemId || ''}`
+}
+
 /** Friendly relative due-date cue: "due today", "due in 3 days", "4 days overdue". */
 export function dueDateLabel(dueDate: string, todayDateOnly: string): string {
   const days = daysUntilDue(dueDate, todayDateOnly)

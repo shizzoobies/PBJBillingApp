@@ -597,6 +597,31 @@ export type Checklist = {
 }
 
 /**
+ * A pending request from a NON-owner to delete a single checklist item /
+ * sub-item / sub-sub-item. Owners delete immediately; staff file one of these
+ * and nothing is removed until an owner approves. The item-level analog of the
+ * whole-checklist deletion approval (`Checklist.deletionRequestedBy`).
+ * Endpoint-managed (NOT part of the bulk app-data write) — stored in
+ * `item_deletion_requests` on pg, under auth-state on the file backend.
+ */
+export type ItemDeletionRequest = {
+  id: string
+  clientId: string
+  checklistId: string
+  itemId: string
+  /** Set when the target is a sub-item or sub-sub-item; null for a top item. */
+  subItemId: string | null
+  /** Set only when the target is a sub-sub-item; null otherwise. */
+  subSubItemId: string | null
+  /** Snapshot of the item's text at request time (the item may change later). */
+  label: string
+  requestedBy: string
+  requestedByName: string | null
+  /** ISO timestamp the request was filed. */
+  requestedAt: string | null
+}
+
+/**
  * A service category = one column on the Active Checklists board (e.g.
  * "Monthly Bookkeeping", "Sales Tax", "Payroll"). Owner-managed; templates and
  * checklists reference it by id via `categoryId`. `sortOrder` drives left-to-
@@ -947,6 +972,7 @@ export type NotificationEvent =
   | 'time_entry_manual'
   | 'waiting_cleared'
   | 'checklist_deletion_requested'
+  | 'checklist_item_deletion_requested'
 
 export type NotificationEntry = {
   id: string

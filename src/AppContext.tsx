@@ -9,6 +9,7 @@ import type {
   Client,
   Contact,
   FirmSettings,
+  ItemDeletionRequest,
   Role,
   ServiceCategory,
   SessionUser,
@@ -336,6 +337,22 @@ export type AppContextValue = {
    * leaves the checklist active.
    */
   rejectChecklistDeletion: (checklistId: string) => Promise<void>
+  /**
+   * Pending item-level deletion requests (staff asked to delete a single item /
+   * sub-item / sub-sub-item). Owners see all; staff see only those for their
+   * assigned clients. Drives the per-item "Deletion requested" badge + the
+   * owner queue.
+   */
+  itemDeletionRequests: ItemDeletionRequest[]
+  /**
+   * Set of `${checklistId}:${itemId}:${subItemId||''}:${subSubItemId||''}` keys
+   * for fast per-item "is a deletion pending?" lookup (see `itemDeletionKey`).
+   */
+  pendingItemDeletionKeys: Set<string>
+  /** Owner-only: approve a pending item-deletion request (executes the delete). */
+  approveItemDeletion: (requestId: string) => Promise<void>
+  /** Owner-only: reject a pending item-deletion request (deletes nothing). */
+  rejectItemDeletion: (requestId: string) => Promise<void>
   /** Owner-only: restore a recycled checklist back to the active list. */
   restoreChecklist: (checklistId: string) => Promise<void>
   /** Owner-only: permanently delete every recycled checklist. Not reversible. */

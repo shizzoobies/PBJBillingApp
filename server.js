@@ -442,6 +442,70 @@ function visibleClientIdSet(session, clients) {
 }
 
 /**
+ * Non-owner item-deletion flow (item / sub-item / sub-sub-item). Files a
+ * deletion REQUEST (capturing the path + a label snapshot) instead of deleting,
+ * skipping duplicates, and notifies every owner. Mirrors the whole-checklist
+ * deletion-request flow. Returns the created (or existing) request so the
+ * handler can 200 it back. The caller must have already confirmed the client is
+ * in the user's visible set.
+ */
+async function fileItemDeletionRequest(
+  request,
+  session,
+  data,
+  checklist,
+  { itemId, subItemId, subSubItemId, label },
+) {
+  const existing = await appDataStore.listItemDeletionRequests()
+  const duplicate = existing.find(
+    (req) =>
+      req.checklistId === checklist.id &&
+      req.itemId === itemId &&
+      (req.subItemId ?? null) === (subItemId ?? null) &&
+      (req.subSubItemId ?? null) === (subSubItemId ?? null),
+  )
+  if (duplicate) return duplicate
+
+  const requesterName =
+    (data.employees ?? []).find((e) => e.id === session.user.id)?.name ??
+    session.user.name ??
+    'A team member'
+  const created = await appDataStore.createItemDeletionRequest({
+    clientId: checklist.clientId,
+    checklistId: checklist.id,
+    itemId,
+    subItemId: subItemId ?? null,
+    subSubItemId: subSubItemId ?? null,
+    label,
+    requestedBy: session.user.id,
+    requestedByName: requesterName,
+  })
+  await appDataStore.recordActivity(
+    session.user.id,
+    'checklist_item_deletion_requested',
+    `${checklist.title}: ${label}`,
+  )
+  try {
+    const members = await appDataStore.getTeamMembers()
+    const owners = members.filter((member) => member.role === 'owner')
+    for (const owner of owners) {
+      await notify(appDataStore, owner.id, 'checklist_item_deletion_requested', {
+        checklistId: checklist.id,
+        message: `${requesterName} requested deletion of "${label}" in "${checklist.title}".`,
+        link: '/checklists',
+        appPublicUrl: getPublicAppUrl(request),
+      })
+    }
+  } catch (err) {
+    console.error(
+      '[notify] checklist_item_deletion_requested dispatch failed:',
+      err?.message || err,
+    )
+  }
+  return created
+}
+
+/**
  * Strip data so a non-owner only sees clients they're scoped to and
  * derivative records (checklists, templates, time entries, plans) that
  * reference those clients. Owners get the data unchanged.
@@ -3319,6 +3383,102 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // GET /api/checklists/item-deletions — list pending item-deletion requests.
+    // Owners see all; a non-owner sees only requests for clients in their
+    // visible set (so they can show "Deletion requested" badges). Checked
+    // BEFORE the generic `:id` matcher so it isn't poached.
+    if (normalizedPath === '/api/checklists/item-deletions' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const all = await appDataStore.listItemDeletionRequests()
+      if (session.user.role === 'owner') {
+        sendJson(response, 200, { requests: all })
+        return
+      }
+      const data = await appDataStore.read()
+      const visible = visibleClientIdSet(session, data.clients ?? [])
+      sendJson(response, 200, {
+        requests: all.filter((req) => visible.has(req.clientId)),
+      })
+      return
+    }
+
+    // POST /api/checklists/item-deletions/:requestId/(approve|reject) — owner-only.
+    // approve = execute the real delete by the stored path, then drop the
+    // request; reject = drop the request only. Returns the updated checklist
+    // (approve) or { ok } (reject).
+    const itemDeletionDecisionMatch = normalizedPath.match(
+      /^\/api\/checklists\/item-deletions\/([^/]+)\/(approve|reject)$/,
+    )
+    if (itemDeletionDecisionMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can resolve deletion requests' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      const requestId = decodeURIComponent(itemDeletionDecisionMatch[1])
+      const decision = itemDeletionDecisionMatch[2]
+      const req = await appDataStore.getItemDeletionRequest(requestId)
+      if (!req) {
+        sendJson(response, 404, { error: 'Deletion request not found' })
+        return
+      }
+
+      if (decision === 'reject') {
+        await appDataStore.deleteItemDeletionRequest(requestId)
+        sendJson(response, 200, { ok: true, removed: requestId })
+        return
+      }
+
+      // approve → execute the real delete by the stored path.
+      let updated = null
+      if (req.subSubItemId) {
+        updated = await appDataStore.removeChecklistSubSubItem(
+          req.checklistId,
+          req.itemId,
+          req.subItemId,
+          req.subSubItemId,
+        )
+      } else if (req.subItemId) {
+        updated = await appDataStore.removeChecklistSubItem(
+          req.checklistId,
+          req.itemId,
+          req.subItemId,
+        )
+      } else {
+        updated = await appDataStore.deleteChecklistItem(req.checklistId, req.itemId)
+      }
+      // Drop the request regardless — if the target is already gone the request
+      // is stale and should not linger.
+      await appDataStore.deleteItemDeletionRequest(requestId)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Target item no longer exists' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'checklist_item_removed',
+        `${updated.title}: ${req.label}`,
+      )
+      sendJson(response, 200, updated)
+      return
+    }
+
     // DELETE /api/checklists/:id — soft delete (move to bin) for owners, or a
     // deletion REQUEST for an authorized non-owner. The matcher's trailing `$`
     // keeps it from poaching the more-specific /items/... routes below; those
@@ -3436,14 +3596,22 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // A non-owner can edit any item on a checklist whose client is in their
+      // visible (assigned) set — in addition to the legacy assignee/editor/
+      // per-item-assignee paths. Owners always pass.
+      const clientVisible =
+        session.user.role === 'owner' ||
+        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
       const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
       const canEdit = itemAssigneeId
         ? session.user.role === 'owner' ||
           itemAssigneeId === session.user.id ||
-          editorIds.includes(session.user.id)
+          editorIds.includes(session.user.id) ||
+          clientVisible
         : session.user.role === 'owner' ||
           checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id)
+          editorIds.includes(session.user.id) ||
+          clientVisible
 
       if (!canEdit) {
         sendJson(response, 403, { error: 'You can only update your assigned checklists' })
@@ -3660,14 +3828,21 @@ const server = createServer(async (request, response) => {
       }
 
       const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+      // A non-owner can edit any item on a checklist whose client is in their
+      // visible (assigned) set — plus the legacy assignee/editor paths.
+      const clientVisible =
+        session.user.role === 'owner' ||
+        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
       const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
       const canEdit = itemAssigneeId
         ? session.user.role === 'owner' ||
           itemAssigneeId === session.user.id ||
-          editorIds.includes(session.user.id)
+          editorIds.includes(session.user.id) ||
+          clientVisible
         : session.user.role === 'owner' ||
           checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id)
+          editorIds.includes(session.user.id) ||
+          clientVisible
       if (!canEdit) {
         sendJson(response, 403, { error: 'You can only update your assigned checklists' })
         return
@@ -3701,7 +3876,28 @@ const server = createServer(async (request, response) => {
       }
 
       // --- DELETE: remove a sub-sub-item ---
+      // Owner deletes immediately; an authorized non-owner files a deletion
+      // REQUEST (nothing removed until an owner approves).
       if (subSubItemId && request.method === 'DELETE') {
+        const targetSubSub = Array.isArray(targetSub?.subItems)
+          ? targetSub.subItems.find((s) => s.id === subSubItemId)
+          : undefined
+        if (!targetSubSub) {
+          sendJson(response, 404, { error: 'Sub-sub-item not found' })
+          return
+        }
+
+        if (session.user.role !== 'owner') {
+          const filed = await fileItemDeletionRequest(request, session, data, checklist, {
+            itemId,
+            subItemId,
+            subSubItemId,
+            label: targetSubSub.title ?? '',
+          })
+          sendJson(response, 200, { request: filed, checklist })
+          return
+        }
+
         const updated = await appDataStore.removeChecklistSubSubItem(
           checklistId,
           itemId,
@@ -3753,14 +3949,21 @@ const server = createServer(async (request, response) => {
       }
 
       const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+      // A non-owner can edit any item on a checklist whose client is in their
+      // visible (assigned) set — plus the legacy assignee/editor paths.
+      const clientVisible =
+        session.user.role === 'owner' ||
+        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
       const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
       const canEdit = itemAssigneeId
         ? session.user.role === 'owner' ||
           itemAssigneeId === session.user.id ||
-          editorIds.includes(session.user.id)
+          editorIds.includes(session.user.id) ||
+          clientVisible
         : session.user.role === 'owner' ||
           checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id)
+          editorIds.includes(session.user.id) ||
+          clientVisible
       if (!canEdit) {
         sendJson(response, 403, { error: 'You can only update your assigned checklists' })
         return
@@ -3789,7 +3992,28 @@ const server = createServer(async (request, response) => {
       }
 
       // --- DELETE: remove a sub-item ---
+      // Owner deletes immediately; an authorized non-owner files a deletion
+      // REQUEST (nothing removed until an owner approves).
       if (subItemId && request.method === 'DELETE') {
+        const targetSub = Array.isArray(targetItem.subItems)
+          ? targetItem.subItems.find((sub) => sub.id === subItemId)
+          : undefined
+        if (!targetSub) {
+          sendJson(response, 404, { error: 'Sub-item not found' })
+          return
+        }
+
+        if (session.user.role !== 'owner') {
+          const filed = await fileItemDeletionRequest(request, session, data, checklist, {
+            itemId,
+            subItemId,
+            subSubItemId: null,
+            label: targetSub.title ?? '',
+          })
+          sendJson(response, 200, { request: filed, checklist })
+          return
+        }
+
         const updated = await appDataStore.removeChecklistSubItem(checklistId, itemId, subItemId)
         if (!updated) {
           sendJson(response, 404, { error: 'Sub-item not found' })
@@ -3864,7 +4088,8 @@ const server = createServer(async (request, response) => {
       const canEdit =
         session.user.role === 'owner' ||
         checklist.assigneeId === session.user.id ||
-        editorIds.includes(session.user.id)
+        editorIds.includes(session.user.id) ||
+        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
       if (!canEdit) {
         sendJson(response, 403, { error: 'You do not have permission to reorder items' })
         return
@@ -3905,13 +4130,19 @@ const server = createServer(async (request, response) => {
       }
 
       const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+      // A non-owner can edit any item on a checklist whose client is in their
+      // visible (assigned) set — plus the legacy assignee/editor paths.
+      const clientVisible =
+        session.user.role === 'owner' ||
+        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
 
       // --- POST /api/checklists/:id/items (bulk append) ---
       if (!itemId && request.method === 'POST') {
         const canEdit =
           session.user.role === 'owner' ||
           checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id)
+          editorIds.includes(session.user.id) ||
+          clientVisible
         if (!canEdit) {
           sendJson(response, 403, { error: 'You do not have permission to add items' })
           return
@@ -3951,15 +4182,18 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        // Per-item assignee also gets edit access
+        // Per-item assignee also gets edit access; so does any non-owner whose
+        // client is in their visible (assigned) set.
         const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
         const canEdit = itemAssigneeId
           ? session.user.role === 'owner' ||
             itemAssigneeId === session.user.id ||
-            editorIds.includes(session.user.id)
+            editorIds.includes(session.user.id) ||
+            clientVisible
           : session.user.role === 'owner' ||
             checklist.assigneeId === session.user.id ||
-            editorIds.includes(session.user.id)
+            editorIds.includes(session.user.id) ||
+            clientVisible
         if (!canEdit) {
           sendJson(response, 403, { error: 'You do not have permission to edit this item' })
           return
@@ -4030,6 +4264,9 @@ const server = createServer(async (request, response) => {
       }
 
       // --- DELETE /api/checklists/:id/items/:itemId ---
+      // Owner deletes immediately; an authorized non-owner files a deletion
+      // REQUEST (nothing removed until an owner approves). Anyone without
+      // access to the client → 403.
       if (itemId && request.method === 'DELETE') {
         const targetItem = checklist.items.find((item) => item.id === itemId)
         if (!targetItem) {
@@ -4040,9 +4277,21 @@ const server = createServer(async (request, response) => {
         const canEdit =
           session.user.role === 'owner' ||
           checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id)
+          editorIds.includes(session.user.id) ||
+          clientVisible
         if (!canEdit) {
           sendJson(response, 403, { error: 'You do not have permission to delete this item' })
+          return
+        }
+
+        if (session.user.role !== 'owner') {
+          const filed = await fileItemDeletionRequest(request, session, data, checklist, {
+            itemId,
+            subItemId: null,
+            subSubItemId: null,
+            label: targetItem.label ?? '',
+          })
+          sendJson(response, 200, { request: filed, checklist })
           return
         }
 

@@ -1678,6 +1678,31 @@ export class AppDataStore {
         `create index if not exists client_notes_client_idx on client_notes (client_id)`,
       )
 
+      // Item-level deletion requests: a NON-owner asks to delete a single
+      // checklist item / sub-item / sub-sub-item; nothing is removed until an
+      // owner approves. Endpoint-managed (NOT part of the bulk app-data write)
+      // — exactly like client_notes / sales_tax_records — so staff can file a
+      // request without the owner-only bulk save, and so requests can't be
+      // clobbered by an autosave. Plain text ids (no FK) so the row survives
+      // even if the target item is edited; `label` snapshots the text.
+      await this.pool.query(`
+        create table if not exists item_deletion_requests (
+          id text primary key,
+          client_id text not null,
+          checklist_id text not null,
+          item_id text not null,
+          sub_item_id text,
+          sub_sub_item_id text,
+          label text not null,
+          requested_by text,
+          requested_by_name text,
+          requested_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists item_deletion_requests_checklist_idx on item_deletion_requests (checklist_id)`,
+      )
+
       // Active Checklists board: per-template/per-checklist service category
       // (the board's columns) + the categories table itself. The column is a
       // plain text id (NOT a FK) so deleting a category leaves rows readable as
@@ -7692,6 +7717,131 @@ export class AppDataStore {
     const before = authState.clientNotes.length
     authState.clientNotes = authState.clientNotes.filter((note) => note.id !== noteId)
     const removed = authState.clientNotes.length < before
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return removed
+  }
+
+  // ---- Item-level deletion requests (staff request → owner approves) ----
+  //
+  // Endpoint-managed (NOT part of the bulk /api/app-data write), like client
+  // notes — so staff can file a request without the owner-only bulk save and
+  // requests can't be clobbered by an autosave. Stored in auth-state on the
+  // file backend, item_deletion_requests on pg. Always returned newest-first.
+
+  /** Every pending item-deletion request, newest first. */
+  async listItemDeletionRequests() {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, checklist_id, item_id, sub_item_id, sub_sub_item_id,
+                label, requested_by, requested_by_name, requested_at
+           from item_deletion_requests order by requested_at desc`,
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        clientId: row.client_id,
+        checklistId: row.checklist_id,
+        itemId: row.item_id,
+        subItemId: row.sub_item_id ?? null,
+        subSubItemId: row.sub_sub_item_id ?? null,
+        label: row.label,
+        requestedBy: row.requested_by ?? null,
+        requestedByName: row.requested_by_name ?? null,
+        requestedAt: row.requested_at ? new Date(row.requested_at).toISOString() : null,
+      }))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.itemDeletionRequests)
+      ? authState.itemDeletionRequests
+      : []
+    return list
+      .map((req) => ({
+        id: req.id,
+        clientId: req.clientId,
+        checklistId: req.checklistId,
+        itemId: req.itemId,
+        subItemId: req.subItemId ?? null,
+        subSubItemId: req.subSubItemId ?? null,
+        label: req.label,
+        requestedBy: req.requestedBy ?? null,
+        requestedByName: req.requestedByName ?? null,
+        requestedAt: req.requestedAt ?? null,
+      }))
+      .sort((a, b) => String(b.requestedAt).localeCompare(String(a.requestedAt)))
+  }
+
+  /** Look up a single item-deletion request by id (used to approve/reject). */
+  async getItemDeletionRequest(id) {
+    if (!id) return null
+    const all = await this.listItemDeletionRequests()
+    return all.find((req) => req.id === id) ?? null
+  }
+
+  /** File an item-deletion request. Returns the created request. */
+  async createItemDeletionRequest({
+    clientId,
+    checklistId,
+    itemId,
+    subItemId,
+    subSubItemId,
+    label,
+    requestedBy,
+    requestedByName,
+  } = {}) {
+    if (!clientId || !checklistId || !itemId) return null
+    const request = {
+      id: `idr-${randomUUID().slice(0, 8)}`,
+      clientId,
+      checklistId,
+      itemId,
+      subItemId: subItemId ?? null,
+      subSubItemId: subSubItemId ?? null,
+      label: String(label ?? '').slice(0, 500),
+      requestedBy: requestedBy ?? null,
+      requestedByName: requestedByName ?? null,
+      requestedAt: nowIso(),
+    }
+    if (this.pool) {
+      await this.pool.query(
+        `insert into item_deletion_requests
+           (id, client_id, checklist_id, item_id, sub_item_id, sub_sub_item_id,
+            label, requested_by, requested_by_name, requested_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())`,
+        [
+          request.id,
+          request.clientId,
+          request.checklistId,
+          request.itemId,
+          request.subItemId,
+          request.subSubItemId,
+          request.label,
+          request.requestedBy,
+          request.requestedByName,
+        ],
+      )
+      return request
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.itemDeletionRequests)) authState.itemDeletionRequests = []
+    authState.itemDeletionRequests.push(request)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return request
+  }
+
+  /** Delete an item-deletion request by id. Returns true if a row was removed. */
+  async deleteItemDeletionRequest(id) {
+    if (!id) return false
+    if (this.pool) {
+      const result = await this.pool.query(
+        `delete from item_deletion_requests where id = $1`,
+        [id],
+      )
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.itemDeletionRequests)) authState.itemDeletionRequests = []
+    const before = authState.itemDeletionRequests.length
+    authState.itemDeletionRequests = authState.itemDeletionRequests.filter((req) => req.id !== id)
+    const removed = authState.itemDeletionRequests.length < before
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return removed
   }

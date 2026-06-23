@@ -26,6 +26,7 @@ import type {
   ChecklistTemplateItem,
   Client,
   Employee,
+  ItemDeletionRequest,
   Role,
   TemplateStage,
   TimeEntry,
@@ -41,6 +42,7 @@ import {
   employeeName,
   formatHours,
   getChecklistFrequencyLabel,
+  itemDeletionKey,
   lastDayOfCurrentMonth,
   localDateOnly,
   makeId,
@@ -194,6 +196,9 @@ export function ChecklistsPage() {
     deleteChecklist,
     approveChecklistDeletion,
     rejectChecklistDeletion,
+    itemDeletionRequests,
+    approveItemDeletion,
+    rejectItemDeletion,
     restoreChecklist,
     emptyChecklistRecycleBin,
   } = useAppContext()
@@ -290,6 +295,9 @@ export function ChecklistsPage() {
           employees={data.employees}
           onApprove={approveChecklistDeletion}
           onReject={rejectChecklistDeletion}
+          itemRequests={itemDeletionRequests}
+          onApproveItem={approveItemDeletion}
+          onRejectItem={rejectItemDeletion}
         />
       ) : null}
       <section className="panel">
@@ -473,19 +481,32 @@ function PendingDeletionsSection({
   employees,
   onApprove,
   onReject,
+  itemRequests,
+  onApproveItem,
+  onRejectItem,
 }: {
   checklists: Checklist[]
   clients: Client[]
   employees: Employee[]
   onApprove: (checklistId: string) => Promise<void>
   onReject: (checklistId: string) => Promise<void>
+  itemRequests: ItemDeletionRequest[]
+  onApproveItem: (requestId: string) => Promise<void>
+  onRejectItem: (requestId: string) => Promise<void>
 }) {
   const pending = checklists
     .filter(checklistHasPendingDeletionRequest)
     .sort((a, b) =>
       (b.deletionRequestedAt ?? '').localeCompare(a.deletionRequestedAt ?? ''),
     )
-  if (pending.length === 0) return null
+  const pendingItems = [...itemRequests].sort((a, b) =>
+    String(b.requestedAt ?? '').localeCompare(String(a.requestedAt ?? '')),
+  )
+  const total = pending.length + pendingItems.length
+  if (total === 0) return null
+
+  const checklistTitleFor = (checklistId: string) =>
+    checklists.find((c) => c.id === checklistId)?.title ?? 'a task'
 
   return (
     <section className="panel">
@@ -493,64 +514,122 @@ function PendingDeletionsSection({
         <div>
           <h2>Deletion requests</h2>
           <p className="section-subtitle">
-            A bookkeeper asked to delete these tasks. Approve to move a task to the recycle bin, or
-            reject to keep it.
+            A bookkeeper asked to delete these. Approve a whole task to move it to the recycle bin,
+            or approve a single item to remove just that item. Reject to keep things as they are.
           </p>
         </div>
-        <span className="status-pill">{pending.length}</span>
+        <span className="status-pill">{total}</span>
       </div>
-      <ul
-        className="pending-deletions-list"
-        style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}
-      >
-        {pending.map((checklist) => (
-          <li
-            key={checklist.id}
-            className="pending-deletion-item"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 12,
-              padding: '8px 0',
-              borderTop: '1px solid var(--border-subtle, #eee)',
-            }}
-          >
-            <div>
-              <strong>{checklist.title}</strong>
-              <div className="checklist-meta-line">
-                {clientName(clients, checklist.clientId)} ·{' '}
-                Requested by{' '}
-                {checklist.deletionRequestedBy
-                  ? employeeName(employees, checklist.deletionRequestedBy)
-                  : 'a team member'}{' '}
-                ·{' '}
-                {checklist.deletionRequestedAt
-                  ? shortDate.format(new Date(checklist.deletionRequestedAt))
-                  : 'recently'}
+      {pending.length > 0 ? (
+        <ul
+          className="pending-deletions-list"
+          style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}
+        >
+          {pending.map((checklist) => (
+            <li
+              key={checklist.id}
+              className="pending-deletion-item"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                padding: '8px 0',
+                borderTop: '1px solid var(--border-subtle, #eee)',
+              }}
+            >
+              <div>
+                <strong>{checklist.title}</strong>
+                <div className="checklist-meta-line">
+                  {clientName(clients, checklist.clientId)} ·{' '}
+                  Requested by{' '}
+                  {checklist.deletionRequestedBy
+                    ? employeeName(employees, checklist.deletionRequestedBy)
+                    : 'a team member'}{' '}
+                  ·{' '}
+                  {checklist.deletionRequestedAt
+                    ? shortDate.format(new Date(checklist.deletionRequestedAt))
+                    : 'recently'}
+                </div>
               </div>
-            </div>
-            <div style={{ display: 'inline-flex', gap: 8 }}>
-              <button
-                type="button"
-                className="secondary-action danger"
-                onClick={() => void onApprove(checklist.id)}
-                title="Approve — move this task to the recycle bin"
+              <div style={{ display: 'inline-flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className="secondary-action danger"
+                  onClick={() => void onApprove(checklist.id)}
+                  title="Approve — move this task to the recycle bin"
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => void onReject(checklist.id)}
+                  title="Reject — keep this task active"
+                >
+                  Reject
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {pendingItems.length > 0 ? (
+        <>
+          <p className="section-subtitle" style={{ marginTop: pending.length > 0 ? 16 : 0 }}>
+            Item deletions
+          </p>
+          <ul
+            className="pending-deletions-list"
+            style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}
+          >
+            {pendingItems.map((req) => (
+              <li
+                key={req.id}
+                className="pending-deletion-item"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  padding: '8px 0',
+                  borderTop: '1px solid var(--border-subtle, #eee)',
+                }}
               >
-                Approve
-              </button>
-              <button
-                type="button"
-                className="secondary-action"
-                onClick={() => void onReject(checklist.id)}
-                title="Reject — keep this task active"
-              >
-                Reject
-              </button>
-            </div>
-          </li>
-        ))}
-      </ul>
+                <div>
+                  <strong>{req.label || '(item)'}</strong>
+                  <div className="checklist-meta-line">
+                    {clientName(clients, req.clientId)} · in &ldquo;{checklistTitleFor(req.checklistId)}
+                    &rdquo; · Requested by{' '}
+                    {req.requestedByName ||
+                      (req.requestedBy ? employeeName(employees, req.requestedBy) : 'a team member')}{' '}
+                    ·{' '}
+                    {req.requestedAt ? shortDate.format(new Date(req.requestedAt)) : 'recently'}
+                  </div>
+                </div>
+                <div style={{ display: 'inline-flex', gap: 8 }}>
+                  <button
+                    type="button"
+                    className="secondary-action danger"
+                    onClick={() => void onApproveItem(req.id)}
+                    title="Approve — remove this item"
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={() => void onRejectItem(req.id)}
+                    title="Reject — keep this item"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
     </section>
   )
 }
@@ -1092,13 +1171,20 @@ export function ChecklistCard({
   const editorIds = checklist.editorIds ?? []
   const isAssignee = checklist.assigneeId === activeEmployeeId
   const isEditor = editorIds.includes(activeEmployeeId)
-  // A non-owner who is neither the assignee nor an editor sees the task
-  // read-only. This now covers any task on a client they're assigned to
-  // (not just ones they were explicitly added to as a viewer), so the
-  // "View only" pill correctly labels a teammate's task on a shared client.
-  const isViewerOnly = role !== 'owner' && !isAssignee && !isEditor
+  // A non-owner can also edit any checklist whose client they're assigned to —
+  // resolve the checklist's client and check both assignment lists. This mirrors
+  // the server's visible-client allowance so staff can edit the shared board for
+  // their clients (not just tasks they're the assignee/editor of).
+  const checklistClient = clients.find((c) => c.id === checklist.clientId)
+  const isAssignedToClient =
+    !!checklistClient &&
+    ((checklistClient.assignedEmployeeIds ?? []).includes(activeEmployeeId) ||
+      (checklistClient.assignedBookkeeperIds ?? []).includes(activeEmployeeId))
+  // A non-owner who is neither assignee nor editor nor assigned to the client
+  // sees the task read-only.
+  const isViewerOnly = role !== 'owner' && !isAssignee && !isEditor && !isAssignedToClient
   // Whether the current viewer can edit checklist structure (reorder, bulk add)
-  const canEditStructure = role === 'owner' || isAssignee || isEditor
+  const canEditStructure = role === 'owner' || isAssignee || isEditor || isAssignedToClient
   // A staff member has asked an owner to delete this task; surfaces a badge and
   // (for owners) Approve / Reject actions, and disables re-requesting.
   const pendingDeletion = checklistHasPendingDeletionRequest(checklist)
@@ -1140,6 +1226,9 @@ export function ChecklistCard({
   const canToggleItem = (item: ChecklistItem) => {
     if (role === 'owner') return true
     if (isEditor) return true
+    // A non-owner assigned to the checklist's client can toggle any item on it
+    // (matches the server's visible-client allowance + canEditStructure).
+    if (isAssignedToClient) return true
     if (item.assigneeId) {
       // Item explicitly assigned - only that person (plus owner/editor handled above)
       return item.assigneeId === activeEmployeeId
@@ -1633,7 +1722,14 @@ function DraggableTaskList({
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   // Other checklists for this client — candidates to "wait on" (notified when
   // that one is completed). Pulled from context to avoid prop-drilling.
-  const { data: appData } = useAppContext()
+  // `pendingItemDeletionKeys` drives the per-item "Deletion requested" badge +
+  // disabling its delete control (can't re-request a pending deletion).
+  const { data: appData, pendingItemDeletionKeys } = useAppContext()
+  const hasPendingDeletion = (
+    itemId: string,
+    subItemId?: string | null,
+    subSubItemId?: string | null,
+  ) => pendingItemDeletionKeys.has(itemDeletionKey(checklistId, itemId, subItemId, subSubItemId))
   const availableTasks = useMemo(() => {
     const current = appData.checklists.find((entry) => entry.id === checklistId)
     if (!current) return []
@@ -1809,11 +1905,21 @@ function DraggableTaskList({
                       type="button"
                       aria-label="Delete item"
                       className="item-delete-btn"
-                      title="Delete item"
+                      disabled={hasPendingDeletion(item.id)}
+                      title={
+                        hasPendingDeletion(item.id)
+                          ? 'Deletion already requested — waiting on owner approval'
+                          : 'Delete item'
+                      }
                       onClick={() => void onDeleteItem(item.id)}
                     >
                       ×
                     </button>
+                    {hasPendingDeletion(item.id) ? (
+                      <span className="item-deletion-pending" title="An owner must approve this deletion.">
+                        Deletion requested
+                      </span>
+                    ) : null}
                   </span>
                 ) : (
                   item.dueDate || item.assigneeId ? (
@@ -1916,11 +2022,21 @@ function DraggableTaskList({
                             type="button"
                             aria-label="Delete sub-step"
                             className="item-delete-btn sub-item-delete"
-                            title="Delete sub-step"
+                            disabled={hasPendingDeletion(item.id, sub.id)}
+                            title={
+                              hasPendingDeletion(item.id, sub.id)
+                                ? 'Deletion already requested — waiting on owner approval'
+                                : 'Delete sub-step'
+                            }
                             onClick={() => onRemoveSubItem(item.id, sub.id)}
                           >
                             ×
                           </button>
+                        ) : null}
+                        {hasPendingDeletion(item.id, sub.id) ? (
+                          <span className="item-deletion-pending" title="An owner must approve this deletion.">
+                            Deletion requested
+                          </span>
                         ) : null}
                       </div>
                       {canEdit && sub.waiting ? (
@@ -1969,13 +2085,23 @@ function DraggableTaskList({
                                   type="button"
                                   aria-label="Delete sub-step"
                                   className="item-delete-btn sub-item-delete"
-                                  title="Delete sub-step"
+                                  disabled={hasPendingDeletion(item.id, sub.id, subSub.id)}
+                                  title={
+                                    hasPendingDeletion(item.id, sub.id, subSub.id)
+                                      ? 'Deletion already requested — waiting on owner approval'
+                                      : 'Delete sub-step'
+                                  }
                                   onClick={() =>
                                     onRemoveSubSubItem(item.id, sub.id, subSub.id)
                                   }
                                 >
                                   ×
                                 </button>
+                              ) : null}
+                              {hasPendingDeletion(item.id, sub.id, subSub.id) ? (
+                                <span className="item-deletion-pending" title="An owner must approve this deletion.">
+                                  Deletion requested
+                                </span>
                               ) : null}
                             </div>
                           ))}

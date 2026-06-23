@@ -14,7 +14,14 @@ import type {
   Employee,
   SubscriptionPlan,
 } from '../lib/types'
-import { currency, employeeName, getAssignedEmployeeIds, MONTH_NAMES } from '../lib/utils'
+import {
+  currency,
+  deriveChecklistStatus,
+  employeeName,
+  getAssignedEmployeeIds,
+  localDateOnly,
+  MONTH_NAMES,
+} from '../lib/utils'
 
 const BILLING_LABELS: Record<BillingMode, string> = {
   hourly: 'Hourly',
@@ -41,6 +48,20 @@ export function ClientsPage() {
 
   const filteredClients = visibleClients.filter((c) => matchesClientQuery(c, query))
 
+  // Client ids that have at least one ACTIVE checklist — not soft-deleted and
+  // not fully Done. Drives the green tint on each row's Checklist button so a
+  // client with live work-in-progress stands out at a glance.
+  const todayDateOnly = localDateOnly()
+  const clientsWithActiveChecklists = new Set(
+    (data.checklists ?? [])
+      .filter(
+        (checklist) =>
+          !checklist.deletedAt &&
+          deriveChecklistStatus(checklist, todayDateOnly) !== 'Done',
+      )
+      .map((checklist) => checklist.clientId),
+  )
+
   return (
     <section className={ownerMode ? 'content-grid client-layout' : 'panel'} id="clients">
       <div className={ownerMode ? 'panel' : undefined}>
@@ -66,6 +87,7 @@ export function ClientsPage() {
         ) : null}
         <ClientTable
           clients={filteredClients}
+          clientsWithActiveChecklists={clientsWithActiveChecklists}
           employees={data.employees}
           onUpdatePlan={updateClientPlan}
           ownerMode={ownerMode}
@@ -405,6 +427,7 @@ function ClientBuilder({
 
 function ClientTable({
   clients,
+  clientsWithActiveChecklists,
   employees,
   onUpdatePlan,
   ownerMode,
@@ -412,6 +435,8 @@ function ClientTable({
   query = '',
 }: {
   clients: Client[]
+  /** Client ids with at least one active (not done, not deleted) checklist. */
+  clientsWithActiveChecklists: Set<string>
   employees: Employee[]
   onUpdatePlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
   ownerMode: boolean
@@ -506,8 +531,16 @@ function ClientTable({
                 <td>
                   <button
                     type="button"
-                    className="secondary-action compact-action"
-                    title="Open checklist & notes"
+                    className={
+                      clientsWithActiveChecklists.has(client.id)
+                        ? 'secondary-action compact-action has-active-checklists'
+                        : 'secondary-action compact-action'
+                    }
+                    title={
+                      clientsWithActiveChecklists.has(client.id)
+                        ? 'Open checklist & notes — this client has active checklists'
+                        : 'Open checklist & notes'
+                    }
                     onClick={() => setModalClient(client)}
                   >
                     <ListChecks size={14} /> Checklist

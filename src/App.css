@@ -1575,6 +1575,30 @@ textarea.input {
   border-color: var(--red);
 }
 
+/* A staff member has filed a deletion request for this item — the control is
+   disabled (can't re-request) until an owner approves/rejects. */
+.item-delete-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.item-delete-btn:disabled:hover {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--line);
+}
+
+.item-deletion-pending {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
 .inline-add-row {
   align-items: center;
   border: 1px dashed var(--line-strong);
@@ -6790,6 +6814,20 @@ button.repeating-task-toggle-pill {
   font-size: 13px;
   padding: 5px 10px;
   white-space: nowrap;
+}
+
+/* Client-list "Checklist" button when the client has active (in-progress,
+   not-done) checklists — a subtle green tint/border so live work stands out
+   without shouting. Uses the palette green at low opacity. */
+.compact-action.has-active-checklists {
+  border-color: color-mix(in srgb, var(--green) 45%, var(--line));
+  background: color-mix(in srgb, var(--green) 9%, transparent);
+  color: var(--green);
+}
+
+.compact-action.has-active-checklists:hover {
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  border-color: var(--green);
 }
 
 /* ---- CSV contact import ---- */

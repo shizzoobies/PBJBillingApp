@@ -37,6 +37,10 @@ import {
   createServiceCategory as createServiceCategoryRequest,
   updateServiceCategory as updateServiceCategoryRequest,
   deleteServiceCategory as deleteServiceCategoryRequest,
+  listItemDeletionRequests,
+  approveItemDeletion as approveItemDeletionRequest,
+  rejectItemDeletion as rejectItemDeletionRequest,
+  isItemDeletionFiled,
   generateChecklistFromTemplateRequest,
   addRecurringReimbursementRequest,
   addReimbursementRequest,
@@ -83,6 +87,7 @@ import {
   type Contact,
   type DataSyncState,
   type FirmSettings,
+  type ItemDeletionRequest,
   type PublicFirmSettings,
   type ServiceCategory,
   type SessionUser,
@@ -97,6 +102,7 @@ import {
   formatTimeFromMs,
   getAssignedEmployeeIds,
   type GroupAllocationMode,
+  itemDeletionKey,
   legibleSidebarText,
   localDateOnly,
   makeId,
@@ -201,6 +207,10 @@ function App() {
   // workspace data) so they survive autosaves; fetched once the user is signed
   // in and refreshed after any owner edit.
   const [serviceCategories, setServiceCategories] = useState<ServiceCategory[]>([])
+  // Pending item-level deletion requests (staff request → owner approves).
+  // Endpoint-managed like service categories: fetched on sign-in and refreshed
+  // after any item-delete / approve / reject so badges stay accurate.
+  const [itemDeletionRequests, setItemDeletionRequests] = useState<ItemDeletionRequest[]>([])
   const [activeEmployeeId, setActiveEmployeeId] = useState('emp-avery')
   const [previewUserId, setPreviewUserId] = useState<string | null>(null)
   const [selectedClientId, setSelectedClientId] = useState('client-northstar')
@@ -331,6 +341,32 @@ function App() {
     },
     [refreshServiceCategories],
   )
+
+  // Item-level deletion requests. Endpoint-managed like service categories, so
+  // they're loaded on sign-in and refreshed after relevant actions.
+  const refreshItemDeletionRequests = useCallback(async () => {
+    try {
+      setItemDeletionRequests(await listItemDeletionRequests())
+    } catch {
+      /* non-fatal — badges just won't show until the next refresh */
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!sessionUser) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const requests = await listItemDeletionRequests()
+        if (!cancelled) setItemDeletionRequests(requests)
+      } catch {
+        /* non-fatal */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [sessionUser])
 
   useEffect(() => {
     if (!sessionUser) return
@@ -758,6 +794,32 @@ function App() {
     lastWorkspaceEditRef.current = new Date().getTime()
     setData(updater)
   }
+
+  // Owner item-deletion decisions. Defined after `applyServerDataUpdate` since
+  // approve merges the server-returned checklist into local state.
+  const approveItemDeletion = useCallback(
+    async (requestId: string) => {
+      if (previewActiveRef.current) return
+      const updated = await approveItemDeletionRequest(requestId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === updated.id ? updated : checklist,
+        ),
+      }))
+      await refreshItemDeletionRequests()
+    },
+    [refreshItemDeletionRequests],
+  )
+
+  const rejectItemDeletion = useCallback(
+    async (requestId: string) => {
+      if (previewActiveRef.current) return
+      await rejectItemDeletionRequest(requestId)
+      await refreshItemDeletionRequests()
+    },
+    [refreshItemDeletionRequests],
+  )
 
   const logTime = async (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => {
     if (previewActiveRef.current) return
@@ -1518,13 +1580,17 @@ function App() {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
-      const updatedChecklist = await removeChecklistSubItemRequest(checklistId, itemId, subItemId)
-      applyServerDataUpdate((current) => ({
-        ...current,
-        checklists: current.checklists.map((checklist) =>
-          checklist.id === checklistId ? updatedChecklist : checklist,
-        ),
-      }))
+      const result = await removeChecklistSubItemRequest(checklistId, itemId, subItemId)
+      if (isItemDeletionFiled(result)) {
+        await refreshItemDeletionRequests()
+      } else {
+        applyServerDataUpdate((current) => ({
+          ...current,
+          checklists: current.checklists.map((checklist) =>
+            checklist.id === checklistId ? result : checklist,
+          ),
+        }))
+      }
       setDataSyncState('synced')
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -1615,18 +1681,22 @@ function App() {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
-      const updatedChecklist = await removeChecklistSubSubItemRequest(
+      const result = await removeChecklistSubSubItemRequest(
         checklistId,
         itemId,
         subItemId,
         subSubItemId,
       )
-      applyServerDataUpdate((current) => ({
-        ...current,
-        checklists: current.checklists.map((checklist) =>
-          checklist.id === checklistId ? updatedChecklist : checklist,
-        ),
-      }))
+      if (isItemDeletionFiled(result)) {
+        await refreshItemDeletionRequests()
+      } else {
+        applyServerDataUpdate((current) => ({
+          ...current,
+          checklists: current.checklists.map((checklist) =>
+            checklist.id === checklistId ? result : checklist,
+          ),
+        }))
+      }
       setDataSyncState('synced')
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -2204,13 +2274,19 @@ function App() {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
-      const updated = await deleteChecklistItemRequest(checklistId, itemId)
-      applyServerDataUpdate((current) => ({
-        ...current,
-        checklists: current.checklists.map((checklist) =>
-          checklist.id === checklistId ? updated : checklist,
-        ),
-      }))
+      const result = await deleteChecklistItemRequest(checklistId, itemId)
+      if (isItemDeletionFiled(result)) {
+        // Non-owner: a deletion REQUEST was filed; nothing removed. Reflect the
+        // new pending state so the badge shows + the delete control disables.
+        await refreshItemDeletionRequests()
+      } else {
+        applyServerDataUpdate((current) => ({
+          ...current,
+          checklists: current.checklists.map((checklist) =>
+            checklist.id === checklistId ? result : checklist,
+          ),
+        }))
+      }
       setDataSyncState('synced')
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -2942,6 +3018,13 @@ function App() {
     )
   }
 
+  // Fast per-item "is a deletion pending?" lookup, keyed by the stable path key.
+  const pendingItemDeletionKeys = new Set(
+    itemDeletionRequests.map((req) =>
+      itemDeletionKey(req.checklistId, req.itemId, req.subItemId, req.subSubItemId),
+    ),
+  )
+
   const contextValue: AppContextValue = {
     data,
     sessionUser,
@@ -3033,6 +3116,10 @@ function App() {
     deleteChecklist,
     approveChecklistDeletion,
     rejectChecklistDeletion,
+    itemDeletionRequests,
+    pendingItemDeletionKeys,
+    approveItemDeletion,
+    rejectItemDeletion,
     restoreChecklist,
     emptyChecklistRecycleBin,
     deleteTeamMember,

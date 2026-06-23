@@ -101,17 +101,19 @@ bell, and account menu sit in the top bar on every page.
 - Task card actions: Edit details (title, due date, assignee) — available to the
   owner and to a task's assignee/editor. Delete task — for the OWNER it moves the
   task to the owner-only Recycle bin immediately (time entries preserved, restore
-  anytime until emptied). For STAFF, "Delete" files a deletion REQUEST that an
-  owner must approve — only deletions need approval, edits don't. The owner sees
-  a "Pending deletion requests" queue at the top of the Checklists page with
-  Approve (delete) / Reject (keep) per request, and gets a bell notification when
-  a request is filed; the requested task shows a "Deletion requested" badge to
-  staff until resolved.
+  anytime until emptied). For STAFF, deleting — a whole checklist OR an
+  individual step/sub-step — files a deletion REQUEST that an owner must approve;
+  nothing is removed until then (editing/adding don't need approval). The owner
+  sees a "Pending deletion requests" queue at the top of the Checklists page
+  (both whole-checklist and per-item requests) with Approve (delete) / Reject
+  (keep), and gets a bell notification when a request is filed; the requested
+  task/item shows a "Deletion requested" badge to staff until resolved. Owners
+  delete immediately (they're the approver).
 - Sharing/visibility: a team member assigned to a client sees ALL of that
   client's tasks (the whole shared board), not just tasks assigned to them
-  personally. They can log time against any of those tasks, including
-  upcoming/get-ahead ones. Editing and completing steps stays limited to the
-  task's assignee/editor — other tasks show as "View only".
+  personally. They can log time against any of those tasks AND add/edit items on
+  any checklist for a client they're assigned to (deletions still need owner
+  approval, per above). Owners can edit everything.
 - Time logged against a task shows on the card.
 
 ## Board — Active Checklists (sidebar: "Board")
@@ -168,7 +170,9 @@ bell, and account menu sit in the top bar on every page.
   Notes persist independently of the bulk autosave so staff can add them.
 - Quick access from the client LIST: each row has a "Checklist" button that
   opens a modal with that client's active (editable) checklists plus the notes
-  panel (add + history) — no need to open the client and scroll.
+  panel (add + history) — no need to open the client and scroll. The button is
+  tinted green for clients that currently have active checklists, so open work is
+  visible at a glance.
 - The client's "Active checklists" section has a "Due this month" toggle that
   filters to checklists due in the current calendar month (with a count).
 - Assigned team controls which staff can see/log time for the client.

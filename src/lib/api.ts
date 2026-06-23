@@ -7,6 +7,7 @@
   type ChecklistTemplateItem,
   type Client,
   type ClientNote,
+  type ItemDeletionRequest,
   type FirmSettings,
   type NotificationEntry,
   type PublicFirmSettings,
@@ -607,6 +608,24 @@ export async function addChecklistSubItemRequest(
   return (await response.json()) as Checklist
 }
 
+/**
+ * Result of an item / sub-item / sub-sub-item DELETE call. For an OWNER the
+ * item is removed immediately and the server returns the updated `Checklist`.
+ * For a NON-owner the server instead files a deletion REQUEST (nothing removed)
+ * and returns `{ request, checklist }` — the checklist is unchanged. Callers
+ * branch on the `request` key.
+ */
+export type ItemDeleteResult =
+  | Checklist
+  | { request: ItemDeletionRequest; checklist: Checklist }
+
+/** Type guard: the DELETE only FILED a deletion request (non-owner path). */
+export function isItemDeletionFiled(
+  result: ItemDeleteResult,
+): result is { request: ItemDeletionRequest; checklist: Checklist } {
+  return typeof result === 'object' && result !== null && 'request' in result
+}
+
 /** Remove a sub-item from a live-checklist item. */
 export async function removeChecklistSubItemRequest(
   checklistId: string,
@@ -624,7 +643,7 @@ export async function removeChecklistSubItemRequest(
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to remove sub-item (${response.status})`)
   }
-  return (await response.json()) as Checklist
+  return (await response.json()) as ItemDeleteResult
 }
 
 /** Update a sub-item's "waiting on" flag + note on a live-checklist item. */
@@ -697,7 +716,7 @@ export async function removeChecklistSubSubItemRequest(
       message || `Failed to remove sub-sub-item (${response.status})`,
     )
   }
-  return (await response.json()) as Checklist
+  return (await response.json()) as ItemDeleteResult
 }
 
 export async function setChecklistViewersRequest(
@@ -998,7 +1017,66 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to delete checklist item (${response.status})`)
   }
+  return (await response.json()) as ItemDeleteResult
+}
+
+// ---- Item-level deletion requests (staff request → owner approves) ----
+
+/** Every pending item-deletion request the caller can see. */
+export async function listItemDeletionRequests() {
+  const response = await apiFetch('/api/checklists/item-deletions', {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to load deletion requests (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { requests: ItemDeletionRequest[] }).requests
+}
+
+/** Owner-only: approve a pending item-deletion request. Returns the updated checklist. */
+export async function approveItemDeletion(requestId: string) {
+  const response = await apiFetch(
+    `/api/checklists/item-deletions/${encodeURIComponent(requestId)}/approve`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to approve deletion (${response.status})`,
+    )
+  }
   return (await response.json()) as Checklist
+}
+
+/** Owner-only: reject a pending item-deletion request (clears it, deletes nothing). */
+export async function rejectItemDeletion(requestId: string) {
+  const response = await apiFetch(
+    `/api/checklists/item-deletions/${encodeURIComponent(requestId)}/reject`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to reject deletion (${response.status})`,
+    )
+  }
+  return (await response.json()) as { ok: true; removed: string }
 }
 
 /**
