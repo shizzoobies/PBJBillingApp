@@ -2733,11 +2733,13 @@ function App() {
     }))
   }
 
-  const addClient = (client: Omit<Client, 'id'>) => {
+  const addClient = (client: Omit<Client, 'id'>): Client => {
+    const created: Client = { ...client, id: makeId('client') }
     updateWorkspaceData((current) => ({
       ...current,
-      clients: [{ ...client, id: makeId('client') }, ...current.clients],
+      clients: [created, ...current.clients],
     }))
+    return created
   }
 
   const addPlan = (plan: Omit<SubscriptionPlan, 'id'>) => {

@@ -1,7 +1,9 @@
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
+import { AddModal } from '../components/AddModal'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
+import { FloatingAddButton } from '../components/FloatingAddButton'
 import { highlightMatch } from '../lib/highlight'
 import { ListSearch } from '../components/ListSearch'
 import { CollapsibleSection } from '../components/SectionKit'
@@ -15,9 +17,9 @@ import { planTemplates, templatePickerLabel } from '../lib/utils'
 
 export function PlansPage() {
   const { data, addPlan, updatePlan, deletePlan, ownerMode } = useAppContext()
+  const [addOpen, setAddOpen] = useState(false)
   return (
-    <section className="content-grid two-column" id="plans">
-      <PlanBuilder onCreate={addPlan} />
+    <section className="panel" id="plans">
       <PlanLibrary
         plans={data.plans}
         clients={data.clients}
@@ -26,14 +28,28 @@ export function PlansPage() {
         onUpdate={updatePlan}
         onDelete={deletePlan}
       />
+      <FloatingAddButton label="Add plan" onClick={() => setAddOpen(true)} />
+      {addOpen ? (
+        <AddModal title="Create plan" onClose={() => setAddOpen(false)}>
+          <PlanBuilder
+            variant="modal"
+            onCreate={(values) => {
+              addPlan(values)
+              setAddOpen(false)
+            }}
+          />
+        </AddModal>
+      ) : null}
     </section>
   )
 }
 
 function PlanBuilder({
   onCreate,
+  variant = 'panel',
 }: {
   onCreate: (plan: Omit<SubscriptionPlan, 'id'>) => void
+  variant?: 'panel' | 'modal'
 }) {
   const [name, setName] = useState('Controller Support')
   const [notes, setNotes] = useState('Monthly reporting, close review, and client advisory support.')
@@ -49,9 +65,8 @@ function PlanBuilder({
     setNotes('')
   }
 
-  return (
-    <CollapsibleSection kicker="Subscription setup" title="Create plan">
-      <form className="form-grid single" onSubmit={handleSubmit}>
+  const form = (
+    <form className="form-grid single" onSubmit={handleSubmit}>
         <label className="field">
           <span>Plan / service name</span>
           <input
@@ -74,6 +89,15 @@ function PlanBuilder({
           Add plan
         </button>
       </form>
+  )
+
+  if (variant === 'modal') {
+    return form
+  }
+
+  return (
+    <CollapsibleSection kicker="Subscription setup" title="Create plan">
+      {form}
     </CollapsibleSection>
   )
 }

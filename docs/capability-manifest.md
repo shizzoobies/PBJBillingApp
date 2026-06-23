@@ -152,11 +152,15 @@ bell, and account menu sit in the top bar on every page.
 
 - Client list: contact, billing type (Hourly / Monthly subscription / Annual),
   rate, assigned team, plans/services.
-- Add client: name, primary contact, billing type, monthly/annual rate (for
-  subscription/annual clients), estimated monthly hours per role (informational
-  only — never affects invoices), assigned bookkeeper(s), plans/services. NOTE:
-  there is no per-client hourly rate anymore — Hourly clients are billed off
-  each team member's own bill rate (set on the Team page).
+- Add client: a floating "+" Add client button (bottom-left, follows you as you
+  scroll; owner only) opens an Add-client modal. Fields: name, primary contact,
+  billing type, monthly/annual rate (for subscription/annual clients), estimated
+  monthly hours per role (informational only — never affects invoices), assigned
+  bookkeeper(s), plans/services. NOTE: there is no per-client hourly rate
+  anymore — Hourly clients are billed off each team member's own bill rate (set
+  on the Team page). Right after saving, a prompt asks "Open their checklist
+  now?" — choosing yes jumps straight into the new client's checklist + notes
+  modal. (Contacts and Plans have the same floating "+" add-in-a-modal flow.)
 - Client detail page (owner): everything about one client — tasks, time,
   contacts, billing, branding, invoice settings, notes.
 - Client detail page (staff): assigned bookkeepers/accountants can open their

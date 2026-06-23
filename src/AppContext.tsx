@@ -369,7 +369,7 @@ export type AppContextValue = {
   updateClientPlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
   updateClient: (clientId: string, patch: Partial<Client>) => void
   deleteClient: (clientId: string) => void
-  addClient: (client: Omit<Client, 'id'>) => void
+  addClient: (client: Omit<Client, 'id'>) => Client
   addPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void
   /**
    * Owner-only: patch a subscription plan's editable fields (name / notes).

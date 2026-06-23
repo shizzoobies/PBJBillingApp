@@ -2,8 +2,10 @@ import { ChevronRight, ListChecks, Plus, ShieldCheck } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { AddModal } from '../components/AddModal'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { ClientChecklistModal } from '../components/ClientChecklistModal'
+import { FloatingAddButton } from '../components/FloatingAddButton'
 import { highlightMatch } from '../lib/highlight'
 import { ListSearch } from '../components/ListSearch'
 import type {
@@ -45,6 +47,18 @@ function matchesClientQuery(client: Client, query: string): boolean {
 export function ClientsPage() {
   const { ownerMode, visibleClients, data, updateClientPlan, addClient } = useAppContext()
   const [query, setQuery] = useState('')
+  // Owner-only "+" add flow: the add-client modal, the just-created client
+  // awaiting the "Open their checklist now?" prompt, and the client whose
+  // checklist modal is open (jumped to from that prompt).
+  const [addOpen, setAddOpen] = useState(false)
+  const [postAddClient, setPostAddClient] = useState<Client | null>(null)
+  const [modalClient, setModalClient] = useState<Client | null>(null)
+
+  const handleCreateClient = (values: Omit<Client, 'id'>) => {
+    const created = addClient(values)
+    setAddOpen(false)
+    setPostAddClient(created)
+  }
 
   const filteredClients = visibleClients.filter((c) => matchesClientQuery(c, query))
 
@@ -62,56 +76,134 @@ export function ClientsPage() {
       .map((checklist) => checklist.clientId),
   )
 
+  if (!ownerMode) {
+    return (
+      <section className="content-grid two-column" id="clients">
+        <div className="panel">
+          <div className="section-heading">
+            <div>
+              <p className="section-kicker">Assigned client work</p>
+              <h2>Clients</h2>
+            </div>
+          </div>
+          <ListSearch
+            value={query}
+            onChange={setQuery}
+            placeholder="Search clients…"
+            resultCount={filteredClients.length}
+            total={visibleClients.length}
+          />
+          {query.trim() && filteredClients.length === 0 ? (
+            <p className="list-search-empty">No clients match &ldquo;{query.trim()}&rdquo;.</p>
+          ) : null}
+          <ClientTable
+            clients={filteredClients}
+            clientsWithActiveChecklists={clientsWithActiveChecklists}
+            employees={data.employees}
+            onUpdatePlan={updateClientPlan}
+            ownerMode={ownerMode}
+            plans={data.plans}
+            query={query}
+          />
+        </div>
+        <VisibilityPanel visibleClients={visibleClients} />
+      </section>
+    )
+  }
+
+  // Owner view: single-column list panel. The add form lives behind the
+  // floating "+" button → modal, and a just-created client offers a jump
+  // straight into its checklist.
   return (
-    <section className={ownerMode ? 'content-grid client-layout' : 'panel'} id="clients">
-      <div className={ownerMode ? 'panel' : undefined}>
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">
-              {ownerMode ? 'Owner client controls' : 'Assigned client work'}
-            </p>
-            <h2>Clients</h2>
+    <section className="panel" id="clients">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Owner client controls</p>
+          <h2>Clients</h2>
+        </div>
+      </div>
+      <ListSearch
+        value={query}
+        onChange={setQuery}
+        placeholder="Search clients…"
+        resultCount={filteredClients.length}
+        total={visibleClients.length}
+      />
+      {query.trim() && filteredClients.length === 0 ? (
+        <p className="list-search-empty">No clients match &ldquo;{query.trim()}&rdquo;.</p>
+      ) : null}
+      <ClientTable
+        clients={filteredClients}
+        clientsWithActiveChecklists={clientsWithActiveChecklists}
+        employees={data.employees}
+        onUpdatePlan={updateClientPlan}
+        ownerMode={ownerMode}
+        plans={data.plans}
+        query={query}
+      />
+
+      <FloatingAddButton label="Add client" onClick={() => setAddOpen(true)} />
+
+      {addOpen ? (
+        <AddModal title="Add client" onClose={() => setAddOpen(false)}>
+          <ClientBuilder
+            variant="modal"
+            // Owners do client work too, so they're assignable here (visibility
+            // scoping is moot — owners always see every client).
+            employees={data.employees}
+            onCreate={handleCreateClient}
+            plans={data.plans}
+            contacts={data.contacts}
+            defaults={data.firmSettings?.clientDefaults}
+          />
+        </AddModal>
+      ) : null}
+
+      {postAddClient ? (
+        <div
+          className="modal-overlay"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setPostAddClient(null)
+          }}
+        >
+          <div
+            className="modal-panel add-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${postAddClient.name} added`}
+          >
+            <div className="modal-body">
+              <h2 className="modal-title">{postAddClient.name} added</h2>
+              <p className="modal-intro">Open their checklist now?</p>
+              <div className="button-row">
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => setPostAddClient(null)}
+                >
+                  Not now
+                </button>
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={() => {
+                    setModalClient(postAddClient)
+                    setPostAddClient(null)
+                  }}
+                >
+                  <ListChecks size={16} />
+                  Open checklist
+                </button>
+              </div>
+            </div>
           </div>
         </div>
-        <ListSearch
-          value={query}
-          onChange={setQuery}
-          placeholder="Search clients…"
-          resultCount={filteredClients.length}
-          total={visibleClients.length}
-        />
-        {query.trim() && filteredClients.length === 0 ? (
-          <p className="list-search-empty">
-            No clients match &ldquo;{query.trim()}&rdquo;.
-          </p>
-        ) : null}
-        <ClientTable
-          clients={filteredClients}
-          clientsWithActiveChecklists={clientsWithActiveChecklists}
-          employees={data.employees}
-          onUpdatePlan={updateClientPlan}
-          ownerMode={ownerMode}
-          plans={data.plans}
-          query={query}
-        />
-      </div>
-      {ownerMode ? (
-        <ClientBuilder
-          // PREVIOUSLY: this list was filtered to non-Owner employees only,
-          // which made the Add-client form unusable for any firm whose only
-          // active employees were Owners (e.g., a 2-person shop with both
-          // partners listed as Owner). Owners do client work too, so let
-          // them be assignable; visibility scoping doesn't care because
-          // owners always see every client anyway.
-          employees={data.employees}
-          onCreate={addClient}
-          plans={data.plans}
-          contacts={data.contacts}
-          defaults={data.firmSettings?.clientDefaults}
-        />
-      ) : (
-        <VisibilityPanel visibleClients={visibleClients} />
-      )}
+      ) : null}
+
+      {modalClient ? (
+        <ClientChecklistModal client={modalClient} onClose={() => setModalClient(null)} />
+      ) : null}
     </section>
   )
 }
@@ -148,12 +240,14 @@ function ClientBuilder({
   plans,
   contacts,
   defaults,
+  variant = 'panel',
 }: {
   employees: Employee[]
   onCreate: (client: Omit<Client, 'id'>) => void
   plans: SubscriptionPlan[]
   contacts: Contact[]
   defaults?: ClientDefaults
+  variant?: 'panel' | 'modal'
 }) {
   // Owner-configured house defaults (Settings → "Default values for new
   // clients"). Fall back to the historical hard-coded values when unset.
@@ -259,15 +353,8 @@ function ClientBuilder({
     (Number(estimatedAccountantHours) || 0) +
     (Number(estimatedCfoHours) || 0)
 
-  return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Owner setup</p>
-          <h2>Add client</h2>
-        </div>
-      </div>
-      <form className="form-grid single" onSubmit={handleSubmit}>
+  const form = (
+    <form className="form-grid single" onSubmit={handleSubmit}>
         <label className="field">
           <span>Client name</span>
           <input
@@ -421,6 +508,21 @@ function ClientBuilder({
           Add client
         </button>
       </form>
+  )
+
+  if (variant === 'modal') {
+    return form
+  }
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Owner setup</p>
+          <h2>Add client</h2>
+        </div>
+      </div>
+      {form}
     </section>
   )
 }

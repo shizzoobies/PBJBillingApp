@@ -2,7 +2,9 @@ import { Archive, ArchiveRestore, Lock, Plus, Trash2, Unlock, Upload } from 'luc
 import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { AddModal } from '../components/AddModal'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
+import { FloatingAddButton } from '../components/FloatingAddButton'
 import { ListSearch } from '../components/ListSearch'
 import { CollapsibleSection, SavingTextInput, SavingTextarea } from '../components/SectionKit'
 import type { Client, Contact } from '../lib/types'
@@ -29,15 +31,15 @@ export function ContactsPage() {
     ownerMode,
   } = useAppContext()
   const groupNames = useMemo(() => distinctGroupNames(data.contacts), [data.contacts])
+  const [addOpen, setAddOpen] = useState(false)
   return (
-    <section className="content-grid two-column" id="contacts">
+    <section className="panel" id="contacts">
       {/* Shared list of existing group names, referenced by every Group input. */}
       <datalist id={GROUP_DATALIST_ID}>
         {groupNames.map((name) => (
           <option key={name} value={name} />
         ))}
       </datalist>
-      <ContactBuilder onCreate={addContact} />
       <ContactLibrary
         contacts={data.contacts}
         clients={data.clients}
@@ -48,6 +50,18 @@ export function ContactsPage() {
         onSetLinks={setContactLinks}
         onSetArchived={setContactArchived}
       />
+      <FloatingAddButton label="Add contact" onClick={() => setAddOpen(true)} />
+      {addOpen ? (
+        <AddModal title="Add contact" onClose={() => setAddOpen(false)}>
+          <ContactBuilder
+            variant="modal"
+            onCreate={(values) => {
+              addContact(values)
+              setAddOpen(false)
+            }}
+          />
+        </AddModal>
+      ) : null}
     </section>
   )
 }
@@ -57,8 +71,10 @@ const GROUP_DATALIST_ID = 'contact-group-names'
 
 function ContactBuilder({
   onCreate,
+  variant = 'panel',
 }: {
   onCreate: (contact: Omit<Contact, 'id'>) => void
+  variant?: 'panel' | 'modal'
 }) {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -90,9 +106,8 @@ function ContactBuilder({
     setGroup('')
   }
 
-  return (
-    <CollapsibleSection kicker="Shared contacts" title="Add contact">
-      <form className="form-grid single" onSubmit={handleSubmit}>
+  const form = (
+    <form className="form-grid single" onSubmit={handleSubmit}>
         <label className="field">
           <span>Name</span>
           <input className="input" onChange={(event) => setName(event.target.value)} value={name} />
@@ -146,6 +161,15 @@ function ContactBuilder({
           Add contact
         </button>
       </form>
+  )
+
+  if (variant === 'modal') {
+    return form
+  }
+
+  return (
+    <CollapsibleSection kicker="Shared contacts" title="Add contact">
+      {form}
     </CollapsibleSection>
   )
 }

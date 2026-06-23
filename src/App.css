@@ -7030,6 +7030,84 @@ button.repeating-task-toggle-pill {
   transform: translateY(-2px);
 }
 
+/* Floating "+" add button (Clients / Contacts / Plans). Pinned bottom-LEFT so
+   it never overlaps the owner-only assistant launcher at bottom-right. Sits
+   above page chrome (z 28) but BELOW the modal overlay (z 60). */
+.fab {
+  align-items: center;
+  background: linear-gradient(135deg, var(--berry), var(--jam));
+  border: 1px solid transparent;
+  border-radius: 999px;
+  bottom: 1.5rem;
+  box-shadow: 0 6px 18px rgba(142, 47, 82, 0.35);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 0.95rem;
+  font-weight: 600;
+  gap: 0.45rem;
+  left: 1.5rem;
+  padding: 0.7rem 1.15rem;
+  position: fixed;
+  transition: box-shadow var(--ease), transform var(--ease), filter var(--ease);
+  z-index: 28;
+}
+
+.fab:hover {
+  box-shadow: 0 9px 24px rgba(142, 47, 82, 0.42);
+  filter: brightness(1.04);
+  transform: translateY(-2px);
+}
+
+.fab:active {
+  box-shadow: 0 3px 9px rgba(142, 47, 82, 0.26);
+  transform: translateY(0);
+}
+
+.fab:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--berry) 55%, #fff);
+  outline-offset: 2px;
+}
+
+.fab-label {
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .fab {
+    bottom: 16px;
+    left: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fab {
+    transition: none;
+  }
+
+  .fab:hover,
+  .fab:active {
+    transform: none;
+  }
+}
+
+@media print {
+  .fab {
+    display: none !important;
+  }
+}
+
+/* Compact "client added → open checklist?" confirmation shown right after a
+   client is saved from the add modal. */
+.add-confirm-modal {
+  max-width: 420px;
+}
+
+.add-confirm-modal .button-row {
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
 .assistant-title-avatar {
   border-radius: 999px;
   flex: 0 0 auto;
