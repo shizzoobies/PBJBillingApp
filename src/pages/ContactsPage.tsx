@@ -178,8 +178,10 @@ function ContactLibrary({
   const [unlinkedOnly, setUnlinkedOnly] = useState(false)
   // Text search query over the active list.
   const [query, setQuery] = useState('')
-  // "Group by group" — opt-in; OFF = the flat, name-sorted view (default).
-  const [groupByGroup, setGroupByGroup] = useState(false)
+  // Default to the grouped view: groups sorted alphabetically by group name
+  // (members by name, Ungrouped last). The toggle still flips to a flat,
+  // name-sorted list.
+  const [groupByGroup, setGroupByGroup] = useState(true)
 
   const toggleExpanded = (id: string) => {
     setExpandedIds((current) => {
