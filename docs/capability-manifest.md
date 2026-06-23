@@ -14,12 +14,14 @@ Sidebar pages: Dashboard, Time, Timesheet, Time Approvals, Checklists, Board,
 Delayed, Clients, Client Recap, Contacts, Reports, Productivity, Gantt,
 Invoices, Plans, Team, To 100%, Settings. A billing-month picker, notification
 bell, and account menu sit in the top bar on every page.
-- The Clients, Contacts, Plans, and Team list pages each have an instant search
-  box: type to filter the list by name and key fields (clients: name/contact/
-  email/billing type; contacts: name/title/email/phone/company emails/linked
-  client; plans: name/notes; team: name/email/role), with a live result count
-  and a clear button. (Checklists, Board, Gantt, Reports, Productivity already
-  have their own assignee/client/status filters.)
+- Most list/board pages have an instant search box: type to filter by name and
+  key fields, with a live result count, matched-text highlight, and a clear
+  button. Coverage: Clients (name/contact/email/billing type), Contacts
+  (name/title/email/phone/company emails/linked client), Plans (name/notes),
+  Team (name/email/role), Checklists & Gantt (task title/client — composes with
+  the assignee/client/status filters), Delayed (task title/client/waiting note),
+  and the Board (client/task title — composes with the period toggle). Reports
+  and Productivity remain aggregate views with their own filters.
 
 ## Dashboard
 

@@ -8,6 +8,7 @@ import {
   type PeriodType,
 } from '../lib/activeBoard'
 import { useAppContext } from '../AppContext'
+import { ListSearch } from '../components/ListSearch'
 import { ChecklistCard } from './ChecklistsPage'
 import { localDateOnly, stageNameFor } from '../lib/utils'
 import type { Checklist, ServiceCategory } from '../lib/types'
@@ -39,6 +40,7 @@ export function ActiveChecklistsBoardPage() {
 
   const [periodType, setPeriodType] = useState<PeriodType>('month')
   const [managingColumns, setManagingColumns] = useState(false)
+  const [query, setQuery] = useState('')
 
   const today = localDateOnly()
 
@@ -61,6 +63,34 @@ export function ActiveChecklistsBoardPage() {
 
   const range = boardPeriodRange(periodType, today)
   const totalOpen = board.columns.reduce((sum, col) => sum + col.openClientCount, 0)
+
+  const filteredColumns = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return board.columns
+    return board.columns.map((col) => {
+      const filteredClients = col.clients.filter((clientRow) => {
+        const nameMatch = clientRow.name.toLowerCase().includes(q)
+        const titleMatch = clientRow.checklists.some((c) =>
+          c.title.toLowerCase().includes(q),
+        )
+        return nameMatch || titleMatch
+      }).map((clientRow) => {
+        const q2 = query.trim().toLowerCase()
+        const nameMatch = clientRow.name.toLowerCase().includes(q2)
+        return {
+          ...clientRow,
+          checklists: nameMatch
+            ? clientRow.checklists
+            : clientRow.checklists.filter((c) => c.title.toLowerCase().includes(q2)),
+        }
+      })
+      return {
+        ...col,
+        clients: filteredClients,
+        openClientCount: filteredClients.length,
+      }
+    })
+  }, [board.columns, query])
 
   // Full-fidelity card, wired to the same context handlers the Checklists page
   // uses — so checking items off the board behaves identically (and completing
@@ -108,6 +138,13 @@ export function ActiveChecklistsBoardPage() {
             </p>
           </div>
           <div className="board-controls">
+            <ListSearch
+              value={query}
+              onChange={setQuery}
+              placeholder="Search board…"
+              resultCount={filteredColumns.reduce((sum, col) => sum + col.openClientCount, 0)}
+              total={totalOpen}
+            />
             <div className="group-by-toggle" role="group" aria-label="Period">
               {PERIOD_OPTIONS.map((option) => (
                 <button
@@ -145,7 +182,10 @@ export function ActiveChecklistsBoardPage() {
           </p>
         ) : (
           <div className="board-scroll">
-            {board.columns.map((column) => (
+            {filteredColumns.every((col) => col.clients.length === 0) && query.trim() ? (
+              <p className="empty-state">No clients or checklists match "{query.trim()}".</p>
+            ) : null}
+            {filteredColumns.map((column) => (
               <BoardColumnView key={column.id} column={column} renderCard={renderCard} />
             ))}
           </div>

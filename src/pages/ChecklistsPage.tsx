@@ -13,6 +13,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { FilterBar } from '../components/FilterBar'
+import { ListSearch } from '../components/ListSearch'
 import { useFilters } from '../components/useFilters'
 import { SaveBadge } from '../components/SectionKit'
 import { SharingControl } from '../components/SharingControl'
@@ -754,6 +755,7 @@ function ChecklistInProgressSection({
 }) {
   const todayDateOnly = localDateOnly()
   const { assignee, client, status } = useFilters()
+  const [query, setQuery] = useState('')
   const [searchParams, setSearchParams] = useSearchParams()
   const focusId = searchParams.get('focus')
   const focusRef = useRef<HTMLElement | null>(null)
@@ -786,15 +788,21 @@ function ChecklistInProgressSection({
   }, [focusId, searchParams, setSearchParams])
 
   const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
     return checklists.filter((checklist) => {
       if (assignee && checklist.assigneeId !== assignee) return false
       if (client && checklist.clientId !== client) return false
       if (status && status !== 'all') {
         if (statusForChecklist(checklist, todayDateOnly) !== status) return false
       }
+      if (q) {
+        const nameMatch = clientName(clients, checklist.clientId).toLowerCase().includes(q)
+        const titleMatch = checklist.title.toLowerCase().includes(q)
+        if (!nameMatch && !titleMatch) return false
+      }
       return true
     })
-  }, [checklists, assignee, client, status, todayDateOnly])
+  }, [checklists, assignee, client, status, todayDateOnly, query, clients])
 
   // Status grouping (current behavior, unchanged).
   const groupedByStatus: Record<Group, Checklist[]> = {
@@ -895,10 +903,21 @@ function ChecklistInProgressSection({
           </button>
         </div>
       </div>
-      <FilterBar employees={employees} clients={clients} />
+      <div className="filter-row">
+        <FilterBar employees={employees} clients={clients} />
+        <ListSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search checklists…"
+          resultCount={filtered.length}
+          total={checklists.length}
+        />
+      </div>
       <div className="checklist-stack">
         {checklists.length === 0 ? (
           <p className="empty-state">No tasks in progress. Hit + New to add one.</p>
+        ) : filtered.length === 0 && query.trim() ? (
+          <p className="empty-state">No tasks match "{query.trim()}".</p>
         ) : filtered.length === 0 ? (
           <p className="empty-state">No tasks match your filters.</p>
         ) : null}

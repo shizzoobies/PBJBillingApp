@@ -2,6 +2,7 @@ import { AlarmClock, ChevronDown, ChevronRight } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { ListSearch } from '../components/ListSearch'
 import { clientName, employeeName, localDateOnly, shortDate } from '../lib/utils'
 
 /**
@@ -102,7 +103,37 @@ export function DelayedPage() {
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
   }, [checklists, clients])
 
+  const [query, setQuery] = useState('')
+
+  const visibleGroups = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return groups
+    return groups
+      .map((group) => {
+        const clientMatch = group.name.toLowerCase().includes(q)
+        const filteredChecklists = group.checklists
+          .map((checklist) => {
+            const titleMatch = checklist.title.toLowerCase().includes(q)
+            const filteredRows = clientMatch || titleMatch
+              ? checklist.rows
+              : checklist.rows.filter((row) => {
+                  const noteMatch = (row.note ?? '').toLowerCase().includes(q)
+                  return noteMatch
+                })
+            return { ...checklist, rows: filteredRows }
+          })
+          .filter((checklist) => checklist.rows.length > 0)
+        return {
+          ...group,
+          checklists: filteredChecklists,
+          count: filteredChecklists.reduce((sum, c) => sum + c.rows.length, 0),
+        }
+      })
+      .filter((group) => group.checklists.length > 0)
+  }, [groups, query])
+
   const totalDelayed = groups.reduce((total, group) => total + group.count, 0)
+  const visibleTotal = visibleGroups.reduce((total, group) => total + group.count, 0)
 
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const toggleClient = (clientId: string) => {
@@ -126,6 +157,13 @@ export function DelayedPage() {
             <AlarmClock size={16} />
             {totalDelayed} waiting {totalDelayed === 1 ? 'item' : 'items'}
           </span>
+          <ListSearch
+            value={query}
+            onChange={setQuery}
+            placeholder="Search delayed…"
+            resultCount={visibleTotal}
+            total={totalDelayed}
+          />
         </div>
       </header>
 
@@ -142,9 +180,13 @@ export function DelayedPage() {
             to flag it as delayed.
           </p>
         </div>
+      ) : visibleGroups.length === 0 ? (
+        <div className="panel">
+          <p className="empty-state">No delayed items match "{query.trim()}".</p>
+        </div>
       ) : (
         <div className="delayed-groups">
-          {groups.map((group) => {
+          {visibleGroups.map((group) => {
             const isCollapsed = collapsed.has(group.clientId)
             return (
               <div className="panel delayed-client-group" key={group.clientId}>

@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { FilterBar } from '../components/FilterBar'
+import { ListSearch } from '../components/ListSearch'
 import { useFilters, type StatusFilter } from '../components/useFilters'
 import type { Checklist, Client, Employee } from '../lib/types'
 import { clientName, employeeName, localDateOnly } from '../lib/utils'
@@ -36,6 +38,7 @@ function GanttView({
 }) {
   const navigate = useNavigate()
   const { assignee, client, status } = useFilters()
+  const [query, setQuery] = useState('')
 
   const today = new Date()
   const todayDateOnly = localDateOnly(today)
@@ -68,11 +71,17 @@ function GanttView({
     })
   }
 
+  const q = query.trim().toLowerCase()
   const filtered = checklists.filter((checklist) => {
     if (assignee && checklist.assigneeId !== assignee) return false
     if (client && checklist.clientId !== client) return false
     if (status && status !== 'all') {
       if (checklistStatus(checklist, todayDateOnly) !== status) return false
+    }
+    if (q) {
+      const titleMatch = checklist.title.toLowerCase().includes(q)
+      const nameMatch = clientName(clients, checklist.clientId).toLowerCase().includes(q)
+      if (!titleMatch && !nameMatch) return false
     }
     return true
   })
@@ -159,7 +168,16 @@ function GanttView({
           <h2>Checklist Gantt</h2>
         </div>
       </div>
-      <FilterBar employees={employees} clients={clients} />
+      <div className="filter-row">
+        <FilterBar employees={employees} clients={clients} />
+        <ListSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search checklists…"
+          resultCount={filtered.length}
+          total={checklists.length}
+        />
+      </div>
       <p className="report-caption">
         One bar per checklist instance, grouped by assignee. Click any row to open the underlying
         checklist.
@@ -182,7 +200,9 @@ function GanttView({
             </div>
           ))}
         </div>
-        {orderedGroups.length === 0 ? (
+        {orderedGroups.length === 0 && q ? (
+          <p className="empty-state">No tasks match "{query.trim()}".</p>
+        ) : orderedGroups.length === 0 ? (
           <p className="empty-state">No checklist instances to plot.</p>
         ) : (
           orderedGroups.map(([assigneeId, group]) => (
