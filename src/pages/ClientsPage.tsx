@@ -1,10 +1,11 @@
-import { ChevronRight, ListChecks, Plus, ShieldCheck } from 'lucide-react'
+import { ChevronRight, ListChecks, Plus, ShieldCheck, StickyNote } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { AddModal } from '../components/AddModal'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { ClientChecklistModal } from '../components/ClientChecklistModal'
+import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { FloatingAddButton } from '../components/FloatingAddButton'
 import { highlightMatch } from '../lib/highlight'
 import { ListSearch } from '../components/ListSearch'
@@ -546,7 +547,9 @@ function ClientTable({
   plans: SubscriptionPlan[]
   query?: string
 }) {
+  const { sessionUser } = useAppContext()
   const [modalClient, setModalClient] = useState<Client | null>(null)
+  const [notesClient, setNotesClient] = useState<Client | null>(null)
   return (
     <div className="table-wrap">
       <table>
@@ -558,7 +561,7 @@ function ClientTable({
             {ownerMode ? <th>Rate</th> : null}
             <th>Assigned team</th>
             {ownerMode ? <th>Plans / services</th> : null}
-            <th aria-label="Checklist" />
+            <th aria-label="Actions" />
           </tr>
         </thead>
         <tbody>
@@ -632,22 +635,32 @@ function ClientTable({
                   </td>
                 ) : null}
                 <td>
-                  <button
-                    type="button"
-                    className={
-                      clientsWithActiveChecklists.has(client.id)
-                        ? 'secondary-action compact-action has-active-checklists'
-                        : 'secondary-action compact-action'
-                    }
-                    title={
-                      clientsWithActiveChecklists.has(client.id)
-                        ? 'Open checklist & notes — this client has active checklists'
-                        : 'Open checklist & notes'
-                    }
-                    onClick={() => setModalClient(client)}
-                  >
-                    <ListChecks size={14} /> Checklist
-                  </button>
+                  <div className="client-row-actions">
+                    <button
+                      type="button"
+                      className={
+                        clientsWithActiveChecklists.has(client.id)
+                          ? 'secondary-action compact-action has-active-checklists'
+                          : 'secondary-action compact-action'
+                      }
+                      title={
+                        clientsWithActiveChecklists.has(client.id)
+                          ? 'Open checklist & notes — this client has active checklists'
+                          : 'Open checklist & notes'
+                      }
+                      onClick={() => setModalClient(client)}
+                    >
+                      <ListChecks size={14} /> Checklist
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-action compact-action"
+                      title="Add or read notes for this client"
+                      onClick={() => setNotesClient(client)}
+                    >
+                      <StickyNote size={14} /> Note
+                    </button>
+                  </div>
                 </td>
               </tr>
             )
@@ -656,6 +669,15 @@ function ClientTable({
       </table>
       {modalClient ? (
         <ClientChecklistModal client={modalClient} onClose={() => setModalClient(null)} />
+      ) : null}
+      {notesClient ? (
+        <AddModal title={`Notes · ${notesClient.name}`} onClose={() => setNotesClient(null)}>
+          <ClientNotesPanel
+            clientId={notesClient.id}
+            ownerMode={ownerMode}
+            currentUserId={sessionUser.id}
+          />
+        </AddModal>
       ) : null}
     </div>
   )

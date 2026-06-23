@@ -185,7 +185,10 @@ bell, and account menu sit in the top bar on every page.
   opens a modal with that client's active (editable) checklists plus the notes
   panel (add + history) — no need to open the client and scroll. The button is
   tinted green for clients that currently have active checklists, so open work is
-  visible at a glance.
+  visible at a glance. Right next to it is a "Note" button that opens a
+  notes-only modal (add a note + read history) for anyone who just needs to jot
+  a note. Both buttons work for owners and assigned staff (bookkeepers /
+  accountants) on any client they can see.
 - The client's "Active checklists" section has a "Due this month" toggle that
   filters to checklists due in the current calendar month (with a count).
 - Assigned team controls which staff can see/log time for the client.

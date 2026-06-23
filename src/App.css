@@ -6880,6 +6880,14 @@ button.repeating-task-toggle-pill {
   white-space: nowrap;
 }
 
+/* The Checklist + Note buttons in each client-row actions cell. */
+.client-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 /* Client-list "Checklist" button when the client has active (in-progress,
    not-done) checklists — a subtle green tint/border so live work stands out
    without shouting. Uses the palette green at low opacity. */
