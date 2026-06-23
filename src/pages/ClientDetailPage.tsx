@@ -1,5 +1,5 @@
 import { ArrowLeft, Check, Copy, ExternalLink, Pencil, Plus, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
@@ -19,12 +19,10 @@ import {
   SavingTextInput,
 } from '../components/SectionKit'
 import {
-  addClientNote,
-  deleteClientNote,
-  listClientNotes,
   recordClientProfileActivity,
   setClientAssignedTeamRequest,
 } from '../lib/api'
+import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { useSaveFlash } from '../lib/useSaveFlash'
 import {
   ApiError,
@@ -34,7 +32,6 @@ import {
   type ChecklistFrequency,
   type ChecklistTemplate,
   type Client,
-  type ClientNote,
   type Contact,
   type Employee,
   type SubscriptionPlan,
@@ -276,141 +273,10 @@ export function ClientDetailPage() {
       </CollapsibleSection>
 
       <CollapsibleSection kicker="Notes" title="Client notes">
-        <ClientNotesBody clientId={client.id} ownerMode={ownerMode} currentUserId={sessionUser.id} />
+        <ClientNotesPanel clientId={client.id} ownerMode={ownerMode} currentUserId={sessionUser.id} />
       </CollapsibleSection>
     </section>
     </SectionScopeContext.Provider>
-  )
-}
-
-/* -------------------------------------------------------------------------- */
-/* Notes                                                                      */
-/* -------------------------------------------------------------------------- */
-
-const noteStamp = new Intl.DateTimeFormat('en-US', {
-  month: 'short',
-  day: 'numeric',
-  year: 'numeric',
-  hour: 'numeric',
-  minute: '2-digit',
-})
-
-function ClientNotesBody({
-  clientId,
-  ownerMode,
-  currentUserId,
-}: {
-  clientId: string
-  ownerMode: boolean
-  currentUserId: string
-}) {
-  const [notes, setNotes] = useState<ClientNote[]>([])
-  const [draft, setDraft] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      setLoading(true)
-      setError('')
-      try {
-        const list = await listClientNotes(clientId)
-        if (!cancelled) setNotes(list)
-      } catch {
-        if (!cancelled) setError('Could not load notes.')
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [clientId])
-
-  const submit = async () => {
-    const body = draft.trim()
-    if (!body || busy) return
-    setBusy(true)
-    setError('')
-    try {
-      const note = await addClientNote(clientId, body)
-      setNotes((current) => [note, ...current])
-      setDraft('')
-    } catch {
-      setError('Could not add that note — please try again.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const remove = async (noteId: string) => {
-    setError('')
-    try {
-      await deleteClientNote(clientId, noteId)
-      setNotes((current) => current.filter((note) => note.id !== noteId))
-    } catch {
-      setError('Could not delete that note.')
-    }
-  }
-
-  return (
-    <div className="client-notes">
-      <div className="field full-row">
-        <span className="field-label-row">Add a note</span>
-        <textarea
-          className="input"
-          rows={3}
-          placeholder="Jot a note for this client…"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-        />
-        <div className="button-row">
-          <button
-            type="button"
-            className="primary-action"
-            disabled={busy || !draft.trim()}
-            onClick={() => void submit()}
-          >
-            {busy ? 'Adding…' : 'Add note'}
-          </button>
-        </div>
-      </div>
-
-      {error ? <p className="auth-error">{error}</p> : null}
-
-      {loading ? (
-        <p className="muted-text">Loading notes…</p>
-      ) : notes.length === 0 ? (
-        <p className="muted-text">No notes yet.</p>
-      ) : (
-        <ul className="activity-list">
-          {notes.map((note) => {
-            const canDelete = ownerMode || note.authorId === currentUserId
-            return (
-              <li key={note.id}>
-                <strong>
-                  {note.authorName || 'Unknown'}
-                  {note.createdAt ? ` · ${noteStamp.format(new Date(note.createdAt))}` : ''}
-                </strong>
-                <span className="client-note-body">{note.body}</span>
-                {canDelete ? (
-                  <button
-                    type="button"
-                    className="link-button"
-                    onClick={() => void remove(note.id)}
-                  >
-                    Delete
-                  </button>
-                ) : null}
-              </li>
-            )
-          })}
-        </ul>
-      )}
-    </div>
   )
 }
 
@@ -1034,7 +900,7 @@ function ChipField({
 /* Read-only sections (checklists, activity)                                  */
 /* -------------------------------------------------------------------------- */
 
-function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData }) {
+export function ActiveChecklistsBody({ client, data }: { client: Client; data: AppData }) {
   const {
     activeEmployeeId,
     role,

@@ -163,8 +163,12 @@ bell, and account menu sit in the top bar on every page.
   are stripped from their data server-side.
 - Client notes: a timestamped, attributed notes log on each client. The owner
   and the client's assigned staff can read and add notes; you can delete your
-  own note (the owner can delete any). Notes persist independently of the bulk
-  autosave so staff can add them.
+  own note (the owner can delete any). Notes support lightweight rich text
+  (bold, italic, bullet/numbered lists, links) via a small formatting toolbar.
+  Notes persist independently of the bulk autosave so staff can add them.
+- Quick access from the client LIST: each row has a "Checklist" button that
+  opens a modal with that client's active (editable) checklists plus the notes
+  panel (add + history) — no need to open the client and scroll.
 - The client's "Active checklists" section has a "Due this month" toggle that
   filters to checklists due in the current calendar month (with a count).
 - Assigned team controls which staff can see/log time for the client.

@@ -6724,6 +6724,74 @@ button.repeating-task-toggle-pill {
   margin: 0;
 }
 
+/* ---- Rich note editor (lightweight markdown toolbar + textarea) ---- */
+.rich-note-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.rich-note-toolbar {
+  display: flex;
+  gap: 4px;
+}
+
+.rich-note-tool {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--plum);
+  cursor: pointer;
+  display: inline-flex;
+  justify-content: center;
+  padding: 4px 7px;
+}
+
+.rich-note-tool:hover {
+  background: var(--surface-alt, rgba(0, 0, 0, 0.04));
+}
+
+/* Rendered note bodies: keep the small markdown subset tidy. */
+.client-note-body ul,
+.client-note-body ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.client-note-body p {
+  margin: 4px 0;
+}
+
+.client-note-body p:first-child {
+  margin-top: 0;
+}
+
+.client-note-body p:last-child {
+  margin-bottom: 0;
+}
+
+/* ---- Client-list checklist + notes modal ---- */
+.client-checklist-modal {
+  max-width: 760px;
+}
+
+.client-checklist-modal-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.client-checklist-modal-section {
+  display: grid;
+  gap: 8px;
+}
+
+.compact-action {
+  font-size: 13px;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
 /* ---- CSV contact import ---- */
 .section-heading-actions {
   display: flex;

@@ -1,8 +1,9 @@
-import { ChevronRight, Plus, ShieldCheck } from 'lucide-react'
+import { ChevronRight, ListChecks, Plus, ShieldCheck } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
+import { ClientChecklistModal } from '../components/ClientChecklistModal'
 import { highlightMatch } from '../lib/highlight'
 import { ListSearch } from '../components/ListSearch'
 import type {
@@ -417,6 +418,7 @@ function ClientTable({
   plans: SubscriptionPlan[]
   query?: string
 }) {
+  const [modalClient, setModalClient] = useState<Client | null>(null)
   return (
     <div className="table-wrap">
       <table>
@@ -428,6 +430,7 @@ function ClientTable({
             {ownerMode ? <th>Rate</th> : null}
             <th>Assigned team</th>
             {ownerMode ? <th>Plans / services</th> : null}
+            <th aria-label="Checklist" />
           </tr>
         </thead>
         <tbody>
@@ -500,11 +503,24 @@ function ClientTable({
                     )}
                   </td>
                 ) : null}
+                <td>
+                  <button
+                    type="button"
+                    className="secondary-action compact-action"
+                    title="Open checklist & notes"
+                    onClick={() => setModalClient(client)}
+                  >
+                    <ListChecks size={14} /> Checklist
+                  </button>
+                </td>
               </tr>
             )
           })}
         </tbody>
       </table>
+      {modalClient ? (
+        <ClientChecklistModal client={modalClient} onClose={() => setModalClient(null)} />
+      ) : null}
     </div>
   )
 }
