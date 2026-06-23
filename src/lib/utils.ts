@@ -1043,6 +1043,72 @@ export function unlinkedContacts(contacts: Contact[], clients: Client[]): Contac
 }
 
 /**
+ * The distinct, trimmed group names already in use across `contacts`, sorted
+ * alphabetically (case-insensitive). Powers the Group input's <datalist> so the
+ * owner can pick an existing group or type a new one. Pure — unit-tested.
+ */
+export function distinctGroupNames(contacts: Contact[]): string[] {
+  const seen = new Map<string, string>()
+  for (const contact of contacts) {
+    const name = (contact.group ?? '').trim()
+    if (!name) continue
+    const key = name.toLowerCase()
+    if (!seen.has(key)) seen.set(key, name)
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+}
+
+/** One group section produced by {@link groupContacts}. */
+export type ContactGroupSection = {
+  /** Display name of the group, or 'Ungrouped' for the no-group bucket. */
+  group: string
+  /** Whether this is the synthetic "Ungrouped" bucket (always sorted last). */
+  ungrouped: boolean
+  /** Members of this group, sorted by name. */
+  contacts: Contact[]
+}
+
+/**
+ * Partition `contacts` into named-group sections for the "Group by group" view.
+ * Groups are sorted alphabetically (case-insensitive); members within a group
+ * are sorted by name. Contacts with no (or blank) group land in a single
+ * "Ungrouped" section appended last. Pure — unit-tested. The caller is expected
+ * to pass the already-filtered (search + unlinked) list.
+ */
+export function groupContacts(contacts: Contact[]): ContactGroupSection[] {
+  const byKey = new Map<string, { group: string; contacts: Contact[] }>()
+  const ungrouped: Contact[] = []
+  for (const contact of contacts) {
+    const name = (contact.group ?? '').trim()
+    if (!name) {
+      ungrouped.push(contact)
+      continue
+    }
+    const key = name.toLowerCase()
+    const bucket = byKey.get(key)
+    if (bucket) bucket.contacts.push(contact)
+    else byKey.set(key, { group: name, contacts: [contact] })
+  }
+  const byName = (a: Contact, b: Contact) =>
+    a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+  const sections: ContactGroupSection[] = [...byKey.values()]
+    .sort((a, b) => a.group.localeCompare(b.group, undefined, { sensitivity: 'base' }))
+    .map((bucket) => ({
+      group: bucket.group,
+      ungrouped: false,
+      contacts: [...bucket.contacts].sort(byName),
+    }))
+  if (ungrouped.length > 0) {
+    sections.push({
+      group: 'Ungrouped',
+      ungrouped: true,
+      contacts: [...ungrouped].sort(byName),
+    })
+  }
+  return sections
+}
+
+/**
  * True when a recurring reimbursement should appear on the invoice for
  * `billingPeriod` ('YYYY-MM'). Cadence logic:
  *  - Skip if `startDate` is after the billing period (the recurring

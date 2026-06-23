@@ -1839,6 +1839,11 @@ export class AppDataStore {
       await this.pool.query(
         `alter table contacts add column if not exists archived_at timestamptz`,
       )
+      // Optional named group (`group` is a SQL reserved word → column is
+      // `group_name`). Null/empty = ungrouped.
+      await this.pool.query(
+        `alter table contacts add column if not exists group_name text`,
+      )
 
       await this.pool.query(`
         create table if not exists clients (
@@ -2878,7 +2883,7 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, name, email, phone, title, notes, locked,
-                   company_emails, linked_contact_ids, archived_at
+                   company_emails, linked_contact_ids, archived_at, group_name
             from contacts
             order by name asc
           `),
@@ -3126,6 +3131,8 @@ export class AppDataStore {
             : [],
           // timestamptz → ISO string (or null when active).
           archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
+          // Optional named group; empty column → undefined (ungrouped).
+          group: row.group_name ?? undefined,
         })),
         clients: clientsResult.rows.map((row) => {
           // Back-compat normalization. The frontend always gets
@@ -3670,13 +3677,16 @@ export class AppDataStore {
             : []
           const archivedAt =
             typeof contact.archivedAt === 'string' && contact.archivedAt ? contact.archivedAt : null
+          // Optional group: trim, store null when empty.
+          const groupName =
+            typeof contact.group === 'string' && contact.group.trim() ? contact.group.trim() : null
           await client.query(
             `
               insert into contacts (
                 id, name, email, phone, title, notes, locked,
-                company_emails, linked_contact_ids, archived_at, updated_at
+                company_emails, linked_contact_ids, archived_at, group_name, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::text[], $10, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::text[], $10, $11, now())
             `,
             [
               contact.id,
@@ -3689,6 +3699,7 @@ export class AppDataStore {
               JSON.stringify(companyEmails),
               linkedContactIds,
               archivedAt,
+              groupName,
             ],
           )
         }

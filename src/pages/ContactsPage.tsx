@@ -6,7 +6,7 @@ import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { ListSearch } from '../components/ListSearch'
 import { CollapsibleSection, SavingTextInput, SavingTextarea } from '../components/SectionKit'
 import type { Client, Contact } from '../lib/types'
-import { unlinkedContacts } from '../lib/utils'
+import { distinctGroupNames, groupContacts, unlinkedContacts } from '../lib/utils'
 import {
   applyMerge,
   buildImportPlan,
@@ -28,8 +28,15 @@ export function ContactsPage() {
     setContactArchived,
     ownerMode,
   } = useAppContext()
+  const groupNames = useMemo(() => distinctGroupNames(data.contacts), [data.contacts])
   return (
     <section className="content-grid two-column" id="contacts">
+      {/* Shared list of existing group names, referenced by every Group input. */}
+      <datalist id={GROUP_DATALIST_ID}>
+        {groupNames.map((name) => (
+          <option key={name} value={name} />
+        ))}
+      </datalist>
       <ContactBuilder onCreate={addContact} />
       <ContactLibrary
         contacts={data.contacts}
@@ -45,6 +52,9 @@ export function ContactsPage() {
   )
 }
 
+/** Shared id for the existing-group-names <datalist> used by Group inputs. */
+const GROUP_DATALIST_ID = 'contact-group-names'
+
 function ContactBuilder({
   onCreate,
 }: {
@@ -55,6 +65,7 @@ function ContactBuilder({
   const [phone, setPhone] = useState('')
   const [title, setTitle] = useState('')
   const [notes, setNotes] = useState('')
+  const [group, setGroup] = useState('')
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -69,12 +80,14 @@ function ContactBuilder({
       phone: phone.trim(),
       title: title.trim(),
       notes: notes.trim(),
+      group: group.trim(),
     })
     setName('')
     setEmail('')
     setPhone('')
     setTitle('')
     setNotes('')
+    setGroup('')
   }
 
   return (
@@ -107,6 +120,16 @@ function ContactBuilder({
             className="input"
             onChange={(event) => setPhone(event.target.value)}
             value={phone}
+          />
+        </label>
+        <label className="field">
+          <span>Group</span>
+          <input
+            className="input"
+            list={GROUP_DATALIST_ID}
+            placeholder="Optional — e.g. Smith Family"
+            onChange={(event) => setGroup(event.target.value)}
+            value={group}
           />
         </label>
         <label className="field">
@@ -155,6 +178,8 @@ function ContactLibrary({
   const [unlinkedOnly, setUnlinkedOnly] = useState(false)
   // Text search query over the active list.
   const [query, setQuery] = useState('')
+  // "Group by group" — opt-in; OFF = the flat, name-sorted view (default).
+  const [groupByGroup, setGroupByGroup] = useState(false)
 
   const toggleExpanded = (id: string) => {
     setExpandedIds((current) => {
@@ -212,6 +237,34 @@ function ContactLibrary({
     ? activeContacts.filter((contact) => unlinkedIdSet.has(contact.id))
     : activeContacts
   const visibleActive = matchesQuery ? unlinkedFiltered.filter(matchesQuery) : unlinkedFiltered
+
+  // When "Group by group" is on, partition the already-filtered list into
+  // alphabetical group sections (with an "Ungrouped" bucket last). Computed off
+  // visibleActive so search + the Unlinked pill apply first, then we group what
+  // remains.
+  const groupedSections = useMemo(
+    () => (groupByGroup ? groupContacts(visibleActive) : null),
+    [groupByGroup, visibleActive],
+  )
+
+  // One contact row — shared by the flat list and the grouped sections so the
+  // wiring stays in one place.
+  const renderContactRow = (contact: Contact) => (
+    <ContactRow
+      key={contact.id}
+      contact={contact}
+      clients={clients}
+      contacts={contacts}
+      ownerMode={ownerMode}
+      isUnlinked={unlinkedIdSet.has(contact.id)}
+      expanded={expandedIds.has(contact.id)}
+      onToggleExpanded={() => toggleExpanded(contact.id)}
+      onUpdate={onUpdate}
+      onDelete={handleDelete}
+      onSetLinks={onSetLinks}
+      onSetArchived={onSetArchived}
+    />
+  )
 
   const handleDelete = (contact: Contact) => {
     const attached = clients.filter((client) => (client.contactIds ?? []).includes(contact.id))
@@ -282,6 +335,14 @@ function ContactLibrary({
             >
               Unlinked ({unlinked.length})
             </button>
+            <button
+              type="button"
+              className={`contacts-filter-pill${groupByGroup ? ' is-active' : ''}`}
+              aria-pressed={groupByGroup}
+              onClick={() => setGroupByGroup((on) => !on)}
+            >
+              Group by group
+            </button>
             <ListSearch
               value={query}
               onChange={setQuery}
@@ -303,22 +364,17 @@ function ContactLibrary({
               No contacts match &ldquo;{query.trim()}&rdquo;.
             </p>
           ) : null}
-          {visibleActive.map((contact) => (
-            <ContactRow
-              key={contact.id}
-              contact={contact}
-              clients={clients}
-              contacts={contacts}
-              ownerMode={ownerMode}
-              isUnlinked={unlinkedIdSet.has(contact.id)}
-              expanded={expandedIds.has(contact.id)}
-              onToggleExpanded={() => toggleExpanded(contact.id)}
-              onUpdate={onUpdate}
-              onDelete={handleDelete}
-              onSetLinks={onSetLinks}
-              onSetArchived={onSetArchived}
-            />
-          ))}
+          {groupedSections
+            ? groupedSections.map((section) => (
+                <div className="contact-group-section" key={section.group}>
+                  <h3 className="contact-group-heading">
+                    {section.group}{' '}
+                    <span className="contact-group-count">({section.contacts.length})</span>
+                  </h3>
+                  {section.contacts.map(renderContactRow)}
+                </div>
+              ))
+            : visibleActive.map(renderContactRow)}
         </div>
       </CollapsibleSection>
       {archivedContacts.length > 0 ? (
@@ -453,6 +509,13 @@ function ContactRow({
               placeholder="Notes"
               onCommit={(value) => onUpdate(contact.id, { notes: value })}
             />
+            <ContactTextInput
+              ariaLabel={`${contact.name} group`}
+              canonical={contact.group ?? ''}
+              placeholder="Group (optional)"
+              list={GROUP_DATALIST_ID}
+              onCommit={(value) => onUpdate(contact.id, { group: value })}
+            />
           </>
         )}
 
@@ -586,11 +649,13 @@ function ContactTextInput({
   canonical,
   placeholder,
   onCommit,
+  list,
 }: {
   ariaLabel: string
   canonical: string
   placeholder?: string
   onCommit: (value: string) => void
+  list?: string
 }) {
   return (
     <SavingTextInput
@@ -598,6 +663,7 @@ function ContactTextInput({
       canonical={canonical}
       placeholder={placeholder}
       onCommit={onCommit}
+      list={list}
     />
   )
 }

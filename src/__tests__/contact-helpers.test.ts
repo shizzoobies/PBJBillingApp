@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { emailForClient, unlinkedContacts } from '../lib/utils'
+import {
+  distinctGroupNames,
+  emailForClient,
+  groupContacts,
+  unlinkedContacts,
+} from '../lib/utils'
 import type { Client, Contact } from '../lib/types'
 
 /**
@@ -79,5 +84,66 @@ describe('unlinkedContacts', () => {
       makeClient({ id: 'client-2', contactIds: ['c2'] }),
     ]
     expect(unlinkedContacts(contacts, clients)).toEqual([])
+  })
+})
+
+describe('distinctGroupNames', () => {
+  it('returns the trimmed distinct groups, sorted case-insensitively', () => {
+    const contacts = [
+      makeContact({ id: 'c1', group: 'Smith Family' }),
+      makeContact({ id: 'c2', group: 'Acme stakeholders' }),
+      makeContact({ id: 'c3', group: '  Smith Family  ' }),
+      makeContact({ id: 'c4', group: '' }),
+      makeContact({ id: 'c5' }),
+    ]
+    expect(distinctGroupNames(contacts)).toEqual(['Acme stakeholders', 'Smith Family'])
+  })
+
+  it('dedupes case-insensitively, keeping the first-seen spelling', () => {
+    const contacts = [
+      makeContact({ id: 'c1', group: 'Acme' }),
+      makeContact({ id: 'c2', group: 'acme' }),
+    ]
+    expect(distinctGroupNames(contacts)).toEqual(['Acme'])
+  })
+})
+
+describe('groupContacts', () => {
+  it('partitions into alphabetical sections with members sorted by name', () => {
+    const contacts = [
+      makeContact({ id: 'c1', name: 'Bob', group: 'Smith Family' }),
+      makeContact({ id: 'c2', name: 'Alice', group: 'Smith Family' }),
+      makeContact({ id: 'c3', name: 'Zoe', group: 'Acme' }),
+    ]
+    const sections = groupContacts(contacts)
+    expect(sections.map((s) => s.group)).toEqual(['Acme', 'Smith Family'])
+    expect(sections[1].contacts.map((c) => c.name)).toEqual(['Alice', 'Bob'])
+  })
+
+  it('puts ungrouped contacts in an "Ungrouped" section last', () => {
+    const contacts = [
+      makeContact({ id: 'c1', name: 'Solo' }),
+      makeContact({ id: 'c2', name: 'Grouped', group: 'Team' }),
+    ]
+    const sections = groupContacts(contacts)
+    expect(sections.map((s) => s.group)).toEqual(['Team', 'Ungrouped'])
+    expect(sections[1].ungrouped).toBe(true)
+    expect(sections[1].contacts.map((c) => c.id)).toEqual(['c1'])
+  })
+
+  it('omits the Ungrouped section when every contact has a group', () => {
+    const contacts = [makeContact({ id: 'c1', group: 'A' })]
+    const sections = groupContacts(contacts)
+    expect(sections.map((s) => s.group)).toEqual(['A'])
+  })
+
+  it('merges case-variant group names into one section', () => {
+    const contacts = [
+      makeContact({ id: 'c1', name: 'X', group: 'Acme' }),
+      makeContact({ id: 'c2', name: 'Y', group: 'acme' }),
+    ]
+    const sections = groupContacts(contacts)
+    expect(sections).toHaveLength(1)
+    expect(sections[0].contacts.map((c) => c.id)).toEqual(['c1', 'c2'])
   })
 })

@@ -201,6 +201,11 @@ bell, and account menu sit in the top bar on every page.
   emails use the per-company address when set.
 - Linked contacts: relate contacts to each other (symmetric — linking A to B
   links B to A).
+- Groups: give a contact an optional Group name (e.g. "Smith Family") — pick an
+  existing group or type a new one. A "Group by group" toggle on the Contacts
+  page clusters the list under group headers (ungrouped contacts in their own
+  section); off by default (flat, name-sorted). Composes with search + the
+  Unlinked filter.
 - Archive: archive old/inactive contacts into an Archived section; archived
   contacts are hidden from the active directory and from client contact pickers.
   Unarchive to restore.

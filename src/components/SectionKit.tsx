@@ -175,6 +175,7 @@ export function SavingTextInput({
   type = 'text',
   className = 'input',
   ariaLabel,
+  list,
 }: {
   canonical: string
   onCommit: (value: string) => void
@@ -182,6 +183,8 @@ export function SavingTextInput({
   type?: string
   className?: string
   ariaLabel?: string
+  /** Optional id of a <datalist> to surface existing-value suggestions. */
+  list?: string
 }) {
   const [draft, setDraft] = useState(canonical)
   const [prev, setPrev] = useState(canonical)
@@ -208,6 +211,7 @@ export function SavingTextInput({
       aria-label={ariaLabel}
       className={className}
       type={type}
+      list={list}
       placeholder={placeholder}
       value={draft}
       onFocus={() => setFocused(true)}

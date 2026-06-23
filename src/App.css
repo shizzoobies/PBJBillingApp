@@ -8170,3 +8170,22 @@ mark.list-search-hit {
   border-color: var(--plum);
   color: #fff;
 }
+
+/* "Group by group" sections in the contacts directory. */
+.contact-group-section + .contact-group-section {
+  margin-top: 18px;
+}
+
+.contact-group-heading {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--plum);
+}
+
+.contact-group-count {
+  font-weight: 500;
+  color: var(--muted, #6b7280);
+}

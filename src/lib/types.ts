@@ -201,6 +201,14 @@ export type Contact = {
    * contact pickers. Persisted as timestamptz in pg.
    */
   archivedAt?: string | null
+  /**
+   * Optional named group this contact belongs to (e.g. "Smith Family",
+   * "Acme stakeholders"). A contact has AT MOST ONE group; empty/undefined =
+   * ungrouped. Owner-set on the Contacts page; lets the directory optionally
+   * group the list by group. Persisted as the `group_name` text column in pg
+   * (`group` is a SQL reserved word).
+   */
+  group?: string
 }
 
 export type TimeApprovalStatus = 'pending' | 'approved' | 'rejected'
