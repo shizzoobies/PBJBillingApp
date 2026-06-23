@@ -304,6 +304,10 @@ html {
   display: grid;
   gap: 18px;
   padding: 28px;
+  /* Height of the sticky `.topbar`. All in-page sticky offsets below the
+     topbar (list heads, section heads, jump nav) tuck under it via
+     `top: var(--topbar-h)` and use z-index < 15 so the topbar always wins. */
+  --topbar-h: 64px;
 }
 
 .auth-shell {
@@ -967,6 +971,9 @@ input[type='number'] {
 .panel {
   min-width: 0;
   padding: 20px 22px;
+  /* When a jump-nav pill scrolls a section to the top, land its heading BELOW
+     the sticky topbar + the jump nav instead of hidden behind them. */
+  scroll-margin-top: calc(var(--topbar-h, 64px) + 76px);
 }
 
 .section-heading {
@@ -3790,6 +3797,38 @@ td strong {
   align-items: center;
   display: flex;
   gap: 12px;
+}
+
+/* ── Sticky list / section heads ─────────────────────────────────────────
+   Pin a list's heading row (heading + search + empty hint) just under the
+   sticky topbar so the "+" add button stays reachable down a long list.
+   Opaque `--surface` background + matching `.panel` horizontal padding (22px)
+   so list rows scrolling underneath don't bleed through, and the block lines
+   up flush with the panel edges. z-index < 15 so it tucks under the topbar. */
+.list-sticky-head {
+  position: sticky;
+  top: var(--topbar-h, 64px);
+  z-index: 12;
+  background: var(--surface);
+  margin: 0 -22px;
+  padding: 12px 22px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+}
+.list-sticky-head .section-heading {
+  margin-bottom: 12px;
+}
+
+/* Sticky variant of a CollapsibleSection's heading (Contacts / Plans). Sits at
+   the top of the section's padding box; opaque `--surface` background matching
+   `.panel`/`.client-section`, with vertical padding + a bottom hairline so the
+   pinned header reads cleanly. z-index < 15 so the topbar still wins. */
+.client-section-heading--sticky {
+  position: sticky;
+  top: var(--topbar-h, 64px);
+  z-index: 12;
+  background: var(--surface);
+  padding: 6px 0 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
 }
 .client-section.collapsed .client-section-heading {
   margin-bottom: 0;
@@ -8252,6 +8291,48 @@ mark.list-search-hit {
 /* "Group by group" sections in the contacts directory. */
 .contact-group-section + .contact-group-section {
   margin-top: 18px;
+}
+
+/* ── Client-detail sticky jump-nav ───────────────────────────────────────
+   A horizontally-scrollable row of pill buttons pinned under the topbar that
+   jumps to each section of the (very long) client-detail page. Opaque
+   workspace background so sections scrolling under it don't show through.
+   z-index 13 > the list/section sticky heads (12) but < the topbar (15). */
+.client-jump-nav {
+  position: sticky;
+  top: var(--topbar-h, 64px);
+  z-index: 13;
+  display: flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding: 10px 0;
+  background: #f6f2ef;
+  scrollbar-width: thin;
+}
+.client-jump-nav::-webkit-scrollbar {
+  height: 6px;
+}
+.client-jump-nav::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--line-strong) 70%, transparent);
+  border-radius: 999px;
+}
+.client-jump-pill {
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 0.4rem 0.85rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  transition: border-color var(--ease), background var(--ease), color var(--ease);
+}
+.client-jump-pill:hover {
+  border-color: color-mix(in srgb, var(--plum) 40%, var(--line-strong));
+  background: var(--soft);
+  color: var(--plum);
 }
 
 .contact-group-heading {

@@ -161,9 +161,15 @@ bell, and account menu sit in the top bar on every page.
   anymore — Hourly clients are billed off each team member's own bill rate (set
   on the Team page). Right after saving, a prompt asks "Open their checklist
   now?" — choosing yes jumps straight into the new client's checklist + notes
-  modal. (Contacts and Plans have the same floating "+" add-in-a-modal flow.)
+  modal. (Contacts and Plans have the same "+" add-in-a-modal flow.) The header
+  (title + "+" + search) stays pinned to the top as you scroll the list, so the
+  add button is always reachable.
 - Client detail page (owner): everything about one client — tasks, time,
-  contacts, billing, branding, invoice settings, notes.
+  contacts, billing, branding, invoice settings, notes. A sticky "Jump to
+  section" pill bar at the top lets you jump to any section (Profile, Contacts,
+  Team, Billing, Plan checklists, Expenses, Branding, Invoice, Checklists,
+  Recurring, Activity, Notes); staff see only the pills for sections they can
+  access.
 - Client detail page (staff): assigned bookkeepers/accountants can open their
   assigned clients in a scoped view — client name + contacts (read-only), active
   & recurring checklists, recent work, and notes. Owner-only sections (billing

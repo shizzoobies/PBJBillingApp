@@ -61,6 +61,8 @@ export function CollapsibleSection({
   defaultLocked = false,
   storageKey,
   bodyClassName,
+  stickyHeader = false,
+  id,
   children,
 }: {
   kicker?: string
@@ -76,6 +78,10 @@ export function CollapsibleSection({
    */
   storageKey?: string
   bodyClassName?: string
+  /** When true, pins the section heading just under the topbar on scroll. */
+  stickyHeader?: boolean
+  /** Optional DOM id on the section root so in-page nav can jump to it. */
+  id?: string
   children: ReactNode
 }) {
   const scope = useContext(SectionScopeContext)
@@ -101,8 +107,12 @@ export function CollapsibleSection({
     })
 
   return (
-    <section className={`panel client-section${collapsed ? ' collapsed' : ''}`}>
-      <div className="section-heading client-section-heading">
+    <section className={`panel client-section${collapsed ? ' collapsed' : ''}`} id={id}>
+      <div
+        className={`section-heading client-section-heading${
+          stickyHeader ? ' client-section-heading--sticky' : ''
+        }`}
+      >
         <button
           type="button"
           className="section-collapse-btn"

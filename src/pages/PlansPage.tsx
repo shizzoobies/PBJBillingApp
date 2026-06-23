@@ -194,6 +194,7 @@ function PlanLibrary({
       kicker="Available templates"
       title="Plans"
       lockable
+      stickyHeader
       headerAction={
         ownerMode ? <FloatingAddButton label="Add plan" onClick={onAddClick} /> : undefined
       }

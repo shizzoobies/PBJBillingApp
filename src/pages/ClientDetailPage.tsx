@@ -127,6 +127,29 @@ export function ClientDetailPage() {
     data.checklists.filter((checklist) => checklist.clientId === client.id),
   ).slice(0, 8)
 
+  // In-page jump-nav pills. Built conditionally so it mirrors EXACTLY which
+  // sections render for the current role — owner-only sections reuse the same
+  // `ownerMode` guard that wraps them, so staff never get pills to sections
+  // they can't see.
+  const jumpItems: Array<{ id: string; label: string }> = [
+    { id: 'client-section-profile', label: 'Profile' },
+    { id: 'client-section-contacts', label: 'Contacts' },
+    ...(ownerMode
+      ? [
+          { id: 'client-section-team', label: 'Team' },
+          { id: 'client-section-billing', label: 'Billing' },
+          { id: 'client-section-plan-checklists', label: 'Plan checklists' },
+          { id: 'client-section-expenses', label: 'Expenses' },
+          { id: 'client-section-branding', label: 'Branding' },
+          { id: 'client-section-invoice', label: 'Invoice' },
+        ]
+      : []),
+    { id: 'client-section-checklists', label: 'Checklists' },
+    { id: 'client-section-recurring', label: 'Recurring' },
+    { id: 'client-section-activity', label: 'Activity' },
+    { id: 'client-section-notes', label: 'Notes' },
+  ]
+
   return (
     <SectionScopeContext.Provider value={`client:${client.id}:`}>
     <section className="client-detail">
@@ -137,8 +160,26 @@ export function ClientDetailPage() {
         </Link>
       </div>
 
+      <nav className="client-jump-nav" aria-label="Jump to section">
+        {jumpItems.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className="client-jump-pill"
+            onClick={() =>
+              document
+                .getElementById(item.id)
+                ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
+
       {ownerMode ? (
         <CollapsibleSection
+          id="client-section-profile"
           kicker="Client profile"
           title="Client name"
           lockable
@@ -154,7 +195,7 @@ export function ClientDetailPage() {
       ) : (
         // Staff: read-only name. Renaming commits via the owner-only bulk PUT
         // /api/app-data, which would 403 for staff — so no editor, no delete.
-        <CollapsibleSection kicker="Client profile" title="Client name">
+        <CollapsibleSection id="client-section-profile" kicker="Client profile" title="Client name">
           <div className="field full-row">
             <span className="field-label-row">Client name</span>
             <h2 className="client-detail-title">{client.name}</h2>
@@ -163,19 +204,19 @@ export function ClientDetailPage() {
       )}
 
       {ownerMode ? (
-        <CollapsibleSection kicker="Contact" title="Contacts & address" lockable>
+        <CollapsibleSection id="client-section-contacts" kicker="Contact" title="Contacts & address" lockable>
           <ContactSectionBody client={client} contacts={data.contacts} onCommit={commit} />
         </CollapsibleSection>
       ) : (
         // Staff: display-only contacts & address (same bulk-save 403 reason).
-        <CollapsibleSection kicker="Contact" title="Contacts & address">
+        <CollapsibleSection id="client-section-contacts" kicker="Contact" title="Contacts & address">
           <ReadOnlyContactSectionBody client={client} contacts={data.contacts} />
         </CollapsibleSection>
       )}
 
       {ownerMode ? (
         <>
-          <CollapsibleSection kicker="Visibility" title="Assigned team" lockable>
+          <CollapsibleSection id="client-section-team" kicker="Visibility" title="Assigned team" lockable>
             <AssignedTeamField
               client={client}
               employees={data.employees}
@@ -187,15 +228,15 @@ export function ClientDetailPage() {
             {assignedTeamError ? <p className="auth-error">{assignedTeamError}</p> : null}
           </CollapsibleSection>
 
-          <CollapsibleSection kicker="Billing" title="Rate and services" lockable>
+          <CollapsibleSection id="client-section-billing" kicker="Billing" title="Rate and services" lockable>
             <BillingSectionBody client={client} plans={data.plans} onCommit={commit} />
           </CollapsibleSection>
 
-          <CollapsibleSection kicker="Billing" title="Plan checklists" lockable>
+          <CollapsibleSection id="client-section-plan-checklists" kicker="Billing" title="Plan checklists" lockable>
             <PlanChecklistsBody client={client} data={data} />
           </CollapsibleSection>
 
-          <CollapsibleSection kicker="Expenses" title="Recurring reimbursements" lockable>
+          <CollapsibleSection id="client-section-expenses" kicker="Expenses" title="Recurring reimbursements" lockable>
             <RecurringReimbursementsCard clientId={client.id} bare />
           </CollapsibleSection>
 
@@ -203,25 +244,25 @@ export function ClientDetailPage() {
             <ReimbursementsCard clientId={client.id} bare />
           </CollapsibleSection>
 
-          <CollapsibleSection kicker="Branding" title="Logo" lockable>
+          <CollapsibleSection id="client-section-branding" kicker="Branding" title="Logo" lockable>
             <BrandingSectionBody client={client} onCommit={commit} />
           </CollapsibleSection>
 
-          <CollapsibleSection kicker="Invoice settings" title="Invoice customization" lockable>
+          <CollapsibleSection id="client-section-invoice" kicker="Invoice settings" title="Invoice customization" lockable>
             <InvoiceSettingsSectionBody client={client} onCommit={commit} />
           </CollapsibleSection>
         </>
       ) : null}
 
-      <CollapsibleSection kicker="Work in flight" title="Active checklists">
+      <CollapsibleSection id="client-section-checklists" kicker="Work in flight" title="Active checklists">
         <ActiveChecklistsBody client={client} data={data} />
       </CollapsibleSection>
 
-      <CollapsibleSection kicker="Schedule" title="Recurring checklists">
+      <CollapsibleSection id="client-section-recurring" kicker="Schedule" title="Recurring checklists">
         <RecurringChecklistsBody client={client} data={data} />
       </CollapsibleSection>
 
-      <CollapsibleSection kicker="Activity" title="Recent work for this client">
+      <CollapsibleSection id="client-section-activity" kicker="Activity" title="Recent work for this client">
         <div className="form-grid two-col">
           <div>
             <h3 className="mini-heading">Recent time entries</h3>
@@ -272,7 +313,7 @@ export function ClientDetailPage() {
         </div>
       </CollapsibleSection>
 
-      <CollapsibleSection kicker="Notes" title="Client notes">
+      <CollapsibleSection id="client-section-notes" kicker="Notes" title="Client notes">
         <ClientNotesPanel clientId={client.id} ownerMode={ownerMode} currentUserId={sessionUser.id} />
       </CollapsibleSection>
     </section>

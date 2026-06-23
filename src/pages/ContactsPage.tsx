@@ -352,6 +352,7 @@ function ContactLibrary({
         kicker="Directory"
         title="Contacts"
         lockable
+        stickyHeader
         headerAction={importActions}
       >
         {activeContacts.length > 0 ? (

@@ -116,23 +116,25 @@ export function ClientsPage() {
   // straight into its checklist.
   return (
     <section className="panel" id="clients">
-      <div className="section-heading">
-        <div>
-          <p className="section-kicker">Owner client controls</p>
-          <h2>Clients</h2>
+      <div className="list-sticky-head">
+        <div className="section-heading">
+          <div>
+            <p className="section-kicker">Owner client controls</p>
+            <h2>Clients</h2>
+          </div>
+          <FloatingAddButton label="Add client" onClick={() => setAddOpen(true)} />
         </div>
-        <FloatingAddButton label="Add client" onClick={() => setAddOpen(true)} />
+        <ListSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search clients…"
+          resultCount={filteredClients.length}
+          total={visibleClients.length}
+        />
+        {query.trim() && filteredClients.length === 0 ? (
+          <p className="list-search-empty">No clients match &ldquo;{query.trim()}&rdquo;.</p>
+        ) : null}
       </div>
-      <ListSearch
-        value={query}
-        onChange={setQuery}
-        placeholder="Search clients…"
-        resultCount={filteredClients.length}
-        total={visibleClients.length}
-      />
-      {query.trim() && filteredClients.length === 0 ? (
-        <p className="list-search-empty">No clients match &ldquo;{query.trim()}&rdquo;.</p>
-      ) : null}
       <ClientTable
         clients={filteredClients}
         clientsWithActiveChecklists={clientsWithActiveChecklists}
