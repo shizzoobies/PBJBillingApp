@@ -219,6 +219,9 @@ bell, and account menu sit in the top bar on every page.
   plans and/or billable hours become line items; total due computed. For
   Hourly clients, billable hours are charged per team member at that person's
   own bill rate — the invoice shows one "Billable hours — <name>" line each.
+  This per-employee billing applies from June 2026 onward; invoices for earlier
+  months keep computing at the client's prior per-client hourly rate, so already
+  -sent historical invoices stay exact and never change retroactively.
 - This invoice's reimbursements: add out-of-pocket expenses (date,
   description, amount) — each becomes a line on the invoice. Recurring
   reimbursements supported.

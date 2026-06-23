@@ -1075,6 +1075,15 @@ export function recurringReimbursementAppliesToPeriod(
  * stored per period; the line is derived at read time. Owner stops it
  * by deleting the recurring record.
  */
+/**
+ * Hourly billing cutover (YYYY-MM, inclusive). Billing periods on/after this
+ * month bill hourly clients at each EMPLOYEE's bill rate; earlier months keep
+ * the LEGACY per-CLIENT hourly rate so already-sent historical invoices stay
+ * byte-for-byte exact (accounting firm — historical numbers must not change).
+ * June 2026 is the first month invoiced under the new per-employee model.
+ */
+export const PER_EMPLOYEE_BILLING_START = '2026-06'
+
 export function getInvoice(
   client: Client,
   entries: TimeEntry[],
@@ -1216,38 +1225,54 @@ export function getInvoice(
     }
   }
 
-  // Hourly billing is now per-EMPLOYEE: each person's billable hours are
-  // charged at THEIR own bill rate (set on the Team page), not a single
-  // per-client rate. Group this client's billable minutes by employee, then
-  // emit one invoice line per employee with hours. An employee with no bill
-  // rate set falls back to the firm's default hourly rate.
-  const employeeById = new Map(employees.map((employee) => [employee.id, employee]))
-  const minutesByEmployee = new Map<string, number>()
-  for (const entry of billableEntries) {
-    minutesByEmployee.set(
-      entry.employeeId,
-      (minutesByEmployee.get(entry.employeeId) ?? 0) + entry.minutes,
-    )
+  // Hourly billing has a CUTOVER (see PER_EMPLOYEE_BILLING_START).
+  //  - On/after the cutover: bill each person's hours at THEIR own bill rate
+  //    (set on the Team page); one line per employee. An employee with no bill
+  //    rate falls back to the firm's default hourly rate.
+  //  - Before the cutover: reproduce the LEGACY per-CLIENT rate exactly, so
+  //    invoices already sent for past months never change. Historical numbers
+  //    must stay exact for an accounting firm.
+  let employeeLines: InvoiceLine[]
+  let billableAmount: number
+  if (billingPeriod >= PER_EMPLOYEE_BILLING_START) {
+    const employeeById = new Map(employees.map((employee) => [employee.id, employee]))
+    const minutesByEmployee = new Map<string, number>()
+    for (const entry of billableEntries) {
+      minutesByEmployee.set(
+        entry.employeeId,
+        (minutesByEmployee.get(entry.employeeId) ?? 0) + entry.minutes,
+      )
+    }
+
+    employeeLines = Array.from(minutesByEmployee.entries())
+      .map(([employeeId, minutes]) => {
+        const employee = employeeById.get(employeeId)
+        const rate =
+          employee && typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
+            ? employee.billRate
+            : defaultHourlyRate
+        const amount = (minutes / 60) * rate
+        const name = employee?.name ?? 'Unknown'
+        return {
+          label: `Billable hours — ${name}`,
+          detail: `${formatHours(minutes)} at ${currency.format(rate)}/hr`,
+          amount,
+        }
+      })
+      .sort((a, b) => a.label.localeCompare(b.label))
+    billableAmount = employeeLines.reduce((total, line) => total + line.amount, 0)
+  } else {
+    // Legacy: a single per-client "Billable hours" line at the client's own
+    // stored hourly rate — the exact shape historical invoices were sent in.
+    billableAmount = (billableMinutes / 60) * client.hourlyRate
+    employeeLines = [
+      {
+        label: 'Billable hours',
+        detail: `${formatHours(billableMinutes)} at ${currency.format(client.hourlyRate)}/hr`,
+        amount: billableAmount,
+      },
+    ]
   }
-
-  const employeeLines: InvoiceLine[] = Array.from(minutesByEmployee.entries())
-    .map(([employeeId, minutes]) => {
-      const employee = employeeById.get(employeeId)
-      const rate =
-        employee && typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
-          ? employee.billRate
-          : defaultHourlyRate
-      const amount = (minutes / 60) * rate
-      const name = employee?.name ?? 'Unknown'
-      return {
-        label: `Billable hours — ${name}`,
-        detail: `${formatHours(minutes)} at ${currency.format(rate)}/hr`,
-        amount,
-      }
-    })
-    .sort((a, b) => a.label.localeCompare(b.label))
-
-  const billableAmount = employeeLines.reduce((total, line) => total + line.amount, 0)
 
   return {
     client,

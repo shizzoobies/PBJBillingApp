@@ -27,13 +27,15 @@ function makeClient(overrides: Partial<Client>): Client {
   }
 }
 
-const period = '2026-05'
+// June 2026 is on/after the per-employee billing cutover, so hourly tests here
+// exercise the per-employee path. A separate describe below covers pre-cutover.
+const period = '2026-06'
 
 const entry: TimeEntry = {
   id: 'time-1',
   employeeId: 'emp-1',
   clientId: 'client-1',
-  date: '2026-05-10',
+  date: '2026-06-10',
   minutes: 600, // 10h — would have created overage under the old model
   description: 'Work',
   billable: true,
@@ -101,7 +103,7 @@ describe('getInvoice — hourly billing (per-employee bill rate)', () => {
     id: 'time-x',
     employeeId: 'emp-1',
     clientId: 'client-1',
-    date: '2026-05-10',
+    date: '2026-06-10',
     minutes: 60,
     description: 'Work',
     billable: true,
@@ -159,6 +161,43 @@ describe('getInvoice — hourly billing (per-employee bill rate)', () => {
     const entries = [makeEntry({ employeeId: 'emp-2', minutes: 600 })]
     const invoice = getInvoice(client, entries, plans, '2026-05', [], [], employees, 999)
     expect(invoice.total).toBe(6000)
+  })
+})
+
+describe('getInvoice — hourly billing cutover (historical stays exact)', () => {
+  // An employee with a deliberately different bill rate, to prove pre-cutover
+  // months ignore it and use the per-client rate.
+  const employees: Employee[] = [
+    { id: 'emp-1', name: 'Alice', role: 'Bookkeeper', billRate: 999 },
+  ]
+  const tenHours = (date: string): TimeEntry => ({
+    id: `e-${date}`,
+    employeeId: 'emp-1',
+    clientId: 'client-1',
+    date,
+    minutes: 600, // 10h
+    description: 'Work',
+    billable: true,
+    approvalStatus: 'approved',
+    entryMethod: 'timer',
+  })
+
+  it('bills a PRE-cutover month at the per-CLIENT rate, ignoring employee bill rates', () => {
+    const client = makeClient({ billingMode: 'hourly', hourlyRate: 90 })
+    const invoice = getInvoice(client, [tenHours('2026-05-10')], plans, '2026-05', [], [], employees, 0)
+    // 10h * $90 (client's stored rate) = $900 — NOT 10h * $999 (employee rate).
+    expect(invoice.total).toBe(900)
+    expect(invoice.lines).toHaveLength(1)
+    expect(invoice.lines[0].label).toBe('Billable hours')
+    expect(invoice.lines[0].detail).toContain('$90')
+  })
+
+  it('bills the SAME client+hours per-employee on/after the cutover', () => {
+    const client = makeClient({ billingMode: 'hourly', hourlyRate: 90 })
+    const invoice = getInvoice(client, [tenHours('2026-06-10')], plans, '2026-06', [], [], employees, 0)
+    // 10h * $999 (Alice's bill rate) = $9990.
+    expect(invoice.total).toBe(9990)
+    expect(invoice.lines[0].label).toBe('Billable hours — Alice')
   })
 })
 
