@@ -8379,7 +8379,13 @@ export class AppDataStore {
     if (!rawTemplate) return null
     const template = ensureTemplateStages(rawTemplate)
     const stages = template.stages ?? []
-    if (stages.length === 0 || (stages[0].items ?? []).length === 0) return null
+    // Generate even when Stage 1 has no items. "Get ahead" from the timer just
+    // needs a real checklist to log time against, and plenty of recurring tasks
+    // (e.g. a plain "Monthly Bookkeeping") have no sub-steps — refusing those
+    // was why an upcoming recurring task couldn't be started. An empty checklist
+    // is valid; items can be added afterward. (ensureTemplateStages always
+    // yields at least one stage, so this guard is essentially defensive.)
+    if (stages.length === 0) return null
     const stageOne = stages[0]
     const baseDate = typeof dueDate === 'string' && dueDate
       ? dueDate

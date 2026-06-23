@@ -5066,7 +5066,7 @@ const server = createServer(async (request, response) => {
       const checklist = await appDataStore.generateChecklistFromTemplate(templateId, { dueDate })
       if (!checklist) {
         sendJson(response, 400, {
-          error: 'This template has no checklist items in its first step yet',
+          error: 'This template has no stages to generate from',
         })
         return
       }
