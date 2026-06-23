@@ -7030,27 +7030,25 @@ button.repeating-task-toggle-pill {
   transform: translateY(-2px);
 }
 
-/* Floating "+" add button (Clients / Contacts / Plans). Pinned bottom-LEFT so
-   it never overlaps the owner-only assistant launcher at bottom-right. Sits
-   above page chrome (z 28) but BELOW the modal overlay (z 60). */
+/* "+" add button (Clients / Contacts / Plans). Sits in the top-right of each
+   page's header (opposite the page title, above the search bar) so it never
+   covers list content. Rendered inside section-heading / the CollapsibleSection
+   header-action slot. */
 .fab {
   align-items: center;
   background: linear-gradient(135deg, var(--berry), var(--jam));
   border: 1px solid transparent;
   border-radius: 999px;
-  bottom: 1.5rem;
-  box-shadow: 0 6px 18px rgba(142, 47, 82, 0.35);
+  box-shadow: 0 4px 12px rgba(142, 47, 82, 0.28);
   color: #fff;
   cursor: pointer;
   display: inline-flex;
-  font-size: 0.95rem;
+  font-size: 0.85rem;
   font-weight: 600;
-  gap: 0.45rem;
-  left: 1.5rem;
-  padding: 0.7rem 1.15rem;
-  position: fixed;
+  gap: 0.4rem;
+  padding: 0.5rem 0.95rem;
   transition: box-shadow var(--ease), transform var(--ease), filter var(--ease);
-  z-index: 28;
+  white-space: nowrap;
 }
 
 .fab:hover {
@@ -7074,9 +7072,11 @@ button.repeating-task-toggle-pill {
 }
 
 @media (max-width: 640px) {
-  .fab {
-    bottom: 16px;
-    left: 16px;
+  /* When the heading stacks to a column on narrow screens, let the add button
+     span the row instead of clinging to a corner. */
+  .section-heading .fab {
+    justify-content: center;
+    width: 100%;
   }
 }
 

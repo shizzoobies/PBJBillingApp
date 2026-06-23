@@ -121,6 +121,7 @@ export function ClientsPage() {
           <p className="section-kicker">Owner client controls</p>
           <h2>Clients</h2>
         </div>
+        <FloatingAddButton label="Add client" onClick={() => setAddOpen(true)} />
       </div>
       <ListSearch
         value={query}
@@ -141,8 +142,6 @@ export function ClientsPage() {
         plans={data.plans}
         query={query}
       />
-
-      <FloatingAddButton label="Add client" onClick={() => setAddOpen(true)} />
 
       {addOpen ? (
         <AddModal title="Add client" onClose={() => setAddOpen(false)}>

@@ -49,8 +49,8 @@ export function ContactsPage() {
         onAdd={addContact}
         onSetLinks={setContactLinks}
         onSetArchived={setContactArchived}
+        onAddClick={() => setAddOpen(true)}
       />
-      <FloatingAddButton label="Add contact" onClick={() => setAddOpen(true)} />
       {addOpen ? (
         <AddModal title="Add contact" onClose={() => setAddOpen(false)}>
           <ContactBuilder
@@ -183,6 +183,7 @@ function ContactLibrary({
   onAdd,
   onSetLinks,
   onSetArchived,
+  onAddClick,
 }: {
   contacts: Contact[]
   clients: Client[]
@@ -192,6 +193,7 @@ function ContactLibrary({
   onAdd: (contact: Omit<Contact, 'id'>) => void
   onSetLinks: (contactId: string, nextLinkedIds: string[]) => void
   onSetArchived: (contactId: string, archived: boolean) => void
+  onAddClick: () => void
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [importText, setImportText] = useState<string | null>(null)
@@ -323,6 +325,7 @@ function ContactLibrary({
 
   const importActions = ownerMode ? (
     <div className="section-heading-actions">
+      <FloatingAddButton label="Add contact" onClick={onAddClick} />
       <input
         ref={fileInputRef}
         type="file"

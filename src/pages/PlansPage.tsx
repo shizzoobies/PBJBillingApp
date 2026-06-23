@@ -27,8 +27,8 @@ export function PlansPage() {
         ownerMode={ownerMode}
         onUpdate={updatePlan}
         onDelete={deletePlan}
+        onAddClick={() => setAddOpen(true)}
       />
-      <FloatingAddButton label="Add plan" onClick={() => setAddOpen(true)} />
       {addOpen ? (
         <AddModal title="Create plan" onClose={() => setAddOpen(false)}>
           <PlanBuilder
@@ -109,6 +109,7 @@ function PlanLibrary({
   ownerMode,
   onUpdate,
   onDelete,
+  onAddClick,
 }: {
   plans: SubscriptionPlan[]
   clients: Client[]
@@ -116,6 +117,7 @@ function PlanLibrary({
   ownerMode: boolean
   onUpdate: (planId: string, patch: Partial<SubscriptionPlan>) => void
   onDelete: (planId: string) => Promise<void>
+  onAddClick: () => void
 }) {
   // Templates the owner can bundle into a plan. Standard (client-agnostic)
   // blueprints come first since they're the intended building blocks, then
@@ -188,7 +190,14 @@ function PlanLibrary({
   }
 
   return (
-    <CollapsibleSection kicker="Available templates" title="Plans" lockable>
+    <CollapsibleSection
+      kicker="Available templates"
+      title="Plans"
+      lockable
+      headerAction={
+        ownerMode ? <FloatingAddButton label="Add plan" onClick={onAddClick} /> : undefined
+      }
+    >
       <ListSearch
         value={query}
         onChange={setQuery}

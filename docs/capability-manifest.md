@@ -152,8 +152,9 @@ bell, and account menu sit in the top bar on every page.
 
 - Client list: contact, billing type (Hourly / Monthly subscription / Annual),
   rate, assigned team, plans/services.
-- Add client: a floating "+" Add client button (bottom-left, follows you as you
-  scroll; owner only) opens an Add-client modal. Fields: name, primary contact,
+- Add client: a "+" Add client button in the top-right of the page header
+  (opposite the "Clients" title, above the search bar; owner only) opens an
+  Add-client modal. Fields: name, primary contact,
   billing type, monthly/annual rate (for subscription/annual clients), estimated
   monthly hours per role (informational only — never affects invoices), assigned
   bookkeeper(s), plans/services. NOTE: there is no per-client hourly rate
