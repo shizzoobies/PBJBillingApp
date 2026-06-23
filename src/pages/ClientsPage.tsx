@@ -3,6 +3,8 @@ import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
+import { highlightMatch } from '../lib/highlight'
+import { ListSearch } from '../components/ListSearch'
 import type {
   BillingMode,
   Client,
@@ -13,8 +15,30 @@ import type {
 } from '../lib/types'
 import { currency, employeeName, getAssignedEmployeeIds, MONTH_NAMES } from '../lib/utils'
 
+const BILLING_LABELS: Record<BillingMode, string> = {
+  hourly: 'Hourly',
+  subscription: 'Monthly',
+  annual: 'Annual',
+}
+
+function matchesClientQuery(client: Client, query: string): boolean {
+  const q = query.trim().toLowerCase()
+  if (!q) return true
+  const fields = [
+    client.name,
+    client.contact ?? '',
+    (client as unknown as { contactName?: string }).contactName ?? '',
+    (client as unknown as { email?: string }).email ?? '',
+    BILLING_LABELS[client.billingMode] ?? '',
+  ]
+  return fields.some((f) => f.toLowerCase().includes(q))
+}
+
 export function ClientsPage() {
   const { ownerMode, visibleClients, data, updateClientPlan, addClient } = useAppContext()
+  const [query, setQuery] = useState('')
+
+  const filteredClients = visibleClients.filter((c) => matchesClientQuery(c, query))
 
   return (
     <section className={ownerMode ? 'content-grid client-layout' : 'panel'} id="clients">
@@ -27,12 +51,25 @@ export function ClientsPage() {
             <h2>Clients</h2>
           </div>
         </div>
+        <ListSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search clients…"
+          resultCount={filteredClients.length}
+          total={visibleClients.length}
+        />
+        {query.trim() && filteredClients.length === 0 ? (
+          <p className="list-search-empty">
+            No clients match &ldquo;{query.trim()}&rdquo;.
+          </p>
+        ) : null}
         <ClientTable
-          clients={visibleClients}
+          clients={filteredClients}
           employees={data.employees}
           onUpdatePlan={updateClientPlan}
           ownerMode={ownerMode}
           plans={data.plans}
+          query={query}
         />
       </div>
       {ownerMode ? (
@@ -371,12 +408,14 @@ function ClientTable({
   onUpdatePlan,
   ownerMode,
   plans,
+  query = '',
 }: {
   clients: Client[]
   employees: Employee[]
   onUpdatePlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
   ownerMode: boolean
   plans: SubscriptionPlan[]
+  query?: string
 }) {
   return (
     <div className="table-wrap">
@@ -401,11 +440,11 @@ function ClientTable({
                 <td>
                   {ownerMode ? (
                     <Link className="client-name-link" to={`/clients/${client.id}`}>
-                      <strong>{client.name}</strong>
+                      <strong>{highlightMatch(client.name, query)}</strong>
                       <ChevronRight size={14} />
                     </Link>
                   ) : (
-                    <strong>{client.name}</strong>
+                    <strong>{highlightMatch(client.name, query)}</strong>
                   )}
                 </td>
                 <td>{client.contact}</td>

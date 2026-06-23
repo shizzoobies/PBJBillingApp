@@ -3,6 +3,7 @@ import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'rea
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
+import { ListSearch } from '../components/ListSearch'
 import { CollapsibleSection, SavingTextInput, SavingTextarea } from '../components/SectionKit'
 import type { Client, Contact } from '../lib/types'
 import { unlinkedContacts } from '../lib/utils'
@@ -152,6 +153,8 @@ function ContactLibrary({
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   // "Unlinked only" at-a-glance filter for the active list.
   const [unlinkedOnly, setUnlinkedOnly] = useState(false)
+  // Text search query over the active list.
+  const [query, setQuery] = useState('')
 
   const toggleExpanded = (id: string) => {
     setExpandedIds((current) => {
@@ -174,9 +177,41 @@ function ContactLibrary({
   const unlinked = useMemo(() => unlinkedContacts(contacts, clients), [contacts, clients])
   const unlinkedIdSet = useMemo(() => new Set(unlinked.map((c) => c.id)), [unlinked])
 
-  const visibleActive = unlinkedOnly
+  // Build a set of client names indexed by contact id for search.
+  const contactClientNames = useMemo(() => {
+    const map = new Map<string, string[]>()
+    for (const client of clients) {
+      for (const cid of client.contactIds ?? []) {
+        const existing = map.get(cid) ?? []
+        existing.push(client.name)
+        map.set(cid, existing)
+      }
+    }
+    return map
+  }, [clients])
+
+  const matchesQuery = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return null // null = no filter
+    return (contact: Contact) => {
+      const clientNames = contactClientNames.get(contact.id) ?? []
+      const fields = [
+        contact.name,
+        contact.title ?? '',
+        contact.email ?? '',
+        contact.phone ?? '',
+        ...(contact.companyEmails ?? []).map((e) => e.email),
+        ...clientNames,
+      ]
+      return fields.some((f) => f.toLowerCase().includes(q))
+    }
+  }, [query, contactClientNames])
+
+  // Both filters (unlinked pill + search query) apply simultaneously.
+  const unlinkedFiltered = unlinkedOnly
     ? activeContacts.filter((contact) => unlinkedIdSet.has(contact.id))
     : activeContacts
+  const visibleActive = matchesQuery ? unlinkedFiltered.filter(matchesQuery) : unlinkedFiltered
 
   const handleDelete = (contact: Contact) => {
     const attached = clients.filter((client) => (client.contactIds ?? []).includes(contact.id))
@@ -247,17 +282,26 @@ function ContactLibrary({
             >
               Unlinked ({unlinked.length})
             </button>
-            {unlinkedOnly ? (
-              <span className="muted-text">Showing only contacts not on any client.</span>
-            ) : null}
+            <ListSearch
+              value={query}
+              onChange={setQuery}
+              placeholder="Search contacts…"
+              resultCount={visibleActive.length}
+              total={activeContacts.length}
+            />
           </div>
         ) : null}
         <div className="plan-list">
           {activeContacts.length === 0 ? (
             <p className="muted-text">No contacts yet. Add one to select it on a client.</p>
           ) : null}
-          {activeContacts.length > 0 && visibleActive.length === 0 ? (
+          {activeContacts.length > 0 && visibleActive.length === 0 && !query.trim() ? (
             <p className="muted-text">Every contact is linked to a client.</p>
+          ) : null}
+          {activeContacts.length > 0 && visibleActive.length === 0 && query.trim() ? (
+            <p className="list-search-empty">
+              No contacts match &ldquo;{query.trim()}&rdquo;.
+            </p>
           ) : null}
           {visibleActive.map((contact) => (
             <ContactRow

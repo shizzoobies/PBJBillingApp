@@ -7902,3 +7902,165 @@ button.repeating-task-toggle-pill {
 .setup-issue-fix:hover {
   text-decoration: underline;
 }
+
+/* ── ListSearch — premium instant search bar ──────────────────────────────── */
+
+.list-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.list-search-field {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1.5px solid var(--line-strong);
+  border-radius: 100px; /* pill shape */
+  padding: 0 10px;
+  gap: 7px;
+  transition: border-color var(--ease), box-shadow var(--ease);
+}
+
+.list-search-field:focus-within {
+  border-color: var(--plum);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--plum) 12%, transparent);
+}
+
+.list-search-icon {
+  flex: none;
+  color: var(--muted);
+  pointer-events: none;
+  transition: color var(--ease);
+}
+
+.list-search-field:focus-within .list-search-icon {
+  color: var(--plum);
+}
+
+.list-search-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  font-size: 0.92rem;
+  outline: none;
+  padding: 7px 0;
+  /* Remove native search-cancel button (Chrome/Safari) */
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.list-search-input::placeholder {
+  color: var(--muted);
+}
+
+/* Hide browser-native × in search inputs */
+.list-search-input::-webkit-search-cancel-button,
+.list-search-input::-webkit-search-decoration {
+  -webkit-appearance: none;
+}
+
+.list-search-clear {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 15%, transparent);
+  color: var(--muted);
+  padding: 0;
+  cursor: pointer;
+  transition: background var(--ease), color var(--ease);
+}
+
+.list-search-clear:hover {
+  background: color-mix(in srgb, var(--plum) 14%, transparent);
+  color: var(--plum);
+}
+
+/* Invisible spacer so layout width is stable whether the button is shown or not */
+.list-search-clear-placeholder {
+  display: block;
+  flex: none;
+  width: 20px;
+  height: 20px;
+}
+
+.list-search-count {
+  flex: none;
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* Highlight for matched text fragments */
+mark.list-search-hit {
+  background: color-mix(in srgb, var(--gold) 30%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* Empty state message shown when filter yields no results */
+.list-search-empty {
+  color: var(--muted);
+  font-size: 0.9rem;
+  padding: 10px 0 4px;
+}
+
+/* ── Contacts filter bar (Unlinked pill + search in one row) ─────────────── */
+
+.contacts-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+/* When the ListSearch is inside the contacts-filter-bar it should flex-grow */
+.contacts-filter-bar .list-search {
+  flex: 1;
+  min-width: 180px;
+  margin-bottom: 0; /* bar already provides margin */
+}
+
+.contacts-filter-bar .list-search-field {
+  /* slightly smaller pill to sit neatly next to the Unlinked pill */
+}
+
+.contacts-filter-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 100px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--ease), background var(--ease), color var(--ease);
+  white-space: nowrap;
+}
+
+.contacts-filter-pill:hover {
+  border-color: color-mix(in srgb, var(--plum) 40%, var(--line-strong));
+  color: var(--plum);
+}
+
+.contacts-filter-pill.is-active {
+  background: var(--plum);
+  border-color: var(--plum);
+  color: #fff;
+}

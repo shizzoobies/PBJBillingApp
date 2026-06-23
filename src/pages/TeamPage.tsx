@@ -2,6 +2,8 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChevronDown, ChevronUp, Eye, MailPlus, Send, Trash2, X } from 'lucide-react'
 import { useAppContext } from '../AppContext'
+import { highlightMatch } from '../lib/highlight'
+import { ListSearch } from '../components/ListSearch'
 import { CollapsibleSection } from '../components/SectionKit'
 import {
   fetchTeam,
@@ -42,6 +44,7 @@ export function TeamPage() {
   const [invitePending, setInvitePending] = useState(false)
   const [lastInvited, setLastInvited] = useState<TeamMember | null>(null)
 
+  const [memberQuery, setMemberQuery] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [activity, setActivity] = useState<Record<string, ActivityEntry[]>>({})
   const [activityLoading, setActivityLoading] = useState<string | null>(null)
@@ -357,10 +360,33 @@ export function TeamPage() {
           <p className="team-error">{loadError}</p>
         ) : members.length === 0 ? (
           <p className="team-muted">No team members yet. Invite someone above.</p>
-        ) : (
-          <ul className="team-list">
-            {members.map((member, index) => {
-              const isExpanded = expandedId === member.id
+        ) : (() => {
+          const mq = memberQuery.trim().toLowerCase()
+          const visibleMembers = mq
+            ? members.filter(
+                (m) =>
+                  m.name.toLowerCase().includes(mq) ||
+                  (m.email ?? '').toLowerCase().includes(mq) ||
+                  (m.staffRole ?? '').toLowerCase().includes(mq),
+              )
+            : members
+          return (
+            <>
+              <ListSearch
+                value={memberQuery}
+                onChange={setMemberQuery}
+                placeholder="Search team…"
+                resultCount={visibleMembers.length}
+                total={members.length}
+              />
+              {memberQuery.trim() && visibleMembers.length === 0 ? (
+                <p className="list-search-empty">
+                  No team members match &ldquo;{memberQuery.trim()}&rdquo;.
+                </p>
+              ) : null}
+              <ul className="team-list">
+                {visibleMembers.map((member, index) => {
+                  const isExpanded = expandedId === member.id
               return (
                 <li className="team-card" key={member.id}>
                   <div className="team-card-top">
@@ -393,7 +419,7 @@ export function TeamPage() {
                       aria-expanded={isExpanded}
                     >
                       <div className="team-card-identity">
-                        <strong>{member.name}</strong>
+                        <strong>{highlightMatch(member.name, memberQuery)}</strong>
                         <span className="team-card-email">{member.email}</span>
                       </div>
                       <div className="team-card-meta">
@@ -626,9 +652,11 @@ export function TeamPage() {
                   ) : null}
                 </li>
               )
-            })}
-          </ul>
-        )}
+                })}
+              </ul>
+            </>
+          )
+        })()}
       </CollapsibleSection>
     </section>
   )

@@ -2,6 +2,8 @@ import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
+import { highlightMatch } from '../lib/highlight'
+import { ListSearch } from '../components/ListSearch'
 import { CollapsibleSection } from '../components/SectionKit'
 import {
   ApiError,
@@ -103,6 +105,12 @@ function PlanLibrary({
       return a.title.localeCompare(b.title)
     })
     .map((template) => ({ id: template.id, label: templatePickerLabel(template) }))
+  const [query, setQuery] = useState('')
+  const filteredPlans = plans.filter((plan) => {
+    const q = query.trim().toLowerCase()
+    if (!q) return true
+    return plan.name.toLowerCase().includes(q) || (plan.notes ?? '').toLowerCase().includes(q)
+  })
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
@@ -157,8 +165,20 @@ function PlanLibrary({
 
   return (
     <CollapsibleSection kicker="Available templates" title="Plans" lockable>
+      <ListSearch
+        value={query}
+        onChange={setQuery}
+        placeholder="Search plans…"
+        resultCount={filteredPlans.length}
+        total={plans.length}
+      />
+      {query.trim() && filteredPlans.length === 0 ? (
+        <p className="list-search-empty">
+          No plans match &ldquo;{query.trim()}&rdquo;.
+        </p>
+      ) : null}
       <div className="plan-list">
-        {plans.map((plan) => {
+        {filteredPlans.map((plan) => {
           const attachedCount = clients.filter((client) =>
             (client.planIds ?? []).includes(plan.id),
           ).length
@@ -202,7 +222,7 @@ function PlanLibrary({
               ) : (
                 <>
                   <div>
-                    <strong>{plan.name}</strong>
+                    <strong>{highlightMatch(plan.name, query)}</strong>
                     <span>{plan.notes}</span>
                     {attachedCount > 0 ? (
                       <span className="checklist-meta-line">
