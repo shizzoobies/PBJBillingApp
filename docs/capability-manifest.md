@@ -113,7 +113,9 @@ bell, and account menu sit in the top bar on every page.
   client's tasks (the whole shared board), not just tasks assigned to them
   personally. They can log time against any of those tasks AND add/edit items on
   any checklist for a client they're assigned to (deletions still need owner
-  approval, per above). Owners can edit everything.
+  approval, per above). Staff can also CREATE a one-time task for any client
+  they're assigned to (the "New task" button on the Checklists page); repeating
+  templates stay owner-only. Owners can create/edit everything.
 - Time logged against a task shows on the card.
 
 ## Board — Active Checklists (sidebar: "Board")

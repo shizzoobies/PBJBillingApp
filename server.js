@@ -3179,11 +3179,6 @@ const server = createServer(async (request, response) => {
       }
 
       if (request.method === 'POST') {
-        if (session.user.role !== 'owner') {
-          sendJson(response, 403, { error: 'Only owners can create checklists' })
-          return
-        }
-
         const payload = await readJsonBody(request)
         const title = typeof payload?.title === 'string' ? payload.title.trim() : ''
         const clientId = typeof payload?.clientId === 'string' ? payload.clientId : ''
@@ -3221,6 +3216,18 @@ const server = createServer(async (request, response) => {
 
         if (!clientExists || !assigneeExists) {
           sendJson(response, 400, { error: 'Checklist references an invalid client or assignee' })
+          return
+        }
+
+        // Non-owners may create checklists only for clients they're assigned to
+        // (owners can create for anyone). Mirrors the item-edit scoping.
+        if (
+          session.user.role !== 'owner' &&
+          !visibleClientIdSet(session, data.clients ?? []).has(clientId)
+        ) {
+          sendJson(response, 403, {
+            error: 'You can only create checklists for your assigned clients',
+          })
           return
         }
 

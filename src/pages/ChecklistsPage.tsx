@@ -347,10 +347,21 @@ export function ChecklistsPage() {
                 </div>
               ) : null}
             </div>
-          ) : null}
+          ) : (
+            // Staff can create ONE-TIME tasks for their assigned clients.
+            // Repeating templates stay owner-only (firm-standard recurring work).
+            <button
+              type="button"
+              className="primary-action"
+              onClick={() => setCreateMode('one-time')}
+            >
+              <Plus size={14} />
+              New task
+            </button>
+          )}
         </div>
 
-        {createMode && ownerMode ? (
+        {createMode && (ownerMode || createMode === 'one-time') ? (
           <NewTaskForm
             mode={createMode}
             activeEmployeeId={activeEmployeeId}
