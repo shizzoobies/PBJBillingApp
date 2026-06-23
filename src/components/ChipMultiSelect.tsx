@@ -21,15 +21,29 @@ export function ChipMultiSelect({
   emptyHelper: string
 }) {
   const [adderOpen, setAdderOpen] = useState(false)
+  const [query, setQuery] = useState('')
 
   const labelById = new Map(options.map((option) => [option.id, option.label]))
   const onList = new Set(selectedIds)
   const addable = options.filter((option) => !onList.has(option.id))
 
+  // Show a search box once the list is long enough to be unwieldy (e.g. the
+  // firm has ~130 checklist templates) so picking one doesn't mean scrolling a
+  // giant menu.
+  const showSearch = addable.length > 7
+  const q = query.trim().toLowerCase()
+  const filtered = q ? addable.filter((option) => option.label.toLowerCase().includes(q)) : addable
+
+  const toggleAdder = () => {
+    setQuery('')
+    setAdderOpen((open) => !open)
+  }
+
   const addOne = (id: string) => {
     if (selectedIds.includes(id)) return
     onChange([...selectedIds, id])
     setAdderOpen(false)
+    setQuery('')
   }
 
   const removeOne = (id: string) => {
@@ -57,16 +71,23 @@ export function ChipMultiSelect({
         ))}
         {addable.length > 0 ? (
           <div className="sharing-add">
-            <button
-              type="button"
-              className="add-person-pill"
-              onClick={() => setAdderOpen((open) => !open)}
-            >
+            <button type="button" className="add-person-pill" onClick={toggleAdder}>
               {addLabel}
             </button>
             {adderOpen ? (
               <div className="sharing-add-menu" role="menu">
-                {addable.map((option) => (
+                {showSearch ? (
+                  <input
+                    className="sharing-add-search"
+                    type="text"
+                    autoFocus
+                    placeholder="Search…"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    aria-label="Search options"
+                  />
+                ) : null}
+                {filtered.map((option) => (
                   <button
                     key={option.id}
                     type="button"
@@ -76,6 +97,7 @@ export function ChipMultiSelect({
                     {option.label}
                   </button>
                 ))}
+                {filtered.length === 0 ? <p className="sharing-add-empty">No matches.</p> : null}
               </div>
             ) : null}
           </div>
