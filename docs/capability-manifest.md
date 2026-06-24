@@ -99,21 +99,23 @@ bell, and account menu sit in the top bar on every page.
   notified when the whole case completes. Stuck cases are flagged on the
   Dashboard.
 - Task card actions: Edit details (title, due date, assignee) — available to the
-  owner and to a task's assignee/editor. Delete task — for the OWNER it moves the
-  task to the owner-only Recycle bin immediately (time entries preserved, restore
-  anytime until emptied). For STAFF, deleting — a whole checklist OR an
-  individual step/sub-step — files a deletion REQUEST that an owner must approve;
-  nothing is removed until then (editing/adding don't need approval). The owner
-  sees a "Pending deletion requests" queue at the top of the Checklists page
-  (both whole-checklist and per-item requests) with Approve (delete) / Reject
-  (keep), and gets a bell notification when a request is filed; the requested
-  task/item shows a "Deletion requested" badge to staff until resolved. Owners
-  delete immediately (they're the approver).
+  owner and to a task's assignee/editor. Removing individual steps/sub-steps
+  (the "×" on a checklist item or subtask): authorized staff (the checklist's
+  assignee, an editor, or any bookkeeper assigned to the client) remove them
+  DIRECTLY now — no owner approval needed (editing/adding never needed it). Delete
+  WHOLE checklist — for the OWNER it moves the task to the owner-only Recycle bin
+  immediately (time entries preserved, restore anytime until emptied). For STAFF,
+  deleting a whole checklist still files a deletion REQUEST that an owner must
+  approve; nothing is removed until then. The owner sees a "Pending deletion
+  requests" queue at the top of the Checklists page with Approve (delete) /
+  Reject (keep), and gets a bell notification when a whole-checklist request is
+  filed. Owners delete immediately (they're the approver).
 - Sharing/visibility: a team member assigned to a client sees ALL of that
   client's tasks (the whole shared board), not just tasks assigned to them
   personally. They can log time against any of those tasks AND add/edit items on
-  any checklist for a client they're assigned to (deletions still need owner
-  approval, per above). Staff can also CREATE a one-time task for any client
+  any checklist for a client they're assigned to (removing individual items/
+  subtasks is direct; deleting a whole checklist still needs owner approval, per
+  above). Staff can also CREATE a one-time task for any client
   they're assigned to (the "New task" button on the Checklists page); repeating
   templates stay owner-only. Owners can create/edit everything.
 - Time logged against a task shows on the card.

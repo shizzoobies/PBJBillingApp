@@ -441,69 +441,13 @@ function visibleClientIdSet(session, clients) {
   )
 }
 
-/**
- * Non-owner item-deletion flow (item / sub-item / sub-sub-item). Files a
- * deletion REQUEST (capturing the path + a label snapshot) instead of deleting,
- * skipping duplicates, and notifies every owner. Mirrors the whole-checklist
- * deletion-request flow. Returns the created (or existing) request so the
- * handler can 200 it back. The caller must have already confirmed the client is
- * in the user's visible set.
- */
-async function fileItemDeletionRequest(
-  request,
-  session,
-  data,
-  checklist,
-  { itemId, subItemId, subSubItemId, label },
-) {
-  const existing = await appDataStore.listItemDeletionRequests()
-  const duplicate = existing.find(
-    (req) =>
-      req.checklistId === checklist.id &&
-      req.itemId === itemId &&
-      (req.subItemId ?? null) === (subItemId ?? null) &&
-      (req.subSubItemId ?? null) === (subSubItemId ?? null),
-  )
-  if (duplicate) return duplicate
-
-  const requesterName =
-    (data.employees ?? []).find((e) => e.id === session.user.id)?.name ??
-    session.user.name ??
-    'A team member'
-  const created = await appDataStore.createItemDeletionRequest({
-    clientId: checklist.clientId,
-    checklistId: checklist.id,
-    itemId,
-    subItemId: subItemId ?? null,
-    subSubItemId: subSubItemId ?? null,
-    label,
-    requestedBy: session.user.id,
-    requestedByName: requesterName,
-  })
-  await appDataStore.recordActivity(
-    session.user.id,
-    'checklist_item_deletion_requested',
-    `${checklist.title}: ${label}`,
-  )
-  try {
-    const members = await appDataStore.getTeamMembers()
-    const owners = members.filter((member) => member.role === 'owner')
-    for (const owner of owners) {
-      await notify(appDataStore, owner.id, 'checklist_item_deletion_requested', {
-        checklistId: checklist.id,
-        message: `${requesterName} requested deletion of "${label}" in "${checklist.title}".`,
-        link: '/checklists',
-        appPublicUrl: getPublicAppUrl(request),
-      })
-    }
-  } catch (err) {
-    console.error(
-      '[notify] checklist_item_deletion_requested dispatch failed:',
-      err?.message || err,
-    )
-  }
-  return created
-}
+// NOTE: Item / sub-item / sub-sub-item deletions are now performed DIRECTLY by
+// any authorized editor (owner, the checklist's assignee, an editor, or a
+// bookkeeper assigned to the client). The previous "file a deletion request and
+// wait for owner approval" flow was removed at the firm's request — that
+// approval gate is kept only for deleting a WHOLE checklist. The item-deletion
+// request store + /api/checklists/item-deletions endpoints remain so any
+// requests filed under the old behavior can still be cleared by an owner.
 
 /**
  * Strip data so a non-owner only sees clients they're scoped to and
@@ -3883,25 +3827,13 @@ const server = createServer(async (request, response) => {
       }
 
       // --- DELETE: remove a sub-sub-item ---
-      // Owner deletes immediately; an authorized non-owner files a deletion
-      // REQUEST (nothing removed until an owner approves).
+      // Owner and any authorized editor delete the sub-sub-item immediately.
       if (subSubItemId && request.method === 'DELETE') {
         const targetSubSub = Array.isArray(targetSub?.subItems)
           ? targetSub.subItems.find((s) => s.id === subSubItemId)
           : undefined
         if (!targetSubSub) {
           sendJson(response, 404, { error: 'Sub-sub-item not found' })
-          return
-        }
-
-        if (session.user.role !== 'owner') {
-          const filed = await fileItemDeletionRequest(request, session, data, checklist, {
-            itemId,
-            subItemId,
-            subSubItemId,
-            label: targetSubSub.title ?? '',
-          })
-          sendJson(response, 200, { request: filed, checklist })
           return
         }
 
@@ -3999,25 +3931,13 @@ const server = createServer(async (request, response) => {
       }
 
       // --- DELETE: remove a sub-item ---
-      // Owner deletes immediately; an authorized non-owner files a deletion
-      // REQUEST (nothing removed until an owner approves).
+      // Owner and any authorized editor delete the sub-item immediately.
       if (subItemId && request.method === 'DELETE') {
         const targetSub = Array.isArray(targetItem.subItems)
           ? targetItem.subItems.find((sub) => sub.id === subItemId)
           : undefined
         if (!targetSub) {
           sendJson(response, 404, { error: 'Sub-item not found' })
-          return
-        }
-
-        if (session.user.role !== 'owner') {
-          const filed = await fileItemDeletionRequest(request, session, data, checklist, {
-            itemId,
-            subItemId,
-            subSubItemId: null,
-            label: targetSub.title ?? '',
-          })
-          sendJson(response, 200, { request: filed, checklist })
           return
         }
 
@@ -4271,9 +4191,9 @@ const server = createServer(async (request, response) => {
       }
 
       // --- DELETE /api/checklists/:id/items/:itemId ---
-      // Owner deletes immediately; an authorized non-owner files a deletion
-      // REQUEST (nothing removed until an owner approves). Anyone without
-      // access to the client → 403.
+      // Owner and any authorized editor (the checklist's assignee, an editor, or
+      // a bookkeeper assigned to the client) delete the item immediately.
+      // Anyone without access to the client → 403.
       if (itemId && request.method === 'DELETE') {
         const targetItem = checklist.items.find((item) => item.id === itemId)
         if (!targetItem) {
@@ -4288,17 +4208,6 @@ const server = createServer(async (request, response) => {
           clientVisible
         if (!canEdit) {
           sendJson(response, 403, { error: 'You do not have permission to delete this item' })
-          return
-        }
-
-        if (session.user.role !== 'owner') {
-          const filed = await fileItemDeletionRequest(request, session, data, checklist, {
-            itemId,
-            subItemId: null,
-            subSubItemId: null,
-            label: targetItem.label ?? '',
-          })
-          sendJson(response, 200, { request: filed, checklist })
           return
         }
 
