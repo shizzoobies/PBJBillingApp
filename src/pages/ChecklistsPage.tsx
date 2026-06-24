@@ -36,12 +36,12 @@ import {
   checklistFrequencies,
   checklistHasPendingDeletionRequest,
   clientName,
-  daysUntilDue,
   dueDateLabel,
   effectiveChecklistDue,
   employeeName,
   formatHours,
   getChecklistFrequencyLabel,
+  groupChecklist,
   itemDeletionKey,
   lastDayOfCurrentMonth,
   localDateOnly,
@@ -60,20 +60,6 @@ function parseBulkLines(value: string): string[] {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith('#'))
-}
-
-function groupChecklist(checklist: Checklist, todayDateOnly: string): Group {
-  const completed = checklist.items.filter((item) => item.done).length
-  const total = checklist.items.length
-  if (total > 0 && completed === total) return 'completed'
-  // Bucket by the soonest of the overall deadline and any incomplete step's due.
-  const due = effectiveChecklistDue(checklist)
-  if (due < todayDateOnly) return 'overdue'
-  // Due today through the next 7 days.
-  if (daysUntilDue(due, todayDateOnly) <= 7) return 'week'
-  // Beyond a week but still inside the current calendar month.
-  if (due.slice(0, 7) === todayDateOnly.slice(0, 7)) return 'month'
-  return 'later'
 }
 
 function statusForChecklist(checklist: Checklist, todayDateOnly: string) {

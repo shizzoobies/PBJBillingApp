@@ -235,6 +235,28 @@ export function effectiveChecklistDue(checklist: Checklist): string {
   return earliest
 }
 
+/** Which "due" bucket a checklist falls into on the Checklists page. */
+export type ChecklistDueBucket = 'overdue' | 'week' | 'month' | 'later' | 'completed'
+
+/**
+ * Bucket a checklist by how soon it's due (using the soonest of the overall
+ * deadline and any incomplete step's due). The "month" bucket is a ROLLING
+ * ~31-day horizon, NOT the current calendar month — otherwise a task due a week
+ * or two out that lands in the NEXT calendar month would fall into the
+ * collapsed "Later" bucket and disappear from the view (it would still show on
+ * the Gantt, which is date-range based — the exact mismatch staff reported).
+ */
+export function groupChecklist(checklist: Checklist, todayDateOnly: string): ChecklistDueBucket {
+  const completed = checklist.items.filter((item) => item.done).length
+  const total = checklist.items.length
+  if (total > 0 && completed === total) return 'completed'
+  const due = effectiveChecklistDue(checklist)
+  if (due < todayDateOnly) return 'overdue'
+  if (daysUntilDue(due, todayDateOnly) <= 7) return 'week'
+  if (daysUntilDue(due, todayDateOnly) <= 31) return 'month'
+  return 'later'
+}
+
 /**
  * True when a checklist has a pending staff deletion request awaiting owner
  * approval — i.e. `deletionRequestedBy` is a non-empty string. (A request can
