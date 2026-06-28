@@ -9,6 +9,8 @@ import type {
   ChecklistTemplateItem,
   Client,
   Contact,
+  FeatureRequest,
+  FeatureRequestType,
   FirmSettings,
   ItemDeletionRequest,
   Role,
@@ -197,6 +199,39 @@ export type AppContextValue = {
   ) => Promise<void>
   /** Owner-only: delete a board column (its checklists become Uncategorized). */
   deleteServiceCategory: (id: string) => Promise<void>
+  /**
+   * Owner-only "Updates" tracker items, loaded from the server independently of
+   * the bulk workspace data. Empty for staff (and until the first fetch).
+   */
+  featureRequests: FeatureRequest[]
+  /** Owner-only: create an update. Resolves to the created item. */
+  addFeatureRequest: (input: {
+    title: string
+    description: string
+    type: FeatureRequestType
+  }) => Promise<FeatureRequest>
+  /** Owner-only: patch any field of an update (status/urgent/title/etc.). */
+  updateFeatureRequest: (
+    id: string,
+    patch: Partial<{
+      title: string
+      description: string
+      type: FeatureRequestType
+      status: FeatureRequest['status']
+      urgent: boolean
+      priorityRank: number
+      devNotes: string
+    }>,
+  ) => Promise<void>
+  /** Owner-only: re-rank updates to the given id order (drag-to-reorder). */
+  reorderFeatureRequests: (orderedIds: string[]) => Promise<void>
+  /** Owner-only: delete an update. */
+  removeFeatureRequest: (id: string) => Promise<void>
+  /**
+   * Owner-only: ask the AI to refine an update into a dev-ready spec. Returns
+   * the suggested title/description WITHOUT saving (the UI accepts → PATCH).
+   */
+  refineFeatureRequest: (id: string) => Promise<{ title: string; description: string }>
   addChecklistTemplateItem: (templateId: string, stageId: string) => void
   updateChecklistTemplateItem: (
     templateId: string,

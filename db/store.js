@@ -1613,6 +1613,29 @@ export class AppDataStore {
           created_at timestamptz not null default now()
         )
       `)
+      // Owner-only "Updates" tracker fields (Feature D). Idempotent so the
+      // existing assistant-drafted rows pick up sensible defaults:
+      //  - type:          feature | bug | improvement
+      //  - urgent:        pins an item to the top of the backlog
+      //  - priority_rank: drag-to-rank order (lower = nearer the top)
+      //  - dev_notes:     optional owner notes carried into the copy block
+      //  - updated_at:    last-edit stamp (null for never-edited legacy rows)
+      // The legacy status default ('sent') is read-mapped to 'new'.
+      await this.pool.query(
+        `alter table feature_requests add column if not exists type text not null default 'feature'`,
+      )
+      await this.pool.query(
+        `alter table feature_requests add column if not exists urgent boolean not null default false`,
+      )
+      await this.pool.query(
+        `alter table feature_requests add column if not exists priority_rank integer not null default 0`,
+      )
+      await this.pool.query(
+        `alter table feature_requests add column if not exists dev_notes text`,
+      )
+      await this.pool.query(
+        `alter table feature_requests add column if not exists updated_at timestamptz`,
+      )
 
       // Assistant suggestions the owner dismissed — keyed by a stable
       // pattern key so the same suggestion never nags twice.
@@ -7383,36 +7406,277 @@ export class AppDataStore {
     }
   }
 
+  // ---- Feature requests / "Updates" tracker (owner-only) ----
+  //
+  // The same `feature_requests` table backs both the assistant's "send to Alex"
+  // flow (which creates a row with status 'sent', read as 'new') and the
+  // owner-only Updates tracker (drag-rank + urgent + status + dev notes).
+  // Endpoint-managed (NOT part of the bulk /api/app-data write).
+
   /**
-   * Record a feature request sent to the developer via the AI assistant.
-   * Returns the created record.
+   * Shape a stored feature-request row/record into the camelCase object the
+   * client expects. Maps the legacy status 'sent' → 'new'.
    */
-  async createFeatureRequest(userId, title, description) {
+  static mapFeatureRequest(row) {
+    const rawStatus = String(row.status ?? 'new')
+    const status = rawStatus === 'sent' ? 'new' : rawStatus
+    return {
+      id: row.id,
+      userId: row.user_id ?? row.userId,
+      title: row.title ?? '',
+      description: row.description ?? '',
+      type: row.type ?? 'feature',
+      status,
+      urgent: Boolean(row.urgent),
+      priorityRank: Number(row.priority_rank ?? row.priorityRank ?? 0) || 0,
+      devNotes: row.dev_notes ?? row.devNotes ?? null,
+      createdAt: row.created_at
+        ? new Date(row.created_at).toISOString()
+        : (row.createdAt ?? nowIso()),
+      updatedAt: row.updated_at
+        ? new Date(row.updated_at).toISOString()
+        : (row.updatedAt ?? null),
+    }
+  }
+
+  /**
+   * Every feature request, ordered urgent-first, then priority_rank asc, then
+   * created_at asc. Owner-only at the endpoint layer.
+   */
+  async listFeatureRequests() {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, user_id, title, description, type, status, urgent,
+                priority_rank, dev_notes, created_at, updated_at
+           from feature_requests
+          order by urgent desc, priority_rank asc, created_at asc`,
+      )
+      return result.rows.map((row) => AppDataStore.mapFeatureRequest(row))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.featureRequests) ? authState.featureRequests : []
+    return list
+      .map((r) => AppDataStore.mapFeatureRequest(r))
+      .sort(
+        (a, b) =>
+          Number(b.urgent) - Number(a.urgent) ||
+          a.priorityRank - b.priorityRank ||
+          a.createdAt.localeCompare(b.createdAt),
+      )
+  }
+
+  /**
+   * Record a feature request. Used by both the assistant "send to Alex" flow
+   * (3-arg call, defaults type 'feature' / status 'sent') and the Updates
+   * tracker's add form (opts.type). New items land at the bottom of the rank
+   * order (priority_rank = current max + 1). Returns the created record.
+   */
+  async createFeatureRequest(userId, title, description, opts = {}) {
     const id = `featreq-${randomUUID().slice(0, 8)}`
     const createdAt = nowIso()
+    const allowedTypes = ['feature', 'bug', 'improvement']
+    const type = allowedTypes.includes(opts.type) ? opts.type : 'feature'
     const record = {
       id,
       userId,
       title: String(title ?? '').slice(0, 120),
       description: String(description ?? '').slice(0, 2000),
+      type,
       status: 'sent',
+      urgent: false,
+      priorityRank: 0,
+      devNotes: null,
       createdAt,
+      updatedAt: null,
     }
 
     if (this.pool) {
-      await this.pool.query(
-        `insert into feature_requests (id, user_id, title, description, status, created_at)
-         values ($1, $2, $3, $4, $5, $6)`,
-        [record.id, record.userId, record.title, record.description, record.status, createdAt],
+      const maxRow = await this.pool.query(
+        `select coalesce(max(priority_rank), -1) + 1 as next from feature_requests`,
       )
-      return record
+      record.priorityRank = Number(maxRow.rows[0]?.next ?? 0) || 0
+      await this.pool.query(
+        `insert into feature_requests
+           (id, user_id, title, description, type, status, urgent, priority_rank, dev_notes, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          record.id,
+          record.userId,
+          record.title,
+          record.description,
+          record.type,
+          record.status,
+          record.urgent,
+          record.priorityRank,
+          record.devNotes,
+          createdAt,
+        ],
+      )
+      return AppDataStore.mapFeatureRequest({ ...record, status: 'new' })
     }
 
     const authState = await readJson(localAuthPath)
     if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
+    const maxRank = authState.featureRequests.reduce(
+      (max, r) => Math.max(max, Number(r.priorityRank ?? r.priority_rank ?? 0) || 0),
+      -1,
+    )
+    record.priorityRank = maxRank + 1
     authState.featureRequests.push(record)
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return record
+    return AppDataStore.mapFeatureRequest({ ...record, status: 'new' })
+  }
+
+  /**
+   * Patch a feature request (title/description/type/status/urgent/priorityRank/
+   * devNotes) and stamp updated_at. Returns the updated record, or null.
+   */
+  async updateFeatureRequest(id, patch = {}) {
+    if (!id) return null
+    const allowedTypes = ['feature', 'bug', 'improvement']
+    const allowedStatuses = ['new', 'planned', 'in_progress', 'done', 'wont_do']
+    const title =
+      typeof patch.title === 'string' ? patch.title.trim().slice(0, 120) : undefined
+    const description =
+      typeof patch.description === 'string' ? patch.description.slice(0, 2000) : undefined
+    const type =
+      typeof patch.type === 'string' && allowedTypes.includes(patch.type) ? patch.type : undefined
+    const status =
+      typeof patch.status === 'string' && allowedStatuses.includes(patch.status)
+        ? patch.status
+        : undefined
+    const urgent = typeof patch.urgent === 'boolean' ? patch.urgent : undefined
+    const priorityRank =
+      typeof patch.priorityRank === 'number' && Number.isFinite(patch.priorityRank)
+        ? Math.max(0, Math.floor(patch.priorityRank))
+        : undefined
+    const devNotes =
+      typeof patch.devNotes === 'string' ? patch.devNotes.slice(0, 4000) : undefined
+
+    if (
+      title === undefined &&
+      description === undefined &&
+      type === undefined &&
+      status === undefined &&
+      urgent === undefined &&
+      priorityRank === undefined &&
+      devNotes === undefined
+    ) {
+      return null
+    }
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update feature_requests
+            set title = coalesce($2, title),
+                description = coalesce($3, description),
+                type = coalesce($4, type),
+                status = coalesce($5, status),
+                urgent = coalesce($6, urgent),
+                priority_rank = coalesce($7, priority_rank),
+                dev_notes = coalesce($8, dev_notes),
+                updated_at = now()
+          where id = $1
+        returning id, user_id, title, description, type, status, urgent,
+                  priority_rank, dev_notes, created_at, updated_at`,
+        [
+          id,
+          title ?? null,
+          description ?? null,
+          type ?? null,
+          status ?? null,
+          urgent ?? null,
+          priorityRank ?? null,
+          devNotes ?? null,
+        ],
+      )
+      if (!result.rowCount) return null
+      return AppDataStore.mapFeatureRequest(result.rows[0])
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
+    const existing = authState.featureRequests.find((r) => r.id === id)
+    if (!existing) return null
+    if (title !== undefined) existing.title = title
+    if (description !== undefined) existing.description = description
+    if (type !== undefined) existing.type = type
+    if (status !== undefined) existing.status = status
+    if (urgent !== undefined) existing.urgent = urgent
+    if (priorityRank !== undefined) existing.priorityRank = priorityRank
+    if (devNotes !== undefined) existing.devNotes = devNotes
+    existing.updatedAt = nowIso()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapFeatureRequest(existing)
+  }
+
+  /** Re-rank feature requests by array index (priority_rank = position). */
+  async reorderFeatureRequests(orderedIds) {
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) return
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        for (let index = 0; index < orderedIds.length; index += 1) {
+          await client.query(
+            `update feature_requests set priority_rank = $2, updated_at = now() where id = $1`,
+            [orderedIds[index], index],
+          )
+        }
+        await client.query('commit')
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
+      }
+      return
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
+    const rankById = new Map(orderedIds.map((id, index) => [id, index]))
+    for (const r of authState.featureRequests) {
+      if (rankById.has(r.id)) {
+        r.priorityRank = rankById.get(r.id)
+        r.updatedAt = nowIso()
+      }
+    }
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+
+  /** Delete a feature request. Returns true if a row was removed. */
+  async deleteFeatureRequest(id) {
+    if (!id) return false
+    if (this.pool) {
+      const result = await this.pool.query(`delete from feature_requests where id = $1`, [id])
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
+    const before = authState.featureRequests.length
+    authState.featureRequests = authState.featureRequests.filter((r) => r.id !== id)
+    const removed = authState.featureRequests.length < before
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return removed
+  }
+
+  /** Load a single feature request by id (for the /refine endpoint). */
+  async getFeatureRequest(id) {
+    if (!id) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, user_id, title, description, type, status, urgent,
+                priority_rank, dev_notes, created_at, updated_at
+           from feature_requests where id = $1`,
+        [id],
+      )
+      if (!result.rowCount) return null
+      return AppDataStore.mapFeatureRequest(result.rows[0])
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.featureRequests) ? authState.featureRequests : []
+    const found = list.find((r) => r.id === id)
+    return found ? AppDataStore.mapFeatureRequest(found) : null
   }
 
   /** Suggestion keys this user has dismissed (assistant insights). */

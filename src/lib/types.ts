@@ -688,6 +688,35 @@ export type ServiceCategory = {
   sortOrder: number
 }
 
+/** Kind of update tracked on the owner-only "Updates" page. */
+export type FeatureRequestType = 'feature' | 'bug' | 'improvement'
+
+/** Lifecycle of an update: New → Planned → In Progress → Done / Won't do. */
+export type FeatureRequestStatus = 'new' | 'planned' | 'in_progress' | 'done' | 'wont_do'
+
+/**
+ * One item in the owner-only "Updates" tracker (a pending feature/bug/
+ * improvement). Endpoint-managed (NOT part of the bulk app-data save). Backed
+ * by the `feature_requests` table — assistant-drafted "send to Alex" requests
+ * surface here too (status read-mapped from legacy 'sent' to 'new').
+ */
+export type FeatureRequest = {
+  id: string
+  userId: string
+  title: string
+  description: string
+  type: FeatureRequestType
+  status: FeatureRequestStatus
+  /** Pins the item to the top of the backlog regardless of rank. */
+  urgent: boolean
+  /** Drag-to-rank order; lower sits nearer the top. */
+  priorityRank: number
+  /** Optional owner notes, carried into the copy-for-Claude block. */
+  devNotes?: string | null
+  createdAt: string
+  updatedAt?: string | null
+}
+
 /**
  * One entry in a client's notes log — a timestamped, attributed, append-only
  * history. Owner and a client's assigned staff can view + add. Endpoint-managed

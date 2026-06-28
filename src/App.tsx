@@ -37,6 +37,12 @@ import {
   createServiceCategory as createServiceCategoryRequest,
   updateServiceCategory as updateServiceCategoryRequest,
   deleteServiceCategory as deleteServiceCategoryRequest,
+  fetchFeatureRequests,
+  createFeatureRequest as createFeatureRequestRequest,
+  updateFeatureRequest as updateFeatureRequestRequest,
+  reorderFeatureRequests as reorderFeatureRequestsRequest,
+  deleteFeatureRequest as deleteFeatureRequestRequest,
+  refineFeatureRequest as refineFeatureRequestRequest,
   listItemDeletionRequests,
   approveItemDeletion as approveItemDeletionRequest,
   rejectItemDeletion as rejectItemDeletionRequest,
@@ -87,6 +93,8 @@ import {
   type Client,
   type Contact,
   type DataSyncState,
+  type FeatureRequest,
+  type FeatureRequestType,
   type FirmSettings,
   type ItemDeletionRequest,
   type PublicFirmSettings,
@@ -123,6 +131,7 @@ import { ClientDetailPage } from './pages/ClientDetailPage'
 import { ClientRecapPage } from './pages/ClientRecapPage'
 import { ClientsPage } from './pages/ClientsPage'
 import { SetupChecklistPage } from './pages/SetupChecklistPage'
+import { UpdatesPage } from './pages/UpdatesPage'
 import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
 import { InvoicesPage } from './pages/InvoicesPage'
@@ -241,6 +250,10 @@ function App() {
   // workspace data) so they survive autosaves; fetched once the user is signed
   // in and refreshed after any owner edit.
   const [serviceCategories, setServiceCategories] = useState<ServiceCategory[]>([])
+  // Owner-only "Updates" tracker (feature/bug/improvement items). Endpoint-
+  // managed like service categories; loaded only on OWNER sign-in and refreshed
+  // after each mutation. Empty for staff (they never fetch it).
+  const [featureRequests, setFeatureRequests] = useState<FeatureRequest[]>([])
   // Pending item-level deletion requests (staff request → owner approves).
   // Endpoint-managed like service categories: fetched on sign-in and refreshed
   // after any item-delete / approve / reject so badges stay accurate.
@@ -346,6 +359,45 @@ function App() {
     }
   }, [sessionUser])
 
+  // Owner-only "Updates" tracker. Endpoint-managed; loaded on OWNER sign-in
+  // and refreshed after each mutation. The endpoint is owner-only (403 for
+  // staff), so we only fetch when the signed-in user is an owner.
+  const refreshFeatureRequests = useCallback(async () => {
+    if (sessionUser?.role !== 'owner') return
+    try {
+      setFeatureRequests(await fetchFeatureRequests())
+    } catch {
+      /* non-fatal — the Updates page shows an empty list */
+    }
+  }, [sessionUser])
+
+  useEffect(() => {
+    let cancelled = false
+    // Defer the setState off the synchronous effect body (the codebase's
+    // async-deferred pattern — see the service-category effect) so it never
+    // trips the cascading-render lint rule. Staff get an empty list; owners
+    // fetch their tracker.
+    if (sessionUser?.role !== 'owner') {
+      void Promise.resolve().then(() => {
+        if (!cancelled) setFeatureRequests([])
+      })
+      return () => {
+        cancelled = true
+      }
+    }
+    void (async () => {
+      try {
+        const requests = await fetchFeatureRequests()
+        if (!cancelled) setFeatureRequests(requests)
+      } catch {
+        /* non-fatal — the Updates page shows an empty list */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [sessionUser])
+
   // Load the per-user report period on sign-in (or when the user changes). A
   // non-custom preset is re-derived to today by normalizeReportPeriod, so
   // "This month" always means the current month on load. Absent/invalid values
@@ -410,6 +462,58 @@ function App() {
       }
     },
     [refreshServiceCategories],
+  )
+
+  // ---- Updates tracker mutation handlers (owner-only) ----
+  const addFeatureRequest = useCallback(
+    async (input: { title: string; description: string; type: FeatureRequestType }) => {
+      const created = await createFeatureRequestRequest(input)
+      await refreshFeatureRequests()
+      return created
+    },
+    [refreshFeatureRequests],
+  )
+
+  const updateFeatureRequest = useCallback(
+    async (
+      id: string,
+      patch: Partial<{
+        title: string
+        description: string
+        type: FeatureRequestType
+        status: FeatureRequest['status']
+        urgent: boolean
+        priorityRank: number
+        devNotes: string
+      }>,
+    ) => {
+      await updateFeatureRequestRequest(id, patch)
+      await refreshFeatureRequests()
+    },
+    [refreshFeatureRequests],
+  )
+
+  const reorderFeatureRequests = useCallback(
+    async (orderedIds: string[]) => {
+      // The endpoint returns the freshly-sorted list; trust it directly so the
+      // drag lands immediately without a second round-trip.
+      const requests = await reorderFeatureRequestsRequest(orderedIds)
+      setFeatureRequests(requests)
+    },
+    [],
+  )
+
+  const removeFeatureRequest = useCallback(
+    async (id: string) => {
+      await deleteFeatureRequestRequest(id)
+      await refreshFeatureRequests()
+    },
+    [refreshFeatureRequests],
+  )
+
+  const refineFeatureRequest = useCallback(
+    (id: string) => refineFeatureRequestRequest(id),
+    [],
   )
 
   // Item-level deletion requests. Endpoint-managed like service categories, so
@@ -3196,6 +3300,12 @@ function App() {
     addServiceCategory,
     updateServiceCategory,
     deleteServiceCategory,
+    featureRequests,
+    addFeatureRequest,
+    updateFeatureRequest,
+    reorderFeatureRequests,
+    removeFeatureRequest,
+    refineFeatureRequest,
     addChecklistTemplateItem,
     updateChecklistTemplateItem,
     setChecklistTemplateItemDueDate,
@@ -3296,6 +3406,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
       '/contacts',
       '/team',
       '/cases',
+      '/updates',
       '/settings',
     ]
     if (!ownerMode && ownerOnly.some((path) => location.pathname.startsWith(path))) {
@@ -3340,6 +3451,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           element={
             <OwnerOnly ownerMode={ownerMode}>
               <SetupChecklistPage />
+            </OwnerOnly>
+          }
+        />
+        <Route
+          path="/updates"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <UpdatesPage />
             </OwnerOnly>
           }
         />

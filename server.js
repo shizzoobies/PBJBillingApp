@@ -8,6 +8,7 @@ import { AppDataStore } from './db/store.js'
 import {
   buildActionProposal,
   executeAssistantAction,
+  refineFeatureRequest,
   runAssistantChat,
   sanitizeReport,
   validateAssistantAction,
@@ -2054,6 +2055,165 @@ const server = createServer(async (request, response) => {
         return
       }
       sendJson(response, 200, { category: updated })
+      return
+    }
+
+    // Owner-only "Updates" tracker (Feature D). The same `feature_requests`
+    // table backs the assistant's "send to Alex" flow; here the owner can list,
+    // rank (drag), flag urgent, move through statuses, refine wording via the
+    // AI, and copy a paste-ready block for Claude Code. All endpoints are
+    // owner-only; writes are CSRF + content-type guarded (mirrors service
+    // categories). Endpoint-managed (NOT the bulk /api/app-data write).
+    if (normalizedPath === '/api/feature-requests' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      const requests = await appDataStore.listFeatureRequests()
+      sendJson(response, 200, { requests })
+      return
+    }
+
+    if (normalizedPath === '/api/feature-requests' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const title = String(payload?.title ?? '').trim().slice(0, 120)
+      const description = String(payload?.description ?? '').trim().slice(0, 2000)
+      if (!title || !description) {
+        sendJson(response, 400, { error: 'A title and description are required' })
+        return
+      }
+      const record = await appDataStore.createFeatureRequest(session.user.id, title, description, {
+        type: payload?.type,
+      })
+      await appDataStore.recordActivity(session.user.id, 'feature_request_created', title)
+      sendJson(response, 201, { request: record })
+      return
+    }
+
+    const featureRequestReorderMatch = normalizedPath === '/api/feature-requests/reorder'
+    if (featureRequestReorderMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const orderedIds = Array.isArray(payload?.orderedIds)
+        ? payload.orderedIds.map((id) => String(id))
+        : null
+      if (!orderedIds) {
+        sendJson(response, 400, { error: 'orderedIds must be an array' })
+        return
+      }
+      await appDataStore.reorderFeatureRequests(orderedIds)
+      const requests = await appDataStore.listFeatureRequests()
+      sendJson(response, 200, { requests })
+      return
+    }
+
+    const featureRequestRefineMatch = normalizedPath.match(
+      /^\/api\/feature-requests\/([^/]+)\/refine$/,
+    )
+    if (featureRequestRefineMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const id = decodeURIComponent(featureRequestRefineMatch[1])
+      const item = await appDataStore.getFeatureRequest(id)
+      if (!item) {
+        sendJson(response, 404, { error: 'Update not found' })
+        return
+      }
+      try {
+        const suggestion = await refineFeatureRequest(item)
+        sendJson(response, 200, { suggestion })
+      } catch (error) {
+        const status = error?.statusCode ?? error?.status ?? 502
+        console.error('[updates] refine failed:', error?.message || error)
+        sendJson(response, status === 503 ? 503 : 502, {
+          error: error?.message || 'The AI could not refine this right now. Please try again.',
+        })
+      }
+      return
+    }
+
+    const featureRequestMatch = normalizedPath.match(/^\/api\/feature-requests\/([^/]+)$/)
+    if (featureRequestMatch && (request.method === 'PATCH' || request.method === 'DELETE')) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const id = decodeURIComponent(featureRequestMatch[1])
+      if (request.method === 'DELETE') {
+        const removed = await appDataStore.deleteFeatureRequest(id)
+        sendJson(response, removed ? 200 : 404, removed ? { ok: true } : { error: 'Update not found' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const updated = await appDataStore.updateFeatureRequest(id, {
+        title: payload?.title,
+        description: payload?.description,
+        type: payload?.type,
+        status: payload?.status,
+        urgent: payload?.urgent,
+        priorityRank: payload?.priorityRank,
+        devNotes: payload?.devNotes,
+      })
+      if (!updated) {
+        sendJson(response, 400, { error: 'Nothing to update' })
+        return
+      }
+      sendJson(response, 200, { request: updated })
       return
     }
 

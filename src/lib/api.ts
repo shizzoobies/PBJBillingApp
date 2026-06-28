@@ -7,6 +7,8 @@
   type ChecklistTemplateItem,
   type Client,
   type ClientNote,
+  type FeatureRequest,
+  type FeatureRequestType,
   type ItemDeletionRequest,
   type FirmSettings,
   type NotificationEntry,
@@ -1991,6 +1993,111 @@ export async function deleteServiceCategory(id: string) {
     throw new ApiError(response.status, body?.error ?? `Failed to delete column (${response.status})`)
   }
   return (await response.json()) as { ok: boolean }
+}
+
+// ---- Updates tracker: feature requests / bug reports (owner-only) ----
+
+/** Every update, ordered urgent-first then by rank. Owner-only. */
+export async function fetchFeatureRequests() {
+  const response = await apiFetch('/api/feature-requests', { credentials: 'same-origin' })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to load updates (${response.status})`)
+  }
+  return ((await response.json()) as { requests: FeatureRequest[] }).requests
+}
+
+/** Owner-only: create an update. Returns the created item. */
+export async function createFeatureRequest(input: {
+  title: string
+  description: string
+  type: FeatureRequestType
+}) {
+  const response = await apiFetch('/api/feature-requests', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to add update (${response.status})`)
+  }
+  return ((await response.json()) as { request: FeatureRequest }).request
+}
+
+/** Owner-only: patch any field of an update. Returns the updated item. */
+export async function updateFeatureRequest(
+  id: string,
+  patch: Partial<{
+    title: string
+    description: string
+    type: FeatureRequestType
+    status: FeatureRequest['status']
+    urgent: boolean
+    priorityRank: number
+    devNotes: string
+  }>,
+) {
+  const response = await apiFetch(`/api/feature-requests/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to update item (${response.status})`)
+  }
+  return ((await response.json()) as { request: FeatureRequest }).request
+}
+
+/** Owner-only: re-rank updates by the given id order. Returns the new list. */
+export async function reorderFeatureRequests(orderedIds: string[]) {
+  const response = await apiFetch('/api/feature-requests/reorder', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orderedIds }),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to reorder (${response.status})`)
+  }
+  return ((await response.json()) as { requests: FeatureRequest[] }).requests
+}
+
+/** Owner-only: delete an update. */
+export async function deleteFeatureRequest(id: string) {
+  const response = await apiFetch(`/api/feature-requests/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to delete item (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean }
+}
+
+/**
+ * Owner-only: ask the AI to refine an update into a clean dev-ready spec.
+ * Returns the suggested `{ title, description }` WITHOUT saving — the UI shows
+ * it and the owner accepts (which then PATCH-saves it).
+ */
+export async function refineFeatureRequest(id: string) {
+  const response = await apiFetch(`/api/feature-requests/${encodeURIComponent(id)}/refine`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to refine (${response.status})`)
+  }
+  return ((await response.json()) as { suggestion: { title: string; description: string } })
+    .suggestion
 }
 
 // ---- Client notes: a timestamped, attributed, append-only log per client ----

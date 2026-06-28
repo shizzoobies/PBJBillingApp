@@ -12,8 +12,8 @@ see a reduced version of the app — owner-only abilities are marked.
 
 Sidebar pages: Dashboard, Time, Timesheet, Time Approvals, Checklists, Board,
 Delayed, Clients, Client Recap, Contacts, Reports, Productivity, Gantt,
-Invoices, Plans, Team, To 100%, Settings. A billing-month picker, notification
-bell, and account menu sit in the top bar on every page.
+Invoices, Plans, Team, To 100%, Updates (owner only), Settings. A billing-month
+picker, notification bell, and account menu sit in the top bar on every page.
 - Most list/board pages have an instant search box: type to filter by name and
   key fields, with a live result count, matched-text highlight, and a clear
   button. Coverage: Clients (name/contact/email/billing type), Contacts
@@ -396,7 +396,8 @@ bell, and account menu sit in the top bar on every page.
 - Can draft a feature request to Alex (the developer / admin) when something
   isn't supported — the owner reviews the draft and confirms before any email
   is sent. It goes to the admin email; sent requests are recorded in the
-  activity log.
+  activity log AND appear on the owner's "Updates" page (the tracker) where they
+  can be prioritized and tracked.
 - Generates reports on request from any data it can read (profitability,
   hours, deadlines, capacity, clients, workspace setup). Ask for a report —
   e.g. "give me a Q2 profitability report" — and it assembles a structured
@@ -440,6 +441,22 @@ bell, and account menu sit in the top bar on every page.
   - Who's over or near capacity this week (hours vs a weekly target).
   Numbers come straight from time entries and billing settings — it reports,
   it doesn't change anything, and it never alters invoices.
+
+## Updates (owner only)
+
+- A tracker for pending feature updates and bug fixes — the owner's roadmap.
+  Items come from two places: requests drafted by this assistant (chat →
+  "Send to Alex") land here automatically, and the owner can add items directly.
+- Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
+  In Progress → Done / Won't do), and can be flagged "Urgent" (pins it to the
+  top). The list is a drag-to-rank backlog — drag items to set priority order.
+- "Refine for dev": sends a rough item to the AI to rewrite it into a clean,
+  implementation-ready spec (Problem / Desired behavior / Where in the app /
+  Acceptance); the owner accepts or discards the suggestion.
+- "Copy for Claude Code" (per item) and "Copy all (prioritized)" put a clean,
+  paste-ready markdown spec on the clipboard so the owner can hand work to the
+  developer's build tool in one click.
+- Owner-only — staff don't see this page.
 
 ## NOT supported (yet) — common asks
 
