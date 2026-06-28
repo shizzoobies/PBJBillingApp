@@ -4,7 +4,8 @@ import { useAppContext } from '../AppContext'
 import { FilterBar } from '../components/FilterBar'
 import { ListSearch } from '../components/ListSearch'
 import { useFilters, type StatusFilter } from '../components/useFilters'
-import type { Checklist, Client, Employee } from '../lib/types'
+import type { AppData, Checklist, Client, Employee } from '../lib/types'
+import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { clientName, employeeName, localDateOnly } from '../lib/utils'
 
 function checklistStatus(checklist: Checklist, todayDateOnly: string): StatusFilter {
@@ -22,7 +23,12 @@ export function GanttPage() {
 
   return (
     <section className="content-grid" id="gantt">
-      <GanttView checklists={data.checklists} clients={data.clients} employees={data.employees} />
+      <GanttView
+        checklists={data.checklists}
+        clients={data.clients}
+        employees={data.employees}
+        data={data}
+      />
     </section>
   )
 }
@@ -31,19 +37,31 @@ function GanttView({
   checklists,
   clients,
   employees,
+  data,
 }: {
   checklists: Checklist[]
   clients: Client[]
   employees: Employee[]
+  data: AppData
 }) {
   const navigate = useNavigate()
   const { assignee, client, status } = useFilters()
   const [query, setQuery] = useState('')
+  const [showUpcoming, setShowUpcoming] = useState(true)
 
   const today = new Date()
   const todayDateOnly = localDateOnly(today)
   const rangeStart = new Date(today.getFullYear(), today.getMonth(), 1)
   const rangeEnd = new Date(today.getFullYear(), today.getMonth() + 2, 0)
+
+  // Read-only projection of upcoming recurring instances within the Gantt's
+  // 2-month window. Pure + derived only — never persisted, never sent anywhere.
+  const projectedGhosts: Checklist[] = showUpcoming
+    ? projectUpcomingChecklists(data, {
+        fromDateOnly: todayDateOnly,
+        horizonEndDateOnly: localDateOnly(rangeEnd),
+      })
+    : []
   const totalDays = Math.max(
     1,
     Math.round((rangeEnd.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24)) + 1,
@@ -72,7 +90,7 @@ function GanttView({
   }
 
   const q = query.trim().toLowerCase()
-  const filtered = checklists.filter((checklist) => {
+  const filtered = [...checklists, ...projectedGhosts].filter((checklist) => {
     if (assignee && checklist.assigneeId !== assignee) return false
     if (client && checklist.clientId !== client) return false
     if (status && status !== 'all') {
@@ -128,7 +146,10 @@ function GanttView({
     const overdue = !allDone && dueDateOnly < todayDateOnly
 
     let stateClass = 'gantt-bar-not-started'
-    if (overdue) {
+    if (checklist.projected) {
+      // Faded/dashed "upcoming" treatment for not-yet-materialized ghosts.
+      stateClass = 'gantt-bar-projected'
+    } else if (overdue) {
       stateClass = 'gantt-bar-overdue'
     } else if (allDone) {
       stateClass = 'gantt-bar-done'
@@ -187,6 +208,15 @@ function GanttView({
         <span className="gantt-legend-swatch gantt-bar-progress" /> In progress
         <span className="gantt-legend-swatch gantt-bar-done" /> Completed
         <span className="gantt-legend-swatch gantt-bar-overdue" /> Overdue
+        <span className="gantt-legend-swatch gantt-bar-projected" /> Upcoming
+        <label className="upcoming-toggle">
+          <input
+            type="checkbox"
+            checked={showUpcoming}
+            onChange={(event) => setShowUpcoming(event.target.checked)}
+          />
+          Show upcoming
+        </label>
       </div>
       <div className="gantt-wrap">
         <div className="gantt-header">
@@ -212,14 +242,8 @@ function GanttView({
                 {group
                   .map((checklist) => ({ checklist, metrics: computeBarMetrics(checklist) }))
                   .filter(({ metrics }) => metrics.inRange)
-                  .map(({ checklist, metrics }) => (
-                    <button
-                      type="button"
-                      className="gantt-row gantt-row-clickable"
-                      key={checklist.id}
-                      onClick={() => goToChecklist(checklist.id)}
-                      aria-label={`Open ${checklist.title}`}
-                    >
+                  .map(({ checklist, metrics }) => {
+                    const track = (
                       <div className="gantt-track">
                         <div
                           className="gantt-today"
@@ -232,7 +256,11 @@ function GanttView({
                             left: `${metrics.leftPercent}%`,
                             width: `${metrics.widthPercent}%`,
                           }}
-                          title={`${checklist.title} - ${clientName(clients, checklist.clientId)} - ${metrics.completed}/${metrics.total} complete`}
+                          title={
+                            checklist.projected
+                              ? `Upcoming · ${checklist.title} - ${clientName(clients, checklist.clientId)}`
+                              : `${checklist.title} - ${clientName(clients, checklist.clientId)} - ${metrics.completed}/${metrics.total} complete`
+                          }
                         >
                           <span className="gantt-bar-label">{checklist.title}</span>
                         </div>
@@ -242,15 +270,44 @@ function GanttView({
                           aria-hidden="true"
                         />
                       </div>
-                      <div className="gantt-meta">
-                        <strong>{checklist.title}</strong>
-                        <span>
-                          {clientName(clients, checklist.clientId)} · {metrics.completed}/
-                          {metrics.total} done
-                        </span>
-                      </div>
-                    </button>
-                  ))}
+                    )
+
+                    // Projected ("upcoming") ghosts are NON-interactive: a plain
+                    // div with no click handler, so they can never navigate to /
+                    // mutate a real checklist (their `projected:` id is synthetic).
+                    if (checklist.projected) {
+                      return (
+                        <div className="gantt-row gantt-row-projected" key={checklist.id} aria-disabled="true">
+                          {track}
+                          <div className="gantt-meta">
+                            <strong>
+                              {checklist.title} <span className="upcoming-badge">Upcoming</span>
+                            </strong>
+                            <span>{clientName(clients, checklist.clientId)} · not yet created</span>
+                          </div>
+                        </div>
+                      )
+                    }
+
+                    return (
+                      <button
+                        type="button"
+                        className="gantt-row gantt-row-clickable"
+                        key={checklist.id}
+                        onClick={() => goToChecklist(checklist.id)}
+                        aria-label={`Open ${checklist.title}`}
+                      >
+                        {track}
+                        <div className="gantt-meta">
+                          <strong>{checklist.title}</strong>
+                          <span>
+                            {clientName(clients, checklist.clientId)} · {metrics.completed}/
+                            {metrics.total} done
+                          </span>
+                        </div>
+                      </button>
+                    )
+                  })}
               </div>
             </div>
           ))

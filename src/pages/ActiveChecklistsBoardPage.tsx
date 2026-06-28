@@ -9,6 +9,7 @@ import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
 import { reportPeriodLabel } from '../lib/reportPeriod'
+import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { ChecklistCard } from './ChecklistsPage'
 import { localDateOnly, stageNameFor } from '../lib/utils'
 import type { Checklist, ServiceCategory } from '../lib/types'
@@ -27,6 +28,7 @@ export function ActiveChecklistsBoardPage() {
   const ctx = useAppContext()
   const {
     visibleChecklists,
+    visibleClientIds,
     data,
     serviceCategories,
     ownerMode,
@@ -38,6 +40,7 @@ export function ActiveChecklistsBoardPage() {
 
   const [managingColumns, setManagingColumns] = useState(false)
   const [query, setQuery] = useState('')
+  const [showUpcoming, setShowUpcoming] = useState(true)
 
   const today = localDateOnly()
 
@@ -46,16 +49,28 @@ export function ActiveChecklistsBoardPage() {
     [data.clients],
   )
 
+  // Read-only projection of upcoming (not-yet-materialized) recurring instances.
+  // Pure + derived only — these ghosts are NEVER written to context data /
+  // visibleChecklists, autosave, or any endpoint (see lib/projectRecurring.ts).
+  // Scoped to the clients the user can see, exactly like real checklists.
+  const projectedGhosts = useMemo(() => {
+    if (!showUpcoming) return [] as Checklist[]
+    return projectUpcomingChecklists(data, {
+      fromDateOnly: today,
+      horizonEndDateOnly: reportPeriod.to,
+    }).filter((ghost) => visibleClientIds.has(ghost.clientId))
+  }, [showUpcoming, data, today, reportPeriod.to, visibleClientIds])
+
   const board = useMemo(
     () =>
       buildActiveBoard({
-        checklists: visibleChecklists,
+        checklists: [...visibleChecklists, ...projectedGhosts],
         categories: serviceCategories,
         horizonEnd: reportPeriod.to,
         today,
         clientNameById,
       }),
-    [visibleChecklists, serviceCategories, reportPeriod.to, today, clientNameById],
+    [visibleChecklists, projectedGhosts, serviceCategories, reportPeriod.to, today, clientNameById],
   )
 
   const totalOpen = board.columns.reduce((sum, col) => sum + col.openClientCount, 0)
@@ -90,8 +105,14 @@ export function ActiveChecklistsBoardPage() {
 
   // Full-fidelity card, wired to the same context handlers the Checklists page
   // uses — so checking items off the board behaves identically (and completing
-  // a checklist drops its client off the column on the next render).
-  const renderCard = (checklist: Checklist): ReactNode => (
+  // a checklist drops its client off the column on the next render). Projected
+  // "upcoming" ghosts render as a faded, NON-interactive informational card —
+  // none of the mutation handlers above are ever passed to them.
+  const renderCard = (checklist: Checklist): ReactNode => {
+    if (checklist.projected) {
+      return <ProjectedCard key={checklist.id} checklist={checklist} />
+    }
+    return (
     <ChecklistCard
       key={checklist.id}
       activeEmployeeId={activeEmployeeId}
@@ -119,7 +140,8 @@ export function ActiveChecklistsBoardPage() {
       role={role}
       timeEntries={data.timeEntries}
     />
-  )
+    )
+  }
 
   return (
     <section className="content-grid one-column" id="active-board">
@@ -142,6 +164,14 @@ export function ActiveChecklistsBoardPage() {
               total={totalOpen}
             />
             <ReportPeriodControl value={reportPeriod} onChange={setReportPeriod} />
+            <label className="upcoming-toggle">
+              <input
+                type="checkbox"
+                checked={showUpcoming}
+                onChange={(event) => setShowUpcoming(event.target.checked)}
+              />
+              Show upcoming
+            </label>
             {ownerMode ? (
               <button
                 type="button"
@@ -177,6 +207,46 @@ export function ActiveChecklistsBoardPage() {
       </section>
     </section>
   )
+}
+
+/**
+ * A faded, NON-interactive informational card for a projected ("upcoming")
+ * recurring occurrence that has not yet been materialized. No checkboxes, no
+ * expand-to-edit, no delete — purely a heads-up that the task is coming. None of
+ * the board's mutation handlers are wired here, so a projected item can never
+ * trigger a write (and its `projected:` id never reaches the server).
+ */
+function ProjectedCard({ checklist }: { checklist: Checklist }): ReactNode {
+  const dueLabel = formatGhostDueDate(checklist.dueDate)
+  return (
+    <article
+      className="checklist-card projected"
+      aria-disabled="true"
+      title={`Upcoming · due ${dueLabel}`}
+    >
+      <div className="checklist-card-head">
+        <div className="checklist-card-title">
+          <span className="upcoming-badge">Upcoming</span>
+          <strong>{checklist.title}</strong>
+        </div>
+        <span className="projected-due">Due {dueLabel}</span>
+      </div>
+      <p className="projected-note">
+        Not yet created — this recurring task will appear here when it’s due.
+      </p>
+    </article>
+  )
+}
+
+/** Friendly "Mon D, YYYY" for a yyyy-mm-dd due date (parsed at noon to avoid TZ slips). */
+function formatGhostDueDate(dueDate: string): string {
+  const parsed = new Date(`${dueDate}T12:00:00`)
+  if (Number.isNaN(parsed.getTime())) return dueDate
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(parsed)
 }
 
 function BoardColumnView({

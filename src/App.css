@@ -8499,3 +8499,125 @@ mark.list-search-hit {
   font-weight: 500;
   color: var(--muted, #6b7280);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Upcoming (projected) recurring instances — read-only ghosts on Board+Gantt */
+/* -------------------------------------------------------------------------- */
+
+/* "Show upcoming" toggle, used beside the Report period control and in the
+   Gantt legend. */
+.upcoming-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.upcoming-toggle input {
+  cursor: pointer;
+}
+
+/* Small badge marking a projected card/bar as a not-yet-created occurrence. */
+.upcoming-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--bluegray);
+  background: rgba(66, 84, 102, 0.12);
+  border: 1px dashed rgba(66, 84, 102, 0.5);
+  border-radius: 999px;
+  padding: 1px 7px;
+  vertical-align: middle;
+}
+
+/* Faded, non-interactive board card for a projected occurrence. */
+.checklist-card.projected {
+  opacity: 0.78;
+  background: repeating-linear-gradient(
+    135deg,
+    var(--soft),
+    var(--soft) 10px,
+    rgba(66, 84, 102, 0.04) 10px,
+    rgba(66, 84, 102, 0.04) 20px
+  );
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  cursor: default;
+}
+
+.checklist-card.projected .checklist-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.checklist-card.projected .checklist-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.checklist-card.projected .checklist-card-title strong {
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projected-due {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.projected-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Gantt: dashed/translucent bar treatment for projected ("upcoming") rows. */
+.gantt-bar-projected {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(66, 84, 102, 0.5),
+    rgba(66, 84, 102, 0.5) 6px,
+    rgba(66, 84, 102, 0.22) 6px,
+    rgba(66, 84, 102, 0.22) 12px
+  );
+  color: var(--surface);
+  border: 1px dashed rgba(66, 84, 102, 0.7);
+}
+
+/* Non-interactive projected row — no hover/click affordance. */
+.gantt-row-projected {
+  opacity: 0.82;
+  cursor: default;
+}
+
+@media (max-width: 640px) {
+  .upcoming-toggle {
+    font-size: 12px;
+  }
+  .checklist-card.projected .checklist-card-head {
+    flex-wrap: wrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .checklist-card.projected,
+  .gantt-row-projected {
+    transition: none;
+  }
+}

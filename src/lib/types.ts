@@ -602,6 +602,18 @@ export type Checklist = {
   deletionRequestedBy?: string | null
   /** ISO timestamp the deletion request was made. Cleared on approve/reject. */
   deletionRequestedAt?: string | null
+  /**
+   * CLIENT-ONLY: marks a synthesized "ghost" of a future recurring occurrence
+   * that has NOT yet been materialized. Projected ghosts are derived purely in
+   * the page layer (see {@link file://./projectRecurring.ts}) for the read-only
+   * "Show upcoming" overlay on the Board and Gantt. They are NEVER persisted,
+   * NEVER written into context `data`/`visibleChecklists`, and NEVER sent to the
+   * server. Their `id` follows the stable convention
+   * `projected:<templateId>:<dueDate>` (with `:<stageIndex>` appended when a
+   * stage index other than 0 is relevant), so they can be deduped against real
+   * instances and so any mutation handler can guard `if (checklist.projected)`.
+   */
+  projected?: boolean
 }
 
 /**

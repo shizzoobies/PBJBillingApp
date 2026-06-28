@@ -476,3 +476,46 @@ describe('materializeRecurringChecklists — specific-months auto-complete past 
     expect(allOpen).toBe(true)
   })
 })
+
+describe('materializeRecurringChecklists — mixed weekly + monthly coexistence', () => {
+  // Regression guard (real bug fixed Jun 24, 2026): a due MONTHLY template must
+  // NOT prevent a due WEEKLY template from generating in the same materialize
+  // pass. Each template advances on its own cadence with a non-colliding
+  // instance key (templateId + dueDate + stageIndex), so both must spawn.
+  it('generates BOTH weekly and monthly instances when both are due in one pass', () => {
+    const data = makeData({
+      checklistTemplates: [
+        makeMonthlyTemplate({ id: 'tpl-monthly', title: 'Monthly Close', frequency: 'monthly' }),
+        makeMonthlyTemplate({ id: 'tpl-weekly', title: 'Weekly Bank Rec', frequency: 'weekly' }),
+      ],
+    })
+
+    const result = materializeRecurringChecklists(data)
+
+    const monthly = result.data.checklists.filter(
+      (c: { templateId?: string }) => c.templateId === 'tpl-monthly',
+    )
+    const weekly = result.data.checklists.filter(
+      (c: { templateId?: string }) => c.templateId === 'tpl-weekly',
+    )
+    expect(monthly.length).toBeGreaterThanOrEqual(1)
+    expect(weekly.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('still generates the weekly instance when the monthly template is listed FIRST', () => {
+    // The original bug was order-sensitive — a monthly template earlier in the
+    // list short-circuited the loop for the weekly one. Guard against that.
+    const data = makeData({
+      checklistTemplates: [
+        makeMonthlyTemplate({ id: 'tpl-monthly', frequency: 'monthly' }),
+        makeMonthlyTemplate({ id: 'tpl-weekly', frequency: 'weekly' }),
+      ],
+    })
+
+    const result = materializeRecurringChecklists(data)
+    const weekly = result.data.checklists.some(
+      (c: { templateId?: string }) => c.templateId === 'tpl-weekly',
+    )
+    expect(weekly).toBe(true)
+  })
+})

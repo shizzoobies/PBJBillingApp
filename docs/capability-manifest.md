@@ -103,9 +103,18 @@ bell, and account menu sit in the top bar on every page.
   notification ("Ready to continue"). Waiting items also appear on the
   Delayed page.
 - Recurring templates: build a template once (with steps/sub-steps); the app
-  materializes an instance each period automatically. Templates support
-  multi-stage cases (see Cases). Owner manages templates; "get ahead" lets
-  staff generate the next instance early.
+  materializes an instance each period automatically. Frequencies: daily,
+  weekly, biweekly, monthly, quarterly, annually, or specific months. Each
+  template recurs on its OWN cadence independently — a monthly template never
+  blocks a weekly one from generating. Templates support multi-stage cases
+  (see Cases). Owner manages templates; "get ahead" lets staff generate the
+  next instance early (this actually CREATES it).
+- Upcoming (read-only preview): the Board and Gantt can show FUTURE recurring
+  instances that haven't been generated yet — projected from each template's
+  recurrence rule and shown faded with an "Upcoming" badge. These are
+  read-only previews only: they are NOT real tasks, can't be edited/checked,
+  and nothing is created (unlike "get ahead"). A "Show upcoming" toggle turns
+  them on/off; the horizon is the selected Report period.
 - Cases (multi-stage workflows): a template can define stages (e.g. Data
   entry → Review → Filing) with a primary assignee per stage. Completing a
   stage advances the case and notifies the next assignee; the case opener is
@@ -262,6 +271,9 @@ bell, and account menu sit in the top bar on every page.
   for due dates. Click a row to open the underlying checklist. Filter by
   assignee, client, status. Staff see it scoped to their assigned clients; the
   owner sees the whole firm.
+- "Show upcoming" toggle: overlays projected future recurring instances (within
+  the Report period) as faded, dashed, non-interactive bars marked "Upcoming" —
+  a read-only preview that creates nothing.
 
 ## Invoices (owner only)
 

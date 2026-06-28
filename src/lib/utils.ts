@@ -435,6 +435,10 @@ export function advanceChecklistFrequency(dateString: string, frequency: Checkli
     return addDays(dateString, 7)
   }
 
+  if (frequency === 'biweekly') {
+    return addDays(dateString, 14)
+  }
+
   if (frequency === 'quarterly') {
     return addMonths(dateString, 3)
   }
