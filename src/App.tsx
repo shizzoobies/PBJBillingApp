@@ -482,7 +482,7 @@ function App() {
         description: string
         type: FeatureRequestType
         status: FeatureRequest['status']
-        urgent: boolean
+        priority: FeatureRequest['priority']
         priorityRank: number
         devNotes: string
       }>,

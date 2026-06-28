@@ -694,6 +694,9 @@ export type FeatureRequestType = 'feature' | 'bug' | 'improvement'
 /** Lifecycle of an update: New → Planned → In Progress → Done / Won't do. */
 export type FeatureRequestStatus = 'new' | 'planned' | 'in_progress' | 'done' | 'wont_do'
 
+/** Priority level of an update — items group by level first, then drag rank. */
+export type FeatureRequestPriority = 'urgent' | 'high' | 'medium' | 'low'
+
 /**
  * One item in the owner-only "Updates" tracker (a pending feature/bug/
  * improvement). Endpoint-managed (NOT part of the bulk app-data save). Backed
@@ -707,9 +710,9 @@ export type FeatureRequest = {
   description: string
   type: FeatureRequestType
   status: FeatureRequestStatus
-  /** Pins the item to the top of the backlog regardless of rank. */
-  urgent: boolean
-  /** Drag-to-rank order; lower sits nearer the top. */
+  /** Priority level — items group by level first (Urgent → Low). */
+  priority: FeatureRequestPriority
+  /** Drag-to-rank order WITHIN a priority level; lower sits nearer the top. */
   priorityRank: number
   /** Optional owner notes, carried into the copy-for-Claude block. */
   devNotes?: string | null

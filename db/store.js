@@ -150,6 +150,14 @@ function normalizeStoredSessions(rawSessions, startedAt, endedAt) {
 
 const VALID_BILLING_MODES = new Set(['hourly', 'subscription', 'annual'])
 
+// 4-level priority for the owner-only "Updates" tracker. Items group by level
+// first (Urgent → Low), then by drag-rank within a level. The SQL CASE mirrors
+// PRIORITY_WEIGHT for the listFeatureRequests ORDER BY.
+const FEATURE_REQUEST_PRIORITIES = ['urgent', 'high', 'medium', 'low']
+const FEATURE_REQUEST_PRIORITY_WEIGHT_SQL =
+  `case priority when 'urgent' then 0 when 'high' then 1 when 'medium' then 2 else 3 end`
+const FEATURE_REQUEST_PRIORITY_WEIGHT = { urgent: 0, high: 1, medium: 2, low: 3 }
+
 /**
  * Validate the owner-configured new-client defaults. Every field is optional;
  * only well-typed values survive so a crafted payload can't poison the
@@ -1626,6 +1634,17 @@ export class AppDataStore {
       )
       await this.pool.query(
         `alter table feature_requests add column if not exists urgent boolean not null default false`,
+      )
+      // 4-level priority (urgent | high | medium | low). Replaces the binary
+      // `urgent` flag — the old column is kept for back-compat but no longer
+      // read/written. Backfill once: rows still at the default ('medium') whose
+      // legacy `urgent` flag was set become 'urgent'. Guarded so it never
+      // clobbers a level the owner has since chosen.
+      await this.pool.query(
+        `alter table feature_requests add column if not exists priority text not null default 'medium'`,
+      )
+      await this.pool.query(
+        `update feature_requests set priority = 'urgent' where urgent = true and priority = 'medium'`,
       )
       await this.pool.query(
         `alter table feature_requests add column if not exists priority_rank integer not null default 0`,
@@ -7420,6 +7439,14 @@ export class AppDataStore {
   static mapFeatureRequest(row) {
     const rawStatus = String(row.status ?? 'new')
     const status = rawStatus === 'sent' ? 'new' : rawStatus
+    // Priority: prefer the stored level; validate to one of the 4; otherwise
+    // derive from the legacy `urgent` flag, defaulting to 'medium'.
+    const rawPriority = row.priority ?? row.priorityLevel
+    const priority = FEATURE_REQUEST_PRIORITIES.includes(rawPriority)
+      ? rawPriority
+      : row.urgent
+        ? 'urgent'
+        : 'medium'
     return {
       id: row.id,
       userId: row.user_id ?? row.userId,
@@ -7427,7 +7454,7 @@ export class AppDataStore {
       description: row.description ?? '',
       type: row.type ?? 'feature',
       status,
-      urgent: Boolean(row.urgent),
+      priority,
       priorityRank: Number(row.priority_rank ?? row.priorityRank ?? 0) || 0,
       devNotes: row.dev_notes ?? row.devNotes ?? null,
       createdAt: row.created_at
@@ -7446,20 +7473,22 @@ export class AppDataStore {
   async listFeatureRequests() {
     if (this.pool) {
       const result = await this.pool.query(
-        `select id, user_id, title, description, type, status, urgent,
+        `select id, user_id, title, description, type, status, urgent, priority,
                 priority_rank, dev_notes, created_at, updated_at
            from feature_requests
-          order by urgent desc, priority_rank asc, created_at asc`,
+          order by ${FEATURE_REQUEST_PRIORITY_WEIGHT_SQL} asc,
+                   priority_rank asc, created_at asc`,
       )
       return result.rows.map((row) => AppDataStore.mapFeatureRequest(row))
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.featureRequests) ? authState.featureRequests : []
+    const weight = (p) => FEATURE_REQUEST_PRIORITY_WEIGHT[p] ?? FEATURE_REQUEST_PRIORITY_WEIGHT.medium
     return list
       .map((r) => AppDataStore.mapFeatureRequest(r))
       .sort(
         (a, b) =>
-          Number(b.urgent) - Number(a.urgent) ||
+          weight(a.priority) - weight(b.priority) ||
           a.priorityRank - b.priorityRank ||
           a.createdAt.localeCompare(b.createdAt),
       )
@@ -7483,7 +7512,7 @@ export class AppDataStore {
       description: String(description ?? '').slice(0, 2000),
       type,
       status: 'sent',
-      urgent: false,
+      priority: 'medium',
       priorityRank: 0,
       devNotes: null,
       createdAt,
@@ -7497,7 +7526,7 @@ export class AppDataStore {
       record.priorityRank = Number(maxRow.rows[0]?.next ?? 0) || 0
       await this.pool.query(
         `insert into feature_requests
-           (id, user_id, title, description, type, status, urgent, priority_rank, dev_notes, created_at)
+           (id, user_id, title, description, type, status, priority, priority_rank, dev_notes, created_at)
          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
           record.id,
@@ -7506,7 +7535,7 @@ export class AppDataStore {
           record.description,
           record.type,
           record.status,
-          record.urgent,
+          record.priority,
           record.priorityRank,
           record.devNotes,
           createdAt,
@@ -7545,7 +7574,10 @@ export class AppDataStore {
       typeof patch.status === 'string' && allowedStatuses.includes(patch.status)
         ? patch.status
         : undefined
-    const urgent = typeof patch.urgent === 'boolean' ? patch.urgent : undefined
+    const priority =
+      typeof patch.priority === 'string' && FEATURE_REQUEST_PRIORITIES.includes(patch.priority)
+        ? patch.priority
+        : undefined
     const priorityRank =
       typeof patch.priorityRank === 'number' && Number.isFinite(patch.priorityRank)
         ? Math.max(0, Math.floor(patch.priorityRank))
@@ -7558,7 +7590,7 @@ export class AppDataStore {
       description === undefined &&
       type === undefined &&
       status === undefined &&
-      urgent === undefined &&
+      priority === undefined &&
       priorityRank === undefined &&
       devNotes === undefined
     ) {
@@ -7572,12 +7604,12 @@ export class AppDataStore {
                 description = coalesce($3, description),
                 type = coalesce($4, type),
                 status = coalesce($5, status),
-                urgent = coalesce($6, urgent),
+                priority = coalesce($6, priority),
                 priority_rank = coalesce($7, priority_rank),
                 dev_notes = coalesce($8, dev_notes),
                 updated_at = now()
           where id = $1
-        returning id, user_id, title, description, type, status, urgent,
+        returning id, user_id, title, description, type, status, urgent, priority,
                   priority_rank, dev_notes, created_at, updated_at`,
         [
           id,
@@ -7585,7 +7617,7 @@ export class AppDataStore {
           description ?? null,
           type ?? null,
           status ?? null,
-          urgent ?? null,
+          priority ?? null,
           priorityRank ?? null,
           devNotes ?? null,
         ],
@@ -7602,7 +7634,7 @@ export class AppDataStore {
     if (description !== undefined) existing.description = description
     if (type !== undefined) existing.type = type
     if (status !== undefined) existing.status = status
-    if (urgent !== undefined) existing.urgent = urgent
+    if (priority !== undefined) existing.priority = priority
     if (priorityRank !== undefined) existing.priorityRank = priorityRank
     if (devNotes !== undefined) existing.devNotes = devNotes
     existing.updatedAt = nowIso()
@@ -7665,7 +7697,7 @@ export class AppDataStore {
     if (!id) return null
     if (this.pool) {
       const result = await this.pool.query(
-        `select id, user_id, title, description, type, status, urgent,
+        `select id, user_id, title, description, type, status, urgent, priority,
                 priority_rank, dev_notes, created_at, updated_at
            from feature_requests where id = $1`,
         [id],

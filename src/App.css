@@ -8809,9 +8809,39 @@ mark.list-search-hit {
     opacity var(--ease);
 }
 
-.updates-card.urgent {
-  border-color: var(--jam);
-  box-shadow: 0 0 0 1px var(--jam) inset, var(--shadow-sm);
+/* Priority levels — accent palette (intent: urgent=red, high=orange,
+   medium=blue, low=slate). Chosen for clear, accessible contrast. */
+:root {
+  --prio-urgent: #c2293c;
+  --prio-urgent-soft: rgba(194, 41, 60, 0.1);
+  --prio-high: #c2680f;
+  --prio-high-soft: rgba(194, 104, 15, 0.12);
+  --prio-medium: #2563a8;
+  --prio-medium-soft: rgba(37, 99, 168, 0.1);
+  --prio-low: #5a6675;
+  --prio-low-soft: rgba(90, 102, 117, 0.1);
+}
+
+/* Left-edge color stripe per priority level on each card. */
+.updates-priority-card-urgent {
+  border-left: 4px solid var(--prio-urgent);
+}
+
+.updates-priority-card-high {
+  border-left: 4px solid var(--prio-high);
+}
+
+.updates-priority-card-medium {
+  border-left: 4px solid var(--prio-medium);
+}
+
+.updates-priority-card-low {
+  border-left: 4px solid var(--prio-low);
+}
+
+/* Urgent cards get an extra inset glow so the top group reads at a glance. */
+.updates-card.updates-priority-card-urgent {
+  box-shadow: 0 0 0 1px var(--prio-urgent) inset, var(--shadow-sm);
 }
 
 .updates-card.closed {
@@ -8877,37 +8907,73 @@ mark.list-search-hit {
   outline: none;
 }
 
-.updates-urgent-toggle {
+/* Priority picker in the title row — its accent matches the chosen level. */
+.updates-priority-select {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 7px;
   border: 1px solid var(--line);
   background: var(--surface);
-  color: var(--muted);
+  color: var(--ink);
   cursor: pointer;
-  transition:
-    color var(--ease),
-    background var(--ease),
-    border-color var(--ease);
 }
 
-.updates-urgent-toggle:hover {
-  border-color: var(--jam);
-  color: var(--jam);
+.updates-priority-select.updates-priority-urgent {
+  border-color: var(--prio-urgent);
+  color: var(--prio-urgent);
 }
 
-.updates-urgent-toggle.active {
-  background: var(--jam);
-  border-color: var(--jam);
-  color: #fff;
+.updates-priority-select.updates-priority-high {
+  border-color: var(--prio-high);
+  color: var(--prio-high);
 }
 
-.updates-urgent-toggle.active svg {
-  fill: currentColor;
+.updates-priority-select.updates-priority-medium {
+  border-color: var(--prio-medium);
+  color: var(--prio-medium);
+}
+
+.updates-priority-select.updates-priority-low {
+  border-color: var(--prio-low);
+  color: var(--prio-low);
+}
+
+/* Priority badge in the meta row. */
+.updates-priority-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+
+.updates-priority-badge.updates-priority-urgent {
+  color: var(--prio-urgent);
+  border-color: var(--prio-urgent);
+  background: var(--prio-urgent-soft);
+}
+
+.updates-priority-badge.updates-priority-high {
+  color: var(--prio-high);
+  border-color: var(--prio-high);
+  background: var(--prio-high-soft);
+}
+
+.updates-priority-badge.updates-priority-medium {
+  color: var(--prio-medium);
+  border-color: var(--prio-medium);
+  background: var(--prio-medium-soft);
+}
+
+.updates-priority-badge.updates-priority-low {
+  color: var(--prio-low);
+  border-color: var(--prio-low);
+  background: var(--prio-low-soft);
 }
 
 .updates-card-meta {
@@ -9034,8 +9100,7 @@ mark.list-search-hit {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .updates-card,
-  .updates-urgent-toggle {
+  .updates-card {
     transition: none;
   }
 }

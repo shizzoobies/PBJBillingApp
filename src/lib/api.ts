@@ -1997,7 +1997,7 @@ export async function deleteServiceCategory(id: string) {
 
 // ---- Updates tracker: feature requests / bug reports (owner-only) ----
 
-/** Every update, ordered urgent-first then by rank. Owner-only. */
+/** Every update, ordered by priority level then by rank. Owner-only. */
 export async function fetchFeatureRequests() {
   const response = await apiFetch('/api/feature-requests', { credentials: 'same-origin' })
   if (!response.ok) {
@@ -2034,7 +2034,7 @@ export async function updateFeatureRequest(
     description: string
     type: FeatureRequestType
     status: FeatureRequest['status']
-    urgent: boolean
+    priority: FeatureRequest['priority']
     priorityRank: number
     devNotes: string
   }>,

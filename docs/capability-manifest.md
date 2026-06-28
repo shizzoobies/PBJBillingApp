@@ -448,8 +448,12 @@ picker, notification bell, and account menu sit in the top bar on every page.
   Items come from two places: requests drafted by this assistant (chat →
   "Send to Alex") land here automatically, and the owner can add items directly.
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
-  In Progress → Done / Won't do), and can be flagged "Urgent" (pins it to the
-  top). The list is a drag-to-rank backlog — drag items to set priority order.
+  In Progress → Done / Won't do), and a color-coded priority level — Urgent
+  (red), High (orange), Medium (blue), Low (slate). The list sorts by priority
+  level first (every Urgent above every High, every High above every Medium,
+  etc.), and within each level it's a drag-to-rank backlog — so dragging sets
+  the order inside a level, and changing the priority moves an item between
+  levels.
 - "Refine for dev": sends a rough item to the AI to rewrite it into a clean,
   implementation-ready spec (Problem / Desired behavior / Where in the app /
   Acceptance); the owner accepts or discards the suggestion.

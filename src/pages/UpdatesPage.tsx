@@ -8,20 +8,28 @@ import {
   Lightbulb,
   Plus,
   Sparkles,
-  Star,
   Trash2,
 } from 'lucide-react'
 import { useAppContext } from '../AppContext'
 import {
   formatBacklogForClaude,
   formatRequestForClaude,
+  PRIORITY_LABELS,
   sortFeatureRequests,
 } from '../lib/updatesCopy'
 import type {
   FeatureRequest,
+  FeatureRequestPriority,
   FeatureRequestStatus,
   FeatureRequestType,
 } from '../lib/types'
+
+const PRIORITY_OPTIONS: Array<{ value: FeatureRequestPriority; label: string }> = [
+  { value: 'urgent', label: 'Urgent' },
+  { value: 'high', label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low', label: 'Low' },
+]
 
 const TYPE_OPTIONS: Array<{ value: FeatureRequestType; label: string }> = [
   { value: 'feature', label: 'Feature' },
@@ -54,11 +62,20 @@ function TypeBadge({ type }: { type: FeatureRequestType }) {
   )
 }
 
+function PriorityBadge({ priority }: { priority: FeatureRequestPriority }) {
+  return (
+    <span className={`updates-priority-badge updates-priority-${priority}`}>
+      {PRIORITY_LABELS[priority]}
+    </span>
+  )
+}
+
 /**
  * Owner-only "Updates" page — a tracker for pending feature/bug/improvement
- * items. Drag to rank priority, flag Urgent (pins to top), move through
- * statuses, have the AI refine rough notes into a dev-ready spec, and copy a
- * paste-ready block for Claude Code.
+ * items. Set a priority level (Urgent/High/Medium/Low — items group by level
+ * first), drag to rank within a level, move through statuses, have the AI
+ * refine rough notes into a dev-ready spec, and copy a paste-ready block for
+ * Claude Code.
  */
 export function UpdatesPage() {
   const {
@@ -155,8 +172,9 @@ export function UpdatesPage() {
       setDropTargetId(null)
       return
     }
-    // Reorder within the full sorted list (urgent items stay pinned server-side
-    // by the urgent flag; rank only governs ties / non-urgent order).
+    // Reorder within the full sorted list. The sort groups by priority level
+    // first, so dragging effectively re-ranks within a level; crossing a level
+    // boundary just re-groups under the item's own level on the next sort.
     const orderedIds = sorted.map((i) => i.id)
     const fromIdx = orderedIds.indexOf(draggingId)
     const toIdx = orderedIds.indexOf(targetId)
@@ -312,8 +330,7 @@ export function UpdatesPage() {
             {visible.map((item) => {
               const closed = CLOSED_STATUSES.has(item.status)
               const refine = refineState[item.id]
-              const classes = ['updates-card']
-              if (item.urgent) classes.push('urgent')
+              const classes = ['updates-card', `updates-priority-card-${item.priority}`]
               if (closed) classes.push('closed')
               if (draggingId === item.id) classes.push('dragging')
               if (dropTargetId === item.id) classes.push('drop-target')
@@ -344,20 +361,27 @@ export function UpdatesPage() {
                             void updateFeatureRequest(item.id, { title: event.target.value })
                           }
                         />
-                        <button
-                          type="button"
-                          className={`updates-urgent-toggle${item.urgent ? ' active' : ''}`}
-                          aria-pressed={item.urgent}
-                          title={item.urgent ? 'Urgent — pinned to top' : 'Flag as urgent'}
-                          onClick={() =>
-                            void updateFeatureRequest(item.id, { urgent: !item.urgent })
+                        <select
+                          className={`updates-priority-select updates-priority-${item.priority}`}
+                          value={item.priority}
+                          aria-label="Priority"
+                          title="Priority level"
+                          onChange={(event) =>
+                            void updateFeatureRequest(item.id, {
+                              priority: event.target.value as FeatureRequestPriority,
+                            })
                           }
                         >
-                          <Star size={15} aria-hidden="true" />
-                        </button>
+                          {PRIORITY_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
                       </div>
 
                       <div className="updates-card-meta">
+                        <PriorityBadge priority={item.priority} />
                         <TypeBadge type={item.type} />
                         <select
                           className="updates-status-select"

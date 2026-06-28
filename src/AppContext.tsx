@@ -210,7 +210,7 @@ export type AppContextValue = {
     description: string
     type: FeatureRequestType
   }) => Promise<FeatureRequest>
-  /** Owner-only: patch any field of an update (status/urgent/title/etc.). */
+  /** Owner-only: patch any field of an update (status/priority/title/etc.). */
   updateFeatureRequest: (
     id: string,
     patch: Partial<{
@@ -218,7 +218,7 @@ export type AppContextValue = {
       description: string
       type: FeatureRequestType
       status: FeatureRequest['status']
-      urgent: boolean
+      priority: FeatureRequest['priority']
       priorityRank: number
       devNotes: string
     }>,

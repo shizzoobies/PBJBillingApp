@@ -2205,7 +2205,7 @@ const server = createServer(async (request, response) => {
         description: payload?.description,
         type: payload?.type,
         status: payload?.status,
-        urgent: payload?.urgent,
+        priority: payload?.priority,
         priorityRank: payload?.priorityRank,
         devNotes: payload?.devNotes,
       })

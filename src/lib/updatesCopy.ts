@@ -4,13 +4,34 @@
  * Kept side-effect-free (no DOM, no clipboard) so they're unit-testable. The
  * page calls these and then writes the result to the clipboard itself.
  */
-import type { FeatureRequest, FeatureRequestStatus } from './types'
+import type { FeatureRequest, FeatureRequestPriority, FeatureRequestStatus } from './types'
 
 /** Human label for an update's type, used in the copy block header. */
 const TYPE_LABELS: Record<FeatureRequest['type'], string> = {
   feature: 'Feature',
   bug: 'Bug',
   improvement: 'Improvement',
+}
+
+/** Display labels for each priority level. */
+export const PRIORITY_LABELS: Record<FeatureRequestPriority, string> = {
+  urgent: 'Urgent',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+}
+
+/** Sort weight per priority level — lower groups nearer the top. */
+export const PRIORITY_ORDER: Record<FeatureRequestPriority, number> = {
+  urgent: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+}
+
+/** Weight for an item's priority level (unknown → medium). */
+export function priorityWeight(priority: FeatureRequestPriority): number {
+  return PRIORITY_ORDER[priority] ?? PRIORITY_ORDER.medium
 }
 
 /** Statuses considered "closed" — excluded from the prioritized backlog copy. */
@@ -20,13 +41,15 @@ const CLOSED_STATUSES: ReadonlySet<FeatureRequestStatus> = new Set<FeatureReques
 ])
 
 /**
- * Sort updates urgent-first, then by priority rank (ascending), then by
- * created-at (ascending) as a stable tiebreaker. Returns a new array.
+ * Sort updates by priority level first (Urgent → High → Medium → Low), then by
+ * priority rank (ascending) WITHIN a level, then by created-at (ascending) as a
+ * stable tiebreaker. So "the last Urgent sits above the first High." Returns a
+ * new array.
  */
 export function sortFeatureRequests(items: FeatureRequest[]): FeatureRequest[] {
   return [...items].sort(
     (a, b) =>
-      Number(b.urgent) - Number(a.urgent) ||
+      priorityWeight(a.priority) - priorityWeight(b.priority) ||
       a.priorityRank - b.priorityRank ||
       a.createdAt.localeCompare(b.createdAt),
   )
@@ -35,19 +58,13 @@ export function sortFeatureRequests(items: FeatureRequest[]): FeatureRequest[] {
 /**
  * Format a single update as a markdown block ready to paste into Claude Code.
  *
- *   ## [Bug] <title>  (priority: Urgent)        // urgent
- *   ## [Feature] <title>  (priority: #3)        // otherwise, #<rank+1>
+ *   ## [Bug] <title>  (priority: High)
  *   <description>
  *   Notes: <devNotes>                           // omitted when empty
- *
- * `rank` is the 0-based display position (its index in the sorted backlog);
- * the header shows `#<rank + 1>`. When omitted, non-urgent items use
- * `priorityRank + 1`.
  */
-export function formatRequestForClaude(item: FeatureRequest, rank?: number): string {
+export function formatRequestForClaude(item: FeatureRequest): string {
   const label = TYPE_LABELS[item.type] ?? 'Feature'
-  const position = typeof rank === 'number' ? rank + 1 : item.priorityRank + 1
-  const priority = item.urgent ? 'Urgent' : `#${position}`
+  const priority = PRIORITY_LABELS[item.priority] ?? PRIORITY_LABELS.medium
   const lines = [`## [${label}] ${item.title.trim()}  (priority: ${priority})`]
   const description = item.description.trim()
   if (description) lines.push(description)
@@ -64,6 +81,6 @@ export function formatRequestForClaude(item: FeatureRequest, rank?: number): str
 export function formatBacklogForClaude(items: FeatureRequest[]): string {
   const open = sortFeatureRequests(items).filter((item) => !CLOSED_STATUSES.has(item.status))
   return open
-    .map((item, index) => `${index + 1}. ${formatRequestForClaude(item, index)}`)
+    .map((item, index) => `${index + 1}. ${formatRequestForClaude(item)}`)
     .join('\n\n')
 }
