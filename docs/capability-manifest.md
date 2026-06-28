@@ -213,6 +213,15 @@ bell, and account menu sit in the top bar on every page.
   accountants) on any client they can see.
 - The client's "Active checklists" section has a "Due this month" toggle that
   filters to checklists due in the current calendar month (with a count).
+- Client lifecycle / onboarding (owner): every client has a stage —
+  Proposal → Onboarding → Active (existing clients are Active). The Clients list
+  has stage tabs (Active · Onboarding · Proposal · All, defaulting to Active, with
+  counts) and each row shows a stage badge. "Start onboarding" on a client builds
+  a 3-stage onboarding checklist (Proposal / Onboarding / Client) and moves the
+  client to Proposal; as the team completes each stage of that checklist the
+  client automatically advances (Proposal → Onboarding → Active). The owner can
+  also set a client's stage directly. New clients can be added straight into any
+  stage (defaults to Active). Staff see the badge but don't manage stages.
 - Assigned team controls which staff can see/log time for the client.
 
 ## Client Recap (owner only)

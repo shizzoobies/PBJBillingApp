@@ -42,6 +42,7 @@ import {
   rejectItemDeletion as rejectItemDeletionRequest,
   isItemDeletionFiled,
   generateChecklistFromTemplateRequest,
+  startOnboardingRequest,
   addRecurringReimbursementRequest,
   addReimbursementRequest,
   approveWeeklySubmissionRequest,
@@ -2755,6 +2756,42 @@ function App() {
     }
   }
 
+  // Owner-only: start a client's onboarding case. Merges the new template,
+  // Stage-1 checklist, and the now-'proposal' client into local state.
+  const startOnboarding = async (clientId: string): Promise<boolean> => {
+    if (previewActiveRef.current) return false
+    try {
+      setDataSyncState('saving')
+      const result = await startOnboardingRequest(clientId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        clients: current.clients.map((client) =>
+          result.client && client.id === clientId ? result.client : client,
+        ),
+        checklistTemplates: [...(current.checklistTemplates ?? []), result.template],
+        checklists: result.checklist
+          ? [...current.checklists, result.checklist]
+          : current.checklists,
+      }))
+      setDataSyncState('synced')
+      return true
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return false
+      }
+      // 409 = already onboarding / missing client — surface as a soft no-op.
+      if (error instanceof ApiError && error.status === 409) {
+        setDataSyncState('synced')
+        return false
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
   const updateClientPlan = (clientId: string, billingMode: BillingMode, planId: string | null) => {
     updateWorkspaceData((current) => ({
       ...current,
@@ -3180,6 +3217,7 @@ function App() {
     createStandardTemplate,
     applyTemplateToClient,
     generateChecklistFromTemplate,
+    startOnboarding,
     reorderChecklistItems,
     bulkAddChecklistItems,
     createChecklist,

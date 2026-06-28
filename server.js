@@ -5087,6 +5087,58 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/clients/:id/start-onboarding — owner-only: open a client's
+    // 3-stage onboarding case (Proposal → Onboarding → Client) and move the
+    // client to 'proposal'. Mirrors the checklist-create endpoints' guards
+    // (owner gate + CSRF + content-type). Idempotent: a 409 if the client
+    // already has an onboarding case.
+    const startOnboardingMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/start-onboarding$/,
+    )
+    if (startOnboardingMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can start onboarding' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      // Body is unused (the action is parameterless), but read+discard it so
+      // the request stream is drained consistently with other POSTs.
+      await readJsonBody(request)
+      const clientId = decodeURIComponent(startOnboardingMatch[1])
+      const result = await appDataStore.startOnboarding(clientId)
+      if (!result) {
+        sendJson(response, 409, {
+          error: 'Client not found, or onboarding already started',
+        })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'onboarding_started',
+        result.client?.name ?? clientId,
+      )
+      if (result.checklist?.assigneeId && result.checklist.assigneeId !== session.user.id) {
+        await notify(appDataStore, result.checklist.assigneeId, 'task_assigned', {
+          checklistId: result.checklist.id,
+          message: `New task: ${result.checklist.title}`,
+          link: `/checklists?focus=${result.checklist.id}`,
+          appPublicUrl: getPublicAppUrl(request),
+        })
+      }
+      sendJson(response, 201, result)
+      return
+    }
+
     // ---- Phase 5: notifications API ----
     if (normalizedPath === '/api/notifications' && request.method === 'GET') {
       const session = await requireSession(request, response)

@@ -1401,6 +1401,36 @@ export async function generateChecklistFromTemplateRequest(
   return (await response.json()) as Checklist
 }
 
+/**
+ * Owner-only: open a client's 3-stage onboarding case (Proposal → Onboarding →
+ * Client) and move the client to 'proposal'. Returns the new template, the
+ * materialized Stage-1 checklist, and the updated client so the caller can
+ * merge them into local state.
+ */
+export async function startOnboardingRequest(clientId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/start-onboarding`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to start onboarding (${response.status})`,
+    )
+  }
+  return (await response.json()) as {
+    template: ChecklistTemplate
+    checklist: Checklist | null
+    client: Client | null
+  }
+}
+
 // ---- Phase 5: notifications ----
 
 export async function fetchNotifications(

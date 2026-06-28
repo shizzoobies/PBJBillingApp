@@ -297,6 +297,12 @@ export type AppContextValue = {
     templateId: string,
     payload?: { dueDate?: string },
   ) => Promise<Checklist | null>
+  /**
+   * Owner-only: open a client's 3-stage onboarding case (Proposal → Onboarding
+   * → Client) and move the client to 'proposal'. Returns true on success,
+   * false if onboarding was already started or the client was missing.
+   */
+  startOnboarding: (clientId: string) => Promise<boolean>
   reorderChecklistItems: (checklistId: string, orderedIds: string[]) => void
   bulkAddChecklistItems: (checklistId: string, labels: string[]) => void
   createChecklist: (payload: {

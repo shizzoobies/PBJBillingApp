@@ -15,6 +15,7 @@ import type {
   ClientDefaults,
   Contact,
   Employee,
+  LifecycleStage,
   SubscriptionPlan,
 } from '../lib/types'
 import {
@@ -32,6 +33,37 @@ const BILLING_LABELS: Record<BillingMode, string> = {
   annual: 'Annual',
 }
 
+// Lifecycle stages in display order, plus their human label. An absent
+// `lifecycleStage` is treated as 'active' everywhere (see `lifecycleOf`).
+const LIFECYCLE_STAGES: readonly LifecycleStage[] = ['proposal', 'onboarding', 'active']
+const LIFECYCLE_LABELS: Record<LifecycleStage, string> = {
+  proposal: 'Proposal',
+  onboarding: 'Onboarding',
+  active: 'Active',
+}
+
+/** The effective lifecycle stage of a client — absent defaults to 'active'. */
+function lifecycleOf(client: Client): LifecycleStage {
+  return client.lifecycleStage ?? 'active'
+}
+
+/** Small color-coded pill showing a client's lifecycle stage. */
+function StageBadge({ stage }: { stage: LifecycleStage }) {
+  return (
+    <span className={`lifecycle-badge lifecycle-badge-${stage}`}>{LIFECYCLE_LABELS[stage]}</span>
+  )
+}
+
+// Segment control over the stage list: Active · Onboarding · Proposal · All.
+type StageSegment = LifecycleStage | 'all'
+const STAGE_SEGMENTS: readonly StageSegment[] = ['active', 'onboarding', 'proposal', 'all']
+const SEGMENT_LABELS: Record<StageSegment, string> = {
+  active: 'Active',
+  onboarding: 'Onboarding',
+  proposal: 'Proposal',
+  all: 'All',
+}
+
 function matchesClientQuery(client: Client, query: string): boolean {
   const q = query.trim().toLowerCase()
   if (!q) return true
@@ -46,8 +78,12 @@ function matchesClientQuery(client: Client, query: string): boolean {
 }
 
 export function ClientsPage() {
-  const { ownerMode, visibleClients, data, updateClientPlan, addClient } = useAppContext()
+  const { ownerMode, visibleClients, data, updateClientPlan, updateClient, addClient, startOnboarding } =
+    useAppContext()
   const [query, setQuery] = useState('')
+  // Owner-only stage segment. Default to 'active' so the normal list isn't
+  // cluttered with prospects/onboarding.
+  const [stageSegment, setStageSegment] = useState<StageSegment>('active')
   // Owner-only "+" add flow: the add-client modal, the just-created client
   // awaiting the "Open their checklist now?" prompt, and the client whose
   // checklist modal is open (jumped to from that prompt).
@@ -61,7 +97,19 @@ export function ClientsPage() {
     setPostAddClient(created)
   }
 
-  const filteredClients = visibleClients.filter((c) => matchesClientQuery(c, query))
+  const searchedClients = visibleClients.filter((c) => matchesClientQuery(c, query))
+  // Per-segment counts (over the search-filtered list, so counts reflect the
+  // current query). Staff view ignores segments entirely.
+  const segmentCounts: Record<StageSegment, number> = {
+    active: searchedClients.filter((c) => lifecycleOf(c) === 'active').length,
+    onboarding: searchedClients.filter((c) => lifecycleOf(c) === 'onboarding').length,
+    proposal: searchedClients.filter((c) => lifecycleOf(c) === 'proposal').length,
+    all: searchedClients.length,
+  }
+  // Owner list also respects the stage segment; staff list is search-only.
+  const filteredClients = ownerMode
+    ? searchedClients.filter((c) => stageSegment === 'all' || lifecycleOf(c) === stageSegment)
+    : searchedClients
 
   // Client ids that have at least one ACTIVE checklist — not soft-deleted and
   // not fully Done. Drives the green tint on each row's Checklist button so a
@@ -132,15 +180,36 @@ export function ClientsPage() {
           resultCount={filteredClients.length}
           total={visibleClients.length}
         />
-        {query.trim() && filteredClients.length === 0 ? (
+        {query.trim() && searchedClients.length === 0 ? (
           <p className="list-search-empty">No clients match &ldquo;{query.trim()}&rdquo;.</p>
         ) : null}
+        <div className="stage-segment" role="tablist" aria-label="Filter clients by stage">
+          {STAGE_SEGMENTS.map((segment) => (
+            <button
+              key={segment}
+              type="button"
+              role="tab"
+              aria-selected={stageSegment === segment}
+              className={
+                stageSegment === segment
+                  ? 'stage-segment-tab is-active'
+                  : 'stage-segment-tab'
+              }
+              onClick={() => setStageSegment(segment)}
+            >
+              {SEGMENT_LABELS[segment]}
+              <span className="stage-segment-count">{segmentCounts[segment]}</span>
+            </button>
+          ))}
+        </div>
       </div>
       <ClientTable
         clients={filteredClients}
         clientsWithActiveChecklists={clientsWithActiveChecklists}
         employees={data.employees}
         onUpdatePlan={updateClientPlan}
+        onUpdateClient={updateClient}
+        onStartOnboarding={startOnboarding}
         ownerMode={ownerMode}
         plans={data.plans}
         query={query}
@@ -268,6 +337,9 @@ function ClientBuilder({
   const [estimatedAccountantHours, setEstimatedAccountantHours] = useState('')
   const [estimatedCfoHours, setEstimatedCfoHours] = useState('')
   const [billingMode, setBillingMode] = useState<BillingMode>(defaultBillingMode)
+  // Initial lifecycle stage — most clients are added Active; pick Proposal to
+  // start them as a prospect.
+  const [initialStage, setInitialStage] = useState<LifecycleStage>('active')
   const [planIds, setPlanIds] = useState<string[]>([])
   const [contactIds, setContactIds] = useState<string[]>([])
   const [assignedEmployeeIds, setAssignedEmployeeIds] = useState<string[]>(
@@ -334,10 +406,14 @@ function ClientBuilder({
       ...(defaults?.invoiceGroupByCategory !== undefined
         ? { invoiceGroupByCategory: defaults.invoiceGroupByCategory }
         : {}),
+      // Only persist a non-default stage so most clients stay simply 'active'
+      // (absent ⇒ active downstream).
+      ...(initialStage !== 'active' ? { lifecycleStage: initialStage } : {}),
       assignedEmployeeIds,
     })
     setName('')
     setContact('')
+    setInitialStage('active')
     setHourlyRate(defaultHourly)
     setMonthlyRate(defaultMonthly)
     setAnnualRate('')
@@ -383,6 +459,20 @@ function ClientBuilder({
             <option value="hourly">Hourly</option>
             <option value="subscription">Monthly</option>
             <option value="annual">Annual</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Initial stage</span>
+          <select
+            className="input"
+            onChange={(event) => setInitialStage(event.target.value as LifecycleStage)}
+            value={initialStage}
+          >
+            {LIFECYCLE_STAGES.map((stage) => (
+              <option key={stage} value={stage}>
+                {LIFECYCLE_LABELS[stage]}
+              </option>
+            ))}
           </select>
         </label>
         {billingMode === 'hourly' ? (
@@ -534,6 +624,8 @@ function ClientTable({
   clientsWithActiveChecklists,
   employees,
   onUpdatePlan,
+  onUpdateClient,
+  onStartOnboarding,
   ownerMode,
   plans,
   query = '',
@@ -543,6 +635,10 @@ function ClientTable({
   clientsWithActiveChecklists: Set<string>
   employees: Employee[]
   onUpdatePlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
+  /** Owner-only: manual lifecycle-stage override. Omitted in the staff view. */
+  onUpdateClient?: (clientId: string, patch: Partial<Client>) => void
+  /** Owner-only: start a client's onboarding case. Omitted in the staff view. */
+  onStartOnboarding?: (clientId: string) => Promise<boolean>
   ownerMode: boolean
   plans: SubscriptionPlan[]
   query?: string
@@ -550,6 +646,20 @@ function ClientTable({
   const { sessionUser } = useAppContext()
   const [modalClient, setModalClient] = useState<Client | null>(null)
   const [notesClient, setNotesClient] = useState<Client | null>(null)
+  // Client id currently mid-onboarding-request, so its button shows a pending
+  // state and can't be double-clicked.
+  const [onboardingId, setOnboardingId] = useState<string | null>(null)
+
+  const handleStartOnboarding = async (clientId: string) => {
+    if (!onStartOnboarding) return
+    setOnboardingId(clientId)
+    try {
+      await onStartOnboarding(clientId)
+    } finally {
+      setOnboardingId(null)
+    }
+  }
+
   return (
     <div className="table-wrap">
       <table>
@@ -557,6 +667,7 @@ function ClientTable({
           <tr>
             <th>Client</th>
             <th>Contact</th>
+            <th>Stage</th>
             {ownerMode ? <th>Billing</th> : null}
             {ownerMode ? <th>Rate</th> : null}
             <th>Assigned team</th>
@@ -582,6 +693,30 @@ function ClientTable({
                   )}
                 </td>
                 <td>{client.contact}</td>
+                <td>
+                  <div className="stage-cell">
+                    <StageBadge stage={lifecycleOf(client)} />
+                    {ownerMode && onUpdateClient ? (
+                      <select
+                        className="compact-input stage-override"
+                        aria-label={`Set stage for ${client.name}`}
+                        title="Manually move this client between stages"
+                        onChange={(event) =>
+                          onUpdateClient(client.id, {
+                            lifecycleStage: event.target.value as LifecycleStage,
+                          })
+                        }
+                        value={lifecycleOf(client)}
+                      >
+                        {LIFECYCLE_STAGES.map((stage) => (
+                          <option key={stage} value={stage}>
+                            {LIFECYCLE_LABELS[stage]}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                  </div>
+                </td>
                 {ownerMode ? (
                   <td>
                     <select
@@ -636,6 +771,17 @@ function ClientTable({
                 ) : null}
                 <td>
                   <div className="client-row-actions">
+                    {ownerMode && onStartOnboarding && lifecycleOf(client) === 'active' ? (
+                      <button
+                        type="button"
+                        className="secondary-action compact-action"
+                        title="Create the 3-stage onboarding checklist and move this client to Proposal"
+                        disabled={onboardingId === client.id}
+                        onClick={() => handleStartOnboarding(client.id)}
+                      >
+                        {onboardingId === client.id ? 'Starting…' : 'Start onboarding'}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className={

@@ -2,6 +2,17 @@ export type Role = 'employee' | 'owner'
 export type BillingMode = 'hourly' | 'subscription' | 'annual'
 
 /**
+ * A client's onboarding lifecycle stage, in order: Proposal → Onboarding →
+ * Active. Optional on {@link Client}; an absent value is treated as 'active'
+ * everywhere (existing clients predate this field and must never silently
+ * become a prospect). Driven primarily by the 3-stage onboarding case (see
+ * {@link Checklist.onboardingForClientId}): stage 0 ⇒ 'proposal', stage 1 ⇒
+ * 'onboarding', final stage complete ⇒ 'active'. The owner can also set it
+ * directly on the Clients page as a manual override.
+ */
+export type LifecycleStage = 'proposal' | 'onboarding' | 'active'
+
+/**
  * The firm's named monthly service packages. Picked per-client when billing
  * mode is 'subscription' and used as the invoice line label.
  */
@@ -147,6 +158,12 @@ export type Client = {
   invoiceShowTimeBreakdown?: boolean
   invoiceHideInternalHours?: boolean
   invoiceGroupByCategory?: boolean
+  /**
+   * Onboarding lifecycle stage (Proposal → Onboarding → Active). Optional —
+   * absent is treated as 'active' (existing clients default to active and must
+   * never silently become a prospect). See {@link LifecycleStage}.
+   */
+  lifecycleStage?: LifecycleStage
 }
 
 export type SubscriptionPlan = {
@@ -560,6 +577,15 @@ export type ChecklistTemplate = {
   sourceTemplateId?: string
   /** @deprecated Kept transiently for backwards-compat reads; new writes serialize `stages`. */
   items?: ChecklistTemplateItem[]
+  /**
+   * Set on the template behind a client's onboarding case (created by "Start
+   * onboarding"). When present, this template's stages drive the client's
+   * lifecycle stage: every materialized stage checklist inherits this id (see
+   * {@link Checklist.onboardingForClientId}), and completing/advancing a stage
+   * advances the client through Proposal → Onboarding → Active. Unset on every
+   * ordinary (recurring/standard) template — the sync is a no-op without it.
+   */
+  onboardingForClientId?: string
 }
 
 export type Checklist = {
@@ -614,6 +640,15 @@ export type Checklist = {
    * instances and so any mutation handler can guard `if (checklist.projected)`.
    */
   projected?: boolean
+  /**
+   * Marks this checklist as a stage of a client's ONBOARDING case. When set,
+   * advancing/completing this stage server-side advances the client's
+   * `lifecycleStage` (stage 0 ⇒ 'proposal', 1 ⇒ 'onboarding', final stage
+   * complete ⇒ 'active'). Inherited by every spawned next-stage checklist of
+   * the case. Unset on every ordinary checklist — the stage-advance sync is a
+   * no-op without it, so normal cases are unaffected.
+   */
+  onboardingForClientId?: string
 }
 
 /**

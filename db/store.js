@@ -733,6 +733,12 @@ function buildChecklistFromStage({
     stageCount,
     // Inherit the template's board column so generated instances sort correctly.
     categoryId: template.categoryId ?? null,
+    // Onboarding link: every stage checklist of an onboarding case inherits the
+    // template's `onboardingForClientId`, so completing/advancing any stage can
+    // sync the client's lifecycle stage. Absent on ordinary templates.
+    ...(template.onboardingForClientId
+      ? { onboardingForClientId: template.onboardingForClientId }
+      : {}),
     items: stage.items.map((item) => {
       const itemDue = resolveNodeDueDate(item, cycleYear, cycleMonth)
       return {
@@ -1351,6 +1357,39 @@ export function materializeRecurringChecklists(data) {
 }
 
 /**
+ * Pure mapping for the onboarding case ↔ client lifecycle sync. Given the
+ * checklist whose stage just advanced/completed, returns the lifecycle stage
+ * the client should be moved to — or null when nothing should change.
+ *
+ *   - `spawned` truthy (a NEXT stage was just materialised): map the SPAWNED
+ *     stage index — 0 ⇒ 'proposal', 1 ⇒ 'onboarding', anything beyond ⇒
+ *     'active' (defensive; the final stage is the last one).
+ *   - no spawn but the FINAL stage just completed (every item done and
+ *     stageIndex+1 >= stageCount): the case is finished ⇒ 'active'.
+ *   - otherwise (e.g. a mid-stage toggle that didn't advance): null.
+ *
+ * Returns null unless `checklist.onboardingForClientId` is set, so the sync is
+ * a strict no-op for every normal (non-onboarding) case.
+ */
+export function onboardingStageForSync(checklist, spawned) {
+  if (!checklist || !checklist.onboardingForClientId) return null
+  if (spawned) {
+    const idx = typeof spawned.stageIndex === 'number' ? spawned.stageIndex : 0
+    if (idx <= 0) return 'proposal'
+    if (idx === 1) return 'onboarding'
+    return 'active'
+  }
+  const stageCount = typeof checklist.stageCount === 'number' ? checklist.stageCount : 1
+  const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
+  const allItemsDone =
+    Array.isArray(checklist.items) &&
+    checklist.items.length > 0 &&
+    checklist.items.every((item) => item.done)
+  if (allItemsDone && stageIndex + 1 >= stageCount) return 'active'
+  return null
+}
+
+/**
  * Forward-only stage progression. When `justCompletedChecklist` represents the
  * final state of a stage instance whose every item is done, materialise the
  * next stage as a fresh checklist instance. Returns the spawned checklist (if
@@ -1942,6 +1981,12 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists annual_billing_month integer`,
       )
+      // Onboarding lifecycle stage (Proposal → Onboarding → Active). NOT NULL
+      // default 'active' so the firm's existing clients stay active — no client
+      // silently becomes a prospect. Additive + idempotent.
+      await this.pool.query(
+        `alter table clients add column if not exists lifecycle_stage text not null default 'active'`,
+      )
 
       // BILLING-CRITICAL MIGRATION — preserve every client's current
       // effective monthly amount before pricing left the plan. Guarded on
@@ -2377,6 +2422,14 @@ export class AppDataStore {
       await this.pool.query(`alter table checklists add column if not exists stage_id text`)
       await this.pool.query(`alter table checklists add column if not exists stage_index int`)
       await this.pool.query(`alter table checklists add column if not exists stage_count int`)
+      // Onboarding case link — the client whose lifecycle this stage drives.
+      // Set only on the stages of an onboarding case; null everywhere else.
+      await this.pool.query(
+        `alter table checklists add column if not exists onboarding_for_client_id text`,
+      )
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists onboarding_for_client_id text`,
+      )
 
       await this.pool.query(`
         create table if not exists invoice_drafts (
@@ -2898,7 +2951,7 @@ export class AppDataStore {
                    footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
                    invoice_hide_internal_hours, invoice_group_by_category,
                    assigned_bookkeeper_ids, monthly_service_tier,
-                   annual_rate, annual_billing_month
+                   annual_rate, annual_billing_month, lifecycle_stage
             from clients
             order by name asc
           `),
@@ -2917,7 +2970,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
                    case_id, stage_id, stage_index, stage_count, category_id, deleted_at,
-                   deletion_requested_by, deletion_requested_at
+                   deletion_requested_by, deletion_requested_at, onboarding_for_client_id
             from checklists
             order by due_date asc, id asc
           `),
@@ -2928,7 +2981,8 @@ export class AppDataStore {
           `),
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
-                   scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id
+                   scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id,
+                   onboarding_for_client_id
             from checklist_templates
             order by title asc
           `),
@@ -3091,6 +3145,9 @@ export class AppDataStore {
         stageIndex: typeof row.stage_index === 'number' ? row.stage_index : 0,
         stageCount: typeof row.stage_count === 'number' ? row.stage_count : 1,
         categoryId: row.category_id ?? null,
+        ...(row.onboarding_for_client_id
+          ? { onboardingForClientId: row.onboarding_for_client_id }
+          : {}),
         items: itemsByChecklist.get(row.id) ?? [],
         deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
         deletionRequestedBy: row.deletion_requested_by ?? null,
@@ -3206,6 +3263,9 @@ export class AppDataStore {
             invoiceShowTimeBreakdown: row.invoice_show_time_breakdown ?? true,
             invoiceHideInternalHours: row.invoice_hide_internal_hours ?? true,
             invoiceGroupByCategory: row.invoice_group_by_category ?? false,
+            // Default 'active' when null so legacy/absent rows are never treated
+            // as prospects.
+            lifecycleStage: row.lifecycle_stage ?? 'active',
           }
         }),
         timeEntries: timeEntriesResult.rows.map((row) => ({
@@ -3247,6 +3307,9 @@ export class AppDataStore {
           active: row.active,
           isStandard: Boolean(row.is_standard),
           categoryId: row.category_id ?? null,
+          ...(row.onboarding_for_client_id
+            ? { onboardingForClientId: row.onboarding_for_client_id }
+            : {}),
           ...(row.source_template_id ? { sourceTemplateId: row.source_template_id } : {}),
           viewerIds: Array.isArray(row.viewer_ids) ? row.viewer_ids : [],
           editorIds: Array.isArray(row.editor_ids) ? row.editor_ids : [],
@@ -3721,9 +3784,9 @@ export class AppDataStore {
                 assigned_bookkeeper_ids,
                 estimated_bookkeeper_hours, estimated_accountant_hours,
                 estimated_cfo_hours, monthly_service_tier,
-                annual_rate, annual_billing_month, updated_at
+                annual_rate, annual_billing_month, lifecycle_stage, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, now())
             `,
             [
               clientRecord.id,
@@ -3791,6 +3854,12 @@ export class AppDataStore {
               clientRecord.annualBillingMonth === null
                 ? null
                 : Number(clientRecord.annualBillingMonth),
+              // Default 'active' so a client saved without the field set (legacy
+              // payload / older client) never becomes a prospect.
+              clientRecord.lifecycleStage === 'proposal' ||
+              clientRecord.lifecycleStage === 'onboarding'
+                ? clientRecord.lifecycleStage
+                : 'active',
             ],
           )
 
@@ -3916,8 +3985,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now())
             `,
             [
               template.id,
@@ -3948,6 +4017,9 @@ export class AppDataStore {
               template.categoryId ? template.categoryId : null,
               typeof template.sourceTemplateId === 'string' && template.sourceTemplateId
                 ? template.sourceTemplateId
+                : null,
+              typeof template.onboardingForClientId === 'string' && template.onboardingForClientId
+                ? template.onboardingForClientId
                 : null,
             ],
           )
@@ -4012,8 +4084,8 @@ export class AppDataStore {
         for (const checklist of checklistsToWrite) {
           await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
             `,
             [
               checklist.id,
@@ -4033,6 +4105,7 @@ export class AppDataStore {
               checklist.deletedAt ?? null,
               checklist.deletionRequestedBy ?? null,
               checklist.deletionRequestedAt ?? null,
+              checklist.onboardingForClientId ?? null,
             ],
           )
 
@@ -5171,6 +5244,9 @@ export class AppDataStore {
       stageId: checklist.stageId ?? null,
       stageIndex: typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0,
       stageCount: typeof checklist.stageCount === 'number' ? checklist.stageCount : 1,
+      ...(checklist.onboardingForClientId
+        ? { onboardingForClientId: checklist.onboardingForClientId }
+        : {}),
       items: checklist.items.map((item, index) => {
         const subItems = normalizeSubItems(item.subItems, { withDone: true })
         return {
@@ -5196,8 +5272,8 @@ export class AppDataStore {
         await client.query('begin')
         await client.query(
           `
-            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, updated_at)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, onboarding_for_client_id, updated_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
           `,
           [
             nextChecklist.id,
@@ -5214,6 +5290,7 @@ export class AppDataStore {
             nextChecklist.stageIndex,
             nextChecklist.stageCount,
             nextChecklist.categoryId ? nextChecklist.categoryId : null,
+            nextChecklist.onboardingForClientId ?? null,
           ],
         )
 
@@ -5308,6 +5385,13 @@ export class AppDataStore {
       const data = await this.read()
       const updated = data.checklists.find((checklist) => checklist.id === checklistId) ?? null
       const spawn = await this.maybeSpawnNextStage(data, updated)
+      // Onboarding case ↔ client lifecycle sync. No-op for normal cases (the
+      // helper returns null unless `onboardingForClientId` is set), so ordinary
+      // stage advancement is byte-for-byte unchanged.
+      const lifecycleStage = onboardingStageForSync(updated, spawn)
+      if (lifecycleStage && updated) {
+        await this.setClientLifecycleStage(updated.onboardingForClientId, lifecycleStage)
+      }
       return { checklist: updated, spawned: spawn }
     }
 
@@ -5355,6 +5439,18 @@ export class AppDataStore {
     const spawn = await this.maybeSpawnNextStage(data, updatedChecklist, { fileMode: true })
     if (spawn) {
       data.checklists = sortChecklists([...data.checklists, spawn])
+    }
+
+    // Onboarding case ↔ client lifecycle sync, applied to the same open
+    // snapshot so it persists atomically with the toggle. No-op for normal
+    // cases (helper returns null without `onboardingForClientId`).
+    const lifecycleStage = onboardingStageForSync(updatedChecklist, spawn)
+    if (lifecycleStage) {
+      data.clients = (data.clients ?? []).map((client) =>
+        client.id === updatedChecklist.onboardingForClientId
+          ? { ...client, lifecycleStage }
+          : client,
+      )
     }
 
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
@@ -5414,6 +5510,125 @@ export class AppDataStore {
     // Auto-grant the new stage's assignee visibility into the client.
     await this.grantClientVisibility(created.clientId, created.assigneeId)
     return created
+  }
+
+  /**
+   * Set a single client's onboarding `lifecycleStage`. Authoritative,
+   * server-side counterpart of the manual-override the owner can set via the
+   * bulk save — used by the onboarding case ↔ client sync so a stage advance
+   * moves the client without a round-trip through the bulk app-data write.
+   * Returns the updated client, or null when the client doesn't exist.
+   */
+  async setClientLifecycleStage(clientId, lifecycleStage) {
+    if (!clientId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update clients set lifecycle_stage = $2, updated_at = now()
+         where id = $1
+         returning id`,
+        [clientId, lifecycleStage],
+      )
+      if (!result.rowCount) return null
+      const data = await this.read()
+      return data.clients.find((client) => client.id === clientId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updated = null
+    data.clients = (data.clients ?? []).map((client) => {
+      if (client.id !== clientId) return client
+      updated = { ...client, lifecycleStage }
+      return updated
+    })
+    if (!updated) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updated
+  }
+
+  /**
+   * Owner action — begin a client's onboarding. Creates the ONE onboarding
+   * checklist as a 3-stage case (Proposal → Onboarding → Client), tags the
+   * template with `onboardingForClientId` so each stage syncs the client's
+   * lifecycle stage, materialises the Stage-1 (Proposal) instance, and moves
+   * the client to 'proposal'. Reuses the standard template + generate paths
+   * (no parallel creation path). Returns { template, checklist, client } or
+   * null when the client is missing or already has an onboarding case.
+   * Owner-only — caller enforces auth.
+   */
+  async startOnboarding(clientId) {
+    const data = await this.read()
+    const client = (data.clients ?? []).find((c) => c.id === clientId)
+    if (!client) return null
+    // Idempotent: don't open a second onboarding case for the same client.
+    const existing = (data.checklistTemplates ?? []).find(
+      (t) => t.onboardingForClientId === clientId,
+    )
+    if (existing) return null
+
+    const assigneeId = (client.assignedBookkeeperIds ?? [])[0] ||
+      (client.assignedEmployeeIds ?? [])[0] || ''
+    const today = formatDateOnly(new Date())
+    const makeStage = (name, items) => ({
+      id: `stage-${randomUUID().slice(0, 8)}`,
+      name,
+      assigneeId,
+      offsetDays: 0,
+      viewerIds: [],
+      editorIds: [],
+      items: items.map((label) => ({
+        id: `template-item-${randomUUID().slice(0, 8)}`,
+        label,
+      })),
+    })
+    const template = {
+      id: `template-${randomUUID().slice(0, 8)}`,
+      title: `Onboarding · ${client.name}`,
+      clientId,
+      assigneeId,
+      frequency: 'monthly',
+      nextDueDate: today,
+      // Not a recurring template — it's a one-shot case. Inactive so the
+      // materializer never spawns extra instances from it.
+      active: false,
+      isStandard: false,
+      onboardingForClientId: clientId,
+      viewerIds: [],
+      editorIds: [],
+      stages: [
+        makeStage('Proposal', [
+          'Send proposal / engagement letter',
+          'Confirm scope & pricing',
+          'Client signs engagement',
+        ]),
+        makeStage('Onboarding', [
+          'Collect access to books / bank feeds',
+          'Set up client in systems',
+          'Gather prior financials',
+        ]),
+        makeStage('Client', [
+          'Kickoff call complete',
+          'First close / deliverable scheduled',
+          'Mark client active',
+        ]),
+      ],
+    }
+
+    const nextData = {
+      ...data,
+      checklistTemplates: [...(data.checklistTemplates ?? []), template],
+      clients: (data.clients ?? []).map((c) =>
+        c.id === clientId ? { ...c, lifecycleStage: 'proposal' } : c,
+      ),
+    }
+    await this.write(nextData)
+
+    // Materialise the Stage-1 (Proposal) instance via the shared generate path
+    // so it goes through createChecklist + visibility grant like every other
+    // instance. It inherits `onboardingForClientId` from the template.
+    const checklist = await this.generateChecklistFromTemplate(template.id, { dueDate: today })
+    const refreshed = await this.read()
+    const updatedClient = (refreshed.clients ?? []).find((c) => c.id === clientId) ?? null
+    return { template, checklist, client: updatedClient }
   }
 
   async setChecklistViewers(checklistId, viewerIds, editorIds) {
