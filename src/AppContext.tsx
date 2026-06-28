@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react'
 import type { GroupAllocationMode } from './lib/utils'
+import type { ReportPeriod } from './lib/reportPeriod'
 import type {
   AppData,
   BillingMode,
@@ -43,6 +44,13 @@ export type AppContextValue = {
   visibleEntries: TimeEntry[]
   billingPeriod: string
   setBillingPeriod: (period: string) => void
+  /**
+   * Shared "Report period" date range used by the Time, Timesheet, Board, and
+   * Checklists views. Per-user, persisted in localStorage (NOT server data).
+   * Distinct from `billingPeriod`, which is the invoicing month picker.
+   */
+  reportPeriod: ReportPeriod
+  setReportPeriod: (period: ReportPeriod) => void
   timer: TimerState | null
   timerElapsed: string
   startTimer: (timer: TimerState) => void

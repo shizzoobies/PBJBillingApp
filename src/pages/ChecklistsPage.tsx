@@ -14,6 +14,8 @@ import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { FilterBar } from '../components/FilterBar'
 import { ListSearch } from '../components/ListSearch'
+import { ReportPeriodControl } from '../components/ReportPeriodControl'
+import { isInReportPeriod } from '../lib/reportPeriod'
 import { useFilters } from '../components/useFilters'
 import { SaveBadge } from '../components/SectionKit'
 import { SharingControl } from '../components/SharingControl'
@@ -830,6 +832,7 @@ function ChecklistInProgressSection({
   timeEntries: TimeEntry[]
 }) {
   const todayDateOnly = localDateOnly()
+  const { reportPeriod, setReportPeriod } = useAppContext()
   const { assignee, client, status } = useFilters()
   const [query, setQuery] = useState('')
   const [searchParams, setSearchParams] = useSearchParams()
@@ -866,6 +869,7 @@ function ChecklistInProgressSection({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     return checklists.filter((checklist) => {
+      if (!isInReportPeriod(effectiveChecklistDue(checklist), reportPeriod)) return false
       if (assignee && checklist.assigneeId !== assignee) return false
       if (client && checklist.clientId !== client) return false
       if (status && status !== 'all') {
@@ -878,7 +882,7 @@ function ChecklistInProgressSection({
       }
       return true
     })
-  }, [checklists, assignee, client, status, todayDateOnly, query, clients])
+  }, [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod])
 
   // Status grouping (current behavior, unchanged).
   const groupedByStatus: Record<Group, Checklist[]> = {
@@ -981,6 +985,7 @@ function ChecklistInProgressSection({
       </div>
       <div className="filter-row">
         <FilterBar employees={employees} clients={clients} />
+        <ReportPeriodControl value={reportPeriod} onChange={setReportPeriod} />
         <ListSearch
           value={query}
           onChange={setQuery}

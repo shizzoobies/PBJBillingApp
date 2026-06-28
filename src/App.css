@@ -819,6 +819,96 @@ h2 {
   outline: none;
 }
 
+/* Shared "Report period" range control (Time / Timesheet / Board / Checklists).
+   Mirrors the .period-control pill + .group-by-toggle visual language: an inline
+   premium pill that wraps gracefully on narrow screens. */
+.report-period {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  min-height: 40px;
+  padding: 6px 12px;
+}
+.report-period-label {
+  color: var(--bluegray);
+  font-size: 12px;
+  font-weight: 760;
+  letter-spacing: 0.01em;
+}
+.report-period-select {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 10px;
+}
+.report-period-select:hover {
+  border-color: var(--line-strong);
+}
+.report-period-dates {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.report-period-field {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+}
+.report-period-field-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.report-period-input {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font-weight: 700;
+  outline: none;
+  padding: 3px 6px;
+}
+.report-period-input:disabled {
+  background: transparent;
+  border-color: transparent;
+  color: var(--bluegray);
+  opacity: 1;
+}
+.report-period-sep {
+  color: var(--muted);
+}
+.report-period-readout {
+  color: var(--bluegray);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+@media (max-width: 640px) {
+  .report-period {
+    width: 100%;
+  }
+}
+
+/* Filter row that hosts the report-period control above a list. */
+.time-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
 .segmented {
   background: #ebe3ec;
   border: 1px solid var(--line);
@@ -5981,10 +6071,38 @@ h2 {
   margin-bottom: 14px;
 }
 
+.timesheet-toolbar-left {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 .timesheet-weeknav {
   align-items: center;
   display: flex;
   gap: 8px;
+}
+
+.timesheet-week-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.timesheet-week-status {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.timesheet-multiweek-hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 14px;
 }
 
 .timesheet-weeklabel {

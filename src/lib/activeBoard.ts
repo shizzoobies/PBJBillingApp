@@ -104,16 +104,26 @@ export function buildActiveBoard({
   checklists = [],
   categories = [],
   periodType = 'month',
+  horizonEnd,
   today,
   clientNameById = {},
 }: {
   checklists?: Checklist[]
   categories?: ServiceCategory[]
   periodType?: PeriodType
+  /**
+   * Explicit horizon end ('YYYY-MM-DD') for the shared Report-period control.
+   * When provided it supersedes `periodType` — the board shows every open
+   * checklist whose effective due date is on or before this date (overdue work
+   * stays visible). `periodType` remains for legacy / test callers.
+   */
+  horizonEnd?: string
   today: string
   clientNameById?: Record<string, string>
 }): ActiveBoard {
-  const range = boardPeriodRange(periodType, today)
+  const range = horizonEnd
+    ? { start: today, end: horizonEnd }
+    : boardPeriodRange(periodType, today)
 
   const orderedCategories = [...categories].sort(
     (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name),

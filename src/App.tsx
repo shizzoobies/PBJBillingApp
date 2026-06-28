@@ -108,6 +108,11 @@ import {
   makeId,
   sortChecklists,
 } from './lib/utils'
+import {
+  defaultReportPeriod,
+  normalizeReportPeriod,
+  type ReportPeriod,
+} from './lib/reportPeriod'
 import { ActiveChecklistsBoardPage } from './pages/ActiveChecklistsBoardPage'
 import { CaseDetailPage } from './pages/CaseDetailPage'
 import { ChecklistsPage } from './pages/ChecklistsPage'
@@ -184,6 +189,34 @@ function writeStoredTimer(timer: TimerState | null) {
   }
 }
 
+// The shared "Report period" range is a per-user UI preference, so it lives in
+// localStorage keyed by user id (NOT the server / workspace data). v1 schema.
+const REPORT_PERIOD_KEY_PREFIX = 'pbj.reportPeriod.v1.'
+
+function reportPeriodKeyFor(userId: string) {
+  return `${REPORT_PERIOD_KEY_PREFIX}${userId}`
+}
+
+/** Read + validate a user's persisted report period; null when absent/unusable. */
+function readStoredReportPeriod(userId: string, todayDateOnly: string): ReportPeriod | null {
+  try {
+    const raw = localStorage.getItem(reportPeriodKeyFor(userId))
+    if (!raw) return null
+    return normalizeReportPeriod(JSON.parse(raw) as unknown, todayDateOnly)
+  } catch {
+    // malformed JSON or unavailable storage — fall back to the default.
+    return null
+  }
+}
+
+function writeStoredReportPeriod(userId: string, period: ReportPeriod) {
+  try {
+    localStorage.setItem(reportPeriodKeyFor(userId), JSON.stringify(period))
+  } catch {
+    // ignore storage failures (private mode / quota)
+  }
+}
+
 // True when the user currently has a text input / textarea / select /
 // contenteditable focused — i.e. is mid-edit. A cross-session refetch defers
 // while this holds so it can never re-paint stale server data over a field the
@@ -215,6 +248,12 @@ function App() {
   const [previewUserId, setPreviewUserId] = useState<string | null>(null)
   const [selectedClientId, setSelectedClientId] = useState('client-northstar')
   const [billingPeriod, setBillingPeriod] = useState(currentBillingPeriod())
+  // Shared "Report period" range, consumed by Time / Timesheet / Board /
+  // Checklists. Seeded to the current month; the per-user persisted value is
+  // loaded once `sessionUser` is known (see the effect below).
+  const [reportPeriod, setReportPeriodState] = useState<ReportPeriod>(() =>
+    defaultReportPeriod(localDateOnly()),
+  )
   const [timer, setTimer] = useState<TimerState | null>(() => readStoredTimer())
   // Lazily seed "now" to the current time so a restored timer shows the right
   // elapsed on first paint (the interval keeps it ticking while a timer runs).
@@ -305,6 +344,36 @@ function App() {
       cancelled = true
     }
   }, [sessionUser])
+
+  // Load the per-user report period on sign-in (or when the user changes). A
+  // non-custom preset is re-derived to today by normalizeReportPeriod, so
+  // "This month" always means the current month on load. Absent/invalid values
+  // leave the default month in place.
+  useEffect(() => {
+    if (!sessionUser) return
+    let cancelled = false
+    // Defer the setState off the synchronous effect body (the codebase's
+    // async-deferred pattern — see the service-category effect) so it doesn't
+    // trip the cascading-render lint rule.
+    void Promise.resolve().then(() => {
+      if (cancelled) return
+      const stored = readStoredReportPeriod(sessionUser.id, localDateOnly())
+      if (stored) setReportPeriodState(stored)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [sessionUser])
+
+  // Set the report period AND persist it for the signed-in user. Only writes
+  // when a user is known, so a pre-auth change never lands under a stale key.
+  const setReportPeriod = useCallback(
+    (period: ReportPeriod) => {
+      setReportPeriodState(period)
+      if (sessionUser) writeStoredReportPeriod(sessionUser.id, period)
+    },
+    [sessionUser],
+  )
 
   const addServiceCategory = useCallback(
     async (name: string) => {
@@ -3047,6 +3116,8 @@ function App() {
     visibleEntries,
     billingPeriod,
     setBillingPeriod,
+    reportPeriod,
+    setReportPeriod,
     timer,
     timerElapsed: timer ? formatTimeFromMs(now - timer.startedAt) : '0:00',
     startTimer,

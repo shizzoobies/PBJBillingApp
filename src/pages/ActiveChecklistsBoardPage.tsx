@@ -2,30 +2,26 @@ import { ChevronDown, ChevronRight, GripVertical, Plus, X } from 'lucide-react'
 import { useMemo, useState, type ReactNode } from 'react'
 import {
   buildActiveBoard,
-  boardPeriodRange,
   UNCATEGORIZED_ID,
   type BoardColumn,
-  type PeriodType,
 } from '../lib/activeBoard'
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
+import { ReportPeriodControl } from '../components/ReportPeriodControl'
+import { reportPeriodLabel } from '../lib/reportPeriod'
 import { ChecklistCard } from './ChecklistsPage'
 import { localDateOnly, stageNameFor } from '../lib/utils'
 import type { Checklist, ServiceCategory } from '../lib/types'
-
-const PERIOD_OPTIONS: Array<{ value: PeriodType; label: string }> = [
-  { value: 'week', label: 'This week' },
-  { value: 'month', label: 'This month' },
-  { value: 'quarter', label: 'This quarter' },
-]
 
 /**
  * The Active Checklists board: one column per service category (Monthly
  * Bookkeeping, Sales Tax, Payroll, …), each listing the clients that still have
  * open work of that type. Collapsible client rows expand to the live checklist.
- * Completing a client's checklist drops it off automatically. A period toggle
- * scopes the horizon (week / month / quarter). Staff see only their assigned
- * clients (visibleChecklists is already scoped server-side).
+ * Completing a client's checklist drops it off automatically. The shared Report
+ * period scopes the horizon: a client shows while it has open work whose
+ * effective due date is on or before the period's end (overdue work stays
+ * visible — the board is a horizon view, not a strict window). Staff see only
+ * their assigned clients (visibleChecklists is already scoped server-side).
  */
 export function ActiveChecklistsBoardPage() {
   const ctx = useAppContext()
@@ -36,9 +32,10 @@ export function ActiveChecklistsBoardPage() {
     ownerMode,
     role,
     activeEmployeeId,
+    reportPeriod,
+    setReportPeriod,
   } = ctx
 
-  const [periodType, setPeriodType] = useState<PeriodType>('month')
   const [managingColumns, setManagingColumns] = useState(false)
   const [query, setQuery] = useState('')
 
@@ -54,14 +51,13 @@ export function ActiveChecklistsBoardPage() {
       buildActiveBoard({
         checklists: visibleChecklists,
         categories: serviceCategories,
-        periodType,
+        horizonEnd: reportPeriod.to,
         today,
         clientNameById,
       }),
-    [visibleChecklists, serviceCategories, periodType, today, clientNameById],
+    [visibleChecklists, serviceCategories, reportPeriod.to, today, clientNameById],
   )
 
-  const range = boardPeriodRange(periodType, today)
   const totalOpen = board.columns.reduce((sum, col) => sum + col.openClientCount, 0)
 
   const filteredColumns = useMemo(() => {
@@ -134,7 +130,7 @@ export function ActiveChecklistsBoardPage() {
             <p className="section-subtitle">
               {totalOpen === 0
                 ? 'Nothing open in this period — nice.'
-                : `${totalOpen} client${totalOpen === 1 ? '' : 's'} with open work · ${range.start} → ${range.end}`}
+                : `${totalOpen} client${totalOpen === 1 ? '' : 's'} with open work · through ${reportPeriodLabel(reportPeriod)}`}
             </p>
           </div>
           <div className="board-controls">
@@ -145,19 +141,7 @@ export function ActiveChecklistsBoardPage() {
               resultCount={filteredColumns.reduce((sum, col) => sum + col.openClientCount, 0)}
               total={totalOpen}
             />
-            <div className="group-by-toggle" role="group" aria-label="Period">
-              {PERIOD_OPTIONS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={periodType === option.value ? 'group-by-btn active' : 'group-by-btn'}
-                  aria-pressed={periodType === option.value}
-                  onClick={() => setPeriodType(option.value)}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
+            <ReportPeriodControl value={reportPeriod} onChange={setReportPeriod} />
             {ownerMode ? (
               <button
                 type="button"

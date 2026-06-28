@@ -1,13 +1,21 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
-import type { TimeEntry } from '../lib/types'
+import { ReportPeriodControl } from '../components/ReportPeriodControl'
+import {
+  isInReportPeriod,
+  isSingleWeek,
+  presetRange,
+  type ReportPeriod,
+} from '../lib/reportPeriod'
+import type { TimeEntry, WeeklySubmission } from '../lib/types'
 import {
   clientName,
-  currentWeekStart,
   employeeName,
+  formatHours,
   formatHoursMinutes,
   getWeekLabel,
+  localDateOnly,
   sessionMinutes,
   shiftWeek,
   weekRangeOf,
@@ -52,26 +60,38 @@ function formatDayLabel(date: string) {
   return `${weekday} ${parsed.getMonth() + 1}/${parsed.getDate()}`
 }
 
+/** A custom one-week (Sun–Sat) report period anchored on `weekStartIso`. */
+function weekReportPeriod(weekStartIso: string): ReportPeriod {
+  const { start, end } = weekRangeOf(weekStartIso)
+  return { preset: 'custom', from: start, to: end }
+}
+
 export function TimesheetPage() {
-  const { data, role, visibleEntries, activeEmployeeId } = useAppContext()
+  const { data, role, visibleEntries, activeEmployeeId, reportPeriod, setReportPeriod } =
+    useAppContext()
   const employees = data.employees
   const clients = data.clients
   const checklists = data.checklists
 
-  const [weekStart, setWeekStart] = useState(currentWeekStart)
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(activeEmployeeId)
 
   // Owners pick whose timesheet to view; everyone else sees their own.
   const viewedEmployeeId = role === 'owner' ? selectedEmployeeId : activeEmployeeId
-  const { start, end } = weekRangeOf(weekStart)
+
+  const today = localDateOnly()
+  // Single-week mode keeps the full weekly submit/lock workflow; a wider range
+  // is a read-only multi-week view.
+  const singleWeek = isSingleWeek(reportPeriod, today)
+  // The Sun–Sat week the weekly workflow operates on (derived from the range).
+  const weekStart = reportPeriod.from
 
   const days = useMemo(() => {
-    const inWeek = visibleEntries.filter(
+    const inRange = visibleEntries.filter(
       (entry) =>
-        entry.employeeId === viewedEmployeeId && entry.date >= start && entry.date <= end,
+        entry.employeeId === viewedEmployeeId && isInReportPeriod(entry.date, reportPeriod),
     )
     const byDate = new Map<string, Segment[]>()
-    for (const entry of inWeek) {
+    for (const entry of inRange) {
       const list = byDate.get(entry.date) ?? []
       list.push(...entrySegments(entry))
       byDate.set(entry.date, list)
@@ -86,9 +106,9 @@ export function TimesheetPage() {
           .sort((x, y) => (x.startAt ?? '').localeCompare(y.startAt ?? '')),
         total: segments.reduce((sum, seg) => sum + seg.minutes, 0),
       }))
-  }, [visibleEntries, viewedEmployeeId, start, end])
+  }, [visibleEntries, viewedEmployeeId, reportPeriod])
 
-  const weekTotal = days.reduce((sum, day) => sum + day.total, 0)
+  const rangeTotal = days.reduce((sum, day) => sum + day.total, 0)
 
   const taskTitle = (entry: TimeEntry) => {
     if (entry.isAdministrative) return 'Administrative'
@@ -110,31 +130,39 @@ export function TimesheetPage() {
 
       <section className="panel">
         <div className="timesheet-toolbar">
-          <div className="timesheet-weeknav">
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="Previous week"
-              onClick={() => setWeekStart((current) => shiftWeek(current, -1))}
-            >
-              <ChevronLeft size={16} />
-            </button>
-            <span className="timesheet-weeklabel">{getWeekLabel(weekStart)}</span>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="Next week"
-              onClick={() => setWeekStart((current) => shiftWeek(current, 1))}
-            >
-              <ChevronRight size={16} />
-            </button>
-            <button
-              type="button"
-              className="ghost-action"
-              onClick={() => setWeekStart(currentWeekStart())}
-            >
-              This week
-            </button>
+          <div className="timesheet-toolbar-left">
+            <ReportPeriodControl value={reportPeriod} onChange={setReportPeriod} />
+            {singleWeek ? (
+              <div className="timesheet-weeknav">
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="Previous week"
+                  onClick={() => setReportPeriod(weekReportPeriod(shiftWeek(weekStart, -1)))}
+                >
+                  <ChevronLeft size={16} />
+                </button>
+                <span className="timesheet-weeklabel">{getWeekLabel(weekStart)}</span>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="Next week"
+                  onClick={() => setReportPeriod(weekReportPeriod(shiftWeek(weekStart, 1)))}
+                >
+                  <ChevronRight size={16} />
+                </button>
+                <button
+                  type="button"
+                  className="ghost-action"
+                  onClick={() => {
+                    const { from, to } = presetRange('week', today)
+                    setReportPeriod({ preset: 'week', from, to })
+                  }}
+                >
+                  This week
+                </button>
+              </div>
+            ) : null}
           </div>
 
           <div className="timesheet-toolbar-right">
@@ -155,15 +183,28 @@ export function TimesheetPage() {
               </label>
             ) : null}
             <div className="timesheet-weektotal">
-              <span>Week total</span>
-              <strong>{formatHoursMinutes(weekTotal)}</strong>
+              <span>{singleWeek ? 'Week total' : 'Total'}</span>
+              <strong>{formatHoursMinutes(rangeTotal)}</strong>
             </div>
           </div>
         </div>
 
+        {singleWeek ? (
+          <WeeklyTimesheetControls
+            weekStart={weekStart}
+            viewedEmployeeId={viewedEmployeeId}
+            weekMinutes={rangeTotal}
+          />
+        ) : (
+          <p className="timesheet-multiweek-hint">
+            Showing a multi-week range (read-only). Select a single week (Report period → This
+            week) to submit or lock a timesheet.
+          </p>
+        )}
+
         {days.length === 0 ? (
           <p className="empty-state">
-            No time logged for {employeeName(employees, viewedEmployeeId)} this week.
+            No time logged for {employeeName(employees, viewedEmployeeId)} in this period.
           </p>
         ) : (
           <div className="timesheet-days">
@@ -204,5 +245,120 @@ export function TimesheetPage() {
         )}
       </section>
     </section>
+  )
+}
+
+/**
+ * The weekly submit / lock / submission-status controls for a single Sun–Sat
+ * week, derived from the report period's `weekStart`. Shown only in single-week
+ * mode so the weekly workflow stays intact (a bookkeeper submits their week for
+ * owner review; the owner locks it). Owners don't submit — they review — so the
+ * submit button is shown only to staff for their own week.
+ */
+function WeeklyTimesheetControls({
+  weekStart,
+  viewedEmployeeId,
+  weekMinutes,
+}: {
+  weekStart: string
+  viewedEmployeeId: string
+  weekMinutes: number
+}) {
+  const { data, role, activeEmployeeId, previewMode, submitWeeklyTimesheet } = useAppContext()
+  const employees = data.employees
+  const submissions: WeeklySubmission[] = data.weeklySubmissions ?? []
+  const locks = data.timesheetLocks ?? []
+
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  // The submitting/owned timesheet is the viewed employee's; a staff member can
+  // only submit their OWN week.
+  const isOwnWeek = viewedEmployeeId === activeEmployeeId
+  const submission = submissions.find(
+    (entry) => entry.userId === viewedEmployeeId && entry.weekStart === weekStart,
+  )
+  const monthLocked = locks.some(
+    (lock) => lock.userId === viewedEmployeeId && lock.period === weekStart.slice(0, 7),
+  )
+
+  const reviewer =
+    submission?.reviewedBy && submission.status !== 'pending'
+      ? employees.find((employee) => employee.id === submission.reviewedBy)?.name
+      : null
+
+  // Owners review, they don't submit; staff submit only their own week and only
+  // when it isn't already pending/approved (a rejected week can be resubmitted).
+  const canSubmit =
+    role !== 'owner' &&
+    isOwnWeek &&
+    !previewMode &&
+    (!submission || submission.status === 'rejected')
+
+  const buttonLabel =
+    submission?.status === 'rejected'
+      ? 'Resubmit this week'
+      : submission?.status === 'pending'
+        ? 'Awaiting review'
+        : submission?.status === 'approved'
+          ? 'Approved'
+          : 'Submit week for review'
+
+  const handleSubmit = async () => {
+    if (!canSubmit || submitting) return
+    setSubmitting(true)
+    setError('')
+    try {
+      await submitWeeklyTimesheet(weekStart)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Submit failed')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="timesheet-week-controls">
+      <div className="timesheet-week-status">
+        <span className="status-pill">{formatHours(weekMinutes)} logged</span>
+        {submission?.status === 'pending' ? (
+          <span className="status-pill">Pending review</span>
+        ) : null}
+        {submission?.status === 'approved' ? (
+          <span className="status-pill">Approved{reviewer ? ` by ${reviewer}` : ''}</span>
+        ) : null}
+        {submission?.status === 'rejected' ? (
+          <span className="status-pill">Rejected{reviewer ? ` by ${reviewer}` : ''}</span>
+        ) : null}
+        {monthLocked ? <span className="status-pill">Month locked</span> : null}
+      </div>
+
+      {role !== 'owner' && isOwnWeek ? (
+        <button
+          type="button"
+          className="primary-action"
+          disabled={!canSubmit || submitting}
+          onClick={handleSubmit}
+          title={
+            submission?.status === 'approved'
+              ? 'This week is already approved.'
+              : submission?.status === 'pending'
+                ? 'Already submitted — an owner is reviewing.'
+                : previewMode
+                  ? 'Cannot submit while previewing as another user.'
+                  : 'Lock this week and send it to an owner for review.'
+          }
+        >
+          {submitting ? 'Submitting…' : buttonLabel}
+        </button>
+      ) : null}
+
+      {submission?.status === 'rejected' && submission.reviewNote ? (
+        <p className="auth-error" style={{ margin: 0 }}>
+          <strong>Rejection note:</strong> {submission.reviewNote}
+        </p>
+      ) : null}
+      {error ? <p className="auth-error">{error}</p> : null}
+    </div>
   )
 }

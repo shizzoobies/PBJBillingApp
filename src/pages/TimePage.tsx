@@ -8,8 +8,10 @@ import {
   TimerReset,
   Trash2,
 } from 'lucide-react'
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { useAppContext } from '../AppContext'
+import { ReportPeriodControl } from '../components/ReportPeriodControl'
+import { isInReportPeriod } from '../lib/reportPeriod'
 import { ApiError } from '../lib/types'
 import type {
   Checklist,
@@ -117,7 +119,16 @@ export function TimePage() {
     generateChecklistFromTemplate,
     previewMode,
     submitWeeklyTimesheet,
+    reportPeriod,
+    setReportPeriod,
   } = useAppContext()
+
+  // The recent-entries list is scoped to the shared report period. The live
+  // timer and the manual / log form are unaffected — only the displayed list.
+  const periodEntries = useMemo(
+    () => visibleEntries.filter((entry) => isInReportPeriod(entry.date, reportPeriod)),
+    [visibleEntries, reportPeriod],
+  )
 
   // Pick a recurring template in the timer's task list to "get ahead": this
   // generates that template's instance now and returns its checklist id so the
@@ -222,7 +233,11 @@ export function TimePage() {
           checklists={data.checklists}
           clients={data.clients}
           employees={data.employees}
-          entries={visibleEntries}
+          entries={periodEntries}
+          totalEntryCount={visibleEntries.length}
+          reportPeriodControl={
+            <ReportPeriodControl value={reportPeriod} onChange={setReportPeriod} />
+          }
           role={role}
           locks={data.timesheetLocks ?? []}
           timerRunning={Boolean(timer)}
@@ -1509,6 +1524,8 @@ function RecentTimeEntries({
   clients,
   employees,
   entries,
+  totalEntryCount,
+  reportPeriodControl,
   role,
   locks,
   timerRunning,
@@ -1521,6 +1538,9 @@ function RecentTimeEntries({
   clients: Client[]
   employees: Employee[]
   entries: TimeEntry[]
+  /** Count of entries BEFORE the report-period filter — drives the empty copy. */
+  totalEntryCount: number
+  reportPeriodControl: ReactNode
   role: Role
   locks: TimesheetLock[]
   timerRunning: boolean
@@ -1560,7 +1580,11 @@ function RecentTimeEntries({
           <p className="section-kicker">{role === 'owner' ? 'Team activity' : 'My activity'}</p>
           <h2>Recent time</h2>
         </div>
+        <span className="status-pill">
+          {sortedEntries.length} in range
+        </span>
       </div>
+      <div className="time-filter-row">{reportPeriodControl}</div>
       <div className="entry-list">
         {sortedEntries.slice(0, 8).map((entry) => {
           const linkedTask = entry.taskId
@@ -1600,7 +1624,11 @@ function RecentTimeEntries({
           )
         })}
         {entries.length === 0 ? (
-          <p className="empty-state">No time logged yet.</p>
+          <p className="empty-state">
+            {totalEntryCount === 0
+              ? 'No time logged yet.'
+              : 'No time logged in this report period.'}
+          </p>
         ) : null}
       </div>
     </section>

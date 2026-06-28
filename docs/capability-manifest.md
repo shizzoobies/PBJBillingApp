@@ -20,8 +20,15 @@ bell, and account menu sit in the top bar on every page.
   (name/title/email/phone/company emails/linked client), Plans (name/notes),
   Team (name/email/role), Checklists & Gantt (task title/client — composes with
   the assignee/client/status filters), Delayed (task title/client/waiting note),
-  and the Board (client/task title — composes with the period toggle). Reports
+  and the Board (client/task title — composes with the Report period). Reports
   and Productivity remain aggregate views with their own filters.
+- Report period (shared date range): a "Report period" control on the Time,
+  Timesheet, Board, and Checklists pages lets you view a range longer than one
+  week. Pick a preset — This week, This month, This quarter, This year to date —
+  or Custom with From/To date pickers. The chosen range filters what each of
+  those four views shows, and your last-used range is remembered per user (in
+  your browser). It's separate from the top-bar billing-month picker, which is
+  only for invoicing.
 
 ## Dashboard
 
@@ -51,6 +58,8 @@ bell, and account menu sit in the top bar on every page.
   haven't materialized yet; picking one generates it now so time can be logged
   against it. Staff can do this for their assigned clients.
 - Recent time list: edit or delete your recent entries (until approved/locked).
+  The list is scoped by the shared Report period (defaults to this month); the
+  live timer and the log form aren't affected by it.
 - Billable vs non-billable is determined by the client's billing setup.
 - Staff can always log time, with one exception: if an owner sent a prior
   week's timesheet back for changes (rejected), that week must be fixed and
@@ -59,9 +68,13 @@ bell, and account menu sit in the top bar on every page.
 
 ## Timesheet page
 
-- Week-by-week view of what each person worked on, day by day, with a week
-  total. Owner can switch between team members; staff see their own.
-- Navigate weeks with arrows or jump to "This week".
+- Day-by-day view of what each person worked on, scoped by the shared Report
+  period, with a total. Owner can switch between team members; staff see their own.
+- Single-week mode (Report period = This week, or a one-week range): navigate
+  weeks with ◀ ▶ arrows or "This week", and the per-week Submit / approval /
+  lock workflow shows for that week.
+- Multi-week range: the day list + total are read-only (no Submit/lock); pick a
+  single week to submit or lock — the weekly submission model is unchanged.
 
 ## Time Approvals (owner only)
 
@@ -128,10 +141,10 @@ bell, and account menu sit in the top bar on every page.
   live checklist(s) for that column (same checkboxes/cards as the Checklists
   page). Completing a client's checklist **removes that client from the column**
   automatically, so the board always shows what's still open.
-- **Period toggle** at the top: This week / This month / This quarter. It's a
-  horizon — a checklist shows when it's due on or before the end of the selected
-  period, so overdue work stays visible and the view widens week → month →
-  quarter.
+- **Report period** at the top (the shared date-range control): the board is a
+  horizon — a checklist shows when it's due on or before the END of the selected
+  period (`to`), so overdue work stays visible and the view widens as you pick a
+  larger range (week → month → quarter → year-to-date → custom).
 - **Scoping:** staff see only the clients they're assigned to (same as the rest
   of the app). The board is available to everyone, not owner-only.
 - **Which column a checklist lands in:** set its "Board column" on the repeating
