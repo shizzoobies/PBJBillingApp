@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   findBlockingWeek,
+  listBlockingWeeks,
   normalizeTimeEntryMethod,
 } from '../../lib/time-entry.js'
 
@@ -109,5 +110,42 @@ describe('findBlockingWeek', () => {
 
   it('does not block when the user has no prior weeks with time', () => {
     expect(findBlockingWeek(entryWeek, [], [])).toBeNull()
+  })
+})
+
+/**
+ * `listBlockingWeeks` is the plural form the server uses to name EVERY prior
+ * week a bookkeeper must submit — so someone who skipped several weeks (e.g.
+ * Allison: two un-submitted weeks plus a pending one) is told about all of them
+ * at once instead of hitting the gate one week at a time. `findBlockingWeek`
+ * returns only the earliest of this list.
+ */
+describe('listBlockingWeeks', () => {
+  const entryWeek = '2026-06-28'
+
+  it('lists every un-submitted prior week, oldest → newest, skipping submitted ones', () => {
+    // Allison's real shape: 05-31 + 06-14 un-submitted, 06-21 pending (clear).
+    expect(
+      listBlockingWeeks(
+        entryWeek,
+        ['2026-05-31', '2026-06-14', '2026-06-21'],
+        [{ weekStart: '2026-06-21', status: 'pending' }],
+      ),
+    ).toEqual([
+      { weekStart: '2026-05-31', reason: 'unsubmitted' },
+      { weekStart: '2026-06-14', reason: 'unsubmitted' },
+    ])
+  })
+
+  it('returns an empty list when nothing blocks', () => {
+    expect(
+      listBlockingWeeks(entryWeek, ['2026-06-21'], [{ weekStart: '2026-06-21', status: 'pending' }]),
+    ).toEqual([])
+  })
+
+  it('agrees with findBlockingWeek on the earliest blocker', () => {
+    const prior = ['2026-05-31', '2026-06-14', '2026-06-21']
+    const subs = [{ weekStart: '2026-06-14', status: 'rejected' as const }]
+    expect(listBlockingWeeks(entryWeek, prior, subs)[0]).toEqual(findBlockingWeek(entryWeek, prior, subs))
   })
 })

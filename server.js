@@ -27,7 +27,7 @@ import {
   sendReportEmail,
 } from './lib/notify.js'
 import {
-  findBlockingWeek,
+  listBlockingWeeks,
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
 } from './lib/time-entry.js'
@@ -2733,22 +2733,39 @@ const server = createServer(async (request, response) => {
         // week blocks when it's UN-SUBMITTED (no submission) or REJECTED (sent
         // back). A submitted/pending/approved week does NOT block — once it's
         // submitted it's out of staff's hands, so an awaiting-approval week never
-        // locks them out of the timer. See `findBlockingWeek`.
+        // locks them out of the timer. See `listBlockingWeeks`.
         if (session.user.role !== 'owner') {
           const entryWeekStart = weekStartOf(date)
           const priorWeeksWithTime = (allData.timeEntries ?? [])
             .filter((entry) => entry.employeeId === employeeId)
             .map((entry) => weekStartOf(entry.date))
-          const blocking = findBlockingWeek(
+          const blockingWeeks = listBlockingWeeks(
             entryWeekStart,
             priorWeeksWithTime,
             (allData.weeklySubmissions ?? []).filter((entry) => entry.userId === employeeId),
           )
-          if (blocking) {
-            const error =
-              blocking.reason === 'rejected'
-                ? `Your timesheet for the week of ${blocking.weekStart} was sent back for changes. Fix and resubmit it before logging more time.`
-                : `You have an unsubmitted timesheet for the week of ${blocking.weekStart}. Submit that week before logging time for a later week.`
+          if (blockingWeeks.length > 0) {
+            // Name EVERY blocking week so the bookkeeper submits them all in one
+            // pass instead of hitting this gate once per skipped week. Single-
+            // week wording is preserved for the common case; multi-week lists
+            // them explicitly.
+            const weeks = blockingWeeks.map((b) => b.weekStart)
+            const joinWeeks = (arr) =>
+              arr.length <= 1
+                ? arr[0] ?? ''
+                : arr.length === 2
+                  ? `${arr[0]} and ${arr[1]}`
+                  : `${arr.slice(0, -1).join(', ')}, and ${arr[arr.length - 1]}`
+            let error
+            if (weeks.length === 1) {
+              error =
+                blockingWeeks[0].reason === 'rejected'
+                  ? `Your timesheet for the week of ${weeks[0]} was sent back for changes. Fix and resubmit it before logging more time.`
+                  : `You have an unsubmitted timesheet for the week of ${weeks[0]}. Submit that week before logging time for a later week.`
+            } else {
+              const anyRejected = blockingWeeks.some((b) => b.reason === 'rejected')
+              error = `Before logging more time you need to submit ${anyRejected ? '(or resubmit) ' : ''}${weeks.length} earlier weeks that have logged time: ${joinWeeks(weeks)}. Open the Timesheet page, pick each week, and submit it.`
+            }
             sendJson(response, 423, { error })
             return
           }

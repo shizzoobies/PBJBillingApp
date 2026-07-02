@@ -248,6 +248,15 @@ function isEditableElementFocused(): boolean {
   return isEditableElementTag(el?.tagName, el?.isContentEditable ?? false)
 }
 
+// A 4xx policy/validation response (weekly-submission gate, month-lock,
+// client-visibility, bad payload) is the server cleanly REFUSING one action —
+// the workspace itself is still fully in sync. Surfacing it must NOT trip the
+// big red "your work is NOT being saved — contact Alex" alarm, which means a
+// genuine connectivity/save failure. Only network errors and 5xx warrant that.
+function isCleanRejection(error: unknown): boolean {
+  return error instanceof ApiError && [400, 403, 409, 422, 423].includes(error.status)
+}
+
 function App() {
   // Empty workspace until the server fetch resolves — avoids the flash
   // of stale demo clients / checklists on reload that made just-deleted
@@ -1136,6 +1145,13 @@ function App() {
         setDataSyncState('offline')
         return
       }
+      if (isCleanRejection(error)) {
+        // The server declined this one entry (e.g. the weekly-submission gate).
+        // Nothing is unsaved — keep sync healthy and let the caller show the
+        // reason inline, rather than firing the "contact Alex" data-loss alarm.
+        setDataSyncState('synced')
+        throw error
+      }
 
       setDataSyncState('error')
       throw error
@@ -1198,6 +1214,11 @@ function App() {
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
         return
+      }
+      if (isCleanRejection(error)) {
+        // Clean server refusal (gate / lock / visibility) — not a save failure.
+        setDataSyncState('synced')
+        throw error
       }
       setDataSyncState('error')
       throw error
