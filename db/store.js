@@ -8032,17 +8032,17 @@ export class AppDataStore {
                   else approved_at
                 end,
                 review_note = case
-                  when $10 is not null then $10
+                  when $10::text is not null then $10::text
                   when $5 in ('shipped', 'done') then null
                   else review_note
                 end,
                 reviewed_by = case
-                  when $10 is not null then $9
+                  when $10::text is not null then $9::text
                   when $5 in ('shipped', 'done') then null
                   else reviewed_by
                 end,
                 reviewed_at = case
-                  when $10 is not null then now()
+                  when $10::text is not null then now()
                   when $5 in ('shipped', 'done') then null
                   else reviewed_at
                 end,
