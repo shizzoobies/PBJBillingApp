@@ -41,6 +41,7 @@ const STATUS_OPTIONS: Array<{ value: FeatureRequestStatus; label: string }> = [
   { value: 'new', label: 'New' },
   { value: 'planned', label: 'Planned' },
   { value: 'in_progress', label: 'In Progress' },
+  { value: 'shipped', label: 'Shipped' },
   { value: 'done', label: 'Done' },
   { value: 'wont_do', label: "Won't do" },
 ]
@@ -50,6 +51,18 @@ const CLOSED_STATUSES: ReadonlySet<FeatureRequestStatus> = new Set<FeatureReques
   'done',
   'wont_do',
 ])
+
+/** Format an approval timestamp for the "Approved by … · <date>" line. */
+function formatApprovedAt(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return null
+  return date.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}
 
 function TypeBadge({ type }: { type: FeatureRequestType }) {
   const Icon = type === 'bug' ? Bug : type === 'improvement' ? Lightbulb : Sparkles
@@ -80,6 +93,7 @@ function PriorityBadge({ priority }: { priority: FeatureRequestPriority }) {
 export function UpdatesPage() {
   const {
     ownerMode,
+    data,
     featureRequests,
     addFeatureRequest,
     updateFeatureRequest,
@@ -87,6 +101,12 @@ export function UpdatesPage() {
     removeFeatureRequest,
     refineFeatureRequest,
   } = useAppContext()
+
+  // Resolve an approver's user id to a readable name for the "Approved by" line.
+  const employeeName = (userId: string | null | undefined): string | null => {
+    if (!userId) return null
+    return data.employees.find((emp) => emp.id === userId)?.name ?? null
+  }
 
   // Add-item form.
   const [newTitle, setNewTitle] = useState('')
@@ -332,6 +352,7 @@ export function UpdatesPage() {
               const refine = refineState[item.id]
               const classes = ['updates-card', `updates-priority-card-${item.priority}`]
               if (closed) classes.push('closed')
+              if (item.status === 'in_progress') classes.push('updates-card-in-progress')
               if (draggingId === item.id) classes.push('dragging')
               if (dropTargetId === item.id) classes.push('drop-target')
               return (
@@ -384,7 +405,9 @@ export function UpdatesPage() {
                         <PriorityBadge priority={item.priority} />
                         <TypeBadge type={item.type} />
                         <select
-                          className="updates-status-select"
+                          className={`updates-status-select${
+                            item.status === 'shipped' ? ' updates-status-shipped' : ''
+                          }`}
                           value={item.status}
                           aria-label="Status"
                           onChange={(event) =>
@@ -399,6 +422,33 @@ export function UpdatesPage() {
                             </option>
                           ))}
                         </select>
+
+                        {item.status === 'shipped' ? (
+                          <button
+                            type="button"
+                            className="updates-approve-button"
+                            title="Mark this shipped update as approved (closes it)"
+                            onClick={() =>
+                              void updateFeatureRequest(item.id, { status: 'done' })
+                            }
+                          >
+                            <Check size={13} aria-hidden="true" /> Mark approved
+                          </button>
+                        ) : null}
+
+                        {item.status === 'done'
+                          ? (() => {
+                              const approver = employeeName(item.approvedBy)
+                              const when = formatApprovedAt(item.approvedAt)
+                              return (
+                                <span className="updates-approved-by">
+                                  {approver
+                                    ? `Approved by ${approver}${when ? ` · ${when}` : ''}`
+                                    : 'Done'}
+                                </span>
+                              )
+                            })()
+                          : null}
                       </div>
 
                       <textarea

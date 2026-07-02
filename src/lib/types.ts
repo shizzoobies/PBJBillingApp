@@ -731,8 +731,19 @@ export type ServiceCategory = {
 /** Kind of update tracked on the owner-only "Updates" page. */
 export type FeatureRequestType = 'feature' | 'bug' | 'improvement'
 
-/** Lifecycle of an update: New → Planned → In Progress → Done / Won't do. */
-export type FeatureRequestStatus = 'new' | 'planned' | 'in_progress' | 'done' | 'wont_do'
+/**
+ * Lifecycle of an update: New → Planned → In Progress → Shipped → Done / Won't
+ * do. 'shipped' means "pushed, awaiting the owner's approval" — it is still an
+ * OPEN status (stays in the backlog / "Copy all" until approved). 'done' =
+ * approved/closed.
+ */
+export type FeatureRequestStatus =
+  | 'new'
+  | 'planned'
+  | 'in_progress'
+  | 'shipped'
+  | 'done'
+  | 'wont_do'
 
 /** Priority level of an update — items group by level first, then drag rank. */
 export type FeatureRequestPriority = 'urgent' | 'high' | 'medium' | 'low'
@@ -756,6 +767,14 @@ export type FeatureRequest = {
   priorityRank: number
   /** Optional owner notes, carried into the copy-for-Claude block. */
   devNotes?: string | null
+  /**
+   * Approval audit — the user id of the owner who approved (checked "Mark
+   * approved", moving the item to 'done'), and when. Stamped by
+   * `updateFeatureRequest` when status becomes 'done'; cleared if the item
+   * later moves away from 'done'. Null on legacy done items that predate this.
+   */
+  approvedBy?: string | null
+  approvedAt?: string | null
   createdAt: string
   updatedAt?: string | null
 }

@@ -29,13 +29,37 @@ export const PRIORITY_ORDER: Record<FeatureRequestPriority, number> = {
   low: 3,
 }
 
+/** Display labels for each status, in lifecycle order. */
+export const STATUS_LABELS: Record<FeatureRequestStatus, string> = {
+  new: 'New',
+  planned: 'Planned',
+  in_progress: 'In Progress',
+  shipped: 'Shipped',
+  done: 'Done',
+  wont_do: "Won't do",
+}
+
+/** Lifecycle order weight per status (New → … → Won't do). */
+export const STATUS_ORDER: Record<FeatureRequestStatus, number> = {
+  new: 0,
+  planned: 1,
+  in_progress: 2,
+  shipped: 3,
+  done: 4,
+  wont_do: 5,
+}
+
 /** Weight for an item's priority level (unknown → medium). */
 export function priorityWeight(priority: FeatureRequestPriority): number {
   return PRIORITY_ORDER[priority] ?? PRIORITY_ORDER.medium
 }
 
-/** Statuses considered "closed" — excluded from the prioritized backlog copy. */
-const CLOSED_STATUSES: ReadonlySet<FeatureRequestStatus> = new Set<FeatureRequestStatus>([
+/**
+ * Statuses considered "closed" — excluded from the prioritized backlog copy.
+ * 'shipped' is deliberately NOT here: a shipped item is still OPEN (awaiting the
+ * owner's approval) and stays in the backlog / "Copy all" until approved.
+ */
+export const CLOSED_STATUSES: ReadonlySet<FeatureRequestStatus> = new Set<FeatureRequestStatus>([
   'done',
   'wont_do',
 ])

@@ -2307,15 +2307,19 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = await readJsonBody(request)
-      const updated = await appDataStore.updateFeatureRequest(id, {
-        title: payload?.title,
-        description: payload?.description,
-        type: payload?.type,
-        status: payload?.status,
-        priority: payload?.priority,
-        priorityRank: payload?.priorityRank,
-        devNotes: payload?.devNotes,
-      })
+      const updated = await appDataStore.updateFeatureRequest(
+        id,
+        {
+          title: payload?.title,
+          description: payload?.description,
+          type: payload?.type,
+          status: payload?.status,
+          priority: payload?.priority,
+          priorityRank: payload?.priorityRank,
+          devNotes: payload?.devNotes,
+        },
+        session.user.id,
+      )
       if (!updated) {
         sendJson(response, 400, { error: 'Nothing to update' })
         return

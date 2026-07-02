@@ -1655,6 +1655,15 @@ export class AppDataStore {
       await this.pool.query(
         `alter table feature_requests add column if not exists updated_at timestamptz`,
       )
+      // Approval audit: who approved (moved to 'done') and when. Stamped when an
+      // item becomes 'done'; cleared when it moves away from 'done'. Null on
+      // legacy done rows that predate this.
+      await this.pool.query(
+        `alter table feature_requests add column if not exists approved_by text`,
+      )
+      await this.pool.query(
+        `alter table feature_requests add column if not exists approved_at timestamptz`,
+      )
 
       // Assistant suggestions the owner dismissed — keyed by a stable
       // pattern key so the same suggestion never nags twice.
@@ -7493,6 +7502,10 @@ export class AppDataStore {
       priority,
       priorityRank: Number(row.priority_rank ?? row.priorityRank ?? 0) || 0,
       devNotes: row.dev_notes ?? row.devNotes ?? null,
+      approvedBy: row.approved_by ?? row.approvedBy ?? null,
+      approvedAt: row.approved_at
+        ? new Date(row.approved_at).toISOString()
+        : (row.approvedAt ?? null),
       createdAt: row.created_at
         ? new Date(row.created_at).toISOString()
         : (row.createdAt ?? nowIso()),
@@ -7510,7 +7523,7 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, user_id, title, description, type, status, urgent, priority,
-                priority_rank, dev_notes, created_at, updated_at
+                priority_rank, dev_notes, approved_by, approved_at, created_at, updated_at
            from feature_requests
           order by ${FEATURE_REQUEST_PRIORITY_WEIGHT_SQL} asc,
                    priority_rank asc, created_at asc`,
@@ -7595,11 +7608,16 @@ export class AppDataStore {
   /**
    * Patch a feature request (title/description/type/status/urgent/priorityRank/
    * devNotes) and stamp updated_at. Returns the updated record, or null.
+   *
+   * Approval audit: when the patch moves the item TO 'done' and it isn't already
+   * approved, stamp `approved_by = actingUserId` + `approved_at = now()`. When
+   * the status moves to anything OTHER than 'done', clear the stamp (keeps it
+   * truthful — only currently-done items carry an approver).
    */
-  async updateFeatureRequest(id, patch = {}) {
+  async updateFeatureRequest(id, patch = {}, actingUserId = null) {
     if (!id) return null
     const allowedTypes = ['feature', 'bug', 'improvement']
-    const allowedStatuses = ['new', 'planned', 'in_progress', 'done', 'wont_do']
+    const allowedStatuses = ['new', 'planned', 'in_progress', 'shipped', 'done', 'wont_do']
     const title =
       typeof patch.title === 'string' ? patch.title.trim().slice(0, 120) : undefined
     const description =
@@ -7634,6 +7652,9 @@ export class AppDataStore {
     }
 
     if (this.pool) {
+      // Approval stamp ($9 = the acting user's id). When the new status is
+      // 'done' and the row isn't already approved, stamp approved_by/at; when it
+      // moves to any other status, clear them; otherwise leave them untouched.
       const result = await this.pool.query(
         `update feature_requests
             set title = coalesce($2, title),
@@ -7643,10 +7664,20 @@ export class AppDataStore {
                 priority = coalesce($6, priority),
                 priority_rank = coalesce($7, priority_rank),
                 dev_notes = coalesce($8, dev_notes),
+                approved_by = case
+                  when $5 = 'done' then coalesce(approved_by, $9)
+                  when $5 is not null then null
+                  else approved_by
+                end,
+                approved_at = case
+                  when $5 = 'done' then coalesce(approved_at, now())
+                  when $5 is not null then null
+                  else approved_at
+                end,
                 updated_at = now()
           where id = $1
         returning id, user_id, title, description, type, status, urgent, priority,
-                  priority_rank, dev_notes, created_at, updated_at`,
+                  priority_rank, dev_notes, approved_by, approved_at, created_at, updated_at`,
         [
           id,
           title ?? null,
@@ -7656,6 +7687,7 @@ export class AppDataStore {
           priority ?? null,
           priorityRank ?? null,
           devNotes ?? null,
+          actingUserId ?? null,
         ],
       )
       if (!result.rowCount) return null
@@ -7669,7 +7701,19 @@ export class AppDataStore {
     if (title !== undefined) existing.title = title
     if (description !== undefined) existing.description = description
     if (type !== undefined) existing.type = type
-    if (status !== undefined) existing.status = status
+    if (status !== undefined) {
+      existing.status = status
+      // Mirror the approval-stamp logic on the file backend.
+      if (status === 'done') {
+        if (!existing.approvedBy) {
+          existing.approvedBy = actingUserId ?? null
+          existing.approvedAt = nowIso()
+        }
+      } else {
+        existing.approvedBy = null
+        existing.approvedAt = null
+      }
+    }
     if (priority !== undefined) existing.priority = priority
     if (priorityRank !== undefined) existing.priorityRank = priorityRank
     if (devNotes !== undefined) existing.devNotes = devNotes
@@ -7734,7 +7778,7 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, user_id, title, description, type, status, urgent, priority,
-                priority_rank, dev_notes, created_at, updated_at
+                priority_rank, dev_notes, approved_by, approved_at, created_at, updated_at
            from feature_requests where id = $1`,
         [id],
       )

@@ -458,12 +458,17 @@ picker, notification bell, and account menu sit in the top bar on every page.
   Items come from two places: requests drafted by this assistant (chat →
   "Send to Alex") land here automatically, and the owner can add items directly.
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
-  In Progress → Done / Won't do), and a color-coded priority level — Urgent
+  In Progress → Shipped → Done, or Won't do), and a color-coded priority level — Urgent
   (red), High (orange), Medium (blue), Low (slate). The list sorts by priority
   level first (every Urgent above every High, every High above every Medium,
   etc.), and within each level it's a drag-to-rank backlog — so dragging sets
   the order inside a level, and changing the priority moves an item between
   levels.
+- Ship + approve workflow: when the developer has pushed an update they set the
+  item to "Shipped" (a distinct violet badge; still open/awaiting sign-off). A
+  Shipped item shows a "Mark approved" button — checking it moves the item to
+  "Done" and records who approved it and when ("Approved by <name> · <date>").
+  An In-Progress item's whole card gently pulses so it stands out at a glance.
 - "Refine for dev": sends a rough item to the AI to rewrite it into a clean,
   implementation-ready spec (Problem / Desired behavior / Where in the app /
   Acceptance); the owner accepts or discards the suggestion.

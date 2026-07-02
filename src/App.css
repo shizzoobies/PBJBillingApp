@@ -9043,6 +9043,80 @@ mark.list-search-hit {
   color: var(--ink);
 }
 
+/* Status accent colors. In-progress = blue, shipped = violet/teal (distinct
+   from both), done = green. */
+:root {
+  --status-in-progress: #2563a8;
+  --status-in-progress-soft: rgba(37, 99, 168, 0.16);
+  --status-shipped: #7c3aed;
+  --status-shipped-soft: rgba(124, 58, 237, 0.12);
+}
+
+/* "Shipped" reads as its own state: give the status select a violet accent when
+   the item is shipped (awaiting approval). */
+.updates-status-select.updates-status-shipped {
+  border-color: var(--status-shipped);
+  color: var(--status-shipped);
+  font-weight: 600;
+}
+
+/* Owner sign-off button, shown only on shipped items. */
+.updates-approve-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--status-shipped);
+  background: var(--status-shipped-soft);
+  color: var(--status-shipped);
+  cursor: pointer;
+}
+
+.updates-approve-button:hover {
+  background: var(--status-shipped);
+  color: #fff;
+}
+
+/* "Approved by <name> · <date>" caption on done items. */
+.updates-approved-by {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* In-progress cards pulse their whole hue so they stand out beyond the badge. */
+@keyframes updates-in-progress-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px var(--status-in-progress) inset, var(--shadow-sm);
+    border-color: var(--status-in-progress);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px var(--status-in-progress) inset,
+      0 0 14px 2px var(--status-in-progress-soft),
+      var(--shadow-sm);
+    border-color: var(--status-in-progress);
+  }
+}
+
+.updates-card.updates-card-in-progress {
+  border-color: var(--status-in-progress);
+  animation: updates-in-progress-pulse 1.8s ease-in-out infinite;
+}
+
+/* Reduced motion: no animation, just a steady highlight. */
+@media (prefers-reduced-motion: reduce) {
+  .updates-card.updates-card-in-progress {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--status-in-progress) inset, var(--shadow-sm);
+    border-color: var(--status-in-progress);
+  }
+}
+
 .updates-description-input {
   width: 100%;
   resize: vertical;

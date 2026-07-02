@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CLOSED_STATUSES,
   formatBacklogForClaude,
   formatRequestForClaude,
   PRIORITY_LABELS,
   PRIORITY_ORDER,
   priorityWeight,
   sortFeatureRequests,
+  STATUS_LABELS,
+  STATUS_ORDER,
 } from '../lib/updatesCopy'
-import type { FeatureRequest } from '../lib/types'
+import type { FeatureRequest, FeatureRequestStatus } from '../lib/types'
 
 /** Build a FeatureRequest with sensible defaults; override per test. */
 function make(overrides: Partial<FeatureRequest> = {}): FeatureRequest {
@@ -150,8 +153,34 @@ describe('formatRequestForClaude', () => {
   })
 })
 
+describe('status maps', () => {
+  it('includes every status (with shipped between in_progress and done)', () => {
+    const statuses: FeatureRequestStatus[] = [
+      'new',
+      'planned',
+      'in_progress',
+      'shipped',
+      'done',
+      'wont_do',
+    ]
+    expect(Object.keys(STATUS_LABELS).sort()).toEqual([...statuses].sort())
+    expect(Object.keys(STATUS_ORDER).sort()).toEqual([...statuses].sort())
+    expect(STATUS_LABELS.shipped).toBe('Shipped')
+    // Shipped sits between in_progress and done in the lifecycle order.
+    expect(STATUS_ORDER.in_progress).toBeLessThan(STATUS_ORDER.shipped)
+    expect(STATUS_ORDER.shipped).toBeLessThan(STATUS_ORDER.done)
+  })
+
+  it('treats shipped as OPEN — only done and wont_do are closed', () => {
+    expect(CLOSED_STATUSES.has('done')).toBe(true)
+    expect(CLOSED_STATUSES.has('wont_do')).toBe(true)
+    expect(CLOSED_STATUSES.has('shipped')).toBe(false)
+    expect(CLOSED_STATUSES.size).toBe(2)
+  })
+})
+
 describe('formatBacklogForClaude', () => {
-  it('excludes done and wont_do, numbers in the new level-then-rank order', () => {
+  it('excludes done and wont_do but KEEPS shipped, numbering level-then-rank', () => {
     const items = [
       make({ id: 'open-2', title: 'Second', status: 'new', priority: 'high', priorityRank: 1 }),
       make({ id: 'done', title: 'Closed', status: 'done', priority: 'urgent', priorityRank: 0 }),
@@ -162,12 +191,21 @@ describe('formatBacklogForClaude', () => {
         priority: 'urgent',
         priorityRank: 5,
       }),
+      make({
+        id: 'shipped',
+        title: 'Shipped item',
+        status: 'shipped',
+        priority: 'medium',
+        priorityRank: 0,
+      }),
       make({ id: 'wont', title: 'Nope', status: 'wont_do', priority: 'low', priorityRank: 0 }),
     ]
     const out = formatBacklogForClaude(items)
-    // Urgent first (#1), then the high item (#2); closed items gone.
+    // Urgent first (#1), then the high item (#2), then the shipped medium (#3);
+    // closed items gone but shipped (still open) stays.
     expect(out).toContain('1. ## [Feature] First  (priority: Urgent)')
     expect(out).toContain('2. ## [Feature] Second  (priority: High)')
+    expect(out).toContain('3. ## [Feature] Shipped item  (priority: Medium)')
     expect(out).not.toContain('Closed')
     expect(out).not.toContain('Nope')
   })
