@@ -6543,6 +6543,157 @@ button.repeating-task-toggle-pill {
   margin-top: 0;
 }
 
+/* ---- Structured "waiting on a person" blockers ---------------------- */
+.waiting-blocker-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.waiting-blocker-chip {
+  align-items: center;
+  background: #fff;
+  border: 1px solid rgba(211, 155, 42, 0.5);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 7px;
+  padding: 3px 6px 3px 11px;
+}
+
+.waiting-blocker-name {
+  color: #6f5510;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.waiting-blocker-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.waiting-blocker-done {
+  background: var(--brand, #7d2a4d);
+  border: none;
+  border-radius: 999px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  transition: filter 0.15s ease;
+}
+
+.waiting-blocker-done:hover {
+  filter: brightness(1.08);
+}
+
+.waiting-blocker-cancel {
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 4px;
+  transition: color 0.15s ease;
+}
+
+.waiting-blocker-cancel:hover {
+  color: #b3261e;
+}
+
+/* ---- Dashboard "Waiting on you" card -------------------------------- */
+.dashboard-waiting-on-you {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.waiting-on-you-row {
+  align-items: center;
+  background: rgba(211, 155, 42, 0.08);
+  border: 1px solid rgba(211, 155, 42, 0.3);
+  border-radius: 10px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 14px;
+}
+
+.waiting-on-you-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.waiting-on-you-step {
+  color: var(--ink, #13344a);
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.waiting-on-you-step:hover {
+  text-decoration: underline;
+}
+
+.waiting-on-you-sub {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.waiting-on-you-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.waiting-on-you-done {
+  background: var(--brand, #7d2a4d);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 7px 14px;
+  transition: filter 0.15s ease;
+}
+
+.waiting-on-you-done:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.waiting-on-you-done:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@media (max-width: 640px) {
+  .waiting-on-you-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .waiting-on-you-done {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waiting-blocker-done,
+  .waiting-blocker-cancel,
+  .waiting-on-you-done {
+    transition: none;
+  }
+}
+
 /* ---- Weekly final-review modal --------------------------------------- */
 .week-review-modal {
   max-width: 760px;

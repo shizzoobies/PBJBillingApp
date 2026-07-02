@@ -25,6 +25,7 @@
   type TimesheetLock,
   type TotpSetupInit,
   type TotpStatus,
+  type WaitingOnMeItem,
   type WeeklySubmission,
 } from './types'
 
@@ -1097,6 +1098,91 @@ export async function rejectItemDeletion(requestId: string) {
     )
   }
   return (await response.json()) as { ok: true; removed: string }
+}
+
+// ---- Structured "waiting on a person" blockers ----
+
+/** Flag a checklist step as waiting on an internal employee. Returns the updated checklist. */
+export async function addWaitingOnRequest(
+  checklistId: string,
+  body: {
+    itemId: string
+    subItemId?: string | null
+    subSubItemId?: string | null
+    blockerId: string
+    note?: string
+  },
+) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/waiting-ons`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to flag waiting on (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { checklist: Checklist }).checklist
+}
+
+/** Mark a waiting-on blocker done (the blocker, or an owner). Returns the updated checklist. */
+export async function waitingOnDoneRequest(checklistId: string, waitingOnId: string) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/waiting-ons/${encodeURIComponent(
+      waitingOnId,
+    )}/done`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to mark done (${response.status})`)
+  }
+  return ((await response.json()) as { checklist: Checklist }).checklist
+}
+
+/** Cancel a waiting-on blocker (the flagger, the step assignee, or an owner). */
+export async function waitingOnCancelRequest(checklistId: string, waitingOnId: string) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/waiting-ons/${encodeURIComponent(
+      waitingOnId,
+    )}/cancel`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to cancel (${response.status})`)
+  }
+  return ((await response.json()) as { checklist: Checklist }).checklist
+}
+
+/** Every pending blocker where the caller is the person being waited on. */
+export async function fetchWaitingOnMe() {
+  const response = await apiFetch('/api/waiting-on-me', { credentials: 'same-origin' })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to load waiting-on-me (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { items: WaitingOnMeItem[] }).items
 }
 
 // ---- Task-edit approval routing (details edit + pending-edit queue) ----

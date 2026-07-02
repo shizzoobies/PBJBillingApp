@@ -3685,6 +3685,18 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // GET /api/waiting-on-me — every pending structured blocker where the caller
+    // is the person being waited on. Any authed user; returns just the minimal
+    // step context so a blocker sees what they're holding up (even across client
+    // scope). Its own path, checked before the generic `:id` matcher.
+    if (normalizedPath === '/api/waiting-on-me' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const items = await appDataStore.listWaitingOnMe(session.user.id)
+      sendJson(response, 200, { items })
+      return
+    }
+
     // POST /api/checklists/item-deletions/:requestId/(approve|reject) — owner-only.
     // approve = execute the real delete by the stored path, then drop the
     // request; reject = drop the request only. Returns the updated checklist
@@ -4577,6 +4589,205 @@ const server = createServer(async (request, response) => {
       }
 
       sendJson(response, 405, { error: 'Method not allowed' })
+      return
+    }
+
+    // --- Structured "waiting on a person" blockers ---
+    // These routes MUST be matched BEFORE the generic
+    // `/api/checklists/:id/items/...` matchers below so they aren't shadowed.
+
+    // POST /api/checklists/:id/waiting-ons/:waitingOnId/(done|cancel)
+    const waitingOnActionMatch = normalizedPath.match(
+      /^\/api\/checklists\/([^/]+)\/waiting-ons\/([^/]+)\/(done|cancel)$/,
+    )
+    if (waitingOnActionMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      const checklistId = waitingOnActionMatch[1]
+      const waitingOnId = decodeURIComponent(waitingOnActionMatch[2])
+      const action = waitingOnActionMatch[3]
+
+      const existing = await appDataStore.getWaitingOn(checklistId, waitingOnId)
+      if (!existing) {
+        sendJson(response, 404, { error: 'Waiting-on request not found' })
+        return
+      }
+      const entry = existing.entry
+      const isOwner = session.user.role === 'owner'
+
+      if (action === 'done') {
+        // The blocker themselves (or an owner) marks it done.
+        if (entry.blockerId !== session.user.id && !isOwner) {
+          sendJson(response, 403, { error: 'Only the person being waited on can mark this done' })
+          return
+        }
+      } else {
+        // Cancel: the flagger, the step assignee, or an owner.
+        const isAssignee = existing.assigneeId && existing.assigneeId === session.user.id
+        if (entry.requestedBy !== session.user.id && !isAssignee && !isOwner) {
+          sendJson(response, 403, { error: 'You cannot cancel this waiting-on request' })
+          return
+        }
+      }
+
+      const resolved = await appDataStore.resolveWaitingOn(checklistId, waitingOnId)
+      if (!resolved) {
+        sendJson(response, 404, { error: 'Waiting-on request not found' })
+        return
+      }
+
+      const data = await appDataStore.read()
+      const checklist = data.checklists.find((c) => c.id === checklistId)
+      const checklistTitle = checklist?.title ?? 'a task'
+      const employees = data.employees ?? []
+      const nameOf = (id) => employees.find((e) => e.id === id)?.name ?? 'A team member'
+
+      try {
+        if (action === 'done') {
+          const blockerName = nameOf(resolved.entry.blockerId)
+          const message = `${blockerName} finished what you needed on "${resolved.label}" — you can continue`
+          // Notify BOTH the step assignee AND the flagger; dedupe; skip the actor.
+          const recipients = new Set()
+          if (resolved.assigneeId) recipients.add(resolved.assigneeId)
+          if (resolved.entry.requestedBy) recipients.add(resolved.entry.requestedBy)
+          recipients.delete(session.user.id)
+          for (const recipientId of recipients) {
+            await notify(appDataStore, recipientId, 'waiting_on_done', {
+              checklistId,
+              message,
+              link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+          await appDataStore.recordActivity(
+            session.user.id,
+            'waiting_on_done',
+            `${checklistTitle}: ${resolved.label}`,
+          )
+        } else {
+          const cancellerName = nameOf(session.user.id)
+          await notify(appDataStore, resolved.entry.blockerId, 'waiting_on_cancelled', {
+            checklistId,
+            message: `${cancellerName} no longer needs you on "${resolved.label}" in "${checklistTitle}"`,
+            link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+          await appDataStore.recordActivity(
+            session.user.id,
+            'waiting_on_cancelled',
+            `${checklistTitle}: ${resolved.label}`,
+          )
+        }
+      } catch (err) {
+        console.error(`[notify] waiting_on_${action} dispatch failed:`, err?.message || err)
+      }
+
+      sendJson(response, 200, { checklist: resolved.checklist })
+      return
+    }
+
+    // POST /api/checklists/:id/waiting-ons — flag a step as waiting on a person.
+    const waitingOnCollectionMatch = normalizedPath.match(
+      /^\/api\/checklists\/([^/]+)\/waiting-ons$/,
+    )
+    if (waitingOnCollectionMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      const checklistId = waitingOnCollectionMatch[1]
+      const data = await appDataStore.read()
+      const checklist = data.checklists.find((c) => c.id === checklistId)
+      if (!checklist) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      // Auth mirrors the item PATCH: owner / assignee / editor / client-visible.
+      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+      const canEdit =
+        session.user.role === 'owner' ||
+        checklist.assigneeId === session.user.id ||
+        editorIds.includes(session.user.id) ||
+        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
+      if (!canEdit) {
+        sendJson(response, 403, { error: 'You do not have permission to flag this step' })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const itemId = typeof payload?.itemId === 'string' ? payload.itemId : ''
+      const subItemId = typeof payload?.subItemId === 'string' ? payload.subItemId : null
+      const subSubItemId =
+        typeof payload?.subSubItemId === 'string' ? payload.subSubItemId : null
+      const blockerId = typeof payload?.blockerId === 'string' ? payload.blockerId : ''
+      const note = typeof payload?.note === 'string' ? payload.note : undefined
+      if (!itemId) {
+        sendJson(response, 400, { error: 'itemId is required' })
+        return
+      }
+      // blockerId must be a real employee.
+      const employees = data.employees ?? []
+      if (!blockerId || !employees.some((e) => e.id === blockerId)) {
+        sendJson(response, 400, { error: 'blockerId must be a valid employee' })
+        return
+      }
+
+      const result = await appDataStore.addWaitingOn(
+        checklistId,
+        { itemId, subItemId, subSubItemId },
+        { blockerId, requestedBy: session.user.id, note },
+      )
+      if (!result) {
+        sendJson(response, 404, { error: 'Step not found' })
+        return
+      }
+
+      const flaggerName =
+        employees.find((e) => e.id === session.user.id)?.name ?? session.user.name ?? 'A team member'
+      try {
+        await notify(appDataStore, blockerId, 'waiting_on_requested', {
+          checklistId,
+          message: `${flaggerName} is waiting on you: "${result.node.label}" in "${checklist.title}"`,
+          link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+          appPublicUrl: getPublicAppUrl(request),
+        })
+      } catch (err) {
+        console.error('[notify] waiting_on_requested dispatch failed:', err?.message || err)
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'waiting_on_requested',
+        `${checklist.title}: ${result.node.label}`,
+      )
+
+      sendJson(response, 200, { checklist: result.checklist })
       return
     }
 

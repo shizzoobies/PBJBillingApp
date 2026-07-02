@@ -368,12 +368,29 @@ export type TimesheetLock = {
  * The deepest checklist node — a sub-sub-item, nested under a `SubChecklistItem`.
  * Three levels total (item → sub-item → sub-sub-item); nothing nests under this.
  */
+/**
+ * A structured "waiting on a person" blocker on a checklist step. Additive to
+ * (and independent of) the legacy free-text `waitingOn` note + `waiting` flag.
+ * The entry's presence IS the pending state — resolving (done/cancel) removes
+ * it; there's no status field. `blockerId` is the internal employee being
+ * waited on; `requestedBy` is the employee who flagged it.
+ */
+export type WaitingOn = {
+  id: string
+  blockerId: string
+  requestedBy: string
+  note?: string
+  createdAt: string
+}
+
 export type SubSubChecklistItem = {
   id: string
   title: string
   done: boolean
   /** Concrete resolved due date (ISO yyyy-mm-dd), computed at materialization. */
   dueDate?: string
+  /** Structured person-blockers on this sub-sub-step (see WaitingOn). */
+  waitingOns?: WaitingOn[]
 }
 
 /** A sub-sub-item on a template item. Template nodes have no `done`. */
@@ -413,6 +430,8 @@ export type SubChecklistItem = {
   waitingOn?: string
   /** Optional id of a checklist this sub-step is waiting on (see ChecklistItem). */
   waitingForChecklistId?: string
+  /** Structured person-blockers on this sub-step (see WaitingOn). */
+  waitingOns?: WaitingOn[]
   /** One deeper level of nested sub-sub-items. Empty/undefined when flat. */
   subItems?: SubSubChecklistItem[]
 }
@@ -458,6 +477,8 @@ export type ChecklistItem = {
    * longer blocked. Only meaningful while `waiting` is true.
    */
   waitingForChecklistId?: string
+  /** Structured person-blockers on this step (see WaitingOn). */
+  waitingOns?: WaitingOn[]
   /** One level of nested sub-items. Empty/undefined when the item is flat. */
   subItems?: SubChecklistItem[]
 }
@@ -1117,11 +1138,32 @@ export type NotificationEvent =
   | 'invoice_ready'
   | 'time_entry_manual'
   | 'waiting_cleared'
+  | 'waiting_on_requested'
+  | 'waiting_on_done'
+  | 'waiting_on_cancelled'
   | 'checklist_deletion_requested'
   | 'checklist_item_deletion_requested'
   | 'task_edit_requested'
   | 'task_edit_approved'
   | 'task_edit_rejected'
+
+/**
+ * A flattened "someone is waiting on you" row (from GET /api/waiting-on-me).
+ * The minimal step context a blocker needs to see what they're holding up.
+ */
+export type WaitingOnMeItem = {
+  checklistId: string
+  checklistTitle: string
+  clientId: string
+  clientName: string
+  itemLabel: string
+  subLabel?: string
+  waitingOnId: string
+  note?: string
+  requestedById: string
+  requestedByName: string
+  createdAt: string
+}
 
 export type NotificationEntry = {
   id: string

@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
-import { clientName, employeeName, localDateOnly, shortDate } from '../lib/utils'
+import { clientName, employeeName, localDateOnly, shortDate, stepIsWaiting } from '../lib/utils'
 
 /**
  * Owner-only "Delayed" page. Surfaces every checklist step that's been flagged
@@ -20,6 +20,8 @@ type WaitingRow = {
   /** Present when the waiting flag is on a sub-item rather than the item. */
   subLabel?: string
   note?: string
+  /** Names of the internal people this step is structurally waiting on. */
+  blockerNames?: string[]
   assigneeId?: string
   dueDate?: string
 }
@@ -49,19 +51,20 @@ export function DelayedPage() {
       if (checklist.deletedAt) continue
       const rows: WaitingRow[] = []
       for (const item of checklist.items) {
-        if (item.waiting) {
+        if (stepIsWaiting(item)) {
           rows.push({
             key: `${checklist.id}:${item.id}`,
             checklistId: checklist.id,
             checklistTitle: checklist.title,
             itemLabel: item.label,
             note: item.waitingOn,
+            blockerNames: (item.waitingOns ?? []).map((w) => employeeName(employees, w.blockerId)),
             assigneeId: item.assigneeId,
             dueDate: item.dueDate,
           })
         }
         for (const sub of item.subItems ?? []) {
-          if (sub.waiting) {
+          if (stepIsWaiting(sub)) {
             rows.push({
               key: `${checklist.id}:${item.id}:${sub.id}`,
               checklistId: checklist.id,
@@ -69,6 +72,9 @@ export function DelayedPage() {
               itemLabel: item.label,
               subLabel: sub.title,
               note: sub.waitingOn,
+              blockerNames: (sub.waitingOns ?? []).map((w) =>
+                employeeName(employees, w.blockerId),
+              ),
               assigneeId: item.assigneeId,
               dueDate: sub.dueDate ?? item.dueDate,
             })
@@ -101,7 +107,7 @@ export function DelayedPage() {
         }
       })
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
-  }, [checklists, clients])
+  }, [checklists, clients, employees])
 
   const [query, setQuery] = useState('')
 
@@ -225,7 +231,13 @@ export function DelayedPage() {
                                     ) : null}
                                   </span>
                                   <span className="delayed-row-note">
-                                    {row.note ? row.note : 'Waiting (no note yet)'}
+                                    {row.blockerNames && row.blockerNames.length > 0
+                                      ? `Waiting on ${row.blockerNames.join(', ')}${
+                                          row.note ? ` — ${row.note}` : ''
+                                        }`
+                                      : row.note
+                                        ? row.note
+                                        : 'Waiting (no note yet)'}
                                   </span>
                                 </div>
                                 <div className="delayed-row-meta">

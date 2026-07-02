@@ -21,6 +21,7 @@ import type {
   TemplateStage,
   TimeEntry,
   TimerState,
+  WaitingOnMeItem,
 } from './lib/types'
 
 export type AppContextValue = {
@@ -422,6 +423,28 @@ export type AppContextValue = {
   approvePendingTaskEdit: (editId: string) => Promise<void>
   /** Reject a pending task edit (discards it). Allowed for the approver or owner. */
   rejectPendingTaskEdit: (editId: string) => Promise<void>
+  /**
+   * Structured "waiting on you" blockers targeting the signed-in user (from
+   * GET /api/waiting-on-me). Drives the Dashboard "Waiting on you" card + the
+   * per-chip "Mark done" affordance. Loaded on sign-in, refreshed after any
+   * waiting-on action.
+   */
+  waitingOnMe: WaitingOnMeItem[]
+  /** Flag a checklist step as waiting on an internal employee (the blocker). */
+  addWaitingOn: (
+    checklistId: string,
+    body: {
+      itemId: string
+      subItemId?: string | null
+      subSubItemId?: string | null
+      blockerId: string
+      note?: string
+    },
+  ) => Promise<void>
+  /** Mark a waiting-on blocker done (notifies the assignee + flagger). */
+  waitingOnDone: (checklistId: string, waitingOnId: string) => Promise<void>
+  /** Cancel a waiting-on blocker (notifies the blocker it's no longer needed). */
+  waitingOnCancel: (checklistId: string, waitingOnId: string) => Promise<void>
   /** Owner-only: restore a recycled checklist back to the active list. */
   restoreChecklist: (checklistId: string) => Promise<void>
   /** Owner-only: permanently delete every recycled checklist. Not reversible. */

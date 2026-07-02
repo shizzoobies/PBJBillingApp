@@ -554,6 +554,20 @@ export function isChecklistItemDone(item: {
   return item.done
 }
 
+/**
+ * Whether a checklist step (item / sub-item / sub-sub-item) counts as "waiting."
+ * True when the legacy `waiting` toggle is on OR the node carries ≥1 structured
+ * person-blocker (`waitingOns`). Used everywhere the app decides "is this step
+ * waiting?" so person-only blockers surface in the existing waiting UI without
+ * flipping the old boolean.
+ */
+export function stepIsWaiting(node: {
+  waiting?: boolean
+  waitingOns?: unknown[]
+}): boolean {
+  return node.waiting === true || (node.waitingOns ?? []).length > 0
+}
+
 export type ChecklistStatus = 'Done' | 'Overdue' | 'In progress' | 'Not started'
 
 /**

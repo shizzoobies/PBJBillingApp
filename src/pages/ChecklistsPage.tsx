@@ -33,6 +33,7 @@ import type {
   Role,
   TemplateStage,
   TimeEntry,
+  WaitingOn,
 } from '../lib/types'
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import {
@@ -52,6 +53,7 @@ import {
   monthShortNames,
   shortDate,
   stageNameFor,
+  stepIsWaiting,
 } from '../lib/utils'
 
 type Group = 'overdue' | 'week' | 'month' | 'later' | 'completed'
@@ -1725,17 +1727,31 @@ function WaitingEditor({
   employees,
   availableTasks,
   waitingForChecklistId,
+  waitingOns,
+  activeEmployeeId,
   onSetNote,
   onSetWaitingFor,
   onClear,
+  onAddWaitingOn,
+  onCancelWaitingOn,
+  onDoneWaitingOn,
 }: {
   note: string
   employees: Employee[]
   availableTasks: Array<{ id: string; title: string }>
   waitingForChecklistId?: string
+  /** Structured person-blockers on this node (pending). */
+  waitingOns: WaitingOn[]
+  activeEmployeeId: string
   onSetNote: (next: string | null) => void
   onSetWaitingFor: (next: string | null) => void
   onClear: () => void
+  /** Flag a new person-blocker on this step. */
+  onAddWaitingOn: (blockerId: string) => void
+  /** Cancel a pending blocker (the blocked side). */
+  onCancelWaitingOn: (waitingOnId: string) => void
+  /** Mark a pending blocker done (only shown when the current user IS the blocker). */
+  onDoneWaitingOn: (waitingOnId: string) => void
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const { state, flash } = useSaveFlash()
@@ -1749,16 +1765,6 @@ function WaitingEditor({
     }
   }
 
-  // Picking a person APPENDS their name to whatever's already typed, so you can
-  // have "Brittany to review" — person AND note together — not one or the other.
-  const addPerson = (name: string) => {
-    const current = textareaRef.current?.value ?? note ?? ''
-    const combined = current.trim() ? `${current.trim()} ${name}` : name
-    if (textareaRef.current) textareaRef.current.value = combined
-    onSetNote(combined)
-    flash()
-  }
-
   return (
     <div className="waiting-editor">
       <div className="waiting-editor-row">
@@ -1766,16 +1772,16 @@ function WaitingEditor({
         <SaveBadge state={state} />
         <select
           className="waiting-person-select"
-          aria-label="Add a person to the waiting note"
+          aria-label="Waiting on a person"
           value=""
           onChange={(event) => {
-            const name = event.target.value
-            if (name) addPerson(name)
+            const blockerId = event.target.value
+            if (blockerId) onAddWaitingOn(blockerId)
           }}
         >
-          <option value="">+ Add a person…</option>
+          <option value="">+ Waiting on a person…</option>
           {employees.map((emp) => (
-            <option key={emp.id} value={emp.name}>
+            <option key={emp.id} value={emp.id}>
               {emp.name}
             </option>
           ))}
@@ -1784,12 +1790,47 @@ function WaitingEditor({
           Clear
         </button>
       </div>
+      {waitingOns.length > 0 ? (
+        <ul className="waiting-blocker-list">
+          {waitingOns.map((entry) => {
+            const blockerName = employeeName(employees, entry.blockerId)
+            const iAmBlocker = entry.blockerId === activeEmployeeId
+            return (
+              <li key={entry.id} className="waiting-blocker-chip">
+                <span className="waiting-blocker-name">Waiting on {blockerName}</span>
+                {entry.note ? (
+                  <span className="waiting-blocker-note">{entry.note}</span>
+                ) : null}
+                {iAmBlocker ? (
+                  <button
+                    type="button"
+                    className="waiting-blocker-done"
+                    title="Mark what they needed as done — notifies the assignee and flagger"
+                    onClick={() => onDoneWaitingOn(entry.id)}
+                  >
+                    Mark done
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="waiting-blocker-cancel"
+                  aria-label={`Cancel waiting on ${blockerName}`}
+                  title="No longer waiting on this person"
+                  onClick={() => onCancelWaitingOn(entry.id)}
+                >
+                  ×
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      ) : null}
       <textarea
         ref={textareaRef}
         key={note}
         className="waiting-note-textarea"
         rows={2}
-        placeholder="e.g. Brittany to review, or the client to send statements"
+        placeholder="e.g. the client to send statements (free-text note)"
         defaultValue={note}
         onBlur={(event) => save(event.target.value)}
       />
@@ -1876,7 +1917,14 @@ function DraggableTaskList({
   // that one is completed). Pulled from context to avoid prop-drilling.
   // `pendingItemDeletionKeys` drives the per-item "Deletion requested" badge +
   // disabling its delete control (can't re-request a pending deletion).
-  const { data: appData, pendingItemDeletionKeys } = useAppContext()
+  const {
+    data: appData,
+    pendingItemDeletionKeys,
+    activeEmployeeId: meId,
+    addWaitingOn,
+    waitingOnCancel,
+    waitingOnDone,
+  } = useAppContext()
   const hasPendingDeletion = (
     itemId: string,
     subItemId?: string | null,
@@ -1996,7 +2044,7 @@ function DraggableTaskList({
                     </span>
                   ) : null}
                 </span>
-                {item.waiting ? (
+                {stepIsWaiting(item) ? (
                   <span className="task-row-waiting" title="Why this step isn't done yet">
                     {item.waitingOn ? `Waiting on: ${item.waitingOn}` : 'Waiting'}
                   </span>
@@ -2089,12 +2137,14 @@ function DraggableTaskList({
                 )}
               </span>
             </div>
-            {canEdit && item.waiting ? (
+            {canEdit && stepIsWaiting(item) ? (
               <WaitingEditor
                 note={item.waitingOn ?? ''}
                 employees={employees}
                 availableTasks={availableTasks}
                 waitingForChecklistId={item.waitingForChecklistId}
+                waitingOns={item.waitingOns ?? []}
+                activeEmployeeId={meId}
                 onSetNote={(next) => void onUpdateItem(item.id, { waitingOn: next })}
                 onSetWaitingFor={(next) =>
                   void onUpdateItem(item.id, { waitingForChecklistId: next })
@@ -2106,6 +2156,13 @@ function DraggableTaskList({
                     waitingForChecklistId: null,
                   })
                 }
+                onAddWaitingOn={(blockerId) =>
+                  void addWaitingOn(checklistId, { itemId: item.id, blockerId })
+                }
+                onCancelWaitingOn={(waitingOnId) =>
+                  void waitingOnCancel(checklistId, waitingOnId)
+                }
+                onDoneWaitingOn={(waitingOnId) => void waitingOnDone(checklistId, waitingOnId)}
               />
             ) : null}
             {(hasSubItems || canEdit) ? (
@@ -2134,7 +2191,7 @@ function DraggableTaskList({
                             {subSubDoneCount}/{subSubItems.length}
                           </span>
                         ) : null}
-                        {sub.waiting ? (
+                        {stepIsWaiting(sub) ? (
                           <span
                             className="task-row-waiting sub-waiting-badge"
                             title="Why this sub-step isn't done yet"
@@ -2191,12 +2248,14 @@ function DraggableTaskList({
                           </span>
                         ) : null}
                       </div>
-                      {canEdit && sub.waiting ? (
+                      {canEdit && stepIsWaiting(sub) ? (
                         <WaitingEditor
                           note={sub.waitingOn ?? ''}
                           employees={employees}
                           availableTasks={availableTasks}
                           waitingForChecklistId={sub.waitingForChecklistId}
+                          waitingOns={sub.waitingOns ?? []}
+                          activeEmployeeId={meId}
                           onSetNote={(next) =>
                             void onUpdateSubItemWaiting(item.id, sub.id, { waitingOn: next })
                           }
@@ -2211,6 +2270,19 @@ function DraggableTaskList({
                               waitingOn: null,
                               waitingForChecklistId: null,
                             })
+                          }
+                          onAddWaitingOn={(blockerId) =>
+                            void addWaitingOn(checklistId, {
+                              itemId: item.id,
+                              subItemId: sub.id,
+                              blockerId,
+                            })
+                          }
+                          onCancelWaitingOn={(waitingOnId) =>
+                            void waitingOnCancel(checklistId, waitingOnId)
+                          }
+                          onDoneWaitingOn={(waitingOnId) =>
+                            void waitingOnDone(checklistId, waitingOnId)
                           }
                         />
                       ) : null}

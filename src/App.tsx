@@ -47,6 +47,10 @@ import {
   approveItemDeletion as approveItemDeletionRequest,
   rejectItemDeletion as rejectItemDeletionRequest,
   isItemDeletionFiled,
+  addWaitingOnRequest,
+  waitingOnDoneRequest,
+  waitingOnCancelRequest,
+  fetchWaitingOnMe,
   updateChecklistMetaRequest,
   listPendingTaskEdits,
   approvePendingTaskEdit as approvePendingTaskEditRequest,
@@ -107,6 +111,7 @@ import {
   type ServiceCategory,
   type SessionUser,
   type SubscriptionPlan,
+  type WaitingOnMeItem,
   type TimeEntry,
   type TimerState,
 } from './lib/types'
@@ -268,6 +273,10 @@ function App() {
   // approver). Endpoint-managed like itemDeletionRequests: loaded on sign-in and
   // refreshed after any edit / approve / reject so the queue + badges stay fresh.
   const [pendingTaskEdits, setPendingTaskEdits] = useState<PendingTaskEdit[]>([])
+  // Structured "waiting on you" blockers targeting the signed-in user. Endpoint-
+  // managed like itemDeletionRequests: loaded on sign-in and refreshed after any
+  // waiting-on action so the Dashboard card + step chips stay accurate.
+  const [waitingOnMe, setWaitingOnMe] = useState<WaitingOnMeItem[]>([])
   const [activeEmployeeId, setActiveEmployeeId] = useState('emp-avery')
   const [previewUserId, setPreviewUserId] = useState<string | null>(null)
   const [selectedClientId, setSelectedClientId] = useState('client-northstar')
@@ -545,18 +554,29 @@ function App() {
     }
   }, [])
 
+  // "Waiting on you" blockers: same endpoint-managed pattern.
+  const refreshWaitingOnMe = useCallback(async () => {
+    try {
+      setWaitingOnMe(await fetchWaitingOnMe())
+    } catch {
+      /* non-fatal — the card just won't update until the next refresh */
+    }
+  }, [])
+
   useEffect(() => {
     if (!sessionUser) return
     let cancelled = false
     void (async () => {
       try {
-        const [requests, edits] = await Promise.all([
+        const [requests, edits, waiting] = await Promise.all([
           listItemDeletionRequests(),
           listPendingTaskEdits(),
+          fetchWaitingOnMe(),
         ])
         if (!cancelled) {
           setItemDeletionRequests(requests)
           setPendingTaskEdits(edits)
+          setWaitingOnMe(waiting)
         }
       } catch {
         /* non-fatal */
@@ -1018,6 +1038,57 @@ function App() {
       await refreshItemDeletionRequests()
     },
     [refreshItemDeletionRequests],
+  )
+
+  // Structured "waiting on a person" actions. Each hits its endpoint, merges the
+  // returned checklist into local state (so the step chips update), then
+  // refreshes the "waiting on you" list for the Dashboard card.
+  const mergeChecklist = useCallback((updated: Checklist) => {
+    applyServerDataUpdate((current) => ({
+      ...current,
+      checklists: current.checklists.map((checklist) =>
+        checklist.id === updated.id ? updated : checklist,
+      ),
+    }))
+  }, [])
+
+  const addWaitingOn = useCallback(
+    async (
+      checklistId: string,
+      body: {
+        itemId: string
+        subItemId?: string | null
+        subSubItemId?: string | null
+        blockerId: string
+        note?: string
+      },
+    ) => {
+      if (previewActiveRef.current) return
+      const updated = await addWaitingOnRequest(checklistId, body)
+      mergeChecklist(updated)
+      await refreshWaitingOnMe()
+    },
+    [mergeChecklist, refreshWaitingOnMe],
+  )
+
+  const waitingOnDone = useCallback(
+    async (checklistId: string, waitingOnId: string) => {
+      if (previewActiveRef.current) return
+      const updated = await waitingOnDoneRequest(checklistId, waitingOnId)
+      mergeChecklist(updated)
+      await refreshWaitingOnMe()
+    },
+    [mergeChecklist, refreshWaitingOnMe],
+  )
+
+  const waitingOnCancel = useCallback(
+    async (checklistId: string, waitingOnId: string) => {
+      if (previewActiveRef.current) return
+      const updated = await waitingOnCancelRequest(checklistId, waitingOnId)
+      mergeChecklist(updated)
+      await refreshWaitingOnMe()
+    },
+    [mergeChecklist, refreshWaitingOnMe],
   )
 
   // Pending task-edit decisions. Approve merges the server-returned (now-edited)
@@ -3439,6 +3510,10 @@ function App() {
     pendingTaskEditChecklistIds,
     approvePendingTaskEdit,
     rejectPendingTaskEdit,
+    waitingOnMe,
+    addWaitingOn,
+    waitingOnDone,
+    waitingOnCancel,
     restoreChecklist,
     emptyChecklistRecycleBin,
     deleteTeamMember,

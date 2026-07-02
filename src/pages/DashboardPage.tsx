@@ -618,6 +618,8 @@ function EmployeeDashboardView() {
     billingPeriod,
     toggleChecklistItem,
     previewMode,
+    waitingOnMe,
+    waitingOnDone,
   } = useAppContext()
   const navigate = useNavigate()
 
@@ -805,6 +807,43 @@ function EmployeeDashboardView() {
           <small>cases</small>
         </button>
       </section>
+
+      {waitingOnMe.length > 0 ? (
+        <section className="dashboard-section" aria-label="Waiting on you">
+          <h2>Waiting on you</h2>
+          <ul className="dashboard-waiting-on-you">
+            {waitingOnMe.map((row) => (
+              <li key={row.waitingOnId} className="waiting-on-you-row">
+                <div className="waiting-on-you-main">
+                  <Link
+                    className="waiting-on-you-step"
+                    to={`/checklists?focus=${encodeURIComponent(row.checklistId)}`}
+                  >
+                    {row.checklistTitle}
+                    <span className="waiting-on-you-sub">
+                      {' › '}
+                      {row.itemLabel}
+                      {row.subLabel ? ` › ${row.subLabel}` : ''}
+                    </span>
+                  </Link>
+                  <span className="waiting-on-you-meta">
+                    {row.clientName} · {row.requestedByName} is waiting
+                    {row.note ? ` · ${row.note}` : ''}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="waiting-on-you-done"
+                  disabled={previewMode}
+                  onClick={() => void waitingOnDone(row.checklistId, row.waitingOnId)}
+                >
+                  Mark done
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       <section className="dashboard-section" aria-label="My queue">
         <h2>My queue</h2>

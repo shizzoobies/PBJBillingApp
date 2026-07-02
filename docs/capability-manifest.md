@@ -98,10 +98,17 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - "Paste a list" turns pasted lines into steps in one go.
 - Group the page by due date or by client; filter by assignee, client, status.
 - Waiting on (the hourglass ⏳): flag a step as waiting, write who/what it's
-  waiting on, optionally pick the SPECIFIC other task it's waiting for — when
-  that task completes, the blocked step's assignee gets an in-app + email
-  notification ("Ready to continue"). Waiting items also appear on the
+  waiting on (free text), optionally pick the SPECIFIC other task it's waiting
+  for — when that task completes, the blocked step's assignee gets an in-app +
+  email notification ("Ready to continue"). Waiting items also appear on the
   Delayed page.
+- Waiting on a PERSON (two-way): you can also flag a step as waiting on a
+  specific team member. That person is notified immediately that someone's
+  blocked on them, sees it in a "Waiting on you" card on their Dashboard, and
+  gets a "Mark done" button — clicking it notifies BOTH the step's assignee and
+  whoever flagged it that they can continue. A step can wait on several people
+  independently; each is cleared (and notified) on its own. The blocked side can
+  cancel a waiting-on, which notifies that person it's no longer needed.
 - Recurring templates: build a template once (with steps/sub-steps); the app
   materializes an instance each period automatically. Frequencies: daily,
   weekly, biweekly, monthly, quarterly, annually, or specific months. Each

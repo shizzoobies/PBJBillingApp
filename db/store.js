@@ -556,6 +556,44 @@ function resolveSpecificMonthsDueDate(template, year, month) {
  * `{ id, title, done }[]`. Drops malformed entries. Sub-sub-items never nest
  * further. `withDone` controls whether `done` is included.
  */
+/**
+ * Normalize a raw "waiting on a person" list into a clean
+ * `{ id, blockerId, requestedBy, note?, createdAt }[]`. Drops malformed entries
+ * (any missing a blockerId/requestedBy). Defaults to `[]`. Used on every node
+ * (item + sub + sub-sub) so structured blockers survive the JSONB / file
+ * round-trip.
+ */
+export function normalizeWaitingOns(raw) {
+  const list = Array.isArray(raw) ? raw : []
+  return list
+    .filter(
+      (entry) =>
+        entry &&
+        typeof entry.blockerId === 'string' &&
+        entry.blockerId &&
+        typeof entry.requestedBy === 'string' &&
+        entry.requestedBy,
+    )
+    .map((entry) => {
+      const base = {
+        id:
+          typeof entry.id === 'string' && entry.id
+            ? entry.id
+            : `wo-${randomUUID().slice(0, 8)}`,
+        blockerId: entry.blockerId,
+        requestedBy: entry.requestedBy,
+        createdAt:
+          typeof entry.createdAt === 'string' && entry.createdAt
+            ? entry.createdAt
+            : nowIso(),
+      }
+      if (typeof entry.note === 'string' && entry.note.trim()) {
+        base.note = entry.note.trim()
+      }
+      return base
+    })
+}
+
 function normalizeSubSubItems(raw, { withDone = true } = {}) {
   const list = Array.isArray(raw) ? raw : []
   return list
@@ -575,6 +613,11 @@ function normalizeSubSubItems(raw, { withDone = true } = {}) {
       if (typeof sub.dueDate === 'string' && sub.dueDate) base.dueDate = sub.dueDate
       if (typeof sub.dueDayOfMonth === 'number' && sub.dueDayOfMonth >= 1) {
         base.dueDayOfMonth = sub.dueDayOfMonth
+      }
+      // Preserve structured person-blockers on live sub-sub nodes.
+      if (withDone) {
+        const waitingOns = normalizeWaitingOns(sub.waitingOns)
+        if (waitingOns.length > 0) base.waitingOns = waitingOns
       }
       return base
     })
@@ -612,6 +655,9 @@ function normalizeSubItems(raw, { withDone = true } = {}) {
         if (typeof sub.waitingForChecklistId === 'string' && sub.waitingForChecklistId) {
           base.waitingForChecklistId = sub.waitingForChecklistId
         }
+        // Preserve structured person-blockers on live sub-items.
+        const waitingOns = normalizeWaitingOns(sub.waitingOns)
+        if (waitingOns.length > 0) base.waitingOns = waitingOns
       }
       const subSubItems = normalizeSubSubItems(sub.subItems, { withDone })
       if (subSubItems.length > 0) {
@@ -2353,6 +2399,13 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_items add column if not exists waiting_for_checklist_id text`,
       )
+      // Structured "waiting on a person" blockers: a JSONB array of
+      // { id, blockerId, requestedBy, note?, createdAt } on each item. Additive
+      // + defaulted; sub-items / sub-sub-items carry the same field inside the
+      // existing sub_items JSONB. See the WaitingOn type in src/lib/types.ts.
+      await this.pool.query(
+        `alter table checklist_items add column if not exists waiting_ons jsonb not null default '[]'::jsonb`,
+      )
       // Sub-bullets: one level of nested sub-items, stored as a JSONB array
       // ({ id, title, done }[]) directly on the item row. Least-invasive
       // choice given the existing schema; mirrors the `payload jsonb` pattern.
@@ -3059,7 +3112,7 @@ export class AppDataStore {
             order by due_date asc, id asc
           `),
           this.pool.query(`
-            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, sub_items
+            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, waiting_ons, sub_items
             from checklist_items
             order by checklist_id asc, sort_order asc, id asc
           `),
@@ -3147,6 +3200,10 @@ export class AppDataStore {
         }
         if (row.waiting_for_checklist_id) {
           item.waitingForChecklistId = row.waiting_for_checklist_id
+        }
+        const itemWaitingOns = normalizeWaitingOns(row.waiting_ons)
+        if (itemWaitingOns.length > 0) {
+          item.waitingOns = itemWaitingOns
         }
         if (subItems.length > 0) {
           item.subItems = subItems
@@ -4203,8 +4260,8 @@ export class AppDataStore {
               subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
             await client.query(
               `
-                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, sub_items, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, now())
+                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, waiting_ons, sub_items, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, now())
               `,
               [
                 item.id,
@@ -4220,6 +4277,7 @@ export class AppDataStore {
                 item.waitingOn ? String(item.waitingOn) : null,
                 Boolean(item.waiting),
                 item.waitingForChecklistId ? String(item.waitingForChecklistId) : null,
+                JSON.stringify(normalizeWaitingOns(item.waitingOns)),
                 JSON.stringify(subItems),
               ],
             )
@@ -5384,8 +5442,8 @@ export class AppDataStore {
         for (const item of nextChecklist.items) {
           await client.query(
             `
-              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, sub_items, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, now())
+              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, waiting_ons, sub_items, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, now())
             `,
             [
               item.id,
@@ -5401,6 +5459,7 @@ export class AppDataStore {
               item.waitingOn ? String(item.waitingOn) : null,
               Boolean(item.waiting),
               item.waitingForChecklistId ? String(item.waitingForChecklistId) : null,
+              JSON.stringify(normalizeWaitingOns(item.waitingOns)),
               JSON.stringify(Array.isArray(item.subItems) ? item.subItems : []),
             ],
           )
@@ -6688,6 +6747,274 @@ export class AppDataStore {
     if (!subSubItemFound || !updatedChecklist) return null
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return updatedChecklist
+  }
+
+  // ---- Structured "waiting on a person" blockers (waitingOns) ----
+  //
+  // Additive to the legacy free-text `waitingOn` note + `waiting` flag. Each
+  // entry is a pending blocker; resolving (done/cancel) REMOVES it. Top-level
+  // items persist the list in the `waiting_ons` column; sub-items / sub-sub
+  // ride the parent item's `sub_items` JSONB. The file backend keeps the array
+  // on each node object. All four methods reuse `this.read()` for the in-memory
+  // shape, then persist the one affected node.
+
+  /**
+   * Locate a node (item / sub-item / sub-sub-item) inside a checklist by path.
+   * Returns `{ item, sub?, node }` where `node` is the deepest target, or null
+   * when any segment is missing. Pure — operates on the in-memory checklist.
+   */
+  _findChecklistNode(checklist, { itemId, subItemId, subSubItemId }) {
+    const item = (checklist.items ?? []).find((i) => i.id === itemId)
+    if (!item) return null
+    if (!subItemId) return { item, node: item }
+    const sub = (item.subItems ?? []).find((s) => s.id === subItemId)
+    if (!sub) return null
+    if (!subSubItemId) return { item, sub, node: sub }
+    const subSub = (sub.subItems ?? []).find((s) => s.id === subSubItemId)
+    if (!subSub) return null
+    return { item, sub, node: subSub }
+  }
+
+  /** A short display label for a node (its title/label). */
+  _nodeLabel(node) {
+    return node?.label ?? node?.title ?? ''
+  }
+
+  /**
+   * Persist a mutated top-level item's `waitingOns` (PG: the column; sub/sub-sub
+   * ride the item's sub_items JSONB, so we rewrite that instead). `item` is the
+   * in-memory item AFTER mutation; `location.itemId` identifies the row.
+   */
+  async _persistItemWaitingOns(checklistId, item, isSubNode) {
+    if (isSubNode) {
+      await this.pool.query(
+        `update checklist_items set sub_items = $3::jsonb, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+        [
+          checklistId,
+          item.id,
+          JSON.stringify(normalizeSubItems(item.subItems, { withDone: true })),
+        ],
+      )
+    } else {
+      await this.pool.query(
+        `update checklist_items set waiting_ons = $3::jsonb, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+        [checklistId, item.id, JSON.stringify(normalizeWaitingOns(item.waitingOns))],
+      )
+    }
+  }
+
+  /**
+   * Push a new structured blocker onto the node at `location`. Returns
+   * `{ checklist, entry, node: { assigneeId, label } }` or null when the node
+   * (or checklist) is missing.
+   */
+  async addWaitingOn(checklistId, location, { blockerId, requestedBy, note }) {
+    const entry = {
+      id: `wo-${randomUUID().slice(0, 8)}`,
+      blockerId: String(blockerId),
+      requestedBy: String(requestedBy),
+      createdAt: nowIso(),
+    }
+    if (typeof note === 'string' && note.trim()) entry.note = note.trim()
+
+    if (this.pool) {
+      const data = await this.read()
+      const checklist = data.checklists.find((c) => c.id === checklistId)
+      if (!checklist) return null
+      const found = this._findChecklistNode(checklist, location)
+      if (!found) return null
+      found.node.waitingOns = [...(found.node.waitingOns ?? []), entry]
+      await this._persistItemWaitingOns(checklistId, found.item, Boolean(location.subItemId))
+      const fresh = await this.read()
+      return {
+        checklist: fresh.checklists.find((c) => c.id === checklistId) ?? checklist,
+        entry,
+        node: { assigneeId: found.item.assigneeId ?? null, label: this._nodeLabel(found.node) },
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const checklist = (data.checklists ?? []).find((c) => c.id === checklistId)
+    if (!checklist) return null
+    const found = this._findChecklistNode(checklist, location)
+    if (!found) return null
+    found.node.waitingOns = [...(found.node.waitingOns ?? []), entry]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return {
+      checklist,
+      entry,
+      node: { assigneeId: found.item.assigneeId ?? null, label: this._nodeLabel(found.node) },
+    }
+  }
+
+  /**
+   * Find (without mutating) a waiting-on entry by id across every node of a
+   * checklist — for the auth lookup on done/cancel. Returns
+   * `{ entry, assigneeId, label } | null`.
+   */
+  async getWaitingOn(checklistId, waitingOnId) {
+    const data = await this.read()
+    const checklist = data.checklists.find((c) => c.id === checklistId)
+    if (!checklist) return null
+    for (const item of checklist.items ?? []) {
+      const scan = (node, ownerItem) => {
+        const hit = (node.waitingOns ?? []).find((w) => w.id === waitingOnId)
+        if (hit) {
+          return { entry: hit, assigneeId: ownerItem.assigneeId ?? null, label: this._nodeLabel(node) }
+        }
+        return null
+      }
+      const atItem = scan(item, item)
+      if (atItem) return atItem
+      for (const sub of item.subItems ?? []) {
+        const atSub = scan(sub, item)
+        if (atSub) return atSub
+        for (const subSub of sub.subItems ?? []) {
+          const atSubSub = scan(subSub, item)
+          if (atSubSub) return atSubSub
+        }
+      }
+    }
+    return null
+  }
+
+  /**
+   * Remove the matching waiting-on entry from whatever node holds it. Returns
+   * `{ checklist, entry, assigneeId, label } | null`.
+   */
+  async resolveWaitingOn(checklistId, waitingOnId) {
+    const removeFrom = (node) => {
+      const list = node.waitingOns ?? []
+      const hit = list.find((w) => w.id === waitingOnId)
+      if (!hit) return null
+      node.waitingOns = list.filter((w) => w.id !== waitingOnId)
+      return hit
+    }
+
+    if (this.pool) {
+      const data = await this.read()
+      const checklist = data.checklists.find((c) => c.id === checklistId)
+      if (!checklist) return null
+      for (const item of checklist.items ?? []) {
+        let removed = removeFrom(item)
+        let isSubNode = false
+        let label = this._nodeLabel(item)
+        if (!removed) {
+          for (const sub of item.subItems ?? []) {
+            const atSub = removeFrom(sub)
+            if (atSub) {
+              removed = atSub
+              isSubNode = true
+              label = this._nodeLabel(sub)
+              break
+            }
+            for (const subSub of sub.subItems ?? []) {
+              const atSubSub = removeFrom(subSub)
+              if (atSubSub) {
+                removed = atSubSub
+                isSubNode = true
+                label = this._nodeLabel(subSub)
+                break
+              }
+            }
+            if (removed) break
+          }
+        }
+        if (removed) {
+          await this._persistItemWaitingOns(checklistId, item, isSubNode)
+          const fresh = await this.read()
+          return {
+            checklist: fresh.checklists.find((c) => c.id === checklistId) ?? checklist,
+            entry: removed,
+            assigneeId: item.assigneeId ?? null,
+            label,
+          }
+        }
+      }
+      return null
+    }
+
+    const data = await readJson(localDataPath)
+    const checklist = (data.checklists ?? []).find((c) => c.id === checklistId)
+    if (!checklist) return null
+    for (const item of checklist.items ?? []) {
+      let removed = removeFrom(item)
+      let label = this._nodeLabel(item)
+      if (!removed) {
+        for (const sub of item.subItems ?? []) {
+          const atSub = removeFrom(sub)
+          if (atSub) {
+            removed = atSub
+            label = this._nodeLabel(sub)
+            break
+          }
+          for (const subSub of sub.subItems ?? []) {
+            const atSubSub = removeFrom(subSub)
+            if (atSubSub) {
+              removed = atSubSub
+              label = this._nodeLabel(subSub)
+              break
+            }
+          }
+          if (removed) break
+        }
+      }
+      if (removed) {
+        await writeFile(localDataPath, JSON.stringify(data, null, 2))
+        return { checklist, entry: removed, assigneeId: item.assigneeId ?? null, label }
+      }
+    }
+    return null
+  }
+
+  /**
+   * Every pending waiting-on entry across all non-deleted checklists whose
+   * `blockerId === userId`, flattened with the step context a blocker needs to
+   * see what they're holding up. Requester + client names are resolved for
+   * display.
+   */
+  async listWaitingOnMe(userId) {
+    const data = await this.read()
+    const members = await this.getTeamMembers()
+    const nameById = new Map(members.map((m) => [m.id, m.name]))
+    const clientNameById = new Map((data.clients ?? []).map((c) => [c.id, c.name]))
+    const rows = []
+
+    for (const checklist of data.checklists ?? []) {
+      if (checklist.deletedAt) continue
+      const push = (node, itemLabel, subLabel) => {
+        for (const w of node.waitingOns ?? []) {
+          if (w.blockerId !== userId) continue
+          rows.push({
+            checklistId: checklist.id,
+            checklistTitle: checklist.title,
+            clientId: checklist.clientId,
+            clientName: clientNameById.get(checklist.clientId) ?? 'Unknown client',
+            itemLabel,
+            subLabel: subLabel ?? undefined,
+            waitingOnId: w.id,
+            note: w.note ?? undefined,
+            requestedById: w.requestedBy,
+            requestedByName: nameById.get(w.requestedBy) ?? 'A team member',
+            createdAt: w.createdAt,
+          })
+        }
+      }
+      for (const item of checklist.items ?? []) {
+        push(item, item.label, undefined)
+        for (const sub of item.subItems ?? []) {
+          push(sub, item.label, sub.title)
+          for (const subSub of sub.subItems ?? []) {
+            push(subSub, item.label, `${sub.title} › ${subSub.title}`)
+          }
+        }
+      }
+    }
+
+    rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+    return rows
   }
 
   async getLoginOptions() {
