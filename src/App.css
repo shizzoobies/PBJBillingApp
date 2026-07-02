@@ -9077,6 +9077,68 @@ mark.list-search-hit {
   outline: none;
 }
 
+/* Static title (not editing) — a click target that opens the editor. */
+.updates-title-static {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.98rem;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 4px 6px;
+  cursor: text;
+}
+
+.updates-title-static:hover {
+  border-color: var(--line);
+}
+
+/* Static description + its Edit button (read mode). */
+.updates-description-static-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.updates-description-static {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.updates-edit-button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.updates-edit-button:hover {
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+/* Save / Cancel row shown while editing the title + description. */
+.updates-edit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 /* Priority picker in the title row — its accent matches the chosen level. */
 .updates-priority-select {
   flex: 0 0 auto;
@@ -9236,6 +9298,103 @@ mark.list-search-hit {
   font-size: 0.78rem;
   color: var(--muted);
   font-style: italic;
+}
+
+/* Owner "Not approved" button — the reject twin of Mark approved, shown on
+   shipped items. Amber so it reads as "sending back", distinct from approve. */
+.updates-reject-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid #b45309;
+  background: rgba(180, 83, 9, 0.12);
+  color: #b45309;
+  cursor: pointer;
+}
+
+.updates-reject-button:hover {
+  background: #b45309;
+  color: #fff;
+}
+
+/* Inline reason textarea revealed by "Not approved" (the pop-up section). */
+.updates-reject-panel {
+  border: 1px dashed #b45309;
+  border-radius: var(--radius-sm);
+  background: rgba(180, 83, 9, 0.08);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.updates-reject-kicker {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #b45309;
+}
+
+.updates-reject-input {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 9px;
+  background: var(--surface);
+}
+
+.updates-reject-input:focus {
+  border-color: #b45309;
+  outline: none;
+}
+
+.updates-reject-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Amber "Not approved — <date>: <reason>" line on the card while the item is
+   back in progress, so the developer sees exactly what to fix. */
+.updates-review-note {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.4;
+  color: #92400e;
+  background: rgba(180, 83, 9, 0.1);
+  border-left: 3px solid #b45309;
+  border-radius: 0 6px 6px 0;
+  padding: 6px 10px;
+  word-break: break-word;
+}
+
+/* Pinned "Shipped — awaiting approval" group above the prioritized backlog. */
+.updates-shipped-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.updates-shipped-kicker {
+  margin: 0;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--status-shipped);
 }
 
 /* In-progress cards pulse their whole hue so they stand out beyond the badge. */

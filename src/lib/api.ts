@@ -2217,6 +2217,7 @@ export async function updateFeatureRequest(
     priority: FeatureRequest['priority']
     priorityRank: number
     devNotes: string
+    reviewNote: string
   }>,
 ) {
   const response = await apiFetch(`/api/feature-requests/${encodeURIComponent(id)}`, {

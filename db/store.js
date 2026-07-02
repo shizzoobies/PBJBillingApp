@@ -1710,6 +1710,19 @@ export class AppDataStore {
       await this.pool.query(
         `alter table feature_requests add column if not exists approved_at timestamptz`,
       )
+      // Rejection audit: when the owner clicks "Not approved" on a shipped item
+      // it goes back to 'in_progress' carrying the reason note + reviewer id +
+      // timestamp (mirrors approved_by/approved_at). Stamped when a non-empty
+      // review_note is set; cleared when the item is re-shipped or approved.
+      await this.pool.query(
+        `alter table feature_requests add column if not exists review_note text`,
+      )
+      await this.pool.query(
+        `alter table feature_requests add column if not exists reviewed_by text`,
+      )
+      await this.pool.query(
+        `alter table feature_requests add column if not exists reviewed_at timestamptz`,
+      )
 
       // Assistant suggestions the owner dismissed — keyed by a stable
       // pattern key so the same suggestion never nags twice.
@@ -7833,6 +7846,11 @@ export class AppDataStore {
       approvedAt: row.approved_at
         ? new Date(row.approved_at).toISOString()
         : (row.approvedAt ?? null),
+      reviewNote: row.review_note ?? row.reviewNote ?? null,
+      reviewedBy: row.reviewed_by ?? row.reviewedBy ?? null,
+      reviewedAt: row.reviewed_at
+        ? new Date(row.reviewed_at).toISOString()
+        : (row.reviewedAt ?? null),
       createdAt: row.created_at
         ? new Date(row.created_at).toISOString()
         : (row.createdAt ?? nowIso()),
@@ -7850,7 +7868,8 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, user_id, title, description, type, status, urgent, priority,
-                priority_rank, dev_notes, approved_by, approved_at, created_at, updated_at
+                priority_rank, dev_notes, approved_by, approved_at,
+                review_note, reviewed_by, reviewed_at, created_at, updated_at
            from feature_requests
           order by ${FEATURE_REQUEST_PRIORITY_WEIGHT_SQL} asc,
                    priority_rank asc, created_at asc`,
@@ -7891,6 +7910,9 @@ export class AppDataStore {
       priority: 'medium',
       priorityRank: 0,
       devNotes: null,
+      reviewNote: null,
+      reviewedBy: null,
+      reviewedAt: null,
       createdAt,
       updatedAt: null,
     }
@@ -7965,6 +7987,13 @@ export class AppDataStore {
         : undefined
     const devNotes =
       typeof patch.devNotes === 'string' ? patch.devNotes.slice(0, 4000) : undefined
+    // Rejection reason from the owner's "Not approved" flow. A non-empty string
+    // is a fresh rejection (stamped below alongside the incoming status change);
+    // ignored otherwise.
+    const reviewNote =
+      typeof patch.reviewNote === 'string' && patch.reviewNote.trim()
+        ? patch.reviewNote.trim().slice(0, 2000)
+        : undefined
 
     if (
       title === undefined &&
@@ -7973,7 +8002,8 @@ export class AppDataStore {
       status === undefined &&
       priority === undefined &&
       priorityRank === undefined &&
-      devNotes === undefined
+      devNotes === undefined &&
+      reviewNote === undefined
     ) {
       return null
     }
@@ -8001,10 +8031,26 @@ export class AppDataStore {
                   when $5 is not null then null
                   else approved_at
                 end,
+                review_note = case
+                  when $10 is not null then $10
+                  when $5 in ('shipped', 'done') then null
+                  else review_note
+                end,
+                reviewed_by = case
+                  when $10 is not null then $9
+                  when $5 in ('shipped', 'done') then null
+                  else reviewed_by
+                end,
+                reviewed_at = case
+                  when $10 is not null then now()
+                  when $5 in ('shipped', 'done') then null
+                  else reviewed_at
+                end,
                 updated_at = now()
           where id = $1
         returning id, user_id, title, description, type, status, urgent, priority,
-                  priority_rank, dev_notes, approved_by, approved_at, created_at, updated_at`,
+                  priority_rank, dev_notes, approved_by, approved_at,
+                  review_note, reviewed_by, reviewed_at, created_at, updated_at`,
         [
           id,
           title ?? null,
@@ -8015,6 +8061,7 @@ export class AppDataStore {
           priorityRank ?? null,
           devNotes ?? null,
           actingUserId ?? null,
+          reviewNote ?? null,
         ],
       )
       if (!result.rowCount) return null
@@ -8044,6 +8091,18 @@ export class AppDataStore {
     if (priority !== undefined) existing.priority = priority
     if (priorityRank !== undefined) existing.priorityRank = priorityRank
     if (devNotes !== undefined) existing.devNotes = devNotes
+    // Rejection stamp/clear (mirror the pg CASE logic, using the INCOMING
+    // status): a fresh non-empty reviewNote stamps the three review_* fields;
+    // otherwise re-shipping ('shipped') or approving ('done') clears them.
+    if (reviewNote !== undefined) {
+      existing.reviewNote = reviewNote
+      existing.reviewedBy = actingUserId ?? null
+      existing.reviewedAt = nowIso()
+    } else if (status === 'shipped' || status === 'done') {
+      existing.reviewNote = null
+      existing.reviewedBy = null
+      existing.reviewedAt = null
+    }
     existing.updatedAt = nowIso()
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return AppDataStore.mapFeatureRequest(existing)
@@ -8105,7 +8164,8 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, user_id, title, description, type, status, urgent, priority,
-                priority_rank, dev_notes, approved_by, approved_at, created_at, updated_at
+                priority_rank, dev_notes, approved_by, approved_at,
+                review_note, reviewed_by, reviewed_at, created_at, updated_at
            from feature_requests where id = $1`,
         [id],
       )

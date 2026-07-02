@@ -796,6 +796,18 @@ export type FeatureRequest = {
    */
   approvedBy?: string | null
   approvedAt?: string | null
+  /**
+   * Rejection audit — when the owner clicks "Not approved" on a Shipped item,
+   * the item goes back to 'in_progress' carrying this reason note plus the
+   * reviewer id + timestamp (mirrors approvedBy/approvedAt). Shown as an amber
+   * "Not approved — <date>: <reason>" line on the card so the developer sees
+   * exactly what to fix. Stamped by `updateFeatureRequest` when a non-empty
+   * `reviewNote` is set; CLEARED when the item is re-shipped ('shipped') or
+   * approved ('done'). Null when there's no outstanding rejection.
+   */
+  reviewNote?: string | null
+  reviewedBy?: string | null
+  reviewedAt?: string | null
   createdAt: string
   updatedAt?: string | null
 }

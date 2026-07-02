@@ -2317,6 +2317,10 @@ const server = createServer(async (request, response) => {
           priority: payload?.priority,
           priorityRank: payload?.priorityRank,
           devNotes: payload?.devNotes,
+          reviewNote:
+            typeof payload?.reviewNote === 'string'
+              ? payload.reviewNote.trim().slice(0, 2000)
+              : undefined,
         },
         session.user.id,
       )

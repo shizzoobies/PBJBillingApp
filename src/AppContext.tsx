@@ -230,6 +230,7 @@ export type AppContextValue = {
       priority: FeatureRequest['priority']
       priorityRank: number
       devNotes: string
+      reviewNote: string
     }>,
   ) => Promise<void>
   /** Owner-only: re-rank updates to the given id order (drag-to-reorder). */

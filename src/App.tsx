@@ -504,6 +504,7 @@ function App() {
         priority: FeatureRequest['priority']
         priorityRank: number
         devNotes: string
+        reviewNote: string
       }>,
     ) => {
       await updateFeatureRequestRequest(id, patch)

@@ -472,10 +472,17 @@ picker, notification bell, and account menu sit in the top bar on every page.
   the order inside a level, and changing the priority moves an item between
   levels.
 - Ship + approve workflow: when the developer has pushed an update they set the
-  item to "Shipped" (a distinct violet badge; still open/awaiting sign-off). A
-  Shipped item shows a "Mark approved" button — checking it moves the item to
-  "Done" and records who approved it and when ("Approved by <name> · <date>").
-  An In-Progress item's whole card gently pulses so it stands out at a glance.
+  item to "Shipped" (a distinct violet badge; still open/awaiting sign-off).
+  Shipped items are grouped in a "Shipped — awaiting approval" section pinned to
+  the TOP of the list. A Shipped item shows a "Mark approved" button (moves it to
+  "Done" and records who approved it and when — "Approved by <name> · <date>") AND
+  a "Not approved" button, which opens a reason box; sending it back returns the
+  item to In Progress with an amber "Not approved — <date>: <reason>" note so the
+  developer sees what to fix. An In-Progress item's whole card gently pulses.
+- Editing an item: click the title or the "Edit" button to edit the title +
+  description in place; a Save button commits the change (typing doesn't
+  auto-save). Status, priority, and type still change immediately from their
+  dropdowns.
 - "Refine for dev": sends a rough item to the AI to rewrite it into a clean,
   implementation-ready spec (Problem / Desired behavior / Where in the app /
   Acceptance); the owner accepts or discards the suggestion.

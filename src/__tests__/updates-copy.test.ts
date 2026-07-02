@@ -24,6 +24,9 @@ function make(overrides: Partial<FeatureRequest> = {}): FeatureRequest {
     priority: overrides.priority ?? 'medium',
     priorityRank: overrides.priorityRank ?? 0,
     devNotes: overrides.devNotes ?? null,
+    reviewNote: overrides.reviewNote ?? null,
+    reviewedBy: overrides.reviewedBy ?? null,
+    reviewedAt: overrides.reviewedAt ?? null,
     createdAt: overrides.createdAt ?? '2026-01-01T00:00:00.000Z',
     updatedAt: overrides.updatedAt ?? null,
   }

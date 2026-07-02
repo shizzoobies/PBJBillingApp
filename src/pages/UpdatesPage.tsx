@@ -6,9 +6,11 @@ import {
   ClipboardList,
   GripVertical,
   Lightbulb,
+  Pencil,
   Plus,
   Sparkles,
   Trash2,
+  X,
 } from 'lucide-react'
 import { useAppContext } from '../AppContext'
 import {
@@ -129,8 +131,23 @@ export function UpdatesPage() {
     Record<string, { busy: boolean; error: string | null; suggestion: { title: string; description: string } | null }>
   >({})
 
+  // Per-item "Not approved" reject panel: the open draft reason text, keyed by
+  // item id. An entry's presence means the reason textarea is open for that
+  // shipped item.
+  const [rejectDrafts, setRejectDrafts] = useState<Record<string, string>>({})
+  // Title + description editing draft (local, so typing never saves per-keystroke).
+  const [editDraft, setEditDraft] = useState<{
+    id: string
+    title: string
+    description: string
+  } | null>(null)
+
   const sorted = useMemo(() => sortFeatureRequests(featureRequests), [featureRequests])
-  const visible = hideDone ? sorted.filter((i) => !CLOSED_STATUSES.has(i.status)) : sorted
+  // Shipped items are pinned to their own top section; everything else forms the
+  // normal prioritized backlog below (so a shipped item appears exactly once).
+  const shipped = useMemo(() => sorted.filter((i) => i.status === 'shipped'), [sorted])
+  const backlog = useMemo(() => sorted.filter((i) => i.status !== 'shipped'), [sorted])
+  const visible = hideDone ? backlog.filter((i) => !CLOSED_STATUSES.has(i.status)) : backlog
   const openCount = sorted.filter((i) => !CLOSED_STATUSES.has(i.status)).length
 
   if (!ownerMode) return null
@@ -256,9 +273,328 @@ export function UpdatesPage() {
     })
   }
 
+  // "Not approved" flow: open/close the reason textarea and send the item back
+  // to the developer with the rejection note.
+  const openReject = (id: string) =>
+    setRejectDrafts((prev) => (id in prev ? prev : { ...prev, [id]: '' }))
+
+  const setRejectText = (id: string, text: string) =>
+    setRejectDrafts((prev) => ({ ...prev, [id]: text }))
+
+  const cancelReject = (id: string) =>
+    setRejectDrafts((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+
+  const submitReject = async (item: FeatureRequest) => {
+    const reviewNote = (rejectDrafts[item.id] ?? '').trim()
+    if (!reviewNote) return
+    await updateFeatureRequest(item.id, { status: 'in_progress', reviewNote })
+    cancelReject(item.id)
+  }
+
+  // Title + description editing: the draft (state above) is only persisted when
+  // the user clicks Save — typing never saves per-keystroke (which used to
+  // re-sort the list and steal focus).
+  const startEdit = (item: FeatureRequest) =>
+    setEditDraft({ id: item.id, title: item.title, description: item.description })
+
+  const saveEdit = async (item: FeatureRequest) => {
+    if (!editDraft || editDraft.id !== item.id) return
+    const title = editDraft.title.trim()
+    if (!title) return
+    await updateFeatureRequest(item.id, { title, description: editDraft.description.trim() })
+    setEditDraft(null)
+  }
+
   const handleDelete = async (item: FeatureRequest) => {
     if (!window.confirm(`Delete “${item.title}”? This can't be undone.`)) return
     await removeFeatureRequest(item.id)
+  }
+
+  const renderCard = (item: FeatureRequest) => {
+    const closed = CLOSED_STATUSES.has(item.status)
+    const refine = refineState[item.id]
+    const rejectOpen = item.id in rejectDrafts
+    const isEditing = editDraft?.id === item.id
+    const classes = ['updates-card', `updates-priority-card-${item.priority}`]
+    if (closed) classes.push('closed')
+    if (item.status === 'in_progress') classes.push('updates-card-in-progress')
+    if (draggingId === item.id) classes.push('dragging')
+    if (dropTargetId === item.id) classes.push('drop-target')
+    const reviewedWhen = formatApprovedAt(item.reviewedAt)
+    return (
+      <div
+        key={item.id}
+        className={classes.join(' ')}
+        draggable
+        onDragStart={(event) => handleDragStart(event, item.id)}
+        onDragOver={(event) => handleDragOver(event, item.id)}
+        onDragLeave={handleDragLeave}
+        onDrop={(event) => handleDrop(event, item.id)}
+        onDragEnd={handleDragEnd}
+      >
+        <div className="updates-card-main">
+          <span className="drag-handle" aria-hidden="true" title="Drag to reorder">
+            <GripVertical size={14} />
+          </span>
+          <div className="updates-card-body">
+            <div className="updates-card-titlerow">
+              {isEditing ? (
+                <input
+                  className="updates-title-input"
+                  type="text"
+                  value={editDraft.title}
+                  maxLength={120}
+                  aria-label="Title"
+                  autoFocus
+                  onChange={(event) =>
+                    setEditDraft((draft) =>
+                      draft ? { ...draft, title: event.target.value } : draft,
+                    )
+                  }
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="updates-title-static"
+                  title="Click to edit the title"
+                  onClick={() => startEdit(item)}
+                >
+                  {item.title}
+                </button>
+              )}
+              <select
+                className={`updates-priority-select updates-priority-${item.priority}`}
+                value={item.priority}
+                aria-label="Priority"
+                title="Priority level"
+                onChange={(event) =>
+                  void updateFeatureRequest(item.id, {
+                    priority: event.target.value as FeatureRequestPriority,
+                  })
+                }
+              >
+                {PRIORITY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="updates-card-meta">
+              <PriorityBadge priority={item.priority} />
+              <TypeBadge type={item.type} />
+              <select
+                className={`updates-status-select${
+                  item.status === 'shipped' ? ' updates-status-shipped' : ''
+                }`}
+                value={item.status}
+                aria-label="Status"
+                onChange={(event) =>
+                  void updateFeatureRequest(item.id, {
+                    status: event.target.value as FeatureRequestStatus,
+                  })
+                }
+              >
+                {STATUS_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+
+              {item.status === 'shipped' ? (
+                <>
+                  <button
+                    type="button"
+                    className="updates-approve-button"
+                    title="Mark this shipped update as approved (closes it)"
+                    onClick={() => void updateFeatureRequest(item.id, { status: 'done' })}
+                  >
+                    <Check size={13} aria-hidden="true" /> Mark approved
+                  </button>
+                  <button
+                    type="button"
+                    className="updates-reject-button"
+                    title="Send this shipped update back to the developer with a reason"
+                    onClick={() => openReject(item.id)}
+                  >
+                    <X size={13} aria-hidden="true" /> Not approved
+                  </button>
+                </>
+              ) : null}
+
+              {item.status === 'done'
+                ? (() => {
+                    const approver = employeeName(item.approvedBy)
+                    const when = formatApprovedAt(item.approvedAt)
+                    return (
+                      <span className="updates-approved-by">
+                        {approver
+                          ? `Approved by ${approver}${when ? ` · ${when}` : ''}`
+                          : 'Done'}
+                      </span>
+                    )
+                  })()
+                : null}
+            </div>
+
+            {item.reviewNote ? (
+              <p className="updates-review-note">
+                Not approved{reviewedWhen ? ` — ${reviewedWhen}` : ''}: {item.reviewNote}
+              </p>
+            ) : null}
+
+            {rejectOpen ? (
+              <div className="updates-reject-panel">
+                <p className="updates-reject-kicker">Send back to the developer</p>
+                <textarea
+                  className="updates-reject-input"
+                  value={rejectDrafts[item.id] ?? ''}
+                  maxLength={2000}
+                  rows={3}
+                  aria-label="Rejection reason"
+                  placeholder="What still needs fixing? The developer sees this note."
+                  onChange={(event) => setRejectText(item.id, event.target.value)}
+                />
+                <div className="updates-reject-actions">
+                  <button
+                    type="button"
+                    className="primary-action"
+                    disabled={!(rejectDrafts[item.id] ?? '').trim()}
+                    onClick={() => void submitReject(item)}
+                  >
+                    <X size={14} aria-hidden="true" /> Send back
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={() => cancelReject(item.id)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {isEditing ? (
+              <>
+                <textarea
+                  className="updates-description-input"
+                  value={editDraft.description}
+                  maxLength={2000}
+                  rows={4}
+                  aria-label="Description"
+                  placeholder="Description…"
+                  onChange={(event) =>
+                    setEditDraft((draft) =>
+                      draft ? { ...draft, description: event.target.value } : draft,
+                    )
+                  }
+                />
+                <div className="updates-edit-actions">
+                  <button
+                    type="button"
+                    className="primary-action"
+                    disabled={!editDraft.title.trim()}
+                    onClick={() => void saveEdit(item)}
+                  >
+                    <Check size={14} aria-hidden="true" /> Save
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={() => setEditDraft(null)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="updates-description-static-row">
+                {item.description ? (
+                  <p className="updates-description-static">{item.description}</p>
+                ) : (
+                  <p className="updates-description-static muted-text">No description yet.</p>
+                )}
+                <button
+                  type="button"
+                  className="updates-edit-button"
+                  title="Edit title &amp; description"
+                  onClick={() => startEdit(item)}
+                >
+                  <Pencil size={13} aria-hidden="true" /> Edit
+                </button>
+              </div>
+            )}
+
+            {refine?.suggestion ? (
+              <div className="updates-refine-panel">
+                <p className="updates-refine-kicker">Suggested rewrite</p>
+                <strong>{refine.suggestion.title}</strong>
+                <pre className="updates-refine-description">{refine.suggestion.description}</pre>
+                <div className="updates-refine-actions">
+                  <button
+                    type="button"
+                    className="primary-action"
+                    onClick={() => void acceptRefine(item)}
+                  >
+                    <Check size={14} aria-hidden="true" /> Accept
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={() => discardRefine(item.id)}
+                  >
+                    Discard
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            {refine?.error ? <p className="updates-form-error">{refine.error}</p> : null}
+
+            <div className="updates-card-actions">
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={refine?.busy}
+                onClick={() => void handleRefine(item)}
+              >
+                <Sparkles size={14} aria-hidden="true" />{' '}
+                {refine?.busy ? 'Refining…' : 'Refine for dev'}
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => void copyText(formatRequestForClaude(item), `item-${item.id}`)}
+              >
+                {copiedKey === `item-${item.id}` ? (
+                  <>
+                    <Check size={14} aria-hidden="true" /> Copied
+                  </>
+                ) : (
+                  <>
+                    <Clipboard size={14} aria-hidden="true" /> Copy for Claude Code
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                className="danger-action updates-delete"
+                title="Delete"
+                onClick={() => void handleDelete(item)}
+              >
+                <Trash2 size={14} aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -341,198 +677,21 @@ export function UpdatesPage() {
           </label>
         </div>
 
-        {visible.length === 0 ? (
-          <p className="muted-text updates-empty">
-            No updates yet. Add one above, or send one from the assistant — they show up here.
-          </p>
-        ) : (
-          <div className="updates-list">
-            {visible.map((item) => {
-              const closed = CLOSED_STATUSES.has(item.status)
-              const refine = refineState[item.id]
-              const classes = ['updates-card', `updates-priority-card-${item.priority}`]
-              if (closed) classes.push('closed')
-              if (item.status === 'in_progress') classes.push('updates-card-in-progress')
-              if (draggingId === item.id) classes.push('dragging')
-              if (dropTargetId === item.id) classes.push('drop-target')
-              return (
-                <div
-                  key={item.id}
-                  className={classes.join(' ')}
-                  draggable
-                  onDragStart={(event) => handleDragStart(event, item.id)}
-                  onDragOver={(event) => handleDragOver(event, item.id)}
-                  onDragLeave={handleDragLeave}
-                  onDrop={(event) => handleDrop(event, item.id)}
-                  onDragEnd={handleDragEnd}
-                >
-                  <div className="updates-card-main">
-                    <span className="drag-handle" aria-hidden="true" title="Drag to reorder">
-                      <GripVertical size={14} />
-                    </span>
-                    <div className="updates-card-body">
-                      <div className="updates-card-titlerow">
-                        <input
-                          className="updates-title-input"
-                          type="text"
-                          value={item.title}
-                          maxLength={120}
-                          aria-label="Title"
-                          onChange={(event) =>
-                            void updateFeatureRequest(item.id, { title: event.target.value })
-                          }
-                        />
-                        <select
-                          className={`updates-priority-select updates-priority-${item.priority}`}
-                          value={item.priority}
-                          aria-label="Priority"
-                          title="Priority level"
-                          onChange={(event) =>
-                            void updateFeatureRequest(item.id, {
-                              priority: event.target.value as FeatureRequestPriority,
-                            })
-                          }
-                        >
-                          {PRIORITY_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div className="updates-card-meta">
-                        <PriorityBadge priority={item.priority} />
-                        <TypeBadge type={item.type} />
-                        <select
-                          className={`updates-status-select${
-                            item.status === 'shipped' ? ' updates-status-shipped' : ''
-                          }`}
-                          value={item.status}
-                          aria-label="Status"
-                          onChange={(event) =>
-                            void updateFeatureRequest(item.id, {
-                              status: event.target.value as FeatureRequestStatus,
-                            })
-                          }
-                        >
-                          {STATUS_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-
-                        {item.status === 'shipped' ? (
-                          <button
-                            type="button"
-                            className="updates-approve-button"
-                            title="Mark this shipped update as approved (closes it)"
-                            onClick={() =>
-                              void updateFeatureRequest(item.id, { status: 'done' })
-                            }
-                          >
-                            <Check size={13} aria-hidden="true" /> Mark approved
-                          </button>
-                        ) : null}
-
-                        {item.status === 'done'
-                          ? (() => {
-                              const approver = employeeName(item.approvedBy)
-                              const when = formatApprovedAt(item.approvedAt)
-                              return (
-                                <span className="updates-approved-by">
-                                  {approver
-                                    ? `Approved by ${approver}${when ? ` · ${when}` : ''}`
-                                    : 'Done'}
-                                </span>
-                              )
-                            })()
-                          : null}
-                      </div>
-
-                      <textarea
-                        className="updates-description-input"
-                        value={item.description}
-                        maxLength={2000}
-                        rows={3}
-                        aria-label="Description"
-                        onChange={(event) =>
-                          void updateFeatureRequest(item.id, { description: event.target.value })
-                        }
-                      />
-
-                      {refine?.suggestion ? (
-                        <div className="updates-refine-panel">
-                          <p className="updates-refine-kicker">Suggested rewrite</p>
-                          <strong>{refine.suggestion.title}</strong>
-                          <pre className="updates-refine-description">
-                            {refine.suggestion.description}
-                          </pre>
-                          <div className="updates-refine-actions">
-                            <button
-                              type="button"
-                              className="primary-action"
-                              onClick={() => void acceptRefine(item)}
-                            >
-                              <Check size={14} aria-hidden="true" /> Accept
-                            </button>
-                            <button
-                              type="button"
-                              className="secondary-action"
-                              onClick={() => discardRefine(item.id)}
-                            >
-                              Discard
-                            </button>
-                          </div>
-                        </div>
-                      ) : null}
-                      {refine?.error ? (
-                        <p className="updates-form-error">{refine.error}</p>
-                      ) : null}
-
-                      <div className="updates-card-actions">
-                        <button
-                          type="button"
-                          className="secondary-action"
-                          disabled={refine?.busy}
-                          onClick={() => void handleRefine(item)}
-                        >
-                          <Sparkles size={14} aria-hidden="true" />{' '}
-                          {refine?.busy ? 'Refining…' : 'Refine for dev'}
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary-action"
-                          onClick={() =>
-                            void copyText(formatRequestForClaude(item), `item-${item.id}`)
-                          }
-                        >
-                          {copiedKey === `item-${item.id}` ? (
-                            <>
-                              <Check size={14} aria-hidden="true" /> Copied
-                            </>
-                          ) : (
-                            <>
-                              <Clipboard size={14} aria-hidden="true" /> Copy for Claude Code
-                            </>
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          className="danger-action updates-delete"
-                          title="Delete"
-                          onClick={() => void handleDelete(item)}
-                        >
-                          <Trash2 size={14} aria-hidden="true" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
+        {shipped.length > 0 ? (
+          <div className="updates-shipped-section">
+            <p className="updates-shipped-kicker">Shipped — awaiting approval</p>
+            <div className="updates-list">{shipped.map((item) => renderCard(item))}</div>
           </div>
+        ) : null}
+
+        {visible.length === 0 ? (
+          shipped.length === 0 ? (
+            <p className="muted-text updates-empty">
+              No updates yet. Add one above, or send one from the assistant — they show up here.
+            </p>
+          ) : null
+        ) : (
+          <div className="updates-list">{visible.map((item) => renderCard(item))}</div>
         )}
       </div>
     </section>
