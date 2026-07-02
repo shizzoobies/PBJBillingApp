@@ -599,6 +599,15 @@ export type Checklist = {
   viewerIds: string[]
   editorIds: string[]
   createdAt?: string
+  /**
+   * User id of the staff member who CREATED this task (set on POST
+   * /api/checklists). Drives task-edit approval routing: a non-creator,
+   * non-owner editing the task's details/steps files a pending edit routed to
+   * this user (see {@link PendingTaskEdit}). Absent/null = system-created
+   * (recurring / template / onboarding instances) — those route to the owner.
+   * Existing pre-feature rows are null.
+   */
+  createdBy?: string | null
   items: ChecklistItem[]
   caseId?: string
   stageId?: string
@@ -673,6 +682,37 @@ export type ItemDeletionRequest = {
   requestedBy: string
   requestedByName: string | null
   /** ISO timestamp the request was filed. */
+  requestedAt: string | null
+}
+
+/** The kind of edit a {@link PendingTaskEdit} carries. */
+export type PendingTaskEditScope = 'details' | 'item' | 'add_item'
+
+/**
+ * A pending edit to someone else's task, filed when a NON-creator (and
+ * non-owner) edits a task's DETAILS (title/dueDate/assignee) or STEPS (edit an
+ * item, add an item). Nothing on the task changes until the approver — the
+ * task's creator, or the owner for system tasks — approves (applies) or rejects
+ * (discards), with notifications. The edit analog of {@link ItemDeletionRequest};
+ * endpoint-managed (NOT part of the bulk app-data write), stored in
+ * `pending_task_edits` on pg / under auth-state on the file backend.
+ */
+export type PendingTaskEdit = {
+  id: string
+  clientId: string
+  checklistId: string
+  /** Set for 'item' edits (which step); null for 'details' and 'add_item'. */
+  itemId: string | null
+  scope: PendingTaskEditScope
+  /** The field→newValue patch to apply on approve (+ any add_item title). */
+  proposed: Record<string, unknown>
+  /** Human-readable one-line summary shown in the approver queue. */
+  summary: string
+  requestedBy: string | null
+  requestedByName: string | null
+  /** The user who must approve/reject (creator, else owner). */
+  approverId: string | null
+  /** ISO timestamp the edit was filed. */
   requestedAt: string | null
 }
 
@@ -1060,6 +1100,9 @@ export type NotificationEvent =
   | 'waiting_cleared'
   | 'checklist_deletion_requested'
   | 'checklist_item_deletion_requested'
+  | 'task_edit_requested'
+  | 'task_edit_approved'
+  | 'task_edit_rejected'
 
 export type NotificationEntry = {
   id: string

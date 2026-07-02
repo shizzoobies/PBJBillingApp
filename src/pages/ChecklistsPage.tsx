@@ -29,6 +29,7 @@ import type {
   Client,
   Employee,
   ItemDeletionRequest,
+  PendingTaskEdit,
   Role,
   TemplateStage,
   TimeEntry,
@@ -187,6 +188,9 @@ export function ChecklistsPage() {
     itemDeletionRequests,
     approveItemDeletion,
     rejectItemDeletion,
+    pendingTaskEdits,
+    approvePendingTaskEdit,
+    rejectPendingTaskEdit,
     restoreChecklist,
     emptyChecklistRecycleBin,
   } = useAppContext()
@@ -276,6 +280,17 @@ export function ChecklistsPage() {
 
   return (
     <section className="content-grid one-column" id="checklists">
+      {/* The approver queue is shown to ANY user who is the approver of ≥1
+          pending edit (the server already scopes the list: owner sees all,
+          staff see only edits routed to them). */}
+      <PendingTaskEditsSection
+        edits={pendingTaskEdits}
+        checklists={visibleChecklists}
+        clients={data.clients}
+        employees={data.employees}
+        onApprove={approvePendingTaskEdit}
+        onReject={rejectPendingTaskEdit}
+      />
       {ownerMode ? (
         <PendingDeletionsSection
           checklists={visibleChecklists}
@@ -629,6 +644,104 @@ function PendingDeletionsSection({
           </ul>
         </>
       ) : null}
+    </section>
+  )
+}
+
+/**
+ * Queue of task edits routed to the current user for approval (a non-creator
+ * edited someone else's task). Shown to any user who is the approver of ≥1
+ * pending edit (the server scopes the list: owner sees all, staff see only
+ * edits routed to them). Each row: task title + client, requester, the readable
+ * summary, and Approve / Reject. Hidden entirely when there's nothing pending.
+ */
+function PendingTaskEditsSection({
+  edits,
+  checklists,
+  clients,
+  employees,
+  onApprove,
+  onReject,
+}: {
+  edits: PendingTaskEdit[]
+  checklists: Checklist[]
+  clients: Client[]
+  employees: Employee[]
+  onApprove: (editId: string) => Promise<void>
+  onReject: (editId: string) => Promise<void>
+}) {
+  const pending = [...edits].sort((a, b) =>
+    String(b.requestedAt ?? '').localeCompare(String(a.requestedAt ?? '')),
+  )
+  if (pending.length === 0) return null
+
+  const checklistFor = (checklistId: string) => checklists.find((c) => c.id === checklistId)
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <h2>Edits awaiting your approval</h2>
+          <p className="section-subtitle">
+            A team member proposed changes to a task you created. Approve to apply the change, or
+            reject to discard it — the task stays as-is until you decide.
+          </p>
+        </div>
+        <span className="status-pill">{pending.length}</span>
+      </div>
+      <ul
+        className="pending-deletions-list"
+        style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}
+      >
+        {pending.map((edit) => {
+          const target = checklistFor(edit.checklistId)
+          const title = target?.title ?? 'a task'
+          const clientLabel = target ? clientName(clients, target.clientId) : ''
+          return (
+            <li
+              key={edit.id}
+              className="pending-deletion-item"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                padding: '8px 0',
+                borderTop: '1px solid var(--border-subtle, #eee)',
+              }}
+            >
+              <div>
+                <strong>{title}</strong>
+                <div className="checklist-meta-line">
+                  {clientLabel ? `${clientLabel} · ` : ''}
+                  Requested by{' '}
+                  {edit.requestedByName ||
+                    (edit.requestedBy ? employeeName(employees, edit.requestedBy) : 'a team member')}
+                </div>
+                <div className="checklist-meta-line pending-edit-summary">{edit.summary}</div>
+              </div>
+              <div style={{ display: 'inline-flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={() => void onApprove(edit.id)}
+                  title="Approve — apply this change"
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => void onReject(edit.id)}
+                  title="Reject — discard this change"
+                >
+                  Reject
+                </button>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
     </section>
   )
 }
@@ -1191,26 +1304,52 @@ export function ChecklistCard({
   // (for owners) Approve / Reject actions, and disables re-requesting.
   const pendingDeletion = checklistHasPendingDeletionRequest(checklist)
 
-  // Owner-only inline edit of the active checklist's own fields (title, due
-  // date, assignee). Item-level edits stay on their own controls below.
-  const { updateChecklist, approveChecklistDeletion, rejectChecklistDeletion } = useAppContext()
+  // Inline edit of the active checklist's own fields (title, due date,
+  // assignee). Item-level edits stay on their own controls below. Any authorized
+  // editor (owner / assignee / editor / client-assigned) can open this; the
+  // server applies the owner's + the creator's edits directly and ROUTES
+  // everyone else's to the task's approver.
+  const {
+    updateChecklistMeta,
+    approveChecklistDeletion,
+    rejectChecklistDeletion,
+    pendingTaskEditChecklistIds,
+  } = useAppContext()
   const [editingMeta, setEditingMeta] = useState(false)
   const [metaTitle, setMetaTitle] = useState(checklist.title)
   const [metaDue, setMetaDue] = useState(checklist.dueDate)
   const [metaAssignee, setMetaAssignee] = useState(checklist.assigneeId)
+  // Inline "sent for approval" note shown after a routed save.
+  const [metaPendingNote, setMetaPendingNote] = useState<string | null>(null)
+  // True when this task already has a pending edit awaiting approval.
+  const hasPendingEdit = pendingTaskEditChecklistIds.has(checklist.id)
   const openMetaEditor = () => {
     setMetaTitle(checklist.title)
     setMetaDue(checklist.dueDate)
     setMetaAssignee(checklist.assigneeId)
+    setMetaPendingNote(null)
     setEditingMeta(true)
   }
   const saveMetaEditor = () => {
+    // Don't route a projected ghost (never persisted server-side).
+    if (checklist.projected) {
+      setEditingMeta(false)
+      return
+    }
     const title = metaTitle.trim()
-    updateChecklist(checklist.id, {
-      title: title || checklist.title,
-      dueDate: metaDue || checklist.dueDate,
-      assigneeId: metaAssignee || checklist.assigneeId,
-    })
+    void (async () => {
+      const result = await updateChecklistMeta(checklist.id, {
+        title: title || checklist.title,
+        dueDate: metaDue || checklist.dueDate,
+        assigneeId: metaAssignee || checklist.assigneeId,
+      })
+      if (result && 'pending' in result) {
+        const approverName = employeeName(employees, result.pending.approverId ?? '')
+        setMetaPendingNote(`Sent to ${approverName} for approval.`)
+      } else {
+        setMetaPendingNote(null)
+      }
+    })()
     setEditingMeta(false)
   }
 
@@ -1345,10 +1484,21 @@ export function ChecklistCard({
               <span className="checklist-meta-line">Time logged: {formatHours(totalMinutes)}</span>
             ) : null
           })()}
+          {metaPendingNote ? (
+            <span className="checklist-meta-line pending-edit-note">{metaPendingNote}</span>
+          ) : null}
         </div>
         <div className="checklist-meta">
           {handedOff ? <span className="status-pill">Handed off</span> : null}
           {isViewerOnly ? <span className="status-pill">View only</span> : null}
+          {hasPendingEdit ? (
+            <span
+              className="status-pill pending-edit-pill"
+              title="An edit to this task is waiting for approval."
+            >
+              Edit pending approval
+            </span>
+          ) : null}
           {pendingDeletion ? (
             <span className="status-pill" title="A bookkeeper asked to delete this — an owner must approve.">
               Deletion requested
@@ -1380,7 +1530,7 @@ export function ChecklistCard({
               the owner approves. Re-requesting is disabled once pending. */}
           {canEditStructure ? (
             <CardActionsMenu
-              showEdit={ownerMode && !editingMeta}
+              showEdit={!editingMeta && !checklist.projected}
               showDelete={!pendingDeletion}
               deleteLabel={ownerMode ? 'Delete task' : 'Request deletion'}
               onEdit={openMetaEditor}

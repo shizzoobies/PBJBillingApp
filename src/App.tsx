@@ -47,6 +47,11 @@ import {
   approveItemDeletion as approveItemDeletionRequest,
   rejectItemDeletion as rejectItemDeletionRequest,
   isItemDeletionFiled,
+  updateChecklistMetaRequest,
+  listPendingTaskEdits,
+  approvePendingTaskEdit as approvePendingTaskEditRequest,
+  rejectPendingTaskEdit as rejectPendingTaskEditRequest,
+  isTaskEditPending,
   generateChecklistFromTemplateRequest,
   startOnboardingRequest,
   addRecurringReimbursementRequest,
@@ -97,6 +102,7 @@ import {
   type FeatureRequestType,
   type FirmSettings,
   type ItemDeletionRequest,
+  type PendingTaskEdit,
   type PublicFirmSettings,
   type ServiceCategory,
   type SessionUser,
@@ -258,6 +264,10 @@ function App() {
   // Endpoint-managed like service categories: fetched on sign-in and refreshed
   // after any item-delete / approve / reject so badges stay accurate.
   const [itemDeletionRequests, setItemDeletionRequests] = useState<ItemDeletionRequest[]>([])
+  // Pending task edits (a non-creator edited someone else's task → routed to the
+  // approver). Endpoint-managed like itemDeletionRequests: loaded on sign-in and
+  // refreshed after any edit / approve / reject so the queue + badges stay fresh.
+  const [pendingTaskEdits, setPendingTaskEdits] = useState<PendingTaskEdit[]>([])
   const [activeEmployeeId, setActiveEmployeeId] = useState('emp-avery')
   const [previewUserId, setPreviewUserId] = useState<string | null>(null)
   const [selectedClientId, setSelectedClientId] = useState('client-northstar')
@@ -526,13 +536,28 @@ function App() {
     }
   }, [])
 
+  // Pending task edits: same endpoint-managed pattern as item deletions.
+  const refreshPendingTaskEdits = useCallback(async () => {
+    try {
+      setPendingTaskEdits(await listPendingTaskEdits())
+    } catch {
+      /* non-fatal — the queue/badges just won't update until the next refresh */
+    }
+  }, [])
+
   useEffect(() => {
     if (!sessionUser) return
     let cancelled = false
     void (async () => {
       try {
-        const requests = await listItemDeletionRequests()
-        if (!cancelled) setItemDeletionRequests(requests)
+        const [requests, edits] = await Promise.all([
+          listItemDeletionRequests(),
+          listPendingTaskEdits(),
+        ])
+        if (!cancelled) {
+          setItemDeletionRequests(requests)
+          setPendingTaskEdits(edits)
+        }
       } catch {
         /* non-fatal */
       }
@@ -993,6 +1018,32 @@ function App() {
       await refreshItemDeletionRequests()
     },
     [refreshItemDeletionRequests],
+  )
+
+  // Pending task-edit decisions. Approve merges the server-returned (now-edited)
+  // checklist into local state; both refresh the queue afterward.
+  const approvePendingTaskEdit = useCallback(
+    async (editId: string) => {
+      if (previewActiveRef.current) return
+      const updated = await approvePendingTaskEditRequest(editId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === updated.id ? updated : checklist,
+        ),
+      }))
+      await refreshPendingTaskEdits()
+    },
+    [refreshPendingTaskEdits],
+  )
+
+  const rejectPendingTaskEdit = useCallback(
+    async (editId: string) => {
+      if (previewActiveRef.current) return
+      await rejectPendingTaskEditRequest(editId)
+      await refreshPendingTaskEdits()
+    },
+    [refreshPendingTaskEdits],
   )
 
   const logTime = async (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => {
@@ -1973,16 +2024,45 @@ function App() {
   // Edit an ACTIVE (materialized) checklist's own fields — title, concrete due
   // date, assignee. Item-level edits keep their dedicated endpoints; these
   // checklist-level fields ride the bulk autosave like other workspace edits.
-  const updateChecklist = (
+  // Edit a task's DETAILS (title / due date / assignee) through the dedicated
+  // endpoint so task-edit approval routing applies. Owner + the task's creator
+  // apply directly (the server returns the updated checklist, merged here);
+  // every other authorized editor's change is ROUTED — the server returns a
+  // pending edit, which we surface to the caller (and refresh the queue). The
+  // result tells the UI whether to show a "sent for approval" note.
+  const updateChecklistMeta = async (
     checklistId: string,
-    patch: { title?: string; dueDate?: string; assigneeId?: string; categoryId?: string | null },
-  ) => {
-    updateWorkspaceData((current) => ({
-      ...current,
-      checklists: current.checklists.map((checklist) =>
-        checklist.id === checklistId ? { ...checklist, ...patch } : checklist,
-      ),
-    }))
+    patch: { title?: string; dueDate?: string; assigneeId?: string },
+  ): Promise<{ pending: PendingTaskEdit } | { checklist: Checklist } | null> => {
+    if (previewActiveRef.current) return null
+    try {
+      setDataSyncState('saving')
+      const result = await updateChecklistMetaRequest(checklistId, patch)
+      if ('checklist' in result) {
+        const updated = result.checklist
+        applyServerDataUpdate((current) => ({
+          ...current,
+          checklists: current.checklists.map((checklist) =>
+            checklist.id === checklistId ? updated : checklist,
+          ),
+        }))
+        setDataSyncState('synced')
+        return { checklist: updated }
+      }
+      // Routed for approval — nothing changed on the task; refresh the queue.
+      await refreshPendingTaskEdits()
+      setDataSyncState('synced')
+      return { pending: result.pending }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return null
+      }
+      setDataSyncState('error')
+      return null
+    }
   }
 
   // Phase 3: stage-aware mutators. Each mutator targets a specific stage by id;
@@ -2330,13 +2410,18 @@ function App() {
     if (previewActiveRef.current || labels.length === 0) return
     try {
       setDataSyncState('saving')
-      const updated = await appendChecklistItemsRequest(checklistId, labels)
-      applyServerDataUpdate((current) => ({
-        ...current,
-        checklists: current.checklists.map((checklist) =>
-          checklist.id === checklistId ? updated : checklist,
-        ),
-      }))
+      const result = await appendChecklistItemsRequest(checklistId, labels)
+      if (isTaskEditPending(result)) {
+        // Non-creator: the added step(s) were routed for approval, not applied.
+        await refreshPendingTaskEdits()
+      } else {
+        applyServerDataUpdate((current) => ({
+          ...current,
+          checklists: current.checklists.map((checklist) =>
+            checklist.id === checklistId ? result : checklist,
+          ),
+        }))
+      }
       setDataSyncState('synced')
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -2395,13 +2480,19 @@ function App() {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
-      const updated = await updateChecklistItemRequest(checklistId, itemId, patch)
-      applyServerDataUpdate((current) => ({
-        ...current,
-        checklists: current.checklists.map((checklist) =>
-          checklist.id === checklistId ? updated : checklist,
-        ),
-      }))
+      const result = await updateChecklistItemRequest(checklistId, itemId, patch)
+      if (isTaskEditPending(result)) {
+        // Non-creator structural step edit → routed for approval, not applied.
+        // (Any waiting-only fields the server applied are picked up on refresh.)
+        await refreshPendingTaskEdits()
+      } else {
+        applyServerDataUpdate((current) => ({
+          ...current,
+          checklists: current.checklists.map((checklist) =>
+            checklist.id === checklistId ? result : checklist,
+          ),
+        }))
+      }
       setDataSyncState('synced')
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -3237,6 +3328,9 @@ function App() {
     ),
   )
 
+  // Fast "does this task have a pending edit?" lookup for the card badge.
+  const pendingTaskEditChecklistIds = new Set(pendingTaskEdits.map((edit) => edit.checklistId))
+
   const contextValue: AppContextValue = {
     data,
     sessionUser,
@@ -3294,7 +3388,7 @@ function App() {
     setTemplateViewers,
     addChecklistTemplate,
     updateChecklistTemplate,
-    updateChecklist,
+    updateChecklistMeta,
     deleteChecklistTemplate,
     serviceCategories,
     addServiceCategory,
@@ -3341,6 +3435,10 @@ function App() {
     pendingItemDeletionKeys,
     approveItemDeletion,
     rejectItemDeletion,
+    pendingTaskEdits,
+    pendingTaskEditChecklistIds,
+    approvePendingTaskEdit,
+    rejectPendingTaskEdit,
     restoreChecklist,
     emptyChecklistRecycleBin,
     deleteTeamMember,

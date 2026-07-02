@@ -506,6 +506,113 @@ async function fileItemDeletionRequest(
   return created
 }
 
+// --- Task-edit approval routing (server-side helpers) ---
+//
+// Mirror of src/lib/taskEditApproval.ts (kept in sync; server.js is plain Node
+// and can't import the client TypeScript). A non-creator, non-owner editing a
+// task's details/steps files a pending edit routed to the task's creator, or
+// the owner for system/recurring/template tasks with no creator.
+
+/** Owner override + own-creator direct edit; everyone else routes. */
+function canEditTaskDirectly(session, checklist) {
+  if (!session?.user) return false
+  return (
+    session.user.role === 'owner' ||
+    (!!checklist?.createdBy && checklist.createdBy === session.user.id)
+  )
+}
+
+/** Who approves a routed edit: the real non-owner creator, else the owner. */
+function resolveTaskApproverId(checklist, employees) {
+  const list = Array.isArray(employees) ? employees : []
+  const owner = list.find((u) => u.role === 'Owner' || u.role === 'owner')
+  const createdBy = checklist?.createdBy
+  if (createdBy) {
+    const creator = list.find((u) => u.id === createdBy)
+    if (creator && creator.role !== 'Owner' && creator.role !== 'owner') {
+      return createdBy
+    }
+  }
+  return owner?.id ?? createdBy ?? null
+}
+
+/** Readable one-line summary of a proposed edit for the approver queue. */
+function summarizeTaskEdit(scope, proposed, prev = {}) {
+  const patch = proposed ?? {}
+  const before = prev ?? {}
+  const show = (value) =>
+    value === null || value === undefined || value === '' ? '—' : `"${String(value)}"`
+  if (scope === 'add_item') {
+    return `Add step: ${show(patch.title ?? patch.label)}`
+  }
+  const parts = []
+  const field = (key, label) => {
+    if (key in patch) parts.push(`${label}: ${show(before[key])} → ${show(patch[key])}`)
+  }
+  field('title', 'Title')
+  field('dueDate', 'Due date')
+  field('assigneeId', 'Assignee')
+  if (parts.length === 0) return scope === 'item' ? 'Edit step' : 'Edit task details'
+  return parts.join('; ')
+}
+
+/**
+ * File a pending task edit routed to the task's approver + notify them. Skips
+ * duplicates (same checklist + scope + item + same proposed shape). Returns the
+ * created (or existing) pending edit so the handler can 200 it back. Records
+ * activity. The caller must have already confirmed the edit permission.
+ */
+async function filePendingTaskEdit(request, session, data, checklist, { scope, itemId, proposed, prev }) {
+  const approverId = resolveTaskApproverId(checklist, data.employees ?? [])
+  const summary = summarizeTaskEdit(scope, proposed, prev)
+
+  const existing = await appDataStore.listPendingTaskEdits({
+    user: { id: session.user.id, role: 'owner' },
+  })
+  const proposedKey = JSON.stringify(proposed ?? {})
+  const duplicate = existing.find(
+    (req) =>
+      req.checklistId === checklist.id &&
+      req.scope === scope &&
+      (req.itemId ?? null) === (itemId ?? null) &&
+      JSON.stringify(req.proposed ?? {}) === proposedKey,
+  )
+  if (duplicate) return duplicate
+
+  const requesterName =
+    (data.employees ?? []).find((e) => e.id === session.user.id)?.name ??
+    session.user.name ??
+    'A team member'
+  const created = await appDataStore.createPendingTaskEdit({
+    checklistId: checklist.id,
+    itemId: itemId ?? null,
+    scope,
+    proposed: proposed ?? {},
+    summary,
+    requestedBy: session.user.id,
+    requestedByName: requesterName,
+    approverId,
+  })
+  await appDataStore.recordActivity(
+    session.user.id,
+    'task_edit_requested',
+    `${checklist.title}: ${summary}`,
+  )
+  try {
+    if (approverId && approverId !== session.user.id) {
+      await notify(appDataStore, approverId, 'task_edit_requested', {
+        checklistId: checklist.id,
+        message: `${requesterName} proposed an edit to "${checklist.title}" (${summary}).`,
+        link: '/checklists',
+        appPublicUrl: getPublicAppUrl(request),
+      })
+    }
+  } catch (err) {
+    console.error('[notify] task_edit_requested dispatch failed:', err?.message || err)
+  }
+  return created
+}
+
 /**
  * Strip data so a non-owner only sees clients they're scoped to and
  * derivative records (checklists, templates, time entries, plans) that
@@ -3398,6 +3505,10 @@ const server = createServer(async (request, response) => {
           dueDate,
           categoryId,
           items,
+          // Stamp the creator for task-edit approval routing. System-created
+          // instances (recurring / template / onboarding) go through other
+          // paths and leave this null, routing their edits to the owner.
+          createdBy: session.user.id,
         })
 
         // Auto-grant: a non-owner being assigned a task on this client gains
@@ -3643,6 +3754,239 @@ const server = createServer(async (request, response) => {
         `${updated.title}: ${req.label}`,
       )
       sendJson(response, 200, updated)
+      return
+    }
+
+    // GET /api/checklists/pending-edits — the approver queue. Owners see all
+    // pending edits; a non-owner sees only edits routed to them. Checked BEFORE
+    // the generic `:id` matcher so "pending-edits" isn't treated as an id.
+    if (normalizedPath === '/api/checklists/pending-edits' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const edits = await appDataStore.listPendingTaskEdits(session)
+      sendJson(response, 200, { edits })
+      return
+    }
+
+    // POST /api/checklists/pending-edits/:id/(approve|reject) — allowed for the
+    // request's approver OR the owner. Approve applies `proposed` to the task /
+    // item / appends a step, drops the request, records activity, and notifies
+    // the editor. Reject drops the request and notifies the editor. Returns the
+    // updated checklist (approve) or { ok } (reject).
+    const pendingEditDecisionMatch = normalizedPath.match(
+      /^\/api\/checklists\/pending-edits\/([^/]+)\/(approve|reject)$/,
+    )
+    if (pendingEditDecisionMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      const editId = decodeURIComponent(pendingEditDecisionMatch[1])
+      const decision = pendingEditDecisionMatch[2]
+      const edit = await appDataStore.getPendingTaskEdit(editId)
+      if (!edit) {
+        sendJson(response, 404, { error: 'Pending edit not found' })
+        return
+      }
+      // Only the routed approver or the owner may resolve it.
+      if (session.user.role !== 'owner' && edit.approverId !== session.user.id) {
+        sendJson(response, 403, { error: 'You cannot resolve this edit' })
+        return
+      }
+
+      const data = await appDataStore.read()
+      const checklist = data.checklists.find((c) => c.id === edit.checklistId)
+      const editorName =
+        (data.employees ?? []).find((e) => e.id === edit.requestedBy)?.name ??
+        edit.requestedByName ??
+        'A team member'
+      const checklistTitle = checklist?.title ?? 'a task'
+
+      if (decision === 'reject') {
+        await appDataStore.deletePendingTaskEdit(editId)
+        await appDataStore.recordActivity(
+          session.user.id,
+          'task_edit_rejected',
+          `${checklistTitle}: ${edit.summary}`,
+        )
+        try {
+          if (edit.requestedBy && edit.requestedBy !== session.user.id) {
+            await notify(appDataStore, edit.requestedBy, 'task_edit_rejected', {
+              checklistId: edit.checklistId,
+              message: `Your edit to "${checklistTitle}" was declined (${edit.summary}).`,
+              link: '/checklists',
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+        } catch (err) {
+          console.error('[notify] task_edit_rejected dispatch failed:', err?.message || err)
+        }
+        sendJson(response, 200, { ok: true, removed: editId })
+        return
+      }
+
+      // approve → apply the proposed edit by scope.
+      if (!checklist) {
+        // Target task is gone; drop the stale request.
+        await appDataStore.deletePendingTaskEdit(editId)
+        sendJson(response, 404, { error: 'Target task no longer exists' })
+        return
+      }
+      const proposed = edit.proposed ?? {}
+      let updated = null
+      if (edit.scope === 'details') {
+        updated = await appDataStore.updateChecklistMeta(edit.checklistId, {
+          ...('title' in proposed ? { title: proposed.title } : {}),
+          ...('dueDate' in proposed ? { dueDate: proposed.dueDate } : {}),
+          ...('assigneeId' in proposed ? { assigneeId: proposed.assigneeId } : {}),
+        })
+      } else if (edit.scope === 'add_item') {
+        const label = String(proposed.title ?? proposed.label ?? '').trim()
+        if (label) {
+          updated = await appDataStore.appendChecklistItems(edit.checklistId, [label])
+        }
+      } else if (edit.scope === 'item' && edit.itemId) {
+        const patch = {}
+        if ('title' in proposed) patch.title = proposed.title
+        if ('dueDate' in proposed) patch.dueDate = proposed.dueDate
+        if ('assigneeId' in proposed) patch.assigneeId = proposed.assigneeId
+        updated = await appDataStore.updateChecklistItem(edit.checklistId, edit.itemId, patch)
+      }
+      // Drop the request regardless — applied or not, it's resolved.
+      await appDataStore.deletePendingTaskEdit(editId)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Could not apply the edit' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'task_edit_approved',
+        `${updated.title}: ${edit.summary}`,
+      )
+      try {
+        if (edit.requestedBy && edit.requestedBy !== session.user.id) {
+          await notify(appDataStore, edit.requestedBy, 'task_edit_approved', {
+            checklistId: edit.checklistId,
+            message: `Your edit to "${updated.title}" was approved (${edit.summary}).`,
+            link: '/checklists',
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
+      } catch (err) {
+        console.error('[notify] task_edit_approved dispatch failed:', err?.message || err)
+      }
+      sendJson(response, 200, updated)
+      return
+    }
+
+    // PATCH /api/checklists/:id — edit task DETAILS (title / due date /
+    // assignee). Authorized like the item endpoints (owner / assignee / editor /
+    // client-visible). Owner + the task's own creator apply directly; every
+    // other authorized editor's change is ROUTED as a pending edit to the
+    // approver. Handled before the DELETE `:id` block below (same matcher).
+    const checklistMetaPatchMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)$/)
+    if (checklistMetaPatchMatch && request.method === 'PATCH') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      const checklistId = checklistMetaPatchMatch[1]
+      const data = await appDataStore.read()
+      const checklist = data.checklists.find((c) => c.id === checklistId)
+      if (!checklist) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      // Authorization mirrors the item endpoints: owner / assignee / editor /
+      // any non-owner whose client is in their visible (assigned) set.
+      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
+      const clientVisible =
+        session.user.role === 'owner' ||
+        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
+      const canEdit =
+        session.user.role === 'owner' ||
+        checklist.assigneeId === session.user.id ||
+        editorIds.includes(session.user.id) ||
+        clientVisible
+      if (!canEdit) {
+        sendJson(response, 403, { error: 'You do not have permission to edit this task' })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const proposed = {}
+      const prev = {}
+      if ('title' in payload && typeof payload.title === 'string') {
+        const trimmed = payload.title.trim()
+        if (!trimmed) {
+          sendJson(response, 400, { error: 'title cannot be blank' })
+          return
+        }
+        proposed.title = trimmed
+        prev.title = checklist.title
+      }
+      if ('dueDate' in payload) {
+        proposed.dueDate = payload.dueDate === null ? '' : String(payload.dueDate ?? '')
+        prev.dueDate = checklist.dueDate
+      }
+      if ('assigneeId' in payload) {
+        const incoming = payload.assigneeId === null ? '' : String(payload.assigneeId ?? '')
+        if (incoming && !data.employees.some((e) => e.id === incoming)) {
+          sendJson(response, 400, { error: 'Invalid assigneeId' })
+          return
+        }
+        proposed.assigneeId = incoming
+        prev.assigneeId = checklist.assigneeId
+      }
+      if (Object.keys(proposed).length === 0) {
+        sendJson(response, 400, { error: 'No editable fields provided' })
+        return
+      }
+
+      // Owner + own-creator apply directly; everyone else routes.
+      if (canEditTaskDirectly(session, checklist)) {
+        const updated = await appDataStore.updateChecklistMeta(checklistId, proposed)
+        if (!updated) {
+          sendJson(response, 404, { error: 'Checklist not found' })
+          return
+        }
+        // A non-owner assignee change should keep client visibility coherent.
+        if (proposed.assigneeId) {
+          await appDataStore.grantClientVisibility(updated.clientId, proposed.assigneeId)
+        }
+        await appDataStore.recordActivity(session.user.id, 'checklist_edited', updated.title)
+        sendJson(response, 200, { checklist: updated })
+        return
+      }
+
+      const pending = await filePendingTaskEdit(request, session, data, checklist, {
+        scope: 'details',
+        itemId: null,
+        proposed,
+        prev,
+      })
+      sendJson(response, 200, { pending })
       return
     }
 
@@ -4324,6 +4668,23 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // Non-creator, non-owner: route each added step to the approver rather
+        // than applying it. Owner + own-creator fall through to direct append.
+        if (!canEditTaskDirectly(session, checklist)) {
+          const filed = []
+          for (const title of titles) {
+            const pending = await filePendingTaskEdit(request, session, data, checklist, {
+              scope: 'add_item',
+              itemId: null,
+              proposed: { title: title.trim() },
+              prev: {},
+            })
+            if (pending) filed.push(pending)
+          }
+          sendJson(response, 200, { pending: filed })
+          return
+        }
+
         const updated = await appDataStore.appendChecklistItems(checklistId, titles)
         if (!updated) {
           sendJson(response, 404, { error: 'Checklist not found' })
@@ -4413,6 +4774,42 @@ const server = createServer(async (request, response) => {
             payload.waitingForChecklistId === null
               ? ''
               : String(payload.waitingForChecklistId ?? '')
+        }
+
+        // Only STRUCTURAL step edits (rename / due date / assignee) route for
+        // approval. The "waiting" flag + note are WORK (like completing a step),
+        // so they always apply directly. When a non-creator, non-owner sends a
+        // structural change, file it as a pending 'item' edit instead of
+        // applying — but still apply any waiting-only fields directly.
+        const structuralKeys = ['title', 'dueDate', 'assigneeId'].filter((k) => k in patch)
+        if (structuralKeys.length > 0 && !canEditTaskDirectly(session, checklist)) {
+          const proposed = {}
+          const prev = {}
+          for (const key of structuralKeys) {
+            proposed[key] = patch[key]
+            prev[key] =
+              key === 'title'
+                ? targetItem.label
+                : key === 'dueDate'
+                  ? (targetItem.dueDate ?? '')
+                  : (targetItem.assigneeId ?? '')
+          }
+          const pending = await filePendingTaskEdit(request, session, data, checklist, {
+            scope: 'item',
+            itemId,
+            proposed,
+            prev,
+          })
+          // Apply any waiting-only fields immediately (they aren't routed).
+          const waitingPatch = {}
+          for (const key of ['waiting', 'waitingOn', 'waitingForChecklistId']) {
+            if (key in patch) waitingPatch[key] = patch[key]
+          }
+          if (Object.keys(waitingPatch).length > 0) {
+            await appDataStore.updateChecklistItem(checklistId, itemId, waitingPatch)
+          }
+          sendJson(response, 200, { pending })
+          return
         }
 
         const updated = await appDataStore.updateChecklistItem(checklistId, itemId, patch)

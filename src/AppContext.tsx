@@ -13,6 +13,7 @@ import type {
   FeatureRequestType,
   FirmSettings,
   ItemDeletionRequest,
+  PendingTaskEdit,
   Role,
   ServiceCategory,
   SessionUser,
@@ -180,10 +181,17 @@ export type AppContextValue = {
     updater: (template: ChecklistTemplate) => ChecklistTemplate,
   ) => void
   deleteChecklistTemplate: (templateId: string) => void
-  updateChecklist: (
+  /**
+   * Edit a task's DETAILS (title / due date / assignee) through the dedicated
+   * endpoint so task-edit approval routing applies. Owner + the task's creator
+   * apply directly (resolves to `{ checklist }`); every other authorized editor
+   * is ROUTED (resolves to `{ pending }`) and the change is NOT applied until
+   * the approver accepts. Resolves to `null` on error / preview mode.
+   */
+  updateChecklistMeta: (
     checklistId: string,
-    patch: { title?: string; dueDate?: string; assigneeId?: string; categoryId?: string | null },
-  ) => void
+    patch: { title?: string; dueDate?: string; assigneeId?: string },
+  ) => Promise<{ pending: PendingTaskEdit } | { checklist: Checklist } | null>
   /**
    * The Active Checklists board columns (service categories), loaded from the
    * server independently of the bulk workspace data. Empty until the first
@@ -402,6 +410,18 @@ export type AppContextValue = {
   approveItemDeletion: (requestId: string) => Promise<void>
   /** Owner-only: reject a pending item-deletion request (deletes nothing). */
   rejectItemDeletion: (requestId: string) => Promise<void>
+  /**
+   * Pending task edits (a non-creator edited someone else's task → routed to the
+   * approver). The owner sees all; staff see only edits routed to them. Drives
+   * the review section + the per-card "Edit pending approval" badge.
+   */
+  pendingTaskEdits: PendingTaskEdit[]
+  /** Set of checklist ids that have ≥1 pending edit, for fast badge lookup. */
+  pendingTaskEditChecklistIds: Set<string>
+  /** Approve a pending task edit (applies it). Allowed for the approver or owner. */
+  approvePendingTaskEdit: (editId: string) => Promise<void>
+  /** Reject a pending task edit (discards it). Allowed for the approver or owner. */
+  rejectPendingTaskEdit: (editId: string) => Promise<void>
   /** Owner-only: restore a recycled checklist back to the active list. */
   restoreChecklist: (checklistId: string) => Promise<void>
   /** Owner-only: permanently delete every recycled checklist. Not reversible. */

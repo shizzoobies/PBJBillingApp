@@ -2101,6 +2101,39 @@ export class AppDataStore {
         `alter table checklists add column if not exists deletion_requested_at timestamptz`,
       )
 
+      // Creator tracking for task-edit approval routing. A plain text user id
+      // (no FK) set at POST /api/checklists; NULL on system-created instances
+      // (recurring / template / onboarding) and on every pre-feature row. A
+      // non-creator, non-owner editing a task's details/steps files a pending
+      // edit routed to this user (see the pending_task_edits table below).
+      await this.pool.query(`alter table checklists add column if not exists created_by text`)
+
+      // Task-edit approval queue: a NON-creator (and non-owner) edited a task's
+      // details / a step / added a step; nothing is applied until the approver
+      // (the creator, else the owner) approves. Endpoint-managed (NOT part of
+      // the bulk app-data write) — exactly like item_deletion_requests — so
+      // staff can file without the owner-only bulk save. `proposed` is the
+      // field→newValue patch to apply on approve; `summary` snapshots a readable
+      // description for the queue. Plain text ids (no FK) so the row survives an
+      // unrelated edit.
+      await this.pool.query(`
+        create table if not exists pending_task_edits (
+          id text primary key,
+          checklist_id text not null,
+          item_id text,
+          scope text not null,
+          proposed jsonb not null default '{}'::jsonb,
+          summary text,
+          requested_by text,
+          requested_by_name text,
+          approver_id text,
+          requested_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists pending_task_edits_approver_idx on pending_task_edits (approver_id)`,
+      )
+
       // Time approval workflow. Detect whether the column already exists BEFORE
       // adding it: if this is the first deploy of the feature, every existing
       // entry is backfilled to 'approved' so there's no pending backlog. On
@@ -3012,7 +3045,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
                    case_id, stage_id, stage_index, stage_count, category_id, deleted_at,
-                   deletion_requested_by, deletion_requested_at, onboarding_for_client_id
+                   deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by
             from checklists
             order by due_date asc, id asc
           `),
@@ -3196,6 +3229,7 @@ export class AppDataStore {
         deletionRequestedAt: row.deletion_requested_at
           ? row.deletion_requested_at.toISOString()
           : null,
+        createdBy: row.created_by ?? null,
       }))
 
       const data = {
@@ -4126,8 +4160,8 @@ export class AppDataStore {
         for (const checklist of checklistsToWrite) {
           await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now())
             `,
             [
               checklist.id,
@@ -4148,6 +4182,7 @@ export class AppDataStore {
               checklist.deletionRequestedBy ?? null,
               checklist.deletionRequestedAt ?? null,
               checklist.onboardingForClientId ?? null,
+              checklist.createdBy ?? null,
             ],
           )
 
@@ -5314,8 +5349,8 @@ export class AppDataStore {
         await client.query('begin')
         await client.query(
           `
-            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, onboarding_for_client_id, updated_at)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, onboarding_for_client_id, created_by, updated_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
           `,
           [
             nextChecklist.id,
@@ -5333,6 +5368,7 @@ export class AppDataStore {
             nextChecklist.stageCount,
             nextChecklist.categoryId ? nextChecklist.categoryId : null,
             nextChecklist.onboardingForClientId ?? null,
+            nextChecklist.createdBy ?? null,
           ],
         )
 
@@ -8364,6 +8400,231 @@ export class AppDataStore {
     const before = authState.itemDeletionRequests.length
     authState.itemDeletionRequests = authState.itemDeletionRequests.filter((req) => req.id !== id)
     const removed = authState.itemDeletionRequests.length < before
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return removed
+  }
+
+  // ---- Task DETAILS meta edit (title / due date / assignee) ----
+  //
+  // Direct apply of a checklist's own fields, used by the dedicated
+  // PATCH /api/checklists/:id endpoint (owner / creator direct edits and the
+  // approve step of a routed edit). Only the three routable detail fields are
+  // touched — items and every other column are left alone. Returns the updated
+  // checklist (via read()) or null when the id doesn't exist.
+  async updateChecklistMeta(checklistId, patch = {}) {
+    if (!checklistId) return null
+    const { title, dueDate, assigneeId } = patch ?? {}
+
+    if (this.pool) {
+      const setClauses = []
+      const params = [checklistId]
+      if (title !== undefined) {
+        params.push(String(title))
+        setClauses.push(`title = $${params.length}`)
+      }
+      if (dueDate !== undefined) {
+        params.push(dueDate === '' || dueDate === null ? null : dueDate)
+        setClauses.push(`due_date = $${params.length}`)
+      }
+      if (assigneeId !== undefined) {
+        params.push(assigneeId === '' || assigneeId === null ? null : assigneeId)
+        setClauses.push(`assignee_id = $${params.length}`)
+      }
+      if (setClauses.length === 0) {
+        const data = await this.read()
+        return data.checklists.find((c) => c.id === checklistId) ?? null
+      }
+      setClauses.push('updated_at = now()')
+      const result = await this.pool.query(
+        `update checklists set ${setClauses.join(', ')} where id = $1 returning id`,
+        params,
+      )
+      if (!result.rowCount) return null
+      const data = await this.read()
+      return data.checklists.find((c) => c.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updated = null
+    data.checklists = (data.checklists ?? []).map((checklist) => {
+      if (checklist.id !== checklistId) return checklist
+      const next = { ...checklist }
+      if (title !== undefined) next.title = String(title)
+      if (dueDate !== undefined && dueDate !== '' && dueDate !== null) next.dueDate = dueDate
+      if (assigneeId !== undefined && assigneeId !== '' && assigneeId !== null) {
+        next.assigneeId = assigneeId
+      }
+      updated = next
+      return next
+    })
+    if (!updated) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updated
+  }
+
+  // ---- Pending task edits (non-creator edit → creator/owner approves) ----
+  //
+  // Endpoint-managed (NOT part of the bulk /api/app-data write), like item
+  // deletion requests — so staff can file an edit without the owner-only bulk
+  // save and edits can't be clobbered by an autosave. Stored in auth-state on
+  // the file backend, pending_task_edits on pg. Always returned newest-first.
+
+  /**
+   * Pending task edits visible to `session`. The owner sees all; everyone else
+   * sees only edits routed to them (`approver_id = self`), mirroring
+   * listItemDeletionRequests' owner-vs-scoped rule.
+   */
+  async listPendingTaskEdits(session) {
+    const isOwner = session?.user?.role === 'owner'
+    const selfId = session?.user?.id ?? null
+    let all
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, checklist_id, item_id, scope, proposed, summary,
+                requested_by, requested_by_name, approver_id, requested_at
+           from pending_task_edits order by requested_at desc`,
+      )
+      all = result.rows.map((row) => ({
+        id: row.id,
+        checklistId: row.checklist_id,
+        itemId: row.item_id ?? null,
+        scope: row.scope,
+        proposed:
+          row.proposed && typeof row.proposed === 'object' ? row.proposed : {},
+        summary: row.summary ?? '',
+        requestedBy: row.requested_by ?? null,
+        requestedByName: row.requested_by_name ?? null,
+        approverId: row.approver_id ?? null,
+        requestedAt: row.requested_at ? new Date(row.requested_at).toISOString() : null,
+      }))
+    } else {
+      const authState = await readJson(localAuthPath)
+      const list = Array.isArray(authState.pendingTaskEdits) ? authState.pendingTaskEdits : []
+      all = list
+        .map((req) => ({
+          id: req.id,
+          checklistId: req.checklistId,
+          itemId: req.itemId ?? null,
+          scope: req.scope,
+          proposed: req.proposed && typeof req.proposed === 'object' ? req.proposed : {},
+          summary: req.summary ?? '',
+          requestedBy: req.requestedBy ?? null,
+          requestedByName: req.requestedByName ?? null,
+          approverId: req.approverId ?? null,
+          requestedAt: req.requestedAt ?? null,
+        }))
+        .sort((a, b) => String(b.requestedAt).localeCompare(String(a.requestedAt)))
+    }
+    if (isOwner) return all
+    return all.filter((req) => req.approverId === selfId)
+  }
+
+  /** Look up a single pending task edit by id (used to approve/reject). */
+  async getPendingTaskEdit(id) {
+    if (!id) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, checklist_id, item_id, scope, proposed, summary,
+                requested_by, requested_by_name, approver_id, requested_at
+           from pending_task_edits where id = $1`,
+        [id],
+      )
+      const row = result.rows[0]
+      if (!row) return null
+      return {
+        id: row.id,
+        checklistId: row.checklist_id,
+        itemId: row.item_id ?? null,
+        scope: row.scope,
+        proposed: row.proposed && typeof row.proposed === 'object' ? row.proposed : {},
+        summary: row.summary ?? '',
+        requestedBy: row.requested_by ?? null,
+        requestedByName: row.requested_by_name ?? null,
+        approverId: row.approver_id ?? null,
+        requestedAt: row.requested_at ? new Date(row.requested_at).toISOString() : null,
+      }
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.pendingTaskEdits) ? authState.pendingTaskEdits : []
+    const req = list.find((r) => r.id === id)
+    if (!req) return null
+    return {
+      id: req.id,
+      checklistId: req.checklistId,
+      itemId: req.itemId ?? null,
+      scope: req.scope,
+      proposed: req.proposed && typeof req.proposed === 'object' ? req.proposed : {},
+      summary: req.summary ?? '',
+      requestedBy: req.requestedBy ?? null,
+      requestedByName: req.requestedByName ?? null,
+      approverId: req.approverId ?? null,
+      requestedAt: req.requestedAt ?? null,
+    }
+  }
+
+  /** File a pending task edit. Returns the created request. */
+  async createPendingTaskEdit({
+    checklistId,
+    itemId,
+    scope,
+    proposed,
+    summary,
+    requestedBy,
+    requestedByName,
+    approverId,
+  } = {}) {
+    if (!checklistId || !scope) return null
+    const request = {
+      id: `pte-${randomUUID().slice(0, 8)}`,
+      checklistId,
+      itemId: itemId ?? null,
+      scope,
+      proposed: proposed && typeof proposed === 'object' ? proposed : {},
+      summary: String(summary ?? '').slice(0, 500),
+      requestedBy: requestedBy ?? null,
+      requestedByName: requestedByName ?? null,
+      approverId: approverId ?? null,
+      requestedAt: nowIso(),
+    }
+    if (this.pool) {
+      await this.pool.query(
+        `insert into pending_task_edits
+           (id, checklist_id, item_id, scope, proposed, summary,
+            requested_by, requested_by_name, approver_id, requested_at)
+         values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, now())`,
+        [
+          request.id,
+          request.checklistId,
+          request.itemId,
+          request.scope,
+          JSON.stringify(request.proposed),
+          request.summary,
+          request.requestedBy,
+          request.requestedByName,
+          request.approverId,
+        ],
+      )
+      return request
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.pendingTaskEdits)) authState.pendingTaskEdits = []
+    authState.pendingTaskEdits.push(request)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return request
+  }
+
+  /** Delete a pending task edit by id. Returns true if a row was removed. */
+  async deletePendingTaskEdit(id) {
+    if (!id) return false
+    if (this.pool) {
+      const result = await this.pool.query(`delete from pending_task_edits where id = $1`, [id])
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.pendingTaskEdits)) authState.pendingTaskEdits = []
+    const before = authState.pendingTaskEdits.length
+    authState.pendingTaskEdits = authState.pendingTaskEdits.filter((req) => req.id !== id)
+    const removed = authState.pendingTaskEdits.length < before
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return removed
   }

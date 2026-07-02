@@ -10,6 +10,7 @@
   type FeatureRequest,
   type FeatureRequestType,
   type ItemDeletionRequest,
+  type PendingTaskEdit,
   type FirmSettings,
   type NotificationEntry,
   type PublicFirmSettings,
@@ -974,7 +975,24 @@ export async function createChecklistRequest(payload: {
   return (await response.json()) as Checklist
 }
 
-export async function appendChecklistItemsRequest(checklistId: string, titles: string[]) {
+/**
+ * The item add / edit endpoints now return `{ pending }` when a non-creator's
+ * change was ROUTED for approval instead of applied. Callers branch on this
+ * shape via {@link isTaskEditPending}.
+ */
+export type TaskEditResult<T> = T | { pending: PendingTaskEdit | PendingTaskEdit[] }
+
+/** Type guard: the write only FILED a pending edit (non-creator routed path). */
+export function isTaskEditPending<T>(
+  result: TaskEditResult<T>,
+): result is { pending: PendingTaskEdit | PendingTaskEdit[] } {
+  return typeof result === 'object' && result !== null && 'pending' in result
+}
+
+export async function appendChecklistItemsRequest(
+  checklistId: string,
+  titles: string[],
+): Promise<TaskEditResult<Checklist>> {
   const response = await apiFetch(`/api/checklists/${checklistId}/items`, {
     credentials: 'same-origin',
     method: 'POST',
@@ -984,7 +1002,7 @@ export async function appendChecklistItemsRequest(checklistId: string, titles: s
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to add checklist items (${response.status})`)
   }
-  return (await response.json()) as Checklist
+  return (await response.json()) as TaskEditResult<Checklist>
 }
 
 export async function updateChecklistItemRequest(
@@ -1008,7 +1026,7 @@ export async function updateChecklistItemRequest(
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to update checklist item (${response.status})`)
   }
-  return (await response.json()) as Checklist
+  return (await response.json()) as TaskEditResult<Checklist>
 }
 
 export async function deleteChecklistItemRequest(checklistId: string, itemId: string) {
@@ -1077,6 +1095,82 @@ export async function rejectItemDeletion(requestId: string) {
       response.status,
       body?.error ?? `Failed to reject deletion (${response.status})`,
     )
+  }
+  return (await response.json()) as { ok: true; removed: string }
+}
+
+// ---- Task-edit approval routing (details edit + pending-edit queue) ----
+
+/**
+ * Edit a task's DETAILS (title / due date / assignee). For the OWNER or the
+ * task's own creator the server applies it and returns `{ checklist }`. For any
+ * other authorized editor the change is ROUTED and the server returns
+ * `{ pending }`. Callers branch on the shape.
+ */
+export async function updateChecklistMetaRequest(
+  checklistId: string,
+  patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+): Promise<{ checklist: Checklist } | { pending: PendingTaskEdit }> {
+  const response = await apiFetch(`/api/checklists/${encodeURIComponent(checklistId)}`, {
+    credentials: 'same-origin',
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to update task (${response.status})`)
+  }
+  return (await response.json()) as { checklist: Checklist } | { pending: PendingTaskEdit }
+}
+
+/** Every pending task edit the caller can approve (owner: all; staff: routed to them). */
+export async function listPendingTaskEdits() {
+  const response = await apiFetch('/api/checklists/pending-edits', {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to load pending edits (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { edits: PendingTaskEdit[] }).edits
+}
+
+/** Approve a pending task edit (applies it). Returns the updated checklist. */
+export async function approvePendingTaskEdit(editId: string) {
+  const response = await apiFetch(
+    `/api/checklists/pending-edits/${encodeURIComponent(editId)}/approve`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to approve edit (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
+/** Reject a pending task edit (discards it, applies nothing). */
+export async function rejectPendingTaskEdit(editId: string) {
+  const response = await apiFetch(
+    `/api/checklists/pending-edits/${encodeURIComponent(editId)}/reject`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(response.status, body?.error ?? `Failed to reject edit (${response.status})`)
   }
   return (await response.json()) as { ok: true; removed: string }
 }

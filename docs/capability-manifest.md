@@ -120,17 +120,27 @@ picker, notification bell, and account menu sit in the top bar on every page.
   stage advances the case and notifies the next assignee; the case opener is
   notified when the whole case completes. Stuck cases are flagged on the
   Dashboard.
-- Task card actions: Edit details (title, due date, assignee) — available to the
-  owner and to a task's assignee/editor. Delete task — for the OWNER it moves the
-  task to the owner-only Recycle bin immediately (time entries preserved, restore
-  anytime until emptied). For STAFF, deleting — a whole checklist OR an
+- Task card actions: Edit details (title, due date, assignee) — the owner and any
+  assignee/editor/assigned-staff can open the editor. Delete task — for the OWNER it
+  moves the task to the owner-only Recycle bin immediately (time entries preserved,
+  restore anytime until emptied). For STAFF, deleting — a whole checklist OR an
   individual step/sub-step — files a deletion REQUEST that an owner must approve;
-  nothing is removed until then (editing/adding don't need approval). The owner
-  sees a "Pending deletion requests" queue at the top of the Checklists page
-  (both whole-checklist and per-item requests) with Approve (delete) / Reject
-  (keep), and gets a bell notification when a request is filed; the requested
-  task/item shows a "Deletion requested" badge to staff until resolved. Owners
-  delete immediately (they're the approver).
+  nothing is removed until then. The owner sees a "Pending deletion requests" queue
+  at the top of the Checklists page (both whole-checklist and per-item requests) with
+  Approve (delete) / Reject (keep), and gets a bell notification when a request is
+  filed; the requested task/item shows a "Deletion requested" badge to staff until
+  resolved. Owners delete immediately (they're the approver).
+- Edit approval (edits to someone else's task): a task now tracks who CREATED it.
+  When you edit a task you created — or you're the owner — the change applies
+  immediately. When you edit a task SOMEONE ELSE created (its details title/due/
+  assignee, editing a step, or adding a step), the change does NOT apply — it's
+  routed as a PENDING EDIT to that task's creator (tasks with no human creator —
+  recurring/template/onboarding — route to the owner). The approver sees a "Pending
+  task edits" queue at the top of the Checklists page with a "field: old → new"
+  summary and Approve (apply) / Reject (discard), gets a bell notification, and the
+  edited task shows an "Edit pending approval" badge until resolved; the editor is
+  notified on approve/reject. Completing/checking off steps and "waiting" flags are
+  the work, not edits — they always apply directly.
 - Sharing/visibility: a team member assigned to a client sees ALL of that
   client's tasks (the whole shared board), not just tasks assigned to them
   personally. They can log time against any of those tasks AND add/edit items on
