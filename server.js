@@ -27,7 +27,7 @@ import {
   sendReportEmail,
 } from './lib/notify.js'
 import {
-  findBlockingRejectedWeek,
+  findBlockingWeek,
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
 } from './lib/time-entry.js'
@@ -2728,28 +2728,28 @@ const server = createServer(async (request, response) => {
         // check is skipped for it.
         const allData = await appDataStore.read()
 
-        // Weekly-submission gate: a non-owner is blocked from logging NEW time
-        // only when a PRIOR week's timesheet has been REJECTED and sent back
-        // for changes — resubmitting it is the one thing in their control.
-        // Un-submitted and still-pending prior weeks no longer block (firm
-        // owners asked for this: an awaiting-approval week is out of staff's
-        // hands and was locking them out of the timer). See
-        // `findBlockingRejectedWeek` for the rule. They can always add to / fix
-        // a prior week itself.
+        // Weekly-submission gate: a non-owner must SUBMIT (or resubmit) a PRIOR
+        // week that has logged time before logging time in a LATER week. A prior
+        // week blocks when it's UN-SUBMITTED (no submission) or REJECTED (sent
+        // back). A submitted/pending/approved week does NOT block — once it's
+        // submitted it's out of staff's hands, so an awaiting-approval week never
+        // locks them out of the timer. See `findBlockingWeek`.
         if (session.user.role !== 'owner') {
           const entryWeekStart = weekStartOf(date)
           const priorWeeksWithTime = (allData.timeEntries ?? [])
             .filter((entry) => entry.employeeId === employeeId)
             .map((entry) => weekStartOf(entry.date))
-          const rejectedWeek = findBlockingRejectedWeek(
+          const blocking = findBlockingWeek(
             entryWeekStart,
             priorWeeksWithTime,
             (allData.weeklySubmissions ?? []).filter((entry) => entry.userId === employeeId),
           )
-          if (rejectedWeek) {
-            sendJson(response, 423, {
-              error: `Your timesheet for the week of ${rejectedWeek} was sent back for changes. Fix and resubmit it before logging more time.`,
-            })
+          if (blocking) {
+            const error =
+              blocking.reason === 'rejected'
+                ? `Your timesheet for the week of ${blocking.weekStart} was sent back for changes. Fix and resubmit it before logging more time.`
+                : `You have an unsubmitted timesheet for the week of ${blocking.weekStart}. Submit that week before logging time for a later week.`
+            sendJson(response, 423, { error })
             return
           }
         }

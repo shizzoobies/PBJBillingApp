@@ -190,7 +190,7 @@ export function UpdatesPage() {
     }
   }
 
-  const handleDragStart = (event: DragEvent<HTMLDivElement>, id: string) => {
+  const handleDragStart = (event: DragEvent<HTMLElement>, id: string) => {
     setDraggingId(id)
     event.dataTransfer.effectAllowed = 'move'
   }
@@ -329,15 +329,22 @@ export function UpdatesPage() {
       <div
         key={item.id}
         className={classes.join(' ')}
-        draggable
-        onDragStart={(event) => handleDragStart(event, item.id)}
         onDragOver={(event) => handleDragOver(event, item.id)}
         onDragLeave={handleDragLeave}
         onDrop={(event) => handleDrop(event, item.id)}
         onDragEnd={handleDragEnd}
       >
         <div className="updates-card-main">
-          <span className="drag-handle" aria-hidden="true" title="Drag to reorder">
+          {/* Only the handle is draggable — making the whole card draggable
+              hijacked mousedown on the buttons/inputs inside it (Refine, Save,
+              Edit, the textareas), so they wouldn't reliably click/focus. */}
+          <span
+            className="drag-handle"
+            title="Drag to reorder"
+            draggable
+            onDragStart={(event) => handleDragStart(event, item.id)}
+            onDragEnd={handleDragEnd}
+          >
             <GripVertical size={14} />
           </span>
           <div className="updates-card-body">

@@ -16,9 +16,9 @@ declare module '*/lib/time-entry.js' {
     manualReason: string | undefined
     error: string | null
   }
-  export function findBlockingRejectedWeek(
+  export function findBlockingWeek(
     entryWeekStart: string,
     priorWeekStarts: Iterable<string>,
     submissions: ReadonlyArray<{ weekStart: string; status: string }>,
-  ): string | null
+  ): { weekStart: string; reason: 'unsubmitted' | 'rejected' } | null
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  findBlockingRejectedWeek,
+  findBlockingWeek,
   normalizeTimeEntryMethod,
 } from '../../lib/time-entry.js'
 
@@ -56,75 +56,58 @@ describe('normalizeTimeEntryMethod', () => {
 })
 
 /**
- * `findBlockingRejectedWeek` is the weekly-submission gate. Only a REJECTED
- * prior week (owner sent it back) blocks logging new time; un-submitted and
- * pending prior weeks never block.
+ * `findBlockingWeek` is the weekly-submission gate. A non-owner must SUBMIT (or
+ * resubmit) a prior week with time before logging a later week: an UN-SUBMITTED
+ * or REJECTED prior week blocks; a submitted/pending/approved one does not.
  */
-describe('findBlockingRejectedWeek', () => {
+describe('findBlockingWeek', () => {
   const entryWeek = '2026-06-14'
 
-  it('does not block when a prior week is un-submitted (no submission row)', () => {
-    // This is the real-world case that was 423-ing staff: a prior week with
-    // logged time but no submission.
-    expect(findBlockingRejectedWeek(entryWeek, ['2026-06-07'], [])).toBeNull()
+  it('BLOCKS when a prior week with time is un-submitted (no submission row)', () => {
+    expect(findBlockingWeek(entryWeek, ['2026-06-07'], [])).toEqual({
+      weekStart: '2026-06-07',
+      reason: 'unsubmitted',
+    })
   })
 
-  it('does not block when the prior week is still pending approval', () => {
+  it('does not block when the prior week is submitted / pending approval', () => {
     expect(
-      findBlockingRejectedWeek(entryWeek, ['2026-06-07'], [
-        { weekStart: '2026-06-07', status: 'pending' },
-      ]),
+      findBlockingWeek(entryWeek, ['2026-06-07'], [{ weekStart: '2026-06-07', status: 'pending' }]),
     ).toBeNull()
   })
 
   it('does not block when the prior week is approved', () => {
     expect(
-      findBlockingRejectedWeek(entryWeek, ['2026-06-07'], [
-        { weekStart: '2026-06-07', status: 'approved' },
-      ]),
+      findBlockingWeek(entryWeek, ['2026-06-07'], [{ weekStart: '2026-06-07', status: 'approved' }]),
     ).toBeNull()
   })
 
   it('blocks on a rejected prior week and names it', () => {
     expect(
-      findBlockingRejectedWeek(entryWeek, ['2026-06-07'], [
+      findBlockingWeek(entryWeek, ['2026-06-07'], [{ weekStart: '2026-06-07', status: 'rejected' }]),
+    ).toEqual({ weekStart: '2026-06-07', reason: 'rejected' })
+  })
+
+  it('ignores a week that has no logged time (not a prior-with-time week)', () => {
+    // Entry week itself has time but no prior weeks-with-time → nothing gates.
+    expect(findBlockingWeek(entryWeek, ['2026-06-14'], [])).toBeNull()
+  })
+
+  it('ignores weeks that are the entry week or later (only prior weeks gate)', () => {
+    expect(findBlockingWeek(entryWeek, ['2026-06-14', '2026-06-21'], [])).toBeNull()
+  })
+
+  it('returns the earliest blocking prior week, skipping submitted ones', () => {
+    // 05-24 submitted (clear) → 05-31 un-submitted (blocks first) → 06-07 rejected.
+    expect(
+      findBlockingWeek(entryWeek, ['2026-05-24', '2026-05-31', '2026-06-07'], [
+        { weekStart: '2026-05-24', status: 'pending' },
         { weekStart: '2026-06-07', status: 'rejected' },
       ]),
-    ).toBe('2026-06-07')
-  })
-
-  it('ignores a rejected week that has no logged time (not a prior-with-time week)', () => {
-    expect(
-      findBlockingRejectedWeek(entryWeek, ['2026-05-31'], [
-        { weekStart: '2026-06-07', status: 'rejected' },
-      ]),
-    ).toBeNull()
-  })
-
-  it('ignores a rejected week that is the entry week or later (only prior weeks gate)', () => {
-    expect(
-      findBlockingRejectedWeek(entryWeek, ['2026-06-14', '2026-06-21'], [
-        { weekStart: '2026-06-14', status: 'rejected' },
-        { weekStart: '2026-06-21', status: 'rejected' },
-      ]),
-    ).toBeNull()
-  })
-
-  it('returns the earliest rejected prior week when several are rejected', () => {
-    expect(
-      findBlockingRejectedWeek(
-        entryWeek,
-        ['2026-05-24', '2026-05-31', '2026-06-07'],
-        [
-          { weekStart: '2026-06-07', status: 'rejected' },
-          { weekStart: '2026-05-24', status: 'rejected' },
-          { weekStart: '2026-05-31', status: 'pending' },
-        ],
-      ),
-    ).toBe('2026-05-24')
+    ).toEqual({ weekStart: '2026-05-31', reason: 'unsubmitted' })
   })
 
   it('does not block when the user has no prior weeks with time', () => {
-    expect(findBlockingRejectedWeek(entryWeek, [], [])).toBeNull()
+    expect(findBlockingWeek(entryWeek, [], [])).toBeNull()
   })
 })

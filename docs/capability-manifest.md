@@ -61,10 +61,13 @@ picker, notification bell, and account menu sit in the top bar on every page.
   The list is scoped by the shared Report period (defaults to this month); the
   live timer and the log form aren't affected by it.
 - Billable vs non-billable is determined by the client's billing setup.
-- Staff can always log time, with one exception: if an owner sent a prior
-  week's timesheet back for changes (rejected), that week must be fixed and
-  resubmitted before more time can be logged. A week that's simply
-  un-submitted or still awaiting approval never blocks logging.
+- Weekly-submission gate: staff must SUBMIT (or resubmit) a prior week that has
+  logged time before they can log time in a LATER week. A prior week blocks when
+  it's un-submitted (never submitted) OR was sent back for changes (rejected) —
+  they get a message naming the week to submit/fix. A week that's already
+  submitted (pending owner approval) or approved does NOT block, so an
+  awaiting-approval week never locks them out. Logging in the current week is
+  always fine.
 
 ## Timesheet page
 
