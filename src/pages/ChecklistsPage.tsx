@@ -1316,11 +1316,15 @@ export function ChecklistCard({
     approveChecklistDeletion,
     rejectChecklistDeletion,
     pendingTaskEditChecklistIds,
+    serviceCategories,
   } = useAppContext()
   const [editingMeta, setEditingMeta] = useState(false)
   const [metaTitle, setMetaTitle] = useState(checklist.title)
   const [metaDue, setMetaDue] = useState(checklist.dueDate)
   const [metaAssignee, setMetaAssignee] = useState(checklist.assigneeId)
+  // Board column (service category). '' = Uncategorized. Editing this is how an
+  // uncategorized checklist gets moved into the right board column.
+  const [metaCategoryId, setMetaCategoryId] = useState(checklist.categoryId ?? '')
   // Inline "sent for approval" note shown after a routed save.
   const [metaPendingNote, setMetaPendingNote] = useState<string | null>(null)
   // True when this task already has a pending edit awaiting approval.
@@ -1329,6 +1333,7 @@ export function ChecklistCard({
     setMetaTitle(checklist.title)
     setMetaDue(checklist.dueDate)
     setMetaAssignee(checklist.assigneeId)
+    setMetaCategoryId(checklist.categoryId ?? '')
     setMetaPendingNote(null)
     setEditingMeta(true)
   }
@@ -1344,6 +1349,8 @@ export function ChecklistCard({
         title: title || checklist.title,
         dueDate: metaDue || checklist.dueDate,
         assigneeId: metaAssignee || checklist.assigneeId,
+        // '' → null so choosing "Uncategorized" clears the column.
+        categoryId: metaCategoryId || null,
       })
       if (result && 'pending' in result) {
         const approverName = employeeName(employees, result.pending.approverId ?? '')
@@ -1414,6 +1421,21 @@ export function ChecklistCard({
                     {employees.map((employee) => (
                       <option key={employee.id} value={employee.id}>
                         {employee.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Board column</span>
+                  <select
+                    className="input"
+                    value={metaCategoryId}
+                    onChange={(event) => setMetaCategoryId(event.target.value)}
+                  >
+                    <option value="">Uncategorized</option>
+                    {serviceCategories.map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {category.name}
                       </option>
                     ))}
                   </select>

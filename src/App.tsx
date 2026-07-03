@@ -2125,7 +2125,7 @@ function App() {
   // result tells the UI whether to show a "sent for approval" note.
   const updateChecklistMeta = async (
     checklistId: string,
-    patch: { title?: string; dueDate?: string; assigneeId?: string },
+    patch: { title?: string; dueDate?: string; assigneeId?: string; categoryId?: string | null },
   ): Promise<{ pending: PendingTaskEdit } | { checklist: Checklist } | null> => {
     if (previewActiveRef.current) return null
     try {

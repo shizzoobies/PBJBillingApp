@@ -142,6 +142,31 @@ describe('buildActiveBoard', () => {
     expect(withOrphan.columns.find((c) => c.id === UNCATEGORIZED_ID)!.openClientCount).toBe(2)
   })
 
+  it('reflects re-tagging: an uncategorized checklist moves into its column (board-correction fix)', () => {
+    // Before: no category → it sits in the Uncategorized column.
+    const before = buildActiveBoard({
+      checklists: [open({ id: 'x', clientId: 'c1', categoryId: null, dueDate: '2026-06-20' })],
+      categories,
+      periodType: 'month',
+      today: '2026-06-16',
+      clientNameById,
+    })
+    expect(before.columns.find((c) => c.id === UNCATEGORIZED_ID)!.openClientCount).toBe(1)
+    expect(before.columns.find((c) => c.id === 'mb')!.openClientCount).toBe(0)
+
+    // After: setting categoryId (what the card's new "Board column" editor
+    // persists) re-renders it under that column, and Uncategorized disappears.
+    const after = buildActiveBoard({
+      checklists: [open({ id: 'x', clientId: 'c1', categoryId: 'mb', dueDate: '2026-06-20' })],
+      categories,
+      periodType: 'month',
+      today: '2026-06-16',
+      clientNameById,
+    })
+    expect(after.columns.some((c) => c.id === UNCATEGORIZED_ID)).toBe(false)
+    expect(after.columns.find((c) => c.id === 'mb')!.clients.map((c) => c.clientId)).toEqual(['c1'])
+  })
+
   it('honors the period horizon and keeps overdue visible', () => {
     const checklists = [
       open({ id: 'thisweek', clientId: 'c1', categoryId: 'mb', dueDate: '2026-06-18' }),

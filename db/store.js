@@ -8844,7 +8844,7 @@ export class AppDataStore {
   // checklist (via read()) or null when the id doesn't exist.
   async updateChecklistMeta(checklistId, patch = {}) {
     if (!checklistId) return null
-    const { title, dueDate, assigneeId } = patch ?? {}
+    const { title, dueDate, assigneeId, categoryId } = patch ?? {}
 
     if (this.pool) {
       const setClauses = []
@@ -8860,6 +8860,13 @@ export class AppDataStore {
       if (assigneeId !== undefined) {
         params.push(assigneeId === '' || assigneeId === null ? null : assigneeId)
         setClauses.push(`assignee_id = $${params.length}`)
+      }
+      // categoryId moves the checklist between board columns. Unlike the fields
+      // above, an explicit null/'' is meaningful (→ Uncategorized), so it's
+      // written through rather than ignored.
+      if (categoryId !== undefined) {
+        params.push(categoryId === '' || categoryId === null ? null : String(categoryId))
+        setClauses.push(`category_id = $${params.length}`)
       }
       if (setClauses.length === 0) {
         const data = await this.read()
@@ -8884,6 +8891,11 @@ export class AppDataStore {
       if (dueDate !== undefined && dueDate !== '' && dueDate !== null) next.dueDate = dueDate
       if (assigneeId !== undefined && assigneeId !== '' && assigneeId !== null) {
         next.assigneeId = assigneeId
+      }
+      // categoryId: an explicit null/'' clears it (→ Uncategorized), so it's
+      // applied even when empty (unlike due/assignee above).
+      if (categoryId !== undefined) {
+        next.categoryId = categoryId === '' || categoryId === null ? null : categoryId
       }
       updated = next
       return next

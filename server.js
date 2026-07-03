@@ -537,11 +537,16 @@ function resolveTaskApproverId(checklist, employees) {
 }
 
 /** Readable one-line summary of a proposed edit for the approver queue. */
-function summarizeTaskEdit(scope, proposed, prev = {}) {
+function summarizeTaskEdit(scope, proposed, prev = {}, categoryNames = {}) {
   const patch = proposed ?? {}
   const before = prev ?? {}
   const show = (value) =>
     value === null || value === undefined || value === '' ? '—' : `"${String(value)}"`
+  // Category is stored as an id but shown by name; empty = the Uncategorized column.
+  const showCat = (value) =>
+    value === null || value === undefined || value === ''
+      ? 'Uncategorized'
+      : `"${categoryNames[value] ?? String(value)}"`
   if (scope === 'add_item') {
     return `Add step: ${show(patch.title ?? patch.label)}`
   }
@@ -552,6 +557,9 @@ function summarizeTaskEdit(scope, proposed, prev = {}) {
   field('title', 'Title')
   field('dueDate', 'Due date')
   field('assigneeId', 'Assignee')
+  if ('categoryId' in patch) {
+    parts.push(`Column: ${showCat(before.categoryId)} → ${showCat(patch.categoryId)}`)
+  }
   if (parts.length === 0) return scope === 'item' ? 'Edit step' : 'Edit task details'
   return parts.join('; ')
 }
@@ -564,7 +572,10 @@ function summarizeTaskEdit(scope, proposed, prev = {}) {
  */
 async function filePendingTaskEdit(request, session, data, checklist, { scope, itemId, proposed, prev }) {
   const approverId = resolveTaskApproverId(checklist, data.employees ?? [])
-  const summary = summarizeTaskEdit(scope, proposed, prev)
+  // Resolve category ids → names so a routed "column changed" edit reads clearly.
+  const categories = await appDataStore.listServiceCategories()
+  const categoryNames = Object.fromEntries((categories ?? []).map((c) => [c.id, c.name]))
+  const summary = summarizeTaskEdit(scope, proposed, prev, categoryNames)
 
   const existing = await appDataStore.listPendingTaskEdits({
     user: { id: session.user.id, role: 'owner' },
@@ -3888,6 +3899,7 @@ const server = createServer(async (request, response) => {
           ...('title' in proposed ? { title: proposed.title } : {}),
           ...('dueDate' in proposed ? { dueDate: proposed.dueDate } : {}),
           ...('assigneeId' in proposed ? { assigneeId: proposed.assigneeId } : {}),
+          ...('categoryId' in proposed ? { categoryId: proposed.categoryId } : {}),
         })
       } else if (edit.scope === 'add_item') {
         const label = String(proposed.title ?? proposed.label ?? '').trim()
@@ -3995,6 +4007,24 @@ const server = createServer(async (request, response) => {
         }
         proposed.assigneeId = incoming
         prev.assigneeId = checklist.assigneeId
+      }
+      // Board column (service category). Empty/null = Uncategorized, which is a
+      // valid target (this is how an uncategorized checklist is re-tagged so it
+      // moves to the right column). A non-empty id must be a real category.
+      if ('categoryId' in payload) {
+        const incoming =
+          payload.categoryId === null || payload.categoryId === ''
+            ? null
+            : String(payload.categoryId)
+        if (incoming) {
+          const categories = await appDataStore.listServiceCategories()
+          if (!categories.some((c) => c.id === incoming)) {
+            sendJson(response, 400, { error: 'Invalid categoryId' })
+            return
+          }
+        }
+        proposed.categoryId = incoming
+        prev.categoryId = checklist.categoryId ?? null
       }
       if (Object.keys(proposed).length === 0) {
         sendJson(response, 400, { error: 'No editable fields provided' })

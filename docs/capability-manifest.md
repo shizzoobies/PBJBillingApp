@@ -179,6 +179,12 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - **Which column a checklist lands in:** set its "Board column" on the repeating
   template (or one-time task) — generated checklists inherit it. Anything with no
   column shows in an "Uncategorized" column.
+- **Re-tagging an existing checklist:** open a checklist's Edit (the ⋯ menu on its
+  card, on the board or the Checklists page) and pick a "Board column" (including
+  "Uncategorized"). This moves it between columns — e.g. to pull an item out of
+  the Uncategorized column into the right one — and the board updates immediately.
+  Owner/creator edits apply directly; other authorized editors' changes route to
+  the task's approver like any other task-details edit.
 - **Managing columns (owner only):** "Manage columns" on the board lets the owner
   add, rename, reorder, or delete columns. Deleting a column doesn't delete its
   checklists — they move to "Uncategorized" until re-tagged.

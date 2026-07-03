@@ -1195,7 +1195,13 @@ export async function fetchWaitingOnMe() {
  */
 export async function updateChecklistMetaRequest(
   checklistId: string,
-  patch: { title?: string; dueDate?: string | null; assigneeId?: string | null },
+  patch: {
+    title?: string
+    dueDate?: string | null
+    assigneeId?: string | null
+    /** Board column (service category); null/'' = Uncategorized. */
+    categoryId?: string | null
+  },
 ): Promise<{ checklist: Checklist } | { pending: PendingTaskEdit }> {
   const response = await apiFetch(`/api/checklists/${encodeURIComponent(checklistId)}`, {
     credentials: 'same-origin',

@@ -191,7 +191,7 @@ export type AppContextValue = {
    */
   updateChecklistMeta: (
     checklistId: string,
-    patch: { title?: string; dueDate?: string; assigneeId?: string },
+    patch: { title?: string; dueDate?: string; assigneeId?: string; categoryId?: string | null },
   ) => Promise<{ pending: PendingTaskEdit } | { checklist: Checklist } | null>
   /**
    * The Active Checklists board columns (service categories), loaded from the
