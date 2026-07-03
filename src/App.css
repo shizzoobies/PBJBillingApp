@@ -3355,6 +3355,27 @@ td strong {
   background: var(--soft);
 }
 
+/* Recurring-task editor: the "+ Add person" dropdown normally floats
+   (position: absolute) below the pill. But the recurring frames clip their
+   overflow to round their corners (.repeating-task-row / .stage-card use
+   overflow: hidden), which cut the floating menu off "below the frame" — the
+   reported bug. Inside those frames, render the menu IN FLOW instead: the
+   frames have no fixed height, so they simply grow to show the fully-visible
+   menu (still capped + scrollable for long lists via the base rule). */
+.repeating-task-body .sharing-add,
+.stage-card-body .sharing-add {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  align-self: flex-start;
+}
+.repeating-task-body .sharing-add-menu,
+.stage-card-body .sharing-add-menu {
+  position: static;
+  margin-top: 6px;
+  min-width: 0;
+}
+
 /* --- Filter bar ------------------------------------------------------- */
 
 .filter-bar {
