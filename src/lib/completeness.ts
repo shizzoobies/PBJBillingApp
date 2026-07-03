@@ -26,6 +26,13 @@ export interface SetupIssue {
   title: string
   /** Optional extra context. */
   detail?: string
+  /**
+   * Optional list of the specific outstanding things behind this issue, by
+   * name — so a suggestion isn't just a count ("3 checklists not yet added")
+   * but names each one ("Monthly Bookkeeping", "Payroll", "Sales Tax"). The
+   * count always matches `items.length`.
+   */
+  items?: string[]
   /** Route to go fix it (react-router path). */
   to: string
   severity: SetupSeverity
@@ -131,7 +138,11 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
           id: `client:plan-checklists:${client.id}:${plan.id}`,
           category: 'Clients',
           title: `Set up ${plan.name} checklists for ${client.name}`,
-          detail: `${missing.length} plan checklist${missing.length === 1 ? '' : 's'} not yet added.`,
+          detail: `${missing.length} plan checklist${missing.length === 1 ? '' : 's'} not yet added:`,
+          // Name each missing checklist so the owner sees exactly which ones are
+          // outstanding, not just a count. Already-added ones are filtered out
+          // by `missingPlanTemplatesForClient`, so this lists only what's left.
+          items: missing.map((template) => template.title),
           to: where,
           severity: 'medium',
         })

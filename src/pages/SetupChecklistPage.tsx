@@ -79,6 +79,13 @@ export function SetupChecklistPage() {
                 <div className="setup-issue-body">
                   <strong>{issue.title}</strong>
                   {issue.detail ? <span className="muted-text">{issue.detail}</span> : null}
+                  {issue.items && issue.items.length > 0 ? (
+                    <ul className="setup-issue-items">
+                      {issue.items.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  ) : null}
                   <span className="setup-issue-sev">{SEVERITY_LABEL[issue.severity]}</span>
                 </div>
                 <Link to={issue.to} className="setup-issue-fix">

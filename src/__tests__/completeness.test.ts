@@ -113,9 +113,51 @@ describe('computeSetupIssues', () => {
       plans,
       checklistTemplates,
     }
-    expect(
-      computeSetupIssues(input).some((i) => i.id === 'client:plan-checklists:client-1:plan-1'),
-    ).toBe(true)
+    const issue = computeSetupIssues(input).find(
+      (i) => i.id === 'client:plan-checklists:client-1:plan-1',
+    )
+    expect(issue).toBeDefined()
+    // Names each missing checklist, not just a count — and the count matches.
+    expect(issue?.items).toEqual(['Monthly Close'])
+    expect(issue?.detail).toContain('1 plan checklist')
+  })
+
+  it('lists each specific missing checklist by name, excluding ones already added', () => {
+    const plans: SubscriptionPlan[] = [
+      { id: 'plan-1', name: 'Essentials', notes: '', templateIds: ['tmpl-1', 'tmpl-2', 'tmpl-3'] },
+    ]
+    const makeTmpl = (id: string, title: string, clientId: string): ChecklistTemplate =>
+      ({
+        id,
+        title,
+        clientId,
+        assigneeId: '',
+        frequency: 'monthly',
+        active: true,
+        isStandard: clientId === '',
+        stages: [],
+      }) as unknown as ChecklistTemplate
+    const checklistTemplates: ChecklistTemplate[] = [
+      makeTmpl('tmpl-1', 'Monthly Close', ''),
+      makeTmpl('tmpl-2', 'Payroll', ''),
+      makeTmpl('tmpl-3', 'Sales Tax', ''),
+      // Client already has "Payroll" set up (a client-scoped copy of tmpl-2).
+      makeTmpl('client-tmpl-2', 'Payroll', 'client-1'),
+    ]
+    const input: CompletenessInput = {
+      ...emptyInput,
+      clients: [makeClient({ planIds: ['plan-1'] })],
+      plans,
+      checklistTemplates,
+    }
+    const issue = computeSetupIssues(input).find(
+      (i) => i.id === 'client:plan-checklists:client-1:plan-1',
+    )
+    // Payroll is already added, so only the two truly-missing ones are listed,
+    // and the count in the detail matches the listed items.
+    expect(issue?.items).toEqual(['Monthly Close', 'Sales Tax'])
+    expect(issue?.items?.length).toBe(2)
+    expect(issue?.detail).toContain('2 plan checklists')
   })
 })
 

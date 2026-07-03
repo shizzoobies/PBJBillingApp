@@ -8427,6 +8427,20 @@ button.repeating-task-toggle-pill {
 .setup-issue-body .muted-text {
   font-size: 0.85rem;
 }
+/* The specific outstanding things behind an issue (e.g. which plan checklists
+   are still missing), named rather than just counted. */
+.setup-issue-items {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  list-style: disc;
+}
+.setup-issue-items li {
+  font-size: 0.85rem;
+  color: var(--ink, #2c2735);
+}
 .setup-issue-sev {
   font-size: 0.72rem;
   text-transform: uppercase;

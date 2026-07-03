@@ -345,6 +345,10 @@ picker, notification bell, and account menu sit in the top bar on every page.
   aren't set up yet; team members with no bill rate; plans with no checklist
   templates; contacts not linked to any client. Shows "You're all set — 100%"
   when nothing is outstanding.
+- Suggestions that stand for several outstanding things name each one rather
+  than only counting them: the "plan checklists not set up" item lists each
+  specific missing checklist by name (already-added ones are excluded, and the
+  count matches the named list).
 
 ## Team (owner only)
 
