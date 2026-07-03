@@ -31,6 +31,7 @@ import {
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
 } from './lib/time-entry.js'
+import { isTemplateVisibleToScope } from './lib/data-scope.js'
 import {
   generateBackupCodes,
   generateSecret,
@@ -658,8 +659,11 @@ function scopeAppDataForSession(session, data) {
   const checklists = (data.checklists ?? []).filter((checklist) =>
     allowedClientIds.has(checklist.clientId),
   )
+  // Client-agnostic "standard" blueprints (no billing data) are visible to
+  // every team member; client-bound recurring templates stay scoped to the
+  // clients this member is assigned to. See `isTemplateVisibleToScope`.
   const checklistTemplates = (data.checklistTemplates ?? []).filter((template) =>
-    allowedClientIds.has(template.clientId),
+    isTemplateVisibleToScope(template, allowedClientIds),
   )
   const timeEntries = (data.timeEntries ?? []).filter(
     (entry) =>

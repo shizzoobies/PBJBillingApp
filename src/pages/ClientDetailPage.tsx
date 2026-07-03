@@ -8,6 +8,7 @@ import { AssignedTeamControl } from '../components/AssignedTeamControl'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
+import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import {
   CollapsibleSection,
   SaveBadge,
@@ -37,6 +38,7 @@ import {
   type SubscriptionPlan,
 } from '../lib/types'
 import {
+  addDays,
   clientName,
   deriveChecklistStatus,
   emailForClient,
@@ -1201,6 +1203,21 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
     [data.checklistTemplates, client.id],
   )
 
+  // Read-only projection of the recurring instances coming up for THIS client
+  // over the next ~2 months — the same engine the Board/Gantt use (pure, never
+  // persisted). Lets a team member see what's on the way, not just the recipes.
+  const today = localDateOnly()
+  const upcoming = useMemo(
+    () =>
+      projectUpcomingChecklists(data, {
+        fromDateOnly: today,
+        horizonEndDateOnly: addDays(today, 60),
+      })
+        .filter((ghost) => ghost.clientId === client.id)
+        .sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
+    [data, client.id, today],
+  )
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return templates
@@ -1311,6 +1328,26 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
           )}
         </>
       )}
+
+      {upcoming.length > 0 ? (
+        <div className="recurring-upcoming">
+          <h3 className="mini-heading">Upcoming (next 60 days)</h3>
+          <ul className="active-checklist-list">
+            {upcoming.map((ghost) => (
+              <li key={ghost.id} className="active-checklist-row">
+                <div className="active-checklist-main">
+                  <strong>{ghost.title}</strong>
+                  <span className="upcoming-badge">Upcoming</span>
+                </div>
+                <div className="active-checklist-meta">
+                  <span>Due {shortDate.format(new Date(`${ghost.dueDate}T12:00:00`))}</span>
+                  <span>{employeeName(data.employees, ghost.assigneeId)}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </>
   )
 }
@@ -1408,9 +1445,15 @@ function RecurringTemplateRow({
   return (
     <li className="active-checklist-row">
       <div className="active-checklist-main">
-        <Link to={jumpTo} className="active-checklist-link">
+        {/* The title links to the full editor on the Checklists page, which is
+            owner-only — so staff get plain text (no dead-end link). */}
+        {canEdit ? (
+          <Link to={jumpTo} className="active-checklist-link">
+            <strong>{template.title}</strong>
+          </Link>
+        ) : (
           <strong>{template.title}</strong>
-        </Link>
+        )}
         {canEdit ? (
           <button
             type="button"
@@ -1446,9 +1489,13 @@ function RecurringTemplateRow({
             <Pencil size={12} style={{ verticalAlign: 'middle' }} /> Edit
           </button>
         ) : null}
-        <Link to={jumpTo} className="active-checklist-link">
-          Items <ExternalLink size={12} style={{ verticalAlign: 'middle' }} />
-        </Link>
+        {/* "Items" jumps to the owner-only editor — owners only; staff see the
+            actual steps on the generated checklists in "Active checklists". */}
+        {canEdit ? (
+          <Link to={jumpTo} className="active-checklist-link">
+            Items <ExternalLink size={12} style={{ verticalAlign: 'middle' }} />
+          </Link>
+        ) : null}
       </div>
     </li>
   )

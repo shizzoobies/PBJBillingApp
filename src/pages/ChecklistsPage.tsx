@@ -43,6 +43,7 @@ import {
   dueDateLabel,
   effectiveChecklistDue,
   employeeName,
+  ensureTemplateStages,
   formatHours,
   getChecklistFrequencyLabel,
   groupChecklist,
@@ -475,7 +476,127 @@ export function ChecklistsPage() {
           recycledChecklists={data.recycledChecklists ?? []}
         />
       ) : null}
+
+      {/* Team members see the firm's standard blueprints read-only (the owner
+          keeps the full editor above). Lets them know what standard work exists
+          so they don't re-create it; an owner applies one to a client. */}
+      {!ownerMode ? (
+        <StaffStandardTemplatesView
+          templates={data.checklistTemplates}
+          employees={data.employees}
+        />
+      ) : null}
     </section>
+  )
+}
+
+/**
+ * Read-only view of the firm's STANDARD (client-agnostic) checklist blueprints,
+ * shown to team members. They can browse the standard steps but cannot edit,
+ * apply, or delete — that stays with the owner. Renders nothing when there are
+ * no standard templates.
+ */
+function StaffStandardTemplatesView({
+  templates,
+  employees,
+}: {
+  templates: ChecklistTemplate[]
+  employees: Employee[]
+}) {
+  const standards = useMemo(
+    () =>
+      templates
+        .filter((template) => template.isStandard)
+        .slice()
+        .sort((a, b) => a.title.localeCompare(b.title)),
+    [templates],
+  )
+  if (standards.length === 0) return null
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Blueprints</p>
+          <h2>Standard templates</h2>
+          <p className="section-subtitle">
+            Your firm&apos;s reusable checklist blueprints, shown read-only. Ask an owner to
+            apply one to a client to put it to work.
+          </p>
+        </div>
+      </div>
+      <ul className="staff-template-list">
+        {standards.map((template) => (
+          <StaffStandardTemplateRow
+            key={template.id}
+            template={template}
+            employees={employees}
+          />
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/** One collapsible, read-only standard-template row (title → its steps). */
+function StaffStandardTemplateRow({
+  template,
+  employees,
+}: {
+  template: ChecklistTemplate
+  employees: Employee[]
+}) {
+  const [open, setOpen] = useState(false)
+  const stages = ensureTemplateStages(template).stages
+  const totalSteps = stages.reduce((sum, stage) => sum + stage.items.length, 0)
+  const multiStage = stages.length > 1
+  return (
+    <li className="staff-template-row">
+      <button
+        type="button"
+        className="staff-template-summary"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <strong>{template.title}</strong>
+        <span className="staff-template-meta">
+          {totalSteps} step{totalSteps === 1 ? '' : 's'}
+          {multiStage ? ` · ${stages.length} hand-off steps` : ''}
+        </span>
+      </button>
+      {open ? (
+        <div className="staff-template-body">
+          {totalSteps === 0 ? (
+            <p className="muted-text">No steps defined yet.</p>
+          ) : (
+            stages.map((stage) => (
+              <div key={stage.id} className="staff-template-stage">
+                {multiStage ? (
+                  <p className="staff-template-stage-name">
+                    {stage.name}
+                    {stage.assigneeId ? ` · ${employeeName(employees, stage.assigneeId)}` : ''}
+                  </p>
+                ) : null}
+                <ul className="staff-template-steps">
+                  {stage.items.map((item) => (
+                    <li key={item.id}>
+                      {item.label}
+                      {item.subItems && item.subItems.length > 0 ? (
+                        <ul className="staff-template-substeps">
+                          {item.subItems.map((sub) => (
+                            <li key={sub.id}>{sub.title}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          )}
+        </div>
+      ) : null}
+    </li>
   )
 }
 

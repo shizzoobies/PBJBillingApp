@@ -4820,6 +4820,65 @@ td strong {
   gap: 14px;
   padding: 14px;
 }
+
+/* Read-only "Standard templates" list shown to team members (no editing). */
+.staff-template-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.staff-template-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.staff-template-summary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+.staff-template-summary:hover {
+  background: var(--soft);
+}
+.staff-template-meta {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+.staff-template-body {
+  border-top: 1px solid var(--line);
+  padding: 10px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.staff-template-stage-name {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.staff-template-steps,
+.staff-template-substeps {
+  margin: 0;
+  padding-left: 18px;
+}
+.staff-template-steps > li {
+  margin: 2px 0;
+}
+.staff-template-substeps {
+  list-style: circle;
+  color: var(--muted);
+}
 .repeating-task-on-off-row {
   align-items: center;
   display: flex;
