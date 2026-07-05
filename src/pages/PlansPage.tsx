@@ -119,17 +119,13 @@ function PlanLibrary({
   onDelete: (planId: string) => Promise<void>
   onAddClick: () => void
 }) {
-  // Templates the owner can bundle into a plan. Standard (client-agnostic)
-  // blueprints come first since they're the intended building blocks, then
-  // every other template so existing client checklists can be reused too.
+  // Templates the owner can bundle into a plan. A plan pulls ONLY from the
+  // firm's standard (client-agnostic) BLUEPRINTS — never a client-bound
+  // checklist — so a plan stays a reusable recipe, not tied to one client.
   const templateOptions = templates
+    .filter((template) => template.isStandard)
     .slice()
-    .sort((a, b) => {
-      if (Boolean(a.isStandard) !== Boolean(b.isStandard)) {
-        return a.isStandard ? -1 : 1
-      }
-      return a.title.localeCompare(b.title)
-    })
+    .sort((a, b) => a.title.localeCompare(b.title))
     .map((template) => ({ id: template.id, label: templatePickerLabel(template) }))
   const [query, setQuery] = useState('')
   const filteredPlans = plans.filter((plan) => {
@@ -321,7 +317,12 @@ function PlanTemplatesField({
   ownerMode: boolean
   onUpdate: (planId: string, patch: Partial<SubscriptionPlan>) => void
 }) {
-  const chosen = planTemplates(plan, templates)
+  // Only BLUEPRINT (standard) templates count as a plan's checklists — filter
+  // out any stale client-bound ids so nothing from another source shows here.
+  // Passing the blueprint-only id set as the selection also means an owner's
+  // next edit persists a clean, blueprint-only templateIds.
+  const chosen = planTemplates(plan, templates).filter((template) => template.isStandard)
+  const chosenBlueprintIds = chosen.map((template) => template.id)
 
   if (!ownerMode) {
     if (chosen.length === 0) return null
@@ -336,14 +337,14 @@ function PlanTemplatesField({
     <div className="plan-templates-field">
       <span className="checklist-meta-line">Plan checklists</span>
       <ChipMultiSelect
-        selectedIds={plan.templateIds ?? []}
+        selectedIds={chosenBlueprintIds}
         options={templateOptions}
         onChange={(nextIds) => onUpdate(plan.id, { templateIds: nextIds })}
         addLabel="+ Add checklist template"
         emptyHelper={
           templateOptions.length === 0
-            ? 'Create a recurring checklist first to bundle it into a plan.'
-            : 'No checklist templates bundled with this plan yet.'
+            ? 'Create a standard blueprint template first to bundle it into a plan.'
+            : 'No blueprint checklists bundled with this plan yet.'
         }
       />
     </div>

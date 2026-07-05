@@ -350,7 +350,10 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Subscription plan catalog: name + notes (e.g. "Monthly Close Essentials").
   Attach plans to clients (plans label the monthly invoice line).
 - A plan can be linked to a set of checklist TEMPLATES — the standard work that
-  comes with that plan. On a client's detail page, for each plan the client is
+  comes with that plan. A plan pulls ONLY from the firm's standard BLUEPRINT
+  templates (the client-agnostic ones on the Checklists page), never a
+  client-bound checklist, so the picker lists only blueprints and only blueprint
+  checklists show on a plan. On a client's detail page, for each plan the client is
   on, a "Plan checklists" panel shows that plan's templates, marks which are
   already set up on the client, and a "Set up plan checklists" button adds the
   missing ones to the client. Because templates carry a board column, the new
