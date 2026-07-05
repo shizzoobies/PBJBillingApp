@@ -1,5 +1,5 @@
-import { ChevronDown, ChevronRight, GripVertical, Plus, X } from 'lucide-react'
-import { useMemo, useState, type ReactNode } from 'react'
+import { ChevronDown, ChevronRight, Filter, GripVertical, Plus, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   buildActiveBoard,
   UNCATEGORIZED_ID,
@@ -41,6 +41,9 @@ export function ActiveChecklistsBoardPage() {
   const [managingColumns, setManagingColumns] = useState(false)
   const [query, setQuery] = useState('')
   const [showUpcoming, setShowUpcoming] = useState(true)
+  // Client filter: empty = all clients; otherwise the board shows only items for
+  // the selected clients (single or multiple).
+  const [clientFilter, setClientFilter] = useState<string[]>([])
 
   const today = localDateOnly()
 
@@ -61,17 +64,41 @@ export function ActiveChecklistsBoardPage() {
     }).filter((ghost) => visibleClientIds.has(ghost.clientId))
   }, [showUpcoming, data, today, reportPeriod.to, visibleClientIds])
 
-  const board = useMemo(
-    () =>
-      buildActiveBoard({
-        checklists: [...visibleChecklists, ...projectedGhosts],
-        categories: serviceCategories,
-        horizonEnd: reportPeriod.to,
-        today,
-        clientNameById,
-      }),
-    [visibleChecklists, projectedGhosts, serviceCategories, reportPeriod.to, today, clientNameById],
-  )
+  // The clients that actually have work on the board right now — the filter only
+  // offers clients you could meaningfully pick (and it hides itself for ≤1).
+  const clientFilterOptions = useMemo(() => {
+    const ids = new Set<string>()
+    for (const checklist of visibleChecklists) ids.add(checklist.clientId)
+    for (const ghost of projectedGhosts) ids.add(ghost.clientId)
+    return [...ids]
+      .map((id) => ({ id, label: clientNameById[id] ?? id }))
+      .sort((a, b) => a.label.localeCompare(b.label))
+  }, [visibleChecklists, projectedGhosts, clientNameById])
+
+  const clientFilterSet = useMemo(() => new Set(clientFilter), [clientFilter])
+
+  const board = useMemo(() => {
+    const all = [...visibleChecklists, ...projectedGhosts]
+    const scoped =
+      clientFilterSet.size === 0
+        ? all
+        : all.filter((checklist) => clientFilterSet.has(checklist.clientId))
+    return buildActiveBoard({
+      checklists: scoped,
+      categories: serviceCategories,
+      horizonEnd: reportPeriod.to,
+      today,
+      clientNameById,
+    })
+  }, [
+    visibleChecklists,
+    projectedGhosts,
+    clientFilterSet,
+    serviceCategories,
+    reportPeriod.to,
+    today,
+    clientNameById,
+  ])
 
   const totalOpen = board.columns.reduce((sum, col) => sum + col.openClientCount, 0)
 
@@ -163,6 +190,13 @@ export function ActiveChecklistsBoardPage() {
               resultCount={filteredColumns.reduce((sum, col) => sum + col.openClientCount, 0)}
               total={totalOpen}
             />
+            {clientFilterOptions.length > 1 ? (
+              <BoardClientFilter
+                options={clientFilterOptions}
+                selected={clientFilter}
+                onChange={setClientFilter}
+              />
+            ) : null}
             <ReportPeriodControl value={reportPeriod} onChange={setReportPeriod} />
             <label className="upcoming-toggle">
               <input
@@ -247,6 +281,86 @@ function formatGhostDueDate(dueDate: string): string {
     day: 'numeric',
     year: 'numeric',
   }).format(parsed)
+}
+
+/**
+ * Compact toolbar dropdown to filter the board by client. Empty selection = all
+ * clients; checking one or more narrows the board to those clients. Multi-select
+ * via checkboxes; "Clear" resets to all.
+ */
+function BoardClientFilter({
+  options,
+  selected,
+  onChange,
+}: {
+  options: Array<{ id: string; label: string }>
+  selected: string[]
+  onChange: (ids: string[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+
+  // Close when clicking outside the control.
+  useEffect(() => {
+    if (!open) return
+    const onDocMouseDown = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    return () => document.removeEventListener('mousedown', onDocMouseDown)
+  }, [open])
+
+  const selectedSet = new Set(selected)
+  const toggle = (id: string) => {
+    const next = new Set(selectedSet)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onChange([...next])
+  }
+  const label =
+    selected.length === 0
+      ? 'All clients'
+      : selected.length === 1
+        ? options.find((option) => option.id === selected[0])?.label ?? '1 client'
+        : `${selected.length} clients`
+
+  return (
+    <div className="board-client-filter" ref={ref}>
+      <button
+        type="button"
+        className="secondary-action"
+        onClick={() => setOpen((value) => !value)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <Filter size={14} /> {label} <ChevronDown size={14} />
+      </button>
+      {open ? (
+        <div className="board-client-filter-menu" role="menu">
+          <div className="board-client-filter-head">
+            <span>Filter by client</span>
+            {selected.length > 0 ? (
+              <button type="button" className="link-button" onClick={() => onChange([])}>
+                Clear
+              </button>
+            ) : null}
+          </div>
+          <div className="board-client-filter-list">
+            {options.map((option) => (
+              <label key={option.id} className="board-client-filter-item">
+                <input
+                  type="checkbox"
+                  checked={selectedSet.has(option.id)}
+                  onChange={() => toggle(option.id)}
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function BoardColumnView({

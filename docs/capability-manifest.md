@@ -188,6 +188,10 @@ picker, notification bell, and account menu sit in the top bar on every page.
   larger range (week → month → quarter → year-to-date → custom).
 - **Scoping:** staff see only the clients they're assigned to (same as the rest
   of the app). The board is available to everyone, not owner-only.
+- **Filter by client:** a "Filter by client" dropdown in the board toolbar
+  narrows the board to one or more selected clients (multi-select checkboxes);
+  "Clear" (or no selection) shows all clients again. It only lists clients that
+  currently have work on the board, and hides itself when there's ≤1.
 - **Which column a checklist lands in:** set its "Board column" on the repeating
   template (or one-time task) — generated checklists inherit it. Anything with no
   column shows in an "Uncategorized" column.

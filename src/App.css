@@ -8293,6 +8293,57 @@ button.repeating-task-toggle-pill {
   flex-wrap: wrap;
 }
 
+/* Client filter dropdown on the board toolbar. */
+.board-client-filter {
+  position: relative;
+}
+.board-client-filter-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 6px;
+}
+.board-client-filter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+.board-client-filter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.board-client-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.board-client-filter-item:hover {
+  background: var(--soft);
+}
+.board-client-filter-item input {
+  cursor: pointer;
+}
+
 /* Horizontal column scroller — one column per service category. */
 .board-scroll {
   display: flex;
