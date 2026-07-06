@@ -1156,6 +1156,11 @@ function MonthEndSection({
   }, [employees, entries, locks, period])
 
   const unlockedRows = rows.filter((row) => !row.lock)
+  // Month-end sign-off is only for a month that has ALREADY ENDED. Locking the
+  // current (in-progress) or a future month would block everyone from tracking
+  // time in it — so locking is disabled for those (unlocking always works).
+  const currentMonth = localDateOnly().slice(0, 7)
+  const canLockPeriod = period < currentMonth
 
   return (
     <section className="panel report-section">
@@ -1173,7 +1178,7 @@ function MonthEndSection({
               onChange={(event) => setPeriod(event.target.value)}
             />
           </label>
-          {unlockedRows.length > 0 ? (
+          {unlockedRows.length > 0 && canLockPeriod ? (
             <button
               type="button"
               className="ghost-action"
@@ -1196,8 +1201,18 @@ function MonthEndSection({
         </div>
       </div>
       <p className="report-caption">
-        Locking {getBillingPeriodLabel(period)} signs off that month — pending entries are
-        auto-approved and the employee can no longer change them.
+        {canLockPeriod ? (
+          <>
+            Locking {getBillingPeriodLabel(period)} signs off that month — pending entries are
+            auto-approved and the employee can no longer change them.
+          </>
+        ) : (
+          <>
+            {getBillingPeriodLabel(period)} hasn’t ended yet, so it can’t be locked — locking a
+            current or future month would stop everyone from tracking time in it. You can still
+            unlock any month here.
+          </>
+        )}
       </p>
       <div className="table-wrap">
         <table>
@@ -1218,6 +1233,7 @@ function MonthEndSection({
                 minutes={row.minutes}
                 pendingCount={row.pendingCount}
                 lock={row.lock}
+                canLock={canLockPeriod}
                 onLock={() => onLock(row.employee.id, period)}
                 onUnlock={() => onUnlock(row.employee.id, period)}
               />
@@ -1234,6 +1250,7 @@ function MonthEndRow({
   minutes,
   pendingCount,
   lock,
+  canLock,
   onLock,
   onUnlock,
 }: {
@@ -1241,6 +1258,8 @@ function MonthEndRow({
   minutes: number
   pendingCount: number
   lock: { lockedBy: string; lockedAt: string } | undefined
+  /** Whether this month may be locked yet (false for the current/future month). */
+  canLock: boolean
   onLock: () => Promise<void>
   onUnlock: () => Promise<void>
 }) {
@@ -1280,7 +1299,7 @@ function MonthEndRow({
             <LockOpen size={14} />
             Unlock
           </button>
-        ) : (
+        ) : canLock ? (
           <button
             type="button"
             className="ghost-action"
@@ -1297,6 +1316,8 @@ function MonthEndRow({
             <Lock size={14} />
             Lock month
           </button>
+        ) : (
+          <span className="muted-text">—</span>
         )}
       </td>
     </tr>

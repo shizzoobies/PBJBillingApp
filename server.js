@@ -3179,6 +3179,17 @@ const server = createServer(async (request, response) => {
       }
 
       if (normalizedPath === '/api/timesheets/lock') {
+        // Month-end sign-off is only for a month that has ALREADY ENDED. Locking
+        // the current (in-progress) or a future month would seal it and block
+        // everyone from tracking time in it — the outage this guards against.
+        const currentMonth = new Date().toISOString().slice(0, 7)
+        if (period >= currentMonth) {
+          sendJson(response, 400, {
+            error:
+              'You can only lock a month that has already ended. The current (or a future) month can’t be locked — that would block everyone from tracking time in it.',
+          })
+          return
+        }
         const lock = await appDataStore.lockTimesheet(userId, period, session.user.id)
         await appDataStore.recordActivity(
           session.user.id,

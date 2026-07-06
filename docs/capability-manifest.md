@@ -97,7 +97,11 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Approval queue: filter Pending / Rejected / All individual submitted entries.
 - Timesheet locks: lock a month per employee — pending entries are
   auto-approved and the employee can no longer change that month. "Lock all"
-  locks everyone at once. Locking is the month-end sign-off.
+  locks everyone at once. Locking is the month-end sign-off. Only a month that
+  has ALREADY ENDED can be locked — the current (in-progress) or a future month
+  can't be, since that would block everyone from tracking time in it (the
+  per-row Lock button and "Lock all" are hidden for such months; the server
+  rejects it too). Unlocking any month always works.
 
 ## Checklists (tasks)
 
