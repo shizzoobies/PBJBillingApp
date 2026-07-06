@@ -111,6 +111,20 @@ describe('findBlockingWeek', () => {
   it('does not block when the user has no prior weeks with time', () => {
     expect(findBlockingWeek(entryWeek, [], [])).toBeNull()
   })
+
+  it('does NOT block on an un-submitted prior week inside a LOCKED month', () => {
+    // Lisa's real incident: time in the week of 2026-06-07 with no submission
+    // row, but June (2026-06) is month-locked. A sealed month must never gate.
+    expect(
+      findBlockingWeek('2026-07-05', ['2026-06-07'], [], ['2026-06']),
+    ).toBeNull()
+  })
+
+  it('still blocks an un-submitted prior week when its month is NOT locked', () => {
+    expect(
+      findBlockingWeek('2026-07-05', ['2026-06-07'], [], ['2026-05']),
+    ).toEqual({ weekStart: '2026-06-07', reason: 'unsubmitted' })
+  })
 })
 
 /**

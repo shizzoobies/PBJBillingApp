@@ -20,10 +20,12 @@ declare module '*/lib/time-entry.js' {
     entryWeekStart: string,
     priorWeekStarts: Iterable<string>,
     submissions: ReadonlyArray<{ weekStart: string; status: string }>,
+    lockedPeriods?: Iterable<string>,
   ): { weekStart: string; reason: 'unsubmitted' | 'rejected' } | null
   export function listBlockingWeeks(
     entryWeekStart: string,
     priorWeekStarts: Iterable<string>,
     submissions: ReadonlyArray<{ weekStart: string; status: string }>,
+    lockedPeriods?: Iterable<string>,
   ): Array<{ weekStart: string; reason: 'unsubmitted' | 'rejected' }>
 }

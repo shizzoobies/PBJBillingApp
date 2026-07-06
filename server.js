@@ -2754,10 +2754,19 @@ const server = createServer(async (request, response) => {
           const priorWeeksWithTime = (allData.timeEntries ?? [])
             .filter((entry) => entry.employeeId === employeeId)
             .map((entry) => weekStartOf(entry.date))
+          // Months the owner has LOCKED for this user: weeks inside a sealed
+          // month never gate (locking auto-approves entries but leaves no weekly
+          // submission row, which would otherwise look "un-submitted" forever).
+          const lockedPeriods = new Set(
+            (allData.timesheetLocks ?? [])
+              .filter((lock) => lock.userId === employeeId)
+              .map((lock) => lock.period),
+          )
           const blockingWeeks = listBlockingWeeks(
             entryWeekStart,
             priorWeeksWithTime,
             (allData.weeklySubmissions ?? []).filter((entry) => entry.userId === employeeId),
+            lockedPeriods,
           )
           if (blockingWeeks.length > 0) {
             // Name EVERY blocking week so the bookkeeper submits them all in one
