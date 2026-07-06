@@ -95,6 +95,8 @@ export type AppContextValue = {
   submitWeeklyTimesheet: (weekStart: string) => Promise<void>
   /** Owner-only: approve a pending weekly submission. */
   approveWeeklySubmission: (submissionId: string) => Promise<void>
+  /** Owner-only: reopen an APPROVED weekly submission (un-approve → pending). */
+  reopenWeeklySubmission: (submissionId: string) => Promise<void>
   /** Owner-only: reject a pending weekly submission with a written note. */
   rejectWeeklySubmission: (submissionId: string, note: string) => Promise<void>
   /**

@@ -46,6 +46,7 @@ export function TimeApprovalsPage() {
     lockTimesheet,
     unlockTimesheet,
     approveWeeklySubmission,
+    reopenWeeklySubmission,
     rejectWeeklySubmission,
   } = useAppContext()
 
@@ -88,6 +89,7 @@ export function TimeApprovalsPage() {
         checklists={data.checklists}
         entries={data.timeEntries}
         onApprove={approveWeeklySubmission}
+        onReopen={reopenWeeklySubmission}
         onReject={rejectWeeklySubmission}
         onApproveEntry={approveTimeEntry}
         onRejectEntry={rejectTimeEntry}
@@ -136,6 +138,7 @@ function WeeklyReviewSection({
   checklists,
   entries,
   onApprove,
+  onReopen,
   onReject,
   onApproveEntry,
   onRejectEntry,
@@ -146,6 +149,7 @@ function WeeklyReviewSection({
   checklists: Checklist[]
   entries: TimeEntry[]
   onApprove: (submissionId: string) => Promise<void>
+  onReopen: (submissionId: string) => Promise<void>
   onReject: (submissionId: string, note: string) => Promise<void>
   onApproveEntry: (entryId: string) => Promise<void>
   onRejectEntry: (entryId: string, note: string) => Promise<void>
@@ -163,6 +167,18 @@ function WeeklyReviewSection({
         .filter((submission) => submission.status === 'pending')
         .slice()
         .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt)),
+    [submissions],
+  )
+
+  // Recently APPROVED weeks, so an owner can undo an approval done in error.
+  // Capped so the list stays short; newest sign-offs first.
+  const approved = useMemo(
+    () =>
+      submissions
+        .filter((submission) => submission.status === 'approved')
+        .slice()
+        .sort((a, b) => (b.reviewedAt ?? '').localeCompare(a.reviewedAt ?? ''))
+        .slice(0, 12),
     [submissions],
   )
 
@@ -194,6 +210,24 @@ function WeeklyReviewSection({
         delete next[submissionId]
         return next
       })
+    } finally {
+      setPendingId(null)
+    }
+  }
+
+  const handleReopen = async (submissionId: string) => {
+    const submission = approved.find((entry) => entry.id === submissionId)
+    const who = submission ? employeeName(employees, submission.userId) : 'this person'
+    if (
+      !window.confirm(
+        `Reopen ${who}'s week of ${submission?.weekStart ?? ''}?\n\nThe approval is undone: the week goes back to "pending" for review and its time entries become editable again. (If the month is also locked, unlock it below so they can make changes.)`,
+      )
+    ) {
+      return
+    }
+    setPendingId(submissionId)
+    try {
+      await onReopen(submissionId)
     } finally {
       setPendingId(null)
     }
@@ -309,6 +343,60 @@ function WeeklyReviewSection({
           })}
         </ul>
       )}
+      {approved.length > 0 ? (
+        <div className="weekly-approved">
+          <div className="section-heading" style={{ marginTop: 4 }}>
+            <div>
+              <h3 style={{ margin: 0 }}>Recently approved</h3>
+              <p className="productivity-subtitle" style={{ margin: '4px 0 0 0' }}>
+                Approved a week by mistake? <strong>Reopen</strong> it to undo the approval — the
+                week goes back to pending and its entries become editable again. If that month is
+                also locked, unlock it in the Month-end section below.
+              </p>
+            </div>
+          </div>
+          <ul
+            style={{ listStyle: 'none', padding: 0, margin: '8px 0 0', display: 'grid', gap: 8 }}
+          >
+            {approved.map((submission) => {
+              const inFlight = pendingId === submission.id
+              return (
+                <li
+                  key={submission.id}
+                  style={{
+                    padding: '10px 12px',
+                    borderTop: '1px solid var(--border-subtle, #eee)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <span>
+                    <strong>{employeeName(employees, submission.userId)}</strong>
+                    {' · week of '}
+                    {submission.weekStart}
+                    {submission.reviewedBy
+                      ? ` · approved by ${employeeName(employees, submission.reviewedBy)}`
+                      : ''}
+                  </span>
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    disabled={inFlight}
+                    onClick={() => void handleReopen(submission.id)}
+                    title="Undo this approval — reopens the week for editing and re-review"
+                  >
+                    <LockOpen size={14} />
+                    Reopen
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      ) : null}
       {reviewSubmission ? (
         <WeekReviewModal
           submission={reviewSubmission}

@@ -4919,6 +4919,112 @@ export class AppDataStore {
   }
 
   /**
+   * Owner REOPENS an APPROVED weekly submission — the reverse of approve. The
+   * submission goes back to 'pending' (re-entering the owner's review queue) and
+   * that week's approved time entries are un-sealed back to 'pending', so they
+   * can be edited (once the month is unlocked) and re-reviewed. Only acts on an
+   * 'approved' submission; returns the updated row, or null when the id doesn't
+   * match an approved one.
+   */
+  async reopenWeeklySubmission(submissionId) {
+    if (!submissionId) return null
+    const reopenedAt = nowIso()
+
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        const target = await client.query(
+          `select id, user_id, week_start
+             from weekly_submissions
+             where id = $1 and status = 'approved'
+             for update`,
+          [submissionId],
+        )
+        if (!target.rowCount) {
+          await client.query('rollback')
+          return null
+        }
+        const { user_id: userId, week_start: weekStart } = target.rows[0]
+
+        await client.query(
+          `update time_entries
+             set approval_status = 'pending',
+                 approved_by = null,
+                 approved_at = null,
+                 updated_at = now()
+             where user_id = $1
+               and approval_status = 'approved'
+               and entry_date >= $2
+               and entry_date < ($2::date + interval '7 days')`,
+          [userId, weekStart],
+        )
+
+        const updated = await client.query(
+          `update weekly_submissions
+             set status = 'pending',
+                 reviewed_by = null,
+                 reviewed_at = null,
+                 review_note = null
+             where id = $1
+             returning id, user_id, week_start, submitted_at, status, reviewed_by, reviewed_at, review_note`,
+          [submissionId],
+        )
+        await client.query('commit')
+        const row = updated.rows[0]
+        if (!row) return null
+        return {
+          id: row.id,
+          userId: row.user_id,
+          weekStart: row.week_start.toISOString().slice(0, 10),
+          submittedAt: row.submitted_at ? row.submitted_at.toISOString() : reopenedAt,
+          status: row.status,
+          reviewedBy: row.reviewed_by,
+          reviewedAt: row.reviewed_at ? row.reviewed_at.toISOString() : null,
+        }
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const submissions = Array.isArray(data.weeklySubmissions) ? data.weeklySubmissions : []
+    const target = submissions.find((s) => s.id === submissionId && s.status === 'approved')
+    if (!target) return null
+    const userId = target.userId
+    const weekStart = target.weekStart
+    const weekEndDate = new Date(`${weekStart}T12:00:00`)
+    weekEndDate.setDate(weekEndDate.getDate() + 7)
+    const weekEnd = weekEndDate.toISOString().slice(0, 10)
+
+    data.timeEntries = (data.timeEntries ?? []).map((entry) => {
+      if (
+        entry.employeeId === userId &&
+        entry.approvalStatus === 'approved' &&
+        typeof entry.date === 'string' &&
+        entry.date >= weekStart &&
+        entry.date < weekEnd
+      ) {
+        const next = { ...entry, approvalStatus: 'pending' }
+        delete next.approvedBy
+        delete next.approvedAt
+        return next
+      }
+      return entry
+    })
+
+    target.status = 'pending'
+    delete target.reviewedBy
+    delete target.reviewedAt
+    delete target.reviewNote
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return target
+  }
+
+  /**
    * Create a new reimbursement on a client. Validates the inputs (positive
    * amount, non-empty description, ISO date) and returns the persisted
    * record so the caller can drop it straight into local state. Returns

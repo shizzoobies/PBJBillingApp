@@ -84,6 +84,13 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Weekly submissions: staff submit a week; approving seals every pending
   entry in it. Rejecting unlocks the week so the bookkeeper can edit and
   resubmit.
+- Reopen an approved week (undo an approval): a "Recently approved" list on the
+  Time Approvals page shows the latest approved weeks, each with a "Reopen"
+  button. Reopening un-approves the week — the submission goes back to pending
+  (re-entering the review queue) and that week's sealed entries become pending
+  and editable again. (If the month is ALSO locked, unlock it in the Month-end
+  section — the two are independent; unlocking a month is what actually lets
+  staff edit that month's time.)
 - Weekly review modal: expand any individual entry; per-entry actions —
   "Approve this entry" or "Send back with note" (the note is required and the
   bookkeeper sees it). The owner does not edit staff time directly.

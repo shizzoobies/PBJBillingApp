@@ -387,6 +387,25 @@ export async function approveWeeklySubmissionRequest(submissionId: string) {
   return (await response.json()) as WeeklySubmission
 }
 
+/** Owner reopens an APPROVED weekly submission (un-approve → back to pending). */
+export async function reopenWeeklySubmissionRequest(submissionId: string) {
+  const response = await apiFetch(
+    `/api/timesheets/weekly-submissions/${encodeURIComponent(submissionId)}/reopen`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to reopen weekly submission (${response.status})`,
+    )
+  }
+  return (await response.json()) as WeeklySubmission
+}
+
 /** Owner-only: create a new reimbursement line on a client. */
 export async function addReimbursementRequest(input: {
   clientId: string

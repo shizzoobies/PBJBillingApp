@@ -61,6 +61,7 @@ import {
   addRecurringReimbursementRequest,
   addReimbursementRequest,
   approveWeeklySubmissionRequest,
+  reopenWeeklySubmissionRequest,
   deletePlanRequest,
   deleteRecurringReimbursementRequest,
   deleteReimbursementRequest,
@@ -1599,6 +1600,52 @@ function App() {
               approvedBy: reviewerId,
               approvedAt: reviewedAt,
             }
+          }
+          return entry
+        }),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  /**
+   * Owner REOPENS an approved week — the reverse of approve. The submission
+   * goes back to 'pending' (re-entering the review queue) and that week's
+   * approved time entries are un-sealed to 'pending', so the week can be edited
+   * (once the month is unlocked) and re-reviewed.
+   */
+  const reopenWeeklySubmission = async (submissionId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updated = await reopenWeeklySubmissionRequest(submissionId)
+      const weekStartDate = new Date(`${updated.weekStart}T12:00:00`)
+      const weekEndDate = new Date(weekStartDate)
+      weekEndDate.setDate(weekEndDate.getDate() + 7)
+      const weekEnd = weekEndDate.toISOString().slice(0, 10)
+
+      applyServerDataUpdate((current) => ({
+        ...current,
+        weeklySubmissions: (current.weeklySubmissions ?? []).map((entry) =>
+          entry.id === submissionId ? updated : entry,
+        ),
+        timeEntries: current.timeEntries.map((entry) => {
+          if (
+            entry.employeeId === updated.userId &&
+            entry.approvalStatus === 'approved' &&
+            entry.date >= updated.weekStart &&
+            entry.date < weekEnd
+          ) {
+            return { ...entry, approvalStatus: 'pending', approvedBy: undefined, approvedAt: undefined }
           }
           return entry
         }),
@@ -3463,6 +3510,7 @@ function App() {
     unlockTimesheet,
     submitWeeklyTimesheet,
     approveWeeklySubmission,
+    reopenWeeklySubmission,
     rejectWeeklySubmission,
     addReimbursement,
     updateReimbursement,

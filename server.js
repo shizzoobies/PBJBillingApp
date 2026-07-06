@@ -3299,6 +3299,39 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Owner-only REOPEN of an approved weekly submission — the reverse of
+    // approve. Un-seals the week (submission → pending, entries → pending) so it
+    // can be edited and re-reviewed.
+    const weeklyReopenMatch = normalizedPath.match(
+      /^\/api\/timesheets\/weekly-submissions\/([^/]+)\/reopen$/,
+    )
+    if (weeklyReopenMatch) {
+      const session = await requireSession(request, response)
+      if (!session) {
+        return
+      }
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can reopen weekly timesheets' })
+        return
+      }
+      const submission = await appDataStore.reopenWeeklySubmission(weeklyReopenMatch[1])
+      if (!submission) {
+        sendJson(response, 404, { error: 'No approved submission with that id' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'weekly_timesheet_reopened',
+        `${submission.userId} · ${submission.weekStart}`,
+      )
+      sendJson(response, 200, submission)
+      return
+    }
+
     // Owner-only reimbursement create — body { clientId, date, description, amount }.
     // Owner-only subscription plan delete — DELETE /api/plans/:id.
     // The clients.plan_id FK has `on delete set null`, so unlinking is
