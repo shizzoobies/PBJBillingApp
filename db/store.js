@@ -8329,6 +8329,30 @@ export class AppDataStore {
     }
   }
 
+  /** Un-dismiss (restore) one previously-dismissed key for this user. */
+  async removeDismissedSuggestion(userId, suggestionKey) {
+    const key = String(suggestionKey ?? '').slice(0, 300)
+    if (!userId || !key) return
+
+    if (this.pool) {
+      await this.pool.query(
+        `delete from assistant_dismissed_suggestions where user_id = $1 and suggestion_key = $2`,
+        [userId, key],
+      )
+      return
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.dismissedSuggestions)) return
+    const before = authState.dismissedSuggestions.length
+    authState.dismissedSuggestions = authState.dismissedSuggestions.filter(
+      (entry) => !(entry.userId === userId && entry.suggestionKey === key),
+    )
+    if (authState.dismissedSuggestions.length !== before) {
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+  }
+
   /**
    * Persisted assistant conversation (Phase 3). Returns the user's chat
    * turns oldest-first, capped to the most recent `limit` rows. Only

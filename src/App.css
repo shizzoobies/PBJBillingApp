@@ -8591,6 +8591,87 @@ button.repeating-task-toggle-pill {
 .setup-issue-fix:hover {
   text-decoration: underline;
 }
+/* "Fix" is a <button> for quick-fix issues and a <Link> for deep-link ones —
+   reset the button so both look identical. */
+button.setup-issue-fix {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* Collapsible category header (full-width toggle). */
+.setup-cat-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+}
+.setup-cat-header .section-kicker {
+  margin: 0;
+}
+.setup-cat-count {
+  margin-left: auto;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+/* Per-issue actions: Fix + Ignore stacked at the row's right edge. */
+.setup-issue-actions {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.setup-issue-ignore {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--muted-ink, #8a8494);
+  white-space: nowrap;
+}
+.setup-issue-ignore:hover {
+  color: var(--ink, #2c2735);
+  text-decoration: underline;
+}
+.setup-issue--ignored {
+  opacity: 0.7;
+  border-left-color: var(--hairline, #e6e3ea);
+}
+
+/* Quick-fix modal sizing + the $-prefixed money input. */
+.setup-fix-modal {
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.setup-fix-money {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.setup-fix-money > span {
+  color: var(--muted-ink, #8a8494);
+  font-weight: 600;
+}
+.setup-fix-money .input {
+  flex: 1;
+}
 
 /* ── ListSearch — premium instant search bar ──────────────────────────────── */
 

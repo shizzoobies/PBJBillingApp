@@ -379,8 +379,17 @@ picker, notification bell, and account menu sit in the top bar on every page.
 ## To 100% (setup checklist, owner only)
 
 - A live "Setup checklist" page (sidebar: "To 100%") that lists everything still
-  missing for the workspace to be fully set up, grouped by category and updating
-  itself as you fill things in. Each item deep-links to where it's fixed.
+  missing for the workspace to be fully set up, grouped by category. Each
+  category section (Billing, Clients, Team, Plans, Contacts) collapses.
+- Fix in place: most items open a small QUICK-FIX modal with only the missing
+  field(s) — a monthly/annual rate, a billing email, the assigned-team picker,
+  or a "Set them up" button for a plan's missing checklists — and save without
+  leaving the page (the item disappears the moment it's filled in). Items with no
+  single field (bill rate → Team page, contacts, plan templates) deep-link
+  instead.
+- Ignore: any item can be IGNORED (something the owner knows about but doesn't
+  need to fix). Ignored items move to a collapsible "Ignored" section at the
+  bottom and can be Restored anytime; the ignore list is saved per owner.
 - Checks: Monthly/Annual clients with no rate; clients missing a billing email,
   an assigned team member, or a contact; clients on a plan whose plan checklists
   aren't set up yet; team members with no bill rate; plans with no checklist

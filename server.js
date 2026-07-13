@@ -1260,6 +1260,66 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // "To 100%" setup-issue ignore list (owner-only, per-user). Reuses the
+    // dismissed-suggestions store with `setup:`-prefixed keys, so ignoring a
+    // setup item never collides with assistant insights.
+    if (normalizedPath === '/api/setup/dismissed') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The setup checklist is owner-only' })
+        return
+      }
+      if (request.method === 'GET') {
+        const all = await appDataStore.listDismissedSuggestions(session.user.id)
+        const ids = all
+          .filter((key) => typeof key === 'string' && key.startsWith('setup:'))
+          .map((key) => key.slice('setup:'.length))
+        sendJson(response, 200, { ids })
+        return
+      }
+      if (request.method === 'POST') {
+        const contentType = String(request.headers['content-type'] || '')
+        if (!contentType.toLowerCase().includes('application/json')) {
+          sendJson(response, 415, { error: 'application/json required' })
+          return
+        }
+        if (isCrossSiteOrigin(request)) {
+          sendJson(response, 403, { error: 'Origin not allowed' })
+          return
+        }
+        const payload = await readJsonBody(request)
+        const issueId = String(payload?.issueId ?? '').trim()
+        if (!issueId) {
+          sendJson(response, 400, { error: 'issueId is required' })
+          return
+        }
+        await appDataStore.dismissSuggestion(session.user.id, `setup:${issueId}`)
+        sendJson(response, 200, { ok: true })
+        return
+      }
+      sendJson(response, 405, { error: 'Method not allowed' })
+      return
+    }
+    // Restore (un-ignore) one setup issue.
+    const setupRestoreMatch = normalizedPath.match(/^\/api\/setup\/dismissed\/(.+)$/)
+    if (setupRestoreMatch && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The setup checklist is owner-only' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const issueId = decodeURIComponent(setupRestoreMatch[1])
+      await appDataStore.removeDismissedSuggestion(session.user.id, `setup:${issueId}`)
+      sendJson(response, 200, { ok: true })
+      return
+    }
+
     // Feature-request confirm: records + emails the draft the owner approved
     // in the UI. A separate endpoint so sending is always an explicit human
     // action — the model can only draft, never send.

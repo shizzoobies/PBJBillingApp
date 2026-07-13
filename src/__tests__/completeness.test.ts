@@ -46,6 +46,30 @@ describe('computeSetupIssues', () => {
     )
   })
 
+  it('attaches quick-fix descriptors to the field-based issues', () => {
+    const input: CompletenessInput = {
+      ...emptyInput,
+      clients: [makeClient({ monthlyRate: 0, email: '', assignedEmployeeIds: [] })],
+    }
+    const byId = new Map(computeSetupIssues(input).map((i) => [i.id, i]))
+    expect(byId.get('billing:monthly:client-1')?.fix).toEqual({
+      kind: 'clientNumber',
+      clientId: 'client-1',
+      field: 'monthlyRate',
+      label: 'Monthly rate',
+    })
+    expect(byId.get('client:email:client-1')?.fix).toEqual({
+      kind: 'clientText',
+      clientId: 'client-1',
+      field: 'email',
+      label: 'Billing email',
+    })
+    expect(byId.get('client:team:client-1')?.fix).toEqual({
+      kind: 'clientTeam',
+      clientId: 'client-1',
+    })
+  })
+
   it('flags an annual client with no annual rate', () => {
     const input: CompletenessInput = {
       ...emptyInput,

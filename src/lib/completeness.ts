@@ -18,6 +18,17 @@ import { missingPlanTemplatesForClient, unlinkedContacts } from './utils'
 export type SetupCategory = 'Billing' | 'Clients' | 'Team' | 'Contacts' | 'Plans'
 export type SetupSeverity = 'high' | 'medium' | 'low'
 
+/**
+ * A focused fix an issue can offer, so "Fix" opens a small modal on just the
+ * missing field instead of navigating to the whole client/team page. Issues
+ * with no `fix` fall back to their deep-link (`to`).
+ */
+export type SetupFix =
+  | { kind: 'clientNumber'; clientId: string; field: 'monthlyRate' | 'annualRate'; label: string }
+  | { kind: 'clientText'; clientId: string; field: 'email'; label: string }
+  | { kind: 'clientTeam'; clientId: string }
+  | { kind: 'planChecklists'; clientId: string; templateIds: string[] }
+
 export interface SetupIssue {
   /** Stable id so React keys + tests are deterministic. */
   id: string
@@ -26,6 +37,8 @@ export interface SetupIssue {
   title: string
   /** Optional extra context. */
   detail?: string
+  /** Optional focused fix (opens a quick-fix modal); absent = use the deep-link. */
+  fix?: SetupFix
   /**
    * Optional list of the specific outstanding things behind this issue, by
    * name — so a suggestion isn't just a count ("3 checklists not yet added")
@@ -71,6 +84,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
         category: 'Billing',
         title: `Set a monthly rate for ${client.name}`,
         detail: 'This Monthly client has no monthly rate, so its invoice is $0.',
+        fix: { kind: 'clientNumber', clientId: client.id, field: 'monthlyRate', label: 'Monthly rate' },
         to: where,
         severity: 'high',
       })
@@ -81,6 +95,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
         category: 'Billing',
         title: `Set an annual rate for ${client.name}`,
         detail: 'This Annual client has no annual fee, so its invoice is $0.',
+        fix: { kind: 'clientNumber', clientId: client.id, field: 'annualRate', label: 'Annual fee' },
         to: where,
         severity: 'high',
       })
@@ -93,6 +108,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
         category: 'Clients',
         title: `Add a billing email for ${client.name}`,
         detail: 'Needed to email this client their invoice.',
+        fix: { kind: 'clientText', clientId: client.id, field: 'email', label: 'Billing email' },
         to: where,
         severity: 'medium',
       })
@@ -104,6 +120,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
         id: `client:team:${client.id}`,
         category: 'Clients',
         title: `Assign a team member to ${client.name}`,
+        fix: { kind: 'clientTeam', clientId: client.id },
         to: where,
         severity: 'medium',
       })
@@ -143,6 +160,11 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
           // outstanding, not just a count. Already-added ones are filtered out
           // by `missingPlanTemplatesForClient`, so this lists only what's left.
           items: missing.map((template) => template.title),
+          fix: {
+            kind: 'planChecklists',
+            clientId: client.id,
+            templateIds: missing.map((template) => template.id),
+          },
           to: where,
           severity: 'medium',
         })
@@ -158,6 +180,8 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
         category: 'Team',
         title: `Set a bill rate for ${employee.name}`,
         detail: "Their billable hours fall back to the firm default rate until set.",
+        // Bill rate lives on the Team page (updates there don't flow through the
+        // client workspace data), so this one deep-links rather than quick-fixes.
         to: '/team',
         severity: 'medium',
       })

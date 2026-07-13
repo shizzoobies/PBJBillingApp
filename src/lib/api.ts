@@ -406,6 +406,43 @@ export async function reopenWeeklySubmissionRequest(submissionId: string) {
   return (await response.json()) as WeeklySubmission
 }
 
+// ---- "To 100%" setup-issue ignore list (owner-only) ----
+
+/** The setup-issue ids the owner has ignored. */
+export async function fetchDismissedSetupIssues(): Promise<string[]> {
+  const response = await apiFetch('/api/setup/dismissed', { credentials: 'same-origin' })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load ignored items (${response.status})`)
+  }
+  return ((await response.json()) as { ids: string[] }).ids ?? []
+}
+
+/** Ignore (dismiss) one setup issue by its stable id. */
+export async function dismissSetupIssueRequest(issueId: string): Promise<void> {
+  const response = await apiFetch('/api/setup/dismissed', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ issueId }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to ignore item (${response.status})`)
+  }
+}
+
+/** Restore (un-ignore) one setup issue. */
+export async function restoreSetupIssueRequest(issueId: string): Promise<void> {
+  const response = await apiFetch(`/api/setup/dismissed/${encodeURIComponent(issueId)}`, {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to restore item (${response.status})`)
+  }
+}
+
 /** Owner-only: create a new reimbursement line on a client. */
 export async function addReimbursementRequest(input: {
   clientId: string
