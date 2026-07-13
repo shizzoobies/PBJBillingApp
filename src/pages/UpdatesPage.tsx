@@ -2,6 +2,8 @@ import { useMemo, useState, type DragEvent, type FormEvent } from 'react'
 import {
   Bug,
   Check,
+  ChevronDown,
+  ChevronRight,
   Clipboard,
   ClipboardList,
   GripVertical,
@@ -118,6 +120,11 @@ export function UpdatesPage() {
   const [formError, setFormError] = useState<string | null>(null)
 
   const [hideDone, setHideDone] = useState(false)
+  // Which status sections are collapsed. Closed statuses (Done / Won't do) start
+  // collapsed so the page opens on the work that's still live.
+  const [collapsedStatuses, setCollapsedStatuses] = useState<Set<FeatureRequestStatus>>(
+    () => new Set<FeatureRequestStatus>(['done', 'wont_do']),
+  )
 
   // Transient "Copied ✓" flash, keyed by a copy-source id ('all' or item id).
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
@@ -143,11 +150,16 @@ export function UpdatesPage() {
   } | null>(null)
 
   const sorted = useMemo(() => sortFeatureRequests(featureRequests), [featureRequests])
-  // Shipped items are pinned to their own top section; everything else forms the
-  // normal prioritized backlog below (so a shipped item appears exactly once).
-  const shipped = useMemo(() => sorted.filter((i) => i.status === 'shipped'), [sorted])
-  const backlog = useMemo(() => sorted.filter((i) => i.status !== 'shipped'), [sorted])
-  const visible = hideDone ? backlog.filter((i) => !CLOSED_STATUSES.has(i.status)) : backlog
+  // One collapsible section per status (New → Planned → In Progress → Shipped →
+  // Done → Won't do). Items keep their priority order inside a section and are
+  // drag-reorderable within it.
+  const byStatus = useMemo(() => {
+    const map = new Map<FeatureRequestStatus, FeatureRequest[]>()
+    for (const option of STATUS_OPTIONS) map.set(option.value, [])
+    for (const item of sorted) map.get(item.status)?.push(item)
+    return map
+  }, [sorted])
+  const statusOfId = (id: string) => sorted.find((item) => item.id === id)?.status
   const openCount = sorted.filter((i) => !CLOSED_STATUSES.has(i.status)).length
 
   if (!ownerMode) return null
@@ -197,14 +209,17 @@ export function UpdatesPage() {
 
   const handleDragOver = (event: DragEvent<HTMLDivElement>, id: string) => {
     event.preventDefault()
-    if (draggingId && draggingId !== id) setDropTargetId(id)
+    // Re-ranking only makes sense within the same status section.
+    if (draggingId && draggingId !== id && statusOfId(draggingId) === statusOfId(id)) {
+      setDropTargetId(id)
+    }
   }
 
   const handleDragLeave = () => setDropTargetId(null)
 
   const handleDrop = (event: DragEvent<HTMLDivElement>, targetId: string) => {
     event.preventDefault()
-    if (!draggingId || draggingId === targetId) {
+    if (!draggingId || draggingId === targetId || statusOfId(draggingId) !== statusOfId(targetId)) {
       setDraggingId(null)
       setDropTargetId(null)
       return
@@ -227,6 +242,16 @@ export function UpdatesPage() {
     setDraggingId(null)
     setDropTargetId(null)
   }
+
+  const toggleStatusSection = (status: FeatureRequestStatus) =>
+    setCollapsedStatuses((prev) => {
+      const next = new Set(prev)
+      if (next.has(status)) next.delete(status)
+      else next.add(status)
+      return next
+    })
+  const setAllCollapsed = (collapsed: boolean) =>
+    setCollapsedStatuses(collapsed ? new Set(STATUS_OPTIONS.map((o) => o.value)) : new Set())
 
   const handleRefine = async (item: FeatureRequest) => {
     setRefineState((prev) => ({
@@ -674,31 +699,55 @@ export function UpdatesPage() {
           <span className="muted-text">
             {openCount} open · {sorted.length} total
           </span>
-          <label className="updates-filter-toggle">
-            <input
-              type="checkbox"
-              checked={hideDone}
-              onChange={(event) => setHideDone(event.target.checked)}
-            />
-            Hide Done / Won&apos;t do
-          </label>
+          <div className="updates-toolbar-controls">
+            <button type="button" className="link-button" onClick={() => setAllCollapsed(false)}>
+              Expand all
+            </button>
+            <button type="button" className="link-button" onClick={() => setAllCollapsed(true)}>
+              Collapse all
+            </button>
+            <label className="updates-filter-toggle">
+              <input
+                type="checkbox"
+                checked={hideDone}
+                onChange={(event) => setHideDone(event.target.checked)}
+              />
+              Hide Done / Won&apos;t do
+            </label>
+          </div>
         </div>
 
-        {shipped.length > 0 ? (
-          <div className="updates-shipped-section">
-            <p className="updates-shipped-kicker">Shipped — awaiting approval</p>
-            <div className="updates-list">{shipped.map((item) => renderCard(item))}</div>
-          </div>
-        ) : null}
-
-        {visible.length === 0 ? (
-          shipped.length === 0 ? (
-            <p className="muted-text updates-empty">
-              No updates yet. Add one above, or send one from the assistant — they show up here.
-            </p>
-          ) : null
+        {sorted.length === 0 ? (
+          <p className="muted-text updates-empty">
+            No updates yet. Add one above, or send one from the assistant — they show up here.
+          </p>
         ) : (
-          <div className="updates-list">{visible.map((item) => renderCard(item))}</div>
+          STATUS_OPTIONS.map((option) => {
+            const items = byStatus.get(option.value) ?? []
+            if (items.length === 0) return null
+            if (hideDone && CLOSED_STATUSES.has(option.value)) return null
+            const isCollapsed = collapsedStatuses.has(option.value)
+            return (
+              <div className="updates-status-section" key={option.value}>
+                <button
+                  type="button"
+                  className={`updates-status-header updates-status-header--${option.value}`}
+                  aria-expanded={!isCollapsed}
+                  onClick={() => toggleStatusSection(option.value)}
+                >
+                  {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                  <span className="updates-status-name">
+                    {option.label}
+                    {option.value === 'shipped' ? ' — awaiting approval' : ''}
+                  </span>
+                  <span className="updates-status-count">{items.length}</span>
+                </button>
+                {isCollapsed ? null : (
+                  <div className="updates-list">{items.map((item) => renderCard(item))}</div>
+                )}
+              </div>
+            )
+          })
         )}
       </div>
     </section>

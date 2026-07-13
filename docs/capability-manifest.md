@@ -523,15 +523,18 @@ picker, notification bell, and account menu sit in the top bar on every page.
   "Send to Alex") land here automatically, and the owner can add items directly.
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
   In Progress → Shipped → Done, or Won't do), and a color-coded priority level — Urgent
-  (red), High (orange), Medium (blue), Low (slate). The list sorts by priority
-  level first (every Urgent above every High, every High above every Medium,
-  etc.), and within each level it's a drag-to-rank backlog — so dragging sets
-  the order inside a level, and changing the priority moves an item between
-  levels.
+  (red), High (orange), Medium (blue), Low (slate).
+- Layout: the list is organized into one COLLAPSIBLE section per status (New,
+  Planned, In Progress, Shipped, Done, Won't do), each with its item count;
+  Done / Won't do start collapsed. "Expand all"/"Collapse all" and a "Hide Done
+  / Won't do" toggle sit in the toolbar. Inside a section items are ordered by
+  priority level (Urgent → Low) and drag-to-rank within their level; dragging
+  only re-ranks within the same status. Changing an item's status moves it to
+  the matching section; changing its priority moves it between levels.
 - Ship + approve workflow: when the developer has pushed an update they set the
-  item to "Shipped" (a distinct violet badge; still open/awaiting sign-off).
-  Shipped items are grouped in a "Shipped — awaiting approval" section pinned to
-  the TOP of the list. A Shipped item shows a "Mark approved" button (moves it to
+  item to "Shipped" (a distinct violet badge; still open/awaiting sign-off) —
+  the "Shipped" section header reads "Shipped — awaiting approval". A Shipped
+  item shows a "Mark approved" button (moves it to
   "Done" and records who approved it and when — "Approved by <name> · <date>") AND
   a "Not approved" button, which opens a reason box; sending it back returns the
   item to In Progress with an amber "Not approved — <date>: <reason>" note so the
