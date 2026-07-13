@@ -7010,6 +7010,24 @@ button.repeating-task-toggle-pill {
   flex-shrink: 0;
   gap: 6px;
 }
+/* Mark a delayed step done straight from this list. */
+.delayed-row-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(34, 139, 88, 0.4);
+  border-radius: 999px;
+  background: rgba(34, 139, 88, 0.08);
+  color: #1c7a4a;
+  font-weight: 600;
+  font-size: 0.8rem;
+  padding: 3px 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.delayed-row-done:hover {
+  background: rgba(34, 139, 88, 0.16);
+}
 
 /* Repeating tasks grouped by client */
 .repeating-client-group {

@@ -223,10 +223,14 @@ picker, notification bell, and account menu sit in the top bar on every page.
 
 ## Delayed page (owner + staff)
 
-- Every step flagged "waiting on", grouped by client, so you can see what's
+- Every OPEN step flagged "waiting on", grouped by client, so you can see what's
   blocked and why. Staff see it scoped to their assigned clients; the owner sees
   the whole firm. Clear the flag from the Checklists page (or under the client)
   once unblocked.
+- Each row has a "Done" button that checks the step off right here — the same
+  toggle used on the Checklists page / dashboard — so whoever was tagged (e.g. a
+  bookkeeper waiting-on'd for a step) can complete it without leaving this page.
+  A completed step drops off the list (done steps aren't shown).
 
 ## Clients (owner manages; staff see assigned)
 

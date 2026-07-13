@@ -1,9 +1,16 @@
-import { AlarmClock, ChevronDown, ChevronRight } from 'lucide-react'
+import { AlarmClock, Check, ChevronDown, ChevronRight } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
-import { clientName, employeeName, localDateOnly, shortDate, stepIsWaiting } from '../lib/utils'
+import {
+  clientName,
+  employeeName,
+  isChecklistItemDone,
+  localDateOnly,
+  shortDate,
+  stepIsWaiting,
+} from '../lib/utils'
 
 /**
  * Owner-only "Delayed" page. Surfaces every checklist step that's been flagged
@@ -15,8 +22,12 @@ type WaitingRow = {
   key: string
   checklistId: string
   checklistTitle: string
+  /** The parent item's id (target of the Done toggle for an item row). */
+  itemId: string
   /** The parent item label. */
   itemLabel: string
+  /** Sub-item id — present when the waiting flag is on a sub-item. */
+  subItemId?: string
   /** Present when the waiting flag is on a sub-item rather than the item. */
   subLabel?: string
   note?: string
@@ -40,9 +51,20 @@ type ClientGroup = {
 }
 
 export function DelayedPage() {
-  const { data } = useAppContext()
+  const { data, toggleChecklistItem, toggleSubItem } = useAppContext()
   const { clients, employees, checklists } = data
   const today = localDateOnly()
+
+  // Mark a delayed step done from here — the SAME toggle used on the dashboard /
+  // Checklists page. Once done it no longer counts as an open waiting step, so
+  // it drops off this list on the next render.
+  const markDone = (row: WaitingRow) => {
+    if (row.subItemId) {
+      void toggleSubItem(row.checklistId, row.itemId, row.subItemId)
+    } else {
+      void toggleChecklistItem(row.checklistId, row.itemId)
+    }
+  }
 
   const groups = useMemo<ClientGroup[]>(() => {
     const byClient = new Map<string, Map<string, ChecklistGroup>>()
@@ -51,11 +73,14 @@ export function DelayedPage() {
       if (checklist.deletedAt) continue
       const rows: WaitingRow[] = []
       for (const item of checklist.items) {
-        if (stepIsWaiting(item)) {
+        // A completed step isn't "delayed" any more — hide it so marking a step
+        // done here makes it drop off the list.
+        if (stepIsWaiting(item) && !isChecklistItemDone(item)) {
           rows.push({
             key: `${checklist.id}:${item.id}`,
             checklistId: checklist.id,
             checklistTitle: checklist.title,
+            itemId: item.id,
             itemLabel: item.label,
             note: item.waitingOn,
             blockerNames: (item.waitingOns ?? []).map((w) => employeeName(employees, w.blockerId)),
@@ -64,12 +89,14 @@ export function DelayedPage() {
           })
         }
         for (const sub of item.subItems ?? []) {
-          if (stepIsWaiting(sub)) {
+          if (stepIsWaiting(sub) && !sub.done) {
             rows.push({
               key: `${checklist.id}:${item.id}:${sub.id}`,
               checklistId: checklist.id,
               checklistTitle: checklist.title,
+              itemId: item.id,
               itemLabel: item.label,
+              subItemId: sub.id,
               subLabel: sub.title,
               note: sub.waitingOn,
               blockerNames: (sub.waitingOns ?? []).map((w) =>
@@ -251,6 +278,14 @@ export function DelayedPage() {
                                       Due {shortDate.format(new Date(`${row.dueDate}T12:00:00`))}
                                     </span>
                                   ) : null}
+                                  <button
+                                    type="button"
+                                    className="delayed-row-done"
+                                    onClick={() => markDone(row)}
+                                    title="Mark this step done (same as checking it off on the Checklists page)"
+                                  >
+                                    <Check size={14} /> Done
+                                  </button>
                                 </div>
                               </li>
                             )
