@@ -8561,16 +8561,16 @@ button.repeating-task-toggle-pill {
 /* The specific outstanding things behind an issue (e.g. which plan checklists
    are still missing), named rather than just counted. */
 .setup-issue-items {
-  margin: 2px 0 0;
-  padding-left: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  list-style: disc;
+  /* A real bulleted list (NOT display:flex — flex containers hide list markers,
+     which made the named items look like plain, easy-to-miss text). */
+  margin: 4px 0 2px;
+  padding-left: 20px;
+  list-style: disc outside;
 }
 .setup-issue-items li {
   font-size: 0.85rem;
   color: var(--ink, #2c2735);
+  margin: 2px 0;
 }
 .setup-issue-sev {
   font-size: 0.72rem;
