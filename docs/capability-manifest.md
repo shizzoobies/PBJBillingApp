@@ -48,8 +48,13 @@ picker, notification bell, and account menu sit in the top bar on every page.
 
 - Live timer: pick employee → client → optional task (checklist) → describe
   the work → start/stop. The most accurate way to log time.
-- Track time for a single client, or split across a group of clients
-  (allocates minutes across them).
+- Track time for a single client, or split across a group of clients — pick
+  "A group", choose the clients, save it as one block, then "Split across
+  clients" on that entry (in Recent time) to divide the minutes (evenly, the
+  full duration to each, or a custom per-client split), creating one billable
+  entry per client. Available to EVERYONE who logs time, not just owners: a
+  staff member can split their own time across the clients they're assigned to
+  (the server enforces that every group client is one they're allowed to bill).
 - Administrative work toggle: internal/company time with no client or task.
 - Log time manually: same fields plus date and duration, for after-the-fact
   entries. Manual entries are flagged for owner approval ("manual" badge) and

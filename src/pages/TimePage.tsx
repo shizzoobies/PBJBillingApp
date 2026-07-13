@@ -509,9 +509,11 @@ function TimeCapture({
   const [isAdministrative, setIsAdministrative] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopError, setStopError] = useState('')
-  // Group timing (owner-only): track one block against several clients, chosen
-  // up front, then split it for billing later.
-  const canGroup = role === 'owner'
+  // Group timing: track one block against several clients, chosen up front, then
+  // split it across them for billing. Available to everyone who logs time —
+  // staff can split their own time across their assigned clients (the server
+  // enforces that every group client is one they're allowed to bill).
+  const canGroup = true
   const [billTo, setBillTo] = useState<'single' | 'group'>('single')
   const [groupClientIds, setGroupClientIds] = useState<string[]>([])
   const groupMode = canGroup && billTo === 'group' && !isAdministrative
@@ -921,11 +923,12 @@ function ManualEntryModal({
   onClose: () => void
 }) {
   const [step, setStep] = useState<'confirm' | 'form'>('confirm')
-  // Group billing (owner-only): allocate one block of time across MULTIPLE
-  // clients at once, each billed independently. Brittany picks "Group", selects
-  // the clients, and chooses how to split the time (even / full to each /
-  // custom per-client amounts).
-  const canGroup = role === 'owner'
+  // Group billing: log one block of time across MULTIPLE clients at once, each
+  // billed independently — save it as a group block, then split it (even / full
+  // to each / custom per-client amounts). Available to everyone who logs time;
+  // staff split their own time across their assigned clients (the server
+  // enforces every group client is one they're allowed to bill).
+  const canGroup = true
   const [billTo, setBillTo] = useState<'single' | 'group'>('single')
   const [groupClientIds, setGroupClientIds] = useState<string[]>([])
   // Exact start/stop the employee enters, so the owner can audit. Default to a
@@ -1988,7 +1991,7 @@ function TimeEntryRow({
               Edit
             </button>
           ) : null}
-          {isOwner ? (
+          {canEdit ? (
             <button
               type="button"
               className="secondary-action"
