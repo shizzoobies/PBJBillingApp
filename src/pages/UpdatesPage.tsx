@@ -56,6 +56,15 @@ const CLOSED_STATUSES: ReadonlySet<FeatureRequestStatus> = new Set<FeatureReques
   'wont_do',
 ])
 
+/**
+ * Section display order: Shipped pinned to the TOP (so the owner lands on
+ * just-shipped work awaiting sign-off), then the rest in workflow order.
+ */
+const SECTION_OPTIONS: typeof STATUS_OPTIONS = [
+  ...STATUS_OPTIONS.filter((option) => option.value === 'shipped'),
+  ...STATUS_OPTIONS.filter((option) => option.value !== 'shipped'),
+]
+
 /** Format an approval timestamp for the "Approved by … · <date>" line. */
 function formatApprovedAt(iso: string | null | undefined): string | null {
   if (!iso) return null
@@ -120,10 +129,14 @@ export function UpdatesPage() {
   const [formError, setFormError] = useState<string | null>(null)
 
   const [hideDone, setHideDone] = useState(false)
-  // Which status sections are collapsed. Closed statuses (Done / Won't do) start
-  // collapsed so the page opens on the work that's still live.
+  // Which status sections are collapsed. By default everything EXCEPT Shipped is
+  // collapsed, so the owner lands on the just-shipped work awaiting her sign-off
+  // and can expand the rest as needed.
   const [collapsedStatuses, setCollapsedStatuses] = useState<Set<FeatureRequestStatus>>(
-    () => new Set<FeatureRequestStatus>(['done', 'wont_do']),
+    () =>
+      new Set<FeatureRequestStatus>(
+        STATUS_OPTIONS.map((option) => option.value).filter((value) => value !== 'shipped'),
+      ),
   )
 
   // Transient "Copied ✓" flash, keyed by a copy-source id ('all' or item id).
@@ -722,7 +735,7 @@ export function UpdatesPage() {
             No updates yet. Add one above, or send one from the assistant — they show up here.
           </p>
         ) : (
-          STATUS_OPTIONS.map((option) => {
+          SECTION_OPTIONS.map((option) => {
             const items = byStatus.get(option.value) ?? []
             if (items.length === 0) return null
             if (hideDone && CLOSED_STATUSES.has(option.value)) return null

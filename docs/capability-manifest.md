@@ -528,10 +528,12 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
   In Progress → Shipped → Done, or Won't do), and a color-coded priority level — Urgent
   (red), High (orange), Medium (blue), Low (slate).
-- Layout: the list is organized into one COLLAPSIBLE section per status (New,
-  Planned, In Progress, Shipped, Done, Won't do), each with its item count;
-  Done / Won't do start collapsed. "Expand all"/"Collapse all" and a "Hide Done
-  / Won't do" toggle sit in the toolbar. Inside a section items are ordered by
+- Layout: the list is organized into one COLLAPSIBLE section per status, each
+  with its item count. Shipped is pinned to the TOP and is the only section
+  EXPANDED by default (so the owner lands on just-shipped work awaiting her
+  sign-off); every other section (New, Planned, In Progress, Done, Won't do)
+  starts collapsed. "Expand all"/"Collapse all" and a "Hide Done / Won't do"
+  toggle sit in the toolbar. Inside a section items are ordered by
   priority level (Urgent → Low) and drag-to-rank within their level; dragging
   only re-ranks within the same status. Changing an item's status moves it to
   the matching section; changing its priority moves it between levels.
