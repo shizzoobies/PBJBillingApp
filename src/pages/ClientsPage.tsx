@@ -683,14 +683,14 @@ function ClientTable({
             return (
               <tr key={client.id}>
                 <td>
-                  {ownerMode ? (
-                    <Link className="client-name-link" to={`/clients/${client.id}`}>
-                      <strong>{highlightMatch(client.name, query)}</strong>
-                      <ChevronRight size={14} />
-                    </Link>
-                  ) : (
+                  {/* Everyone links through to the client detail page — staff
+                      get a read-only, staff-scoped view (recurring checklists,
+                      active checklists, contacts). Owner-only sections there are
+                      hidden for staff; the route itself isn't owner-gated. */}
+                  <Link className="client-name-link" to={`/clients/${client.id}`}>
                     <strong>{highlightMatch(client.name, query)}</strong>
-                  )}
+                    <ChevronRight size={14} />
+                  </Link>
                 </td>
                 <td>{client.contact}</td>
                 <td>
