@@ -1,5 +1,5 @@
-import { Download, Printer } from 'lucide-react'
-import { useState } from 'react'
+import { ChevronLeft, ChevronRight, Download, Printer } from 'lucide-react'
+import { useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
@@ -13,6 +13,7 @@ import type {
   TimeEntry,
 } from '../lib/types'
 import {
+  addDays,
   clientName,
   currency,
   employeeName,
@@ -20,6 +21,9 @@ import {
   getBillingPeriodLabel,
   getInvoice,
   isInBillingPeriod,
+  localDateOnly,
+  shortDate,
+  weekStartOf,
 } from '../lib/utils'
 
 export function ReportsPage() {
@@ -175,6 +179,10 @@ export function ReportsPage() {
           Print
         </button>
       </div>
+      <PayrollHoursReport
+        employees={employeesForReport}
+        timeEntries={data.timeEntries}
+      />
       <ReportsOverview
         activeClientCount={activeClientCount}
         billingPeriod={billingPeriod}
@@ -191,6 +199,187 @@ export function ReportsPage() {
         ownerInvoiceTotal={ownerInvoiceTotal}
         ownerTrackedMinutes={ownerTrackedMinutes}
       />
+    </section>
+  )
+}
+
+/**
+ * Payroll hours report: total hours worked per team member over a WEEKLY or
+ * BI-WEEKLY period, independent of the billing month. Both period types are
+ * anchored to the app's Sun–Sat week (the same weeks staff submit), so bi-weekly
+ * = two consecutive Sun–Sat weeks. To line the bi-weekly window up with the
+ * firm's payroll cycle, the owner sets the start date (or navigates) to a day in
+ * their pay period's first week; Prev/Next then steps by a full period, keeping
+ * the cadence.
+ */
+function PayrollHoursReport({
+  employees,
+  timeEntries,
+}: {
+  employees: Employee[]
+  timeEntries: TimeEntry[]
+}) {
+  const [periodType, setPeriodType] = useState<'weekly' | 'biweekly'>('biweekly')
+  // Reference date for the period; the window snaps to its Sun–Sat week.
+  const [anchorDate, setAnchorDate] = useState<string>(() => localDateOnly())
+
+  const spanDays = periodType === 'weekly' ? 7 : 14
+  const start = weekStartOf(anchorDate)
+  const end = addDays(start, spanDays - 1)
+
+  const rows = useMemo(() => {
+    const inRange = timeEntries.filter(
+      (entry) => typeof entry.date === 'string' && entry.date >= start && entry.date <= end,
+    )
+    return employees
+      .map((employee) => {
+        const entries = inRange.filter((entry) => entry.employeeId === employee.id)
+        const billable = entries
+          .filter((entry) => entry.billable)
+          .reduce((sum, entry) => sum + entry.minutes, 0)
+        const internal = entries
+          .filter((entry) => !entry.billable)
+          .reduce((sum, entry) => sum + entry.minutes, 0)
+        return {
+          id: employee.id,
+          name: employee.name,
+          minutes: billable + internal,
+          billable,
+          internal,
+          count: entries.length,
+        }
+      })
+      .sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name))
+  }, [employees, timeEntries, start, end])
+
+  const totalMinutes = rows.reduce((sum, row) => sum + row.minutes, 0)
+  const fmtDay = (iso: string) => shortDate.format(new Date(`${iso}T12:00:00`))
+  const rangeLabel = `${fmtDay(start)} – ${fmtDay(end)}`
+
+  const step = (direction: -1 | 1) => setAnchorDate(addDays(start, direction * spanDays))
+  const goThisPeriod = () => setAnchorDate(localDateOnly())
+
+  const exportCsv = () =>
+    downloadCsv(
+      `payroll-hours-${periodType}-${start}.csv`,
+      ['Employee', 'Tracked hours', 'Billable hours', 'Internal hours', 'Entries'],
+      [
+        ...rows.map((row) => [
+          row.name,
+          (row.minutes / 60).toFixed(2),
+          (row.billable / 60).toFixed(2),
+          (row.internal / 60).toFixed(2),
+          row.count,
+        ]),
+        ['TOTAL', (totalMinutes / 60).toFixed(2), '', '', ''],
+      ],
+    )
+
+  return (
+    <section className="panel report-section" id="payroll-hours">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Payroll</p>
+          <h2>Hours report</h2>
+        </div>
+        <button type="button" className="ghost-action no-print" onClick={exportCsv}>
+          <Download size={14} /> Export CSV
+        </button>
+      </div>
+
+      <div className="payroll-controls no-print">
+        <div className="payroll-period-toggle" role="group" aria-label="Period length">
+          <button
+            type="button"
+            className={periodType === 'weekly' ? 'is-active' : ''}
+            aria-pressed={periodType === 'weekly'}
+            onClick={() => setPeriodType('weekly')}
+          >
+            Weekly
+          </button>
+          <button
+            type="button"
+            className={periodType === 'biweekly' ? 'is-active' : ''}
+            aria-pressed={periodType === 'biweekly'}
+            onClick={() => setPeriodType('biweekly')}
+          >
+            Bi-weekly
+          </button>
+        </div>
+        <div className="payroll-nav">
+          <button type="button" className="icon-button" aria-label="Previous period" onClick={() => step(-1)}>
+            <ChevronLeft size={16} />
+          </button>
+          <input
+            type="date"
+            className="payroll-date"
+            aria-label="Period start date"
+            value={anchorDate}
+            onChange={(event) => setAnchorDate(event.target.value || localDateOnly())}
+          />
+          <button type="button" className="icon-button" aria-label="Next period" onClick={() => step(1)}>
+            <ChevronRight size={16} />
+          </button>
+          <button type="button" className="link-button" onClick={goThisPeriod}>
+            This period
+          </button>
+        </div>
+      </div>
+
+      <p className="report-caption">
+        {periodType === 'biweekly' ? 'Bi-weekly' : 'Weekly'} period: <strong>{rangeLabel}</strong>.
+        {periodType === 'biweekly'
+          ? ' Two Sun–Sat weeks. Set the start to a day in your pay-period’s first week to line it up with payroll; ‹ › move by a full period.'
+          : ' Sun–Sat week; ‹ › move by a week.'}
+      </p>
+
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Team member</th>
+              <th>Hours</th>
+              <th className="no-print">Billable</th>
+              <th className="no-print">Internal</th>
+              <th className="no-print">Entries</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="muted-text">
+                  No team members to report.
+                </td>
+              </tr>
+            ) : (
+              rows.map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    <strong>{row.name}</strong>
+                  </td>
+                  <td>{formatHours(row.minutes)}</td>
+                  <td className="no-print">{formatHours(row.billable)}</td>
+                  <td className="no-print">{formatHours(row.internal)}</td>
+                  <td className="no-print">{row.count}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td>
+                <strong>Total</strong>
+              </td>
+              <td>
+                <strong>{formatHours(totalMinutes)}</strong>
+              </td>
+              <td className="no-print" />
+              <td className="no-print" />
+              <td className="no-print" />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
     </section>
   )
 }

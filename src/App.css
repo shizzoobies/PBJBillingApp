@@ -2508,6 +2508,46 @@ td strong {
   margin: 0 0 14px;
 }
 
+/* Payroll hours report controls (period type + date navigator). */
+.payroll-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 4px 0 12px;
+}
+.payroll-period-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.payroll-period-toggle button {
+  background: var(--surface);
+  border: 0;
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+.payroll-period-toggle button.is-active {
+  background: var(--berry, #8a1c4b);
+  color: #fff;
+}
+.payroll-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.payroll-date {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font: inherit;
+}
+
 .report-metric-grid {
   display: grid;
   gap: 12px;

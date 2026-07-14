@@ -319,6 +319,15 @@ picker, notification bell, and account menu sit in the top bar on every page.
 
 ## Reports (owner only)
 
+- Payroll hours report: total hours worked per team member over a WEEKLY or
+  BI-WEEKLY period (toggle), independent of the billing month — for running
+  payroll. Both period types use the app's Sun–Sat weeks (the same weeks staff
+  submit), so bi-weekly = two consecutive Sun–Sat weeks. A date picker + ‹ ›
+  buttons move the window (‹ › step by a full period); "This period" jumps to
+  now. To line the bi-weekly window up with the firm's payroll cycle, set the
+  start to a day in the pay period's first week — the cadence is then preserved.
+  Table of each member's hours (billable/internal split + entry count) with a
+  grand total, and a Download CSV.
 - Month summary: tracked hours, internal hours, billable mix, projected
   billing, employee coverage.
 - Employee report (hours by person, including billable $ = each person's
