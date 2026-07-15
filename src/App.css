@@ -8716,6 +8716,84 @@ button.setup-issue-fix {
   margin-left: 21px;
 }
 
+/* Top-of-page summary chips: one per non-empty setup category + a checklist
+   chip. Each jumps to (and opens) its section. */
+.setup-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.setup-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--hairline, #e4dfec);
+  border-radius: 999px;
+  background: var(--surface-2, #f6f3fb);
+  color: var(--ink, #2c2735);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.setup-summary-chip:hover {
+  border-color: var(--plum, #3c2044);
+}
+.setup-summary-chip--checklist {
+  background: var(--plum-tint, #efe6f4);
+}
+.setup-summary-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--plum, #3c2044);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+/* Checklist quick-preview modal (tick steps off without leaving To-100%). */
+.setup-preview-modal {
+  max-width: 560px;
+  width: 100%;
+}
+.setup-preview-head {
+  margin-bottom: 12px;
+}
+.setup-preview-items {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+.setup-preview-item {
+  padding: 2px 0;
+}
+.setup-preview-subs {
+  list-style: none;
+  margin: 0 0 4px 28px;
+  padding: 0;
+}
+.setup-preview-modal .task-row,
+.setup-preview-modal .sub-item-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+.setup-preview-modal .task-row.done .task-row-title,
+.setup-preview-modal .sub-item-row.done {
+  text-decoration: line-through;
+  color: var(--muted-ink, #8a8494);
+}
+
 /* Per-issue actions: Fix + Ignore stacked at the row's right edge. */
 .setup-issue-actions {
   flex: none;
