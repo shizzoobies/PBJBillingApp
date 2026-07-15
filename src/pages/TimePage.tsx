@@ -37,6 +37,7 @@ import {
   formatHoursMinutes,
   getWeekLabel,
   type GroupAllocationMode,
+  makeId,
   sessionMinutes,
   shiftWeek,
   weekRangeOf,
@@ -931,6 +932,9 @@ function ManualEntryModal({
   const canGroup = true
   const [billTo, setBillTo] = useState<'single' | 'group'>('single')
   const [groupClientIds, setGroupClientIds] = useState<string[]>([])
+  // How the block is divided across the selected clients (one-step split on save).
+  const [groupSplitMode, setGroupSplitMode] = useState<GroupAllocationMode>('even')
+  const [groupCustomMinutes, setGroupCustomMinutes] = useState<Record<string, string>>({})
   // Exact start/stop the employee enters, so the owner can audit. Default to a
   // one-hour block ending now; duration is derived from the span.
   const [startLocal, setStartLocal] = useState(() => {
@@ -991,9 +995,9 @@ function ManualEntryModal({
   }, [templates, effectiveClientId, eligibleTasks])
   const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
 
-  // Group billing (owner-only): track ONE block against multiple clients, then
-  // split it for billing later. Here she just picks the member clients; the
-  // split (even / full / custom) happens afterward via the Split action.
+  // Group ("split across clients"): log ONE block of time and divide it across
+  // the selected clients in a single save — evenly, a custom amount each, or the
+  // full duration to each. No separate "split later" step.
   const groupMode = canGroup && billTo === 'group' && !isAdministrative
 
   const toggleGroupClient = (id: string) => {
@@ -1001,6 +1005,22 @@ function ManualEntryModal({
       current.includes(id) ? current.filter((existing) => existing !== id) : [...current, id],
     )
   }
+
+  // Live allocation preview (minutes derived from the entered start/stop span).
+  const previewMinutes = useMemo(() => {
+    const s = startLocal ? new Date(startLocal).getTime() : NaN
+    const e = stopLocal ? new Date(stopLocal).getTime() : NaN
+    return Number.isFinite(s) && Number.isFinite(e) && e > s ? Math.round((e - s) / 60000) : 0
+  }, [startLocal, stopLocal])
+  const groupCustomNumeric = useMemo(() => {
+    const out: Record<string, number> = {}
+    for (const id of groupClientIds) out[id] = Number(groupCustomMinutes[id])
+    return out
+  }, [groupClientIds, groupCustomMinutes])
+  const groupAllocation = useMemo(
+    () => allocateGroupMinutes(previewMinutes, groupClientIds, groupSplitMode, groupCustomNumeric),
+    [previewMinutes, groupClientIds, groupSplitMode, groupCustomNumeric],
+  )
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -1032,37 +1052,56 @@ function ManualEntryModal({
       return
     }
 
-    // Group billing: save ONE unsplit holding entry carrying the member
-    // clients (no single client, not billable). The owner splits it across the
-    // members for billing later via the "Split across clients" action.
+    // Split across clients: divide this block per the chosen allocation and save
+    // ONE billable entry per client in a single action (a shared groupId ties
+    // them together). No leftover "un-split" holding entry.
     if (groupMode) {
       if (groupClientIds.length === 0) {
-        setSubmitError('Pick at least one client for the group.')
+        setSubmitError('Pick at least one client to split across.')
+        return
+      }
+      const allocation = allocateGroupMinutes(
+        totalMinutes,
+        groupClientIds,
+        groupSplitMode,
+        groupCustomNumeric,
+      )
+      const allocated = groupClientIds
+        .map((id) => ({ id, minutes: allocation[id] ?? 0 }))
+        .filter((row) => row.minutes > 0)
+      if (allocated.length === 0) {
+        setSubmitError(
+          groupSplitMode === 'custom'
+            ? 'Enter minutes greater than 0 for at least one client.'
+            : 'The tracked time is too short to split.',
+        )
         return
       }
       setSubmitPending(true)
       setSubmitError('')
+      const groupId = makeId('grp')
       try {
-        await onLog({
-          employeeId: effectiveEmployeeId,
-          clientId: '',
-          isAdministrative: false,
-          groupClientIds,
-          date: startLocal.slice(0, 10),
-          minutes: totalMinutes,
-          description,
-          billable: false,
-          taskId: null,
-          entryMethod: 'manual',
-          manualReason: reason.trim(),
-          startAt: localInputToIso(startLocal),
-          endAt: localInputToIso(stopLocal),
-          sessions: [{ startAt: localInputToIso(startLocal), endAt: localInputToIso(stopLocal) }],
-        })
+        for (const row of allocated) {
+          await onLog({
+            employeeId: effectiveEmployeeId,
+            clientId: row.id,
+            isAdministrative: false,
+            date: startLocal.slice(0, 10),
+            // Allocated minutes only (no session span) so the server keeps each
+            // client's split amount instead of recomputing the full duration.
+            minutes: row.minutes,
+            description,
+            billable: true,
+            taskId: null,
+            entryMethod: 'manual',
+            manualReason: reason.trim(),
+            groupId,
+          })
+        }
         setSuccess(true)
       } catch (error) {
         setSubmitError(
-          error instanceof ApiError ? error.message : 'Group time could not be saved.',
+          error instanceof ApiError ? error.message : 'Split time could not be saved.',
         )
       } finally {
         setSubmitPending(false)
@@ -1243,11 +1282,61 @@ function ManualEntryModal({
                       })}
                     </div>
                   </div>
-                  <p className="field full-span group-split-hint">
-                    Saved as one un-split group entry. Use{' '}
-                    <strong>Split across clients</strong> on it (in Recent time) to divide the time
-                    for billing — evenly, the full duration to each, or a custom split.
-                  </p>
+                  <label className="field full-span">
+                    <span>How should the time be split?</span>
+                    <select
+                      className="input"
+                      value={groupSplitMode}
+                      onChange={(event) =>
+                        setGroupSplitMode(event.target.value as GroupAllocationMode)
+                      }
+                    >
+                      <option value="even">Split evenly across clients</option>
+                      <option value="custom">Custom — set each client&apos;s minutes</option>
+                      <option value="full">Full duration to each client</option>
+                    </select>
+                  </label>
+                  {groupClientIds.length > 0 ? (
+                    <div className="field full-span group-allocation-preview">
+                      <span>
+                        {groupSplitMode === 'custom' ? 'Minutes per client' : 'Each client gets'}
+                      </span>
+                      <ul className="group-allocation-list">
+                        {groupClientIds.map((id) => (
+                          <li key={id}>
+                            <span className="group-allocation-name">{clientName(clients, id)}</span>
+                            {groupSplitMode === 'custom' ? (
+                              <input
+                                className="input group-allocation-input"
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={groupCustomMinutes[id] ?? ''}
+                                onChange={(event) =>
+                                  setGroupCustomMinutes((prev) => ({
+                                    ...prev,
+                                    [id]: event.target.value,
+                                  }))
+                                }
+                                placeholder="min"
+                              />
+                            ) : (
+                              <span className="group-allocation-amount">
+                                {formatHoursMinutes(groupAllocation[id] ?? 0)}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="group-allocation-total">
+                        Total:{' '}
+                        {formatHoursMinutes(
+                          Object.values(groupAllocation).reduce((sum, m) => sum + (m || 0), 0),
+                        )}{' '}
+                        · saves one billable entry per client, together.
+                      </p>
+                    </div>
+                  ) : null}
                 </>
               ) : isAdministrative ? null : (
                 <>
