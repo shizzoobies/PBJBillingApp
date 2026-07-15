@@ -6,12 +6,14 @@ import {
   ChevronRight,
   CircleAlert,
   EyeOff,
+  ListChecks,
   RotateCcw,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import {
+  computeIncompleteChecklists,
   computeSetupIssues,
   groupSetupIssues,
   type SetupIssue,
@@ -42,6 +44,9 @@ export function SetupChecklistPage() {
   // Hooks run unconditionally (before the ownerMode early return).
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [collapsedChecklistClients, setCollapsedChecklistClients] = useState<Set<string>>(
+    new Set(),
+  )
   const [showIgnored, setShowIgnored] = useState(false)
   const [fixTarget, setFixTarget] = useState<SetupIssue | null>(null)
 
@@ -70,6 +75,17 @@ export function SetupChecklistPage() {
         checklistTemplates: data.checklistTemplates,
       }),
     [data.clients, data.contacts, data.plans, data.employees, data.checklistTemplates],
+  )
+
+  // The operational side of "to 100%": actual unchecked checklist steps, named
+  // and grouped by client (distinct from the setup-config issues above).
+  const incompleteChecklists = useMemo(
+    () => computeIncompleteChecklists(data.checklists, data.clients),
+    [data.checklists, data.clients],
+  )
+  const totalIncompleteSteps = incompleteChecklists.reduce(
+    (sum, group) => sum + group.totalIncomplete,
+    0,
   )
 
   if (!ownerMode) {
@@ -111,6 +127,13 @@ export function SetupChecklistPage() {
       const next = new Set(prev)
       if (next.has(category)) next.delete(category)
       else next.add(category)
+      return next
+    })
+  const toggleChecklistClient = (clientId: string) =>
+    setCollapsedChecklistClients((prev) => {
+      const next = new Set(prev)
+      if (next.has(clientId)) next.delete(clientId)
+      else next.add(clientId)
       return next
     })
 
@@ -206,6 +229,81 @@ export function SetupChecklistPage() {
           </div>
         )
       })}
+
+      <div className="panel">
+        <div className="section-heading">
+          <div>
+            <p className="section-kicker">Checklist work</p>
+            <h2>Checklist items to finish</h2>
+          </div>
+          {totalIncompleteSteps > 0 ? (
+            <span className="setup-cat-count">
+              {totalIncompleteSteps} step{totalIncompleteSteps === 1 ? '' : 's'}
+            </span>
+          ) : null}
+        </div>
+        {incompleteChecklists.length === 0 ? (
+          <div className="setup-all-clear">
+            <CheckCircle2 size={28} />
+            <div>
+              <strong>Every checklist step is done.</strong>
+              <p className="muted-text" style={{ margin: 0 }}>
+                No active checklist has any unchecked steps right now.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <p className="muted-text" style={{ marginTop: 0 }}>
+              Every unchecked step across your active checklists, by client. Completed steps
+              aren&apos;t shown. Open a checklist to check things off.
+            </p>
+            {incompleteChecklists.map((group) => {
+              const isCollapsed = collapsedChecklistClients.has(group.clientId)
+              return (
+                <div className="setup-checklist-client" key={group.clientId}>
+                  <button
+                    type="button"
+                    className="setup-cat-header"
+                    aria-expanded={!isCollapsed}
+                    onClick={() => toggleChecklistClient(group.clientId)}
+                  >
+                    {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                    <span className="section-kicker">{group.clientName}</span>
+                    <span className="setup-cat-count">
+                      {group.totalIncomplete} step{group.totalIncomplete === 1 ? '' : 's'}
+                    </span>
+                  </button>
+                  {isCollapsed
+                    ? null
+                    : group.checklists.map((checklist) => (
+                        <div className="setup-checklist" key={checklist.checklistId}>
+                          <div className="setup-checklist-head">
+                            <ListChecks size={15} className="setup-issue-icon" />
+                            <Link
+                              to={`/checklists?focus=${checklist.checklistId}`}
+                              className="setup-checklist-title"
+                            >
+                              {checklist.title}
+                            </Link>
+                            <span className="setup-checklist-meta">
+                              {checklist.incompleteCount}/{checklist.totalCount} left
+                              {checklist.dueDate ? ` · due ${checklist.dueDate}` : ''}
+                            </span>
+                          </div>
+                          <ul className="setup-issue-items">
+                            {checklist.incompleteItems.map((label, index) => (
+                              <li key={`${checklist.checklistId}:${index}`}>{label}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                </div>
+              )
+            })}
+          </>
+        )}
+      </div>
 
       {ignoredIssues.length > 0 ? (
         <div className="panel">

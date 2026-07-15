@@ -7,13 +7,14 @@
  * a deep-link to where it's fixed. Tested in src/__tests__/completeness.test.ts.
  */
 import type {
+  Checklist,
   ChecklistTemplate,
   Client,
   Contact,
   Employee,
   SubscriptionPlan,
 } from './types'
-import { missingPlanTemplatesForClient, unlinkedContacts } from './utils'
+import { isChecklistItemDone, missingPlanTemplatesForClient, unlinkedContacts } from './utils'
 
 export type SetupCategory = 'Billing' | 'Clients' | 'Team' | 'Contacts' | 'Plans'
 export type SetupSeverity = 'high' | 'medium' | 'low'
@@ -228,4 +229,83 @@ export function groupSetupIssues(issues: SetupIssue[]): SetupCategoryGroup[] {
     category,
     issues: issues.filter((issue) => issue.category === category),
   })).filter((group) => group.issues.length > 0)
+}
+
+/** One active checklist that still has unchecked steps. */
+export interface IncompleteChecklist {
+  checklistId: string
+  title: string
+  dueDate?: string
+  /** The labels of the steps that are NOT done, in checklist order. */
+  incompleteItems: string[]
+  incompleteCount: number
+  totalCount: number
+}
+
+/** A client and the checklist work still outstanding on it. */
+export interface IncompleteChecklistGroup {
+  clientId: string
+  clientName: string
+  totalIncomplete: number
+  checklists: IncompleteChecklist[]
+}
+
+/**
+ * The operational companion to `computeSetupIssues`: every UNCHECKED checklist
+ * step across active checklists, named and grouped by client — so the To-100%
+ * page shows the actual outstanding checklist work, not just how many items are
+ * left. This is the "checklist part" the setup checks above never looked at.
+ *
+ * A step counts as incomplete when `isChecklistItemDone` is false, which rolls
+ * sub-steps up (an item with any unfinished sub-step is itself unfinished).
+ * Completed steps are omitted; checklists with nothing left, and soft-deleted
+ * checklists, are dropped entirely. Groups are ordered most-incomplete first;
+ * within a group, checklists are ordered by due date then title.
+ */
+export function computeIncompleteChecklists(
+  checklists: Checklist[],
+  clients: Client[],
+): IncompleteChecklistGroup[] {
+  const clientNameById = new Map(clients.map((client) => [client.id, client.name]))
+  const byClient = new Map<string, IncompleteChecklistGroup>()
+
+  for (const checklist of checklists) {
+    if (checklist.deletedAt) continue
+    const items = checklist.items ?? []
+    if (items.length === 0) continue
+    const incompleteItems = items
+      .filter((item) => !isChecklistItemDone(item))
+      .map((item) => item.label)
+    if (incompleteItems.length === 0) continue
+
+    const clientId = checklist.clientId ?? ''
+    const group = byClient.get(clientId) ?? {
+      clientId,
+      clientName: clientNameById.get(clientId) ?? 'Unassigned',
+      totalIncomplete: 0,
+      checklists: [],
+    }
+    group.checklists.push({
+      checklistId: checklist.id,
+      title: checklist.title,
+      dueDate: checklist.dueDate,
+      incompleteItems,
+      incompleteCount: incompleteItems.length,
+      totalCount: items.length,
+    })
+    group.totalIncomplete += incompleteItems.length
+    byClient.set(clientId, group)
+  }
+
+  const groups = [...byClient.values()]
+  for (const group of groups) {
+    group.checklists.sort(
+      (a, b) =>
+        (a.dueDate ?? '').localeCompare(b.dueDate ?? '') || a.title.localeCompare(b.title),
+    )
+  }
+  return groups.sort(
+    (a, b) =>
+      b.totalIncomplete - a.totalIncomplete || a.clientName.localeCompare(b.clientName),
+  )
 }

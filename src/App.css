@@ -8682,6 +8682,40 @@ button.setup-issue-fix {
   font-size: 1.05rem;
 }
 
+/* "Checklist items to finish" — the operational section listing every unchecked
+   step, grouped by client (each client is a collapsible .setup-cat-header). */
+.setup-checklist-client {
+  padding: 10px 0;
+  border-top: 1px solid var(--hairline, #ece8f0);
+}
+.setup-checklist-client:first-of-type {
+  border-top: 0;
+}
+.setup-checklist {
+  margin: 8px 0 4px 24px;
+}
+.setup-checklist-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.setup-checklist-title {
+  font-weight: 600;
+  color: var(--plum, #3c2044);
+  text-decoration: none;
+}
+.setup-checklist-title:hover {
+  text-decoration: underline;
+}
+.setup-checklist-meta {
+  font-size: 0.78rem;
+  color: var(--muted-ink, #8a8494);
+}
+.setup-checklist .setup-issue-items {
+  margin-left: 21px;
+}
+
 /* Per-issue actions: Fix + Ignore stacked at the row's right edge. */
 .setup-issue-actions {
   flex: none;

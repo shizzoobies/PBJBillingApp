@@ -416,6 +416,14 @@ picker, notification bell, and account menu sit in the top bar on every page.
   than only counting them: the "plan checklists not set up" item lists each
   specific missing checklist by name (already-added ones are excluded, and the
   count matches the named list).
+- Checklist items to finish: a separate section (below the setup checks) that
+  looks at the actual checklist work — every UNCHECKED step across active
+  checklists, named and grouped by client, with each client collapsible. A step
+  counts as incomplete when it isn't done (an item with any unfinished sub-step
+  is itself unfinished); completed steps are hidden and each checklist links to
+  itself so the owner can go check things off. Shows "Every checklist step is
+  done" when nothing is outstanding. This is separate from the setup "You're all
+  set — 100%" banner, which stays about configuration.
 
 ## Team (owner only)
 

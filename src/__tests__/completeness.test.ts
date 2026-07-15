@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { computeSetupIssues, groupSetupIssues, type CompletenessInput } from '../lib/completeness'
-import type { Client, Contact, Employee, SubscriptionPlan, ChecklistTemplate } from '../lib/types'
+import {
+  computeIncompleteChecklists,
+  computeSetupIssues,
+  groupSetupIssues,
+  type CompletenessInput,
+} from '../lib/completeness'
+import type {
+  Checklist,
+  ChecklistItem,
+  Client,
+  Contact,
+  Employee,
+  SubscriptionPlan,
+  ChecklistTemplate,
+} from '../lib/types'
 
 const makeClient = (overrides: Partial<Client>): Client => ({
   id: 'client-1',
@@ -182,6 +195,82 @@ describe('computeSetupIssues', () => {
     expect(issue?.items).toEqual(['Monthly Close', 'Sales Tax'])
     expect(issue?.items?.length).toBe(2)
     expect(issue?.detail).toContain('2 plan checklists')
+  })
+})
+
+const item = (label: string, done: boolean, subItems?: ChecklistItem['subItems']): ChecklistItem => ({
+  id: `item-${label}`,
+  label,
+  done,
+  ...(subItems ? { subItems } : {}),
+})
+
+const makeChecklist = (overrides: Partial<Checklist>): Checklist => ({
+  id: 'cl-1',
+  title: 'Monthly Bookkeeping',
+  clientId: 'client-1',
+  assigneeId: 'emp-1',
+  dueDate: '2026-07-20',
+  viewerIds: [],
+  editorIds: [],
+  items: [],
+  ...overrides,
+})
+
+describe('computeIncompleteChecklists', () => {
+  const clients = [makeClient({ id: 'client-1', name: 'Acme' })]
+
+  it('returns nothing when every step is done', () => {
+    const checklists = [makeChecklist({ items: [item('Reconcile', true), item('Review', true)] })]
+    expect(computeIncompleteChecklists(checklists, clients)).toEqual([])
+  })
+
+  it('lists each incomplete step by name and excludes completed ones', () => {
+    const checklists = [
+      makeChecklist({
+        items: [item('Reconcile', false), item('Categorize', true), item('Review', false)],
+      }),
+    ]
+    const groups = computeIncompleteChecklists(checklists, clients)
+    expect(groups).toHaveLength(1)
+    const cl = groups[0].checklists[0]
+    expect(cl.incompleteItems).toEqual(['Reconcile', 'Review'])
+    expect(cl.incompleteCount).toBe(2)
+    expect(cl.totalCount).toBe(3)
+    expect(groups[0].totalIncomplete).toBe(2)
+  })
+
+  it('treats an item with any unfinished sub-step as incomplete', () => {
+    const checklists = [
+      makeChecklist({
+        items: [item('Payroll', false, [{ id: 's1', title: 'Import', done: true }, { id: 's2', title: 'Approve', done: false }])],
+      }),
+    ]
+    const groups = computeIncompleteChecklists(checklists, clients)
+    expect(groups[0].checklists[0].incompleteItems).toEqual(['Payroll'])
+  })
+
+  it('drops soft-deleted checklists', () => {
+    const checklists = [makeChecklist({ deletedAt: '2026-07-01', items: [item('Reconcile', false)] })]
+    expect(computeIncompleteChecklists(checklists, clients)).toEqual([])
+  })
+
+  it('groups by client, resolves client names, and orders most-incomplete first', () => {
+    const twoClients = [
+      makeClient({ id: 'client-1', name: 'Acme' }),
+      makeClient({ id: 'client-2', name: 'Beta' }),
+    ]
+    const checklists = [
+      makeChecklist({ id: 'cl-a', clientId: 'client-1', items: [item('A', false)] }),
+      makeChecklist({ id: 'cl-b', clientId: 'client-2', items: [item('B', false), item('C', false)] }),
+    ]
+    const groups = computeIncompleteChecklists(checklists, twoClients)
+    expect(groups.map((g) => g.clientName)).toEqual(['Beta', 'Acme'])
+  })
+
+  it('labels an unknown client id as Unassigned', () => {
+    const checklists = [makeChecklist({ clientId: 'ghost', items: [item('A', false)] })]
+    expect(computeIncompleteChecklists(checklists, clients)[0].clientName).toBe('Unassigned')
   })
 })
 
