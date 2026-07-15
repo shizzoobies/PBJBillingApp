@@ -8716,46 +8716,113 @@ button.setup-issue-fix {
   margin-left: 21px;
 }
 
-/* Top-of-page summary chips: one per non-empty setup category + a checklist
-   chip. Each jumps to (and opens) its section. */
-.setup-summary {
+/* Top-of-page overview: a segmented "setup by area" stat strip, and — kept
+   visually distinct so it doesn't read as part of the setup count — a callout
+   for the actual checklist work. */
+.setup-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+/* Setup breakdown: one joined, segmented strip of big-number stats (dashboard
+   style, not pills). Each cell jumps to and opens its category. */
+.setup-stat-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
+  border: 1px solid var(--hairline, #e7e2ef);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--surface, #fff);
 }
-.setup-summary-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border: 1px solid var(--hairline, #e4dfec);
-  border-radius: 999px;
-  background: var(--surface-2, #f6f3fb);
-  color: var(--ink, #2c2735);
+.setup-stat {
+  flex: 1 1 96px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 12px 18px;
+  border: 0;
+  border-right: 1px solid var(--hairline, #e7e2ef);
+  background: none;
+  color: inherit;
   font: inherit;
-  font-size: 0.85rem;
-  font-weight: 600;
+  text-align: left;
   cursor: pointer;
+  transition: background 0.12s ease;
 }
-.setup-summary-chip:hover {
-  border-color: var(--plum, #3c2044);
+.setup-stat:last-child {
+  border-right: 0;
 }
-.setup-summary-chip--checklist {
-  background: var(--plum-tint, #efe6f4);
+.setup-stat:hover {
+  background: var(--surface-2, #f7f4fb);
 }
-.setup-summary-num {
-  display: inline-flex;
+.setup-stat-num {
+  font-size: 1.45rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--ink, #2c2735);
+}
+.setup-stat-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-ink, #8a8494);
+}
+
+/* Checklist-work callout: a single accented row, clearly a different kind of
+   thing from the setup stats above. */
+.setup-checklist-callout {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
-  border-radius: 999px;
+  gap: 14px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--hairline, #e7e2ef);
+  border-radius: 14px;
+  background: var(--surface-2, #f7f4fb);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+.setup-checklist-callout:hover {
+  border-color: var(--plum, #3c2044);
+  box-shadow: 0 2px 10px rgba(60, 32, 68, 0.08);
+}
+.setup-callout-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
   background: var(--plum, #3c2044);
   color: #fff;
-  font-size: 0.78rem;
+}
+.setup-callout-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.setup-callout-title {
   font-weight: 700;
+  font-size: 1rem;
+  color: var(--ink, #2c2735);
+}
+.setup-callout-sub {
+  font-size: 0.8rem;
+  color: var(--muted-ink, #8a8494);
+}
+.setup-callout-chev {
+  flex: none;
+  color: var(--muted-ink, #8a8494);
 }
 
 /* Checklist quick-preview modal (tick steps off without leaving To-100%). */

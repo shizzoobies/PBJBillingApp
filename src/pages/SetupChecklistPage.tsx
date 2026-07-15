@@ -182,26 +182,43 @@ export function SetupChecklistPage() {
           </p>
         )}
         {groups.length > 0 || totalIncompleteSteps > 0 ? (
-          <div className="setup-summary">
-            {groups.map((group) => (
-              <button
-                key={group.category}
-                type="button"
-                className="setup-summary-chip"
-                onClick={() => jumpToCategory(group.category)}
-              >
-                <span>{group.category}</span>
-                <span className="setup-summary-num">{group.issues.length}</span>
-              </button>
-            ))}
+          <div className="setup-overview">
+            {groups.length > 0 ? (
+              <div className="setup-stat-strip" role="group" aria-label="Setup items by area">
+                {groups.map((group) => (
+                  <button
+                    key={group.category}
+                    type="button"
+                    className="setup-stat"
+                    onClick={() => jumpToCategory(group.category)}
+                  >
+                    <span className="setup-stat-num">{group.issues.length}</span>
+                    <span className="setup-stat-label">{group.category}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
             {totalIncompleteSteps > 0 ? (
               <button
                 type="button"
-                className="setup-summary-chip setup-summary-chip--checklist"
+                className="setup-checklist-callout"
                 onClick={jumpToChecklists}
               >
-                <span>Checklist items open</span>
-                <span className="setup-summary-num">{totalIncompleteSteps}</span>
+                <span className="setup-callout-icon">
+                  <ListChecks size={20} />
+                </span>
+                <span className="setup-callout-text">
+                  <span className="setup-callout-title">
+                    {totalIncompleteSteps} checklist item{totalIncompleteSteps === 1 ? '' : 's'}{' '}
+                    still open
+                  </span>
+                  <span className="setup-callout-sub">
+                    Across {incompleteChecklists.length} client
+                    {incompleteChecklists.length === 1 ? '' : 's'} — the actual checklist work,
+                    separate from setup
+                  </span>
+                </span>
+                <ChevronRight size={18} className="setup-callout-chev" />
               </button>
             ) : null}
           </div>
