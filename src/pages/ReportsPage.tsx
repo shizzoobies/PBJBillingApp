@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, Download, Printer } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
@@ -180,6 +180,8 @@ export function ReportsPage() {
         </button>
       </div>
       <PayrollHoursReport
+        checklists={data.checklists}
+        clients={data.clients}
         employees={employeesForReport}
         timeEntries={data.timeEntries}
       />
@@ -212,45 +214,80 @@ export function ReportsPage() {
  * their pay period's first week; Prev/Next then steps by a full period, keeping
  * the cadence.
  */
+/** One (day × member × job × task) bucket of the payroll detail. */
+type PayrollDetailRow = {
+  key: string
+  date: string
+  member: string
+  /** The client the time is billed to; '(Admin)' for non-client time. */
+  job: string
+  task: string
+  minutes: number
+  billableMinutes: number
+}
+
+/** All the work logged on a single day, plus that day's total. */
+type PayrollDayGroup = { date: string; minutes: number; rows: PayrollDetailRow[] }
+
 function PayrollHoursReport({
+  checklists,
+  clients,
   employees,
   timeEntries,
 }: {
+  checklists: Checklist[]
+  clients: Client[]
   employees: Employee[]
   timeEntries: TimeEntry[]
 }) {
   const [periodType, setPeriodType] = useState<'weekly' | 'biweekly'>('biweekly')
   // Reference date for the period; the window snaps to its Sun–Sat week.
   const [anchorDate, setAnchorDate] = useState<string>(() => localDateOnly())
+  // Detail scope: 'all' or one team member (payroll is usually run per person).
+  const [memberFilter, setMemberFilter] = useState<string>('all')
 
   const spanDays = periodType === 'weekly' ? 7 : 14
   const start = weekStartOf(anchorDate)
   const end = addDays(start, spanDays - 1)
 
-  const rows = useMemo(() => {
-    const inRange = timeEntries.filter(
-      (entry) => typeof entry.date === 'string' && entry.date >= start && entry.date <= end,
-    )
-    return employees
-      .map((employee) => {
-        const entries = inRange.filter((entry) => entry.employeeId === employee.id)
-        const billable = entries
-          .filter((entry) => entry.billable)
-          .reduce((sum, entry) => sum + entry.minutes, 0)
-        const internal = entries
-          .filter((entry) => !entry.billable)
-          .reduce((sum, entry) => sum + entry.minutes, 0)
-        return {
-          id: employee.id,
-          name: employee.name,
-          minutes: billable + internal,
-          billable,
-          internal,
-          count: entries.length,
-        }
-      })
-      .sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name))
-  }, [employees, timeEntries, start, end])
+  // Scope to the report's roster so the summary and the day/job detail always
+  // add up to the same total (entries from off-roster members are excluded).
+  const rosterIds = useMemo(() => new Set(employees.map((employee) => employee.id)), [employees])
+  const inRange = useMemo(
+    () =>
+      timeEntries.filter(
+        (entry) =>
+          typeof entry.date === 'string' &&
+          entry.date >= start &&
+          entry.date <= end &&
+          rosterIds.has(entry.employeeId),
+      ),
+    [timeEntries, start, end, rosterIds],
+  )
+
+  const rows = useMemo(
+    () =>
+      employees
+        .map((employee) => {
+          const entries = inRange.filter((entry) => entry.employeeId === employee.id)
+          const billable = entries
+            .filter((entry) => entry.billable)
+            .reduce((sum, entry) => sum + entry.minutes, 0)
+          const internal = entries
+            .filter((entry) => !entry.billable)
+            .reduce((sum, entry) => sum + entry.minutes, 0)
+          return {
+            id: employee.id,
+            name: employee.name,
+            minutes: billable + internal,
+            billable,
+            internal,
+            count: entries.length,
+          }
+        })
+        .sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name)),
+    [employees, inRange],
+  )
 
   const totalMinutes = rows.reduce((sum, row) => sum + row.minutes, 0)
   const fmtDay = (iso: string) => shortDate.format(new Date(`${iso}T12:00:00`))
@@ -258,6 +295,73 @@ function PayrollHoursReport({
 
   const step = (direction: -1 | 1) => setAnchorDate(addDays(start, direction * spanDays))
   const goThisPeriod = () => setAnchorDate(localDateOnly())
+
+  // "Job" = the client the time is billed to; admin time has no client.
+  const checklistTitleById = useMemo(
+    () => new Map(checklists.map((checklist) => [checklist.id, checklist.title])),
+    [checklists],
+  )
+  const jobOf = (entry: TimeEntry) =>
+    entry.isAdministrative || !entry.clientId ? '(Admin)' : clientName(clients, entry.clientId)
+  const taskOf = (entry: TimeEntry) =>
+    (entry.taskId ? checklistTitleById.get(entry.taskId) : entry.taskLabel?.trim()) || 'Unassigned'
+
+  const detailEntries = useMemo(
+    () =>
+      memberFilter === 'all'
+        ? inRange
+        : inRange.filter((entry) => entry.employeeId === memberFilter),
+    [inRange, memberFilter],
+  )
+
+  // Total time by DAY by JOB: entries collapsed to one row per
+  // (day, member, job, task) so repeated sessions on the same work add up.
+  const dayGroups = useMemo(() => {
+    const byKey = new Map<string, PayrollDetailRow>()
+    for (const entry of detailEntries) {
+      const job = jobOf(entry)
+      const task = taskOf(entry)
+      const key = `${entry.date}|${entry.employeeId}|${job}|${task}`
+      const existing = byKey.get(key)
+      if (existing) {
+        existing.minutes += entry.minutes
+        if (entry.billable) existing.billableMinutes += entry.minutes
+      } else {
+        byKey.set(key, {
+          key,
+          date: entry.date,
+          member: employeeName(employees, entry.employeeId),
+          job,
+          task,
+          minutes: entry.minutes,
+          billableMinutes: entry.billable ? entry.minutes : 0,
+        })
+      }
+    }
+    const byDate = new Map<string, PayrollDayGroup>()
+    for (const row of byKey.values()) {
+      const group = byDate.get(row.date) ?? { date: row.date, minutes: 0, rows: [] }
+      group.rows.push(row)
+      group.minutes += row.minutes
+      byDate.set(row.date, group)
+    }
+    return [...byDate.values()]
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((group) => ({
+        ...group,
+        rows: group.rows.sort(
+          (a, b) =>
+            a.member.localeCompare(b.member) ||
+            a.job.localeCompare(b.job) ||
+            a.task.localeCompare(b.task),
+        ),
+      }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailEntries, employees, clients, checklistTitleById])
+
+  const detailMinutes = dayGroups.reduce((sum, group) => sum + group.minutes, 0)
+  const showMemberColumn = memberFilter === 'all'
+  const labelSpan = showMemberColumn ? 3 : 2
 
   const exportCsv = () =>
     downloadCsv(
@@ -275,6 +379,41 @@ function PayrollHoursReport({
       ],
     )
 
+  // Total time by day by job — the aggregated breakdown, ready to pivot.
+  const exportByDayJob = () =>
+    downloadCsv(
+      `payroll-hours-by-day-job-${periodType}-${start}.csv`,
+      ['Date', 'Team member', 'Job', 'Task', 'Hours', 'Billable hours'],
+      dayGroups.flatMap((group) =>
+        group.rows.map((row) => [
+          row.date,
+          row.member,
+          row.job,
+          row.task,
+          (row.minutes / 60).toFixed(2),
+          (row.billableMinutes / 60).toFixed(2),
+        ]),
+      ),
+    )
+
+  // Raw hours: one row per time entry, same columns as the monthly raw export.
+  const exportRawHours = () =>
+    downloadCsv(
+      `payroll-raw-hours-${periodType}-${start}.csv`,
+      ['Date', 'Team member', 'Client', 'Task', 'Hours', 'Billable', 'Description'],
+      [...detailEntries]
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .map((entry) => [
+          entry.date,
+          employeeName(employees, entry.employeeId),
+          jobOf(entry),
+          taskOf(entry),
+          (entry.minutes / 60).toFixed(2),
+          entry.billable ? 'Yes' : 'No',
+          entry.description ?? '',
+        ]),
+    )
+
   return (
     <section className="panel report-section" id="payroll-hours">
       <div className="section-heading">
@@ -282,9 +421,17 @@ function PayrollHoursReport({
           <p className="section-kicker">Payroll</p>
           <h2>Hours report</h2>
         </div>
-        <button type="button" className="ghost-action no-print" onClick={exportCsv}>
-          <Download size={14} /> Export CSV
-        </button>
+        <div className="payroll-exports no-print">
+          <button type="button" className="ghost-action" onClick={exportCsv}>
+            <Download size={14} /> Summary CSV
+          </button>
+          <button type="button" className="ghost-action" onClick={exportByDayJob}>
+            <Download size={14} /> By day &amp; job
+          </button>
+          <button type="button" className="ghost-action" onClick={exportRawHours}>
+            <Download size={14} /> Raw hours
+          </button>
+        </div>
       </div>
 
       <div className="payroll-controls no-print">
@@ -375,6 +522,84 @@ function PayrollHoursReport({
               </td>
               <td className="no-print" />
               <td className="no-print" />
+              <td className="no-print" />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <div className="section-heading payroll-detail-heading">
+        <div>
+          <p className="section-kicker">Detail</p>
+          <h3>Time by day and job</h3>
+        </div>
+        <label className="payroll-member-filter no-print">
+          <span>Team member</span>
+          <select
+            value={memberFilter}
+            onChange={(event) => setMemberFilter(event.target.value)}
+          >
+            <option value="all">All team members</option>
+            {employees.map((employee) => (
+              <option key={employee.id} value={employee.id}>
+                {employee.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Day / job</th>
+              {showMemberColumn ? <th>Team member</th> : null}
+              <th>Task</th>
+              <th>Hours</th>
+              <th className="no-print">Billable</th>
+            </tr>
+          </thead>
+          <tbody>
+            {dayGroups.length === 0 ? (
+              <tr>
+                <td colSpan={labelSpan + 2} className="muted-text">
+                  No time logged in this period.
+                </td>
+              </tr>
+            ) : (
+              dayGroups.map((group) => (
+                <Fragment key={group.date}>
+                  <tr className="payroll-day-row">
+                    <td colSpan={labelSpan}>
+                      <strong>{fmtDay(group.date)}</strong>
+                    </td>
+                    <td>
+                      <strong>{formatHours(group.minutes)}</strong>
+                    </td>
+                    <td className="no-print" />
+                  </tr>
+                  {group.rows.map((row) => (
+                    <tr key={row.key}>
+                      <td className="payroll-job-cell">{row.job}</td>
+                      {showMemberColumn ? <td>{row.member}</td> : null}
+                      <td>{row.task}</td>
+                      <td>{formatHours(row.minutes)}</td>
+                      <td className="no-print">{formatHours(row.billableMinutes)}</td>
+                    </tr>
+                  ))}
+                </Fragment>
+              ))
+            )}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={labelSpan}>
+                <strong>Total</strong>
+              </td>
+              <td>
+                <strong>{formatHours(detailMinutes)}</strong>
+              </td>
               <td className="no-print" />
             </tr>
           </tfoot>

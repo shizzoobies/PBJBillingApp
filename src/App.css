@@ -2547,6 +2547,40 @@ td strong {
   padding: 5px 8px;
   font: inherit;
 }
+/* The three payroll exports (summary / by day & job / raw hours). */
+.payroll-exports {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* "Time by day and job" detail block. */
+.payroll-detail-heading {
+  margin-top: 22px;
+}
+.payroll-member-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--muted-ink, #8a8494);
+}
+.payroll-member-filter select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font: inherit;
+  color: var(--ink, #2c2735);
+}
+/* Day sub-header inside the detail table — carries that day's total. */
+.payroll-day-row td {
+  background: var(--surface-2, #f7f4fb);
+  border-top: 1px solid var(--line);
+}
+/* Job name sits under its day header. */
+.payroll-job-cell {
+  padding-left: 22px;
+}
 
 .report-metric-grid {
   display: grid;

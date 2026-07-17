@@ -331,7 +331,19 @@ picker, notification bell, and account menu sit in the top bar on every page.
   now. To line the bi-weekly window up with the firm's payroll cycle, set the
   start to a day in the pay period's first week — the cadence is then preserved.
   Table of each member's hours (billable/internal split + entry count) with a
-  grand total, and a Download CSV.
+  grand total.
+- Payroll report detail — "Time by day and job": below the per-member summary,
+  the same period broken down to TOTAL TIME BY DAY BY JOB (the granularity of
+  the monthly report). Rows are grouped under each day with that day's total,
+  and within a day list the job (the client the time is billed to; '(Admin)'
+  for non-client time), the task, hours, and billable hours. Repeat sessions on
+  the same day/job/task are summed into one row. A "Team member" filter scopes
+  the detail to one person (payroll is usually run per person) or all.
+- Payroll exports (three): "Summary CSV" (per-member totals), "By day & job"
+  (Date, Team member, Job, Task, Hours, Billable hours — the aggregated
+  breakdown, ready to pivot), and "Raw hours" (one row per time entry: Date,
+  Team member, Client, Task, Hours, Billable, Description — same columns as the
+  monthly raw export, scoped to the pay period and the member filter).
 - Month summary: tracked hours, internal hours, billable mix, projected
   billing, employee coverage.
 - Employee report (hours by person, including billable $ = each person's
