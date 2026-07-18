@@ -1021,6 +1021,7 @@ export function ActiveChecklistsBody({ client, data }: { client: Client; data: A
           employees={data.employees}
           focused={false}
           focusRef={null}
+          hideClientName
           onAddSubItem={addSubItem}
           onAddSubSubItem={addSubSubItem}
           onBulkAddItems={bulkAddChecklistItems}

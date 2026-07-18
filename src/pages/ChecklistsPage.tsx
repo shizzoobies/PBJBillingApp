@@ -1323,6 +1323,7 @@ export function ChecklistCard({
   employees,
   focused,
   focusRef,
+  hideClientName = false,
   onAddSubItem,
   onAddSubSubItem,
   onBulkAddItems,
@@ -1349,6 +1350,9 @@ export function ChecklistCard({
   employees: Employee[]
   focused: boolean
   focusRef: React.MutableRefObject<HTMLElement | null> | null
+  /** On the client's own page the client is already obvious — hide the big
+   *  client-name heading and lead with the checklist title instead. */
+  hideClientName?: boolean
   onAddSubItem: (checklistId: string, itemId: string, title: string) => void
   onAddSubSubItem: (
     checklistId: string,
@@ -1438,8 +1442,13 @@ export function ChecklistCard({
     rejectChecklistDeletion,
     pendingTaskEditChecklistIds,
     serviceCategories,
+    addSeriesChecklistItem,
   } = useAppContext()
   const [editingMeta, setEditingMeta] = useState(false)
+  // When the owner adds a task to a live RECURRING instance, ask whether it's
+  // for this checklist only or the whole series. Holds the pending label(s)
+  // until they pick; null = no prompt open.
+  const [seriesPromptLabels, setSeriesPromptLabels] = useState<string[] | null>(null)
   const [metaTitle, setMetaTitle] = useState(checklist.title)
   const [metaDue, setMetaDue] = useState(checklist.dueDate)
   const [metaAssignee, setMetaAssignee] = useState(checklist.assigneeId)
@@ -1577,7 +1586,18 @@ export function ChecklistCard({
             </div>
           ) : (
             <>
-              <strong>{checklist.title}</strong>
+              {hideClientName ? (
+                <strong className="checklist-card-title">{checklist.title}</strong>
+              ) : (
+                <>
+                  {/* Client name leads (bold + larger) so a long list is easy to
+                      scan by client; the checklist name sits just below it. */}
+                  <strong className="checklist-card-client">
+                    {clientName(clients, checklist.clientId)}
+                  </strong>
+                  <span className="checklist-card-title-sub">{checklist.title}</span>
+                </>
+              )}
               {showStageBadge ? (
                 <span className="stage-badge">
                   Step {stageNumber} of {stageCount}
@@ -1598,9 +1618,8 @@ export function ChecklistCard({
                 </span>
               ) : null}
               <span className="checklist-meta-line">
-                {clientName(clients, checklist.clientId)} ·{' '}
                 {employeeName(employees, checklist.assigneeId)} · Due{' '}
-                {shortDate.format(new Date(`${checklist.dueDate}T12:00:00`))}
+                <strong>{shortDate.format(new Date(`${checklist.dueDate}T12:00:00`))}</strong>
                 {checklist.frequency
                   ? ` · ${getChecklistFrequencyLabel(checklist.frequency)}`
                   : ''}
@@ -1746,18 +1765,69 @@ export function ChecklistCard({
         onUpdateItem={(itemId, patch) => onUpdateItem(checklist.id, itemId, patch)}
         todayDateOnly={todayDateOnly}
       />
-      {canEditStructure ? (
-        <>
-          <InlineAddItemRow
-            onAdd={(label) => onBulkAddItems(checklist.id, [label])}
-            placeholder="Add an item..."
-          />
-          <ChecklistBulkAdd
-            label="Paste a list"
-            onAdd={(labels) => onBulkAddItems(checklist.id, labels)}
-          />
-        </>
-      ) : null}
+      {canEditStructure
+        ? (() => {
+            // On a live recurring instance the owner can add to just this
+            // checklist or to the whole series (the template → future instances);
+            // everyone/everything else adds to this checklist directly.
+            const canSeries = ownerMode && Boolean(checklist.templateId)
+            const handleAdd = (labels: string[]) => {
+              const clean = labels.map((label) => label.trim()).filter(Boolean)
+              if (clean.length === 0) return
+              if (canSeries) setSeriesPromptLabels(clean)
+              else onBulkAddItems(checklist.id, clean)
+            }
+            return (
+              <>
+                <InlineAddItemRow onAdd={(label) => handleAdd([label])} placeholder="Add an item..." />
+                <ChecklistBulkAdd label="Paste a list" onAdd={(labels) => handleAdd(labels)} />
+                {seriesPromptLabels ? (
+                  <div className="series-scope-prompt" role="group" aria-label="Where to add this task">
+                    <span className="series-scope-text">
+                      Add{' '}
+                      {seriesPromptLabels.length === 1
+                        ? `“${seriesPromptLabels[0]}”`
+                        : `${seriesPromptLabels.length} items`}{' '}
+                      to…
+                    </span>
+                    <div className="series-scope-actions">
+                      <button
+                        type="button"
+                        className="secondary-action"
+                        onClick={() => {
+                          onBulkAddItems(checklist.id, seriesPromptLabels)
+                          setSeriesPromptLabels(null)
+                        }}
+                      >
+                        This checklist only
+                      </button>
+                      <button
+                        type="button"
+                        className="primary-action"
+                        onClick={() => {
+                          onBulkAddItems(checklist.id, seriesPromptLabels)
+                          seriesPromptLabels.forEach((label) =>
+                            addSeriesChecklistItem(checklist, label),
+                          )
+                          setSeriesPromptLabels(null)
+                        }}
+                      >
+                        This + all future
+                      </button>
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => setSeriesPromptLabels(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )
+          })()
+        : null}
       {ownerMode ? (
         <SharingControl
           assigneeId={checklist.assigneeId}

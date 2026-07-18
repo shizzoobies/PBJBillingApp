@@ -2226,6 +2226,32 @@ function App() {
     }))
   }
 
+  // Add an item to a recurring checklist's TEMPLATE (the "series") so every
+  // future instance includes it — targeting the stage this instance belongs to
+  // for a multi-stage case, else the single stage. Used when the owner adds a
+  // task to a live recurring instance and chooses "this + future". Adding to the
+  // current instance is separate (onBulkAddItems); this only affects the series.
+  const addSeriesChecklistItem = (checklist: Checklist, label: string) => {
+    const trimmed = label.trim()
+    if (!trimmed || !checklist.templateId) return
+    updateChecklistTemplate(checklist.templateId, (template) => {
+      const stages = template.stages ?? []
+      if (stages.length === 0) return template
+      const targetId =
+        checklist.stageId && stages.some((stage) => stage.id === checklist.stageId)
+          ? checklist.stageId
+          : stages[0].id
+      return {
+        ...template,
+        stages: stages.map((stage) =>
+          stage.id === targetId
+            ? { ...stage, items: [...stage.items, { id: makeId('template-item'), label: trimmed }] }
+            : stage,
+        ),
+      }
+    })
+  }
+
   const updateChecklistTemplateItem = (
     templateId: string,
     stageId: string,
@@ -3542,6 +3568,7 @@ function App() {
     removeFeatureRequest,
     refineFeatureRequest,
     addChecklistTemplateItem,
+    addSeriesChecklistItem,
     updateChecklistTemplateItem,
     setChecklistTemplateItemDueDate,
     setChecklistTemplateItemAssignee,

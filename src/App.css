@@ -3540,6 +3540,47 @@ td strong {
   color: var(--muted);
   font-size: 12px;
 }
+/* Client name leads the card (bold + larger) for fast by-client scanning; the
+   checklist title sits just beneath it. */
+.checklist-card-client {
+  display: block;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--ink, #2c2735);
+}
+.checklist-card-title-sub {
+  display: block;
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin-top: 1px;
+}
+.checklist-card-title {
+  display: block;
+}
+/* Scope prompt shown when the owner adds a task to a recurring instance. */
+.series-scope-prompt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2, #f7f4fb);
+}
+.series-scope-text {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ink, #2c2735);
+}
+.series-scope-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
 
 /* --- Quick template form --------------------------------------------- */
 

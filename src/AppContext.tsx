@@ -245,6 +245,8 @@ export type AppContextValue = {
    */
   refineFeatureRequest: (id: string) => Promise<{ title: string; description: string }>
   addChecklistTemplateItem: (templateId: string, stageId: string) => void
+  /** Add an item to a recurring checklist's template (all future instances). */
+  addSeriesChecklistItem: (checklist: Checklist, label: string) => void
   updateChecklistTemplateItem: (
     templateId: string,
     stageId: string,

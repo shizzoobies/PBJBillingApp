@@ -119,6 +119,15 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Steps support sub-steps and sub-sub-steps, drag-to-reorder, per-step due
   date and per-step assignee ("Same as checklist" by default), and checkboxes.
 - "Paste a list" turns pasted lines into steps in one go.
+- Each checklist card leads with the CLIENT NAME (bold + larger) and shows the
+  checklist name just beneath it, so a long list is easy to scan by client; the
+  due date is bold. (On a client's own detail page the client name is already
+  obvious, so the card leads with the checklist title there instead.)
+- Adding a task to a live RECURRING instance asks the owner where it should go:
+  "This checklist only" (just this instance) or "This + all future" (also added
+  to the template's matching stage, so every future instance includes it). Both
+  "Add an item" and "Paste a list" use this prompt. Non-owners, and non-recurring
+  (one-off) checklists, add to the current checklist directly with no prompt.
 - Group the page by due date or by client; filter by assignee, client, status.
 - Waiting on (the hourglass ⏳): flag a step as waiting, write who/what it's
   waiting on (free text), optionally pick the SPECIFIC other task it's waiting
