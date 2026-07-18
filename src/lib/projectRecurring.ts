@@ -35,7 +35,7 @@ import {
   advanceChecklistFrequency,
   ensureTemplateStages,
   resolveNodeDueDate,
-  resolveSpecificMonthsDueDate,
+  resolveSpecificMonthsStageDueDate,
   resolveStageDueDate,
 } from './utils'
 
@@ -184,7 +184,7 @@ export function projectUpcomingChecklists(data: AppData, opts: ProjectOptions): 
       for (const month of months) {
         if (emitted >= maxPerTemplate) break
         if (!Number.isInteger(month) || month < 1 || month > 12) continue
-        const dueDate = resolveSpecificMonthsDueDate(template, currentYear, month)
+        const dueDate = resolveSpecificMonthsStageDueDate(template, stageOne, currentYear, month)
         if (dueDate <= fromDateOnly || dueDate > horizonEndDateOnly) continue
         if (existingKeys.has(`${template.id}:${dueDate}:0`)) continue
         ghosts.push(buildProjectedChecklist(template, stageOne, stages.length, dueDate))

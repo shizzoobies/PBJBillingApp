@@ -812,6 +812,32 @@ export function resolveSpecificMonthsDueDate(
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
+/**
+ * Due date for the FIRST stage of a specific-months case instance. Honors that
+ * stage's own `dueDayOfMonth` (resolved inside the designated `month`, so it
+ * stays in-month) — matching how every LATER stage honors its own day via
+ * {@link resolveStageDueDate} — and falls back to the template's per-month /
+ * shared due day when stage 1 has none. A fixed stage `dueDate` and the legacy
+ * `offsetDays` are intentionally NOT applied here: either could push the
+ * instance out of its designated month and break the materializer's per-month
+ * idempotency key. Without this, stage 1 alone was pinned to the template's
+ * month-level day (e.g. the 20th) while stages 2+ used their own (the 5th, the
+ * 10th…), so step 1 showed the wrong due date.
+ */
+export function resolveSpecificMonthsStageDueDate(
+  template: Pick<ChecklistTemplate, 'dueDayOfMonth' | 'monthlyDueDays'>,
+  stage: Pick<TemplateStage, 'dueDayOfMonth'>,
+  year: number,
+  month: number,
+): string {
+  if (typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1) {
+    const lastDay = new Date(year, month, 0).getDate()
+    const day = Math.min(Math.trunc(stage.dueDayOfMonth), lastDay)
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  }
+  return resolveSpecificMonthsDueDate(template, year, month)
+}
+
 export function ensureRecurringChecklists(data: AppData) {
   const templates = (data.checklistTemplates ?? []).map((template) => ensureTemplateStages(template))
   const existingChecklists = (data.checklists ?? []).map((checklist) => ({
@@ -897,7 +923,7 @@ export function ensureRecurringChecklists(data: AppData) {
         const monthKey = `${template.id}:${currentYear}-${String(month).padStart(2, '0')}`
         if (existingMonthKeys.has(monthKey)) continue
         const stageOne = stages[0]
-        const stageOneDue = resolveSpecificMonthsDueDate(template, currentYear, month)
+        const stageOneDue = resolveSpecificMonthsStageDueDate(template, stageOne, currentYear, month)
         // A designated month whose due date already passed is born completed
         // so the historical occurrence shows as finished; the current/future
         // month generates open exactly as before.

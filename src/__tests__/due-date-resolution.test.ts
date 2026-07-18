@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { resolveStageDueDate, resolveNodeDueDate, ensureTemplateStages } from '../lib/utils'
+import {
+  resolveStageDueDate,
+  resolveNodeDueDate,
+  resolveSpecificMonthsStageDueDate,
+  ensureTemplateStages,
+} from '../lib/utils'
 import type { ChecklistTemplate, TemplateStage } from '../lib/types'
 
 function makeStage(overrides: Partial<TemplateStage>): TemplateStage {
@@ -82,6 +87,37 @@ describe('resolveStageDueDate', () => {
   it('returns the baseDate when there is no due spec and no offset', () => {
     const stage = makeStage({})
     expect(resolveStageDueDate(stage, '2026-06-30')).toBe('2026-06-30')
+  })
+})
+
+describe('resolveSpecificMonthsStageDueDate — stage 1 honors its own day (regression)', () => {
+  // The FHS bug: template-level due day is the 20th, but stage 1 ("Clear Bank
+  // Feed") is configured for the 5th. Stage 1 must land on the 5th, not the 20th.
+  const template = { dueDayOfMonth: 20, monthlyDueDays: null } as unknown as Pick<
+    ChecklistTemplate,
+    'dueDayOfMonth' | 'monthlyDueDays'
+  >
+
+  it("uses the stage's own dueDayOfMonth within the designated month", () => {
+    const stage = makeStage({ dueDayOfMonth: 5, offsetDays: 25 })
+    expect(resolveSpecificMonthsStageDueDate(template, stage, 2026, 7)).toBe('2026-07-05')
+  })
+
+  it("falls back to the template's month-level day when the stage has none", () => {
+    const stage = makeStage({ dueDayOfMonth: undefined, offsetDays: 0 })
+    expect(resolveSpecificMonthsStageDueDate(template, stage, 2026, 7)).toBe('2026-07-20')
+  })
+
+  it('clamps the stage day to the length of a short month', () => {
+    const stage = makeStage({ dueDayOfMonth: 31 })
+    expect(resolveSpecificMonthsStageDueDate(template, stage, 2026, 2)).toBe('2026-02-28')
+  })
+
+  it('ignores the legacy offsetDays (never pushes stage 1 out of its month)', () => {
+    // dueDayOfMonth is unset, so only offsetDays could apply — but it must not:
+    // the result stays in-month via the template fallback.
+    const stage = makeStage({ dueDayOfMonth: undefined, offsetDays: 25 })
+    expect(resolveSpecificMonthsStageDueDate(template, stage, 2026, 7)).toBe('2026-07-20')
   })
 })
 
