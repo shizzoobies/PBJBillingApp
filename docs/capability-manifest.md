@@ -500,6 +500,11 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - In-app bell with unread count + email (when email service is configured):
   task assigned, workflow stage advanced, case completed, manual time entry
   needs approval, "waiting cleared" (the task a step was waiting on is done).
+- Every notification email names the CLIENT it's about — a labeled "Client:
+  <name>" line at the top of the email and appended to the subject, so the
+  recipient can tell which client the notice refers to straight from their
+  inbox. The client is resolved from the notification's task/client automatically
+  (client-less notifications simply omit the line).
 - Emails include a one-click sign-in link.
 
 ## Billing month concept

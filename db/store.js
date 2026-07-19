@@ -7425,6 +7425,42 @@ export class AppDataStore {
   }
 
   /**
+   * A client's display name by id, or null. Small targeted lookup used by the
+   * notification layer to label emails with the client they're about — cheap in
+   * Postgres (single row), a file read otherwise.
+   */
+  async getClientNameById(clientId) {
+    if (!clientId) return null
+    if (this.pool) {
+      const result = await this.pool.query('select name from clients where id = $1', [clientId])
+      return result.rows[0]?.name ?? null
+    }
+    const data = await this.read()
+    return (data.clients ?? []).find((client) => client.id === clientId)?.name ?? null
+  }
+
+  /**
+   * The client name for the client a checklist belongs to, or null. Lets a
+   * notification that only knows its `checklistId` still name the client.
+   */
+  async getClientNameForChecklist(checklistId) {
+    if (!checklistId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select c.name from clients c
+           join checklists k on k.client_id = c.id
+          where k.id = $1`,
+        [checklistId],
+      )
+      return result.rows[0]?.name ?? null
+    }
+    const data = await this.read()
+    const checklist = (data.checklists ?? []).find((item) => item.id === checklistId)
+    if (!checklist) return null
+    return (data.clients ?? []).find((client) => client.id === checklist.clientId)?.name ?? null
+  }
+
+  /**
    * Persist a new top-to-bottom order for the team roster. `orderedIds` is the
    * full list of member ids in the desired order; each gets sort_order 0..n-1.
    * Returns the freshly-ordered team list, or null if nothing matched.
