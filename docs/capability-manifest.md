@@ -187,14 +187,18 @@ picker, notification bell, and account menu sit in the top bar on every page.
   approval, per above). Staff can also CREATE a one-time task for any client
   they're assigned to (the "New task" button on the Checklists page). Owners can
   create/edit everything.
-- Recurring checklists (the repeating "recipes") — team members can now VIEW the
-  recurring checklists for the clients they're assigned to, on that client's
-  detail page ("Recurring checklists" section), plus an "Upcoming (next 60 days)"
-  list of the instances those recipes will generate — so they know what exists
-  and what's coming and don't create duplicates. It's read-only for staff: they
-  can't add, edit, or turn recurring recipes on/off (that stays owner-only), but
-  they CAN add items to the already-generated checklists (which routes to the
-  owner for approval, like any staff structural edit).
+- Recurring checklists (the repeating "recipes") — team members can VIEW the
+  recurring checklists for the clients they're assigned to in TWO places:
+  (1) the main Checklists page has a read-only "Recurring checklists" section
+  (under "Your clients") grouped by client, collapsible, searchable, each recipe
+  showing its cadence + next due date and its steps — so staff see what's coming
+  up on their clients right where they work, without drilling into each client;
+  and (2) each client's detail page has its own "Recurring checklists" section
+  plus an "Upcoming (next 60 days)" list. Both exist so staff know what exists
+  and don't create duplicates. It's read-only for staff: they can't add, edit, or
+  turn recurring recipes on/off (that stays owner-only), but they CAN add items
+  to the already-generated checklist instances (which routes to the owner for
+  approval, like any staff structural edit).
 - Standard templates (the firm's client-agnostic blueprints) are visible READ-ONLY
   to every team member on the Checklists page ("Standard templates" section) — they
   can browse the standard steps but only an owner can edit a blueprint or apply one

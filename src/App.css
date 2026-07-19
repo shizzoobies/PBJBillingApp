@@ -4945,6 +4945,24 @@ td strong {
   flex-direction: column;
   gap: 6px;
 }
+/* Staff "Recurring checklists" — collapsible per-client groups. */
+.staff-recurring-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.staff-recurring-client {
+  border-top: 1px solid var(--hairline, #ece8f0);
+  padding-top: 10px;
+}
+.staff-recurring-client:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.staff-recurring-client .staff-template-list {
+  margin-top: 8px;
+}
 .staff-template-row {
   border: 1px solid var(--line);
   border-radius: 8px;

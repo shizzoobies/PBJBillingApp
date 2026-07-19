@@ -21,6 +21,7 @@ import { SaveBadge } from '../components/SectionKit'
 import { SharingControl } from '../components/SharingControl'
 import { useSaveFlash } from '../lib/useSaveFlash'
 import type {
+  AppData,
   Checklist,
   ChecklistFrequency,
   ChecklistItem,
@@ -36,7 +37,9 @@ import type {
   WaitingOn,
 } from '../lib/types'
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
+import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import {
+  addDays,
   checklistFrequencies,
   checklistHasPendingDeletionRequest,
   clientName,
@@ -481,11 +484,163 @@ export function ChecklistsPage() {
           keeps the full editor above). Lets them know what standard work exists
           so they don't re-create it; an owner applies one to a client. */}
       {!ownerMode ? (
-        <StaffStandardTemplatesView
-          templates={data.checklistTemplates}
-          employees={data.employees}
-        />
+        <>
+          <StaffRecurringTemplatesView data={data} />
+          <StaffStandardTemplatesView
+            templates={data.checklistTemplates}
+            employees={data.employees}
+          />
+        </>
       ) : null}
+    </section>
+  )
+}
+
+/**
+ * Read-only view of the RECURRING checklists the owner set up for the clients
+ * this team member is assigned to (the server already scopes `checklistTemplates`
+ * to those clients). Grouped by client, collapsible, searchable, each template
+ * showing its cadence + next due date and its steps — so staff can see what's
+ * coming up on their clients and don't re-create a recurring checklist that
+ * already exists. Writes stay with the owner; adding items happens on the live
+ * (generated) checklist instance. Renders nothing when there are none.
+ */
+function StaffRecurringTemplatesView({ data }: { data: AppData }) {
+  const { clients, employees, checklistTemplates } = data
+  const [query, setQuery] = useState('')
+  const [openClients, setOpenClients] = useState<Set<string>>(new Set())
+
+  // Soonest upcoming occurrence per template, so each row can show "next: <date>".
+  const nextDueByTemplate = useMemo(() => {
+    const today = localDateOnly()
+    const ghosts = projectUpcomingChecklists(data, {
+      fromDateOnly: today,
+      horizonEndDateOnly: addDays(today, 120),
+    })
+    const map = new Map<string, string>()
+    for (const ghost of ghosts) {
+      if (!ghost.templateId) continue
+      const current = map.get(ghost.templateId)
+      if (!current || ghost.dueDate < current) map.set(ghost.templateId, ghost.dueDate)
+    }
+    return map
+  }, [data])
+
+  const groups = useMemo(() => {
+    const byClient = new Map<
+      string,
+      { clientId: string; clientName: string; templates: ChecklistTemplate[] }
+    >()
+    for (const template of checklistTemplates) {
+      if (template.isStandard) continue
+      const group = byClient.get(template.clientId) ?? {
+        clientId: template.clientId,
+        clientName: clientName(clients, template.clientId),
+        templates: [],
+      }
+      group.templates.push(template)
+      byClient.set(template.clientId, group)
+    }
+    const list = [...byClient.values()]
+    list.forEach((group) => group.templates.sort((a, b) => a.title.localeCompare(b.title)))
+    return list.sort((a, b) => a.clientName.localeCompare(b.clientName))
+  }, [checklistTemplates, clients])
+
+  const q = query.trim().toLowerCase()
+  const filtered = useMemo(() => {
+    if (!q) return groups
+    return groups
+      .map((group) => {
+        if (group.clientName.toLowerCase().includes(q)) return group
+        return {
+          ...group,
+          templates: group.templates.filter((template) =>
+            template.title.toLowerCase().includes(q),
+          ),
+        }
+      })
+      .filter((group) => group.templates.length > 0)
+  }, [groups, q])
+
+  if (groups.length === 0) return null
+  const totalTemplates = groups.reduce((sum, group) => sum + group.templates.length, 0)
+  const searching = q.length > 0
+
+  const toggleClient = (clientId: string) =>
+    setOpenClients((prev) => {
+      const next = new Set(prev)
+      if (next.has(clientId)) next.delete(clientId)
+      else next.add(clientId)
+      return next
+    })
+
+  return (
+    <section className="panel">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Your clients</p>
+          <h2>Recurring checklists</h2>
+          <p className="section-subtitle">
+            The repeating checklists set up for your clients, grouped by client and shown
+            read-only. Check here before starting one so you don&apos;t duplicate it — add your
+            work on the active checklist once it&apos;s generated.
+          </p>
+        </div>
+      </div>
+      <ListSearch
+        value={query}
+        onChange={setQuery}
+        placeholder={`Search ${totalTemplates} recurring checklist${totalTemplates === 1 ? '' : 's'} or client…`}
+      />
+      {filtered.length === 0 ? (
+        <p className="muted-text">No recurring checklists match &ldquo;{query.trim()}&rdquo;.</p>
+      ) : (
+        <div className="staff-recurring-groups">
+          {filtered.map((group) => {
+            const open = searching || openClients.has(group.clientId)
+            return (
+              <div className="staff-recurring-client" key={group.clientId}>
+                <button
+                  type="button"
+                  className="setup-cat-header"
+                  aria-expanded={open}
+                  onClick={() => toggleClient(group.clientId)}
+                >
+                  {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  <span className="section-kicker">{group.clientName}</span>
+                  <span className="setup-cat-count">
+                    {group.templates.length} recurring
+                  </span>
+                </button>
+                {open ? (
+                  <ul className="staff-template-list">
+                    {group.templates.map((template) => {
+                      const nextDue = nextDueByTemplate.get(template.id)
+                      return (
+                        <StaffStandardTemplateRow
+                          key={template.id}
+                          template={template}
+                          employees={employees}
+                          extraMeta={
+                            <>
+                              {template.frequency
+                                ? getChecklistFrequencyLabel(template.frequency)
+                                : 'recurring'}
+                              {nextDue
+                                ? ` · next ${shortDate.format(new Date(`${nextDue}T12:00:00`))}`
+                                : ''}
+                            </>
+                          }
+                        />
+                      )
+                    })}
+                  </ul>
+                ) : null}
+              </div>
+            )
+          })}
+        </div>
+      )}
     </section>
   )
 }
@@ -537,13 +692,16 @@ function StaffStandardTemplatesView({
   )
 }
 
-/** One collapsible, read-only standard-template row (title → its steps). */
+/** One collapsible, read-only template row (title → its steps). `extraMeta`
+ *  appends context (e.g. a recurring template's cadence + next due date). */
 function StaffStandardTemplateRow({
   template,
   employees,
+  extraMeta,
 }: {
   template: ChecklistTemplate
   employees: Employee[]
+  extraMeta?: React.ReactNode
 }) {
   const [open, setOpen] = useState(false)
   const stages = ensureTemplateStages(template).stages
@@ -562,6 +720,7 @@ function StaffStandardTemplateRow({
         <span className="staff-template-meta">
           {totalSteps} step{totalSteps === 1 ? '' : 's'}
           {multiStage ? ` · ${stages.length} hand-off steps` : ''}
+          {extraMeta ? <> · {extraMeta}</> : null}
         </span>
       </button>
       {open ? (
