@@ -1031,6 +1031,24 @@ export function formatAuditStamp(iso?: string) {
   }).format(date)
 }
 
+/**
+ * The clock-in/clock-out spans for an entry. Prefers the `sessions` array;
+ * falls back to the single `startAt`/`endAt` envelope so TIMER and legacy
+ * entries (logged before the sessions model) still report their in/out times.
+ * Returns [] only when an entry genuinely has no timestamps (minutes-only).
+ * Used by the time list, both approval surfaces, and the raw-hours export so
+ * they can't drift apart.
+ */
+export function effectiveSessions(entry: {
+  sessions?: WorkSession[]
+  startAt?: string
+  endAt?: string
+}): WorkSession[] {
+  if (entry.sessions && entry.sessions.length > 0) return entry.sessions
+  if (entry.startAt && entry.endAt) return [{ startAt: entry.startAt, endAt: entry.endAt }]
+  return []
+}
+
 /** Whole minutes in a single session (rounded, never negative). */
 export function sessionMinutes(session: WorkSession): number {
   const startMs = new Date(session.startAt).getTime()

@@ -30,6 +30,7 @@ import {
   clientName,
   currentBillingPeriod,
   currentWeekStart,
+  effectiveSessions,
   eligibleChecklistsFor,
   employeeName,
   formatAuditStamp,
@@ -85,12 +86,6 @@ function makeSessionRowId() {
 }
 
 /** The sessions an entry effectively has (synthesizing one from the envelope). */
-function effectiveSessions(entry: TimeEntry): WorkSession[] {
-  if (entry.sessions && entry.sessions.length > 0) return entry.sessions
-  if (entry.startAt && entry.endAt) return [{ startAt: entry.startAt, endAt: entry.endAt }]
-  return []
-}
-
 /** Build editor rows (datetime-local values) from an entry's sessions. */
 function entryToEditSessions(entry: TimeEntry): Array<{ id: string; start: string; stop: string }> {
   return effectiveSessions(entry).map((s) => ({

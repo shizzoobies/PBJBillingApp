@@ -11,6 +11,7 @@ import type {
 import {
   clientName,
   employeeName,
+  effectiveSessions,
   formatAuditStamp,
   formatHours,
   formatHoursMinutes,
@@ -570,7 +571,9 @@ function WeekReviewEntryRow({
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const sessions = entry.sessions ?? []
+  // Clock in/out for the audit — falls back to the startAt/endAt envelope so
+  // timer + legacy entries show their times here too, not just session entries.
+  const sessions = effectiveSessions(entry)
 
   const handleReject = async () => {
     const trimmed = note.trim()
@@ -993,12 +996,7 @@ function ApprovalRow({
             {entry.billable ? 'Billable' : 'Internal'}
           </small>
           {(() => {
-            const sessions =
-              entry.sessions && entry.sessions.length > 0
-                ? entry.sessions
-                : entry.startAt && entry.endAt
-                  ? [{ startAt: entry.startAt, endAt: entry.endAt }]
-                  : []
+            const sessions = effectiveSessions(entry)
             return sessions.length > 0 ? (
               <div className="approval-sessions">
                 {sessions.map((session, index) => (

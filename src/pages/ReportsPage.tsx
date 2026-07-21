@@ -15,6 +15,8 @@ import type {
 import {
   addDays,
   clientName,
+  effectiveSessions,
+  formatAuditStamp,
   currency,
   employeeName,
   formatHours,
@@ -396,22 +398,45 @@ function PayrollHoursReport({
       ),
     )
 
-  // Raw hours: one row per time entry, same columns as the monthly raw export.
+  // Raw hours: one row per time entry, including the CLOCK IN / CLOCK OUT stamps
+  // so payroll can be audited against when the work actually happened. An entry
+  // logged as minutes only (no timer/manual timestamps) leaves them blank; a
+  // multi-session entry reports its first start and last stop, with the session
+  // count so a split day is obvious.
   const exportRawHours = () =>
     downloadCsv(
       `payroll-raw-hours-${periodType}-${start}.csv`,
-      ['Date', 'Team member', 'Client', 'Task', 'Hours', 'Billable', 'Description'],
+      [
+        'Date',
+        'Team member',
+        'Client',
+        'Task',
+        'Clock in',
+        'Clock out',
+        'Sessions',
+        'Hours',
+        'Billable',
+        'Description',
+      ],
       [...detailEntries]
         .sort((a, b) => a.date.localeCompare(b.date))
-        .map((entry) => [
-          entry.date,
-          employeeName(employees, entry.employeeId),
-          jobOf(entry),
-          taskOf(entry),
-          (entry.minutes / 60).toFixed(2),
-          entry.billable ? 'Yes' : 'No',
-          entry.description ?? '',
-        ]),
+        .map((entry) => {
+          const spans = effectiveSessions(entry)
+          const first = spans[0]
+          const last = spans[spans.length - 1]
+          return [
+            entry.date,
+            employeeName(employees, entry.employeeId),
+            jobOf(entry),
+            taskOf(entry),
+            first ? formatAuditStamp(first.startAt) : '',
+            last ? formatAuditStamp(last.endAt) : '',
+            spans.length,
+            (entry.minutes / 60).toFixed(2),
+            entry.billable ? 'Yes' : 'No',
+            entry.description ?? '',
+          ]
+        }),
     )
 
   return (
@@ -691,7 +716,18 @@ function ReportsOverview({
     const sorted = [...billingPeriodEntries].sort((a, b) => a.date.localeCompare(b.date))
     downloadCsv(
       `hours-by-month-${periodSlug}.csv`,
-      ['Date', 'Employee', 'Client', 'Task', 'Hours', 'Billable', 'Description'],
+      [
+        'Date',
+        'Employee',
+        'Client',
+        'Task',
+        'Clock in',
+        'Clock out',
+        'Sessions',
+        'Hours',
+        'Billable',
+        'Description',
+      ],
       sorted.map((entry) => {
         const taskTitle = entry.taskId
           ? checklists.find((checklist: Checklist) => checklist.id === entry.taskId)?.title ??
@@ -700,11 +736,18 @@ function ReportsOverview({
         const clientDisplay = entry.isAdministrative || !entry.clientId
           ? '(Admin)'
           : clientName(clients, entry.clientId)
+        // Clock in/out = first start, last stop. Blank for minutes-only entries.
+        const spans = effectiveSessions(entry)
+        const first = spans[0]
+        const last = spans[spans.length - 1]
         return [
           entry.date,
           employeeName(employees, entry.employeeId),
           clientDisplay,
           taskTitle,
+          first ? formatAuditStamp(first.startAt) : '',
+          last ? formatAuditStamp(last.endAt) : '',
+          spans.length,
           (entry.minutes / 60).toFixed(2),
           entry.billable ? 'Yes' : 'No',
           entry.description,

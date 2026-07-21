@@ -1662,17 +1662,15 @@ export function ChecklistCard({
   // so we just report the hand-off generically.
   const handedOff = allDone && !isLastStage
 
+  // Checking a step off is PERSONAL — only the person it's assigned to (its own
+  // assignee, else the checklist's) can do it, plus the owner. Mirrors the
+  // server gate on /items/:id/toggle, so a disabled box here is never a
+  // surprise 403. Being assigned to the client still lets you see and edit the
+  // checklist — just not complete someone else's work.
   const canToggleItem = (item: ChecklistItem) => {
     if (role === 'owner') return true
-    if (isEditor) return true
-    // A non-owner assigned to the checklist's client can toggle any item on it
-    // (matches the server's visible-client allowance + canEditStructure).
-    if (isAssignedToClient) return true
-    if (item.assigneeId) {
-      // Item explicitly assigned - only that person (plus owner/editor handled above)
-      return item.assigneeId === activeEmployeeId
-    }
-    return isAssignee
+    const responsibleId = item.assigneeId || checklist.assigneeId || ''
+    return Boolean(responsibleId) && responsibleId === activeEmployeeId
   }
 
   return (
@@ -2398,7 +2396,13 @@ function DraggableTaskList({
                 checked={item.done}
                 disabled={!allowToggle}
                 onChange={() => void onToggle(checklistId, item.id)}
-                title={hasSubItems ? 'Checking this checks every sub-step' : undefined}
+                title={
+                  !allowToggle
+                    ? "This step is assigned to someone else — only they can check it off."
+                    : hasSubItems
+                      ? 'Checking this checks every sub-step'
+                      : undefined
+                }
                 type="checkbox"
               />
               <span className="task-row-body">

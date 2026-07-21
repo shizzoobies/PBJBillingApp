@@ -4208,32 +4208,28 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
       const targetItem = checklist.items.find((item) => item.id === itemId)
       if (!targetItem) {
         sendJson(response, 404, { error: 'Checklist item not found' })
         return
       }
 
-      // A non-owner can edit any item on a checklist whose client is in their
-      // visible (assigned) set — in addition to the legacy assignee/editor/
-      // per-item-assignee paths. Owners always pass.
-      const clientVisible =
-        session.user.role === 'owner' ||
-        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
-      const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
-      const canEdit = itemAssigneeId
-        ? session.user.role === 'owner' ||
-          itemAssigneeId === session.user.id ||
-          editorIds.includes(session.user.id) ||
-          clientVisible
-        : session.user.role === 'owner' ||
-          checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id) ||
-          clientVisible
+      // Completing work is PERSONAL: only the person a step is assigned to may
+      // check it off — its own assignee when set, otherwise the checklist's
+      // assignee — plus the owner as an override. Being assigned to the client
+      // is enough to see and edit the checklist, but NOT to tick off someone
+      // else's task (sub-steps inherit their parent item's responsible person).
+      const responsibleId =
+        (typeof targetItem.assigneeId === 'string' && targetItem.assigneeId) ||
+        checklist.assigneeId ||
+        ''
+      const canEdit =
+        session.user.role === 'owner' || (!!responsibleId && responsibleId === session.user.id)
 
       if (!canEdit) {
-        sendJson(response, 403, { error: 'You can only update your assigned checklists' })
+        sendJson(response, 403, {
+          error: 'Only the person this step is assigned to can check it off.',
+        })
         return
       }
 

@@ -115,6 +115,11 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Weekly review modal: expand any individual entry; per-entry actions —
   "Approve this entry" or "Send back with note" (the note is required and the
   bookkeeper sees it). The owner does not edit staff time directly.
+- Every approval surface shows CLOCK IN → CLOCK OUT for each entry (both the
+  week-review list and the individual approval queue), with per-session rows and
+  each session's length when a day was split, so hours can be audited against
+  when the work happened. Timer and older entries that predate the sessions model
+  fall back to their start/stop stamps rather than showing nothing.
 - Approval queue: filter Pending / Rejected / All individual submitted entries.
 - Timesheet locks: lock a month per employee — pending entries are
   auto-approved and the employee can no longer change that month. "Lock all"
@@ -188,11 +193,18 @@ picker, notification bell, and account menu sit in the top bar on every page.
   checklist or a step still files a request an owner must approve (above).
   (Any pending task edits filed under the old model can still be approved or
   rejected from the existing queue; no new ones are created.)
+- CHECKING A STEP OFF IS PERSONAL: only the person a step is assigned to can tick
+  it — its own assignee when set, otherwise the checklist's assignee — plus the
+  owner as an override. Being assigned to the client lets you SEE and EDIT the
+  checklist (add steps, rename, due dates) but never complete someone else's
+  work; sub-steps follow their parent step's responsible person. Boxes you can't
+  tick render disabled with a "assigned to someone else" tooltip, and the server
+  enforces the same rule.
 - Sharing/visibility: a team member assigned to a client sees ALL of that
   client's tasks (the whole shared board), not just tasks assigned to them
   personally. They can log time against any of those tasks AND add/edit items on
-  any checklist for a client they're assigned to (deletions still need owner
-  approval, per above). Staff can also CREATE a one-time task for any client
+  any checklist for a client they're assigned to (completing steps is limited to
+  the assigned person, per above; deletions still need owner approval). Staff can also CREATE a one-time task for any client
   they're assigned to (the "New task" button on the Checklists page). Owners can
   create/edit everything.
 - Recurring checklists (the repeating "recipes") — team members can VIEW the
@@ -299,8 +311,14 @@ picker, notification bell, and account menu sit in the top bar on every page.
   tinted green for clients that currently have active checklists, so open work is
   visible at a glance. Right next to it is a "Note" button that opens a
   notes-only modal (add a note + read history) for anyone who just needs to jot
-  a note. Both buttons work for owners and assigned staff (bookkeepers /
-  accountants) on any client they can see.
+  a note. A third "Time" button opens a TRACK-TIME modal for that client without
+  leaving the list: shows how much time is logged for them this month, lets you
+  pick an optional task (their open checklists) and a note, and starts the shared
+  timer — the same one the Time page drives, so it keeps running as you navigate
+  and stops there as usual. Only one timer runs at a time, so if one is already
+  going the modal says so and offers the Time page instead. All three buttons
+  work for owners and assigned staff (bookkeepers / accountants) on any client
+  they can see.
 - The client's "Active checklists" section has a "Due this month" toggle that
   filters to checklists due in the current calendar month (with a count).
 - Client lifecycle / onboarding (owner): every client has a stage —
@@ -365,9 +383,13 @@ picker, notification bell, and account menu sit in the top bar on every page.
   the detail to one person (payroll is usually run per person) or all.
 - Payroll exports (three): "Summary CSV" (per-member totals), "By day & job"
   (Date, Team member, Job, Task, Hours, Billable hours — the aggregated
-  breakdown, ready to pivot), and "Raw hours" (one row per time entry: Date,
-  Team member, Client, Task, Hours, Billable, Description — same columns as the
-  monthly raw export, scoped to the pay period and the member filter).
+  breakdown, ready to pivot), and "Raw hours" (one row per time entry, scoped to
+  the pay period and member filter).
+- Both RAW exports (payroll "Raw hours" and the monthly "Hours by month") include
+  CLOCK IN and CLOCK OUT stamps plus a Sessions count, so hours can be audited
+  against when the work actually happened: clock in = the first start, clock out
+  = the last stop, and Sessions > 1 marks a day split across several stretches.
+  Entries logged as minutes only (no timer/manual timestamps) leave them blank.
 - Month summary: tracked hours, internal hours, billable mix, projected
   billing, employee coverage.
 - Employee report (hours by person, including billable $ = each person's

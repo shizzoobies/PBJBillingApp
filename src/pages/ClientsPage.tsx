@@ -1,10 +1,11 @@
-import { ChevronRight, ListChecks, Plus, ShieldCheck, StickyNote } from 'lucide-react'
+import { ChevronRight, ListChecks, Plus, ShieldCheck, StickyNote, Timer } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { AddModal } from '../components/AddModal'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { ClientChecklistModal } from '../components/ClientChecklistModal'
+import { ClientTimeModal } from '../components/ClientTimeModal'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { FloatingAddButton } from '../components/FloatingAddButton'
 import { highlightMatch } from '../lib/highlight'
@@ -646,6 +647,8 @@ function ClientTable({
   const { sessionUser } = useAppContext()
   const [modalClient, setModalClient] = useState<Client | null>(null)
   const [notesClient, setNotesClient] = useState<Client | null>(null)
+  // Client whose "Track time" modal is open (start a timer without leaving the list).
+  const [timeClient, setTimeClient] = useState<Client | null>(null)
   // Client id currently mid-onboarding-request, so its button shows a pending
   // state and can't be double-clicked.
   const [onboardingId, setOnboardingId] = useState<string | null>(null)
@@ -801,6 +804,14 @@ function ClientTable({
                     <button
                       type="button"
                       className="secondary-action compact-action"
+                      title="Start tracking time for this client"
+                      onClick={() => setTimeClient(client)}
+                    >
+                      <Timer size={14} /> Time
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-action compact-action"
                       title="Add or read notes for this client"
                       onClick={() => setNotesClient(client)}
                     >
@@ -815,6 +826,9 @@ function ClientTable({
       </table>
       {modalClient ? (
         <ClientChecklistModal client={modalClient} onClose={() => setModalClient(null)} />
+      ) : null}
+      {timeClient ? (
+        <ClientTimeModal client={timeClient} onClose={() => setTimeClient(null)} />
       ) : null}
       {notesClient ? (
         <AddModal title={`Notes · ${notesClient.name}`} onClose={() => setNotesClient(null)}>
