@@ -83,6 +83,7 @@ import {
   unlockTimesheetRequest,
   updateChecklistItemRequest,
   updateChecklistSubItemRequest,
+  appendTemplateStageItemsRequest,
   updateTimeEntryRequest,
 } from './lib/api'
 import { createEmptyAppData } from './lib/seed'
@@ -2230,28 +2231,54 @@ function App() {
 
   // Add an item to a recurring checklist's TEMPLATE (the "series") so every
   // future instance includes it — targeting the stage this instance belongs to
-  // for a multi-stage case, else the single stage. Used when the owner adds a
-  // task to a live recurring instance and chooses "this + future". Adding to the
+  // for a multi-stage case, else the single stage. Used when someone adds a task
+  // to a live recurring instance and chooses "this + all future". Adding to the
   // current instance is separate (onBulkAddItems); this only affects the series.
-  const addSeriesChecklistItem = (checklist: Checklist, label: string) => {
+  // Goes through a dedicated append endpoint (NOT the owner-only bulk save), so
+  // a bookkeeper assigned to the client can do it too.
+  const addSeriesChecklistItem = async (checklist: Checklist, label: string) => {
+    if (previewActiveRef.current) return
     const trimmed = label.trim()
     if (!trimmed || !checklist.templateId) return
-    updateChecklistTemplate(checklist.templateId, (template) => {
-      const stages = template.stages ?? []
-      if (stages.length === 0) return template
-      const targetId =
-        checklist.stageId && stages.some((stage) => stage.id === checklist.stageId)
-          ? checklist.stageId
-          : stages[0].id
-      return {
-        ...template,
-        stages: stages.map((stage) =>
-          stage.id === targetId
-            ? { ...stage, items: [...stage.items, { id: makeId('template-item'), label: trimmed }] }
-            : stage,
+    const template = data.checklistTemplates.find((item) => item.id === checklist.templateId)
+    const stages = template?.stages ?? []
+    if (stages.length === 0) return
+    const targetStageId =
+      checklist.stageId && stages.some((stage) => stage.id === checklist.stageId)
+        ? checklist.stageId
+        : stages[0].id
+    try {
+      setDataSyncState('saving')
+      const result = await appendTemplateStageItemsRequest(
+        checklist.templateId,
+        targetStageId,
+        [trimmed],
+      )
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklistTemplates: current.checklistTemplates.map((item) =>
+          item.id !== checklist.templateId
+            ? item
+            : {
+                ...item,
+                stages: (item.stages ?? []).map((stage) =>
+                  stage.id === targetStageId
+                    ? { ...stage, items: [...stage.items, ...result.items] }
+                    : stage,
+                ),
+              },
         ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
       }
-    })
+      setDataSyncState('error')
+    }
   }
 
   const updateChecklistTemplateItem = (

@@ -1926,10 +1926,11 @@ export function ChecklistCard({
       />
       {canEditStructure
         ? (() => {
-            // On a live recurring instance the owner can add to just this
-            // checklist or to the whole series (the template → future instances);
-            // everyone/everything else adds to this checklist directly.
-            const canSeries = ownerMode && Boolean(checklist.templateId)
+            // On a live recurring instance ANYONE who can edit the checklist
+            // chooses: just this checklist, or the whole series (the template →
+            // future instances). Adds never need approval — only deletes do.
+            // One-off (non-recurring) checklists have no series, so no prompt.
+            const canSeries = Boolean(checklist.templateId)
             const handleAdd = (labels: string[]) => {
               const clean = labels.map((label) => label.trim()).filter(Boolean)
               if (clean.length === 0) return
@@ -1965,9 +1966,9 @@ export function ChecklistCard({
                         className="primary-action"
                         onClick={() => {
                           onBulkAddItems(checklist.id, seriesPromptLabels)
-                          seriesPromptLabels.forEach((label) =>
-                            addSeriesChecklistItem(checklist, label),
-                          )
+                          seriesPromptLabels.forEach((label) => {
+                            void addSeriesChecklistItem(checklist, label)
+                          })
                           setSeriesPromptLabels(null)
                         }}
                       >

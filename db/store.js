@@ -7447,6 +7447,57 @@ export class AppDataStore {
   }
 
   /**
+   * Append steps to ONE stage of a recurring template — the "add to the series"
+   * half of adding a task to a live recurring checklist. Targeted append only
+   * (never edits or removes existing template steps), so it can safely be
+   * exposed to a non-owner assigned to the template's client. Returns the
+   * created items (`{ id, label }`) in order, or null when the template/stage
+   * doesn't exist.
+   */
+  async appendChecklistTemplateStageItems(templateId, stageId, labels) {
+    const clean = (Array.isArray(labels) ? labels : [])
+      .filter((label) => typeof label === 'string' && label.trim())
+      .map((label) => label.trim())
+    if (clean.length === 0) return []
+
+    if (this.pool) {
+      const stage = await this.pool.query(
+        'select id from checklist_template_stages where id = $1 and template_id = $2',
+        [stageId, templateId],
+      )
+      if (!stage.rowCount) return null
+      const maxRow = await this.pool.query(
+        'select coalesce(max(sort_order), -1) as max from checklist_template_items where stage_id = $1',
+        [stageId],
+      )
+      let nextOrder = Number(maxRow.rows[0]?.max ?? -1) + 1
+      const created = []
+      for (const label of clean) {
+        const id = `template-item-${randomUUID().slice(0, 8)}`
+        await this.pool.query(
+          `insert into checklist_template_items
+             (id, template_id, label, sort_order, due_date, due_day_of_month, assignee_id, stage_id, sub_items, updated_at)
+           values ($1, $2, $3, $4, null, null, null, $5, '[]'::jsonb, now())`,
+          [id, templateId, label, nextOrder, stageId],
+        )
+        created.push({ id, label })
+        nextOrder += 1
+      }
+      return created
+    }
+
+    const data = await readJson(localDataPath)
+    const template = (data.checklistTemplates ?? []).find((item) => item.id === templateId)
+    if (!template) return null
+    const stage = (template.stages ?? []).find((item) => item.id === stageId)
+    if (!stage) return null
+    const created = clean.map((label) => ({ id: `template-item-${randomUUID().slice(0, 8)}`, label }))
+    stage.items = [...(stage.items ?? []), ...created]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return created
+  }
+
+  /**
    * A client's display name by id, or null. Small targeted lookup used by the
    * notification layer to label emails with the client they're about — cheap in
    * Postgres (single row), a file read otherwise.

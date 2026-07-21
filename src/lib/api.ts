@@ -1524,6 +1524,31 @@ export async function patchTemplateStageRequest(
   return (await response.json()) as ChecklistTemplate
 }
 
+/**
+ * Append steps to one stage of a recurring template ("add to all future").
+ * Append-only, so it's allowed for a team member assigned to the template's
+ * client — not just the owner. Returns the created items with their ids.
+ */
+export async function appendTemplateStageItemsRequest(
+  templateId: string,
+  stageId: string,
+  titles: string[],
+) {
+  const response = await apiFetch(
+    `/api/checklist-templates/${encodeURIComponent(templateId)}/stages/${encodeURIComponent(stageId)}/items`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ titles }),
+    },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, await safeErrorMessage(response))
+  }
+  return (await response.json()) as { items: { id: string; label: string }[] }
+}
+
 export async function deleteTemplateStageRequest(templateId: string, stageId: string) {
   const response = await apiFetch(
     `/api/checklist-templates/${templateId}/stages/${encodeURIComponent(stageId)}`,

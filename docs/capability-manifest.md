@@ -181,17 +181,13 @@ picker, notification bell, and account menu sit in the top bar on every page.
   Approve (delete) / Reject (keep), and gets a bell notification when a request is
   filed; the requested task/item shows a "Deletion requested" badge to staff until
   resolved. Owners delete immediately (they're the approver).
-- Edit approval (edits to someone else's task): a task now tracks who CREATED it.
-  When you edit a task you created — or you're the owner — the change applies
-  immediately. When you edit a task SOMEONE ELSE created (its details title/due/
-  assignee, editing a step, or adding a step), the change does NOT apply — it's
-  routed as a PENDING EDIT to that task's creator (tasks with no human creator —
-  recurring/template/onboarding — route to the owner). The approver sees a "Pending
-  task edits" queue at the top of the Checklists page with a "field: old → new"
-  summary and Approve (apply) / Reject (discard), gets a bell notification, and the
-  edited task shows an "Edit pending approval" badge until resolved; the editor is
-  notified on approve/reject. Completing/checking off steps and "waiting" flags are
-  the work, not edits — they always apply directly.
+- APPROVAL IS ONLY FOR DELETES. Adding a step, editing a step (rename / due date /
+  assignee), and editing a task's details all apply IMMEDIATELY for anyone
+  authorized to edit that task — no approval, no pending-edit queue. Completing
+  steps and "waiting" flags always applied directly and still do. Deleting a
+  checklist or a step still files a request an owner must approve (above).
+  (Any pending task edits filed under the old model can still be approved or
+  rejected from the existing queue; no new ones are created.)
 - Sharing/visibility: a team member assigned to a client sees ALL of that
   client's tasks (the whole shared board), not just tasks assigned to them
   personally. They can log time against any of those tasks AND add/edit items on
@@ -207,10 +203,13 @@ picker, notification bell, and account menu sit in the top bar on every page.
   up on their clients right where they work, without drilling into each client;
   and (2) each client's detail page has its own "Recurring checklists" section
   plus an "Upcoming (next 60 days)" list. Both exist so staff know what exists
-  and don't create duplicates. It's read-only for staff: they can't add, edit, or
-  turn recurring recipes on/off (that stays owner-only), but they CAN add items
-  to the already-generated checklist instances (which routes to the owner for
-  approval, like any staff structural edit).
+  and don't create duplicates. Staff can't create, restructure, or turn recurring
+  recipes on/off (that stays owner-only) — but they CAN add steps, both to the
+  already-generated checklist instances and (via the "this + all future" prompt)
+  APPEND a step to the recurring recipe itself for a client they're assigned to.
+  Appending is the only recipe change a non-owner can make; editing or removing
+  existing recipe steps remains owner-only, and standard (client-agnostic)
+  blueprints stay owner-only entirely.
 - Standard templates (the firm's client-agnostic blueprints) are visible READ-ONLY
   to every team member on the Checklists page ("Standard templates" section) — they
   can browse the standard steps but only an owner can edit a blueprint or apply one
