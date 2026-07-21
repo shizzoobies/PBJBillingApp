@@ -1706,6 +1706,8 @@ function RecentTimeEntries({
               locked={monthLocked}
               timerRunning={timerRunning}
               employees={employees}
+              clients={clients}
+              checklists={checklists}
               isOwner={role === 'owner'}
               isHolding={isHolding}
               onUpdate={onUpdate}
@@ -1735,6 +1737,8 @@ function TimeEntryRow({
   locked,
   timerRunning,
   employees,
+  clients,
+  checklists,
   isOwner,
   isHolding,
   onUpdate,
@@ -1749,6 +1753,10 @@ function TimeEntryRow({
   locked: boolean
   timerRunning: boolean
   employees: Employee[]
+  /** Clients the user may move this entry to (their visible list). */
+  clients: Client[]
+  /** All visible checklists — filtered to the picked client for the task list. */
+  checklists: Checklist[]
   isOwner: boolean
   isHolding: boolean
   onUpdate: (
@@ -1757,7 +1765,10 @@ function TimeEntryRow({
       minutes?: number
       description?: string
       billable?: boolean
+      clientId?: string
+      isAdministrative?: boolean
       taskId?: string | null
+      date?: string
       startAt?: string
       endAt?: string
       sessions?: WorkSession[]
@@ -1780,6 +1791,12 @@ function TimeEntryRow({
   const [description, setDescription] = useState(entry.description)
   const [billable, setBillable] = useState(entry.billable)
   const [reassignTo, setReassignTo] = useState(entry.employeeId)
+  // Every other field is editable too — the client it's billed to, the task,
+  // whether it's administrative, and the date it lands on.
+  const [editClientId, setEditClientId] = useState(entry.clientId ?? '')
+  const [editIsAdmin, setEditIsAdmin] = useState(Boolean(entry.isAdministrative))
+  const [editTaskId, setEditTaskId] = useState(entry.taskId ?? '')
+  const [editDate, setEditDate] = useState(entry.date)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -1811,9 +1828,40 @@ function TimeEntryRow({
     setDescription(entry.description)
     setBillable(entry.billable)
     setReassignTo(entry.employeeId)
+    setEditClientId(entry.clientId ?? '')
+    setEditIsAdmin(Boolean(entry.isAdministrative))
+    setEditTaskId(entry.taskId ?? '')
+    setEditDate(entry.date)
     setError('')
     setEditing(true)
   }
+
+  // Tasks belong to a client, so the picker follows whichever client is chosen.
+  const taskOptions = editIsAdmin
+    ? []
+    : checklists.filter((checklist) => checklist.clientId === editClientId)
+
+  // The client / task / date / admin part of the patch, shared by both save
+  // paths (sessions editor and legacy hours+minutes editor).
+  const detailsPatch = (() => {
+    const patch: {
+      clientId?: string
+      isAdministrative?: boolean
+      taskId?: string | null
+      date?: string
+    } = {}
+    if (editIsAdmin !== Boolean(entry.isAdministrative)) patch.isAdministrative = editIsAdmin
+    if (editIsAdmin) {
+      // Admin time carries no client or task; the server enforces this too.
+      if (entry.clientId) patch.clientId = ''
+      if (entry.taskId) patch.taskId = null
+    } else {
+      if (editClientId !== (entry.clientId ?? '')) patch.clientId = editClientId
+      if ((editTaskId || null) !== (entry.taskId ?? null)) patch.taskId = editTaskId || null
+    }
+    if (editDate && editDate !== entry.date) patch.date = editDate
+    return patch
+  })()
 
   // Owner-only: reassign this entry to another team member when the picked
   // employee differs from the current one. Empty otherwise.
@@ -1845,6 +1893,10 @@ function TimeEntryRow({
   }, 0)
 
   const handleSave = async () => {
+    if (!editIsAdmin && !editClientId) {
+      setError('Pick a client, or mark the entry as administrative.')
+      return
+    }
     if (hasSessions) {
       if (editSessions.length === 0) {
         setError('Keep at least one work session.')
@@ -1867,7 +1919,13 @@ function TimeEntryRow({
       setBusy(true)
       setError('')
       try {
-        await onUpdate(entry.id, { sessions: built, description, billable, ...reassignPatch })
+        await onUpdate(entry.id, {
+          sessions: built,
+          description,
+          billable,
+          ...detailsPatch,
+          ...reassignPatch,
+        })
         setEditing(false)
       } catch {
         setError('Could not save — the month may be locked.')
@@ -1896,7 +1954,13 @@ function TimeEntryRow({
     setBusy(true)
     setError('')
     try {
-      await onUpdate(entry.id, { minutes: totalMinutes, description, billable, ...reassignPatch })
+      await onUpdate(entry.id, {
+        minutes: totalMinutes,
+        description,
+        billable,
+        ...detailsPatch,
+        ...reassignPatch,
+      })
       setEditing(false)
     } catch {
       setError('Could not save — the month may be locked.')
@@ -1936,6 +2000,70 @@ function TimeEntryRow({
               </select>
             </label>
           ) : null}
+          <label className="check-row">
+            <input
+              checked={editIsAdmin}
+              type="checkbox"
+              onChange={(event) => {
+                const next = event.target.checked
+                setEditIsAdmin(next)
+                // Admin time has no client/task and is never billable.
+                if (next) {
+                  setEditTaskId('')
+                  setBillable(false)
+                }
+              }}
+            />
+            <span>Administrative / internal (no client)</span>
+          </label>
+          {!editIsAdmin ? (
+            <>
+              <label className="field">
+                <span>Client</span>
+                <select
+                  className="input"
+                  value={editClientId}
+                  onChange={(event) => {
+                    setEditClientId(event.target.value)
+                    // Tasks belong to a client — drop a task from the old one.
+                    setEditTaskId('')
+                  }}
+                >
+                  <option value="">Select a client…</option>
+                  {clients.map((client) => (
+                    <option key={client.id} value={client.id}>
+                      {client.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Task</span>
+                <select
+                  className="input"
+                  value={editTaskId}
+                  disabled={!editClientId}
+                  onChange={(event) => setEditTaskId(event.target.value)}
+                >
+                  <option value="">No specific task</option>
+                  {taskOptions.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {task.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : null}
+          <label className="field">
+            <span>Date</span>
+            <input
+              className="input"
+              type="date"
+              value={editDate}
+              onChange={(event) => setEditDate(event.target.value)}
+            />
+          </label>
           {hasSessions ? (
             <div className="session-editor">
               <span className="session-editor-label">Work sessions</span>

@@ -3078,24 +3078,68 @@ const server = createServer(async (request, response) => {
         }
         if (typeof payload?.description === 'string') patch.description = payload.description
         if (typeof payload?.billable === 'boolean') patch.billable = payload.billable
+        // Re-target the entry to a DIFFERENT client (or to administrative time).
+        // Mirrors the create path: admin time carries no client/task and is never
+        // billable; a non-owner may only move an entry onto a client they can see.
+        let effectiveClientId = entry.clientId
+        let effectiveIsAdmin = Boolean(entry.isAdministrative)
+        const wantsAdmin = Object.prototype.hasOwnProperty.call(payload ?? {}, 'isAdministrative')
+        const wantsClient = Object.prototype.hasOwnProperty.call(payload ?? {}, 'clientId')
+        if (wantsAdmin || wantsClient) {
+          effectiveIsAdmin = wantsAdmin ? Boolean(payload.isAdministrative) : effectiveIsAdmin
+          if (effectiveIsAdmin) {
+            patch.isAdministrative = true
+            patch.clientId = ''
+            patch.taskId = null
+            patch.billable = false
+            effectiveClientId = ''
+          } else {
+            const nextClientId =
+              wantsClient && typeof payload.clientId === 'string'
+                ? payload.clientId.trim()
+                : entry.clientId
+            if (!nextClientId) {
+              sendJson(response, 400, {
+                error: 'Pick a client, or mark the entry as administrative.',
+              })
+              return
+            }
+            scopeData = scopeData ?? (await appDataStore.read())
+            if (!(scopeData.clients ?? []).some((c) => c.id === nextClientId)) {
+              sendJson(response, 400, { error: 'Unknown client.' })
+              return
+            }
+            if (!isOwner && !visibleClientIdSet(session, scopeData.clients ?? []).has(nextClientId)) {
+              sendJson(response, 403, { error: 'That client is not in your assigned list.' })
+              return
+            }
+            patch.clientId = nextClientId
+            patch.isAdministrative = false
+            effectiveClientId = nextClientId
+          }
+        }
         if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'taskId')) {
           patch.taskId =
-            typeof payload.taskId === 'string' && payload.taskId.trim()
-              ? payload.taskId.trim()
-              : null
-          // A re-targeted task must belong to THIS entry's client (parity with
-          // the create path, which validates taskId->client). Without this a
-          // caller could attach an entry to any checklist id firm-wide.
+            effectiveIsAdmin || !(typeof payload.taskId === 'string' && payload.taskId.trim())
+              ? null
+              : payload.taskId.trim()
+          // A re-targeted task must belong to the entry's client AFTER this patch
+          // (parity with the create path, which validates taskId->client). Without
+          // this a caller could attach an entry to any checklist id firm-wide.
           if (patch.taskId) {
-            const taskData = scopeData ?? (await appDataStore.read())
-            const checklist = (taskData.checklists ?? []).find((c) => c.id === patch.taskId)
-            if (!checklist || checklist.clientId !== entry.clientId) {
+            scopeData = scopeData ?? (await appDataStore.read())
+            const checklist = (scopeData.checklists ?? []).find((c) => c.id === patch.taskId)
+            if (!checklist || checklist.clientId !== effectiveClientId) {
               sendJson(response, 400, {
                 error: 'That task does not belong to this entry’s client.',
               })
               return
             }
           }
+        } else if (patch.clientId !== undefined && patch.clientId !== entry.clientId) {
+          // Client changed without an explicit task: whatever task was attached
+          // belongs to the OLD client, so drop it rather than leave it mismatched.
+          patch.taskId = null
         }
         if (typeof payload?.date === 'string' && payload.date) patch.date = payload.date
         // Reassign to another team member — owner only. Validate the target is
@@ -3164,8 +3208,15 @@ const server = createServer(async (request, response) => {
           }
         }
 
-        // Editing a rejected entry resubmits it: status flips back to pending.
-        if (entry.approvalStatus === 'rejected') {
+        // Editing resubmits the entry for approval: a rejected entry flips back
+        // to pending, and so does an already-APPROVED one — an approved entry
+        // that gets changed (different client, time, date…) has to be re-approved
+        // rather than silently keeping its old sign-off. No-op patches are left
+        // alone so a save with nothing changed can't churn the approval queue.
+        if (
+          (entry.approvalStatus === 'rejected' || entry.approvalStatus === 'approved') &&
+          Object.keys(patch).length > 0
+        ) {
           patch.approvalStatus = 'pending'
           patch.approvalNote = null
           patch.approvedBy = null

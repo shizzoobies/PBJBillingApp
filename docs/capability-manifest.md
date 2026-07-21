@@ -66,9 +66,21 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - "Get ahead" tasks: the task dropdown includes upcoming recurring tasks that
   haven't materialized yet; picking one generates it now so time can be logged
   against it. Staff can do this for their assigned clients.
-- Recent time list: edit or delete your recent entries (until approved/locked).
-  The list is scoped by the shared Report period (defaults to this month); the
-  live timer and the log form aren't affected by it.
+- Recent time list: edit or delete your recent entries. The list is scoped by the
+  shared Report period (defaults to this month); the live timer and the log form
+  aren't affected by it.
+- Editing an entry lets you change EVERY field, not just the time: the client it's
+  billed to, the task, the date, the description, billable, the administrative
+  toggle, the work sessions (or hours/minutes), and — for owners — which team
+  member it belongs to. Picking a different client clears a task from the old
+  client (the task list follows the chosen client); switching an entry to
+  administrative drops its client/task and makes it non-billable.
+- Saving an edit RESUBMITS the entry for approval: a rejected entry goes back to
+  pending, and so does an already-approved one (a changed entry has to be
+  re-approved rather than keeping its old sign-off). A save that changes nothing
+  doesn't touch the approval state. Bookkeepers still can't edit a locked month;
+  owners are exempt, and non-owners can only move an entry onto a client they're
+  assigned to.
 - Billable vs non-billable is determined by the client's billing setup.
 - Weekly-submission gate: staff must SUBMIT (or resubmit) a prior week that has
   logged time before they can log time in a LATER week. A prior week blocks when

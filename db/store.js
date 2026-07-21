@@ -488,6 +488,30 @@ function ensureTemplateStages(template) {
  * the month's real length (so "31" lands on Feb 28/29). Mirrors the helper in
  * src/lib/utils.ts.
  */
+/**
+ * Time-entry patch fields where an empty value means "no value" and must be
+ * written as SQL NULL. `clientId` is the critical one: switching an entry to
+ * administrative time clears its client, and the `time_entries.client_id` FK
+ * rejects '' — it has to be NULL (matching the create path's `clientId || null`).
+ */
+const NULLABLE_TIME_ENTRY_FIELDS = new Set([
+  'clientId',
+  'taskId',
+  'approvalNote',
+  'approvedBy',
+  'approvedAt',
+  'startAt',
+  'endAt',
+])
+
+/** Coerce one time-entry patch value for persistence (see the set above). */
+export function coerceTimeEntryPatchValue(key, value) {
+  if (NULLABLE_TIME_ENTRY_FIELDS.has(key) && (value === '' || value === undefined)) {
+    return null
+  }
+  return value
+}
+
 function dayOfMonthDate(baseDate, day) {
   const [year, month] = baseDate.split('-').map(Number)
   const lastDay = new Date(year, month, 0).getDate()
@@ -4484,6 +4508,8 @@ export class AppDataStore {
       const params = [entryId]
       const map = {
         employeeId: 'user_id',
+        clientId: 'client_id',
+        isAdministrative: 'is_administrative',
         minutes: 'minutes',
         description: 'description',
         billable: 'billable',
@@ -4499,12 +4525,7 @@ export class AppDataStore {
       }
       for (const [appKey, dbCol] of Object.entries(map)) {
         if (patch && Object.prototype.hasOwnProperty.call(patch, appKey)) {
-          let value = patch[appKey]
-          if ((appKey === 'taskId' || appKey === 'approvalNote' || appKey === 'approvedBy' ||
-               appKey === 'approvedAt' || appKey === 'startAt' || appKey === 'endAt') &&
-              (value === '' || value === undefined)) {
-            value = null
-          }
+          const value = coerceTimeEntryPatchValue(appKey, patch[appKey])
           params.push(value)
           setClauses.push(`${dbCol} = $${params.length}`)
         }
@@ -4530,7 +4551,8 @@ export class AppDataStore {
       if (entry.id !== entryId) return entry
       const next = { ...entry }
       for (const key of [
-        'employeeId', 'minutes', 'description', 'billable', 'taskId', 'category', 'date',
+        'employeeId', 'clientId', 'isAdministrative', 'minutes', 'description', 'billable',
+        'taskId', 'category', 'date',
         'approvalStatus', 'approvalNote', 'approvedBy', 'approvedAt', 'startAt', 'endAt', 'sessions',
       ]) {
         if (patch && Object.prototype.hasOwnProperty.call(patch, key)) {

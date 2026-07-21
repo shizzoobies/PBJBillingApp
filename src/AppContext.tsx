@@ -73,6 +73,8 @@ export type AppContextValue = {
       minutes?: number
       description?: string
       billable?: boolean
+      clientId?: string
+      isAdministrative?: boolean
       taskId?: string | null
       date?: string
       startAt?: string
