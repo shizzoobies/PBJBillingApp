@@ -77,8 +77,16 @@ export function SetupChecklistPage() {
         plans: data.plans,
         employees: data.employees,
         checklistTemplates: data.checklistTemplates,
+        checklists: data.checklists,
       }),
-    [data.clients, data.contacts, data.plans, data.employees, data.checklistTemplates],
+    [
+      data.clients,
+      data.contacts,
+      data.plans,
+      data.employees,
+      data.checklistTemplates,
+      data.checklists,
+    ],
   )
 
   // The operational side of "to 100%": actual unchecked checklist steps, named

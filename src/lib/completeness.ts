@@ -16,7 +16,7 @@ import type {
 } from './types'
 import { isChecklistItemDone, missingPlanTemplatesForClient, unlinkedContacts } from './utils'
 
-export type SetupCategory = 'Billing' | 'Clients' | 'Team' | 'Contacts' | 'Plans'
+export type SetupCategory = 'Billing' | 'Clients' | 'Checklists' | 'Team' | 'Contacts' | 'Plans'
 export type SetupSeverity = 'high' | 'medium' | 'low'
 
 /**
@@ -59,6 +59,8 @@ export interface CompletenessInput {
   /** Active employees only (inactive/former members aren't actionable). */
   employees: Employee[]
   checklistTemplates: ChecklistTemplate[]
+  /** Live checklists — used only to say whether a recipe has ever generated. */
+  checklists?: Checklist[]
 }
 
 const isPositive = (value: unknown): boolean =>
@@ -173,6 +175,122 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     }
   }
 
+  // Recurring checklists that are MISCONFIGURED and will therefore never
+  // generate. A recipe missing a mandatory field fails silently — nothing is
+  // created and nothing says so — so these are surfaced by name with the exact
+  // field that's missing. Mirrors the materializer's own gate conditions
+  // (see materializeRecurringChecklists); if you change one, change both.
+  const instancesByTemplate = new Map<string, number>()
+  for (const checklist of input.checklists ?? []) {
+    if (!checklist.templateId) continue
+    instancesByTemplate.set(
+      checklist.templateId,
+      (instancesByTemplate.get(checklist.templateId) ?? 0) + 1,
+    )
+  }
+  const currentYear = new Date().getFullYear()
+
+  for (const template of checklistTemplates) {
+    // Standard blueprints are recipes to copy, not schedules — they're never
+    // meant to generate, so an empty one isn't a fault.
+    if (template.isStandard) continue
+
+    const stages = template.stages ?? []
+    const clientLabel = template.clientId
+      ? (clients.find((client) => client.id === template.clientId)?.name ?? 'a client')
+      : ''
+    const name = clientLabel ? `${template.title} · ${clientLabel}` : template.title
+    const to = `/checklists?focusTemplate=${template.id}`
+    const neverRan = (instancesByTemplate.get(template.id) ?? 0) === 0
+    // The strongest evidence something is wrong: it has produced nothing, ever.
+    const evidence = neverRan
+      ? ' It has never generated a checklist.'
+      : ' New ones have stopped generating.'
+    const flag = (id: string, title: string, detail: string, severity: SetupSeverity = 'high') => {
+      issues.push({
+        id: `checklist-template:${id}:${template.id}`,
+        category: 'Checklists',
+        title,
+        detail,
+        to,
+        severity,
+      })
+    }
+
+    if (!template.clientId) {
+      flag(
+        'no-client',
+        `Pick a client for the "${template.title}" recurring checklist`,
+        `It isn't attached to a client, so it can't generate anything.${evidence}`,
+      )
+      continue
+    }
+    // Switched off — that may well be deliberate, so it's flagged gently rather
+    // than as a fault, but she still sees why nothing is appearing.
+    if (!template.active) {
+      flag(
+        'inactive',
+        `"${name}" is turned off`,
+        `It's set to inactive, so it won't generate any new checklists until it's turned back on.`,
+        'medium',
+      )
+      continue
+    }
+    if (stages.length === 0) {
+      flag(
+        'no-stages',
+        `Add steps to the "${name}" recurring checklist`,
+        `It has no stages set up, so nothing can be generated from it.${evidence}`,
+      )
+      continue
+    }
+    if ((stages[0].items ?? []).length === 0) {
+      flag(
+        'no-steps',
+        `Add steps to the "${name}" recurring checklist`,
+        `Its first stage has no steps, so it never generates.${evidence} Open it and add the steps that should be done each time.`,
+      )
+      continue
+    }
+    if (template.frequency === 'specific-months') {
+      const months = Array.isArray(template.scheduledMonths) ? template.scheduledMonths : []
+      if (months.filter((month) => Number.isInteger(month) && month >= 1 && month <= 12).length === 0) {
+        flag(
+          'no-months',
+          `Choose which months "${name}" runs in`,
+          `It repeats in specific months but no months are selected, so it never generates.${evidence}`,
+        )
+        continue
+      }
+      if (template.repeatAnnually === false && template.scheduleYear !== currentYear) {
+        flag(
+          'stale-year',
+          `"${name}" is scheduled for ${template.scheduleYear ?? 'another year'} only`,
+          `"Repeat every year" is off and its scheduled year isn't ${currentYear}, so it won't generate this year.`,
+          'medium',
+        )
+        continue
+      }
+    } else if (!template.nextDueDate) {
+      flag(
+        'no-due-date',
+        `Set a due date for the "${name}" recurring checklist`,
+        `It has no next due date, so the schedule never starts.${evidence}`,
+      )
+      continue
+    }
+    // It WILL generate — but with nobody named, only an owner could ever tick
+    // its steps off (completing a step is limited to the assigned person).
+    if (!stages[0].assigneeId) {
+      flag(
+        'no-assignee',
+        `Assign someone to the "${name}" recurring checklist`,
+        'Its first stage has no assignee, so the checklists it creates land on nobody and only an owner can complete them.',
+        'medium',
+      )
+    }
+  }
+
   // Team members without a bill rate can't have their billable hours invoiced.
   for (const employee of employees) {
     if (!isPositive(employee.billRate)) {
@@ -216,7 +334,16 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
   return issues
 }
 
-const CATEGORY_ORDER: SetupCategory[] = ['Billing', 'Clients', 'Team', 'Plans', 'Contacts']
+const CATEGORY_ORDER: SetupCategory[] = [
+  'Billing',
+  // Checklists sit high: a recipe that silently never generates is invisible
+  // work not getting done.
+  'Checklists',
+  'Clients',
+  'Team',
+  'Plans',
+  'Contacts',
+]
 
 export interface SetupCategoryGroup {
   category: SetupCategory

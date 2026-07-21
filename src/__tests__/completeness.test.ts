@@ -198,6 +198,83 @@ describe('computeSetupIssues', () => {
   })
 })
 
+describe('computeSetupIssues — recurring checklists that will never generate', () => {
+  // The real ask: a recipe missing a mandatory field silently produces nothing.
+  // These mirror the materializer's gate conditions.
+  const makeTemplate = (overrides: Record<string, unknown>): ChecklistTemplate =>
+    ({
+      id: 'tmpl-1',
+      title: 'Annual Reports',
+      clientId: 'client-1',
+      assigneeId: 'emp-1',
+      frequency: 'monthly',
+      active: true,
+      isStandard: false,
+      nextDueDate: '2026-08-01',
+      stages: [{ id: 'stage-1', name: 'Stage 1', assigneeId: 'emp-1', items: [{ id: 'i1', label: 'Do it' }] }],
+      ...overrides,
+    }) as unknown as ChecklistTemplate
+
+  const run = (template: ChecklistTemplate) =>
+    computeSetupIssues({ ...emptyInput, clients: [makeClient({})], checklistTemplates: [template] })
+      .filter((issue) => issue.category === 'Checklists')
+
+  it('flags a recipe whose first stage has no steps (the real production case)', () => {
+    const issues = run(makeTemplate({ stages: [{ id: 'stage-1', name: 'S', assigneeId: 'emp-1', items: [] }] }))
+    expect(issues).toHaveLength(1)
+    expect(issues[0].id).toBe('checklist-template:no-steps:tmpl-1')
+    expect(issues[0].severity).toBe('high')
+    expect(issues[0].detail).toContain('never generated')
+  })
+
+  it('flags a recipe with no stages at all', () => {
+    expect(run(makeTemplate({ stages: [] }))[0].id).toBe('checklist-template:no-stages:tmpl-1')
+  })
+
+  it('flags a specific-months recipe with no months chosen', () => {
+    const issues = run(makeTemplate({ frequency: 'specific-months', scheduledMonths: [] }))
+    expect(issues[0].id).toBe('checklist-template:no-months:tmpl-1')
+  })
+
+  it('flags a non-specific-months recipe with no next due date', () => {
+    expect(run(makeTemplate({ nextDueDate: '' }))[0].id).toBe('checklist-template:no-due-date:tmpl-1')
+  })
+
+  it('flags a recipe that is switched off, but only as medium', () => {
+    const issues = run(makeTemplate({ active: false }))
+    expect(issues[0].id).toBe('checklist-template:inactive:tmpl-1')
+    expect(issues[0].severity).toBe('medium')
+  })
+
+  it('flags a stage with no assignee — nobody could complete it', () => {
+    const issues = run(
+      makeTemplate({
+        stages: [{ id: 'stage-1', name: 'S', assigneeId: '', items: [{ id: 'i1', label: 'Do it' }] }],
+      }),
+    )
+    expect(issues[0].id).toBe('checklist-template:no-assignee:tmpl-1')
+  })
+
+  it('says nothing about a correctly-configured recipe', () => {
+    expect(run(makeTemplate({}))).toEqual([])
+  })
+
+  it('ignores STANDARD blueprints — they are never meant to generate', () => {
+    expect(run(makeTemplate({ isStandard: true, stages: [] }))).toEqual([])
+  })
+
+  it('softens the wording once a recipe has generated before', () => {
+    const template = makeTemplate({ stages: [{ id: 'stage-1', name: 'S', assigneeId: 'emp-1', items: [] }] })
+    const issues = computeSetupIssues({
+      ...emptyInput,
+      clients: [makeClient({})],
+      checklistTemplates: [template],
+      checklists: [{ id: 'c1', templateId: 'tmpl-1' } as unknown as Checklist],
+    }).filter((issue) => issue.category === 'Checklists')
+    expect(issues[0].detail).toContain('stopped generating')
+  })
+})
+
 const item = (label: string, done: boolean, subItems?: ChecklistItem['subItems']): ChecklistItem => ({
   id: `item-${label}`,
   label,

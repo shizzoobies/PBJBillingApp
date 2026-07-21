@@ -470,6 +470,20 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Ignore: any item can be IGNORED (something the owner knows about but doesn't
   need to fix). Ignored items move to a collapsible "Ignored" section at the
   bottom and can be Restored anytime; the ignore list is saved per owner.
+- RECURRING CHECKLISTS THAT WON'T GENERATE (the "Checklists" category): the most
+  important check, because this failure is otherwise SILENT — a recurring
+  checklist saved with a mandatory field missing simply never creates anything,
+  with nothing to say so. Each broken recipe is named (title · client) with the
+  exact field that's missing and a link straight to it, and the detail says
+  whether it has NEVER generated a checklist or has merely stopped:
+  no client attached; no stages; first stage has NO STEPS; a specific-months
+  recipe with no months chosen; no next due date; "repeat every year" off with a
+  past scheduled year; the recipe is switched off; or the first stage has no
+  assignee (it generates, but lands on nobody — and only the assigned person or
+  an owner can complete a step). Standard blueprints are skipped: they're recipes
+  to copy, never scheduled, so an empty one isn't a fault. These mirror the
+  materializer's own conditions, so the list is exactly "what is silently not
+  running".
 - Checks: Monthly/Annual clients with no rate; clients missing a billing email,
   an assigned team member, or a contact; clients on a plan whose plan checklists
   aren't set up yet; team members with no bill rate; plans with no checklist
