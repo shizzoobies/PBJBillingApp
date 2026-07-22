@@ -3558,6 +3558,15 @@ td strong {
 .checklist-card-title {
   display: block;
 }
+/* "N sent back" — entries an owner returned while the WEEK is still pending.
+   Deliberately loud: it's the only cue that something needs redoing. */
+.status-pill--sent-back {
+  background: var(--bg-danger, #fceaea);
+  border-color: var(--border-danger, #e3b7b7);
+  color: var(--text-danger, #a32d2d);
+  font-weight: 700;
+}
+
 /* "Track time" modal opened from a client row — timer-already-running notice. */
 .client-time-running {
   display: flex;

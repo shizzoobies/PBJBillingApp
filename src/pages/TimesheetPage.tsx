@@ -287,6 +287,17 @@ function WeeklyTimesheetControls({
       ? employees.find((employee) => employee.id === submission.reviewedBy)?.name
       : null
 
+  // Individual entries can be sent back while the WEEK stays "pending", so the
+  // week status alone never reveals that something needs redoing.
+  const { start: weekFrom, end: weekTo } = weekRangeOf(weekStart)
+  const sentBack = (data.timeEntries ?? []).filter(
+    (entry) =>
+      entry.employeeId === viewedEmployeeId &&
+      entry.date >= weekFrom &&
+      entry.date <= weekTo &&
+      entry.approvalStatus === 'rejected',
+  ).length
+
   // Owners review, they don't submit; staff submit only their own week and only
   // when it isn't already pending/approved (a rejected week can be resubmitted).
   const canSubmit =
@@ -329,6 +340,14 @@ function WeeklyTimesheetControls({
         ) : null}
         {submission?.status === 'rejected' ? (
           <span className="status-pill">Rejected{reviewer ? ` by ${reviewer}` : ''}</span>
+        ) : null}
+        {sentBack > 0 ? (
+          <span
+            className="status-pill status-pill--sent-back"
+            title="Some entries in this week were sent back — edit and resubmit them on the Time page."
+          >
+            {sentBack} sent back
+          </span>
         ) : null}
         {monthLocked ? <span className="status-pill">Month locked</span> : null}
       </div>

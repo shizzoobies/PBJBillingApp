@@ -2925,6 +2925,29 @@ const server = createServer(async (request, response) => {
           approvedAt: new Date().toISOString(),
         })
         await appDataStore.recordActivity(session.user.id, 'time_entry_rejected', entryId)
+        // Tell the bookkeeper their time was sent back. Without this the
+        // rejection is SILENT — the only trace is a red note partway down their
+        // Recent time list, and the weekly submission still reads "pending", so
+        // they have no idea anything needs redoing.
+        try {
+          if (entry.employeeId && entry.employeeId !== session.user.id) {
+            const reviewerName =
+              (await appDataStore.getTeamMember(session.user.id))?.name ?? 'An owner'
+            const hours = (Number(entry.minutes) / 60).toFixed(2)
+            const scope = entry.isAdministrative || !entry.clientId ? 'Administrative' : null
+            await notify(appDataStore, entry.employeeId, 'time_entry_rejected', {
+              timeEntryId: entryId,
+              clientId: entry.clientId || '',
+              message: `${reviewerName} sent back your ${hours}h entry on ${entry.date}${
+                scope ? ` (${scope})` : ''
+              } — "${note}". Edit and resubmit it from the Time page.`,
+              link: '/time',
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+        } catch (err) {
+          console.error('[notify] time_entry_rejected dispatch failed:', err?.message || err)
+        }
         sendJson(response, 200, updated)
         return
       }

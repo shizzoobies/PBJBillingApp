@@ -115,6 +115,15 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Weekly review modal: expand any individual entry; per-entry actions —
   "Approve this entry" or "Send back with note" (the note is required and the
   bookkeeper sees it). The owner does not edit staff time directly.
+- Sending an entry back NOTIFIES the bookkeeper: rejecting a time entry gives its
+  owner an in-app bell + email naming the client, the date, the hours and the
+  owner's reason, linking to the Time page to edit and resubmit. (Previously
+  rejection was silent — the only trace was a red note in their Recent time list.)
+- "N sent back" badge: individual entries can be returned while the WEEK's
+  submission stays "pending", so the week status alone never reveals it. Both the
+  Time page week bar and the Timesheet week controls show a red "N sent back"
+  count for that week whenever any of its entries are rejected. Editing a
+  sent-back entry resubmits it (back to pending) automatically.
 - Every approval surface shows CLOCK IN → CLOCK OUT for each entry (both the
   week-review list and the individual approval queue), with per-session rows and
   each session's length when a day was split, so hours can be audited against

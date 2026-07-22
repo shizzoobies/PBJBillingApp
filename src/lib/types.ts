@@ -1149,6 +1149,8 @@ export type NotificationEvent =
   | 'case_completed'
   | 'invoice_ready'
   | 'time_entry_manual'
+  /** An owner sent a submitted time entry back for changes. */
+  | 'time_entry_rejected'
   | 'waiting_cleared'
   | 'waiting_on_requested'
   | 'waiting_on_done'

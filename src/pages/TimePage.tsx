@@ -315,6 +315,21 @@ function WeeklySubmissionWidget({
       .reduce((sum, entry) => sum + entry.minutes, 0)
   }, [entries, activeEmployeeId, start, end])
 
+  // Individual entries can be sent back WITHOUT the week itself being rejected —
+  // the submission stays "pending", so nothing about the week hints that some of
+  // it needs redoing. Surface that count here, or it goes unnoticed.
+  const sentBack = useMemo(
+    () =>
+      entries.filter(
+        (entry) =>
+          entry.employeeId === activeEmployeeId &&
+          entry.date >= start &&
+          entry.date <= end &&
+          entry.approvalStatus === 'rejected',
+      ).length,
+    [entries, activeEmployeeId, start, end],
+  )
+
   // Approved weeks are sealed — submitter can't re-submit; an owner would
   // need to unlock first (a future affordance). Pending blocks resubmit
   // until status changes. Rejected re-allows submit so the user can
@@ -411,6 +426,14 @@ function WeeklySubmissionWidget({
           ) : null}
           {submission?.status === 'rejected' ? (
             <span className="status-pill">Rejected{reviewer ? ` by ${reviewer}` : ''}</span>
+          ) : null}
+          {sentBack > 0 ? (
+            <span
+              className="status-pill status-pill--sent-back"
+              title="Some entries in this week were sent back — edit and resubmit them below."
+            >
+              {sentBack} sent back
+            </span>
           ) : null}
           <button
             type="button"
