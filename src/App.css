@@ -3562,6 +3562,17 @@ td strong {
 .checklist-card-title {
   display: block;
 }
+/* Right column of the Time page: Sent back sits directly above Recent time in a
+   single grid cell, so Recent time never wraps to a row of its own beneath the
+   whole layout. `min-width: 0` keeps the grid track from being widened by long
+   content inside. Matches .content-grid's 18px gap. */
+.time-side-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
 /* Collapse chevron on a panel heading (Time page: Recent time / Sent back). */
 .panel-collapse-btn {
   flex: none;

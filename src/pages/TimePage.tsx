@@ -241,6 +241,10 @@ export function TimePage() {
           previewMode={previewMode}
           currentPeriod={currentPeriod}
         />
+        {/* Sent back + Recent time share ONE grid cell (the right column) and
+            stack, so Recent time starts directly under Sent back instead of
+            wrapping onto a new row below the whole layout. */}
+        <div className="time-side-stack">
         <SentBackEntries
           checklists={data.checklists}
           clients={data.clients}
@@ -271,6 +275,7 @@ export function TimePage() {
           onResume={handleResume}
           onSplitGroup={(entry) => setSplitTarget(entry)}
         />
+        </div>
       </div>
 
       {manualOpen ? (
