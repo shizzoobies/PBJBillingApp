@@ -91,7 +91,9 @@ passed lint + build + tests was still wrong against real data. Use it.
 Get a connection (read-only work needs no permission; see the write rule below):
 
 ```bash
-export NODE_PATH="D:/PBJ Accounting Work/AP For Time Stuff/node_modules"
+# Run from the repo root. NODE_PATH is needed because these are throwaway
+# `node -e` scripts outside the package, so `require('pg')` won't resolve.
+export NODE_PATH="$PWD/node_modules"
 DBURL=$(npx @railway/cli@latest variables --service Postgres --json \
   | node -e 'const v=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(v.DATABASE_PUBLIC_URL)')
 # then: new Pool({ connectionString: DBURL, ssl: { rejectUnauthorized: false } })
@@ -247,6 +249,28 @@ scheduled-month marker first.
 - Local dev: `npm run dev` runs Vite + `node server.js`. The **server** (port
   5173) serves `dist/` + same-origin API; Vite's proxy target does not match, so
   use the server port, not Vite's.
-- Windows + Git Bash. `.omc/` holds scratch state; machine-local Claude memory
-  lives under `~/.claude/projects/…/memory/` — this document is the portable
-  source of truth.
+- Windows + Git Bash on the current machine. Shell snippets here assume Git Bash
+  (POSIX), not PowerShell.
+
+### Where things live
+
+Paths are recorded because chats reference them, but **only this repo is
+durable** — treat everything else as machine-local.
+
+| What | Where | Durable? |
+|---|---|---|
+| **This repo** (the only thing that matters) | `D:\PBJ Accounting Work\AP For Time Stuff` on the current machine; `github.com/shizzoobies/PBJBillingApp` | ✅ in git |
+| Parent folder + its own `CLAUDE.md` | `D:\PBJ Accounting Work\` — a broader two-track project (QuickBooks training + AI bookkeeper). Loaded as context; **no work here happened there** | separate repo |
+| Agent scratch state | `.omc/` inside this repo | mostly gitignored |
+| Machine-local Claude memory | `~/.claude/projects/D--PBJ-Accounting-Work-AP-For-Time-Stuff/memory/` | ❌ per-machine, per-account |
+| Session scratchpad (throwaway scripts, snapshots) | OS temp: `…\AppData\Local\Temp\claude\…\scratchpad\` | ❌ **ephemeral** |
+
+Two consequences worth knowing:
+
+1. **Absolute paths in this doc are for the current machine only.** Anything you
+   copy should be run from the repo root instead (§4's snippet now uses `$PWD`).
+2. **The scratchpad is not a backup.** The snapshot taken before the approved
+   177-row due-date backfill was written there, so it is **gone** — that backfill
+   is no longer reversible from a saved file. If you run another approved prod
+   write and want a durable undo, write the snapshot somewhere that survives (or
+   at minimum paste the before/after into the chat).
