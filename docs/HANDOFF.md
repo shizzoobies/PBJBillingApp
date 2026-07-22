@@ -1,8 +1,9 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21. Everything below is live on `main`; the working tree was clean
-at handoff. Read this top to bottom before your first change — several rules here
-are non-obvious and breaking them has caused a production outage before.
+Written 2026-07-21, last updated 2026-07-22. Everything below is live on `main`;
+the working tree was clean at handoff. Read this top to bottom before your first
+change — several rules here are non-obvious and breaking them has caused a
+production outage before.
 
 ---
 
@@ -40,7 +41,7 @@ already and the problem is interpretation, not code.** See §7.
    do, **re-provision the voice agent after deploying** (§3).
 
 3. **`npm run verify`** = `eslint` + `tsc -b && vite build` + `vitest`. Green
-   before every push. Currently **506 tests / 50 files**.
+   before every push. Currently **512 tests / 50 files**.
 
 4. Prefer targeted endpoints over the bulk save. `PUT /api/app-data` (the bulk
    workspace save) is **owner-only (403 for staff)** — anything staff must do
@@ -106,6 +107,12 @@ DBURL=$(npx @railway/cli@latest variables --service Postgres --json \
   issues … `ROLLBACK`, then re-select to prove nothing changed. This caught a
   foreign-key violation (writing `client_id = ''` instead of `NULL`) that would
   have shipped.
+- **Diff what different ROLES see.** When someone reports "my numbers don't match
+  hers", re-implement `scopeAppDataForSession`'s filter over real rows and print
+  owner-visible vs member-visible side by side. That is how the group-time bug
+  (`a365270`) was found and how the fix was proven — the totals went from
+  97 vs 102 to matching exactly. Any "X sees different data than Y" report should
+  start here.
 
 **Rule: any write that is NOT rolled back needs the user's explicit approval
 first.** A past bulk write took production down (see `.omc/` notes / memory
@@ -124,10 +131,22 @@ snapshot first, single transaction, re-verify after.
 
 ---
 
-## 5. Where things stand (last 12 commits, newest first)
+## 5. Where things stand (newest first)
+
+**Most recent work was a run of time-approval bugs, all traced from one email
+from Brittany** ("I rejected parts of last week's timesheet and Allison isn't
+sure where it went"). That one report uncovered four separate defects — worth
+reading as a case study in §4's method, because each was found in the data, not
+the code:
 
 | Commit | What |
 |---|---|
+| `a365270` | **The big one.** Non-owner data scope admitted an entry only if `isAdministrative \|\| allowedClientIds.has(clientId)`. An unsplit **group-time holding entry** is neither (its `client_id` is NULL; members live in `group_client_ids` until split), so the server stripped bookkeepers' **own** tracked time before it reached them — they couldn't see/edit/split it and their totals disagreed with the owner's (15 entries vs 10 for one day). Fixed via `isTimeEntryVisibleToScope` in `lib/data-scope.js`. Verified on prod: Allison 97→102, Lisa 98→101, both now matching the owner exactly. |
+| `2d4ad5f` | Time page is a **two-column grid**; adding a third panel bumped Recent time to its own row. Sent back + Recent time now share one grid cell via `.time-side-stack`. |
+| `64dea4a` | Visual: dropped a badge that wrapped into a cramped circle; `.status-pill` now has `white-space: nowrap` + `flex: none` (fixes that failure mode app-wide). |
+| `64ee907` | Both Time lists collapse + scroll independently; **removed the 8-entry cap** on Recent time (`slice(0, 8)`) — that cap was why heavy loggers never saw older entries. |
+| `b24ad79` | Dedicated **"Sent back"** panel on the Time page — unscoped, uncapped, oldest-first. |
+| `139e196` | Rejecting a time entry **notified nobody** — no `notify()` call, and `time_entry_rejected` wasn't even a registered event. Now notifies (bell + email) and shows an "N sent back" week badge. Also sent the 7 missed notifications retroactively (approved prod write). |
 | `4ddc487` | **To 100%**: new "Checklists" category flagging recurring recipes that will **silently never generate** (missing steps / months / due date / client / assignee, or switched off). Mirrors the materializer's gate. |
 | `f358b2b` | Completing a step is **assignee-only**; clock in/out on **every** approval surface; **Clock in/out/Sessions** columns on both raw exports; **"Time"** button + track-time modal on each client row. |
 | `006c54e` | **Approval is deletes-only.** Removed pending-edit routing for adds and edits. Staff can **append** to a recurring template via a new append-only endpoint. |
@@ -165,10 +184,31 @@ Nothing is half-built — every item above shipped and deployed. These are thing
 5. **To-100% shows switched-off recipes** as MEDIUM. If deliberate-off is noise,
    hiding them is a one-line change.
 
-**Real data for Brittany to fix (not code):** two recurring recipes have generated
-**zero** checklists ever — *Annual Reconciliations with Review · Brentwood United
-Pentecostal Church* and *Annual Reports · N568RT, LLC*, both with an empty first
-stage. That's real work that hasn't been happening. They now appear in To 100%.
+6. **`.entry-list--scroll` is capped at `58vh`** — a guess, never seen on a real
+   screen. On a short laptop that's ~3–4 rows before scrolling. Easy to raise, or
+   to make the two Time panels split the available height.
+7. **The week-bar "N sent back" is still a pill**, kept for consistency with its
+   siblings ("Pending review", "Approved", "Month locked"). Alex disliked pill
+   styling elsewhere; offered to restyle that whole row to plain labels.
+8. **Retroactive notifications were sent as ONE summary per person**, not one per
+   entry (5 near-identical emails to Allison would have been noise). If per-entry
+   is ever wanted for a future backfill, that's a choice, not a constraint.
+
+**Real data worth a look (not code):**
+
+- Two recurring recipes have generated **zero** checklists ever — *Annual
+  Reconciliations with Review · Brentwood United Pentecostal Church* and *Annual
+  Reports · N568RT, LLC*, both with an empty first stage. Real work that hasn't
+  been happening. They now appear in To 100%.
+- **10 unsplit group-time holding entries** sit in production (Allison, Lisa,
+  Brittany). They were invisible to their owners until `a365270`; now that they
+  are visible, they still need **splitting across their member clients** before
+  that time can be billed. Worth telling Brittany to work through them.
+
+**Config worth checking:** `EMAIL_FROM` is `signin@ka-testing.com` — a testing
+domain sending to `@pbjsa.com` addresses. Mail is being accepted by Resend, but
+deliverability/spam placement is unverified. If people report "never got the
+email", start here, not in the notify code.
 
 **Tech debt created deliberately:** the `pending_task_edits` queue is now
 vestigial — nothing creates new entries, but the approve/reject machinery remains
