@@ -2401,6 +2401,10 @@ textarea.input {
   font-weight: 760;
   padding: 5px 9px;
   text-transform: capitalize;
+  /* Never let a pill wrap or get squeezed by a flex parent — a wrapped label
+     turns the pill into a cramped blob. */
+  white-space: nowrap;
+  flex: none;
 }
 
 /* Task-edit approval routing: the "Edit pending approval" card badge + the
@@ -3596,11 +3600,14 @@ td strong {
 
 /* "N sent back" — entries an owner returned while the WEEK is still pending.
    Deliberately loud: it's the only cue that something needs redoing. */
+/* Quiet, not shouty: a soft tint and normal sentence case. It only needs to
+   read clearly next to the other week pills, not compete with them. */
 .status-pill--sent-back {
   background: var(--bg-danger, #fceaea);
   border-color: var(--border-danger, #e3b7b7);
   color: var(--text-danger, #a32d2d);
-  font-weight: 700;
+  font-weight: 600;
+  text-transform: none;
 }
 
 /* "Track time" modal opened from a client row — timer-already-running notice. */

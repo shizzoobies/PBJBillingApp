@@ -1726,7 +1726,6 @@ function SentBackEntries({
             </p>
           ) : null}
         </div>
-        <span className="status-pill status-pill--sent-back">{entries.length} to fix</span>
       </div>
       {open ? (
       <div className="entry-list entry-list--scroll">
