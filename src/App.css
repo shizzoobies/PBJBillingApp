@@ -3558,6 +3558,13 @@ td strong {
 .checklist-card-title {
   display: block;
 }
+/* The dedicated "Sent back" panel on the Time page — accented so work waiting on
+   the bookkeeper is impossible to walk past. Hidden entirely when empty. */
+.panel--sent-back {
+  border-color: var(--border-danger, #e3b7b7);
+  box-shadow: inset 3px 0 0 var(--text-danger, #a32d2d);
+}
+
 /* "N sent back" — entries an owner returned while the WEEK is still pending.
    Deliberately loud: it's the only cue that something needs redoing. */
 .status-pill--sent-back {

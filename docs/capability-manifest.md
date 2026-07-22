@@ -119,6 +119,14 @@ picker, notification bell, and account menu sit in the top bar on every page.
   owner an in-app bell + email naming the client, the date, the hours and the
   owner's reason, linking to the Time page to edit and resubmit. (Previously
   rejection was silent — the only trace was a red note in their Recent time list.)
+- "SENT BACK" section (Time page): a dedicated panel at the top of the Time page
+  listing every one of YOUR entries an owner returned, so they're found and fixed
+  in one place. Unlike the Recent time list it is NOT scoped by the report period
+  and NOT capped, which is what previously hid them — Recent time only renders the
+  8 most recent entries, so anyone who logs a lot never saw their rejected ones.
+  Oldest first (longest outstanding first), each with the owner's reason and the
+  normal editor; "Edit & resubmit" sends it straight back for approval without
+  resubmitting the week. The whole section is hidden when nothing is sent back.
 - "N sent back" badge: individual entries can be returned while the WEEK's
   submission stays "pending", so the week status alone never reveals it. Both the
   Time page week bar and the Timesheet week controls show a red "N sent back"

@@ -126,6 +126,21 @@ export function TimePage() {
     [visibleEntries, reportPeriod],
   )
 
+  // MY entries an owner sent back. Deliberately NOT scoped by the report period
+  // and NOT capped: the Recent list only renders the 8 most recent, so for
+  // anyone who logs a lot the sent-back ones scroll out of reach and look like
+  // they vanished. Oldest first — the longest-outstanding needs fixing most.
+  const sentBackEntries = useMemo(
+    () =>
+      visibleEntries
+        .filter(
+          (entry) =>
+            entry.employeeId === activeEmployeeId && entry.approvalStatus === 'rejected',
+        )
+        .sort((a, b) => a.date.localeCompare(b.date)),
+    [visibleEntries, activeEmployeeId],
+  )
+
   // Pick a recurring template in the timer's task list to "get ahead": this
   // generates that template's instance now and returns its checklist id so the
   // time attaches to a real task.
@@ -224,6 +239,19 @@ export function TimePage() {
           locked={lockedThisPeriod}
           previewMode={previewMode}
           currentPeriod={currentPeriod}
+        />
+        <SentBackEntries
+          checklists={data.checklists}
+          clients={data.clients}
+          employees={data.employees}
+          entries={sentBackEntries}
+          role={role}
+          locks={data.timesheetLocks ?? []}
+          timerRunning={Boolean(timer)}
+          onUpdate={updateTimeEntry}
+          onDelete={deleteTimeEntry}
+          onResume={handleResume}
+          onSplitGroup={(entry) => setSplitTarget(entry)}
         />
         <RecentTimeEntries
           checklists={data.checklists}
@@ -1626,6 +1654,105 @@ function GroupSplitModal({
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * "Sent back" — a dedicated home for the current user's REJECTED time so it can
+ * be found and fixed in one place.
+ *
+ * Why this exists separately from Recent time: rejected entries used to be
+ * findable only in that list, which is scoped to the report period AND capped at
+ * the 8 most recent. Anyone who logs a lot (Lisa had ~36 entries in one week)
+ * simply never saw theirs — they looked lost. This list is unscoped, uncapped,
+ * and sits above Recent time. It disappears entirely when nothing is sent back.
+ *
+ * Each row is the normal entry row, so the rejection note, the full editor and
+ * "Edit & resubmit" all work exactly as they do elsewhere; saving an edit puts
+ * the entry back in the owner's queue automatically.
+ */
+function SentBackEntries({
+  checklists,
+  clients,
+  employees,
+  entries,
+  role,
+  locks,
+  timerRunning,
+  onUpdate,
+  onDelete,
+  onResume,
+  onSplitGroup,
+}: {
+  checklists: Checklist[]
+  clients: Client[]
+  employees: Employee[]
+  entries: TimeEntry[]
+  role: Role
+  locks: TimesheetLock[]
+  timerRunning: boolean
+  onUpdate: React.ComponentProps<typeof RecentTimeEntries>['onUpdate']
+  onDelete: (entryId: string) => Promise<void>
+  onResume: (entry: TimeEntry) => void
+  onSplitGroup: (entry: TimeEntry) => void
+}) {
+  if (entries.length === 0) return null
+  return (
+    <section className="panel panel--sent-back">
+      <div className="section-heading">
+        <div>
+          <p className="section-kicker">Needs your attention</p>
+          <h2>Sent back</h2>
+          <p className="section-subtitle">
+            {entries.length === 1
+              ? 'An owner sent this entry back for a change.'
+              : `An owner sent these ${entries.length} entries back for changes.`}{' '}
+            Fix each one and hit <strong>Edit &amp; resubmit</strong> — it goes straight back for
+            approval, no need to resubmit the whole week. Oldest first.
+          </p>
+        </div>
+        <span className="status-pill status-pill--sent-back">{entries.length} to fix</span>
+      </div>
+      <div className="entry-list">
+        {entries.map((entry) => {
+          const linkedTask = entry.taskId
+            ? checklists.find((checklist) => checklist.id === entry.taskId)
+            : null
+          const monthLocked =
+            role !== 'owner' &&
+            locks.some(
+              (lock) => lock.userId === entry.employeeId && lock.period === entry.date.slice(0, 7),
+            )
+          const memberCount = entry.groupClientIds?.length ?? 0
+          const isHolding = !entry.clientId && !entry.isAdministrative && memberCount > 0
+          const clientLabel = entry.isAdministrative
+            ? 'Administrative'
+            : isHolding
+              ? `Group · ${memberCount} client${memberCount === 1 ? '' : 's'}`
+              : clientName(clients, entry.clientId)
+          return (
+            <TimeEntryRow
+              key={entry.id}
+              entry={entry}
+              clientLabel={clientLabel}
+              employeeLabel={employeeName(employees, entry.employeeId)}
+              taskTitle={linkedTask ? linkedTask.title : entry.taskLabel ?? null}
+              locked={monthLocked}
+              timerRunning={timerRunning}
+              employees={employees}
+              clients={clients}
+              checklists={checklists}
+              isOwner={role === 'owner'}
+              isHolding={isHolding}
+              onUpdate={onUpdate}
+              onDelete={onDelete}
+              onResume={onResume}
+              onSplitGroup={onSplitGroup}
+            />
+          )
+        })}
+      </div>
+    </section>
   )
 }
 
