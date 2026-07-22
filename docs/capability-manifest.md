@@ -123,6 +123,13 @@ picker, notification bell, and account menu sit in the top bar on every page.
   owner an in-app bell + email naming the client, the date, the hours and the
   owner's reason, linking to the Time page to edit and resubmit. (Previously
   rejection was silent — the only trace was a red note in their Recent time list.)
+- A team member sees ALL of their own time — client work for clients they're
+  assigned to, administrative time, AND unsplit GROUP holding entries. A group
+  block has no single client (its members sit in the group list until it's split
+  for billing), so it used to fall outside the client-scoping rule and vanish
+  from the bookkeeper's own view: they couldn't see, edit or split time they had
+  tracked, and their totals came up short of what the owner saw for the same day.
+  Only the member COUNT is shown, never the member client names.
 - "SENT BACK" section (Time page): a dedicated panel at the top of the Time page
   listing every one of YOUR entries an owner returned, so they're found and fixed
   in one place. Unlike the Recent time list it is NOT scoped by the report period

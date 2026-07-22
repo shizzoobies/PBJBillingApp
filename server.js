@@ -31,7 +31,7 @@ import {
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
 } from './lib/time-entry.js'
-import { isTemplateVisibleToScope } from './lib/data-scope.js'
+import { isTemplateVisibleToScope, isTimeEntryVisibleToScope } from './lib/data-scope.js'
 import {
   generateBackupCodes,
   generateSecret,
@@ -547,10 +547,8 @@ function scopeAppDataForSession(session, data) {
   const checklistTemplates = (data.checklistTemplates ?? []).filter((template) =>
     isTemplateVisibleToScope(template, allowedClientIds),
   )
-  const timeEntries = (data.timeEntries ?? []).filter(
-    (entry) =>
-      entry.employeeId === me &&
-      (entry.isAdministrative || allowedClientIds.has(entry.clientId)),
+  const timeEntries = (data.timeEntries ?? []).filter((entry) =>
+    isTimeEntryVisibleToScope(entry, me, allowedClientIds),
   )
   // Subscription plans carry monthly fees — billing data the owner keeps
   // private. Non-owners receive no plans at all.
