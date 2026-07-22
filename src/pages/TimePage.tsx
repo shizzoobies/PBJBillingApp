@@ -1,4 +1,5 @@
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock3,
@@ -1696,24 +1697,39 @@ function SentBackEntries({
   onResume: (entry: TimeEntry) => void
   onSplitGroup: (entry: TimeEntry) => void
 }) {
+  // Collapsible + independently scrollable: a long sent-back list must never
+  // push Recent time (or anything below) off the screen.
+  const [open, setOpen] = useState(true)
   if (entries.length === 0) return null
   return (
     <section className="panel panel--sent-back">
       <div className="section-heading">
+        <button
+          type="button"
+          className="panel-collapse-btn"
+          aria-expanded={open}
+          aria-label={open ? 'Collapse sent-back entries' : 'Expand sent-back entries'}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+        </button>
         <div>
           <p className="section-kicker">Needs your attention</p>
           <h2>Sent back</h2>
-          <p className="section-subtitle">
-            {entries.length === 1
-              ? 'An owner sent this entry back for a change.'
-              : `An owner sent these ${entries.length} entries back for changes.`}{' '}
-            Fix each one and hit <strong>Edit &amp; resubmit</strong> — it goes straight back for
-            approval, no need to resubmit the whole week. Oldest first.
-          </p>
+          {open ? (
+            <p className="section-subtitle">
+              {entries.length === 1
+                ? 'An owner sent this entry back for a change.'
+                : `An owner sent these ${entries.length} entries back for changes.`}{' '}
+              Fix each one and hit <strong>Edit &amp; resubmit</strong> — it goes straight back for
+              approval, no need to resubmit the whole week. Oldest first.
+            </p>
+          ) : null}
         </div>
         <span className="status-pill status-pill--sent-back">{entries.length} to fix</span>
       </div>
-      <div className="entry-list">
+      {open ? (
+      <div className="entry-list entry-list--scroll">
         {entries.map((entry) => {
           const linkedTask = entry.taskId
             ? checklists.find((checklist) => checklist.id === entry.taskId)
@@ -1752,6 +1768,7 @@ function SentBackEntries({
           )
         })}
       </div>
+      ) : null}
     </section>
   )
 }
@@ -1805,6 +1822,9 @@ function RecentTimeEntries({
     const lastSession = sessions.length > 0 ? sessions[sessions.length - 1] : null
     return lastSession?.endAt ?? entry.endAt ?? entry.startAt ?? `${entry.date}T00:00:00`
   }
+  // Collapsible + independently scrollable, so neither this nor the sent-back
+  // list can push the other off the screen.
+  const [open, setOpen] = useState(true)
   const recencyKey = (entry: TimeEntry) => entry.createdAt ?? workedKey(entry)
   const sortedEntries = [...entries].sort((a, b) => {
     const byCreated = recencyKey(b).localeCompare(recencyKey(a))
@@ -1813,6 +1833,15 @@ function RecentTimeEntries({
   return (
     <section className="panel">
       <div className="section-heading">
+        <button
+          type="button"
+          className="panel-collapse-btn"
+          aria-expanded={open}
+          aria-label={open ? 'Collapse recent time' : 'Expand recent time'}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+        </button>
         <div>
           <p className="section-kicker">{role === 'owner' ? 'Team activity' : 'My activity'}</p>
           <h2>Recent time</h2>
@@ -1821,9 +1850,13 @@ function RecentTimeEntries({
           {sortedEntries.length} in range
         </span>
       </div>
+      {open ? (
+      <>
       <div className="time-filter-row">{reportPeriodControl}</div>
-      <div className="entry-list">
-        {sortedEntries.slice(0, 8).map((entry) => {
+      {/* Every entry in range, inside its own scroll box — the list used to be
+          capped at 8, which silently hid anything older for heavy loggers. */}
+      <div className="entry-list entry-list--scroll">
+        {sortedEntries.map((entry) => {
           const linkedTask = entry.taskId
             ? checklists.find((checklist) => checklist.id === entry.taskId)
             : null
@@ -1870,6 +1903,8 @@ function RecentTimeEntries({
           </p>
         ) : null}
       </div>
+      </>
+      ) : null}
     </section>
   )
 }

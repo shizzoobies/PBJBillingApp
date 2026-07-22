@@ -3558,6 +3558,35 @@ td strong {
 .checklist-card-title {
   display: block;
 }
+/* Collapse chevron on a panel heading (Time page: Recent time / Sent back). */
+.panel-collapse-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: var(--muted-ink, #8a8494);
+  cursor: pointer;
+}
+.panel-collapse-btn:hover {
+  color: var(--ink, #2c2735);
+}
+/* Push the count pill to the right now that a chevron leads the heading. */
+.section-heading > .panel-collapse-btn + div {
+  margin-right: auto;
+}
+
+/* A long list scrolls inside its own box instead of shoving everything below it
+   off the screen. Capped in vh so it always leaves the other panel visible. */
+.entry-list--scroll {
+  max-height: 58vh;
+  overflow-y: auto;
+  /* Room for the scrollbar so rows aren't clipped against it. */
+  padding-right: 6px;
+}
+
 /* The dedicated "Sent back" panel on the Time page — accented so work waiting on
    the bookkeeper is impossible to walk past. Hidden entirely when empty. */
 .panel--sent-back {

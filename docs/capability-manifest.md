@@ -68,7 +68,11 @@ picker, notification bell, and account menu sit in the top bar on every page.
   against it. Staff can do this for their assigned clients.
 - Recent time list: edit or delete your recent entries. The list is scoped by the
   shared Report period (defaults to this month); the live timer and the log form
-  aren't affected by it.
+  aren't affected by it. It shows EVERY entry in range (it used to cap at the 8
+  most recent, which silently hid older ones from anyone who logs a lot).
+- Both Time-page lists — "Sent back" and "Recent time" — collapse from a chevron
+  in their heading and each scrolls inside its own box, so a long list can never
+  push the other one (or anything below it) off the screen.
 - Editing an entry lets you change EVERY field, not just the time: the client it's
   billed to, the task, the date, the description, billable, the administrative
   toggle, the work sessions (or hours/minutes), and — for owners — which team
