@@ -135,7 +135,32 @@ snapshot first, single transaction, re-verify after.
 
 ## 5. Where things stand (newest first)
 
-**Most recent work was a run of time-approval bugs, all traced from one email
+**2026-07-22 — two approved production DATA writes (no code).** Railway's
+builders also hiccuped this day (one build failed with an internal RPC error,
+the next sat in "scheduling" ~25 min until aborted + redeployed) — neither was
+a code problem. The data writes, both owner-requested (Brittany, relayed by
+Alex), both done as snapshot + update in one transaction:
+
+1. **Approved Lisa's 3 June sent-back entries** (`time-01630c79` 0.43h,
+   `time-67d73edb` 0.27h, `time-b8a01ab7` 0.07h; June 9–10, all rejected
+   "No client"). They'd been invisible to her until `a365270`; Brittany had
+   already paid them out. *Undo:* status `rejected`, by `emp-patrice`,
+   at `2026-06-10T22:02:46Z` / `:39Z` / `:11Z`, notes "No Client"/"No client".
+2. **Approved all 25 remaining non-approved entries dated before 2026-07-19**
+   (rule: "any time before last week, even if the rejection was yesterday"):
+   Allison's 5 rejected Jul-14 entries (2.01h, `client_id` NULL — rejected by
+   Brittany Jul 21 with notes like "who was this for?", now permanently
+   unanswered) and Lisa's 20 pending Jul-15 split slices (~0.92h). *Undo:*
+   Allison's five back to `rejected` (notes/timestamps in the 2026-07-22 chat
+   and machine-local memory `prod-write-log.md`); Lisa's twenty back to
+   `pending` with null approver fields.
+
+Both writes set `approved_by='emp-patrice'`, cleared `approval_note`, mirroring
+`approveTimeEntries`. After: only current-week (Jul 21–22) pending entries
+remain. Note the approved no-client time (Allison's 5 + Lisa's June 3) shows in
+payroll/raw exports but bills nowhere.
+
+**Most recent code work was a run of time-approval bugs, all traced from one email
 from Brittany** ("I rejected parts of last week's timesheet and Allison isn't
 sure where it went"). That one report uncovered four separate defects — worth
 reading as a case study in §4's method, because each was found in the data, not
