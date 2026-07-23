@@ -761,6 +761,12 @@ export type FeatureRequestType = 'feature' | 'bug' | 'improvement'
 export type FeatureRequestStatus =
   | 'new'
   | 'planned'
+  /**
+   * Planned, but touches enough of the app that it must NOT be worked near
+   * end of month (the firm's close period, when a deploy break hurts most).
+   * The dev queue only picks these up mid-month.
+   */
+  | 'planned_not_eom'
   | 'in_progress'
   /**
    * Blocked on the owner: the developer needs an answer before building.

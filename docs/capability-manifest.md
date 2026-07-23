@@ -688,8 +688,14 @@ picker, notification bell, and account menu sit in the top bar on every page.
   Items come from two places: requests drafted by this assistant (chat →
   "Send to Alex") land here automatically, and the owner can add items directly.
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
-  In Progress → Needs answer → Shipped → Done, or Won't do), and a color-coded
-  priority level — Urgent (red), High (orange), Medium (blue), Low (slate).
+  Planned (not near EOM) → In Progress → Needs answer → Shipped → Done, or
+  Won't do), and a color-coded priority level — Urgent (red), High (orange),
+  Medium (blue), Low (slate).
+- **Planned (not near EOM)**: a parking lane for planned items that touch a lot
+  of the app. The developer's queue only picks these up MID-month (roughly the
+  6th through the 23rd), never during the firm's month-end close window, so a
+  risky change can't break things right when the books are being closed. Move
+  an item in or out with the normal status dropdown.
 - **Needs your answer** (clarification loop): when the developer can't build an
   item without a decision, it moves to "Needs answer" with the blocking question
   attached. Those items appear in an amber panel pinned ABOVE all sections, each

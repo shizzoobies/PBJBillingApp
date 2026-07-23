@@ -161,6 +161,7 @@ describe('status maps', () => {
     const statuses: FeatureRequestStatus[] = [
       'new',
       'planned',
+      'planned_not_eom',
       'in_progress',
       'needs_input',
       'shipped',
@@ -171,6 +172,10 @@ describe('status maps', () => {
     expect(Object.keys(STATUS_ORDER).sort()).toEqual([...statuses].sort())
     expect(STATUS_LABELS.shipped).toBe('Shipped')
     expect(STATUS_LABELS.needs_input).toBe('Needs answer')
+    expect(STATUS_LABELS.planned_not_eom).toBe('Planned (not near EOM)')
+    // The EOM-parked lane sits right after planned, before in_progress, and is OPEN.
+    expect(STATUS_ORDER.planned).toBeLessThan(STATUS_ORDER.planned_not_eom)
+    expect(STATUS_ORDER.planned_not_eom).toBeLessThan(STATUS_ORDER.in_progress)
     // Shipped sits between in_progress and done in the lifecycle order.
     expect(STATUS_ORDER.in_progress).toBeLessThan(STATUS_ORDER.shipped)
     expect(STATUS_ORDER.shipped).toBeLessThan(STATUS_ORDER.done)

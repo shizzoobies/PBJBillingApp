@@ -8226,6 +8226,7 @@ export class AppDataStore {
     const allowedStatuses = [
       'new',
       'planned',
+      'planned_not_eom',
       'in_progress',
       'needs_input',
       'shipped',

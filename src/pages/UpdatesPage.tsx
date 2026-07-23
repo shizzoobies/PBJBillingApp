@@ -45,6 +45,7 @@ const TYPE_OPTIONS: Array<{ value: FeatureRequestType; label: string }> = [
 const STATUS_OPTIONS: Array<{ value: FeatureRequestStatus; label: string }> = [
   { value: 'new', label: 'New' },
   { value: 'planned', label: 'Planned' },
+  { value: 'planned_not_eom', label: 'Planned (not near EOM)' },
   { value: 'in_progress', label: 'In Progress' },
   { value: 'needs_input', label: 'Needs answer' },
   { value: 'shipped', label: 'Shipped' },

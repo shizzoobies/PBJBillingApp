@@ -33,6 +33,7 @@ export const PRIORITY_ORDER: Record<FeatureRequestPriority, number> = {
 export const STATUS_LABELS: Record<FeatureRequestStatus, string> = {
   new: 'New',
   planned: 'Planned',
+  planned_not_eom: 'Planned (not near EOM)',
   in_progress: 'In Progress',
   needs_input: 'Needs answer',
   shipped: 'Shipped',
@@ -44,11 +45,12 @@ export const STATUS_LABELS: Record<FeatureRequestStatus, string> = {
 export const STATUS_ORDER: Record<FeatureRequestStatus, number> = {
   new: 0,
   planned: 1,
-  in_progress: 2,
-  needs_input: 3,
-  shipped: 4,
-  done: 5,
-  wont_do: 6,
+  planned_not_eom: 2,
+  in_progress: 3,
+  needs_input: 4,
+  shipped: 5,
+  done: 6,
+  wont_do: 7,
 }
 
 /** Weight for an item's priority level (unknown → medium). */
