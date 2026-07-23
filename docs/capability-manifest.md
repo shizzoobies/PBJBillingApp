@@ -506,16 +506,26 @@ picker, notification bell, and account menu sit in the top bar on every page.
   checklists land in the right Active-Checklists-board column automatically —
   connecting plans → checklists → board.
 
-## To 100% (setup checklist, owner only)
+## To 100% (owner only)
 
-- A live "Setup checklist" page (sidebar: "To 100%") that lists everything still
-  missing for the workspace to be fully set up, grouped by category. Every
-  section (each of Billing, Clients, Team, Plans, Contacts, and the Checklist
-  work section) is COLLAPSED by default and expands on click.
-- Top-of-page summary: a row of chips outlining what's left — one per non-empty
-  setup category with its item count, plus a "Checklist items open" chip with the
-  total unchecked step count. Clicking a chip opens that section and scrolls to
-  it.
+- **What this page is (and deliberately is NOT):** it answers one question —
+  "what parts of the app aren't working or aren't fully configured?" —
+  organized BY TAB, mirroring the sidebar. ONLY problems appear. Normal
+  day-to-day checklist work (active checklists with unchecked steps) NEVER
+  shows here — that's operations, and it lives on the Checklists page and the
+  Board. A tab with nothing wrong renders as a slim GREEN row ("Nothing
+  missing"), so the owner also sees which areas are fully working.
+- Tabs covered, in sidebar order: **Checklists** (recurring recipes that will
+  silently never generate), **Board** (recipes with no Board column — their
+  checklists pile into "Uncategorized"), **Clients** (missing email / team /
+  contacts / plan checklists), **Invoices** (Monthly/Annual clients with no
+  rate — their invoice would be $0), **Plans**, **Team** (no bill rate),
+  **Contacts** (unlinked). Tabs without automated checks (Time, Timesheet,
+  Dashboard, reports) aren't listed, and the page says so — unlisted means
+  "not scanned", not "verified fine".
+- Top-of-page summary: one chip per tab that HAS problems, with its count;
+  clicking a chip opens that tab's section and scrolls to it. Sections with
+  issues are collapsed by default; green tabs are always visible.
 - Fix in place: most items open a small QUICK-FIX modal with only the missing
   field(s) — a monthly/annual rate, a billing email, the assigned-team picker,
   or a "Set them up" button for a plan's missing checklists — and save without
@@ -539,27 +549,11 @@ picker, notification bell, and account menu sit in the top bar on every page.
   to copy, never scheduled, so an empty one isn't a fault. These mirror the
   materializer's own conditions, so the list is exactly "what is silently not
   running".
-- Checks: Monthly/Annual clients with no rate; clients missing a billing email,
-  an assigned team member, or a contact; clients on a plan whose plan checklists
-  aren't set up yet; team members with no bill rate; plans with no checklist
-  templates; contacts not linked to any client. Shows "You're all set — 100%"
-  when nothing is outstanding.
+- Shows "You're all set — 100%" when nothing is misconfigured anywhere.
 - Suggestions that stand for several outstanding things name each one rather
   than only counting them: the "plan checklists not set up" item lists each
   specific missing checklist by name (already-added ones are excluded, and the
   count matches the named list).
-- Checklist items to finish: a separate, collapsible section (below the setup
-  checks) that looks at the actual checklist work — every UNCHECKED step across
-  active checklists, named and grouped by client, with each client collapsible
-  (all collapsed by default). A step counts as incomplete when it isn't done (an
-  item with any unfinished sub-step is itself unfinished); completed steps are
-  hidden. Shows "Every checklist step is done" when nothing is outstanding. This
-  is separate from the setup "You're all set — 100%" banner, which stays about
-  configuration.
-- Checklist quick-preview: clicking a checklist name in that section opens a
-  small modal showing its steps with checkboxes you can tick off in place (top-
-  level items and one level of sub-steps; the To-100% counts update live), plus
-  an "Open full checklist" button to jump to the full editor only if wanted.
 
 ## Team (owner only)
 

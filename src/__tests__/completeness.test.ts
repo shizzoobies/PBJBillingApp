@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
-  computeIncompleteChecklists,
   computeSetupIssues,
   groupSetupIssues,
   type CompletenessInput,
 } from '../lib/completeness'
 import type {
   Checklist,
-  ChecklistItem,
   Client,
   Contact,
   Employee,
@@ -96,7 +94,7 @@ describe('computeSetupIssues', () => {
       ...emptyInput,
       clients: [makeClient({ billingMode: 'hourly', monthlyRate: undefined })],
     }
-    expect(computeSetupIssues(input).some((i) => i.category === 'Billing')).toBe(false)
+    expect(computeSetupIssues(input).some((i) => i.category === 'Invoices')).toBe(false)
   })
 
   it('flags missing email, team, and contacts on a client', () => {
@@ -275,92 +273,91 @@ describe('computeSetupIssues — recurring checklists that will never generate',
   })
 })
 
-const item = (label: string, done: boolean, subItems?: ChecklistItem['subItems']): ChecklistItem => ({
-  id: `item-${label}`,
-  label,
-  done,
-  ...(subItems ? { subItems } : {}),
+// `computeIncompleteChecklists` was removed with the To-100% rework (owner
+// feedback round 4): active checklist work is operations, not a broken part of
+// the site, and must never appear on that page. This block pins the guarantee
+// at the engine level — in-flight checklists produce NO issues.
+describe('computeSetupIssues — never reports in-flight checklist work', () => {
+  it('an active checklist with unchecked steps produces no issue anywhere', () => {
+    const input: CompletenessInput = {
+      ...emptyInput,
+      clients: [makeClient({})],
+      employees: [{ id: 'emp-1', name: 'Alice', role: 'Bookkeeper', billRate: 100 }],
+      contacts: [{ id: 'contact-1', name: 'Pat' }],
+      checklists: [
+        {
+          id: 'cl-1',
+          title: 'Monthly Bookkeeping',
+          clientId: 'client-1',
+          items: [{ id: 'i1', label: 'Reconcile', done: false }],
+        } as unknown as Checklist,
+      ],
+    }
+    expect(computeSetupIssues(input)).toEqual([])
+  })
+
 })
 
-const makeChecklist = (overrides: Partial<Checklist>): Checklist => ({
-  id: 'cl-1',
-  title: 'Monthly Bookkeeping',
-  clientId: 'client-1',
-  assigneeId: 'emp-1',
-  dueDate: '2026-07-20',
-  viewerIds: [],
-  editorIds: [],
-  items: [],
-  ...overrides,
-})
+describe('computeSetupIssues — Board column check', () => {
+  const template = (overrides: Record<string, unknown>): ChecklistTemplate =>
+    ({
+      id: 'tmpl-1',
+      title: 'Monthly Close',
+      clientId: 'client-1',
+      assigneeId: 'emp-1',
+      frequency: 'monthly',
+      active: true,
+      isStandard: false,
+      nextDueDate: '2026-08-01',
+      stages: [
+        { id: 's1', name: 'Stage 1', assigneeId: 'emp-1', items: [{ id: 'i1', label: 'Do it' }] },
+      ],
+      ...overrides,
+    }) as unknown as ChecklistTemplate
+  const boardIssues = (tmpl: ChecklistTemplate) =>
+    computeSetupIssues({ ...emptyInput, clients: [makeClient({})], checklistTemplates: [tmpl] })
+      .filter((issue) => issue.category === 'Board')
 
-describe('computeIncompleteChecklists', () => {
-  const clients = [makeClient({ id: 'client-1', name: 'Acme' })]
-
-  it('returns nothing when every step is done', () => {
-    const checklists = [makeChecklist({ items: [item('Reconcile', true), item('Review', true)] })]
-    expect(computeIncompleteChecklists(checklists, clients)).toEqual([])
+  it('flags a healthy recipe with no Board column (lands in Uncategorized)', () => {
+    const issues = boardIssues(template({}))
+    expect(issues).toHaveLength(1)
+    expect(issues[0].id).toBe('board:no-column:tmpl-1')
+    expect(issues[0].severity).toBe('low')
   })
 
-  it('lists each incomplete step by name and excludes completed ones', () => {
-    const checklists = [
-      makeChecklist({
-        items: [item('Reconcile', false), item('Categorize', true), item('Review', false)],
-      }),
-    ]
-    const groups = computeIncompleteChecklists(checklists, clients)
-    expect(groups).toHaveLength(1)
-    const cl = groups[0].checklists[0]
-    expect(cl.incompleteItems).toEqual(['Reconcile', 'Review'])
-    expect(cl.incompleteCount).toBe(2)
-    expect(cl.totalCount).toBe(3)
-    expect(groups[0].totalIncomplete).toBe(2)
-  })
-
-  it('treats an item with any unfinished sub-step as incomplete', () => {
-    const checklists = [
-      makeChecklist({
-        items: [item('Payroll', false, [{ id: 's1', title: 'Import', done: true }, { id: 's2', title: 'Approve', done: false }])],
-      }),
-    ]
-    const groups = computeIncompleteChecklists(checklists, clients)
-    expect(groups[0].checklists[0].incompleteItems).toEqual(['Payroll'])
-  })
-
-  it('drops soft-deleted checklists', () => {
-    const checklists = [makeChecklist({ deletedAt: '2026-07-01', items: [item('Reconcile', false)] })]
-    expect(computeIncompleteChecklists(checklists, clients)).toEqual([])
-  })
-
-  it('groups by client, resolves client names, and orders most-incomplete first', () => {
-    const twoClients = [
-      makeClient({ id: 'client-1', name: 'Acme' }),
-      makeClient({ id: 'client-2', name: 'Beta' }),
-    ]
-    const checklists = [
-      makeChecklist({ id: 'cl-a', clientId: 'client-1', items: [item('A', false)] }),
-      makeChecklist({ id: 'cl-b', clientId: 'client-2', items: [item('B', false), item('C', false)] }),
-    ]
-    const groups = computeIncompleteChecklists(checklists, twoClients)
-    expect(groups.map((g) => g.clientName)).toEqual(['Beta', 'Acme'])
-  })
-
-  it('labels an unknown client id as Unassigned', () => {
-    const checklists = [makeChecklist({ clientId: 'ghost', items: [item('A', false)] })]
-    expect(computeIncompleteChecklists(checklists, clients)[0].clientName).toBe('Unassigned')
+  it('says nothing when a column is set, and skips standard blueprints', () => {
+    expect(boardIssues(template({ categoryId: 'cat-1' }))).toEqual([])
+    expect(boardIssues(template({ isStandard: true }))).toEqual([])
   })
 })
 
 describe('groupSetupIssues', () => {
-  it('groups issues by category in display order and drops empty groups', () => {
+  it('groups by tab in sidebar order, KEEPING empty tabs so they can render green', () => {
     const input: CompletenessInput = {
       ...emptyInput,
       clients: [makeClient({ monthlyRate: 0, email: '' })],
       employees: [{ id: 'emp-1', name: 'Alice', role: 'Bookkeeper', billRate: null }],
     }
     const groups = groupSetupIssues(computeSetupIssues(input))
-    const categories = groups.map((g) => g.category)
-    expect(categories).toEqual(['Billing', 'Clients', 'Team'])
-    expect(groups.every((g) => g.issues.length > 0)).toBe(true)
+    expect(groups.map((g) => g.category)).toEqual([
+      'Checklists',
+      'Board',
+      'Clients',
+      'Invoices',
+      'Plans',
+      'Team',
+      'Contacts',
+    ])
+    const counts = Object.fromEntries(groups.map((g) => [g.category, g.issues.length]))
+    // Empty tabs are present with zero issues — the page shows them as green.
+    expect(counts).toEqual({
+      Checklists: 0,
+      Board: 0,
+      Clients: 1,
+      Invoices: 1,
+      Plans: 0,
+      Team: 1,
+      Contacts: 0,
+    })
   })
 })

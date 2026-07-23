@@ -8803,6 +8803,28 @@ button.repeating-task-toggle-pill {
   gap: 12px;
   color: #1f7d4d;
 }
+
+/* A tab with nothing wrong: slim green row, not a collapsible section. */
+.setup-tab-clear {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+.setup-cat-header--clear {
+  cursor: default;
+  color: #1f7d4d;
+}
+.setup-tab-clear-icon {
+  color: #1f7d4d;
+  flex: none;
+}
+.setup-tab-clear .setup-cat-count {
+  color: #1f7d4d;
+}
+
+.setup-coverage-note {
+  margin: 4px 2px 0;
+  font-size: 0.82rem;
+}
 .setup-all-clear strong {
   display: block;
   color: var(--ink, #1f2430);

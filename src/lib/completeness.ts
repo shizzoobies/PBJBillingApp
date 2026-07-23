@@ -1,10 +1,14 @@
 /**
- * "To 100%" setup-completeness engine — a pure, derived view over the workspace
- * that surfaces what the owner still needs to fill in for the app to be fully
- * set up (clients missing rates, team without bill rates, contacts not linked,
- * plans without checklists, etc.). No data-model change: it reads the data the
- * client already holds and returns a flat list of actionable issues, each with
- * a deep-link to where it's fixed. Tested in src/__tests__/completeness.test.ts.
+ * "To 100%" completeness engine — a pure, derived view over the workspace that
+ * surfaces what is MISCONFIGURED or BLOCKING (clients missing rates, recurring
+ * recipes that can silently never generate, team without bill rates, …), each
+ * issue with a deep-link or quick-fix. Organized BY TAB, mirroring the sidebar,
+ * so the owner can see per area of the app what isn't working yet.
+ *
+ * Deliberately NOT here (owner feedback, 4th iteration of this page): normal
+ * in-flight work. An active checklist with unchecked steps is work being done,
+ * not a part of the site that's broken — it must never appear on this page.
+ * Tested in src/__tests__/completeness.test.ts.
  */
 import type {
   Checklist,
@@ -14,9 +18,17 @@ import type {
   Employee,
   SubscriptionPlan,
 } from './types'
-import { isChecklistItemDone, missingPlanTemplatesForClient, unlinkedContacts } from './utils'
+import { missingPlanTemplatesForClient, unlinkedContacts } from './utils'
 
-export type SetupCategory = 'Billing' | 'Clients' | 'Checklists' | 'Team' | 'Contacts' | 'Plans'
+/** The sidebar tab an issue belongs to — the page groups by these. */
+export type SetupCategory =
+  | 'Checklists'
+  | 'Board'
+  | 'Clients'
+  | 'Invoices'
+  | 'Plans'
+  | 'Team'
+  | 'Contacts'
 export type SetupSeverity = 'high' | 'medium' | 'low'
 
 /**
@@ -84,7 +96,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     if (client.billingMode === 'subscription' && !isPositive(client.monthlyRate)) {
       issues.push({
         id: `billing:monthly:${client.id}`,
-        category: 'Billing',
+        category: 'Invoices',
         title: `Set a monthly rate for ${client.name}`,
         detail: 'This Monthly client has no monthly rate, so its invoice is $0.',
         fix: { kind: 'clientNumber', clientId: client.id, field: 'monthlyRate', label: 'Monthly rate' },
@@ -95,7 +107,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     if (client.billingMode === 'annual' && !isPositive(client.annualRate)) {
       issues.push({
         id: `billing:annual:${client.id}`,
-        category: 'Billing',
+        category: 'Invoices',
         title: `Set an annual rate for ${client.name}`,
         detail: 'This Annual client has no annual fee, so its invoice is $0.',
         fix: { kind: 'clientNumber', clientId: client.id, field: 'annualRate', label: 'Annual fee' },
@@ -289,6 +301,19 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
         'medium',
       )
     }
+    // Board tab: no column picked, so everything this recipe generates piles
+    // into "Uncategorized" instead of its service column.
+    if (!template.categoryId) {
+      issues.push({
+        id: `board:no-column:${template.id}`,
+        category: 'Board',
+        title: `Pick a Board column for "${name}"`,
+        detail:
+          'It has no Board column, so its checklists land in "Uncategorized" instead of their service column.',
+        to,
+        severity: 'low',
+      })
+    }
   }
 
   // Team members without a bill rate can't have their billable hours invoiced.
@@ -334,14 +359,14 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
   return issues
 }
 
+/** Sidebar order, so the page reads like the app's own navigation. */
 const CATEGORY_ORDER: SetupCategory[] = [
-  'Billing',
-  // Checklists sit high: a recipe that silently never generates is invisible
-  // work not getting done.
   'Checklists',
+  'Board',
   'Clients',
-  'Team',
+  'Invoices',
   'Plans',
+  'Team',
   'Contacts',
 ]
 
@@ -350,89 +375,22 @@ export interface SetupCategoryGroup {
   issues: SetupIssue[]
 }
 
-/** Group issues by category in display order, dropping empty categories. */
+/**
+ * Group issues by tab in sidebar order. EVERY checked tab is returned — a tab
+ * with zero issues comes back with an empty list so the page can show it as
+ * "nothing missing" (the owner asked to see, per tab, whether anything is
+ * broken; an all-green tab is information, not noise).
+ */
 export function groupSetupIssues(issues: SetupIssue[]): SetupCategoryGroup[] {
   return CATEGORY_ORDER.map((category) => ({
     category,
     issues: issues.filter((issue) => issue.category === category),
-  })).filter((group) => group.issues.length > 0)
+  }))
 }
 
-/** One active checklist that still has unchecked steps. */
-export interface IncompleteChecklist {
-  checklistId: string
-  title: string
-  dueDate?: string
-  /** The labels of the steps that are NOT done, in checklist order. */
-  incompleteItems: string[]
-  incompleteCount: number
-  totalCount: number
-}
-
-/** A client and the checklist work still outstanding on it. */
-export interface IncompleteChecklistGroup {
-  clientId: string
-  clientName: string
-  totalIncomplete: number
-  checklists: IncompleteChecklist[]
-}
-
-/**
- * The operational companion to `computeSetupIssues`: every UNCHECKED checklist
- * step across active checklists, named and grouped by client — so the To-100%
- * page shows the actual outstanding checklist work, not just how many items are
- * left. This is the "checklist part" the setup checks above never looked at.
- *
- * A step counts as incomplete when `isChecklistItemDone` is false, which rolls
- * sub-steps up (an item with any unfinished sub-step is itself unfinished).
- * Completed steps are omitted; checklists with nothing left, and soft-deleted
- * checklists, are dropped entirely. Groups are ordered most-incomplete first;
- * within a group, checklists are ordered by due date then title.
- */
-export function computeIncompleteChecklists(
-  checklists: Checklist[],
-  clients: Client[],
-): IncompleteChecklistGroup[] {
-  const clientNameById = new Map(clients.map((client) => [client.id, client.name]))
-  const byClient = new Map<string, IncompleteChecklistGroup>()
-
-  for (const checklist of checklists) {
-    if (checklist.deletedAt) continue
-    const items = checklist.items ?? []
-    if (items.length === 0) continue
-    const incompleteItems = items
-      .filter((item) => !isChecklistItemDone(item))
-      .map((item) => item.label)
-    if (incompleteItems.length === 0) continue
-
-    const clientId = checklist.clientId ?? ''
-    const group = byClient.get(clientId) ?? {
-      clientId,
-      clientName: clientNameById.get(clientId) ?? 'Unassigned',
-      totalIncomplete: 0,
-      checklists: [],
-    }
-    group.checklists.push({
-      checklistId: checklist.id,
-      title: checklist.title,
-      dueDate: checklist.dueDate,
-      incompleteItems,
-      incompleteCount: incompleteItems.length,
-      totalCount: items.length,
-    })
-    group.totalIncomplete += incompleteItems.length
-    byClient.set(clientId, group)
-  }
-
-  const groups = [...byClient.values()]
-  for (const group of groups) {
-    group.checklists.sort(
-      (a, b) =>
-        (a.dueDate ?? '').localeCompare(b.dueDate ?? '') || a.title.localeCompare(b.title),
-    )
-  }
-  return groups.sort(
-    (a, b) =>
-      b.totalIncomplete - a.totalIncomplete || a.clientName.localeCompare(b.clientName),
-  )
-}
+// NOTE: `computeIncompleteChecklists` (every unchecked step of active
+// checklists) used to live here and feed a "Checklist items to finish" section
+// on the To-100% page. Removed on the owner's fourth round of feedback: active
+// checklist work is day-to-day operations, not a broken part of the site, and
+// its presence kept drowning the real signal. The Checklists page and Board
+// are where in-flight work lives.

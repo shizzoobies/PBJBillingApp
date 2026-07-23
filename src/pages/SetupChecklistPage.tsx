@@ -6,14 +6,12 @@ import {
   ChevronRight,
   CircleAlert,
   EyeOff,
-  ListChecks,
   RotateCcw,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import {
-  computeIncompleteChecklists,
   computeSetupIssues,
   groupSetupIssues,
   type SetupIssue,
@@ -24,7 +22,6 @@ import {
   fetchDismissedSetupIssues,
   restoreSetupIssueRequest,
 } from '../lib/api'
-import { isChecklistItemDone } from '../lib/utils'
 
 const SEVERITY_LABEL: Record<SetupSeverity, string> = {
   high: 'Needs attention',
@@ -33,26 +30,23 @@ const SEVERITY_LABEL: Record<SetupSeverity, string> = {
 }
 
 /**
- * "To 100%" — a live, owner-only checklist of everything still missing for the
- * workspace to be fully set up. Pure derived view (see lib/completeness.ts).
- * Each item can be fixed in a focused quick-fix modal (or deep-links when there
- * isn't a single field), or IGNORED (persisted per owner, restorable). Category
- * sections collapse.
+ * "To 100%" — an owner-only, per-TAB list of what is misconfigured or blocking
+ * in each area of the app (see lib/completeness.ts). Only problems appear;
+ * normal in-flight checklist work never shows here (owner feedback, round 4 —
+ * this page answers "what parts of the site aren't working", nothing else).
+ * A tab with nothing wrong shows as green, so working areas are visible too.
+ * Each item can be fixed in a focused quick-fix modal (or deep-links when
+ * there isn't a single field), or IGNORED (persisted per owner, restorable).
  */
 export function SetupChecklistPage() {
   const { data, ownerMode } = useAppContext()
 
   // Hooks run unconditionally (before the ownerMode early return).
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
-  // Everything is COLLAPSED by default; these Sets hold what the owner has
-  // opened. (Empty = all collapsed.)
+  // Sections with issues are COLLAPSED by default; this holds what's opened.
   const [expandedCats, setExpandedCats] = useState<Set<string>>(new Set())
-  const [expandedClients, setExpandedClients] = useState<Set<string>>(new Set())
-  const [checklistOpen, setChecklistOpen] = useState(false)
   const [showIgnored, setShowIgnored] = useState(false)
   const [fixTarget, setFixTarget] = useState<SetupIssue | null>(null)
-  // Id of the checklist shown in the quick-preview modal (null = closed).
-  const [previewChecklistId, setPreviewChecklistId] = useState<string | null>(null)
 
   useEffect(() => {
     if (!ownerMode) return
@@ -87,17 +81,6 @@ export function SetupChecklistPage() {
       data.checklistTemplates,
       data.checklists,
     ],
-  )
-
-  // The operational side of "to 100%": actual unchecked checklist steps, named
-  // and grouped by client (distinct from the setup-config issues above).
-  const incompleteChecklists = useMemo(
-    () => computeIncompleteChecklists(data.checklists, data.clients),
-    [data.checklists, data.clients],
-  )
-  const totalIncompleteSteps = incompleteChecklists.reduce(
-    (sum, group) => sum + group.totalIncomplete,
-    0,
   )
 
   if (!ownerMode) {
@@ -141,13 +124,6 @@ export function SetupChecklistPage() {
       else next.add(category)
       return next
     })
-  const toggleClient = (clientId: string) =>
-    setExpandedClients((prev) => {
-      const next = new Set(prev)
-      if (next.has(clientId)) next.delete(clientId)
-      else next.add(clientId)
-      return next
-    })
   // Summary chips at the top jump to (and open) their section.
   const scrollTo = (id: string) =>
     requestAnimationFrame(() =>
@@ -157,10 +133,6 @@ export function SetupChecklistPage() {
     setExpandedCats((prev) => new Set(prev).add(category))
     scrollTo(`setup-cat-${category}`)
   }
-  const jumpToChecklists = () => {
-    setChecklistOpen(true)
-    scrollTo('setup-checklist-work')
-  }
 
   return (
     <section className="content-grid" id="setup-checklist">
@@ -168,7 +140,7 @@ export function SetupChecklistPage() {
         <div className="section-heading">
           <div>
             <p className="section-kicker">Getting to 100%</p>
-            <h2>Setup checklist</h2>
+            <h2>What&apos;s not working, by tab</h2>
           </div>
         </div>
         {activeIssues.length === 0 ? (
@@ -177,23 +149,25 @@ export function SetupChecklistPage() {
             <div>
               <strong>You&apos;re all set — 100%.</strong>
               <p className="muted-text" style={{ margin: 0 }}>
-                Every client, team member, plan, and contact is fully configured
+                Nothing is misconfigured or blocked anywhere in the app
                 {ignoredIssues.length > 0 ? ` (${ignoredIssues.length} ignored)` : ''}.
               </p>
             </div>
           </div>
         ) : (
           <p className="muted-text" style={{ marginTop: 0 }}>
-            {activeIssues.length} item{activeIssues.length === 1 ? '' : 's'} left to set up
+            {activeIssues.length} thing{activeIssues.length === 1 ? '' : 's'} to fix
             {highCount > 0 ? ` · ${highCount} need${highCount === 1 ? 's' : ''} attention` : ''}.
-            This list updates itself as you fill things in.
+            Only problems show here — normal day-to-day checklist work never appears on this
+            page. Green tabs are fully working.
           </p>
         )}
-        {groups.length > 0 || totalIncompleteSteps > 0 ? (
+        {activeIssues.length > 0 ? (
           <div className="setup-overview">
-            {groups.length > 0 ? (
-              <div className="setup-stat-strip" role="group" aria-label="Setup items by area">
-                {groups.map((group) => (
+            <div className="setup-stat-strip" role="group" aria-label="Problems by tab">
+              {groups
+                .filter((group) => group.issues.length > 0)
+                .map((group) => (
                   <button
                     key={group.category}
                     type="button"
@@ -204,36 +178,25 @@ export function SetupChecklistPage() {
                     <span className="setup-stat-label">{group.category}</span>
                   </button>
                 ))}
-              </div>
-            ) : null}
-            {totalIncompleteSteps > 0 ? (
-              <button
-                type="button"
-                className="setup-checklist-callout"
-                onClick={jumpToChecklists}
-              >
-                <span className="setup-callout-icon">
-                  <ListChecks size={20} />
-                </span>
-                <span className="setup-callout-text">
-                  <span className="setup-callout-title">
-                    {totalIncompleteSteps} checklist item{totalIncompleteSteps === 1 ? '' : 's'}{' '}
-                    still open
-                  </span>
-                  <span className="setup-callout-sub">
-                    Across {incompleteChecklists.length} client
-                    {incompleteChecklists.length === 1 ? '' : 's'} — the actual checklist work,
-                    separate from setup
-                  </span>
-                </span>
-                <ChevronRight size={18} className="setup-callout-chev" />
-              </button>
-            ) : null}
+            </div>
           </div>
         ) : null}
       </div>
 
       {groups.map((group) => {
+        // A tab with nothing wrong renders as a slim green row — visible proof
+        // that area is fully working, without a collapsible section to open.
+        if (group.issues.length === 0) {
+          return (
+            <div className="panel setup-tab-clear" key={group.category}>
+              <div className="setup-cat-header setup-cat-header--clear">
+                <CheckCircle2 size={16} className="setup-tab-clear-icon" />
+                <span className="section-kicker">{group.category}</span>
+                <span className="setup-cat-count">Nothing missing</span>
+              </div>
+            </div>
+          )
+        }
         const isCollapsed = !expandedCats.has(group.category)
         return (
           <div className="panel" key={group.category} id={`setup-cat-${group.category}`}>
@@ -297,85 +260,10 @@ export function SetupChecklistPage() {
         )
       })}
 
-      <div className="panel" id="setup-checklist-work">
-        <button
-          type="button"
-          className="setup-cat-header"
-          aria-expanded={checklistOpen}
-          onClick={() => setChecklistOpen((value) => !value)}
-        >
-          {checklistOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          <span className="section-kicker">Checklist items to finish</span>
-          <span className="setup-cat-count">
-            {totalIncompleteSteps > 0
-              ? `${totalIncompleteSteps} step${totalIncompleteSteps === 1 ? '' : 's'}`
-              : 'All done'}
-          </span>
-        </button>
-        {!checklistOpen ? null : incompleteChecklists.length === 0 ? (
-          <div className="setup-all-clear">
-            <CheckCircle2 size={28} />
-            <div>
-              <strong>Every checklist step is done.</strong>
-              <p className="muted-text" style={{ margin: 0 }}>
-                No active checklist has any unchecked steps right now.
-              </p>
-            </div>
-          </div>
-        ) : (
-          <>
-            <p className="muted-text" style={{ marginTop: 8 }}>
-              Every unchecked step across your active checklists, by client. Completed steps
-              aren&apos;t shown. Open a checklist to check things off without leaving this page.
-            </p>
-            {incompleteChecklists.map((group) => {
-              const isCollapsed = !expandedClients.has(group.clientId)
-              return (
-                <div className="setup-checklist-client" key={group.clientId}>
-                  <button
-                    type="button"
-                    className="setup-cat-header"
-                    aria-expanded={!isCollapsed}
-                    onClick={() => toggleClient(group.clientId)}
-                  >
-                    {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
-                    <span className="section-kicker">{group.clientName}</span>
-                    <span className="setup-cat-count">
-                      {group.totalIncomplete} step{group.totalIncomplete === 1 ? '' : 's'}
-                    </span>
-                  </button>
-                  {isCollapsed
-                    ? null
-                    : group.checklists.map((checklist) => (
-                        <div className="setup-checklist" key={checklist.checklistId}>
-                          <div className="setup-checklist-head">
-                            <ListChecks size={15} className="setup-issue-icon" />
-                            <button
-                              type="button"
-                              className="setup-checklist-title"
-                              onClick={() => setPreviewChecklistId(checklist.checklistId)}
-                              title="Open a quick view of this checklist"
-                            >
-                              {checklist.title}
-                            </button>
-                            <span className="setup-checklist-meta">
-                              {checklist.incompleteCount}/{checklist.totalCount} left
-                              {checklist.dueDate ? ` · due ${checklist.dueDate}` : ''}
-                            </span>
-                          </div>
-                          <ul className="setup-issue-items">
-                            {checklist.incompleteItems.map((label, index) => (
-                              <li key={`${checklist.checklistId}:${index}`}>{label}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      ))}
-                </div>
-              )
-            })}
-          </>
-        )}
-      </div>
+      <p className="muted-text setup-coverage-note">
+        Tabs not listed here (Time, Timesheet, Dashboard, reports) don&apos;t have automated
+        checks yet — nothing is verified or broken there, they&apos;re just not scanned.
+      </p>
 
       {ignoredIssues.length > 0 ? (
         <div className="panel">
@@ -415,123 +303,7 @@ export function SetupChecklistPage() {
       {fixTarget && fixTarget.fix ? (
         <QuickFixModal issue={fixTarget} onClose={() => setFixTarget(null)} />
       ) : null}
-
-      {previewChecklistId ? (
-        <ChecklistPreviewModal
-          checklistId={previewChecklistId}
-          onClose={() => setPreviewChecklistId(null)}
-        />
-      ) : null}
     </section>
-  )
-}
-
-/**
- * Quick, in-place view of one checklist: its steps with checkboxes you can tick
- * off (top-level items and one level of sub-steps, via the same context
- * handlers the full page uses — so the To-100% counts update live), plus a
- * button to open the full checklist page only if the owner wants the complete
- * editor (due dates, waiting-on, notes, deeper nesting).
- */
-function ChecklistPreviewModal({
-  checklistId,
-  onClose,
-}: {
-  checklistId: string
-  onClose: () => void
-}) {
-  const { data, toggleChecklistItem, toggleSubItem } = useAppContext()
-  const checklist = data.checklists.find((c) => c.id === checklistId)
-  const client = checklist ? data.clients.find((c) => c.id === checklist.clientId) : undefined
-
-  if (!checklist) {
-    return null
-  }
-
-  const items = checklist.items ?? []
-  const doneCount = items.filter((item) => isChecklistItemDone(item)).length
-
-  return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
-      <div
-        className="modal-panel setup-preview-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={checklist.title}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="setup-preview-head">
-          <div>
-            <h2 className="modal-title" style={{ marginBottom: 2 }}>
-              {checklist.title}
-            </h2>
-            <p className="muted-text" style={{ margin: 0 }}>
-              {client?.name ?? 'Client'} · {doneCount}/{items.length} done
-              {checklist.dueDate ? ` · due ${checklist.dueDate}` : ''}
-            </p>
-          </div>
-        </div>
-
-        <ul className="setup-preview-items">
-          {items.map((item) => {
-            const subItems = item.subItems ?? []
-            const hasSubs = subItems.length > 0
-            return (
-              <li key={item.id} className="setup-preview-item">
-                <label className={`task-row${item.done ? ' done' : ''}`}>
-                  <input
-                    type="checkbox"
-                    checked={item.done}
-                    title={hasSubs ? 'Checking this checks every sub-step' : undefined}
-                    onChange={() => void toggleChecklistItem(checklist.id, item.id)}
-                  />
-                  <span className="task-row-body">
-                    <span className="task-row-title">
-                      {item.label}
-                      {hasSubs ? (
-                        <span className="sub-item-count">
-                          {subItems.filter((sub) => isChecklistItemDone(sub)).length}/
-                          {subItems.length}
-                        </span>
-                      ) : null}
-                    </span>
-                  </span>
-                </label>
-                {hasSubs ? (
-                  <ul className="setup-preview-subs">
-                    {subItems.map((sub) => (
-                      <li key={sub.id}>
-                        <label className={`sub-item-row${sub.done ? ' done' : ''}`}>
-                          <input
-                            type="checkbox"
-                            checked={sub.done}
-                            onChange={() => void toggleSubItem(checklist.id, item.id, sub.id)}
-                          />
-                          <span>{sub.title}</span>
-                        </label>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </li>
-            )
-          })}
-        </ul>
-
-        <div className="button-row">
-          <Link
-            to={`/checklists?focus=${checklist.id}`}
-            className="primary-action"
-            onClick={onClose}
-          >
-            Open full checklist <ArrowRight size={14} />
-          </Link>
-          <button type="button" className="secondary-action" onClick={onClose}>
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
   )
 }
 
