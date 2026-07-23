@@ -1,4 +1,4 @@
-import { ChevronRight, ListChecks, Plus, ShieldCheck, StickyNote, Timer } from 'lucide-react'
+import { ChevronRight, Copy, ListChecks, Plus, ShieldCheck, StickyNote, Timer } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
@@ -12,6 +12,7 @@ import { highlightMatch } from '../lib/highlight'
 import { ListSearch } from '../components/ListSearch'
 import type {
   BillingMode,
+  ChecklistTemplate,
   Client,
   ClientDefaults,
   Contact,
@@ -620,6 +621,114 @@ function ClientBuilder({
   )
 }
 
+/**
+ * Owner-only picker inside the client-row "Template" modal: choose a standard
+ * template (blueprint) or copy a recurring template from another client onto
+ * this one. Reuses the same apply-to-client endpoint as the Checklists page —
+ * this surface exists so the action is findable from client management too.
+ */
+function ApplyTemplateForm({
+  client,
+  clients,
+  templates,
+  onApply,
+  onDone,
+}: {
+  client: Client
+  clients: Client[]
+  templates: ChecklistTemplate[]
+  onApply: (templateId: string) => Promise<void>
+  onDone: () => void
+}) {
+  const standardTemplates = templates
+    .filter((template) => template.isStandard)
+    .sort((a, b) => a.title.localeCompare(b.title))
+  // A client's own templates are excluded — copying one onto the same client
+  // is the Checklists page's "Duplicate", not an apply.
+  const otherClientTemplates = templates
+    .filter((template) => !template.isStandard && template.clientId !== client.id)
+    .sort((a, b) => a.title.localeCompare(b.title))
+  const clientName = (id: string) => clients.find((item) => item.id === id)?.name ?? 'Unknown client'
+
+  const [templateId, setTemplateId] = useState(
+    standardTemplates[0]?.id ?? otherClientTemplates[0]?.id ?? '',
+  )
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  if (standardTemplates.length === 0 && otherClientTemplates.length === 0) {
+    return (
+      <p className="muted-text">
+        No templates exist yet. Create a standard template (or a recurring checklist on any
+        client) from the Checklists page first.
+      </p>
+    )
+  }
+
+  const handleApply = async () => {
+    if (!templateId || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await onApply(templateId)
+      onDone()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not apply the template.')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <label className="field">
+        <span>Template</span>
+        <select
+          className="input"
+          value={templateId}
+          onChange={(event) => setTemplateId(event.target.value)}
+        >
+          {standardTemplates.length > 0 ? (
+            <optgroup label="Standard templates">
+              {standardTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.title}
+                </option>
+              ))}
+            </optgroup>
+          ) : null}
+          {otherClientTemplates.length > 0 ? (
+            <optgroup label="Copy from another client">
+              {otherClientTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.title} — {clientName(template.clientId)}
+                </option>
+              ))}
+            </optgroup>
+          ) : null}
+        </select>
+      </label>
+      <p className="muted-text">
+        This creates a new recurring checklist on {client.name} with the template's stages and
+        steps. You can adjust its schedule and assignees afterwards on the Checklists page.
+      </p>
+      {error ? <p className="auth-error">{error}</p> : null}
+      <div className="button-row">
+        <button
+          type="button"
+          className="primary-action"
+          disabled={busy || !templateId}
+          onClick={handleApply}
+        >
+          {busy ? 'Applying…' : 'Apply template'}
+        </button>
+        <button type="button" className="secondary-action" disabled={busy} onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </>
+  )
+}
+
 function ClientTable({
   clients,
   clientsWithActiveChecklists,
@@ -644,11 +753,13 @@ function ClientTable({
   plans: SubscriptionPlan[]
   query?: string
 }) {
-  const { sessionUser } = useAppContext()
+  const { sessionUser, data, applyTemplateToClient } = useAppContext()
   const [modalClient, setModalClient] = useState<Client | null>(null)
   const [notesClient, setNotesClient] = useState<Client | null>(null)
   // Client whose "Track time" modal is open (start a timer without leaving the list).
   const [timeClient, setTimeClient] = useState<Client | null>(null)
+  // Client whose "Apply template" modal is open (owner-only).
+  const [templateClient, setTemplateClient] = useState<Client | null>(null)
   // Client id currently mid-onboarding-request, so its button shows a pending
   // state and can't be double-clicked.
   const [onboardingId, setOnboardingId] = useState<string | null>(null)
@@ -809,6 +920,16 @@ function ClientTable({
                     >
                       <Timer size={14} /> Time
                     </button>
+                    {ownerMode ? (
+                      <button
+                        type="button"
+                        className="secondary-action compact-action"
+                        title="Apply a recurring checklist template to this client"
+                        onClick={() => setTemplateClient(client)}
+                      >
+                        <Copy size={14} /> Template
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="secondary-action compact-action"
@@ -829,6 +950,22 @@ function ClientTable({
       ) : null}
       {timeClient ? (
         <ClientTimeModal client={timeClient} onClose={() => setTimeClient(null)} />
+      ) : null}
+      {templateClient ? (
+        <AddModal
+          title={`Apply template · ${templateClient.name}`}
+          onClose={() => setTemplateClient(null)}
+        >
+          <ApplyTemplateForm
+            client={templateClient}
+            clients={data.clients}
+            templates={data.checklistTemplates}
+            onApply={(templateId) =>
+              applyTemplateToClient(templateId, { clientId: templateClient.id })
+            }
+            onDone={() => setTemplateClient(null)}
+          />
+        </AddModal>
       ) : null}
       {notesClient ? (
         <AddModal title={`Notes · ${notesClient.name}`} onClose={() => setNotesClient(null)}>

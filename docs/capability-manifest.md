@@ -254,6 +254,11 @@ picker, notification bell, and account menu sit in the top bar on every page.
   to every team member on the Checklists page ("Standard templates" section) — they
   can browse the standard steps but only an owner can edit a blueprint or apply one
   to a client.
+- Owners can apply a template **directly from the Clients page** too: every client
+  row has a "Template" button that opens a picker of standard templates and
+  recurring templates copied from other clients, and applies the chosen one to that
+  client (same underlying copy as the Checklists page's "Apply to client"). Works
+  for brand-new clients the moment they're added to the list.
 - Time logged against a task shows on the card.
 
 ## Board — Active Checklists (sidebar: "Board")
