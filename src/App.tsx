@@ -516,6 +516,8 @@ function App() {
         priorityRank: number
         devNotes: string
         reviewNote: string
+        clarificationQuestion: string
+        clarificationAnswer: string
       }>,
     ) => {
       await updateFeatureRequestRequest(id, patch)

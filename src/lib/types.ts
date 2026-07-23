@@ -762,6 +762,12 @@ export type FeatureRequestStatus =
   | 'new'
   | 'planned'
   | 'in_progress'
+  /**
+   * Blocked on the owner: the developer needs an answer before building.
+   * `clarificationQuestion` holds the question; the Updates page pins these in
+   * a "Needs your answer" section, and answering returns the item to 'planned'.
+   */
+  | 'needs_input'
   | 'shipped'
   | 'done'
   | 'wont_do'
@@ -808,6 +814,13 @@ export type FeatureRequest = {
   reviewNote?: string | null
   reviewedBy?: string | null
   reviewedAt?: string | null
+  /**
+   * Clarification loop — the developer's blocking question (set when the item
+   * moves to 'needs_input') and the owner's answer (kept after answering as
+   * the record of what was decided; the item returns to 'planned').
+   */
+  clarificationQuestion?: string | null
+  clarificationAnswer?: string | null
   createdAt: string
   updatedAt?: string | null
 }

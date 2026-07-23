@@ -680,8 +680,14 @@ picker, notification bell, and account menu sit in the top bar on every page.
   Items come from two places: requests drafted by this assistant (chat →
   "Send to Alex") land here automatically, and the owner can add items directly.
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
-  In Progress → Shipped → Done, or Won't do), and a color-coded priority level — Urgent
-  (red), High (orange), Medium (blue), Low (slate).
+  In Progress → Needs answer → Shipped → Done, or Won't do), and a color-coded
+  priority level — Urgent (red), High (orange), Medium (blue), Low (slate).
+- **Needs your answer** (clarification loop): when the developer can't build an
+  item without a decision, it moves to "Needs answer" with the blocking question
+  attached. Those items appear in an amber panel pinned ABOVE all sections, each
+  with the question, an answer box, and an "Answer & return to Planned" button —
+  answering stores the answer on the item (shown as "Q: … — A: …" on its card
+  afterwards) and puts it straight back into the Planned queue for the developer.
 - Layout: the list is organized into one COLLAPSIBLE section per status, each
   with its item count. Shipped is pinned to the TOP and is the only section
   EXPANDED by default (so the owner lands on just-shipped work awaiting her

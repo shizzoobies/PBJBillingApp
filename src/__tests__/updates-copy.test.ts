@@ -162,6 +162,7 @@ describe('status maps', () => {
       'new',
       'planned',
       'in_progress',
+      'needs_input',
       'shipped',
       'done',
       'wont_do',
@@ -169,15 +170,20 @@ describe('status maps', () => {
     expect(Object.keys(STATUS_LABELS).sort()).toEqual([...statuses].sort())
     expect(Object.keys(STATUS_ORDER).sort()).toEqual([...statuses].sort())
     expect(STATUS_LABELS.shipped).toBe('Shipped')
+    expect(STATUS_LABELS.needs_input).toBe('Needs answer')
     // Shipped sits between in_progress and done in the lifecycle order.
     expect(STATUS_ORDER.in_progress).toBeLessThan(STATUS_ORDER.shipped)
     expect(STATUS_ORDER.shipped).toBeLessThan(STATUS_ORDER.done)
+    // Needs-input is open work parked between in_progress and shipped.
+    expect(STATUS_ORDER.in_progress).toBeLessThan(STATUS_ORDER.needs_input)
+    expect(STATUS_ORDER.needs_input).toBeLessThan(STATUS_ORDER.shipped)
   })
 
-  it('treats shipped as OPEN — only done and wont_do are closed', () => {
+  it('treats shipped and needs_input as OPEN — only done and wont_do are closed', () => {
     expect(CLOSED_STATUSES.has('done')).toBe(true)
     expect(CLOSED_STATUSES.has('wont_do')).toBe(true)
     expect(CLOSED_STATUSES.has('shipped')).toBe(false)
+    expect(CLOSED_STATUSES.has('needs_input')).toBe(false)
     expect(CLOSED_STATUSES.size).toBe(2)
   })
 })

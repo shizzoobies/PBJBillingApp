@@ -1767,6 +1767,17 @@ export class AppDataStore {
         `alter table feature_requests add column if not exists reviewed_at timestamptz`,
       )
 
+      // Clarification loop: when the developer can't build an item without an
+      // answer, it moves to status 'needs_input' with clarification_question
+      // set. The owner answers from the Updates page ("Needs your answer"
+      // section) — the answer is stored and the item returns to 'planned'.
+      await this.pool.query(
+        `alter table feature_requests add column if not exists clarification_question text`,
+      )
+      await this.pool.query(
+        `alter table feature_requests add column if not exists clarification_answer text`,
+      )
+
       // Assistant suggestions the owner dismissed — keyed by a stable
       // pattern key so the same suggestion never nags twice.
       await this.pool.query(`
@@ -8085,6 +8096,9 @@ export class AppDataStore {
       reviewedAt: row.reviewed_at
         ? new Date(row.reviewed_at).toISOString()
         : (row.reviewedAt ?? null),
+      clarificationQuestion:
+        row.clarification_question ?? row.clarificationQuestion ?? null,
+      clarificationAnswer: row.clarification_answer ?? row.clarificationAnswer ?? null,
       createdAt: row.created_at
         ? new Date(row.created_at).toISOString()
         : (row.createdAt ?? nowIso()),
@@ -8103,7 +8117,8 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, user_id, title, description, type, status, urgent, priority,
                 priority_rank, dev_notes, approved_by, approved_at,
-                review_note, reviewed_by, reviewed_at, created_at, updated_at
+                review_note, reviewed_by, reviewed_at,
+                clarification_question, clarification_answer, created_at, updated_at
            from feature_requests
           order by ${FEATURE_REQUEST_PRIORITY_WEIGHT_SQL} asc,
                    priority_rank asc, created_at asc`,
@@ -8200,7 +8215,15 @@ export class AppDataStore {
   async updateFeatureRequest(id, patch = {}, actingUserId = null) {
     if (!id) return null
     const allowedTypes = ['feature', 'bug', 'improvement']
-    const allowedStatuses = ['new', 'planned', 'in_progress', 'shipped', 'done', 'wont_do']
+    const allowedStatuses = [
+      'new',
+      'planned',
+      'in_progress',
+      'needs_input',
+      'shipped',
+      'done',
+      'wont_do',
+    ]
     const title =
       typeof patch.title === 'string' ? patch.title.trim().slice(0, 120) : undefined
     const description =
@@ -8228,6 +8251,16 @@ export class AppDataStore {
       typeof patch.reviewNote === 'string' && patch.reviewNote.trim()
         ? patch.reviewNote.trim().slice(0, 2000)
         : undefined
+    // Clarification loop fields. A string sets (trimmed; '' clears to null so
+    // an answered question can be retired); anything else leaves untouched.
+    const clarificationQuestion =
+      typeof patch.clarificationQuestion === 'string'
+        ? patch.clarificationQuestion.trim().slice(0, 2000) || null
+        : undefined
+    const clarificationAnswer =
+      typeof patch.clarificationAnswer === 'string'
+        ? patch.clarificationAnswer.trim().slice(0, 2000) || null
+        : undefined
 
     if (
       title === undefined &&
@@ -8237,7 +8270,9 @@ export class AppDataStore {
       priority === undefined &&
       priorityRank === undefined &&
       devNotes === undefined &&
-      reviewNote === undefined
+      reviewNote === undefined &&
+      clarificationQuestion === undefined &&
+      clarificationAnswer === undefined
     ) {
       return null
     }
@@ -8280,11 +8315,20 @@ export class AppDataStore {
                   when $5 in ('shipped', 'done') then null
                   else reviewed_at
                 end,
+                clarification_question = case
+                  when $13::boolean then $11::text
+                  else clarification_question
+                end,
+                clarification_answer = case
+                  when $14::boolean then $12::text
+                  else clarification_answer
+                end,
                 updated_at = now()
           where id = $1
         returning id, user_id, title, description, type, status, urgent, priority,
                   priority_rank, dev_notes, approved_by, approved_at,
-                  review_note, reviewed_by, reviewed_at, created_at, updated_at`,
+                  review_note, reviewed_by, reviewed_at,
+                  clarification_question, clarification_answer, created_at, updated_at`,
         [
           id,
           title ?? null,
@@ -8296,6 +8340,10 @@ export class AppDataStore {
           devNotes ?? null,
           actingUserId ?? null,
           reviewNote ?? null,
+          clarificationQuestion ?? null,
+          clarificationAnswer ?? null,
+          clarificationQuestion !== undefined,
+          clarificationAnswer !== undefined,
         ],
       )
       if (!result.rowCount) return null
@@ -8325,6 +8373,8 @@ export class AppDataStore {
     if (priority !== undefined) existing.priority = priority
     if (priorityRank !== undefined) existing.priorityRank = priorityRank
     if (devNotes !== undefined) existing.devNotes = devNotes
+    if (clarificationQuestion !== undefined) existing.clarificationQuestion = clarificationQuestion
+    if (clarificationAnswer !== undefined) existing.clarificationAnswer = clarificationAnswer
     // Rejection stamp/clear (mirror the pg CASE logic, using the INCOMING
     // status): a fresh non-empty reviewNote stamps the three review_* fields;
     // otherwise re-shipping ('shipped') or approving ('done') clears them.

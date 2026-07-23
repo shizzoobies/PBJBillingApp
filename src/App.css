@@ -9608,6 +9608,72 @@ mark.list-search-hit {
   border-radius: var(--radius-sm);
 }
 
+/* Pinned "Needs your answer" panel — the developer's blocking questions. */
+.updates-needs-input-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 16px;
+  padding: 14px 16px;
+  background: color-mix(in srgb, var(--gold) 6%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line));
+  border-radius: var(--radius-sm);
+}
+
+.updates-needs-input-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--gold);
+}
+
+.updates-needs-input-head svg {
+  align-self: center;
+  flex: none;
+}
+
+.updates-needs-input-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.updates-needs-input-title {
+  font-weight: 700;
+  margin: 0;
+}
+
+.updates-needs-input-question {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.updates-needs-input-answer {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+}
+
+.updates-needs-input-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Answered clarification kept on the card as the record of the decision. */
+.updates-clarification-line {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  background: var(--soft);
+  border-radius: 6px;
+  padding: 6px 9px;
+  white-space: pre-wrap;
+}
+
 .updates-add-row {
   display: flex;
   gap: 10px;

@@ -7,6 +7,7 @@ import {
   Clipboard,
   ClipboardList,
   GripVertical,
+  HelpCircle,
   Lightbulb,
   Pencil,
   Plus,
@@ -45,6 +46,7 @@ const STATUS_OPTIONS: Array<{ value: FeatureRequestStatus; label: string }> = [
   { value: 'new', label: 'New' },
   { value: 'planned', label: 'Planned' },
   { value: 'in_progress', label: 'In Progress' },
+  { value: 'needs_input', label: 'Needs answer' },
   { value: 'shipped', label: 'Shipped' },
   { value: 'done', label: 'Done' },
   { value: 'wont_do', label: "Won't do" },
@@ -61,8 +63,12 @@ const CLOSED_STATUSES: ReadonlySet<FeatureRequestStatus> = new Set<FeatureReques
  * just-shipped work awaiting sign-off), then the rest in workflow order.
  */
 const SECTION_OPTIONS: typeof STATUS_OPTIONS = [
+  // 'needs_input' is rendered by its own pinned "Needs your answer" panel
+  // above the sections, so it's excluded from the generic loop.
   ...STATUS_OPTIONS.filter((option) => option.value === 'shipped'),
-  ...STATUS_OPTIONS.filter((option) => option.value !== 'shipped'),
+  ...STATUS_OPTIONS.filter(
+    (option) => option.value !== 'shipped' && option.value !== 'needs_input',
+  ),
 ]
 
 /** Format an approval timestamp for the "Approved by … · <date>" line. */
@@ -155,6 +161,9 @@ export function UpdatesPage() {
   // item id. An entry's presence means the reason textarea is open for that
   // shipped item.
   const [rejectDrafts, setRejectDrafts] = useState<Record<string, string>>({})
+  // Clarification answers being typed in the pinned "Needs your answer" panel,
+  // keyed by item id (local drafts; saved only on the Answer button).
+  const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({})
   // Title + description editing draft (local, so typing never saves per-keystroke).
   const [editDraft, setEditDraft] = useState<{
     id: string
@@ -494,6 +503,16 @@ export function UpdatesPage() {
               </p>
             ) : null}
 
+            {item.clarificationAnswer ? (
+              // The answered clarification stays on the card as the record of
+              // what was decided (question + the owner's answer).
+              <p className="updates-clarification-line">
+                {item.clarificationQuestion?.trim()
+                  ? `Q: ${item.clarificationQuestion} — A: ${item.clarificationAnswer}`
+                  : `Owner's answer: ${item.clarificationAnswer}`}
+              </p>
+            ) : null}
+
             {rejectOpen ? (
               <div className="updates-reject-panel">
                 <p className="updates-reject-kicker">Send back to the developer</p>
@@ -729,6 +748,67 @@ export function UpdatesPage() {
             </label>
           </div>
         </div>
+
+        {(byStatus.get('needs_input') ?? []).length > 0 ? (
+          <div className="updates-needs-input-panel">
+            <div className="updates-needs-input-head">
+              <HelpCircle size={16} aria-hidden="true" />
+              <strong>Needs your answer</strong>
+              <span className="muted-text">
+                the developer is blocked on these — answering sends the item back to Planned
+              </span>
+            </div>
+            {(byStatus.get('needs_input') ?? []).map((item) => {
+              const draft = answerDrafts[item.id] ?? ''
+              const submitAnswer = async () => {
+                const answer = draft.trim()
+                if (!answer) return
+                await updateFeatureRequest(item.id, {
+                  clarificationAnswer: answer,
+                  status: 'planned',
+                })
+                setAnswerDrafts((current) => {
+                  const next = { ...current }
+                  delete next[item.id]
+                  return next
+                })
+              }
+              return (
+                <div key={item.id} className="updates-needs-input-card">
+                  <p className="updates-needs-input-title">{item.title}</p>
+                  <p className="updates-needs-input-question">
+                    {item.clarificationQuestion?.trim() ||
+                      'The developer flagged this as needing your input — see its notes for details.'}
+                  </p>
+                  <textarea
+                    className="updates-needs-input-answer"
+                    value={draft}
+                    rows={2}
+                    maxLength={2000}
+                    placeholder="Your answer — one or two sentences is plenty…"
+                    aria-label={`Answer for ${item.title}`}
+                    onChange={(event) =>
+                      setAnswerDrafts((current) => ({
+                        ...current,
+                        [item.id]: event.target.value,
+                      }))
+                    }
+                  />
+                  <div className="updates-needs-input-actions">
+                    <button
+                      type="button"
+                      className="primary-action"
+                      disabled={!draft.trim()}
+                      onClick={() => void submitAnswer()}
+                    >
+                      <Check size={14} aria-hidden="true" /> Answer &amp; return to Planned
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : null}
 
         {sorted.length === 0 ? (
           <p className="muted-text updates-empty">

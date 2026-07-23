@@ -2276,6 +2276,8 @@ const server = createServer(async (request, response) => {
             typeof payload?.reviewNote === 'string'
               ? payload.reviewNote.trim().slice(0, 2000)
               : undefined,
+          clarificationQuestion: payload?.clarificationQuestion,
+          clarificationAnswer: payload?.clarificationAnswer,
         },
         session.user.id,
       )
