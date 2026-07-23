@@ -269,10 +269,12 @@ picker, notification bell, and account menu sit in the top bar on every page.
 
 ## Board — Active Checklists (sidebar: "Board")
 
-- A second view of the active checklists, laid out as **columns by service
-  type** (the columns are "service categories" — e.g. Monthly Bookkeeping,
-  Quarterly Bookkeeping, Sales Tax, Payroll). Each column lists the **clients
-  that still have open work** of that type; a count badge shows how many.
+- A second view of the active checklists, grouped **by service type** ("service
+  categories" — e.g. Monthly Bookkeeping, Quarterly Bookkeeping, Sales Tax,
+  Payroll). The sections **stack vertically at full width** (changed from
+  side-scrolling columns, per client feedback) so the whole board scans top to
+  bottom. Each section lists the **clients that still have open work** of that
+  type; a count badge shows how many.
 - Each client row is **collapsible** — expand it to see and work the client's
   live checklist(s) for that column (same checkboxes/cards as the Checklists
   page). Completing a client's checklist **removes that client from the column**
