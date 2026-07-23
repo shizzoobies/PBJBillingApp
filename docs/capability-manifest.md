@@ -179,6 +179,12 @@ picker, notification bell, and account menu sit in the top bar on every page.
   for — when that task completes, the blocked step's assignee gets an in-app +
   email notification ("Ready to continue"). Waiting items also appear on the
   Delayed page.
+- Finishing a waiting step — **Done vs Clear** in the waiting editor: **Done**
+  checks the step off AND keeps the waiting note visible on that checklist as a
+  "Was waiting on: …" record (that instance only — future recurring instances
+  start fresh), so there's a history of what the team keeps waiting on. **Clear**
+  just un-flags without finishing and erases the note. Done steps stop counting
+  on the Delayed page and the Board's pending chips.
 - Waiting on a PERSON (two-way): you can also flag a step as waiting on a
   specific team member. That person is notified immediately that someone's
   blocked on them, sees it in a "Waiting on you" card on their Dashboard, and

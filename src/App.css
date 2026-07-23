@@ -6754,6 +6754,31 @@ button.repeating-task-toggle-pill {
   padding: 4px 7px;
 }
 
+/* Resolved-wait record on a done step — same badge, drained of urgency. */
+.task-row-waiting-resolved {
+  background: var(--soft);
+  color: var(--muted);
+  text-decoration: none;
+}
+
+/* "Done" in the waiting editor: finish the step, keep the note as a record. */
+.waiting-done-btn {
+  background: var(--plum);
+  border: 1px solid var(--plum);
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: auto;
+  padding: 4px 10px;
+  transition: filter 0.15s ease;
+}
+
+.waiting-done-btn:hover {
+  filter: brightness(1.12);
+}
+
 .waiting-clear-btn {
   background: transparent;
   border: 1px solid var(--line);
@@ -6762,7 +6787,6 @@ button.repeating-task-toggle-pill {
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
-  margin-left: auto;
   padding: 4px 10px;
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
