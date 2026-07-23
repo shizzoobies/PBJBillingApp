@@ -9663,6 +9663,22 @@ mark.list-search-hit {
   justify-content: flex-end;
 }
 
+/* AI read-back of a rejection reason, awaiting the owner's confirmation. */
+.updates-reject-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--gold) 6%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line));
+  border-radius: var(--radius-sm);
+}
+
+.updates-reject-confirm-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
 /* Answered clarification kept on the card as the record of the decision. */
 .updates-clarification-line {
   margin: 4px 0 0;

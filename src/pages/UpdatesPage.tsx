@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react'
 import { useAppContext } from '../AppContext'
+import { confirmRejectFeedbackRequest } from '../lib/api'
 import {
   formatBacklogForClaude,
   formatRequestForClaude,
@@ -162,6 +163,19 @@ export function UpdatesPage() {
   // item id. An entry's presence means the reason textarea is open for that
   // shipped item.
   const [rejectDrafts, setRejectDrafts] = useState<Record<string, string>>({})
+  // AI read-back of the rejection reason (per item): busy while the model runs,
+  // then either the confirmation to approve or an error with a plain fallback.
+  const [rejectConfirm, setRejectConfirm] = useState<
+    Record<
+      string,
+      {
+        busy: boolean
+        error: string | null
+        confirmation: string | null
+        forDeveloper: string | null
+      }
+    >
+  >({})
   // Clarification answers being typed in the pinned "Needs your answer" panel,
   // keyed by item id (local drafts; saved only on the Answer button).
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({})
@@ -329,17 +343,62 @@ export function UpdatesPage() {
   const setRejectText = (id: string, text: string) =>
     setRejectDrafts((prev) => ({ ...prev, [id]: text }))
 
-  const cancelReject = (id: string) =>
+  const cancelReject = (id: string) => {
     setRejectDrafts((prev) => {
       const next = { ...prev }
       delete next[id]
       return next
     })
+    setRejectConfirm((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+  }
 
-  const submitReject = async (item: FeatureRequest) => {
-    const reviewNote = (rejectDrafts[item.id] ?? '').trim()
-    if (!reviewNote) return
-    await updateFeatureRequest(item.id, { status: 'in_progress', reviewNote })
+  // AI read-back step: before her reason is filed, the AI restates it for her
+  // confirmation (and produces the dev-ready version filed alongside). Sending
+  // back returns the item to PLANNED — same as answering a clarification — so
+  // the dev queue picks it up with the confirmed feedback attached.
+  const requestRejectConfirm = async (item: FeatureRequest) => {
+    const note = (rejectDrafts[item.id] ?? '').trim()
+    if (!note) return
+    setRejectConfirm((prev) => ({
+      ...prev,
+      [item.id]: { busy: true, error: null, confirmation: null, forDeveloper: null },
+    }))
+    try {
+      const result = await confirmRejectFeedbackRequest(item.id, note)
+      setRejectConfirm((prev) => ({
+        ...prev,
+        [item.id]: {
+          busy: false,
+          error: null,
+          confirmation: result.confirmation,
+          forDeveloper: result.forDeveloper,
+        },
+      }))
+    } catch (error) {
+      setRejectConfirm((prev) => ({
+        ...prev,
+        [item.id]: {
+          busy: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'The AI could not review this feedback right now.',
+          confirmation: null,
+          forDeveloper: null,
+        },
+      }))
+    }
+  }
+
+  const fileReject = async (item: FeatureRequest, forDeveloper: string | null) => {
+    const note = (rejectDrafts[item.id] ?? '').trim()
+    if (!note) return
+    const reviewNote = forDeveloper ? `${note}\n\n[Confirmed rework spec] ${forDeveloper}` : note
+    await updateFeatureRequest(item.id, { status: 'planned', reviewNote })
     cancelReject(item.id)
   }
 
@@ -523,26 +582,85 @@ export function UpdatesPage() {
                   maxLength={2000}
                   rows={3}
                   aria-label="Rejection reason"
-                  placeholder="What still needs fixing? The developer sees this note."
-                  onChange={(event) => setRejectText(item.id, event.target.value)}
+                  placeholder="What still needs fixing? Plain language is fine — you'll get a read-back to confirm."
+                  onChange={(event) => {
+                    setRejectText(item.id, event.target.value)
+                    // Editing the reason invalidates a previous read-back.
+                    setRejectConfirm((prev) => {
+                      if (!(item.id in prev)) return prev
+                      const next = { ...prev }
+                      delete next[item.id]
+                      return next
+                    })
+                  }}
                 />
-                <div className="updates-reject-actions">
-                  <button
-                    type="button"
-                    className="primary-action"
-                    disabled={!(rejectDrafts[item.id] ?? '').trim()}
-                    onClick={() => void submitReject(item)}
-                  >
-                    <X size={14} aria-hidden="true" /> Send back
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-action"
-                    onClick={() => cancelReject(item.id)}
-                  >
-                    Cancel
-                  </button>
-                </div>
+                {(() => {
+                  const confirm = rejectConfirm[item.id]
+                  if (confirm?.confirmation) {
+                    return (
+                      <div className="updates-reject-confirm">
+                        <p className="updates-reject-confirm-text">{confirm.confirmation}</p>
+                        <div className="updates-reject-actions">
+                          <button
+                            type="button"
+                            className="primary-action"
+                            onClick={() => void fileReject(item, confirm.forDeveloper)}
+                          >
+                            <Check size={14} aria-hidden="true" /> Yes — send back
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-action"
+                            onClick={() =>
+                              setRejectConfirm((prev) => {
+                                const next = { ...prev }
+                                delete next[item.id]
+                                return next
+                              })
+                            }
+                          >
+                            Not quite — let me reword
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  }
+                  return (
+                    <>
+                      {confirm?.error ? (
+                        <p className="updates-form-error">{confirm.error}</p>
+                      ) : null}
+                      <div className="updates-reject-actions">
+                        <button
+                          type="button"
+                          className="primary-action"
+                          disabled={!(rejectDrafts[item.id] ?? '').trim() || confirm?.busy}
+                          onClick={() => void requestRejectConfirm(item)}
+                        >
+                          <X size={14} aria-hidden="true" />{' '}
+                          {confirm?.busy ? 'Reading it back…' : 'Send back'}
+                        </button>
+                        {confirm?.error ? (
+                          <button
+                            type="button"
+                            className="secondary-action"
+                            onClick={() => void fileReject(item, null)}
+                          >
+                            Send back without the read-back
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="secondary-action"
+                          disabled={confirm?.busy}
+                          onClick={() => cancelReject(item.id)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </>
+                  )
+                })()}
               </div>
             ) : null}
 

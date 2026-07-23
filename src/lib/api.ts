@@ -2372,6 +2372,32 @@ export async function refineFeatureRequest(id: string) {
     .suggestion
 }
 
+/**
+ * Owner-only: before a "Not approved" reason is filed, the AI restates it —
+ * `confirmation` for the owner to confirm in her own terms, `forDeveloper` as
+ * the dev-ready version filed with the review note once she confirms. Nothing
+ * is saved by this call.
+ */
+export async function confirmRejectFeedbackRequest(id: string, note: string) {
+  const response = await apiFetch(
+    `/api/feature-requests/${encodeURIComponent(id)}/confirm-feedback`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to review the feedback (${response.status})`,
+    )
+  }
+  return (await response.json()) as { confirmation: string; forDeveloper: string }
+}
+
 // ---- Client notes: a timestamped, attributed, append-only log per client ----
 
 /** Notes for a client, newest first. Owner or the client's assigned staff. */

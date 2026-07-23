@@ -7,6 +7,7 @@ import QRCode from 'qrcode'
 import { AppDataStore } from './db/store.js'
 import {
   buildActionProposal,
+  confirmOwnerFeedback,
   executeAssistantAction,
   refineFeatureRequest,
   runAssistantChat,
@@ -2233,6 +2234,54 @@ const server = createServer(async (request, response) => {
         console.error('[updates] refine failed:', error?.message || error)
         sendJson(response, status === 503 ? 503 : 502, {
           error: error?.message || 'The AI could not refine this right now. Please try again.',
+        })
+      }
+      return
+    }
+
+    // POST /api/feature-requests/:id/confirm-feedback — the owner's "Not
+    // approved" reason is restated by the AI for HER confirmation before it's
+    // filed (same guards + error contract as /refine). Body: { note }.
+    const featureRequestConfirmMatch = normalizedPath.match(
+      /^\/api\/feature-requests\/([^/]+)\/confirm-feedback$/,
+    )
+    if (featureRequestConfirmMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const id = decodeURIComponent(featureRequestConfirmMatch[1])
+      const item = await appDataStore.getFeatureRequest(id)
+      if (!item) {
+        sendJson(response, 404, { error: 'Update not found' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const note = typeof payload?.note === 'string' ? payload.note.trim().slice(0, 2000) : ''
+      if (!note) {
+        sendJson(response, 400, { error: 'A rejection reason is required' })
+        return
+      }
+      try {
+        const result = await confirmOwnerFeedback(item, note)
+        sendJson(response, 200, result)
+      } catch (error) {
+        const status = error?.statusCode ?? error?.status ?? 502
+        console.error('[updates] confirm-feedback failed:', error?.message || error)
+        sendJson(response, status === 503 ? 503 : 502, {
+          error:
+            error?.message || 'The AI could not review this feedback right now. Please try again.',
         })
       }
       return

@@ -716,9 +716,15 @@ picker, notification bell, and account menu sit in the top bar on every page.
   the "Shipped" section header reads "Shipped — awaiting approval". A Shipped
   item shows a "Mark approved" button (moves it to
   "Done" and records who approved it and when — "Approved by <name> · <date>") AND
-  a "Not approved" button, which opens a reason box; sending it back returns the
-  item to In Progress with an amber "Not approved — <date>: <reason>" note so the
-  developer sees what to fix. An In-Progress item's whole card gently pulses.
+  a "Not approved" button, which opens a reason box. Clicking "Send back" first
+  runs an **AI read-back**: the assistant restates the reason in the owner's own
+  terms ("So the change you want is …" — or asks which of two readings she
+  means), and only after she clicks "Yes — send back" is it filed. The item then
+  returns to **Planned** (straight back into the developer's queue — same as
+  answering a clarification) carrying an amber "Not approved — <date>: <reason>"
+  note plus the confirmed dev-ready rework spec. If the AI is unavailable there's
+  a "send back without the read-back" fallback, so feedback is never blocked.
+  An In-Progress item's whole card gently pulses.
 - Editing an item: click the title or the "Edit" button to edit the title +
   description in place; a Save button commits the change (typing doesn't
   auto-save). Status, priority, and type still change immediately from their
