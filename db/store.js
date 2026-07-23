@@ -4398,19 +4398,27 @@ export class AppDataStore {
   }
 
   async createTimeEntry(entry) {
-    // New entries always enter the approval workflow as 'pending'. The capture
-    // method defaults to 'timer'; only an explicit 'manual' entry carries a
-    // reason — any non-manual entry drops manualReason entirely.
+    // The capture method defaults to 'timer'; only an explicit 'manual' entry
+    // carries a reason — any non-manual entry drops manualReason entirely.
     const entryMethod = entry.entryMethod === 'manual' ? 'manual' : 'timer'
     const manualReason =
       entryMethod === 'manual' && typeof entry.manualReason === 'string'
         ? entry.manualReason
         : undefined
+    // Approval routing (owner request, Jul 2026): a PURE timer capture skips
+    // the per-entry daily queue — the weekly-submission / month-lock review
+    // covers it as a whole. Anything a person typed still queues 'pending':
+    // manual entries, and group-SPLIT allocations (groupId set — the per-client
+    // amounts were staff-chosen even though the time was timer-captured). An
+    // unsplit group HOLDING entry auto-approves like any capture; its split
+    // products queue when created. Later edits re-queue separately
+    // (updateTimeEntry flips approved → pending on material changes).
+    const autoApproved = entryMethod === 'timer' && !entry.groupId
     const nextEntry = {
       ...entry,
       id: entry.id ?? `time-${randomUUID().slice(0, 8)}`,
       taskId: entry.taskId ?? null,
-      approvalStatus: 'pending',
+      approvalStatus: autoApproved ? 'approved' : 'pending',
       entryMethod,
       manualReason,
       createdAt: entry.createdAt ?? nowIso(),

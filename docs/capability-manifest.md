@@ -106,6 +106,14 @@ picker, notification bell, and account menu sit in the top bar on every page.
 
 ## Time Approvals (owner only)
 
+- **What needs per-entry approval** (changed Jul 2026 per owner request): a
+  pure TIMER capture is auto-approved the moment it's saved — it never appears
+  in the daily approval queue, and the weekly submission / month lock is where
+  it gets reviewed as a whole. Individual daily approval is reserved for time a
+  person TYPED: manual entries (which always carry a reason), the per-client
+  allocations created by splitting a group time block, and any entry that gets
+  EDITED afterwards (editing an approved entry re-queues it as pending — a
+  changed client/time/date never keeps its old sign-off silently).
 - Weekly submissions: staff submit a week; approving seals every pending
   entry in it. Rejecting unlocks the week so the bookkeeper can edit and
   resubmit.
