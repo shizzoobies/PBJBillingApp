@@ -14,6 +14,11 @@ Sidebar pages: Dashboard, Time, Timesheet, Time Approvals, Checklists, Board,
 Delayed, Clients, Client Recap, Contacts, Reports, Productivity, Gantt,
 Invoices, Plans, Team, To 100%, Updates (owner only), Settings. A billing-month
 picker, notification bell, and account menu sit in the top bar on every page.
+- New-version prompt: a browser tab left open across a deploy shows a small
+  "A new version of the app is ready — Refresh" toast (bottom-right) within a
+  few minutes, and immediately when you come back to the tab. Click Refresh to
+  load the new version. If something that was just fixed "isn't showing",
+  refresh the tab first — an old tab runs the old app until it reloads.
 - Most list/board pages have an instant search box: type to filter by name and
   key fields, with a live result count, matched-text highlight, and a clear
   button. Coverage: Clients (name/contact/email/billing type), Contacts

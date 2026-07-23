@@ -9685,6 +9685,40 @@ mark.list-search-hit {
   justify-content: flex-end;
 }
 
+/* "New version deployed — refresh" toast (bottom-right, non-blocking). */
+.new-version-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 28px rgba(19, 52, 74, 0.18);
+}
+
+.new-version-toast-text {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.new-version-toast-refresh {
+  flex: none;
+}
+
+.new-version-toast-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  display: inline-flex;
+}
+
 /* AI read-back of a rejection reason, awaiting the owner's confirmation. */
 .updates-reject-confirm {
   display: flex;

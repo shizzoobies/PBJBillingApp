@@ -10,6 +10,7 @@ import {
 import './App.css'
 import { AppContext, useAppContext, type AppContextValue } from './AppContext'
 import { AppLayout } from './components/AppLayout'
+import { NewVersionToast } from './components/NewVersionToast'
 import { SignInScreen } from './components/SignInScreen'
 import {
   addChecklistSubItemRequest,
@@ -3682,6 +3683,10 @@ function App() {
     <BrowserRouter>
       <AppContext.Provider value={contextValue}>
         <RoleAwareRoutes ownerMode={ownerMode} />
+        {/* Deploy watchdog: prompts long-lived tabs to refresh onto the new
+            bundle. Twice a stale tab caused real trouble (features "missing",
+            and the June stale-tab bulk-save data loss) — this closes that. */}
+        <NewVersionToast />
       </AppContext.Provider>
     </BrowserRouter>
   )
