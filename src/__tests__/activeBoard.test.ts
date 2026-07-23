@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  boardChecklistStatus,
   buildActiveBoard,
   boardPeriodRange,
   effectiveDue,
@@ -41,6 +42,113 @@ describe('boardPeriodRange', () => {
     expect(boardPeriodRange('week', '2026-06-16')).toEqual({ start: '2026-06-14', end: '2026-06-20' })
     expect(boardPeriodRange('month', '2026-06-16')).toEqual({ start: '2026-06-01', end: '2026-06-30' })
     expect(boardPeriodRange('quarter', '2026-06-16')).toEqual({ start: '2026-04-01', end: '2026-06-30' })
+  })
+})
+
+describe('boardChecklistStatus', () => {
+  const TODAY = '2026-06-16'
+
+  it('due when nothing waits and the due date is today or later', () => {
+    expect(boardChecklistStatus(open({ dueDate: '2026-06-20' }), TODAY)).toEqual({
+      kind: 'due',
+      due: '2026-06-20',
+    })
+    expect(boardChecklistStatus(open({ dueDate: TODAY }), TODAY)).toEqual({
+      kind: 'due',
+      due: TODAY,
+    })
+  })
+
+  it('overdue when past due and nothing waits', () => {
+    expect(boardChecklistStatus(open({ dueDate: '2026-06-10' }), TODAY)).toEqual({
+      kind: 'overdue',
+      due: '2026-06-10',
+    })
+  })
+
+  it('pending wins over overdue: a waiting step with its free-text reason', () => {
+    const status = boardChecklistStatus(
+      open({
+        dueDate: '2026-06-10',
+        items: [{ id: 'i', label: 'l', done: false, waiting: true, waitingOn: 'client bank statements' }],
+      }),
+      TODAY,
+    )
+    expect(status).toEqual({ kind: 'pending', reasons: ['client bank statements'], waitingCount: 1 })
+  })
+
+  it('done steps never count as waiting', () => {
+    const status = boardChecklistStatus(
+      open({
+        items: [
+          { id: 'a', label: 'a', done: true, waiting: true, waitingOn: 'stale flag on a done step' },
+          { id: 'b', label: 'b', done: false },
+        ],
+      }),
+      TODAY,
+    )
+    expect(status.kind).toBe('due')
+  })
+
+  it('structured person-blockers pend too, resolving the blocker name', () => {
+    const status = boardChecklistStatus(
+      open({
+        items: [
+          {
+            id: 'i',
+            label: 'l',
+            done: false,
+            waitingOns: [{ id: 'w', blockerId: 'e2', requestedBy: 'e1', createdAt: '2026-06-15T00:00:00Z' }],
+          },
+        ],
+      }),
+      TODAY,
+      { e2: 'Allison Lehmann' },
+    )
+    expect(status).toEqual({
+      kind: 'pending',
+      reasons: ['waiting on Allison Lehmann'],
+      waitingCount: 1,
+    })
+  })
+
+  it('collects waits from sub-items and sub-sub-items', () => {
+    const status = boardChecklistStatus(
+      open({
+        items: [
+          {
+            id: 'i',
+            label: 'l',
+            done: false,
+            subItems: [
+              {
+                id: 's',
+                title: 's',
+                done: false,
+                waiting: true,
+                waitingOn: 'payroll report',
+                subItems: [
+                  {
+                    id: 'ss',
+                    title: 'ss',
+                    done: false,
+                    waitingOns: [
+                      { id: 'w', blockerId: 'e9', requestedBy: 'e1', createdAt: '2026-06-15T00:00:00Z' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      TODAY,
+    )
+    expect(status.kind).toBe('pending')
+    if (status.kind === 'pending') {
+      expect(status.waitingCount).toBe(2)
+      expect(status.reasons).toEqual(['payroll report', 'waiting on a teammate'])
+    }
   })
 })
 

@@ -275,6 +275,12 @@ picker, notification bell, and account menu sit in the top bar on every page.
   horizon — a checklist shows when it's due on or before the END of the selected
   period (`to`), so overdue work stays visible and the view widens as you pick a
   larger range (week → month → quarter → year-to-date → custom).
+- **Due vs pending at a glance:** every checklist on the board carries a status
+  chip — grey "Due <date>", red "Overdue — was due <date>", or amber
+  "Pending — <reason>" when any open step is flagged waiting (the reason is the
+  waiting note, or who it's waiting on; hover shows all reasons). Collapsed
+  client rows roll these up as "N pending" / "N overdue" chips, so the board
+  answers "what's still due, what's stuck, and why" without expanding anything.
 - **Scoping:** staff see only the clients they're assigned to (same as the rest
   of the app). The board is available to everyone, not owner-only.
 - **Filter by client:** a "Filter by client" dropdown in the board toolbar

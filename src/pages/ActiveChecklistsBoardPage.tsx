@@ -1,8 +1,10 @@
 import { ChevronDown, ChevronRight, Filter, GripVertical, Plus, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
+  boardChecklistStatus,
   buildActiveBoard,
   UNCATEGORIZED_ID,
+  type BoardChecklistStatus,
   type BoardColumn,
 } from '../lib/activeBoard'
 import { useAppContext } from '../AppContext'
@@ -11,7 +13,7 @@ import { ReportPeriodControl } from '../components/ReportPeriodControl'
 import { reportPeriodLabel } from '../lib/reportPeriod'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { ChecklistCard } from './ChecklistsPage'
-import { localDateOnly, stageNameFor } from '../lib/utils'
+import { localDateOnly, MONTH_NAMES, stageNameFor } from '../lib/utils'
 import type { Checklist, ServiceCategory } from '../lib/types'
 
 /**
@@ -51,6 +53,16 @@ export function ActiveChecklistsBoardPage() {
     () => Object.fromEntries(data.clients.map((client) => [client.id, client.name])),
     [data.clients],
   )
+
+  // Quick-glance due-vs-pending status per checklist (pending = a step is
+  // flagged waiting; the chip carries the "why"). Resolved here once so the
+  // structured person-blockers can show a real name.
+  const employeeNameById = useMemo(
+    () => Object.fromEntries(data.employees.map((employee) => [employee.id, employee.name])),
+    [data.employees],
+  )
+  const statusFor = (checklist: Checklist): BoardChecklistStatus =>
+    boardChecklistStatus(checklist, today, employeeNameById)
 
   // Read-only projection of upcoming (not-yet-materialized) recurring instances.
   // Pure + derived only — these ghosts are NEVER written to context data /
@@ -234,7 +246,12 @@ export function ActiveChecklistsBoardPage() {
               <p className="empty-state">No clients or checklists match "{query.trim()}".</p>
             ) : null}
             {filteredColumns.map((column) => (
-              <BoardColumnView key={column.id} column={column} renderCard={renderCard} />
+              <BoardColumnView
+                key={column.id}
+                column={column}
+                renderCard={renderCard}
+                statusFor={statusFor}
+              />
             ))}
           </div>
         )}
@@ -363,12 +380,39 @@ function BoardClientFilter({
   )
 }
 
+/** "Jul 28" from a yyyy-mm-dd string, for the due/overdue chips. */
+function shortDate(iso: string): string {
+  const month = Number(iso.slice(5, 7))
+  const day = Number(iso.slice(8, 10))
+  return `${(MONTH_NAMES[month - 1] ?? '').slice(0, 3)} ${day}`
+}
+
+/** The due / overdue / pending chip itself; reason text only for pending. */
+function StatusChip({ status }: { status: BoardChecklistStatus }) {
+  if (status.kind === 'pending') {
+    const [first] = status.reasons
+    const extra = status.waitingCount - 1
+    return (
+      <span className="board-chip board-chip-pending" title={status.reasons.join(' · ')}>
+        Pending — {first}
+        {extra > 0 ? ` (+${extra} more)` : ''}
+      </span>
+    )
+  }
+  if (status.kind === 'overdue') {
+    return <span className="board-chip board-chip-overdue">Overdue — was due {shortDate(status.due)}</span>
+  }
+  return <span className="board-chip board-chip-due">Due {shortDate(status.due)}</span>
+}
+
 function BoardColumnView({
   column,
   renderCard,
+  statusFor,
 }: {
   column: BoardColumn
   renderCard: (checklist: Checklist) => ReactNode
+  statusFor: (checklist: Checklist) => BoardChecklistStatus
 }) {
   return (
     <div className="board-column" data-uncategorized={column.id === UNCATEGORIZED_ID}>
@@ -386,6 +430,7 @@ function BoardColumnView({
               name={clientRow.name}
               checklists={clientRow.checklists}
               renderCard={renderCard}
+              statusFor={statusFor}
             />
           ))
         )}
@@ -398,12 +443,19 @@ function BoardClientRow({
   name,
   checklists,
   renderCard,
+  statusFor,
 }: {
   name: string
   checklists: Checklist[]
   renderCard: (checklist: Checklist) => ReactNode
+  statusFor: (checklist: Checklist) => BoardChecklistStatus
 }) {
   const [open, setOpen] = useState(false)
+  // Collapsed roll-up: how many of this client's checklists are blocked vs
+  // overdue, so the row reads at a glance without expanding.
+  const statuses = checklists.map(statusFor)
+  const pendingCount = statuses.filter((status) => status.kind === 'pending').length
+  const overdueCount = statuses.filter((status) => status.kind === 'overdue').length
   return (
     <div className="board-client">
       <button
@@ -414,9 +466,24 @@ function BoardClientRow({
       >
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <span className="board-client-name">{name}</span>
+        {pendingCount > 0 ? (
+          <span className="board-chip board-chip-pending">{pendingCount} pending</span>
+        ) : null}
+        {overdueCount > 0 ? (
+          <span className="board-chip board-chip-overdue">{overdueCount} overdue</span>
+        ) : null}
         <span className="board-client-count">{checklists.length}</span>
       </button>
-      {open ? <div className="board-client-cards">{checklists.map(renderCard)}</div> : null}
+      {open ? (
+        <div className="board-client-cards">
+          {checklists.map((checklist, index) => (
+            <div className="board-card-with-status" key={checklist.id}>
+              <StatusChip status={statuses[index]} />
+              {renderCard(checklist)}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }

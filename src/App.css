@@ -8673,6 +8673,45 @@ button.repeating-task-toggle-pill {
   gap: 10px;
 }
 
+/* Due / overdue / pending quick-glance chips (client rows + expanded cards). */
+.board-chip {
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+  flex: none;
+}
+
+.board-chip-due {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.board-chip-pending {
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent);
+  color: var(--gold);
+}
+
+.board-chip-overdue {
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  color: var(--red);
+}
+
+/* Chip sits directly above its card in the expanded client row. */
+.board-card-with-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
 /* Owner-only column manager. */
 .manage-columns {
   border: 1px solid var(--line);

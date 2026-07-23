@@ -100,6 +100,62 @@ export function effectiveDue(checklist: Checklist): string {
   return due
 }
 
+/**
+ * Quick-glance status for a board checklist: is it still DUE (actionable, incl.
+ * overdue) or PENDING (blocked — at least one open step is flagged waiting)?
+ * Mirrors the Delayed page's definition of blocked: a legacy `waiting` flag or
+ * any unresolved structured `waitingOns` entry, at any depth (step, sub-step,
+ * sub-sub-step). `reasons` collects the human "why" strings — the free-text
+ * waiting note first, else the structured blocker's note or name (resolved via
+ * `employeeNameById` when provided).
+ */
+export type BoardChecklistStatus =
+  | { kind: 'pending'; reasons: string[]; waitingCount: number }
+  | { kind: 'overdue'; due: string }
+  | { kind: 'due'; due: string }
+
+export function boardChecklistStatus(
+  checklist: Checklist,
+  today: string,
+  employeeNameById: Record<string, string> = {},
+): BoardChecklistStatus {
+  const reasons: string[] = []
+  let waitingCount = 0
+
+  const nameOf = (id: string) => employeeNameById[id] ?? 'a teammate'
+  const addWaiting = (
+    waiting: boolean | undefined,
+    waitingOn: string | undefined,
+    waitingOns: { blockerId: string; note?: string }[] | undefined,
+  ) => {
+    const structured = waitingOns ?? []
+    if (!waiting && structured.length === 0) return
+    waitingCount += 1
+    const reason =
+      (waitingOn ?? '').trim() ||
+      (structured[0] ? (structured[0].note ?? '').trim() || `waiting on ${nameOf(structured[0].blockerId)}` : '') ||
+      'waiting'
+    reasons.push(reason)
+  }
+
+  for (const item of checklist.items ?? []) {
+    if (item.done) continue
+    addWaiting(item.waiting, item.waitingOn, item.waitingOns)
+    for (const sub of item.subItems ?? []) {
+      if (sub.done) continue
+      addWaiting(sub.waiting, sub.waitingOn, sub.waitingOns)
+      for (const subSub of sub.subItems ?? []) {
+        if (subSub.done) continue
+        addWaiting(undefined, undefined, subSub.waitingOns)
+      }
+    }
+  }
+
+  if (waitingCount > 0) return { kind: 'pending', reasons, waitingCount }
+  const due = effectiveDue(checklist)
+  return due < today ? { kind: 'overdue', due } : { kind: 'due', due }
+}
+
 export function buildActiveBoard({
   checklists = [],
   categories = [],
