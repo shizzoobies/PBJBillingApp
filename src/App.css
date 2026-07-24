@@ -7411,7 +7411,16 @@ button.repeating-task-toggle-pill {
   max-height: calc(100vh - 48px);
   max-width: 540px;
   overflow-y: auto;
+  /* Breathing room by DEFAULT: any modal that renders content straight into
+     the panel gets comfortable padding instead of content flush against the
+     border (the "smooshed" modals). Panels that nest a .modal-body keep the
+     padding there instead — zeroed below so nothing double-pads. */
+  padding: 22px 24px;
   width: 100%;
+}
+
+.modal-panel:has(> .modal-body) {
+  padding: 0;
 }
 
 .modal-body {
@@ -9654,8 +9663,9 @@ mark.list-search-hit {
 .spitball-modal {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  width: min(560px, 92vw);
+  gap: 14px;
+  width: min(620px, 94vw);
+  max-width: 620px;
 }
 .spitball-modal .modal-title {
   display: flex;
@@ -9669,8 +9679,8 @@ mark.list-search-hit {
 .spitball-messages {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 44vh;
+  gap: 10px;
+  max-height: 50vh;
   overflow-y: auto;
   padding: 4px 2px;
 }
@@ -9732,7 +9742,8 @@ mark.list-search-hit {
   font: inherit;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  padding: 10px 12px;
+  min-height: 68px;
 }
 .spitball-footer {
   display: flex;

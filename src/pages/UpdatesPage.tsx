@@ -1177,7 +1177,7 @@ function SpitballModal({ onClose }: { onClose: () => void }) {
           <textarea
             className="spitball-input"
             value={input}
-            rows={2}
+            rows={3}
             maxLength={2000}
             placeholder="Type like you'd talk…"
             aria-label="Your thought"
