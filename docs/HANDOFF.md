@@ -1,9 +1,11 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-07-22. Everything below is live on `main`;
+Written 2026-07-21, last updated 2026-07-24. Everything below is live on `main`;
 the working tree was clean at handoff. Read this top to bottom before your first
 change — several rules here are non-obvious and breaking them has caused a
-production outage before.
+production outage before. **If you do only one extra thing, read §7's
+"queue-run contract": the Updates tracker is now the primary way work arrives,
+and it has rules.**
 
 ---
 
@@ -135,6 +137,55 @@ snapshot first, single transaction, re-verify after.
 
 ## 5. Where things stand (newest first)
 
+**2026-07-23/24 — the Updates tracker became the dev pipeline.** Over two
+days the owner-only Updates page grew from a list into a full closed-loop
+system: Brittany files and reviews, Alex triages, and a Claude session ships
+the queue. ~15 deploys, all verified live. The loop:
+
+```
+spitball chat → Britt's Brain → (Alex promotes) → Planned → queue run ships
+  → Shipped (with date·time pill) → Brittany approves to Done
+     └ or "Not approved" → AI read-back confirms her meaning → back to
+       Planned carrying a [Confirmed rework spec] in review_note
+Ambiguous items → needs_input + clarification_question → pinned "Needs your
+  answer" panel → her answer returns it to Planned (Q&A kept forever)
+```
+
+| Commit | What |
+|---|---|
+| `33acdfd` | **Clarification lane**: status `needs_input` + `clarification_question/answer` columns (tri-state set/clear via explicit flags — coalesce can't express clearing); amber "Needs your answer" panel pinned above all sections; answering returns the item to Planned; the Q&A renders on the card permanently. |
+| `2849d15` | **AI read-back on "Not approved"**: `confirmOwnerFeedback` (lib/assistant.js) restates her reason for HER confirmation (or asks which of two readings she means); files verbatim reason + confirmed dev-ready spec; send-backs now land in **Planned**, not In Progress. Non-AI "send back without the read-back" fallback — feedback is never blocked on the model. |
+| `53de2c9` | **"Planned (not near EOM)" lane** (`planned_not_eom`): parking for changes too far-reaching to ship near month close. Queue works these only ~the 6th–23rd. |
+| `f3d0051` | **`shipped_at`** stamp (re-stamped on every transition INTO shipped; boot backfill for existing rows) + "Shipped Jul 24 · 9:12 PM" pill right of Shipped titles. **Direct-SQL ships must set it manually.** |
+| `042828b` | **Britt's Brain / "Just spitballing…"**: status `brainstorm` + `spitballChat` thought-partner endpoint (asks 1-3 questions/turn, offers an organized draft, saves with transcript in dev_notes). Brain items are excluded from Copy-all and queue runs (`BACKLOG_EXCLUDED`) until Alex promotes them. Includes `escapeControlCharsInJsonStrings` — models emit literal newlines inside JSON strings on multi-line content; repair pass fixes control chars inside string literals only. |
+| `039a2d2` | Priority set at creation (add-form dropdown → create endpoint → both backends); waiting **Done resolves-only** (her post-use refinement: keeps the "Was waiting on" record, never checks the step off); Board: upcoming ghosts default OFF + team-member filter (generalized `BoardFilter`). |
+| `d2acc18` | **"New version — refresh" toast** (`lib/appVersion.ts` + `NewVersionToast`): tabs compare the served bundle fingerprint to their own every 5 min + on tab-focus. Built after TWO stale-tab incidents (the June import wipe, and two "still broken" reports of live features). |
+| `f117751` | **Modal padding at the base**: `.modal-panel` pads by default, zeroed via `:has(> .modal-body)` for the twelve nested-body modals. Audit found only spitball + the To-100% quick-fix rendered flush; future direct-content modals are safe for free. (Live-CSS greps: the minifier strips the space — match `:has(>.modal-body)`.) |
+| `6240cc0` | **To 100% rework (4th iteration, finally approved-track)**: problems ONLY, organized BY TAB with green "Nothing missing" rows; the active-checklist work section is gone (regression test pins it); new Board no-column check; Billing renamed Invoices. Built against her AI-confirmed spec. |
+| `f45af16` | Board **wrap grid** (`repeat(auto-fill, minmax(320px,1fr))`) — round 3 of that item: real change → stale-tab false alarm → confirmed spec. |
+| `cd96a80` | Board **due/overdue/pending chips** with the waiting reason (`boardChecklistStatus` in lib/activeBoard.ts; pending = any open step waiting, same rule as Delayed). |
+| `5aea50b` | **Pure timer captures auto-approve at creation** — the daily queue is only for typed time: manual entries, group-split allocations (groupId set), and post-hoc edits (edit path re-queues). Weekly/month-lock review covers the rest. |
+| `ee9380a` | Owner-only **"Template" button on every client row** — the apply-template capability existed since May on the Checklists page; the request was really discoverability. |
+| `e4193a7` | Waiting editor **Done** button (first version; semantics later refined by `039a2d2`). |
+| `26bb6c2` | Board vertical stack (superseded by the wrap grid). |
+
+**The historical-hours mystery was solved** (tracker `featreq-deef43f1`): the
+Jan–May 2026 import (1,368 entries / 961.8h) **ran successfully on Jun 23 and
+was silently erased within hours** by a stale-tab bulk save (`PUT
+/api/app-data` delete-and-reinserts `time_entries` + `clients` from the tab's
+snapshot; window pinned to 02:16–13:27 UTC Jun 24). Re-run assets are intact in
+`D:\PBJ Accounting\Old Time\` (machine-local!). Brittany confirmed "yes, that's
+what I meant." **Parked in the EOM lane with an explicit plan: ship a
+bulk-save staleness guard FIRST, then re-import with Alex's approval, ~Aug 6.**
+The bulk save's only guards today are malformed-payload and zero-clients — a
+stale-but-populated snapshot still wipes. The refresh toast shrinks that window
+but does not close it.
+
+Also: self-contained Updates-tracker handoffs for Alex's other sites (golf
+studio + nail salon, same GitHub/Cloudflare stack) live in the PARENT folder
+(`D:\PBJ Accounting Work\updates-tracker-*.md`) — machine-local until he copies
+them into those repos.
+
 **2026-07-22 — two approved production DATA writes (no code).** Railway's
 builders also hiccuped this day (one build failed with an internal RPC error,
 the next sat in "scheduling" ~25 min until aborted + redeployed) — neither was
@@ -189,8 +240,25 @@ the code:
 
 ## 6. Open follow-ups
 
-Nothing is half-built — every item above shipped and deployed. These are things I
-**flagged to Alex and he hasn't ruled on**; don't do them unprompted.
+Nothing is half-built — every item above shipped and deployed.
+
+**Tracker state at handoff (2026-07-24):** ~11 items in Shipped awaiting
+Brittany's review (each with a shipped-at pill); 3 in the EOM lane —
+engagement-to-billing workflow (`featreq-79b6d974`, ALSO needs a planning
+session with Alex first), client-tabs consolidation (`featreq-5c225d33`, her
+option "(c)": fold into that same discussion), and historical hours
+(`featreq-deef43f1`, guard-then-reimport plan above); nothing in Planned/New.
+One interpretation flag left for Brittany inside a shipped item's dev_notes:
+the Board "sort by team member box" was built as a FILTER — the note invites a
+send-back if she meant ordering.
+
+**The single most important pending code change:** the bulk-save staleness
+guard (version token on GET, echoed on PUT, 409 on mismatch + log bulk saves
+to activity_log). It gates the historical re-import and closes the app's last
+known data-loss vector. Scheduled with the re-import ~Aug 6, after month close.
+
+These are things **flagged to Alex that he hasn't ruled on**; don't do them
+unprompted.
 
 **Consequences of this session's changes, worth watching:**
 
@@ -251,9 +319,45 @@ scheduled-month marker first.
 
 ## 7. Working agreements with this user
 
-- **Plan, then build.** For anything non-trivial, propose first. "Push" is the go
-  signal. Use structured questions when a decision is genuinely his (or
-  Brittany's) — permissions changes and prod writes especially.
+### The queue-run contract (how work arrives now)
+
+When Alex says "go" / "run the queue" / "fire it up", work the Updates tracker
+autonomously (`feature_requests` table). This replaced ad-hoc requests as the
+main work channel; the statuses are the protocol with Brittany.
+
+1. **Queue** = `status='planned'`, ordered urgent→high→medium→low, then
+   `priority_rank`, then `created_at`. Ignore `new` (untriaged) and
+   `brainstorm` (Britt's Brain — hers until Alex promotes). Include
+   `planned_not_eom` items ONLY when the day-of-month is ~6–23.
+2. **Per item**: flip `in_progress` → **read `review_note` (the AI-confirmed
+   rework spec on send-backs) and `clarification_answer` FIRST** — they outrank
+   your reading of the title → build (BOTH store backends) → `npm run verify`
+   → push → poll Railway → `/health` → manifest + voice re-provision if
+   user-visible → flip `shipped` **with `dev_notes` (what + commit hash) and
+   `shipped_at = now()`** (direct SQL doesn't stamp it; the endpoint does).
+   Only Brittany/Alex flip items to `done`.
+3. **Ambiguous? Don't guess.** Set `needs_input` + ONE owner-readable question
+   in `clarification_question`; investigation detail goes in `dev_notes`; move
+   on. Guessing wrong cost four cycles on one feature.
+4. **"Still broken" reports: check the SERVED bundle before re-coding**
+   (fetch `/`, follow the asset links, grep for the feature's marker; remember
+   the CSS minifier strips spaces in selectors). Two such reports were stale
+   tabs. The refresh toast now mostly prevents this, but verify-first stands.
+5. **Before believing a request is unbuilt, check whether it already shipped**
+   — several "add X" items were discoverability gaps; the fix was surfacing,
+   not rebuilding. Duplicates: ship once, mark both, cross-reference.
+6. **Standing approval (Alex, explicit):** single-row writes on
+   `feature_requests` (status, dev_notes, clarification fields, shipped_at,
+   and filing shipped records for features he ordered directly). Every OTHER
+   prod write still needs his per-write approval with a durable undo snapshot.
+7. Post a short digest here after each item lands.
+
+### General agreements
+
+- **Plan, then build.** For anything non-trivial outside the queue, propose
+  first. "Push" is the go signal. Use structured questions when a decision is
+  genuinely his (or Brittany's) — permissions changes and prod writes
+  especially.
 - **Ship end-to-end.** A task isn't done at "code written": verify → commit →
   deploy → health-check → re-provision voice if the manifest changed.
 - **Re-reports mean re-interpret, not re-code.** The "To 100%" item was rejected
