@@ -9632,6 +9632,19 @@ mark.list-search-hit {
   border-radius: var(--radius-sm);
 }
 
+/* "Shipped Jul 24 · 9:12 PM" stamp right of a Shipped item's title. */
+.updates-shipped-at {
+  flex: none;
+  font-size: 0.76rem;
+  font-weight: 650;
+  color: var(--muted);
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+
 /* Pinned "Needs your answer" panel — the developer's blocking questions. */
 .updates-needs-input-panel {
   display: flex;

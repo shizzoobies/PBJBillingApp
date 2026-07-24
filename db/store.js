@@ -1778,6 +1778,19 @@ export class AppDataStore {
         `alter table feature_requests add column if not exists clarification_answer text`,
       )
 
+      // When the item last moved to 'shipped' — shown next to the title on the
+      // Updates page so the owner sees exactly when a change went live.
+      // Re-stamped on every transition INTO shipped (a re-ship shows its new
+      // time). One-time backfill: items already shipped borrow updated_at,
+      // their last touch (idempotent — only fills NULLs on shipped rows).
+      await this.pool.query(
+        `alter table feature_requests add column if not exists shipped_at timestamptz`,
+      )
+      await this.pool.query(
+        `update feature_requests set shipped_at = coalesce(updated_at, created_at)
+          where status = 'shipped' and shipped_at is null`,
+      )
+
       // Assistant suggestions the owner dismissed — keyed by a stable
       // pattern key so the same suggestion never nags twice.
       await this.pool.query(`
@@ -8107,6 +8120,9 @@ export class AppDataStore {
       clarificationQuestion:
         row.clarification_question ?? row.clarificationQuestion ?? null,
       clarificationAnswer: row.clarification_answer ?? row.clarificationAnswer ?? null,
+      shippedAt: row.shipped_at
+        ? new Date(row.shipped_at).toISOString()
+        : (row.shippedAt ?? null),
       createdAt: row.created_at
         ? new Date(row.created_at).toISOString()
         : (row.createdAt ?? nowIso()),
@@ -8126,7 +8142,8 @@ export class AppDataStore {
         `select id, user_id, title, description, type, status, urgent, priority,
                 priority_rank, dev_notes, approved_by, approved_at,
                 review_note, reviewed_by, reviewed_at,
-                clarification_question, clarification_answer, created_at, updated_at
+                clarification_question, clarification_answer, shipped_at,
+                created_at, updated_at
            from feature_requests
           order by ${FEATURE_REQUEST_PRIORITY_WEIGHT_SQL} asc,
                    priority_rank asc, created_at asc`,
@@ -8337,12 +8354,17 @@ export class AppDataStore {
                   when $14::boolean then $12::text
                   else clarification_answer
                 end,
+                shipped_at = case
+                  when $5 = 'shipped' then now()
+                  else shipped_at
+                end,
                 updated_at = now()
           where id = $1
         returning id, user_id, title, description, type, status, urgent, priority,
                   priority_rank, dev_notes, approved_by, approved_at,
                   review_note, reviewed_by, reviewed_at,
-                  clarification_question, clarification_answer, created_at, updated_at`,
+                  clarification_question, clarification_answer, shipped_at,
+                  created_at, updated_at`,
         [
           id,
           title ?? null,
@@ -8383,6 +8405,8 @@ export class AppDataStore {
         existing.approvedBy = null
         existing.approvedAt = null
       }
+      // Mirror the shipped_at stamp: every transition INTO shipped re-stamps.
+      if (status === 'shipped') existing.shippedAt = nowIso()
     }
     if (priority !== undefined) existing.priority = priority
     if (priorityRank !== undefined) existing.priorityRank = priorityRank

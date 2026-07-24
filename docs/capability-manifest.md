@@ -713,6 +713,9 @@ picker, notification bell, and account menu sit in the top bar on every page.
   with the question, an answer box, and an "Answer & return to Planned" button —
   answering stores the answer on the item (shown as "Q: … — A: …" on its card
   afterwards) and puts it straight back into the Planned queue for the developer.
+- Every Shipped item shows **when it went live** ("Shipped Jul 24 · 9:12 PM")
+  right next to its title, so the owner knows how fresh each change is while
+  reviewing. Re-shipping (after a send-back) re-stamps the time.
 - Layout: the list is organized into one COLLAPSIBLE section per status, each
   with its item count. Shipped is pinned to the TOP and is the only section
   EXPANDED by default (so the owner lands on just-shipped work awaiting her

@@ -73,6 +73,16 @@ const SECTION_OPTIONS: typeof STATUS_OPTIONS = [
   ),
 ]
 
+/** "Jul 24 · 9:12 PM" for the shipped-at stamp next to a Shipped item's title. */
+function formatShippedAt(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return null
+  const day = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  const time = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  return `${day} · ${time}`
+}
+
 /** Format an approval timestamp for the "Approved by … · <date>" line. */
 function formatApprovedAt(iso: string | null | undefined): string | null {
   if (!iso) return null
@@ -482,6 +492,16 @@ export function UpdatesPage() {
                   {item.title}
                 </button>
               )}
+              {item.status === 'shipped' && formatShippedAt(item.shippedAt) ? (
+                // When this change went live — right of the title while the
+                // item awaits the owner's review.
+                <span
+                  className="updates-shipped-at"
+                  title="When this was shipped (deployed and live)"
+                >
+                  Shipped {formatShippedAt(item.shippedAt)}
+                </span>
+              ) : null}
               <select
                 className={`updates-priority-select updates-priority-${item.priority}`}
                 value={item.priority}

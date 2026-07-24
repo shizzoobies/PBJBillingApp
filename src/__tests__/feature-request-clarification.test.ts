@@ -47,5 +47,19 @@ describe('mapFeatureRequest clarification fields', () => {
     const mapped = AppDataStore.mapFeatureRequest(base)
     expect(mapped.clarificationQuestion).toBeNull()
     expect(mapped.clarificationAnswer).toBeNull()
+    expect(mapped.shippedAt).toBeNull()
+  })
+
+  it('maps shipped_at through both row shapes as an ISO string', () => {
+    const pg = AppDataStore.mapFeatureRequest({
+      ...base,
+      shipped_at: '2026-07-24T01:30:00.000Z',
+    })
+    expect(pg.shippedAt).toBe('2026-07-24T01:30:00.000Z')
+    const file = AppDataStore.mapFeatureRequest({
+      ...base,
+      shippedAt: '2026-07-24T01:30:00.000Z',
+    })
+    expect(file.shippedAt).toBe('2026-07-24T01:30:00.000Z')
   })
 })

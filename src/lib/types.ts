@@ -827,6 +827,11 @@ export type FeatureRequest = {
    */
   clarificationQuestion?: string | null
   clarificationAnswer?: string | null
+  /**
+   * When the item last moved to 'shipped' (re-stamped on every re-ship).
+   * Shown next to the title on the Updates page while the item is Shipped.
+   */
+  shippedAt?: string | null
   createdAt: string
   updatedAt?: string | null
 }
