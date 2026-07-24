@@ -42,10 +42,15 @@ export function ActiveChecklistsBoardPage() {
 
   const [managingColumns, setManagingColumns] = useState(false)
   const [query, setQuery] = useState('')
-  const [showUpcoming, setShowUpcoming] = useState(true)
+  // Upcoming (projected) items default OFF — owner preference: the board opens
+  // showing only real, materialized work; the toggle brings ghosts back.
+  const [showUpcoming, setShowUpcoming] = useState(false)
   // Client filter: empty = all clients; otherwise the board shows only items for
   // the selected clients (single or multiple).
   const [clientFilter, setClientFilter] = useState<string[]>([])
+  // Team-member filter: empty = everyone; otherwise only checklists assigned
+  // to the selected member(s).
+  const [assigneeFilter, setAssigneeFilter] = useState<string[]>([])
 
   const today = localDateOnly()
 
@@ -88,13 +93,31 @@ export function ActiveChecklistsBoardPage() {
   }, [visibleChecklists, projectedGhosts, clientNameById])
 
   const clientFilterSet = useMemo(() => new Set(clientFilter), [clientFilter])
+  const assigneeFilterSet = useMemo(() => new Set(assigneeFilter), [assigneeFilter])
+
+  // Members offered by the team filter: only those with work on the board now.
+  const assigneeFilterOptions = useMemo(() => {
+    const ids = new Set<string>()
+    for (const checklist of visibleChecklists) {
+      if (checklist.assigneeId) ids.add(checklist.assigneeId)
+    }
+    for (const ghost of projectedGhosts) {
+      if (ghost.assigneeId) ids.add(ghost.assigneeId)
+    }
+    const nameById = new Map(data.employees.map((employee) => [employee.id, employee.name]))
+    return [...ids]
+      .map((id) => ({ id, label: nameById.get(id) ?? id }))
+      .sort((a, b) => a.label.localeCompare(b.label))
+  }, [visibleChecklists, projectedGhosts, data.employees])
 
   const board = useMemo(() => {
     const all = [...visibleChecklists, ...projectedGhosts]
-    const scoped =
-      clientFilterSet.size === 0
-        ? all
-        : all.filter((checklist) => clientFilterSet.has(checklist.clientId))
+    const scoped = all.filter(
+      (checklist) =>
+        (clientFilterSet.size === 0 || clientFilterSet.has(checklist.clientId)) &&
+        (assigneeFilterSet.size === 0 ||
+          (checklist.assigneeId ? assigneeFilterSet.has(checklist.assigneeId) : false)),
+    )
     return buildActiveBoard({
       checklists: scoped,
       categories: serviceCategories,
@@ -106,6 +129,7 @@ export function ActiveChecklistsBoardPage() {
     visibleChecklists,
     projectedGhosts,
     clientFilterSet,
+    assigneeFilterSet,
     serviceCategories,
     reportPeriod.to,
     today,
@@ -203,10 +227,19 @@ export function ActiveChecklistsBoardPage() {
               total={totalOpen}
             />
             {clientFilterOptions.length > 1 ? (
-              <BoardClientFilter
+              <BoardFilter
+                noun="client"
                 options={clientFilterOptions}
                 selected={clientFilter}
                 onChange={setClientFilter}
+              />
+            ) : null}
+            {assigneeFilterOptions.length > 1 ? (
+              <BoardFilter
+                noun="team member"
+                options={assigneeFilterOptions}
+                selected={assigneeFilter}
+                onChange={setAssigneeFilter}
               />
             ) : null}
             <ReportPeriodControl value={reportPeriod} onChange={setReportPeriod} />
@@ -301,15 +334,19 @@ function formatGhostDueDate(dueDate: string): string {
 }
 
 /**
- * Compact toolbar dropdown to filter the board by client. Empty selection = all
- * clients; checking one or more narrows the board to those clients. Multi-select
- * via checkboxes; "Clear" resets to all.
+ * Compact toolbar dropdown to filter the board — by client or by team member
+ * (the `noun` prop names what's being filtered). Empty selection = all;
+ * checking one or more narrows the board. Multi-select via checkboxes;
+ * "Clear" resets to all.
  */
-function BoardClientFilter({
+function BoardFilter({
+  noun,
   options,
   selected,
   onChange,
 }: {
+  /** Singular label for the thing filtered, e.g. "client" or "team member". */
+  noun: string
   options: Array<{ id: string; label: string }>
   selected: string[]
   onChange: (ids: string[]) => void
@@ -336,10 +373,10 @@ function BoardClientFilter({
   }
   const label =
     selected.length === 0
-      ? 'All clients'
+      ? `All ${noun}s`
       : selected.length === 1
-        ? options.find((option) => option.id === selected[0])?.label ?? '1 client'
-        : `${selected.length} clients`
+        ? options.find((option) => option.id === selected[0])?.label ?? `1 ${noun}`
+        : `${selected.length} ${noun}s`
 
   return (
     <div className="board-client-filter" ref={ref}>
@@ -355,7 +392,7 @@ function BoardClientFilter({
       {open ? (
         <div className="board-client-filter-menu" role="menu">
           <div className="board-client-filter-head">
-            <span>Filter by client</span>
+            <span>Filter by {noun}</span>
             {selected.length > 0 ? (
               <button type="button" className="link-button" onClick={() => onChange([])}>
                 Clear

@@ -2119,8 +2119,9 @@ function WaitingEditor({
   onSetWaitingFor: (next: string | null) => void
   onClear: () => void
   /**
-   * Finish the step: resolves the wait, checks the step off, and KEEPS the
-   * waiting note on this instance as a record (unlike Clear, which erases it).
+   * Retire the blocker: resolves the wait and KEEPS the waiting note on this
+   * instance as a record (unlike Clear, which erases it). Does NOT check the
+   * step off — completing stays with the checkboxes (owner feedback).
    */
   onDone: () => void
   /** Flag a new person-blocker on this step. */
@@ -2166,7 +2167,7 @@ function WaitingEditor({
         <button
           type="button"
           className="waiting-done-btn"
-          title="Finished — check the step off and keep this waiting note on this checklist for the record"
+          title="Wait resolved — keep this note on the checklist as the record. The step itself stays unchecked until you tick it off."
           onClick={onDone}
         >
           Done
@@ -2444,9 +2445,10 @@ function DraggableTaskList({
                   <span className="task-row-waiting" title="Why this step isn't done yet">
                     {item.waitingOn ? `Waiting on: ${item.waitingOn}` : 'Waiting'}
                   </span>
-                ) : item.done && (item.waitingOn ?? '').trim() ? (
+                ) : (item.waitingOn ?? '').trim() ? (
                   // Resolved via the waiting editor's Done — the note is kept
-                  // on this instance as the record of what it waited on.
+                  // on this instance as the record of what it waited on,
+                  // whether or not the step itself is checked off yet.
                   <span
                     className="task-row-waiting task-row-waiting-resolved"
                     title="This step was waiting — note kept for the record"
@@ -2564,12 +2566,13 @@ function DraggableTaskList({
                 onDone={() => {
                   // Resolve the wait but KEEP the note — it renders as a
                   // "was waiting" record on this instance only (future
-                  // recurrences materialize fresh, without it).
+                  // recurrences materialize fresh, without it). Deliberately
+                  // does NOT check the step off (owner feedback: completing
+                  // is the checkboxes' job — Done only retires the blocker).
                   void onUpdateItem(item.id, {
                     waiting: false,
                     waitingForChecklistId: null,
                   })
-                  if (!item.done) void onToggle(checklistId, item.id)
                 }}
                 onAddWaitingOn={(blockerId) =>
                   void addWaitingOn(checklistId, { itemId: item.id, blockerId })
@@ -2613,7 +2616,7 @@ function DraggableTaskList({
                           >
                             {sub.waitingOn ? `Waiting on: ${sub.waitingOn}` : 'Waiting'}
                           </span>
-                        ) : sub.done && (sub.waitingOn ?? '').trim() ? (
+                        ) : (sub.waitingOn ?? '').trim() ? (
                           <span
                             className="task-row-waiting sub-waiting-badge task-row-waiting-resolved"
                             title="This sub-step was waiting — note kept for the record"
@@ -2694,12 +2697,12 @@ function DraggableTaskList({
                             })
                           }
                           onDone={() => {
-                            // Same retention semantics as the item-level Done.
+                            // Same retention semantics as the item-level Done
+                            // (and same rule: never checks the sub-step off).
                             void onUpdateSubItemWaiting(item.id, sub.id, {
                               waiting: false,
                               waitingForChecklistId: null,
                             })
-                            if (!sub.done) onToggleSubItem(item.id, sub.id)
                           }}
                           onAddWaitingOn={(blockerId) =>
                             void addWaitingOn(checklistId, {

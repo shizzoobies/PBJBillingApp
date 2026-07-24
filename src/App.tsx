@@ -497,7 +497,12 @@ function App() {
 
   // ---- Updates tracker mutation handlers (owner-only) ----
   const addFeatureRequest = useCallback(
-    async (input: { title: string; description: string; type: FeatureRequestType }) => {
+    async (input: {
+      title: string
+      description: string
+      type: FeatureRequestType
+      priority?: FeatureRequest['priority']
+    }) => {
       const created = await createFeatureRequestRequest(input)
       await refreshFeatureRequests()
       return created

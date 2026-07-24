@@ -8157,6 +8157,11 @@ export class AppDataStore {
     const createdAt = nowIso()
     const allowedTypes = ['feature', 'bug', 'improvement']
     const type = allowedTypes.includes(opts.type) ? opts.type : 'feature'
+    // Priority can be chosen at creation (Updates add form); anything absent
+    // or invalid lands on 'medium', matching the old always-medium behavior.
+    const priority = FEATURE_REQUEST_PRIORITIES.includes(opts.priority)
+      ? opts.priority
+      : 'medium'
     const record = {
       id,
       userId,
@@ -8164,7 +8169,7 @@ export class AppDataStore {
       description: String(description ?? '').slice(0, 2000),
       type,
       status: 'sent',
-      priority: 'medium',
+      priority,
       priorityRank: 0,
       devNotes: null,
       reviewNote: null,

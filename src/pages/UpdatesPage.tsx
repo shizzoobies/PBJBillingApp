@@ -133,6 +133,7 @@ export function UpdatesPage() {
   const [newTitle, setNewTitle] = useState('')
   const [newDescription, setNewDescription] = useState('')
   const [newType, setNewType] = useState<FeatureRequestType>('feature')
+  const [newPriority, setNewPriority] = useState<FeatureRequestPriority>('medium')
   const [adding, setAdding] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
@@ -228,10 +229,11 @@ export function UpdatesPage() {
     setAdding(true)
     setFormError(null)
     try {
-      await addFeatureRequest({ title, description, type: newType })
+      await addFeatureRequest({ title, description, type: newType, priority: newPriority })
       setNewTitle('')
       setNewDescription('')
       setNewType('feature')
+      setNewPriority('medium')
     } catch (error) {
       setFormError(error instanceof Error ? error.message : 'Could not add that update.')
     } finally {
@@ -824,6 +826,19 @@ export function UpdatesPage() {
               aria-label="Update type"
             >
               {TYPE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <select
+              className={`updates-priority-select updates-priority-${newPriority}`}
+              value={newPriority}
+              onChange={(event) => setNewPriority(event.target.value as FeatureRequestPriority)}
+              aria-label="Priority"
+              title="Priority — set it right here so you don't have to find the item afterwards"
+            >
+              {PRIORITY_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>

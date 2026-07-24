@@ -2281,6 +2281,8 @@ export async function createFeatureRequest(input: {
   title: string
   description: string
   type: FeatureRequestType
+  /** Optional priority chosen at creation; the server defaults to 'medium'. */
+  priority?: FeatureRequest['priority']
 }) {
   const response = await apiFetch('/api/feature-requests', {
     method: 'POST',

@@ -2164,6 +2164,7 @@ const server = createServer(async (request, response) => {
       }
       const record = await appDataStore.createFeatureRequest(session.user.id, title, description, {
         type: payload?.type,
+        priority: payload?.priority,
       })
       await appDataStore.recordActivity(session.user.id, 'feature_request_created', title)
       sendJson(response, 201, { request: record })

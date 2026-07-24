@@ -192,12 +192,14 @@ picker, notification bell, and account menu sit in the top bar on every page.
   for — when that task completes, the blocked step's assignee gets an in-app +
   email notification ("Ready to continue"). Waiting items also appear on the
   Delayed page.
-- Finishing a waiting step — **Done vs Clear** in the waiting editor: **Done**
-  checks the step off AND keeps the waiting note visible on that checklist as a
+- Resolving a waiting step — **Done vs Clear** in the waiting editor: **Done**
+  retires the blocker and keeps the waiting note visible on that checklist as a
   "Was waiting on: …" record (that instance only — future recurring instances
-  start fresh), so there's a history of what the team keeps waiting on. **Clear**
-  just un-flags without finishing and erases the note. Done steps stop counting
-  on the Delayed page and the Board's pending chips.
+  start fresh), so there's a history of what the team keeps waiting on. Done
+  does **NOT** check the step off — completing the work stays with the normal
+  checkboxes (owner feedback: the reference should sit on the still-open step).
+  **Clear** just un-flags and erases the note. Resolved steps stop counting on
+  the Delayed page and the Board's pending chips.
 - Waiting on a PERSON (two-way): you can also flag a step as waiting on a
   specific team member. That person is notified immediately that someone's
   blocked on them, sees it in a "Waiting on you" card on their Dashboard, and
@@ -304,6 +306,11 @@ picker, notification bell, and account menu sit in the top bar on every page.
   waiting note, or who it's waiting on; hover shows all reasons). Collapsed
   client rows roll these up as "N pending" / "N overdue" chips, so the board
   answers "what's still due, what's stuck, and why" without expanding anything.
+- **Filters:** alongside the client filter there's a **team-member filter**
+  (shows only checklists assigned to the selected member(s); both are
+  multi-select and compose with search and the Report period). **"Show
+  upcoming" now defaults OFF** — the board opens with real, materialized work
+  only; tick the toggle to overlay the faded upcoming (projected) items.
 - **Scoping:** staff see only the clients they're assigned to (same as the rest
   of the app). The board is available to everyone, not owner-only.
 - **Filter by client:** a "Filter by client" dropdown in the board toolbar
@@ -688,6 +695,9 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - A tracker for pending feature updates and bug fixes — the owner's roadmap.
   Items come from two places: requests drafted by this assistant (chat →
   "Send to Alex") land here automatically, and the owner can add items directly.
+- Adding an item directly: title, type, **priority (set right in the add form —
+  no need to create first and hunt for it afterwards; defaults to Medium)**,
+  and a plain-language description.
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
   Planned (not near EOM) → In Progress → Needs answer → Shipped → Done, or
   Won't do), and a color-coded priority level — Urgent (red), High (orange),
