@@ -698,6 +698,17 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Adding an item directly: title, type, **priority (set right in the add form —
   no need to create first and hunt for it afterwards; defaults to Medium)**,
   and a plain-language description.
+- **"Just spitballing…" (Britt's Brain)**: for ideas that aren't requests yet.
+  The button at the top opens a little chat where the AI thinks it through
+  WITH the owner — reflecting the idea back and asking a few questions per
+  turn, never pushing toward a spec. When the idea has shape (or she clicks
+  "Wrap it up & organize"), the AI offers an organized draft (The idea / What
+  it could look like / Open questions / Why it matters) and one click saves it
+  to the **Britt's Brain** section — a parking spot for thinking, NOT the dev
+  queue: these items are excluded from "Copy all" and the developer's queue
+  runs until Alex moves one to Planned via the normal status dropdown. The
+  full chat transcript is kept in the item's notes. If the AI is unavailable,
+  "Save my notes as-is" still files the raw idea so nothing is ever lost.
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
   Planned (not near EOM) → In Progress → Needs answer → Shipped → Done, or
   Won't do), and a color-coded priority level — Urgent (red), High (orange),

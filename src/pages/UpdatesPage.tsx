@@ -1,5 +1,6 @@
 import { useMemo, useState, type DragEvent, type FormEvent } from 'react'
 import {
+  Brain,
   Bug,
   Check,
   ChevronDown,
@@ -11,12 +12,13 @@ import {
   Lightbulb,
   Pencil,
   Plus,
+  Send,
   Sparkles,
   Trash2,
   X,
 } from 'lucide-react'
 import { useAppContext } from '../AppContext'
-import { confirmRejectFeedbackRequest } from '../lib/api'
+import { confirmRejectFeedbackRequest, spitballRequest } from '../lib/api'
 import {
   formatBacklogForClaude,
   formatRequestForClaude,
@@ -49,6 +51,7 @@ const STATUS_OPTIONS: Array<{ value: FeatureRequestStatus; label: string }> = [
   { value: 'planned_not_eom', label: 'Planned (not near EOM)' },
   { value: 'in_progress', label: 'In Progress' },
   { value: 'needs_input', label: 'Needs answer' },
+  { value: 'brainstorm', label: "Britt's Brain" },
   { value: 'shipped', label: 'Shipped' },
   { value: 'done', label: 'Done' },
   { value: 'wont_do', label: "Won't do" },
@@ -190,6 +193,8 @@ export function UpdatesPage() {
   // Clarification answers being typed in the pinned "Needs your answer" panel,
   // keyed by item id (local drafts; saved only on the Answer button).
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({})
+  // "Just spitballing" brainstorm modal.
+  const [spitballOpen, setSpitballOpen] = useState(false)
   // Title + description editing draft (local, so typing never saves per-keystroke).
   const [editDraft, setEditDraft] = useState<{
     id: string
@@ -827,6 +832,14 @@ export function UpdatesPage() {
                 </>
               )}
             </button>
+            <button
+              type="button"
+              className="updates-spitball-button"
+              title="Not a request yet — just an idea to think out loud about. The AI asks a few questions and helps organize it into Britt's Brain."
+              onClick={() => setSpitballOpen(true)}
+            >
+              <Brain size={15} aria-hidden="true" /> Just spitballing…
+            </button>
           </div>
         </div>
 
@@ -997,6 +1010,212 @@ export function UpdatesPage() {
           })
         )}
       </div>
+      {spitballOpen ? <SpitballModal onClose={() => setSpitballOpen(false)} /> : null}
     </section>
+  )
+}
+
+type SpitballMessage = { role: 'user' | 'assistant'; text: string }
+
+const SPITBALL_GREETING: SpitballMessage = {
+  role: 'assistant',
+  text: "What's rattling around? It doesn't need to be a plan — just tell me what you've been thinking about and we'll untangle it together.",
+}
+
+/**
+ * "Just spitballing" — a small chat where the AI helps the owner think an
+ * idea out loud (a few questions per turn, no spec pressure). When the idea
+ * has enough shape the AI offers an organized draft; saving files it into
+ * Britt's Brain (status 'brainstorm', NOT the dev queue) with the transcript
+ * kept in dev notes. If the AI is down, the raw notes can still be saved.
+ */
+function SpitballModal({ onClose }: { onClose: () => void }) {
+  const { addFeatureRequest, updateFeatureRequest } = useAppContext()
+  const [messages, setMessages] = useState<SpitballMessage[]>([SPITBALL_GREETING])
+  const [input, setInput] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [draft, setDraft] = useState<{ title: string; description: string } | null>(null)
+
+  const sendText = async (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed || busy || saving) return
+    const next: SpitballMessage[] = [...messages, { role: 'user', text: trimmed }]
+    setMessages(next)
+    setInput('')
+    setBusy(true)
+    setError('')
+    try {
+      const result = await spitballRequest(next)
+      setMessages([...next, { role: 'assistant', text: result.reply }])
+      if (result.draft) setDraft(result.draft)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The spitballing chat hit a snag.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const transcript = () =>
+    `From a "Just spitballing" session, ${new Date().toLocaleDateString()}:\n` +
+    messages
+      .concat(input.trim() ? [{ role: 'user', text: input.trim() }] : [])
+      .map((m) => `${m.role === 'user' ? 'Britt' : 'AI'}: ${m.text}`)
+      .join('\n')
+      .slice(0, 3800)
+
+  const saveToBrain = async (title: string, description: string) => {
+    if (saving) return
+    setSaving(true)
+    setError('')
+    try {
+      const created = await addFeatureRequest({
+        title,
+        description,
+        type: 'improvement',
+        brainstorm: true,
+      })
+      await updateFeatureRequest(created.id, { devNotes: transcript() })
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save — try again.')
+      setSaving(false)
+    }
+  }
+
+  // Non-AI fallback: her words, saved as-is, so a model outage never eats an idea.
+  const saveRaw = () => {
+    const userText = messages
+      .filter((m) => m.role === 'user')
+      .map((m) => m.text)
+      .concat(input.trim() ? [input.trim()] : [])
+      .join('\n\n')
+    if (!userText.trim()) return
+    const title = userText.split('\n')[0].slice(0, 80) || 'Spitballed idea'
+    void saveToBrain(title, `The idea (raw notes):\n${userText}`.slice(0, 2000))
+  }
+
+  const hasUserContent =
+    messages.some((m) => m.role === 'user') || input.trim().length > 0
+
+  return (
+    <div className="modal-overlay" role="presentation" onClick={onClose}>
+      <div
+        className="modal-panel spitball-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Just spitballing"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h2 className="modal-title">
+          <Brain size={18} aria-hidden="true" /> Just spitballing
+        </h2>
+        <p className="muted-text spitball-subtitle">
+          Think out loud — this lands in Britt&apos;s Brain, not the work queue. Alex moves an
+          idea to Planned when you&apos;re ready.
+        </p>
+
+        <div className="spitball-messages">
+          {messages.map((message, index) => (
+            <div
+              key={index}
+              className={`spitball-message spitball-message--${message.role}`}
+            >
+              {message.text}
+            </div>
+          ))}
+          {busy ? <div className="spitball-message spitball-message--assistant">…</div> : null}
+        </div>
+
+        {draft ? (
+          <div className="spitball-draft">
+            <p className="spitball-draft-kicker">
+              <Sparkles size={13} aria-hidden="true" /> Here&apos;s the idea, organized:
+            </p>
+            <strong>{draft.title}</strong>
+            <p className="spitball-draft-body">{draft.description}</p>
+            <div className="button-row">
+              <button
+                type="button"
+                className="primary-action"
+                disabled={saving}
+                onClick={() => void saveToBrain(draft.title, draft.description)}
+              >
+                <Brain size={14} aria-hidden="true" />{' '}
+                {saving ? 'Saving…' : "Save to Britt's Brain"}
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={saving}
+                onClick={() => setDraft(null)}
+              >
+                Keep talking
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {error ? (
+          <div className="spitball-error">
+            <p className="auth-error">{error}</p>
+            {hasUserContent ? (
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={saving}
+                onClick={saveRaw}
+              >
+                Save my notes as-is to Britt&apos;s Brain
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="spitball-input-row">
+          <textarea
+            className="spitball-input"
+            value={input}
+            rows={2}
+            maxLength={2000}
+            placeholder="Type like you'd talk…"
+            aria-label="Your thought"
+            disabled={busy || saving}
+            onChange={(event) => setInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                void sendText(input)
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="primary-action"
+            disabled={busy || saving || !input.trim()}
+            onClick={() => void sendText(input)}
+            aria-label="Send"
+          >
+            <Send size={15} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="spitball-footer">
+          {messages.some((m) => m.role === 'user') && !draft ? (
+            <button
+              type="button"
+              className="link-button"
+              disabled={busy || saving}
+              onClick={() => void sendText("Let's wrap up — please organize what we have so far.")}
+            >
+              Wrap it up &amp; organize
+            </button>
+          ) : null}
+          <button type="button" className="secondary-action" disabled={saving} onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }

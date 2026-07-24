@@ -502,6 +502,7 @@ function App() {
       description: string
       type: FeatureRequestType
       priority?: FeatureRequest['priority']
+      brainstorm?: boolean
     }) => {
       const created = await createFeatureRequestRequest(input)
       await refreshFeatureRequests()

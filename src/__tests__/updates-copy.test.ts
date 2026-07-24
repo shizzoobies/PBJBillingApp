@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  BACKLOG_EXCLUDED,
   CLOSED_STATUSES,
   formatBacklogForClaude,
   formatRequestForClaude,
@@ -164,6 +165,7 @@ describe('status maps', () => {
       'planned_not_eom',
       'in_progress',
       'needs_input',
+      'brainstorm',
       'shipped',
       'done',
       'wont_do',
@@ -190,6 +192,22 @@ describe('status maps', () => {
     expect(CLOSED_STATUSES.has('shipped')).toBe(false)
     expect(CLOSED_STATUSES.has('needs_input')).toBe(false)
     expect(CLOSED_STATUSES.size).toBe(2)
+  })
+
+  it("keeps Britt's Brain out of the backlog copy but NOT closed", () => {
+    expect(STATUS_LABELS.brainstorm).toBe("Britt's Brain")
+    expect(CLOSED_STATUSES.has('brainstorm')).toBe(false)
+    expect(BACKLOG_EXCLUDED.has('brainstorm')).toBe(true)
+    expect(BACKLOG_EXCLUDED.has('done')).toBe(true)
+    expect(BACKLOG_EXCLUDED.has('wont_do')).toBe(true)
+    expect(BACKLOG_EXCLUDED.size).toBe(3)
+    const items = [
+      make({ id: 'idea', title: 'Mull this', status: 'brainstorm', priority: 'high', priorityRank: 0 }),
+      make({ id: 'work', title: 'Build this', status: 'planned', priority: 'low', priorityRank: 0 }),
+    ]
+    const copy = formatBacklogForClaude(items)
+    expect(copy).toContain('Build this')
+    expect(copy).not.toContain('Mull this')
   })
 })
 

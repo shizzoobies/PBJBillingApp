@@ -8179,13 +8179,18 @@ export class AppDataStore {
     const priority = FEATURE_REQUEST_PRIORITIES.includes(opts.priority)
       ? opts.priority
       : 'medium'
+    // A "Just spitballing" save lands in Britt's Brain (status 'brainstorm')
+    // instead of the intake pile — it's an idea to revisit, not filed work.
+    // Only this one status can be chosen at creation; everything else still
+    // starts at 'sent' and moves via the normal update path.
+    const status = opts.brainstorm === true ? 'brainstorm' : 'sent'
     const record = {
       id,
       userId,
       title: String(title ?? '').slice(0, 120),
       description: String(description ?? '').slice(0, 2000),
       type,
-      status: 'sent',
+      status,
       priority,
       priorityRank: 0,
       devNotes: null,
@@ -8251,6 +8256,7 @@ export class AppDataStore {
       'planned_not_eom',
       'in_progress',
       'needs_input',
+      'brainstorm',
       'shipped',
       'done',
       'wont_do',

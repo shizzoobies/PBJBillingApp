@@ -2283,6 +2283,8 @@ export async function createFeatureRequest(input: {
   type: FeatureRequestType
   /** Optional priority chosen at creation; the server defaults to 'medium'. */
   priority?: FeatureRequest['priority']
+  /** True files the item into Britt's Brain (status 'brainstorm') instead of New. */
+  brainstorm?: boolean
 }) {
   const response = await apiFetch('/api/feature-requests', {
     method: 'POST',
@@ -2372,6 +2374,31 @@ export async function refineFeatureRequest(id: string) {
   }
   return ((await response.json()) as { suggestion: { title: string; description: string } })
     .suggestion
+}
+
+/**
+ * Owner-only: one turn of the "Just spitballing" thought-partner chat. Sends
+ * the whole conversation; returns the AI's reply plus an organized draft once
+ * the idea has enough shape (null until then). Nothing is saved by this call.
+ */
+export async function spitballRequest(messages: Array<{ role: 'user' | 'assistant'; text: string }>) {
+  const response = await apiFetch('/api/feature-requests/spitball', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages }),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `The spitballing chat hit a snag (${response.status})`,
+    )
+  }
+  return (await response.json()) as {
+    reply: string
+    draft: { title: string; description: string } | null
+  }
 }
 
 /**

@@ -12,6 +12,7 @@ import {
   refineFeatureRequest,
   runAssistantChat,
   sanitizeReport,
+  spitballChat,
   validateAssistantAction,
 } from './lib/assistant.js'
 import { createPendingActionStore } from './lib/pending-actions.js'
@@ -2165,6 +2166,7 @@ const server = createServer(async (request, response) => {
       const record = await appDataStore.createFeatureRequest(session.user.id, title, description, {
         type: payload?.type,
         priority: payload?.priority,
+        brainstorm: payload?.brainstorm === true,
       })
       await appDataStore.recordActivity(session.user.id, 'feature_request_created', title)
       sendJson(response, 201, { request: record })
@@ -2235,6 +2237,43 @@ const server = createServer(async (request, response) => {
         console.error('[updates] refine failed:', error?.message || error)
         sendJson(response, status === 503 ? 503 : 502, {
           error: error?.message || 'The AI could not refine this right now. Please try again.',
+        })
+      }
+      return
+    }
+
+    // POST /api/feature-requests/spitball — the "Just spitballing" thought-
+    // partner chat. Stateless: body { messages: [{role, text}, …] }, returns
+    // { reply, draft|null }. Nothing is saved here — the UI files the draft
+    // via the normal create endpoint when the owner clicks save. Declared
+    // before the parameterized routes so the literal segment isn't an id.
+    if (normalizedPath === '/api/feature-requests/spitball' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      try {
+        const result = await spitballChat(payload?.messages)
+        sendJson(response, 200, result)
+      } catch (error) {
+        const status = error?.statusCode ?? error?.status ?? 502
+        console.error('[updates] spitball failed:', error?.message || error)
+        sendJson(response, status === 400 ? 400 : status === 503 ? 503 : 502, {
+          error:
+            error?.message ||
+            'The AI is unavailable right now — your notes can still be saved as-is.',
         })
       }
       return

@@ -223,6 +223,7 @@ export type AppContextValue = {
     description: string
     type: FeatureRequestType
     priority?: FeatureRequest['priority']
+    brainstorm?: boolean
   }) => Promise<FeatureRequest>
   /** Owner-only: patch any field of an update (status/priority/title/etc.). */
   updateFeatureRequest: (

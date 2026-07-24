@@ -36,6 +36,7 @@ export const STATUS_LABELS: Record<FeatureRequestStatus, string> = {
   planned_not_eom: 'Planned (not near EOM)',
   in_progress: 'In Progress',
   needs_input: 'Needs answer',
+  brainstorm: "Britt's Brain",
   shipped: 'Shipped',
   done: 'Done',
   wont_do: "Won't do",
@@ -48,9 +49,10 @@ export const STATUS_ORDER: Record<FeatureRequestStatus, number> = {
   planned_not_eom: 2,
   in_progress: 3,
   needs_input: 4,
-  shipped: 5,
-  done: 6,
-  wont_do: 7,
+  brainstorm: 5,
+  shipped: 6,
+  done: 7,
+  wont_do: 8,
 }
 
 /** Weight for an item's priority level (unknown → medium). */
@@ -66,6 +68,17 @@ export function priorityWeight(priority: FeatureRequestPriority): number {
 export const CLOSED_STATUSES: ReadonlySet<FeatureRequestStatus> = new Set<FeatureRequestStatus>([
   'done',
   'wont_do',
+])
+
+/**
+ * Statuses excluded from the "Copy for Claude" backlog and the open-work
+ * count: the closed ones, plus Britt's Brain — an idea being mulled is not
+ * work in the pipeline until Alex promotes it to Planned.
+ */
+export const BACKLOG_EXCLUDED: ReadonlySet<FeatureRequestStatus> = new Set<FeatureRequestStatus>([
+  'done',
+  'wont_do',
+  'brainstorm',
 ])
 
 /**
@@ -107,7 +120,7 @@ export function formatRequestForClaude(item: FeatureRequest): string {
  * its position in the sorted open list.
  */
 export function formatBacklogForClaude(items: FeatureRequest[]): string {
-  const open = sortFeatureRequests(items).filter((item) => !CLOSED_STATUSES.has(item.status))
+  const open = sortFeatureRequests(items).filter((item) => !BACKLOG_EXCLUDED.has(item.status))
   return open
     .map((item, index) => `${index + 1}. ${formatRequestForClaude(item)}`)
     .join('\n\n')

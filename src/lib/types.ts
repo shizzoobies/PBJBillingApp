@@ -774,6 +774,12 @@ export type FeatureRequestStatus =
    * a "Needs your answer" section, and answering returns the item to 'planned'.
    */
   | 'needs_input'
+  /**
+   * Britt's Brain: an idea from a "Just spitballing" session — organized
+   * thinking, NOT filed work. Excluded from the backlog copy and the dev
+   * queue; Alex promotes it to 'planned' when it's ready to build.
+   */
+  | 'brainstorm'
   | 'shipped'
   | 'done'
   | 'wont_do'
