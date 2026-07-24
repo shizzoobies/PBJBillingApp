@@ -8595,16 +8595,18 @@ button.repeating-task-toggle-pill {
   cursor: pointer;
 }
 
-/* Horizontal column scroller — one column per service category. */
-/* Vertical board (client feedback): service-category sections stack top to
-   bottom at full width instead of side-scrolling kanban columns — the whole
-   board scans with the page's own scroll. */
+/* Wrap-grid board (client feedback, round 2 of this item): as many
+   service-category groups per row as the width allows — each at least 320px,
+   sharing the row's width — wrapping to the next row when full, with the
+   page's own vertical scroll reaching lower rows. One column on a narrow
+   screen, several on a wide one. `align-items: start` keeps a short group at
+   its natural height instead of stretching to its row's tallest neighbor. */
 .board-scroll {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 16px;
   padding: 8px 2px 16px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .board-column {
