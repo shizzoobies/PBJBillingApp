@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-07-24. Everything below is live on `main`;
+Written 2026-07-21, last updated 2026-07-25. Everything below is live on `main`;
 the working tree was clean at handoff. Read this top to bottom before your first
 change — several rules here are non-obvious and breaking them has caused a
 production outage before. **If you do only one extra thing, read §7's
@@ -43,7 +43,7 @@ already and the problem is interpretation, not code.** See §7.
    do, **re-provision the voice agent after deploying** (§3).
 
 3. **`npm run verify`** = `eslint` + `tsc -b && vite build` + `vitest`. Green
-   before every push. Currently **512 tests / 50 files**.
+   before every push. Currently **541 tests / 53 files**.
 
 4. Prefer targeted endpoints over the bulk save. `PUT /api/app-data` (the bulk
    workspace save) is **owner-only (403 for staff)** — anything staff must do
@@ -136,6 +136,19 @@ snapshot first, single transaction, re-verify after.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-07-25 — per-user email notification preferences** (queue item
+`featreq-9819cd2c`, filed after Lisa got emailed about another user's
+completed task). Shipped in two deploys, both verified live:
+
+| Commit | What |
+|---|---|
+| `b6ae293` | **Per-user EMAIL notification toggles.** `lib/notification-prefs.js` is the single source of truth: a catalog of 7 toggle types grouping the notify() events (task assigned, workflow progress, waiting-on updates, time entries needing approval, time sent back, deletion requests, edit requests). Prefs live as a **sparse jsonb map on `users.email_notification_prefs`** — missing key = ENABLED, so new types default on (both store backends; the prod column is created by `initialize()`). `GET/PUT /api/me/notification-prefs` for any signed-in user; `notify()` consults `isEmailEnabledForEvent` before the email side only — **bell notifications are never gated**. UI: `EmailNotificationPrefsSection` on the Notifications page (every user — staff have no Settings page) and on owner Settings. `invoice_ready` deliberately has NO toggle (event is wired but unused; unmapped events always send — add its toggle if the invoice cron ever ships). Validated with a rolled-back prod transaction (DDL + jsonb update + roster select) before pushing. |
+| `487ac74` | **Discoverability follow-up (Alex-requested):** bell dropdown footer gains an "Email preferences" link → `/notifications#email-prefs`; the section moved to the TOP of the Notifications page, above the inbox; `CollapsibleSection` gains a `forceExpand` prop (transient — expands for the deep link without overwriting the user's stored collapse preference; implemented as a render-time state adjustment because `react-hooks/set-state-in-effect` rejects the effect version). |
+
+Lisa's specific fix is unticking **"Workflow progress"** — nobody's prefs were
+changed server-side; all types start ON. If someone says "I turned it off but
+still see it in the app," that's by design (toggles gate emails only).
 
 **2026-07-23/24 — the Updates tracker became the dev pipeline.** Over two
 days the owner-only Updates page grew from a list into a full closed-loop
@@ -242,8 +255,9 @@ the code:
 
 Nothing is half-built — every item above shipped and deployed.
 
-**Tracker state at handoff (2026-07-24):** ~11 items in Shipped awaiting
-Brittany's review (each with a shipped-at pill); 3 in the EOM lane —
+**Tracker state at handoff (2026-07-25):** ~12 items in Shipped awaiting
+Brittany's review (each with a shipped-at pill), newest being the email
+notification preferences (`featreq-9819cd2c`); 3 in the EOM lane —
 engagement-to-billing workflow (`featreq-79b6d974`, ALSO needs a planning
 session with Alex first), client-tabs consolidation (`featreq-5c225d33`, her
 option "(c)": fold into that same discussion), and historical hours
