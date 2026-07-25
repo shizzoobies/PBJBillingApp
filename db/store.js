@@ -1962,6 +1962,9 @@ export class AppDataStore {
       // informational — it powers the assistant's margin analytics and NEVER
       // affects invoices (same rule as estimated hours). Null = not set.
       await this.pool.query(`alter table users add column if not exists cost_rate numeric`)
+      // Per-user EMAIL notification toggles (sparse map of prefKey -> boolean;
+      // missing key = enabled). See lib/notification-prefs.js.
+      await this.pool.query(`alter table users add column if not exists email_notification_prefs jsonb`)
       // Per-employee BILL rate ($/hour charged to clients for this person's
       // time). Separate from cost_rate (a cost/pay rate, margin-only). Unlike
       // cost_rate, bill_rate DOES feed invoices: hourly clients are billed off
@@ -7377,7 +7380,7 @@ export class AppDataStore {
       // admin page. Owner re-adds with a fresh invite to undo a removal.
       const result = await this.pool.query(`
         select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at, created_at,
-               totp_enabled, cost_rate, bill_rate
+               totp_enabled, cost_rate, bill_rate, email_notification_prefs
         from users
         where inactive_at is null
         order by sort_order asc nulls last, name asc
@@ -7396,6 +7399,10 @@ export class AppDataStore {
         totpEnabled: Boolean(row.totp_enabled),
         costRate: row.cost_rate == null ? null : Number(row.cost_rate),
         billRate: row.bill_rate == null ? null : Number(row.bill_rate),
+        emailNotificationPrefs:
+          row.email_notification_prefs && typeof row.email_notification_prefs === 'object'
+            ? row.email_notification_prefs
+            : {},
       }))
     }
 
@@ -7413,6 +7420,10 @@ export class AppDataStore {
       totpEnabled: Boolean(user.totpEnabled),
       costRate: typeof user.costRate === 'number' ? user.costRate : null,
       billRate: typeof user.billRate === 'number' ? user.billRate : null,
+      emailNotificationPrefs:
+        user.emailNotificationPrefs && typeof user.emailNotificationPrefs === 'object'
+          ? user.emailNotificationPrefs
+          : {},
     }))
   }
 
@@ -7476,6 +7487,32 @@ export class AppDataStore {
   async getTeamMember(userId) {
     const members = await this.getTeamMembers()
     return members.find((member) => member.id === userId) ?? null
+  }
+
+  /**
+   * Replace a user's email notification preferences with an already-sanitized
+   * sparse map of { prefKey: boolean } (see lib/notification-prefs.js — the
+   * endpoint sanitizes before calling). Returns the stored prefs, or null when
+   * the user doesn't exist.
+   */
+  async setEmailNotificationPrefs(userId, prefs) {
+    if (!userId) return null
+    const clean = prefs && typeof prefs === 'object' && !Array.isArray(prefs) ? prefs : {}
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update users set email_notification_prefs = $2::jsonb, updated_at = now() where id = $1 returning id`,
+        [userId, JSON.stringify(clean)],
+      )
+      return result.rowCount ? clean : null
+    }
+
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((u) => u.id === userId)
+    if (!user) return null
+    user.emailNotificationPrefs = clean
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return clean
   }
 
   /**

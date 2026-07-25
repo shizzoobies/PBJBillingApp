@@ -1743,6 +1743,41 @@ export async function markNotificationReadRequest(notificationId: string) {
   return (await response.json()) as NotificationEntry
 }
 
+export type EmailNotificationPrefType = {
+  key: string
+  label: string
+  description: string
+}
+
+export type EmailNotificationPrefs = Record<string, boolean>
+
+export async function fetchNotificationPrefs(signal?: AbortSignal) {
+  const response = await apiFetch('/api/me/notification-prefs', {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load notification preferences (${response.status})`)
+  }
+  return (await response.json()) as {
+    types: EmailNotificationPrefType[]
+    prefs: EmailNotificationPrefs
+  }
+}
+
+export async function updateNotificationPrefsRequest(prefs: EmailNotificationPrefs) {
+  const response = await apiFetch('/api/me/notification-prefs', {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prefs }),
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to save notification preferences (${response.status})`)
+  }
+  return (await response.json()) as { prefs: EmailNotificationPrefs }
+}
+
 export async function markAllNotificationsReadRequest() {
   const response = await apiFetch('/api/notifications/read-all', {
     credentials: 'same-origin',

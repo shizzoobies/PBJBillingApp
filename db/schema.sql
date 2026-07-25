@@ -21,6 +21,9 @@ create table if not exists users (
 alter table users add column if not exists magic_token text;
 alter table users add column if not exists token_revoked_at timestamptz;
 alter table users add column if not exists last_active_at timestamptz;
+-- Per-user EMAIL notification toggles (sparse map of prefKey -> boolean;
+-- missing key = enabled). See lib/notification-prefs.js.
+alter table users add column if not exists email_notification_prefs jsonb;
 create unique index if not exists users_magic_token_unique on users (magic_token) where magic_token is not null;
 
 create table if not exists activity_log (

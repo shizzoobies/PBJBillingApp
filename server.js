@@ -28,6 +28,7 @@ import {
   sendLoginLinkEmail,
   sendReportEmail,
 } from './lib/notify.js'
+import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
 import {
   listBlockingWeeks,
   normalizeTimeEntryMethod,
@@ -6149,6 +6150,43 @@ const server = createServer(async (request, response) => {
       if (!session) return
       const updated = await appDataStore.markAllNotificationsRead(session.user.id)
       sendJson(response, 200, { updated })
+      return
+    }
+
+    // Per-user EMAIL notification preferences. Any signed-in user manages
+    // their own; the catalog of toggle types is served alongside so the UI
+    // and the notify() gate share one source of truth (lib/notification-prefs.js).
+    if (normalizedPath === '/api/me/notification-prefs' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const member = await appDataStore.getTeamMember(session.user.id)
+      sendJson(response, 200, {
+        types: EMAIL_PREF_TYPES.map(({ key, label, description }) => ({ key, label, description })),
+        prefs: sanitizeEmailPrefs(member?.emailNotificationPrefs),
+      })
+      return
+    }
+
+    if (normalizedPath === '/api/me/notification-prefs' && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const clean = sanitizeEmailPrefs(payload?.prefs)
+      const stored = await appDataStore.setEmailNotificationPrefs(session.user.id, clean)
+      if (stored === null) {
+        sendJson(response, 404, { error: 'User not found' })
+        return
+      }
+      sendJson(response, 200, { prefs: stored })
       return
     }
 

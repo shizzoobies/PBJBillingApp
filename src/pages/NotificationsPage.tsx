@@ -6,6 +6,7 @@ import {
   markNotificationReadRequest,
 } from '../lib/api'
 import type { NotificationEntry } from '../lib/types'
+import { EmailNotificationPrefsSection } from '../components/EmailNotificationPrefs'
 
 const PAGE_SIZE = 50
 
@@ -150,6 +151,8 @@ export function NotificationsPage() {
           </button>
         </div>
       ) : null}
+
+      <EmailNotificationPrefsSection />
     </section>
   )
 }

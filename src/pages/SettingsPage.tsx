@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChangePasswordCard } from '../components/ChangePasswordCard'
+import { EmailNotificationPrefsSection } from '../components/EmailNotificationPrefs'
 import {
   CollapsibleSection,
   SavingNumberInput,
@@ -114,6 +115,7 @@ export function SettingsPage() {
       <BusinessSection settings={settings} onCommit={commit} />
       <ClientDefaultsSection settings={settings} onCommit={commit} />
       <AuthenticationSection />
+      <EmailNotificationPrefsSection />
       <SecuritySection />
       <ChangePasswordCard userEmail={sessionUser?.email ?? null} />
     </section>
