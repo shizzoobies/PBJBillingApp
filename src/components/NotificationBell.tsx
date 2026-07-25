@@ -199,6 +199,16 @@ export function NotificationBell() {
               className="link-button"
               onClick={() => {
                 setOpen(false)
+                navigate('/notifications#email-prefs')
+              }}
+              type="button"
+            >
+              Email preferences
+            </button>
+            <button
+              className="link-button"
+              onClick={() => {
+                setOpen(false)
                 navigate('/notifications')
               }}
               type="button"

@@ -617,9 +617,10 @@ picker, notification bell, and account menu sit in the top bar on every page.
   (client-less notifications simply omit the line).
 - Emails include a one-click sign-in link.
 - **Per-user email preferences**: every user can choose which notification
-  types reach them by EMAIL, via an "Email notifications" section at the
-  bottom of the Notifications page (bell → View all). Owners also see the
-  same section on the Settings page. Toggle types: task assigned to you,
+  types reach them by EMAIL, via an "Email notifications" section at the TOP
+  of the Notifications page. Fastest way there: click the notification bell,
+  then "Email preferences" in the dropdown footer — it jumps straight to the
+  section. Owners also see the same section on the Settings page. Toggle types: task assigned to you,
   workflow progress (someone advances/completes a workflow you opened),
   waiting-on updates, time entries needing approval, your time entry was
   sent back, deletion requests, and edit requests/decisions. Turning a type

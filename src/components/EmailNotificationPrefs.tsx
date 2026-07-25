@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import {
   fetchNotificationPrefs,
   updateNotificationPrefsRequest,
@@ -13,7 +14,14 @@ import { CollapsibleSection } from './SectionKit'
  * owner's Settings page. Toggles gate EMAILS only; in-app bell notifications
  * always arrive.
  */
+export const EMAIL_PREFS_ANCHOR = 'email-prefs'
+
 export function EmailNotificationPrefsSection() {
+  const location = useLocation()
+  // The bell dropdown deep-links here as /notifications#email-prefs — when the
+  // hash targets this section, expand it (even if previously collapsed) and
+  // scroll it into view.
+  const isJumpTarget = location.hash === `#${EMAIL_PREFS_ANCHOR}`
   const [types, setTypes] = useState<EmailNotificationPrefType[]>([])
   const [prefs, setPrefs] = useState<EmailNotificationPrefs>({})
   const [loading, setLoading] = useState(true)
@@ -46,6 +54,17 @@ export function EmailNotificationPrefsSection() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!isJumpTarget) return
+    // Let the section render (and expand) first, then scroll to it.
+    const frame = window.requestAnimationFrame(() => {
+      document
+        .getElementById(EMAIL_PREFS_ANCHOR)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [isJumpTarget])
+
   const flashSaved = () => {
     setSavedFlash(true)
     if (savedTimeoutRef.current) {
@@ -74,6 +93,8 @@ export function EmailNotificationPrefsSection() {
       kicker="Email"
       title="Email notifications"
       storageKey="email-notification-prefs"
+      id={EMAIL_PREFS_ANCHOR}
+      forceExpand={isJumpTarget}
       headerAction={savedFlash ? <span className="saved-flash">Saved</span> : null}
     >
       <p className="muted-text" style={{ marginTop: 0 }}>

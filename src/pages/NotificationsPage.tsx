@@ -117,6 +117,8 @@ export function NotificationsPage() {
 
       {error ? <p className="sync-banner sync-error">{error}</p> : null}
 
+      <EmailNotificationPrefsSection />
+
       <div className="notifications-page-list">
         {loading && entries.length === 0 ? (
           <p className="notification-empty">Loading...</p>
@@ -151,8 +153,6 @@ export function NotificationsPage() {
           </button>
         </div>
       ) : null}
-
-      <EmailNotificationPrefsSection />
     </section>
   )
 }

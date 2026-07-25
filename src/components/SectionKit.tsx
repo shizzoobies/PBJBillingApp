@@ -63,6 +63,7 @@ export function CollapsibleSection({
   bodyClassName,
   stickyHeader = false,
   id,
+  forceExpand = false,
   children,
 }: {
   kicker?: string
@@ -82,16 +83,34 @@ export function CollapsibleSection({
   stickyHeader?: boolean
   /** Optional DOM id on the section root so in-page nav can jump to it. */
   id?: string
+  /**
+   * While true, the section expands even if the user previously collapsed it —
+   * for deep links that jump straight to a section. Transient: it does not
+   * overwrite the stored collapse preference; only explicit toggles persist.
+   */
+  forceExpand?: boolean
   children: ReactNode
 }) {
   const scope = useContext(SectionScopeContext)
   const persistBase = `pbj.section.${scope}${storageKey ?? title}`
   const collapseKey = `${persistBase}.collapsed`
   const lockKey = `${persistBase}.locked`
-  const [collapsed, setCollapsed] = useState(() => readStoredBool(collapseKey, defaultCollapsed))
+  const [collapsed, setCollapsed] = useState(() =>
+    forceExpand ? false : readStoredBool(collapseKey, defaultCollapsed),
+  )
   const [locked, setLocked] = useState(() =>
     lockable ? readStoredBool(lockKey, defaultLocked) : defaultLocked,
   )
+
+  // Render-time adjustment (not an effect): if forceExpand switches on while
+  // mounted (e.g. the hash changes to target this section), expand right away.
+  const [prevForceExpand, setPrevForceExpand] = useState(forceExpand)
+  if (forceExpand !== prevForceExpand) {
+    setPrevForceExpand(forceExpand)
+    if (forceExpand && collapsed) {
+      setCollapsed(false)
+    }
+  }
 
   const toggleCollapsed = () =>
     setCollapsed((value) => {
