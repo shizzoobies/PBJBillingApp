@@ -71,6 +71,12 @@ let store
 beforeEach(async () => {
   store = new AppDataStore()
   expect(store.mode).toBe('file')
+  // Boot it the way server.js does. Not optional: `initialize()` is what
+  // creates the `tmp/` directory (the mkdir in store.js), and without it
+  // write() throws ENOENT on any checkout that doesn't already have one.
+  // Skipping this passed locally and failed the first CI run, because a clean
+  // clone has no tmp/ — a test that depended on ambient machine state.
+  await store.initialize()
   // Baseline, unguarded (server-authoritative writes pass no expectedVersion).
   await store.write(workspace())
 })
