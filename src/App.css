@@ -10375,9 +10375,55 @@ mark.list-search-hit {
   gap: 14px;
   flex-wrap: wrap;
 }
-/* The active status tab's panel. The tab bar itself reuses .stage-segment /
-   .stage-segment-tab (shared with the Clients page stage filter), so the two
-   pages read the same and the counts stay visible for every status at once. */
+/* Updates status tabs — an underline bar, not pills. Eight lozenges in a row
+   reads as clutter; a hairline rule with a single accented underline is quieter
+   and lets the labels themselves carry the hierarchy. */
+.updates-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.updates-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 14px;
+  border: 0;
+  /* The active underline sits ON the container's hairline, not below it. */
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--ease), border-color var(--ease);
+}
+.updates-tab:hover {
+  color: var(--ink);
+}
+.updates-tab.is-active {
+  color: var(--ink);
+  border-bottom-color: var(--plum);
+}
+/* A status with nothing in it stays readable but stops competing. */
+.updates-tab.is-empty:not(.is-active) {
+  opacity: 0.55;
+}
+.updates-tab-count {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+.updates-tab.is-active .updates-tab-count {
+  color: var(--plum);
+  opacity: 1;
+}
+
+/* The active status tab's panel. */
 .updates-status-section {
   margin-top: 14px;
 }

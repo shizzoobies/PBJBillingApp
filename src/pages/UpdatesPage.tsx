@@ -975,21 +975,30 @@ export function UpdatesPage() {
           </p>
         ) : (
           <>
-            <div className="stage-segment" role="tablist" aria-label="Filter updates by status">
+            <div className="updates-tabs" role="tablist" aria-label="Filter updates by status">
               {visibleTabs.map((option) => {
                 const count = (byStatus.get(option.value) ?? []).length
                 const isActive = option.value === activeTab
+                // Empty statuses stay visible (the 0 is informative) but recede,
+                // so the eye lands on the tabs that actually hold work.
+                const classes = [
+                  'updates-tab',
+                  isActive ? 'is-active' : '',
+                  count === 0 ? 'is-empty' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')
                 return (
                   <button
                     key={option.value}
                     type="button"
                     role="tab"
                     aria-selected={isActive}
-                    className={isActive ? 'stage-segment-tab is-active' : 'stage-segment-tab'}
+                    className={classes}
                     onClick={() => setActiveStatus(option.value)}
                   >
                     {option.label}
-                    <span className="stage-segment-count">{count}</span>
+                    <span className="updates-tab-count">{count}</span>
                   </button>
                 )
               })}
