@@ -1190,6 +1190,10 @@ export type NotificationEvent =
   | 'task_edit_requested'
   | 'task_edit_approved'
   | 'task_edit_rejected'
+  /** A new item was logged in the owner-only Updates tracker. */
+  | 'update_created'
+  /** An Updates item moved between statuses (shipped, back to planned, …). */
+  | 'update_status_changed'
 
 /**
  * A flattened "someone is waiting on you" row (from GET /api/waiting-on-me).

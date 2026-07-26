@@ -511,6 +511,52 @@ async function fileItemDeletionRequest(
 }
 
 /**
+ * Human labels for Updates-tracker statuses, so a notification reads
+ * "Shipped → Planned" rather than "shipped → planned". Mirrors the status
+ * union in src/lib/types.ts (FeatureRequestStatus).
+ */
+const UPDATE_STATUS_LABELS = {
+  new: 'New',
+  planned: 'Planned',
+  planned_not_eom: 'Planned (not near EOM)',
+  in_progress: 'In progress',
+  needs_input: 'Needs your answer',
+  brainstorm: "Britt's Brain",
+  shipped: 'Shipped',
+  done: 'Done',
+  wont_do: "Won't do",
+}
+const updateStatusLabel = (status) => UPDATE_STATUS_LABELS[status] ?? String(status ?? 'unknown')
+
+/**
+ * Tell the OTHER owners about Updates-tracker activity — a new item logged, or
+ * one moving status (shipped, sent back to planned, picked up…). The tracker is
+ * owner-only and both owners work the queue, so this is how each stays aware of
+ * what the other did without watching the page.
+ *
+ * Never notifies whoever made the change (they already know), and is
+ * best-effort: a failure is logged and never breaks the write that triggered it.
+ * Email delivery is gated by the 'updatesTracker' preference; the bell is not.
+ */
+async function notifyOwnersOfUpdateActivity(request, session, event, message) {
+  try {
+    const members = await appDataStore.getTeamMembers()
+    const owners = members.filter(
+      (member) => member.role === 'owner' && member.id !== session.user.id,
+    )
+    for (const owner of owners) {
+      await notify(appDataStore, owner.id, event, {
+        message,
+        link: '/updates',
+        appPublicUrl: getPublicAppUrl(request),
+      })
+    }
+  } catch (err) {
+    console.error(`[notify] ${event} dispatch failed:`, err?.message || err)
+  }
+}
+
+/**
  * Strip data so a non-owner only sees clients they're scoped to and
  * derivative records (checklists, templates, time entries, plans) that
  * reference those clients. Owners get the data unchanged.
@@ -2170,6 +2216,14 @@ const server = createServer(async (request, response) => {
         brainstorm: payload?.brainstorm === true,
       })
       await appDataStore.recordActivity(session.user.id, 'feature_request_created', title)
+      const creatorName =
+        (await appDataStore.getTeamMember(session.user.id))?.name ?? 'Someone'
+      await notifyOwnersOfUpdateActivity(
+        request,
+        session,
+        'update_created',
+        `${creatorName} logged a new update: "${title}" (${updateStatusLabel(record?.status)}).`,
+      )
       sendJson(response, 201, { request: record })
       return
     }
@@ -2352,6 +2406,9 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = await readJsonBody(request)
+      // Snapshot the status BEFORE the write so we only notify on a real move
+      // (a title tweak or a drag-reorder shouldn't email anyone).
+      const priorStatus = (await appDataStore.getFeatureRequest(id))?.status ?? null
       const updated = await appDataStore.updateFeatureRequest(
         id,
         {
@@ -2374,6 +2431,19 @@ const server = createServer(async (request, response) => {
       if (!updated) {
         sendJson(response, 400, { error: 'Nothing to update' })
         return
+      }
+      if (updated.status && priorStatus && updated.status !== priorStatus) {
+        const actorName = (await appDataStore.getTeamMember(session.user.id))?.name ?? 'Someone'
+        const note =
+          typeof updated.reviewNote === 'string' && updated.reviewNote.trim()
+            ? ` — "${updated.reviewNote.trim().slice(0, 160)}"`
+            : ''
+        await notifyOwnersOfUpdateActivity(
+          request,
+          session,
+          'update_status_changed',
+          `${actorName} moved "${updated.title}" from ${updateStatusLabel(priorStatus)} to ${updateStatusLabel(updated.status)}${note}.`,
+        )
       }
       sendJson(response, 200, { request: updated })
       return

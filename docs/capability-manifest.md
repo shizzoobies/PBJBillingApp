@@ -623,9 +623,18 @@ picker, notification bell, and account menu sit in the top bar on every page.
   section. Owners also see the same section on the Settings page. Toggle types: task assigned to you,
   workflow progress (someone advances/completes a workflow you opened),
   waiting-on updates, time entries needing approval, your time entry was
-  sent back, deletion requests, and edit requests/decisions. Turning a type
-  off stops the EMAIL only — in-app bell notifications always arrive. All
-  types default to on.
+  sent back, deletion requests, edit requests/decisions, and Updates tracker
+  activity. Turning a type off stops the EMAIL only — in-app bell notifications
+  always arrive. All types default to on.
+- **Updates tracker activity** (the "updatesTracker" toggle): the OTHER owner is
+  notified when a new update is logged, and whenever an update CHANGES STATUS —
+  shipped, sent back to Planned, picked up as In progress, moved to Britt's
+  Brain, and so on. The message names who did it, the update's title, and the
+  move ("Shipped → Planned"), including the review note when one was given. The
+  tracker is owner-only and both owners work the queue, so this is how each stays
+  aware of the other's changes without watching the page. Whoever made the change
+  is never notified about their own action, and edits that DON'T move an item
+  (retitling, re-ranking, dev notes) send nothing.
 
 ## Billing month concept
 
