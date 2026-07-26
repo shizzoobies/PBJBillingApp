@@ -3,8 +3,6 @@ import {
   Brain,
   Bug,
   Check,
-  ChevronDown,
-  ChevronRight,
   Clipboard,
   ClipboardList,
   GripVertical,
@@ -151,15 +149,11 @@ export function UpdatesPage() {
   const [formError, setFormError] = useState<string | null>(null)
 
   const [hideDone, setHideDone] = useState(false)
-  // Which status sections are collapsed. By default everything EXCEPT Shipped is
-  // collapsed, so the owner lands on the just-shipped work awaiting her sign-off
-  // and can expand the rest as needed.
-  const [collapsedStatuses, setCollapsedStatuses] = useState<Set<FeatureRequestStatus>>(
-    () =>
-      new Set<FeatureRequestStatus>(
-        STATUS_OPTIONS.map((option) => option.value).filter((value) => value !== 'shipped'),
-      ),
-  )
+  // One status at a time, chosen from the tab bar. Tabs beat the old accordion
+  // here because every category's COUNT stays visible at once — you can see the
+  // whole queue's shape without opening anything. Defaults to Shipped, so the
+  // owner still lands on work awaiting her sign-off.
+  const [activeStatus, setActiveStatus] = useState<FeatureRequestStatus>('shipped')
 
   // Transient "Copied ✓" flash, keyed by a copy-source id ('all' or item id).
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
@@ -297,15 +291,19 @@ export function UpdatesPage() {
     setDropTargetId(null)
   }
 
-  const toggleStatusSection = (status: FeatureRequestStatus) =>
-    setCollapsedStatuses((prev) => {
-      const next = new Set(prev)
-      if (next.has(status)) next.delete(status)
-      else next.add(status)
-      return next
-    })
-  const setAllCollapsed = (collapsed: boolean) =>
-    setCollapsedStatuses(collapsed ? new Set(STATUS_OPTIONS.map((o) => o.value)) : new Set())
+  // Every status gets a tab — including empty ones, because "In progress 0" is
+  // itself useful ("nothing is being worked on"). "Hide done" drops the closed
+  // tabs entirely rather than showing them at zero.
+  const visibleTabs = SECTION_OPTIONS.filter(
+    (option) => !(hideDone && CLOSED_STATUSES.has(option.value)),
+  )
+  // Derived, not stored: if the selected tab is hidden (e.g. she ticks "Hide
+  // done" while sitting on Done) fall back to the first tab instead of showing
+  // an empty page. Deriving avoids the flash an effect-based reset would cause.
+  const activeTab = visibleTabs.some((option) => option.value === activeStatus)
+    ? activeStatus
+    : (visibleTabs[0]?.value ?? 'shipped')
+  const activeItems = byStatus.get(activeTab) ?? []
 
   const handleRefine = async (item: FeatureRequest) => {
     setRefineState((prev) => ({
@@ -899,12 +897,6 @@ export function UpdatesPage() {
             {openCount} open · {sorted.length} total
           </span>
           <div className="updates-toolbar-controls">
-            <button type="button" className="link-button" onClick={() => setAllCollapsed(false)}>
-              Expand all
-            </button>
-            <button type="button" className="link-button" onClick={() => setAllCollapsed(true)}>
-              Collapse all
-            </button>
             <label className="updates-filter-toggle">
               <input
                 type="checkbox"
@@ -982,32 +974,43 @@ export function UpdatesPage() {
             No updates yet. Add one above, or send one from the assistant — they show up here.
           </p>
         ) : (
-          SECTION_OPTIONS.map((option) => {
-            const items = byStatus.get(option.value) ?? []
-            if (items.length === 0) return null
-            if (hideDone && CLOSED_STATUSES.has(option.value)) return null
-            const isCollapsed = collapsedStatuses.has(option.value)
-            return (
-              <div className="updates-status-section" key={option.value}>
-                <button
-                  type="button"
-                  className={`updates-status-header updates-status-header--${option.value}`}
-                  aria-expanded={!isCollapsed}
-                  onClick={() => toggleStatusSection(option.value)}
-                >
-                  {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
-                  <span className="updates-status-name">
+          <>
+            <div className="stage-segment" role="tablist" aria-label="Filter updates by status">
+              {visibleTabs.map((option) => {
+                const count = (byStatus.get(option.value) ?? []).length
+                const isActive = option.value === activeTab
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className={isActive ? 'stage-segment-tab is-active' : 'stage-segment-tab'}
+                    onClick={() => setActiveStatus(option.value)}
+                  >
                     {option.label}
-                    {option.value === 'shipped' ? ' — awaiting approval' : ''}
-                  </span>
-                  <span className="updates-status-count">{items.length}</span>
-                </button>
-                {isCollapsed ? null : (
-                  <div className="updates-list">{items.map((item) => renderCard(item))}</div>
-                )}
-              </div>
-            )
-          })
+                    <span className="stage-segment-count">{count}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div
+              className={`updates-status-section updates-status-section--${activeTab}`}
+              role="tabpanel"
+            >
+              {activeTab === 'shipped' && activeItems.length > 0 ? (
+                <p className="muted-text updates-tab-note">Awaiting your approval.</p>
+              ) : null}
+              {activeItems.length === 0 ? (
+                <p className="muted-text updates-empty">
+                  Nothing in {SECTION_OPTIONS.find((o) => o.value === activeTab)?.label ?? 'this'}{' '}
+                  right now.
+                </p>
+              ) : (
+                <div className="updates-list">{activeItems.map((item) => renderCard(item))}</div>
+              )}
+            </div>
+          </>
         )}
       </div>
       {spitballOpen ? <SpitballModal onClose={() => setSpitballOpen(false)} /> : null}

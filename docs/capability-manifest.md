@@ -746,18 +746,20 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Every Shipped item shows **when it went live** ("Shipped Jul 24 · 9:12 PM")
   right next to its title, so the owner knows how fresh each change is while
   reviewing. Re-shipping (after a send-back) re-stamps the time.
-- Layout: the list is organized into one COLLAPSIBLE section per status, each
-  with its item count. Shipped is pinned to the TOP and is the only section
-  EXPANDED by default (so the owner lands on just-shipped work awaiting her
-  sign-off); every other section (New, Planned, In Progress, Done, Won't do)
-  starts collapsed. "Expand all"/"Collapse all" and a "Hide Done / Won't do"
-  toggle sit in the toolbar. Inside a section items are ordered by
+- Layout: a TAB BAR across the top, one tab per status, each showing its COUNT —
+  so the shape of the whole queue (how many New, Planned, In Progress, Shipped…)
+  is visible at a glance without opening anything, and one click switches
+  between them. Shipped is the first tab and the default, so the owner still
+  lands on just-shipped work awaiting her sign-off. Empty statuses keep their tab
+  (showing 0) because "In progress 0" is itself useful; the "Hide Done / Won't
+  do" toggle removes those two tabs entirely, and if the selected tab disappears
+  the view falls back to the first one. Within a tab items are ordered by
   priority level (Urgent → Low) and drag-to-rank within their level; dragging
   only re-ranks within the same status. Changing an item's status moves it to
-  the matching section; changing its priority moves it between levels.
+  the matching tab; changing its priority moves it between levels.
 - Ship + approve workflow: when the developer has pushed an update they set the
   item to "Shipped" (a distinct violet badge; still open/awaiting sign-off) —
-  the "Shipped" section header reads "Shipped — awaiting approval". A Shipped
+  the Shipped tab is captioned "Awaiting your approval". A Shipped
   item shows a "Mark approved" button (moves it to
   "Done" and records who approved it and when — "Approved by <name> · <date>") AND
   a "Not approved" button, which opens a reason box. Clicking "Send back" first
