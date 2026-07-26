@@ -43,7 +43,7 @@ already and the problem is interpretation, not code.** See §7.
    do, **re-provision the voice agent after deploying** (§3).
 
 3. **`npm run verify`** = `eslint` + `tsc -b && vite build` + `vitest`. Green
-   before every push. Currently **541 tests / 53 files**.
+   before every push. Currently **542 tests / 53 files**.
 
 4. Prefer targeted endpoints over the bulk save. `PUT /api/app-data` (the bulk
    workspace save) is **owner-only (403 for staff)** — anything staff must do
@@ -136,6 +136,26 @@ snapshot first, single transaction, re-verify after.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-07-25 (later) — Updates tracker: notifications + a tabbed layout.**
+Four deploys, all verified live:
+
+| Commit | What |
+|---|---|
+| `04d53cb` | **"Updates tracker activity" email preference** (Brittany asked to follow the tracker). Two new events — `update_created`, `update_status_changed` — grouped under an 8th `updatesTracker` toggle. The tracker had NO notifications before this. Each owner is notified about **the other's** activity, never their own, and only on a real status MOVE: the PATCH endpoint snapshots status before the write, so a retitle / re-rank / dev-note edit sends nothing. Messages use human labels ("Shipped → Planned") via `UPDATE_STATUS_LABELS` in server.js, and include the review note. Best-effort — a dispatch failure is logged, never breaks the write. The prefs UI renders the server catalog, so no frontend change was needed. |
+| `a08c3ac` | **Status TABS replace the collapsible sections.** An accordion only shows the size of what you've opened; tabs show every count at once. `collapsedStatuses` → a single `activeStatus`. Empty statuses keep their tab (a `0` is real signal); "Hide Done / Won't do" removes those tabs, and the active tab is **derived** with a first-tab fallback so hiding the tab you're on can't strand you (derived, not an effect — no flash). "Expand all"/"Collapse all" removed. Drag-to-rank was already guarded to same-status reorders, so a one-status view fits it better than the accordion did. |
+| `81c29a4` | Tabs restyled from pills to an **underline bar** (Alex: "not pills, more premium") — hairline rule, 2px active underline sitting *on* the rule, counts as quiet tabular-nums text. Empty tabs dim to 55%. Uses its own `.updates-tabs` rather than restyling the shared `.stage-segment`. |
+| `847a329` | Active tab takes the brand **`--pink` (#ff43a4)** — label, underline and count — plus the Shipped panel caption, which was still on the old violet. Selection is still carried by the underline too, never hue alone. |
+
+⚠️ **The Clients page stage filter (`.stage-segment`) is still pills** — Alex has
+now twice said he dislikes pill styling, so bringing it in line with
+`.updates-tabs` is a likely next ask. Deliberately left alone to avoid restyling
+a page he didn't mention.
+
+**Also this session (not code):** scoped the "let Brittany push an update
+herself" idea → **[`docs/autonomous-updates-scoping.md`](autonomous-updates-scoping.md)**.
+Nothing built; it's a decision doc with the tiers, costs, risks and open
+questions. Read it before picking that thread up.
 
 **2026-07-25 — per-user email notification preferences** (queue item
 `featreq-9819cd2c`, filed after Lisa got emailed about another user's
