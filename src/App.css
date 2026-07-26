@@ -10404,9 +10404,13 @@ mark.list-search-hit {
 .updates-tab:hover {
   color: var(--ink);
 }
+/* The open tab wears the brand pink — label, underline and count together, so
+   it's unmistakable which status you're in. The underline carries the state as
+   well as the color, so selection is never signalled by hue alone. */
 .updates-tab.is-active {
-  color: var(--ink);
-  border-bottom-color: var(--plum);
+  color: var(--pink);
+  border-bottom-color: var(--pink);
+  font-weight: 700;
 }
 /* A status with nothing in it stays readable but stops competing. */
 .updates-tab.is-empty:not(.is-active) {
@@ -10419,7 +10423,7 @@ mark.list-search-hit {
   opacity: 0.7;
 }
 .updates-tab.is-active .updates-tab-count {
-  color: var(--plum);
+  color: var(--pink);
   opacity: 1;
 }
 
@@ -10435,7 +10439,7 @@ mark.list-search-hit {
   font-size: 0.85rem;
 }
 .updates-status-section--shipped .updates-tab-note {
-  color: var(--status-shipped);
+  color: var(--pink);
   font-weight: 600;
 }
 
