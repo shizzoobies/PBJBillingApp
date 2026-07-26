@@ -19,6 +19,15 @@ picker, notification bell, and account menu sit in the top bar on every page.
   few minutes, and immediately when you come back to the tab. Click Refresh to
   load the new version. If something that was just fixed "isn't showing",
   refresh the tab first — an old tab runs the old app until it reloads.
+- Out-of-date tab protection: if a tab has been open while someone else changed
+  something, the app will refuse to save that tab's copy of the workspace rather
+  than let it overwrite the newer data. You'll see a "This tab is out of date"
+  message with a Reload button. Reloading is the only way forward, and anything
+  typed but not yet saved will need to be entered again — that trade is
+  deliberate, because saving the old copy would erase everyone else's changes.
+  This is rare in normal use: tabs sync with each other automatically, so it
+  generally only appears when a tab has been sitting idle or lost its
+  connection. It affects owners only (staff never save the whole workspace).
 - Most list/board pages have an instant search box: type to filter by name and
   key fields, with a live result count, matched-text highlight, and a clear
   button. Coverage: Clients (name/contact/email/billing type), Contacts

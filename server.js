@@ -35,6 +35,7 @@ import {
   normalizeWorkSessions,
 } from './lib/time-entry.js'
 import { isTemplateVisibleToScope, isTimeEntryVisibleToScope } from './lib/data-scope.js'
+import { StaleWorkspaceError } from './lib/workspace-version.js'
 import {
   generateBackupCodes,
   generateSecret,
@@ -77,10 +78,11 @@ function sendFile(response, filePath) {
   createReadStream(filePath).pipe(response)
 }
 
-function sendJson(response, statusCode, payload) {
+function sendJson(response, statusCode, payload, extraHeaders = {}) {
   response.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-cache',
+    ...extraHeaders,
   })
   response.end(JSON.stringify(payload))
 }
@@ -173,6 +175,14 @@ function isRateLimited(emailKey) {
   requestLinkAttempts.set(emailKey, list)
   return false
 }
+
+/**
+ * Carries the workspace staleness fingerprint: served on `GET /api/app-data`,
+ * echoed by the tab on `PUT`, and returned again on a successful PUT (the write
+ * moves the fingerprint, so the tab needs the new one). Lowercase because Node
+ * lowercases inbound header names and HTTP/2 requires it outbound.
+ */
+const WORKSPACE_VERSION_HEADER = 'x-workspace-version'
 
 // Generous cap for the bulk /api/app-data save while still bounding memory so
 // an oversized (multi-GB) body can't OOM the process. Throws past the limit;
@@ -2573,7 +2583,15 @@ const server = createServer(async (request, response) => {
             }
           }
         }
-        sendJson(response, 200, scopeAppDataForSession(scopingSession, data))
+        // Staleness guard token. Computed AFTER read() so it reflects any
+        // materializer write-back that read() just performed, and from the FULL
+        // workspace rather than the scoped view — the fingerprint describes the
+        // persisted state, not what this particular user is allowed to see.
+        // Staff receive it too and simply never use it (PUT is owner-only).
+        const workspaceVersion = await appDataStore.computeWorkspaceVersion()
+        sendJson(response, 200, scopeAppDataForSession(scopingSession, data), {
+          [WORKSPACE_VERSION_HEADER]: workspaceVersion,
+        })
         return
       }
 
@@ -2610,9 +2628,55 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // STALENESS GUARD. The bulk save wipes and re-inserts fifteen tables
+        // from this payload, so a tab holding a snapshot from BEFORE some other
+        // change erases everything that landed since — exactly how the Jan-May
+        // historical import was wiped hours after it ran (HANDOFF §5).
+        //
+        // The tab echoes the fingerprint it was served on GET; `write()`
+        // re-checks it inside its own transaction and refuses on mismatch.
+        //
+        // A MISSING token is refused too (fail closed). Tabs left open across
+        // this deploy don't send one; they take a single 409 and reload, which
+        // is the whole point — an old tab is precisely the dangerous case.
+        const expectedVersion = String(request.headers[WORKSPACE_VERSION_HEADER] || '').trim()
+        if (!expectedVersion) {
+          console.warn('[bulk-save] REFUSED save with no workspace version (tab predates the guard)')
+          sendJson(response, 409, {
+            error: 'stale_workspace',
+            message:
+              'This tab has been open since before the last update, so it could not be saved safely. Please reload the page.',
+          })
+          return
+        }
+
         try {
-          await appDataStore.write(data)
+          await appDataStore.write(data, { expectedVersion })
         } catch (error) {
+          if (error instanceof StaleWorkspaceError) {
+            // Nothing was written — the transaction rolled back.
+            console.warn(
+              `[bulk-save] REFUSED stale save from ${session.user.id}: expected ${expectedVersion}, current ${error.currentVersion}`,
+            )
+            await appDataStore
+              .recordActivity(
+                session.user.id,
+                'bulk_save_refused_stale',
+                `expected ${expectedVersion}, current ${error.currentVersion}`,
+              )
+              .catch(() => {})
+            sendJson(
+              response,
+              409,
+              {
+                error: 'stale_workspace',
+                message:
+                  'Someone else changed something while this tab was open, so your last change was not saved. Please reload to get the current data.',
+              },
+              { [WORKSPACE_VERSION_HEADER]: error.currentVersion },
+            )
+            return
+          }
           // Log the full SQL/JS error server-side (visible in Railway logs);
           // return only a generic message so Postgres internals (schema,
           // constraint names, row data in `detail`) aren't leaked to clients.
@@ -2623,7 +2687,21 @@ const server = createServer(async (request, response) => {
           })
           return
         }
-        sendJson(response, 200, { ok: true })
+
+        // The write changed the workspace, so the fingerprint moved. Hand the
+        // new one back or the tab's very next save would 409 against itself.
+        const nextVersion = await appDataStore.computeWorkspaceVersion()
+        // Forensics for accepted saves goes to the SERVER LOG, deliberately not
+        // to activity_log: that table is trimmed to the last 200 rows per user,
+        // and the autosave fires on every debounced edit — logging each one
+        // would evict a working session's real activity (and break the
+        // productivity stats, which count `checklist_item_checked` from the
+        // same table). Refusals DO go to activity_log below: they are rare and
+        // always worth keeping.
+        console.log(
+          `[bulk-save] ${session.user.id} saved ${data.clients.length} clients, ${Array.isArray(data.timeEntries) ? data.timeEntries.length : 0} time entries (${expectedVersion} -> ${nextVersion})`,
+        )
+        sendJson(response, 200, { ok: true }, { [WORKSPACE_VERSION_HEADER]: nextVersion })
         return
       }
 

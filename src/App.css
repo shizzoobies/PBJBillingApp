@@ -9857,6 +9857,51 @@ mark.list-search-hit {
   display: inline-flex;
 }
 
+/* "This tab is out of date" — blocking, because every further save from this
+   tab is being refused and a reload is the only way forward. */
+.stale-workspace-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100; /* above the new-version toast (1000) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(19, 52, 74, 0.45);
+}
+
+.stale-workspace-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 420px;
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--red) 35%, var(--line));
+  border-radius: var(--radius-sm);
+  box-shadow: 0 12px 40px rgba(19, 52, 74, 0.28);
+}
+
+.stale-workspace-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-weight: 700;
+  color: var(--red);
+}
+
+.stale-workspace-body {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.stale-workspace-panel .primary-action {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
 /* AI read-back of a rejection reason, awaiting the owner's confirmation. */
 .updates-reject-confirm {
   display: flex;

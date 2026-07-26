@@ -1,5 +1,10 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile as fsWriteFile } from 'node:fs/promises'
+import {
+  StaleWorkspaceError,
+  fileWorkspaceVersion,
+  postgresWorkspaceVersion,
+} from '../lib/workspace-version.js'
 
 /**
  * Per-file operation queue for the JSON file backend. A plain
@@ -3754,7 +3759,23 @@ export class AppDataStore {
     return data
   }
 
-  async write(data) {
+  /**
+   * Bulk workspace save — wipes and re-inserts every table listed in
+   * `BULK_SAVE_TABLES` from `data`.
+   *
+   * @param {object} data - the full workspace snapshot to persist.
+   * @param {{ expectedVersion?: string | null }} [options]
+   *   `expectedVersion` is the staleness guard: when supplied, the persisted
+   *   workspace's current fingerprint must still match it or the save is
+   *   refused with `StaleWorkspaceError` and NOTHING is written. The comparison
+   *   happens INSIDE the transaction (and inside the file queue), so there is
+   *   no check-then-write window for a concurrent save to slip through.
+   *
+   *   Omit it for server-authoritative writes that must never be gated — most
+   *   importantly `read()`'s materializer write-back, which by definition
+   *   carries the freshest data and would deadlock against its own guard.
+   */
+  async write(data, { expectedVersion = null } = {}) {
     // SECURITY (L1/L2): normalize/clamp clearly-bad values IN PLACE before
     // either persistence branch. This NEVER rejects a save — a normal blob
     // passes through unchanged; only garbage (negative/huge numbers, invalid
@@ -3871,6 +3892,19 @@ export class AppDataStore {
 
       try {
         await client.query('begin')
+
+        // Staleness guard, INSIDE the transaction. Running it here (rather than
+        // in the endpoint before calling write) means a concurrent save cannot
+        // land between the check and the deletes below.
+        // Throwing here lands in this try's catch, which issues the rollback —
+        // no second rollback needed (a redundant one only logs a warning).
+        if (expectedVersion) {
+          const currentVersion = await postgresWorkspaceVersion(client)
+          if (currentVersion !== expectedVersion) {
+            throw new StaleWorkspaceError(currentVersion)
+          }
+        }
+
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
         await client.query('delete from checklist_template_items')
@@ -4378,6 +4412,19 @@ export class AppDataStore {
       return
     }
 
+    // Staleness guard, file backend. Same contract as the Postgres branch
+    // above: refuse the save outright when the caller's snapshot no longer
+    // matches what is on disk. `computeWorkspaceVersion()` reads the persisted
+    // file (not `read()`), and all file access is serialized through
+    // `enqueueFileOperation`, so nothing can land between this check and the
+    // write below.
+    if (expectedVersion) {
+      const currentVersion = await this.computeWorkspaceVersion()
+      if (currentVersion !== expectedVersion) {
+        throw new StaleWorkspaceError(currentVersion)
+      }
+    }
+
     // SECURITY (H4) — file-fallback mirror. In file mode the auth-sensitive
     // fields (the owner/employee `role`, `staffRole`, email and password_hash)
     // live in the SEPARATE auth-state file, which this method never touches —
@@ -4411,6 +4458,41 @@ export class AppDataStore {
     }
 
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  /**
+   * Fingerprint of everything the bulk save can destroy — the staleness guard
+   * for `PUT /api/app-data`. See lib/workspace-version.js for why this is
+   * derived from the data rather than a bumped counter, and why it reads
+   * PERSISTED state instead of going through `read()` (which materializes and
+   * writes back, so it is neither pure nor deterministic).
+   *
+   * Both backends, per cardinal rule 1. The two produce different values for
+   * the same logical workspace; that is fine, since a fingerprint is only ever
+   * compared with another from the same backend.
+   *
+   * @returns {Promise<string>} hex digest of the current persisted workspace.
+   */
+  async computeWorkspaceVersion() {
+    if (this.pool) {
+      return postgresWorkspaceVersion(this.pool)
+    }
+
+    // File backend: hash the raw persisted file, NOT read()'s materialized
+    // output. A missing file is a brand-new workspace — hash the empty shape so
+    // the value is still stable and comparable.
+    let raw = {}
+    if (existsSync(localDataPath)) {
+      try {
+        raw = await readJson(localDataPath)
+      } catch {
+        // A malformed file must not break the guard. An unreadable workspace
+        // hashes as empty, which simply means the next PUT sees a mismatch and
+        // asks the tab to reload — the safe direction.
+        raw = {}
+      }
+    }
+    return fileWorkspaceVersion(raw)
   }
 
   async createTimeEntry(entry) {
