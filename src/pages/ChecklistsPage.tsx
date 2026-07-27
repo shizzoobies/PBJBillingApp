@@ -37,6 +37,7 @@ import type {
   WaitingOn,
 } from '../lib/types'
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
+import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import {
   addDays,
@@ -62,6 +63,12 @@ import {
 
 type Group = 'overdue' | 'week' | 'month' | 'later' | 'completed'
 type GroupByMode = 'status' | 'client'
+
+const TASK_AREAS: Array<{ key: TaskArea; label: string }> = [
+  { key: 'progress', label: 'In progress' },
+  { key: 'repeating', label: 'Repeating' },
+  { key: 'standard', label: 'Standard' },
+]
 type CreateMode = 'one-time' | 'repeating' | null
 
 function parseBulkLines(value: string): string[] {
@@ -210,6 +217,43 @@ export function ChecklistsPage() {
     const next = new URLSearchParams(searchParams)
     next.set('focus', checklistId)
     setSearchParams(next, { replace: true })
+  }
+
+  // ---- Which area is open ------------------------------------------------
+  // DERIVED from the URL, not stored in state, so a deep link always wins and
+  // there is no flash from an effect correcting it after paint.
+  //
+  // Deep links MUST be able to switch area or they silently do nothing: a
+  // `?focusTemplate=` link (from the Plans page's "set up checklists" card)
+  // targets RepeatingTasksManager, which isn't even mounted unless its tab is
+  // open. Same for `?focus=`, which targets the in-progress list.
+  const activeArea = resolveTaskArea({
+    areaParam: searchParams.get('area'),
+    focusChecklist: searchParams.get('focus'),
+    focusTemplate: searchParams.get('focusTemplate'),
+  })
+
+  const setArea = (next: TaskArea) => {
+    const params = new URLSearchParams(searchParams)
+    // 'progress' is the default, so keep it out of the URL — a bare
+    // /checklists link should land somewhere sensible, not carry state.
+    if (next === 'progress') params.delete('area')
+    else params.set('area', next)
+    // Area-scoped params from another area would be dead weight (and could
+    // yank the user straight back out of the tab they just picked).
+    params.delete('focus')
+    params.delete('focusTemplate')
+    setSearchParams(params, { replace: true })
+  }
+
+  // Counts per area. `data.checklistTemplates` is already role-scoped by the
+  // server, so these read correctly for staff as well as the owner.
+  const repeatingCount = data.checklistTemplates.filter((t) => !t.isStandard).length
+  const standardCount = data.checklistTemplates.filter((t) => t.isStandard).length
+  const areaCounts: Record<TaskArea, number> = {
+    progress: visibleChecklists.length,
+    repeating: repeatingCount,
+    standard: standardCount,
   }
 
   // The unified "+ New" dropdown. Mode controls whether the create form is in
@@ -370,6 +414,35 @@ export function ChecklistsPage() {
           )}
         </div>
 
+        {/* In progress / Repeating / Standard. Lives in the Tasks panel header
+            so the "+ New" button stays reachable from every area. */}
+        <div className="task-area-tabs" role="tablist" aria-label="Task areas">
+          {TASK_AREAS.map((area) => {
+            const isActive = area.key === activeArea
+            const count = areaCounts[area.key]
+            const classes = [
+              'task-area-tab',
+              isActive ? 'is-active' : '',
+              count === 0 ? 'is-empty' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')
+            return (
+              <button
+                key={area.key}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                className={classes}
+                onClick={() => setArea(area.key)}
+              >
+                {area.label}
+                <span className="task-area-tab-count">{count}</span>
+              </button>
+            )
+          })}
+        </div>
+
         {createMode && (ownerMode || createMode === 'one-time') ? (
           <NewTaskForm
             mode={createMode}
@@ -383,6 +456,7 @@ export function ChecklistsPage() {
           />
         ) : null}
 
+        {activeArea !== 'progress' ? null : (
         <ChecklistInProgressSection
           activeEmployeeId={activeEmployeeId}
           checklists={visibleChecklists}
@@ -407,9 +481,10 @@ export function ChecklistsPage() {
           role={role}
           timeEntries={data.timeEntries}
         />
+        )}
       </section>
 
-      {ownerMode ? (
+      {ownerMode && activeArea === 'repeating' ? (
         <RepeatingTasksManager
           clients={data.clients}
           employees={data.employees}
@@ -440,7 +515,7 @@ export function ChecklistsPage() {
         />
       ) : null}
 
-      {ownerMode ? (
+      {ownerMode && activeArea === 'standard' ? (
         <StandardTemplatesManager
           clients={data.clients}
           employees={data.employees}
@@ -483,14 +558,14 @@ export function ChecklistsPage() {
       {/* Team members see the firm's standard blueprints read-only (the owner
           keeps the full editor above). Lets them know what standard work exists
           so they don't re-create it; an owner applies one to a client. */}
-      {!ownerMode ? (
-        <>
-          <StaffRecurringTemplatesView data={data} />
-          <StaffStandardTemplatesView
-            templates={data.checklistTemplates}
-            employees={data.employees}
-          />
-        </>
+      {!ownerMode && activeArea === 'repeating' ? (
+        <StaffRecurringTemplatesView data={data} />
+      ) : null}
+      {!ownerMode && activeArea === 'standard' ? (
+        <StaffStandardTemplatesView
+          templates={data.checklistTemplates}
+          employees={data.employees}
+        />
       ) : null}
     </section>
   )

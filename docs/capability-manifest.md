@@ -172,6 +172,20 @@ picker, notification bell, and account menu sit in the top bar on every page.
 
 ## Checklists (tasks)
 
+- **The page is split into three TABS: "In progress", "Repeating" and
+  "Standard"**, each showing a count. They used to sit stacked on top of each
+  other, so getting to a repeating task meant scrolling past every in-progress
+  checklist (hundreds of them). Now each is one click away.
+  - **In progress** — the live checklists, exactly as before: the
+    "Group by: Due date / Client" choice and its collapsible Overdue / Due this
+    week / Due this month / Later / Completed sections are unchanged.
+  - **Repeating** — the recurring task setups (owner edits them here; staff see
+    the recurring checklists for their assigned clients).
+  - **Standard** — the firm's reusable blueprint templates.
+  - The "+ New" button stays available from all three tabs.
+  - Links that jump to a specific task or a specific repeating setup switch to
+    the right tab automatically, so a link never lands on a hidden area.
+  - The recycle bin sits below the tabs and is always available (owner only).
 - A checklist = a task for a client: title, client, assignee, due date,
   frequency (one-off, weekly, monthly, quarterly, annual), steps.
 - Steps support sub-steps and sub-sub-steps, drag-to-reorder, per-step due
