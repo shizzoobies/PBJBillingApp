@@ -182,6 +182,11 @@ picker, notification bell, and account menu sit in the top bar on every page.
   - **Repeating** — the recurring task setups (owner edits them here; staff see
     the recurring checklists for their assigned clients).
   - **Standard** — the firm's reusable blueprint templates.
+  - On "Repeating", tasks are grouped under their business, listed
+    alphabetically, and **each business starts COLLAPSED** — you see a scannable
+    list of business names with a count each, and click one to open its tasks.
+    (Searching opens matching businesses automatically, and a link that jumps to
+    a specific repeating task opens its business too.)
   - **Every tab has a search box.** On "Repeating" it matches the BUSINESS name
     or the task name, so you can jump straight to a client's repeating setup
     instead of scrolling the whole list; "Standard" searches template names, and

@@ -3813,8 +3813,16 @@ type RepeatingTasksManagerProps = {
 function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   const [openId, setOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
-  // Per-client groups collapse independently to cut clutter; default expanded.
-  const [collapsedClients, setCollapsedClients] = useState<Set<string>>(new Set())
+  // Per-client groups, COLLAPSED BY DEFAULT — an empty set means nothing is
+  // open. With 135 repeating setups spread across clients, defaulting to
+  // expanded meant the tab opened as one continuous wall and you had to scroll
+  // to find a business. Collapsed by default turns it into a list of client
+  // names you can scan.
+  //
+  // Mirrors StaffRecurringTemplatesView, which already worked this way (same
+  // `openClients` shape, same searching-forces-open rule) — the owner's copy of
+  // this list was simply the one that never got it.
+  const [openClients, setOpenClients] = useState<Set<string>>(new Set())
   const [searchParams, setSearchParams] = useSearchParams()
   const focusTemplateId = searchParams.get('focusTemplate')
   const focusRef = useRef<HTMLElement | null>(null)
@@ -3823,7 +3831,7 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
     setOpenId((current) => (current === templateId ? null : templateId))
   }
   const toggleClient = (clientId: string) => {
-    setCollapsedClients((prev) => {
+    setOpenClients((prev) => {
       const next = new Set(prev)
       if (next.has(clientId)) next.delete(clientId)
       else next.add(clientId)
@@ -3881,13 +3889,16 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
       // and the deep link appears to do nothing. The lookup above deliberately
       // uses the UNFILTERED list for the same reason.
       setQuery('')
-      // Make sure the focused task's client group is expanded so it's visible.
+      // Make sure the focused task's client group is OPEN so it's visible.
+      // Now that groups start collapsed this is load-bearing rather than a
+      // nicety: without it a ?focusTemplate= link would scroll to a row that is
+      // inside a closed group and therefore not rendered at all.
       const focusTemplate = allRegularTemplates.find((t) => t.id === focusTemplateId)
       if (focusTemplate) {
-        setCollapsedClients((prev) => {
-          if (!prev.has(focusTemplate.clientId)) return prev
+        setOpenClients((prev) => {
+          if (prev.has(focusTemplate.clientId)) return prev
           const next = new Set(prev)
-          next.delete(focusTemplate.clientId)
+          next.add(focusTemplate.clientId)
           return next
         })
       }
@@ -3929,7 +3940,10 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
           <p className="empty-state">No repeating tasks match "{query.trim()}".</p>
         ) : null}
         {clientGroups.map((group) => {
-          const collapsed = collapsedClients.has(group.clientId)
+          // A live search forces every matching group open — otherwise typing a
+          // business name would return a collapsed header and hide the very
+          // rows you searched for.
+          const collapsed = !(q.length > 0 || openClients.has(group.clientId))
           return (
             <div className="repeating-client-group" key={group.clientId}>
               <button
