@@ -15,7 +15,6 @@ import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { FilterBar } from '../components/FilterBar'
 import { ListSearch } from '../components/ListSearch'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
-import { isInReportPeriod } from '../lib/reportPeriod'
 import { useFilters } from '../components/useFilters'
 import { SaveBadge } from '../components/SectionKit'
 import { SharingControl } from '../components/SharingControl'
@@ -38,6 +37,7 @@ import type {
 } from '../lib/types'
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
+import { filterInProgressChecklists } from '../lib/inProgressFilter'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import {
   addDays,
@@ -76,15 +76,6 @@ function parseBulkLines(value: string): string[] {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith('#'))
-}
-
-function statusForChecklist(checklist: Checklist, todayDateOnly: string) {
-  const completed = checklist.items.filter((item) => item.done).length
-  const total = checklist.items.length
-  const allDone = total > 0 && completed === total
-  if (allDone) return 'completed'
-  if (checklist.dueDate < todayDateOnly) return 'overdue'
-  return 'active'
 }
 
 function firstName(employees: Employee[], employeeId: string) {
@@ -206,7 +197,15 @@ export function ChecklistsPage() {
     rejectPendingTaskEdit,
     restoreChecklist,
     emptyChecklistRecycleBin,
+    reportPeriod,
   } = useAppContext()
+
+  // Same filter state the in-progress list reads, so the tab count can apply it.
+  const {
+    assignee: areaAssignee,
+    client: areaClient,
+    status: areaStatus,
+  } = useFilters()
 
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -248,12 +247,28 @@ export function ChecklistsPage() {
 
   // Counts per area. `data.checklistTemplates` is already role-scoped by the
   // server, so these read correctly for staff as well as the owner.
-  const repeatingCount = data.checklistTemplates.filter((t) => !t.isStandard).length
-  const standardCount = data.checklistTemplates.filter((t) => t.isStandard).length
+  //
+  // The In-progress count applies the SAME report period + filters the list
+  // does. It previously used the raw total, which made the tab claim 568 above
+  // a body showing 13 whenever the report period was narrow — the count has to
+  // describe what is actually under it or it is just noise. Search text is
+  // excluded on purpose: the search box shows its own "N of M", and a tab count
+  // that moved on every keystroke would be worse than useless.
+  const inProgressCount = useMemo(
+    () =>
+      filterInProgressChecklists(visibleChecklists, {
+        reportPeriod,
+        assignee: areaAssignee,
+        client: areaClient,
+        status: areaStatus,
+        today: localDateOnly(),
+      }).length,
+    [visibleChecklists, reportPeriod, areaAssignee, areaClient, areaStatus],
+  )
   const areaCounts: Record<TaskArea, number> = {
-    progress: visibleChecklists.length,
-    repeating: repeatingCount,
-    standard: standardCount,
+    progress: inProgressCount,
+    repeating: data.checklistTemplates.filter((t) => !t.isStandard).length,
+    standard: data.checklistTemplates.filter((t) => t.isStandard).length,
   }
 
   // The unified "+ New" dropdown. Mode controls whether the create form is in
@@ -1336,23 +1351,19 @@ function ChecklistInProgressSection({
     return () => window.clearTimeout(timer)
   }, [focusId, searchParams, setSearchParams])
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return checklists.filter((checklist) => {
-      if (!isInReportPeriod(effectiveChecklistDue(checklist), reportPeriod)) return false
-      if (assignee && checklist.assigneeId !== assignee) return false
-      if (client && checklist.clientId !== client) return false
-      if (status && status !== 'all') {
-        if (statusForChecklist(checklist, todayDateOnly) !== status) return false
-      }
-      if (q) {
-        const nameMatch = clientName(clients, checklist.clientId).toLowerCase().includes(q)
-        const titleMatch = checklist.title.toLowerCase().includes(q)
-        if (!nameMatch && !titleMatch) return false
-      }
-      return true
-    })
-  }, [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod])
+  const filtered = useMemo(
+    () =>
+      filterInProgressChecklists(checklists, {
+        reportPeriod,
+        assignee,
+        client,
+        status,
+        today: todayDateOnly,
+        query,
+        clients,
+      }),
+    [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod],
+  )
 
   // Status grouping (current behavior, unchanged).
   const groupedByStatus: Record<Group, Checklist[]> = {
@@ -3801,6 +3812,7 @@ type RepeatingTasksManagerProps = {
  */
 function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   const [openId, setOpenId] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
   // Per-client groups collapse independently to cut clutter; default expanded.
   const [collapsedClients, setCollapsedClients] = useState<Set<string>>(new Set())
   const [searchParams, setSearchParams] = useSearchParams()
@@ -3821,7 +3833,20 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
 
   // Client-bound repeating tasks only — standard (client-agnostic) templates
   // live in their own section.
-  const regularTemplates = props.templates.filter((template) => !template.isStandard)
+  const allRegularTemplates = props.templates.filter((template) => !template.isStandard)
+
+  // Search by BUSINESS or task name. The whole reason this section was hard to
+  // use is that it holds 135 repeating setups across every client, so scrolling
+  // to one business was the only way in. Matching the client name first is the
+  // point: "jump to a business" is the actual job.
+  const q = query.trim().toLowerCase()
+  const regularTemplates = q
+    ? allRegularTemplates.filter(
+        (template) =>
+          clientName(props.clients, template.clientId).toLowerCase().includes(q) ||
+          template.title.toLowerCase().includes(q),
+      )
+    : allRegularTemplates
 
   // Group the repeating tasks under their client so the list stays organized.
   const clientGroups = (() => {
@@ -3846,14 +3871,18 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   // then strip the param so it doesn't keep re-firing.
   useEffect(() => {
     if (!focusTemplateId) return
-    const exists = regularTemplates.some((template) => template.id === focusTemplateId)
+    const exists = allRegularTemplates.some((template) => template.id === focusTemplateId)
     if (!exists) return
     // Defer the open + scroll out of the effect body (avoids a synchronous
     // setState-in-effect) and gives the row a tick to expand before scrolling.
     const scrollTimer = window.setTimeout(() => {
       setOpenId(focusTemplateId)
+      // Drop any active search, or the row we just opened stays filtered out
+      // and the deep link appears to do nothing. The lookup above deliberately
+      // uses the UNFILTERED list for the same reason.
+      setQuery('')
       // Make sure the focused task's client group is expanded so it's visible.
-      const focusTemplate = regularTemplates.find((t) => t.id === focusTemplateId)
+      const focusTemplate = allRegularTemplates.find((t) => t.id === focusTemplateId)
       if (focusTemplate) {
         setCollapsedClients((prev) => {
           if (!prev.has(focusTemplate.clientId)) return prev
@@ -3873,7 +3902,7 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
       window.clearTimeout(scrollTimer)
       window.clearTimeout(clearTimer)
     }
-  }, [focusTemplateId, regularTemplates, searchParams, setSearchParams])
+  }, [focusTemplateId, allRegularTemplates, searchParams, setSearchParams])
 
   return (
     <section className="panel">
@@ -3882,9 +3911,22 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
           <h2>Repeating tasks</h2>
         </div>
       </div>
+      <div className="filter-row">
+        <ListSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search by business or task…"
+          resultCount={regularTemplates.length}
+          total={allRegularTemplates.length}
+        />
+      </div>
       <div className="repeating-task-list">
-        {regularTemplates.length === 0 ? (
+        {allRegularTemplates.length === 0 ? (
           <p className="empty-state">No repeating tasks yet. Hit + New to add one.</p>
+        ) : regularTemplates.length === 0 ? (
+          // Distinguish "you have none" from "your search matched none" — the
+          // first is a prompt to create one, the second is a prompt to retype.
+          <p className="empty-state">No repeating tasks match "{query.trim()}".</p>
         ) : null}
         {clientGroups.map((group) => {
           const collapsed = collapsedClients.has(group.clientId)
@@ -4851,8 +4893,15 @@ type StandardTemplatesManagerProps = Omit<
 function StandardTemplatesManager(props: StandardTemplatesManagerProps) {
   const [openId, setOpenId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
+  const [query, setQuery] = useState('')
 
-  const standardTemplates = props.templates.filter((template) => template.isStandard)
+  const allStandardTemplates = props.templates.filter((template) => template.isStandard)
+  // Standard blueprints are client-agnostic, so there is no business to match —
+  // title only, unlike the repeating list.
+  const sq = query.trim().toLowerCase()
+  const standardTemplates = sq
+    ? allStandardTemplates.filter((template) => template.title.toLowerCase().includes(sq))
+    : allStandardTemplates
 
   const toggleOpen = (templateId: string) => {
     setOpenId((current) => (current === templateId ? null : templateId))
@@ -4889,11 +4938,23 @@ function StandardTemplatesManager(props: StandardTemplatesManagerProps) {
         />
       ) : null}
 
+      <div className="filter-row">
+        <ListSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search standard templates…"
+          resultCount={standardTemplates.length}
+          total={allStandardTemplates.length}
+        />
+      </div>
+
       <div className="repeating-task-list">
-        {standardTemplates.length === 0 ? (
+        {allStandardTemplates.length === 0 ? (
           <p className="empty-state">
             No standard templates yet. Create one to reuse across clients.
           </p>
+        ) : standardTemplates.length === 0 ? (
+          <p className="empty-state">No standard templates match "{query.trim()}".</p>
         ) : null}
         {standardTemplates.map((template) => (
           <RepeatingTaskRow

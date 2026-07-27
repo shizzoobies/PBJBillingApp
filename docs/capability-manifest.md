@@ -182,6 +182,15 @@ picker, notification bell, and account menu sit in the top bar on every page.
   - **Repeating** — the recurring task setups (owner edits them here; staff see
     the recurring checklists for their assigned clients).
   - **Standard** — the firm's reusable blueprint templates.
+  - **Every tab has a search box.** On "Repeating" it matches the BUSINESS name
+    or the task name, so you can jump straight to a client's repeating setup
+    instead of scrolling the whole list; "Standard" searches template names, and
+    "In progress" searches business or task name as before. Each shows "N of M"
+    while you type, and Escape clears it.
+  - The count on each tab reflects what you'd actually see — the "In progress"
+    count applies the current report period and the assignee/client/status
+    filters. If that count looks low, the report period is usually the reason
+    (a narrow custom range hides everything outside it).
   - The "+ New" button stays available from all three tabs.
   - Links that jump to a specific task or a specific repeating setup switch to
     the right tab automatically, so a link never lands on a hidden area.
