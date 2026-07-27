@@ -172,6 +172,23 @@ picker, notification bell, and account menu sit in the top bar on every page.
 
 ## Checklists (tasks)
 
+- **The "In progress" list is organized into TABS by service category** — the
+  same categories that form the Board's columns, in the same left-to-right
+  order. Each tab shows its count, so you can see how much work sits in every
+  category at a glance instead of opening sections to find out. Clicking a tab
+  shows only that category. Opening the page lands you on the category holding
+  the most work.
+  - Categories with nothing in them keep their tab (showing 0) — an empty
+    category is worth knowing about.
+  - **Nothing is ever hidden by the tabs.** Anything without a category — or
+    whose category was deleted — is collected in an "Uncategorized" tab at the
+    end, which appears whenever it has something in it. Every task is always
+    reachable from exactly one tab.
+  - Inside a tab, everything works as before: the "Group by: Due date / Client"
+    choice and its collapsible sections (Overdue, Due this week, Due this month,
+    Later, Completed) are unchanged, and each section still collapses on its own.
+  - Links that jump to a specific task (from a notification, or after creating
+    one) switch to the right tab automatically and open the section it's in.
 - A checklist = a task for a client: title, client, assignee, due date,
   frequency (one-off, weekly, monthly, quarterly, annual), steps.
 - Steps support sub-steps and sub-sub-steps, drag-to-reorder, per-step due

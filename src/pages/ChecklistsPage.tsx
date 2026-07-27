@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronRight, Copy, GripVertical, MoreHorizontal, Plus } from 'lucide-react'
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -37,6 +38,11 @@ import type {
   WaitingOn,
 } from '../lib/types'
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
+import {
+  buildCategoryTabs,
+  categoryKeyFor,
+  resolveActiveCategory,
+} from '../lib/checklistCategoryTabs'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import {
   addDays,
@@ -1227,7 +1233,7 @@ function ChecklistInProgressSection({
   timeEntries: TimeEntry[]
 }) {
   const todayDateOnly = localDateOnly()
-  const { reportPeriod, setReportPeriod } = useAppContext()
+  const { reportPeriod, setReportPeriod, serviceCategories } = useAppContext()
   const { assignee, client, status } = useFilters()
   const [query, setQuery] = useState('')
   const [searchParams, setSearchParams] = useSearchParams()
@@ -1247,20 +1253,6 @@ function ChecklistInProgressSection({
     setSearchParams(params, { replace: true })
   }
 
-  useEffect(() => {
-    if (!focusId) return
-    if (focusRef.current) {
-      focusRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
-    // clear focus param after handling so it doesn't keep re-firing
-    const timer = window.setTimeout(() => {
-      const next = new URLSearchParams(searchParams)
-      next.delete('focus')
-      setSearchParams(next, { replace: true })
-    }, 1500)
-    return () => window.clearTimeout(timer)
-  }, [focusId, searchParams, setSearchParams])
-
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     return checklists.filter((checklist) => {
@@ -1279,7 +1271,74 @@ function ChecklistInProgressSection({
     })
   }, [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod])
 
-  // Status grouping (current behavior, unchanged).
+  // ---- Service-category tabs -------------------------------------------
+  // The top level of this page is now a tab per service category (the same set
+  // that forms the Board's columns) rather than one long stack. The point is
+  // the COUNTS: every category's size is visible at once, which an accordion
+  // can never show — you only learn the size of what you already opened. The
+  // status/client grouping below is unchanged and simply lives inside a tab.
+  const knownCategoryIds = useMemo(
+    () => new Set(serviceCategories.map((category) => category.id)),
+    [serviceCategories],
+  )
+  const categoryKeyOf = useCallback(
+    (checklist: Checklist) => categoryKeyFor(checklist.categoryId, knownCategoryIds),
+    [knownCategoryIds],
+  )
+
+  const categoryTabs = useMemo(
+    () => buildCategoryTabs(filtered, serviceCategories),
+    [filtered, serviceCategories],
+  )
+
+  // Which tab a `?focus=` checklist lives in. Deep links (notifications, "go to
+  // the task I just made") must be able to cross tabs, or they scroll to an
+  // element that isn't rendered and appear to do nothing.
+  const focusedCategoryKey = useMemo(() => {
+    if (!focusId) return null
+    const target = filtered.find((checklist) => checklist.id === focusId)
+    return target ? categoryKeyOf(target) : null
+  }, [focusId, filtered, categoryKeyOf])
+
+  const categoryParam = searchParams.get('cat')
+  // DERIVED, not stored in state — deriving avoids the flash an effect-based
+  // reset would cause. See resolveActiveCategory for the precedence rules.
+  const activeCategory = resolveActiveCategory({
+    tabs: categoryTabs,
+    focusedKey: focusedCategoryKey,
+    param: categoryParam,
+  })
+
+  const setCategory = (key: string) => {
+    const params = new URLSearchParams(searchParams)
+    params.set('cat', key)
+    setSearchParams(params, { replace: true })
+  }
+
+  const visibleForTab = useMemo(
+    () => filtered.filter((checklist) => categoryKeyOf(checklist) === activeCategory),
+    [filtered, activeCategory, categoryKeyOf],
+  )
+
+  useEffect(() => {
+    if (!focusId) return
+    if (focusRef.current) {
+      focusRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+    // clear focus param after handling so it doesn't keep re-firing
+    const timer = window.setTimeout(() => {
+      const next = new URLSearchParams(searchParams)
+      next.delete('focus')
+      // Pin the tab we jumped to. Without this the derived focus override
+      // disappears with the param and the view would snap back to whatever tab
+      // was active before — yanking the user away ~1.5s after they arrived.
+      if (focusedCategoryKey) next.set('cat', focusedCategoryKey)
+      setSearchParams(next, { replace: true })
+    }, 1500)
+    return () => window.clearTimeout(timer)
+  }, [focusId, focusedCategoryKey, searchParams, setSearchParams])
+
+  // Status grouping (current behavior, unchanged) — now scoped to the open tab.
   const groupedByStatus: Record<Group, Checklist[]> = {
     overdue: [],
     week: [],
@@ -1287,7 +1346,7 @@ function ChecklistInProgressSection({
     later: [],
     completed: [],
   }
-  for (const checklist of filtered) {
+  for (const checklist of visibleForTab) {
     groupedByStatus[groupChecklist(checklist, todayDateOnly)].push(checklist)
   }
   // Within each bucket, soonest-due first (by effective due — same basis as
@@ -1310,7 +1369,7 @@ function ChecklistInProgressSection({
   // checklists within a client sorted by due date.
   const clientGroups = useMemo(() => {
     const byClient = new Map<string, Checklist[]>()
-    for (const checklist of filtered) {
+    for (const checklist of visibleForTab) {
       const list = byClient.get(checklist.clientId) ?? []
       list.push(checklist)
       byClient.set(checklist.clientId, list)
@@ -1322,7 +1381,7 @@ function ChecklistInProgressSection({
         checklists: [...list].sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
       }))
       .sort((a, b) => a.label.localeCompare(b.label))
-  }, [filtered, clients])
+  }, [visibleForTab, clients])
 
   const renderCard = (checklist: Checklist) => (
     <ChecklistCard
@@ -1389,6 +1448,33 @@ function ChecklistInProgressSection({
           total={checklists.length}
         />
       </div>
+      {categoryTabs.length > 0 && filtered.length > 0 ? (
+        <div className="checklist-tabs" role="tablist" aria-label="Filter checklists by category">
+          {categoryTabs.map((tab) => {
+            const isActive = tab.key === activeCategory
+            const classes = [
+              'checklist-tab',
+              isActive ? 'is-active' : '',
+              tab.count === 0 ? 'is-empty' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                className={classes}
+                onClick={() => setCategory(tab.key)}
+              >
+                {tab.label}
+                <span className="checklist-tab-count">{tab.count}</span>
+              </button>
+            )
+          })}
+        </div>
+      ) : null}
       <div className="checklist-stack">
         {checklists.length === 0 ? (
           <p className="empty-state">No tasks in progress. Hit + New to add one.</p>
@@ -1396,6 +1482,15 @@ function ChecklistInProgressSection({
           <p className="empty-state">No tasks match "{query.trim()}".</p>
         ) : filtered.length === 0 ? (
           <p className="empty-state">No tasks match your filters.</p>
+        ) : visibleForTab.length === 0 ? (
+          // The page as a whole has matches, just not in the open tab. Say which
+          // tab is empty rather than "no tasks match", which would read as a
+          // filter problem and send the user off fixing the wrong thing.
+          <p className="empty-state">
+            Nothing in{' '}
+            {categoryTabs.find((tab) => tab.key === activeCategory)?.label ?? 'this category'}{' '}
+            right now. Pick another category above.
+          </p>
         ) : null}
         {groupBy === 'status'
           ? groupConfig.map((group) =>
