@@ -471,17 +471,30 @@ picker, notification bell, and account menu sit in the top bar on every page.
   start to a day in the pay period's first week — the cadence is then preserved.
   Table of each member's hours (billable/internal split + entry count) with a
   grand total.
+- **Time is shown EXACTLY, e.g. "2m" or "1h 20m", not rounded to a decimal.**
+  This matters for split time: a block divided across several clients leaves
+  each client a few minutes, and the old one-decimal rounding printed those as
+  "0.0h" — the hours appeared to vanish, and the rows didn't add up to the
+  total. They do now.
+- **Billable time and Billable $ appear on the PRINTED report**, not just on
+  screen — on both the per-member summary and the day-and-job detail, with
+  totals. Billable $ = billable hours × that person's bill rate (the same basis
+  the overview uses). It is what the work BILLS AT, not what the firm pays out;
+  there is no pay-rate field. Anyone with no bill rate configured shows "—"
+  rather than "$0.00", so an unset rate never reads as "billed nothing".
 - Payroll report detail — "Time by day and job": below the per-member summary,
   the same period broken down to TOTAL TIME BY DAY BY JOB (the granularity of
   the monthly report). Rows are grouped under each day with that day's total,
   and within a day list the job (the client the time is billed to; '(Admin)'
-  for non-client time), the task, hours, and billable hours. Repeat sessions on
-  the same day/job/task are summed into one row. A "Team member" filter scopes
+  for non-client time), the task, hours, billable hours, and Billable $. Repeat
+  sessions on the same day/job/task are summed into one row. A "Team member" filter scopes
   the detail to one person (payroll is usually run per person) or all.
 - Payroll exports (three): "Summary CSV" (per-member totals), "By day & job"
   (Date, Team member, Job, Task, Hours, Billable hours — the aggregated
   breakdown, ready to pivot), and "Raw hours" (one row per time entry, scoped to
   the pay period and member filter).
+- Both RAW exports also carry "Billable hours" and "Billable $" columns, matching
+  the printed report (blank, not 0.00, when the person has no bill rate set).
 - Both RAW exports (payroll "Raw hours" and the monthly "Hours by month") include
   CLOCK IN and CLOCK OUT stamps plus a Sessions count, so hours can be audited
   against when the work actually happened: clock in = the first start, clock out
