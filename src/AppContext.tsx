@@ -472,7 +472,12 @@ export type AppContextValue = {
   updateClientPlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
   updateClient: (clientId: string, patch: Partial<Client>) => void
   deleteClient: (clientId: string) => void
-  addClient: (client: Omit<Client, 'id'>) => Client
+  /**
+   * Server-backed: persists through POST /api/clients and resolves with the
+   * SERVER's record. Rejects on failure so the caller can surface it — client
+   * creation used to fail silently via the bulk save.
+   */
+  addClient: (client: Omit<Client, 'id'>) => Promise<Client | null>
   addPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void
   /**
    * Owner-only: patch a subscription plan's editable fields (name / notes).

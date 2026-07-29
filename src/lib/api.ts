@@ -2478,6 +2478,26 @@ export async function listClientNotes(clientId: string) {
 }
 
 /** Append a note to a client's log. Returns the created note. */
+/**
+ * Create a client durably, server-side, instead of waiting for the debounced
+ * bulk save. Returns the server's record — the caller should merge THAT into
+ * local state rather than its own optimistic copy, so the id in the UI is the
+ * id in the database.
+ */
+export async function createClientRequest(payload: Omit<Client, 'id'>) {
+  const response = await apiFetch('/api/clients', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { message?: string } | null
+    throw new ApiError(response.status, body?.message ?? `Failed to add client (${response.status})`)
+  }
+  return ((await response.json()) as { client: Client }).client
+}
+
 export async function addClientNote(clientId: string, body: string) {
   const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/notes`, {
     method: 'POST',

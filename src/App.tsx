@@ -20,6 +20,7 @@ import {
   approveTimeEntriesBatchRequest,
   approveTimeEntryRequest,
   createChecklistRequest,
+  createClientRequest,
   createStandardTemplateRequest,
   createTimeEntry,
   deleteChecklistItemRequest,
@@ -3238,12 +3239,25 @@ function App() {
     }))
   }
 
-  const addClient = (client: Omit<Client, 'id'>): Client => {
-    const created: Client = { ...client, id: makeId('client') }
-    updateWorkspaceData((current) => ({
-      ...current,
-      clients: [created, ...current.clients],
-    }))
+  /**
+   * Server-backed, NOT a local workspace mutation.
+   *
+   * This used to mint an id locally and leave persistence to the debounced bulk
+   * save, so the client existed on screen but not in the database until that
+   * save landed — and not at all if another tab's save overwrote it, with no
+   * error shown. Anything targeted that referenced the new client failed in the
+   * meantime (logging time raised a foreign-key error; assigning a team wrote
+   * nothing; staff could not see it).
+   *
+   * It now creates the client through its own endpoint and merges the SERVER'S
+   * record, so the id on screen is the id in the database. Deliberately does not
+   * go through `updateWorkspaceData`: the workspace isn't dirty afterwards —
+   * the server is already authoritative.
+   */
+  const addClient = async (client: Omit<Client, 'id'>): Promise<Client | null> => {
+    if (previewActiveRef.current) return null
+    const created = await createClientRequest(client)
+    setData((current) => ({ ...current, clients: [created, ...current.clients] }))
     return created
   }
 

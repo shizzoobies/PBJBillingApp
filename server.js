@@ -2116,6 +2116,45 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Create ONE client, durably, instead of waiting for the debounced bulk
+    // save. Before this, a new client lived only in the creating tab until that
+    // save landed — so logging time against it raised a raw foreign-key error,
+    // assigning it a team wrote nothing, and staff could not see it. If the save
+    // was then overwritten by another tab, the client was simply gone with no
+    // error shown. Cardinal rule 4: anything that must actually persist gets its
+    // own endpoint.
+    if (normalizedPath === '/api/clients' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can add clients' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      let created
+      try {
+        created = await appDataStore.createClient(payload ?? {})
+      } catch (error) {
+        console.error('[clients] createClient failed:', error)
+        sendJson(response, 500, {
+          error: 'client_create_failed',
+          message: 'Could not add the client — please try again.',
+        })
+        return
+      }
+      if (!created) {
+        sendJson(response, 400, { error: 'A client name is required' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'client_created', created.name)
+      sendJson(response, 201, { client: created })
+      return
+    }
+
     if (normalizedPath === '/api/service-categories' && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return

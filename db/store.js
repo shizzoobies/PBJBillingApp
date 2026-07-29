@@ -5573,6 +5573,92 @@ export class AppDataStore {
     return updated
   }
 
+  /**
+   * Create ONE client, durably, right now.
+   *
+   * Client creation used to be a local-only workspace mutation that reached the
+   * database only when the debounced bulk save ran. That left a window — and if
+   * the save was overwritten by another tab, a permanent hole — in which the
+   * client existed on screen but not in the database. Everything targeted that
+   * referenced it then failed: logging time against it raised a raw foreign-key
+   * error, assigning a team to it wrote nothing, and staff sessions could not
+   * see it. That is the "I added a client and it never appeared" report, and it
+   * is exactly what cardinal rule 4 says to avoid.
+   *
+   * Mirrors the shape `write()` uses for clients so the two agree, and rebuilds
+   * `client_assignments` from `assignedBookkeeperIds` the same way.
+   */
+  async createClient(client) {
+    const id = client.id ?? `client-${randomUUID().slice(0, 8)}`
+    const name = String(client.name ?? '').trim()
+    if (!name) return null
+
+    const record = {
+      ...client,
+      id,
+      name,
+      contact: String(client.contact ?? ''),
+      billingMode: client.billingMode ?? 'hourly',
+      hourlyRate: clampMoney(client.hourlyRate ?? 0),
+      planIds: Array.isArray(client.planIds) ? client.planIds : [],
+      contactIds: Array.isArray(client.contactIds) ? client.contactIds : [],
+      assignedBookkeeperIds: Array.isArray(client.assignedBookkeeperIds)
+        ? client.assignedBookkeeperIds
+        : [],
+      lifecycleStage: client.lifecycleStage ?? 'active',
+    }
+
+    if (this.pool) {
+      const dbClient = await this.pool.connect()
+      try {
+        await dbClient.query('begin')
+        await dbClient.query(
+          `insert into clients
+             (id, name, contact, billing_mode, hourly_rate, plan_ids, contact_ids,
+              assigned_bookkeeper_ids, email, contact_name, phone, lifecycle_stage, updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())`,
+          [
+            record.id,
+            record.name,
+            record.contact,
+            record.billingMode,
+            record.hourlyRate,
+            record.planIds,
+            record.contactIds,
+            record.assignedBookkeeperIds,
+            record.email ?? null,
+            record.contactName ?? null,
+            record.phone ?? null,
+            record.lifecycleStage,
+          ],
+        )
+        // Same derivation the bulk save uses, so visibility works immediately
+        // rather than only after the next full save.
+        for (const userId of record.assignedBookkeeperIds) {
+          await dbClient.query(
+            `insert into client_assignments (client_id, user_id) values ($1, $2)
+             on conflict do nothing`,
+            [record.id, userId],
+          )
+        }
+        await dbClient.query('commit')
+      } catch (error) {
+        await dbClient.query('rollback')
+        throw error
+      } finally {
+        dbClient.release()
+      }
+      return record
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.clients)) data.clients = []
+    if (data.clients.some((existing) => existing && existing.id === record.id)) return null
+    data.clients = [record, ...data.clients]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return record
+  }
+
   async createChecklist(checklist) {
     const nextChecklist = {
       ...checklist,

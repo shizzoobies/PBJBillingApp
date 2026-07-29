@@ -93,10 +93,20 @@ export function ClientsPage() {
   const [postAddClient, setPostAddClient] = useState<Client | null>(null)
   const [modalClient, setModalClient] = useState<Client | null>(null)
 
-  const handleCreateClient = (values: Omit<Client, 'id'>) => {
-    const created = addClient(values)
-    setAddOpen(false)
-    setPostAddClient(created)
+  const [addError, setAddError] = useState<string | null>(null)
+
+  const handleCreateClient = async (values: Omit<Client, 'id'>) => {
+    setAddError(null)
+    try {
+      const created = await addClient(values)
+      setAddOpen(false)
+      setPostAddClient(created)
+    } catch (error) {
+      // Keep the modal OPEN and say what happened. The old path could not fail
+      // visibly — it always "succeeded" locally and lost the client later with
+      // no message, which is what "it just wasn't creating a client" was.
+      setAddError(error instanceof Error ? error.message : 'Could not add the client.')
+    }
   }
 
   const searchedClients = visibleClients.filter((c) => matchesClientQuery(c, query))
@@ -219,6 +229,11 @@ export function ClientsPage() {
 
       {addOpen ? (
         <AddModal title="Add client" onClose={() => setAddOpen(false)}>
+          {addError ? (
+            <p className="form-error" role="alert">
+              {addError}
+            </p>
+          ) : null}
           <ClientBuilder
             variant="modal"
             // Owners do client work too, so they're assignable here (visibility

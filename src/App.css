@@ -10406,7 +10406,7 @@ mark.list-search-hit {
 }
 /* The open tab wears the brand pink — label, underline and count together, so
    it's unmistakable which status you're in. The underline carries the state as
-   well as the color, so selection is never signalled by hue alone. */
+   well as the color, so selection is never signaled by hue alone. */
 .updates-tab.is-active {
   color: var(--pink);
   border-bottom-color: var(--pink);
@@ -10458,7 +10458,7 @@ mark.list-search-hit {
   color: var(--ink);
 }
 /* Selection is carried by the underline as well as the color, so it is never
-   signalled by hue alone. */
+   signaled by hue alone. */
 .task-area-tab.is-active {
   color: var(--pink);
   border-bottom-color: var(--pink);

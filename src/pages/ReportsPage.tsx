@@ -381,7 +381,7 @@ function PayrollHoursReport({
   // Billable $ from the person's bill rate — the SAME basis the overview's
   // `billableAmount` already uses, so the two reports can't disagree. It is
   // revenue, not what the firm pays out: there is no pay-rate field, which is
-  // exactly why the column is labelled "Billable $" and not "Cost".
+  // exactly why the column is labeled "Billable $" and not "Cost".
   const billRateOf = (employeeId: string) => {
     const employee = employees.find((candidate) => candidate.id === employeeId)
     return typeof employee?.billRate === 'number' && !Number.isNaN(employee.billRate)
