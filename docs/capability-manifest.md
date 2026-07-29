@@ -476,12 +476,22 @@ picker, notification bell, and account menu sit in the top bar on every page.
   each client a few minutes, and the old one-decimal rounding printed those as
   "0.0h" — the hours appeared to vanish, and the rows didn't add up to the
   total. They do now.
-- **Billable time and Billable $ appear on the PRINTED report**, not just on
-  screen — on both the per-member summary and the day-and-job detail, with
-  totals. Billable $ = billable hours × that person's bill rate (the same basis
-  the overview uses). It is what the work BILLS AT, not what the firm pays out;
-  there is no pay-rate field. Anyone with no bill rate configured shows "—"
-  rather than "$0.00", so an unset rate never reads as "billed nothing".
+- **Billable time, Billable $ and Cost appear on the PRINTED report**, not just
+  on screen — on both the per-member summary and the day-and-job detail, with
+  totals.
+  - **Billable $** = billable hours × that person's BILL rate — what the work
+    bills at (revenue).
+  - **Cost** = ALL hours worked × that person's COST rate — what the firm pays
+    for the time. It deliberately covers internal hours too, not just billable
+    ones, because the firm pays for those as well. Set a person's cost rate on
+    the Team page ("$/hour — for margin reports only, never billed").
+  - Side by side, the two columns give margin per person and per day.
+  - **The OWNER's Cost shows "—" and always will.** An owner draws no hourly
+    wage, so her time carries no labor cost — that blank is the correct answer,
+    not a missing setting, and nothing should prompt her to fill it in. The Cost
+    total is therefore the firm's real STAFF labor cost.
+  - Anyone with no rate configured shows "—" rather than "$0.00", so an unset
+    rate never reads as "billed nothing" or "cost nothing".
 - Payroll report detail — "Time by day and job": below the per-member summary,
   the same period broken down to TOTAL TIME BY DAY BY JOB (the granularity of
   the monthly report). Rows are grouped under each day with that day's total,
@@ -493,8 +503,9 @@ picker, notification bell, and account menu sit in the top bar on every page.
   (Date, Team member, Job, Task, Hours, Billable hours — the aggregated
   breakdown, ready to pivot), and "Raw hours" (one row per time entry, scoped to
   the pay period and member filter).
-- Both RAW exports also carry "Billable hours" and "Billable $" columns, matching
-  the printed report (blank, not 0.00, when the person has no bill rate set).
+- Both RAW exports carry "Billable hours" and "Billable $"; the payroll
+  "Raw hours" export also carries "Cost". These match the printed report — blank
+  rather than 0.00 when the person has no rate set.
 - Both RAW exports (payroll "Raw hours" and the monthly "Hours by month") include
   CLOCK IN and CLOCK OUT stamps plus a Sessions count, so hours can be audited
   against when the work actually happened: clock in = the first start, clock out
