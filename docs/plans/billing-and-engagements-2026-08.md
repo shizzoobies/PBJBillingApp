@@ -33,11 +33,13 @@ Operations / Team / Reports / Settings. Pure navigation; every page keeps
 working; staff routes unchanged underneath.
 
 ### Track B — billing (right after P1)
-Monthly **prep packet** per client: hours (by member), labor cost, billable $,
-reimbursements (one-time + recurring), prior-month +/- carry, suggested line
-descriptions, a sendable blurb. Plus **scope flags** (decision 3) and the
-**Recap profit line** (decision 7). Surfaces under Billing; the safe
-`invoice_drafts` table (fixed `32976f4`) is available if drafts materialize.
+**SUPERSEDED same day (2026-08-04, later session with Alex): Track B is now
+full in-app invoicing — see `invoicing-in-app-2026-08.md` (phases I1–I5).**
+The prep-packet content survives as I1/I2 (draft generation + review), and
+the end-state is generate → review → email with an ACH pay link (Stripe
+Checkout; card available with a client-paid convenience fee) → paid-status
+tracking. Decisions 3 (scope flags) and 7 (Recap profit) carry over into I1
+unchanged. The "QBO API rejected" decision stands; QBO remains the ledger.
 
 ### Track C — engagements (P2 → P3 → P4)
 - **P2** tokenized public intake form (magic-link idiom) → Proposals inbox.
