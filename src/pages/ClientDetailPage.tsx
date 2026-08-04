@@ -1,14 +1,23 @@
-import { ArrowLeft, Check, Copy, ExternalLink, Pencil, Plus, Trash2 } from 'lucide-react'
+import { ArrowLeft, Check, Copy, ExternalLink, Pencil, Plus, Timer, Trash2 } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
 import { SectionScopeContext } from '../components/sectionScope'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
+import { ClientTimeModal } from '../components/ClientTimeModal'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
+import {
+  activeChecklistsForClient,
+  CLIENT_SECTION_ANCHORS,
+  resolveClientSection,
+  summarizeClientMonthTime,
+  type ClientMonthTime,
+  type ClientSection,
+} from '../lib/clientSections'
 import {
   CollapsibleSection,
   SaveBadge,
@@ -30,21 +39,24 @@ import {
   MONTHLY_SERVICE_TIERS,
   type AppData,
   type BillingMode,
+  type Checklist,
   type ChecklistFrequency,
   type ChecklistTemplate,
   type Client,
   type Contact,
   type Employee,
   type SubscriptionPlan,
+  type TimeEntry,
 } from '../lib/types'
 import {
   addDays,
   clientName,
-  deriveChecklistStatus,
+  effectiveSessions,
   emailForClient,
   ensureTemplateStages,
   employeeName,
-  formatHours,
+  formatAuditStamp,
+  formatHoursMinutes,
   getChecklistFrequencyLabel,
   isDueThisMonth,
   isSafeImageSrc,
@@ -54,6 +66,7 @@ import {
   MONTH_NAMES,
   normalizeBillingMonth,
   planTemplates,
+  sessionMinutes,
   shortDate,
   sortChecklists,
   stageNameFor,
@@ -68,6 +81,8 @@ export function ClientDetailPage() {
   const navigate = useNavigate()
   const { data, ownerMode, sessionUser, updateClient, deleteClient } = useAppContext()
   const [assignedTeamError, setAssignedTeamError] = useState('')
+  // Whether the shared "Track time" modal is open for this client.
+  const [trackingTime, setTrackingTime] = useState(false)
 
   const client = useMemo(
     () => data.clients.find((entry) => entry.id === clientId),
@@ -76,6 +91,46 @@ export function ClientDetailPage() {
 
   // Activity-record debounce: only fire one event per ~60s of editing.
   const lastActivityRef = useRef<number>(0)
+
+  // ---- Which tab is open --------------------------------------------------
+  // DERIVED from the URL, not stored in state, so a deep link always wins.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const location = useLocation()
+
+  const today = localDateOnly()
+  // Both tab counts are computed from the SAME helper the tab body lists with,
+  // so a label can never contradict what is under it.
+  const openChecklistCount = useMemo(
+    () => activeChecklistsForClient(data.checklists, client?.id ?? '', today).length,
+    [data.checklists, client?.id, today],
+  )
+  const monthTime = useMemo(
+    () => summarizeClientMonthTime(data.timeEntries, client?.id ?? '', today.slice(0, 7)),
+    [data.timeEntries, client?.id, today],
+  )
+
+  // Billing is entirely owner-only panels, so staff never get the tab at all —
+  // the same `ownerMode` guard that wraps those panels, applied to navigation.
+  const tabs: Array<{ key: ClientSection; label: string; count?: number }> = [
+    { key: 'overview', label: 'Overview' },
+    ...(ownerMode ? [{ key: 'billing' as const, label: 'Billing' }] : []),
+    { key: 'checklists', label: 'Checklists', count: openChecklistCount },
+    { key: 'time', label: 'Time', count: monthTime.entryCount },
+  ]
+
+  const activeSection = resolveClientSection({
+    tabParam: searchParams.get('tab'),
+    hash: location.hash,
+    available: tabs.map((tab) => tab.key),
+  })
+
+  // Always WRITE the param, even for Overview: the resolver reads the URL on
+  // every render, so a tab click that left no trace would not survive one.
+  const setSection = (next: ClientSection) => {
+    const params = new URLSearchParams(searchParams)
+    params.set('tab', next)
+    setSearchParams(params, { replace: true })
+  }
 
   // Staff can now reach this page (the route is no longer owner-only). Access is
   // data-level: a non-owner's scoped /api/app-data only contains their assigned
@@ -121,36 +176,9 @@ export function ClientDetailPage() {
     navigate('/clients', { replace: true })
   }
 
-  const recentEntries = data.timeEntries
-    .filter((entry) => entry.clientId === client.id)
-    .slice(0, 8)
-
   const recentChecklists = sortChecklists(
     data.checklists.filter((checklist) => checklist.clientId === client.id),
   ).slice(0, 8)
-
-  // In-page jump-nav pills. Built conditionally so it mirrors EXACTLY which
-  // sections render for the current role — owner-only sections reuse the same
-  // `ownerMode` guard that wraps them, so staff never get pills to sections
-  // they can't see.
-  const jumpItems: Array<{ id: string; label: string }> = [
-    { id: 'client-section-profile', label: 'Profile' },
-    { id: 'client-section-contacts', label: 'Contacts' },
-    ...(ownerMode
-      ? [
-          { id: 'client-section-team', label: 'Team' },
-          { id: 'client-section-billing', label: 'Billing' },
-          { id: 'client-section-plan-checklists', label: 'Plan checklists' },
-          { id: 'client-section-expenses', label: 'Expenses' },
-          { id: 'client-section-branding', label: 'Branding' },
-          { id: 'client-section-invoice', label: 'Invoice' },
-        ]
-      : []),
-    { id: 'client-section-checklists', label: 'Checklists' },
-    { id: 'client-section-recurring', label: 'Recurring' },
-    { id: 'client-section-activity', label: 'Activity' },
-    { id: 'client-section-notes', label: 'Notes' },
-  ]
 
   return (
     <SectionScopeContext.Provider value={`client:${client.id}:`}>
@@ -162,23 +190,39 @@ export function ClientDetailPage() {
         </Link>
       </div>
 
-      <nav className="client-jump-nav" aria-label="Jump to section">
-        {jumpItems.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className="client-jump-pill"
-            onClick={() =>
-              document
-                .getElementById(item.id)
-                ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-            }
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
+      {/* Overview / Billing / Checklists / Time. Navigation only: every panel
+          below renders exactly as it did, it is just no longer stacked into one
+          very long scroll. */}
+      <div className="task-area-tabs" role="tablist" aria-label="Client sections">
+        {tabs.map((tab) => {
+          const isActive = tab.key === activeSection
+          const classes = [
+            'task-area-tab',
+            isActive ? 'is-active' : '',
+            tab.count === 0 ? 'is-empty' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              className={classes}
+              onClick={() => setSection(tab.key)}
+            >
+              {tab.label}
+              {tab.count === undefined ? null : (
+                <span className="task-area-tab-count">{tab.count}</span>
+              )}
+            </button>
+          )
+        })}
+      </div>
 
+      {activeSection === 'overview' ? (
+      <div className="client-tab-panel" id={CLIENT_SECTION_ANCHORS.overview} role="tabpanel">
       {ownerMode ? (
         <CollapsibleSection
           id="client-section-profile"
@@ -230,6 +274,22 @@ export function ClientDetailPage() {
             {assignedTeamError ? <p className="auth-error">{assignedTeamError}</p> : null}
           </CollapsibleSection>
 
+          <CollapsibleSection id="client-section-branding" kicker="Branding" title="Logo" lockable>
+            <BrandingSectionBody client={client} onCommit={commit} />
+          </CollapsibleSection>
+        </>
+      ) : null}
+
+      <CollapsibleSection id="client-section-notes" kicker="Notes" title="Client notes">
+        <ClientNotesPanel clientId={client.id} ownerMode={ownerMode} currentUserId={sessionUser.id} />
+      </CollapsibleSection>
+      </div>
+      ) : null}
+
+      {/* Owner-only in full: staff never get this tab, because every panel in
+          it is one they could not see before either. */}
+      {activeSection === 'billing' && ownerMode ? (
+        <div className="client-tab-panel" id={CLIENT_SECTION_ANCHORS.billing} role="tabpanel">
           <CollapsibleSection id="client-section-billing" kicker="Billing" title="Rate and services" lockable>
             <BillingSectionBody client={client} plans={data.plans} onCommit={commit} />
           </CollapsibleSection>
@@ -246,47 +306,25 @@ export function ClientDetailPage() {
             <ReimbursementsCard clientId={client.id} bare />
           </CollapsibleSection>
 
-          <CollapsibleSection id="client-section-branding" kicker="Branding" title="Logo" lockable>
-            <BrandingSectionBody client={client} onCommit={commit} />
-          </CollapsibleSection>
-
           <CollapsibleSection id="client-section-invoice" kicker="Invoice settings" title="Invoice customization" lockable>
             <InvoiceSettingsSectionBody client={client} onCommit={commit} />
           </CollapsibleSection>
-        </>
+        </div>
       ) : null}
 
-      <CollapsibleSection id="client-section-checklists" kicker="Work in flight" title="Active checklists">
-        <ActiveChecklistsBody client={client} data={data} />
-      </CollapsibleSection>
+      {activeSection === 'checklists' ? (
+        <div className="client-tab-panel" id={CLIENT_SECTION_ANCHORS.checklists} role="tabpanel">
+          <CollapsibleSection id="client-section-checklists" kicker="Work in flight" title="Active checklists">
+            <ActiveChecklistsBody client={client} data={data} />
+          </CollapsibleSection>
 
-      <CollapsibleSection id="client-section-recurring" kicker="Schedule" title="Recurring checklists">
-        <RecurringChecklistsBody client={client} data={data} />
-      </CollapsibleSection>
+          <CollapsibleSection id="client-section-recurring" kicker="Schedule" title="Recurring checklists">
+            <RecurringChecklistsBody client={client} data={data} />
+          </CollapsibleSection>
 
-      <CollapsibleSection id="client-section-activity" kicker="Activity" title="Recent work for this client">
-        <div className="form-grid two-col">
-          <div>
-            <h3 className="mini-heading">Recent time entries</h3>
-            {recentEntries.length === 0 ? (
-              <p className="muted-text">No time entries logged yet.</p>
-            ) : (
-              <ul className="activity-list">
-                {recentEntries.map((entry) => (
-                  <li key={entry.id}>
-                    <strong>{shortDate.format(new Date(`${entry.date}T12:00:00`))}</strong>
-                    <span>
-                      {employeeName(data.employees, entry.employeeId)} ·{' '}
-                      {formatHours(entry.minutes)} · {entry.category}
-                      {entry.billable ? '' : ' (internal)'}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-          <div>
-            <h3 className="mini-heading">Recent checklists</h3>
+          {/* The other half of what used to be "Recent work for this client" —
+              its time column now has a whole tab of its own. */}
+          <CollapsibleSection id="client-section-activity" kicker="Activity" title="Recent checklists">
             {recentChecklists.length === 0 ? (
               <p className="muted-text">No checklists for this client yet.</p>
             ) : (
@@ -311,15 +349,192 @@ export function ClientDetailPage() {
                 })}
               </ul>
             )}
-          </div>
+          </CollapsibleSection>
         </div>
-      </CollapsibleSection>
+      ) : null}
 
-      <CollapsibleSection id="client-section-notes" kicker="Notes" title="Client notes">
-        <ClientNotesPanel clientId={client.id} ownerMode={ownerMode} currentUserId={sessionUser.id} />
-      </CollapsibleSection>
+      {activeSection === 'time' ? (
+        <div className="client-tab-panel" id={CLIENT_SECTION_ANCHORS.time} role="tabpanel">
+          <CollapsibleSection id="client-section-time" kicker="Activity" title="Time for this client">
+            <ClientTimeBody
+              client={client}
+              data={data}
+              month={monthTime}
+              onTrackTime={() => setTrackingTime(true)}
+            />
+          </CollapsibleSection>
+        </div>
+      ) : null}
+
+      {trackingTime ? (
+        <ClientTimeModal client={client} onClose={() => setTrackingTime(false)} />
+      ) : null}
     </section>
     </SectionScopeContext.Provider>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Time                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * How many entries the Time tab shows before "Show all". Not a hard cap — the
+ * rest are one click away, and the list scrolls inside its own box either way.
+ * A silent 8-entry cap on the old activity list hid older work from anyone who
+ * logged more than a week of it.
+ */
+const RECENT_TIME_PREVIEW = 12
+
+/**
+ * This client's time, from the entries the viewer ALREADY holds — a
+ * bookkeeper's `/api/app-data` is scoped to their own entries, so the server
+ * decides what appears here and this adds no request of its own. Read-only:
+ * editing an entry still lives on the Time page, which owns the lock and
+ * approval rules.
+ */
+function ClientTimeBody({
+  client,
+  data,
+  month,
+  onTrackTime,
+}: {
+  client: Client
+  data: AppData
+  /** This month's totals — the same numbers the Time tab's count label uses. */
+  month: ClientMonthTime
+  onTrackTime: () => void
+}) {
+  const [showAll, setShowAll] = useState(false)
+
+  const entries = useMemo(
+    () =>
+      data.timeEntries
+        .filter((entry) => entry.clientId === client.id)
+        .slice()
+        .sort(
+          (left, right) =>
+            right.date.localeCompare(left.date) ||
+            (right.createdAt ?? '').localeCompare(left.createdAt ?? ''),
+        ),
+    [data.timeEntries, client.id],
+  )
+  const shown = showAll ? entries : entries.slice(0, RECENT_TIME_PREVIEW)
+
+  return (
+    <div>
+      <div className="client-time-summary">
+        <div className="client-time-summary-item">
+          <strong>{formatHoursMinutes(month.trackedMinutes)}</strong>
+          <span>Tracked this month</span>
+        </div>
+        <div className="client-time-summary-item">
+          <strong>{formatHoursMinutes(month.billableMinutes)}</strong>
+          <span>Billable this month</span>
+        </div>
+        <div className="client-time-summary-item">
+          <strong>{month.entryCount}</strong>
+          <span>{month.entryCount === 1 ? 'Entry this month' : 'Entries this month'}</span>
+        </div>
+      </div>
+
+      <div className="button-row">
+        <button type="button" className="primary-action" onClick={onTrackTime}>
+          <Timer size={14} /> Track time
+        </button>
+        <Link to="/time" className="secondary-action">
+          Open Time page
+        </Link>
+      </div>
+
+      {entries.length === 0 ? (
+        <p className="muted-text">No time logged for this client yet.</p>
+      ) : (
+        <>
+          <div className="entry-list entry-list--scroll">
+            {shown.map((entry) => (
+              <ClientTimeEntryRow
+                key={entry.id}
+                entry={entry}
+                employeeLabel={employeeName(data.employees, entry.employeeId)}
+                checklists={data.checklists}
+              />
+            ))}
+          </div>
+          {entries.length > RECENT_TIME_PREVIEW ? (
+            <button
+              type="button"
+              className="link-action"
+              onClick={() => setShowAll((value) => !value)}
+            >
+              {showAll
+                ? `Show latest ${RECENT_TIME_PREVIEW}`
+                : `Show all ${entries.length} entries`}
+            </button>
+          ) : null}
+        </>
+      )}
+    </div>
+  )
+}
+
+/** One entry, read-only, in the Time page's own row idiom. */
+function ClientTimeEntryRow({
+  entry,
+  employeeLabel,
+  checklists,
+}: {
+  entry: TimeEntry
+  employeeLabel: string
+  checklists: Checklist[]
+}) {
+  // Clock in/out for the audit — falls back to the startAt/endAt envelope so
+  // timer and legacy entries show their times here too.
+  const sessions = effectiveSessions(entry)
+  const linkedTask = entry.taskId
+    ? checklists.find((checklist) => checklist.id === entry.taskId)
+    : null
+  const taskTitle = linkedTask ? linkedTask.title : entry.taskLabel?.trim() || null
+  const statusLabel =
+    entry.approvalStatus === 'approved'
+      ? 'Approved'
+      : entry.approvalStatus === 'rejected'
+        ? 'Rejected'
+        : 'Pending'
+
+  return (
+    <article className="entry-row">
+      <div>
+        <strong>{employeeLabel}</strong>
+        <span>{entry.description}</span>
+        <small>{shortDate.format(new Date(`${entry.date}T12:00:00`))}</small>
+        {sessions.length > 0 ? (
+          <div className="entry-sessions">
+            {sessions.map((session, index) => (
+              <small className="entry-audit-times" key={`${session.startAt}-${index}`}>
+                {sessions.length > 1 ? `${index + 1}. ` : ''}
+                {formatAuditStamp(session.startAt)} → {formatAuditStamp(session.endAt)} ·{' '}
+                {formatHoursMinutes(sessionMinutes(session))}
+              </small>
+            ))}
+          </div>
+        ) : null}
+        <div className="entry-tags">
+          <span className={`time-status-pill time-status-${entry.approvalStatus}`}>
+            {statusLabel}
+          </span>
+          {entry.entryMethod === 'manual' ? <span className="manual-badge">Manual</span> : null}
+          {taskTitle ? <span className="task-chip">Task: {taskTitle}</span> : null}
+        </div>
+        {entry.approvalStatus === 'rejected' && entry.approvalNote ? (
+          <small className="entry-reject-note">Rejected: {entry.approvalNote}</small>
+        ) : null}
+      </div>
+      <div className="entry-meta">
+        <strong>{formatHoursMinutes(entry.minutes)}</strong>
+        <span>{entry.billable ? 'Billable' : 'Internal'}</span>
+      </div>
+    </article>
   )
 }
 
@@ -967,15 +1182,9 @@ export function ActiveChecklistsBody({ client, data }: { client: Client; data: A
   const today = localDateOnly()
   // "Work in flight" = currently active checklists only. A checklist whose
   // every item is done (status 'Done') is finished, not in flight, so it's
-  // excluded here. Overdue / In progress / Not started all remain.
-  const checklists = sortChecklists(
-    data.checklists.filter(
-      (entry) =>
-        entry.clientId === client.id &&
-        !entry.deletedAt &&
-        deriveChecklistStatus(entry, today) !== 'Done',
-    ),
-  )
+  // excluded here. Overdue / In progress / Not started all remain. Shared with
+  // the Checklists tab's count so the two can't disagree.
+  const checklists = sortChecklists(activeChecklistsForClient(data.checklists, client.id, today))
 
   // "Due this month": a checklist's effective due = its dueDate (same field the
   // page already shows). Count is computed regardless so the label is accurate.

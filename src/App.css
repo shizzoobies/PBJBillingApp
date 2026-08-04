@@ -9419,41 +9419,40 @@ mark.list-search-hit {
    jumps to each section of the (very long) client-detail page. Opaque
    workspace background so sections scrolling under it don't show through.
    z-index 13 > the list/section sticky heads (12) but < the topbar (15). */
-.client-jump-nav {
-  position: sticky;
-  top: var(--topbar-h, 64px);
-  z-index: 13;
+/* One tab's worth of the client page. Replaces the sticky "jump to section"
+   pill bar that used to sit above one very long scroll of every panel; the tab
+   bar itself reuses .task-area-tabs. Restates .client-detail's own stacking so
+   the panels inside a tab keep the spacing they had when they were siblings. */
+.client-tab-panel {
   display: flex;
-  gap: 8px;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  padding: 10px 0;
-  background: #f6f2ef;
-  scrollbar-width: thin;
+  flex-direction: column;
+  gap: 18px;
 }
-.client-jump-nav::-webkit-scrollbar {
-  height: 6px;
+
+/* This month at a glance, above the client's time entries. */
+.client-time-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
 }
-.client-jump-nav::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--line-strong) 70%, transparent);
-  border-radius: 999px;
-}
-.client-jump-pill {
-  white-space: nowrap;
-  border-radius: 999px;
-  padding: 0.4rem 0.85rem;
-  font-size: 0.82rem;
-  font-weight: 600;
-  cursor: pointer;
+.client-time-summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  padding: 10px 14px;
   border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--muted);
-  transition: border-color var(--ease), background var(--ease), color var(--ease);
-}
-.client-jump-pill:hover {
-  border-color: color-mix(in srgb, var(--plum) 40%, var(--line-strong));
+  border-radius: var(--radius);
   background: var(--soft);
-  color: var(--plum);
+}
+.client-time-summary-item strong {
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+.client-time-summary-item span {
+  font-size: 0.78rem;
+  color: var(--muted);
 }
 
 .contact-group-heading {

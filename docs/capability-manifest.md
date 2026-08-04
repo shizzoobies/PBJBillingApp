@@ -474,18 +474,36 @@ picker, notification bell, and account menu sit in the top bar on every page.
   modal. (Contacts and Plans have the same "+" add-in-a-modal flow.) The header
   (title + "+" + search) stays pinned to the top as you scroll the list, so the
   add button is always reachable.
-- Client detail page (owner): everything about one client — tasks, time,
-  contacts, billing, branding, invoice settings, notes. A sticky "Jump to
-  section" pill bar at the top lets you jump to any section (Profile, Contacts,
-  Team, Billing, Plan checklists, Expenses, Branding, Invoice, Checklists,
-  Recurring, Activity, Notes); staff see only the pills for sections they can
-  access.
+- Client detail page (owner): everything about one client in one place, split
+  into four TABS instead of one long scroll —
+  **Overview** (client name, contacts & address, assigned team, logo, notes),
+  **Billing** (rate and services, plan checklists, recurring reimbursements,
+  expenses & reimbursements, invoice customization),
+  **Checklists** (active checklists, recurring checklists, recent checklists),
+  and **Time** (this client's time entries). Overview opens by default. The
+  Checklists tab shows the number of open checklists and the Time tab the number
+  of entries logged this month. The tab is in the URL (`?tab=time`), so a client
+  page can be linked straight to a tab, and older `#client-section-…` links open
+  whichever tab now holds that section.
+- Client detail → Time tab: everything logged against this client — who logged
+  it, the notes, the clock-in → clock-out times, exact hours and minutes,
+  billable/internal, and the approval status (Pending / Approved / Rejected,
+  with the send-back note). A strip on top shows this month's tracked hours,
+  billable hours, and entry count. The latest 12 entries show first with a
+  "Show all N entries" expansion; the list scrolls in its own box. A **Track
+  time** button starts the shared timer for this client without leaving the page
+  (same modal as the client list's "Time" button). The entries themselves are
+  read-only here — editing, splitting, and resubmitting still happen on the Time
+  page. Staff see only the entries their own scoped data contains.
 - Client detail page (staff): assigned bookkeepers/accountants can open their
   assigned clients in a scoped view — client name + contacts (read-only), active
-  & recurring checklists, recent work, and notes. Owner-only sections (billing
-  rates, plan checklists, reimbursements/expenses, branding, invoice settings,
-  assigned team) and the Delete-client action are hidden, and financial fields
-  are stripped from their data server-side.
+  & recurring checklists, recent work, notes, and the Time tab for their own
+  entries. They get the same tabs MINUS Billing (every panel in it is
+  owner-only, so the tab isn't shown at all — and a `?tab=billing` link opens
+  Overview for them). Owner-only sections (billing rates, plan checklists,
+  reimbursements/expenses, branding, invoice settings, assigned team) and the
+  Delete-client action are hidden, and financial fields are stripped from their
+  data server-side.
 - Client notes: a timestamped, attributed notes log on each client. The owner
   and the client's assigned staff can read and add notes; you can delete your
   own note (the owner can delete any). Notes support lightweight rich text
