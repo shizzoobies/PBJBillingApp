@@ -21,6 +21,7 @@ import { AssistantPanel } from './AssistantPanel'
 import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
 import { navItems } from './navItems'
+import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 // Who the user should contact when the app can't save. Surfaced in the big
 // red "not connected" alarm so Brittany knows exactly who to reach out to
@@ -47,6 +48,7 @@ export function AppLayout() {
   } = useAppContext()
 
   const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
+  useDocumentTitle(firmName)
   const firmTagline = firmSettings?.tagline || 'Strategic Accounting'
   const firmLogoUrl = firmSettings?.logoUrl || ''
   const initials = firmName
