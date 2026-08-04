@@ -531,6 +531,39 @@ export function stepIsWaiting(node: {
   return node.waiting === true || (node.waitingOns ?? []).length > 0
 }
 
+/**
+ * The patch the waiting editor's "Done" sends. Deliberately narrow: it retires
+ * the blocker (`waiting` off, no more waiting-for-a-task link) and touches
+ * nothing else — the `waitingOn` note stays on the step as the permanent
+ * record, and the step's own `done` is never set, because completing the work
+ * is the checkboxes' job. Owner's rule, shipped in 039a2d2; pinned by tests so
+ * it can't drift back.
+ */
+export const WAITING_DONE_PATCH: Readonly<{
+  waiting: boolean
+  waitingForChecklistId: string | null
+}> = { waiting: false, waitingForChecklistId: null }
+
+/**
+ * Which endpoint retires each structured person-blocker when "Done" is pressed.
+ * If I'm the person being waited on it is genuinely "done" (notifies the
+ * flagger and the assignee); otherwise I'm the blocked side saying the wait is
+ * over, which is the "cancel" endpoint.
+ *
+ * Retiring these is not optional: `stepIsWaiting` ORs `waitingOns` in, so a
+ * "Done" that only flipped the `waiting` boolean left the step amber and the
+ * editor open — the click produced no visible change whatsoever.
+ */
+export function planWaitingDone(
+  waitingOns: ReadonlyArray<{ id: string; blockerId: string }>,
+  meId: string,
+): Array<{ id: string; action: 'done' | 'cancel' }> {
+  return waitingOns.map((entry) => ({
+    id: entry.id,
+    action: entry.blockerId === meId ? 'done' : 'cancel',
+  }))
+}
+
 export type ChecklistStatus = 'Done' | 'Overdue' | 'In progress' | 'Not started'
 
 /**

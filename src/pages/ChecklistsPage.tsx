@@ -56,9 +56,11 @@ import {
   localDateOnly,
   makeId,
   monthShortNames,
+  planWaitingDone,
   shortDate,
   stageNameFor,
   stepIsWaiting,
+  WAITING_DONE_PATCH,
 } from '../lib/utils'
 
 type Group = 'overdue' | 'week' | 'month' | 'later' | 'completed'
@@ -2209,16 +2211,57 @@ function WaitingEditor({
    * instance as a record (unlike Clear, which erases it). Does NOT check the
    * step off — completing stays with the checkboxes (owner feedback).
    */
-  onDone: () => void
+  onDone: () => Promise<void> | void
   /** Flag a new person-blocker on this step. */
-  onAddWaitingOn: (blockerId: string) => void
+  onAddWaitingOn: (blockerId: string) => Promise<void> | void
   /** Cancel a pending blocker (the blocked side). */
-  onCancelWaitingOn: (waitingOnId: string) => void
+  onCancelWaitingOn: (waitingOnId: string) => Promise<void> | void
   /** Mark a pending blocker done (only shown when the current user IS the blocker). */
-  onDoneWaitingOn: (waitingOnId: string) => void
+  onDoneWaitingOn: (waitingOnId: string) => Promise<void> | void
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const { state, flash } = useSaveFlash()
+  // In-flight + last-failure state for the buttons in this editor. Every
+  // waiting mutation is routed through `run` so a server refusal (the
+  // waiting-on endpoints answer 403 when you're not allowed to retire a
+  // blocker) surfaces right here instead of dying as an unhandled promise
+  // rejection — a swallowed rejection is exactly what "the button does
+  // nothing" looks like from the outside.
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async (work: () => Promise<void> | void) => {
+    setError(null)
+    setBusy(true)
+    try {
+      await work()
+    } catch (err) {
+      setError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Couldn't update this wait — please try again.",
+      )
+    } finally {
+      // A success usually unmounts this editor (the step stops being
+      // "waiting"); setting state on an unmounted component is a no-op.
+      setBusy(false)
+    }
+  }
+
+  // Done = retire the whole wait. The structured person-blockers have to go
+  // first: `stepIsWaiting` counts them, so leaving them behind kept the step
+  // amber and this editor open, which is why the click looked dead.
+  const handleDone = () =>
+    run(async () => {
+      for (const step of planWaitingDone(waitingOns, activeEmployeeId)) {
+        if (step.action === 'done') {
+          await onDoneWaitingOn(step.id)
+        } else {
+          await onCancelWaitingOn(step.id)
+        }
+      }
+      await onDone()
+    })
 
   // Save the note (trimmed); null clears it. Flashes the "Saved" badge.
   const save = (value: string) => {
@@ -2237,10 +2280,11 @@ function WaitingEditor({
         <select
           className="waiting-person-select"
           aria-label="Waiting on a person"
+          disabled={busy}
           value=""
           onChange={(event) => {
             const blockerId = event.target.value
-            if (blockerId) onAddWaitingOn(blockerId)
+            if (blockerId) void run(() => onAddWaitingOn(blockerId))
           }}
         >
           <option value="">+ Waiting on a person…</option>
@@ -2253,20 +2297,35 @@ function WaitingEditor({
         <button
           type="button"
           className="waiting-done-btn"
-          title="Wait resolved — keep this note on the checklist as the record. The step itself stays unchecked until you tick it off."
-          onClick={onDone}
+          disabled={busy}
+          title={
+            busy
+              ? 'Retiring this wait — one moment…'
+              : 'Wait resolved — keep this note on the checklist as the record. The step itself stays unchecked until you tick it off.'
+          }
+          onClick={() => void handleDone()}
         >
-          Done
+          {busy ? 'Retiring…' : 'Done'}
         </button>
         <button
           type="button"
           className="waiting-clear-btn"
-          title="Un-flag without finishing — removes the waiting note entirely"
+          disabled={busy}
+          title={
+            busy
+              ? 'Retiring this wait — one moment…'
+              : 'Un-flag without finishing — removes the waiting note entirely'
+          }
           onClick={onClear}
         >
           Clear
         </button>
       </div>
+      {error ? (
+        <p className="waiting-editor-error" role="alert">
+          {error}
+        </p>
+      ) : null}
       {waitingOns.length > 0 ? (
         <ul className="waiting-blocker-list">
           {waitingOns.map((entry) => {
@@ -2282,8 +2341,13 @@ function WaitingEditor({
                   <button
                     type="button"
                     className="waiting-blocker-done"
-                    title="Mark what they needed as done — notifies the assignee and flagger"
-                    onClick={() => onDoneWaitingOn(entry.id)}
+                    disabled={busy}
+                    title={
+                      busy
+                        ? 'Working on it — one moment…'
+                        : 'Mark what they needed as done — notifies the assignee and flagger'
+                    }
+                    onClick={() => void run(() => onDoneWaitingOn(entry.id))}
                   >
                     Mark done
                   </button>
@@ -2292,8 +2356,11 @@ function WaitingEditor({
                   type="button"
                   className="waiting-blocker-cancel"
                   aria-label={`Cancel waiting on ${blockerName}`}
-                  title="No longer waiting on this person"
-                  onClick={() => onCancelWaitingOn(entry.id)}
+                  disabled={busy}
+                  title={
+                    busy ? 'Working on it — one moment…' : 'No longer waiting on this person'
+                  }
+                  onClick={() => void run(() => onCancelWaitingOn(entry.id))}
                 >
                   ×
                 </button>
@@ -2407,6 +2474,27 @@ function DraggableTaskList({
     subItemId?: string | null,
     subSubItemId?: string | null,
   ) => pendingItemDeletionKeys.has(itemDeletionKey(checklistId, itemId, subItemId, subSubItemId))
+  // Nodes whose wait was retired a moment ago. Retiring can otherwise leave
+  // very little to notice — if no note was ever typed there is no record to
+  // keep — so the badge announces the change for a beat and animates.
+  const [justRetired, setJustRetired] = useState<string[]>([])
+  const retiredTimers = useRef<number[]>([])
+  useEffect(
+    () => () => {
+      retiredTimers.current.forEach((timer) => window.clearTimeout(timer))
+      retiredTimers.current = []
+    },
+    [],
+  )
+  const markRetired = (nodeId: string) => {
+    setJustRetired((prev) => (prev.includes(nodeId) ? prev : [...prev, nodeId]))
+    retiredTimers.current.push(
+      window.setTimeout(
+        () => setJustRetired((prev) => prev.filter((id) => id !== nodeId)),
+        2400,
+      ),
+    )
+  }
   const availableTasks = useMemo(() => {
     const current = appData.checklists.find((entry) => entry.id === checklistId)
     if (!current) return []
@@ -2536,10 +2624,19 @@ function DraggableTaskList({
                   // on this instance as the record of what it waited on,
                   // whether or not the step itself is checked off yet.
                   <span
-                    className="task-row-waiting task-row-waiting-resolved"
-                    title="This step was waiting — note kept for the record"
+                    className={`task-row-waiting task-row-waiting-resolved${
+                      justRetired.includes(item.id) ? ' is-just-retired' : ''
+                    }`}
+                    title="This step was waiting — note kept for the record. The step itself is still yours to check off."
                   >
-                    Was waiting on: {item.waitingOn}
+                    Was waiting on: {item.waitingOn} ✓
+                  </span>
+                ) : justRetired.includes(item.id) ? (
+                  // Retired with no note typed, so there is no record to keep —
+                  // say so for a beat, otherwise the only visible change would
+                  // be the amber editor disappearing.
+                  <span className="task-row-waiting task-row-waiting-resolved is-just-retired">
+                    Wait retired ✓
                   </span>
                 ) : null}
                 {canEdit ? (
@@ -2649,16 +2746,15 @@ function DraggableTaskList({
                     waitingForChecklistId: null,
                   })
                 }
-                onDone={() => {
+                onDone={async () => {
                   // Resolve the wait but KEEP the note — it renders as a
                   // "was waiting" record on this instance only (future
                   // recurrences materialize fresh, without it). Deliberately
                   // does NOT check the step off (owner feedback: completing
                   // is the checkboxes' job — Done only retires the blocker).
-                  void onUpdateItem(item.id, {
-                    waiting: false,
-                    waitingForChecklistId: null,
-                  })
+                  // The editor has already retired any person-blockers.
+                  await onUpdateItem(item.id, WAITING_DONE_PATCH)
+                  markRetired(item.id)
                 }}
                 onAddWaitingOn={(blockerId) =>
                   void addWaitingOn(checklistId, { itemId: item.id, blockerId })
@@ -2704,10 +2800,16 @@ function DraggableTaskList({
                           </span>
                         ) : (sub.waitingOn ?? '').trim() ? (
                           <span
-                            className="task-row-waiting sub-waiting-badge task-row-waiting-resolved"
-                            title="This sub-step was waiting — note kept for the record"
+                            className={`task-row-waiting sub-waiting-badge task-row-waiting-resolved${
+                              justRetired.includes(sub.id) ? ' is-just-retired' : ''
+                            }`}
+                            title="This sub-step was waiting — note kept for the record. The sub-step itself is still yours to check off."
                           >
-                            Was waiting on: {sub.waitingOn}
+                            Was waiting on: {sub.waitingOn} ✓
+                          </span>
+                        ) : justRetired.includes(sub.id) ? (
+                          <span className="task-row-waiting sub-waiting-badge task-row-waiting-resolved is-just-retired">
+                            Wait retired ✓
                           </span>
                         ) : null}
                         {canEdit ? (
@@ -2785,10 +2887,8 @@ function DraggableTaskList({
                           onDone={() => {
                             // Same retention semantics as the item-level Done
                             // (and same rule: never checks the sub-step off).
-                            void onUpdateSubItemWaiting(item.id, sub.id, {
-                              waiting: false,
-                              waitingForChecklistId: null,
-                            })
+                            onUpdateSubItemWaiting(item.id, sub.id, WAITING_DONE_PATCH)
+                            markRetired(sub.id)
                           }}
                           onAddWaitingOn={(blockerId) =>
                             void addWaitingOn(checklistId, {

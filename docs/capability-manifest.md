@@ -279,7 +279,12 @@ picker, notification bell, and account menu sit in the top bar on every page.
   does **NOT** check the step off — completing the work stays with the normal
   checkboxes (owner feedback: the reference should sit on the still-open step).
   **Clear** just un-flags and erases the note. Resolved steps stop counting on
-  the Delayed page and the Board's pending chips.
+  the Delayed page and the Board's pending chips. Done retires the WHOLE wait in
+  one press — including any "waiting on a person" blockers on that step — and
+  you see it happen: the amber "Waiting on: …" badge turns into a green "Was
+  waiting on: … ✓" and the amber editor closes. If the server refuses (e.g. a
+  blocker only its owner may mark done), the reason appears in red inside the
+  waiting editor instead of the button appearing to do nothing.
 - Waiting on a PERSON (two-way): you can also flag a step as waiting on a
   specific team member. That person is notified immediately that someone's
   blocked on them, sees it in a "Waiting on you" card on their Dashboard, and

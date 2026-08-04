@@ -6772,11 +6772,41 @@ button.repeating-task-toggle-pill {
   padding: 4px 7px;
 }
 
-/* Resolved-wait record on a done step — same badge, drained of urgency. */
+/* Resolved-wait record — the amber "Waiting on…" badge drained of urgency and
+   turned green, so retiring a wait reads as a state change, not a text edit. */
 .task-row-waiting-resolved {
-  background: var(--soft);
-  color: var(--muted);
+  background: rgba(35, 116, 90, 0.12);
+  color: var(--green);
   text-decoration: none;
+}
+
+/* One-shot amber → green transition, only on the badge that just changed. */
+@keyframes waiting-retired-settle {
+  0% {
+    background: rgba(211, 155, 42, 0.28);
+    color: #8a6d1a;
+    transform: scale(1);
+  }
+  30% {
+    transform: scale(1.07);
+  }
+  100% {
+    background: rgba(35, 116, 90, 0.12);
+    color: var(--green);
+    transform: scale(1);
+  }
+}
+
+.task-row-waiting-resolved.is-just-retired {
+  animation: waiting-retired-settle 1.3s ease-out 1;
+}
+
+/* Why a waiting action failed, right under the buttons that triggered it. */
+.waiting-editor-error {
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0;
 }
 
 /* "Done" in the waiting editor: finish the step, keep the note as a record. */
@@ -6793,8 +6823,18 @@ button.repeating-task-toggle-pill {
   transition: filter 0.15s ease;
 }
 
-.waiting-done-btn:hover {
+.waiting-done-btn:hover:not(:disabled) {
   filter: brightness(1.12);
+}
+
+/* Waiting controls while a retire/flag request is in flight. */
+.waiting-done-btn:disabled,
+.waiting-clear-btn:disabled,
+.waiting-person-select:disabled,
+.waiting-blocker-done:disabled,
+.waiting-blocker-cancel:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .waiting-clear-btn {
@@ -7022,6 +7062,11 @@ button.repeating-task-toggle-pill {
   .waiting-blocker-cancel,
   .waiting-on-you-done {
     transition: none;
+  }
+
+  /* The green badge still replaces the amber one — just without the motion. */
+  .task-row-waiting-resolved.is-just-retired {
+    animation: none;
   }
 }
 
