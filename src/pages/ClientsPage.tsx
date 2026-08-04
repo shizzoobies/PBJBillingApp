@@ -900,7 +900,9 @@ function ClientTable({
                 ) : null}
                 <td>
                   <div className="client-row-actions">
-                    {ownerMode && onStartOnboarding && lifecycleOf(client) === 'active' ? (
+                    {/* Only for clients who haven't finished onboarding — an Active
+                        client is already onboarded, so the button is just noise. */}
+                    {ownerMode && onStartOnboarding && lifecycleOf(client) !== 'active' ? (
                       <button
                         type="button"
                         className="secondary-action compact-action"

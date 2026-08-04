@@ -522,7 +522,9 @@ picker, notification bell, and account menu sit in the top bar on every page.
   has stage tabs (Active · Onboarding · Proposal · All, defaulting to Active, with
   counts) and each row shows a stage badge. "Start onboarding" on a client builds
   a 3-stage onboarding checklist (Proposal / Onboarding / Client) and moves the
-  client to Proposal; as the team completes each stage of that checklist the
+  client to Proposal. That button only shows on clients who aren't Active yet
+  (Proposal or Onboarding) — an Active client is already onboarded, so it's
+  hidden there; as the team completes each stage of that checklist the
   client automatically advances (Proposal → Onboarding → Active). The owner can
   also set a client's stage directly. New clients can be added straight into any
   stage (defaults to Active). Staff see the badge but don't manage stages.
