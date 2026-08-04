@@ -3959,6 +3959,24 @@ export class AppDataStore {
           }
         }
 
+        // `invoice_drafts` is NOT part of the bulk-save payload — nothing in
+        // the app reads or writes that table, so `data` carries no drafts to
+        // re-insert. It still has to be DELETED below: its `client_id` FK is
+        // `on delete restrict`, so `delete from clients` cannot run while any
+        // draft row exists. Snapshot the rows here and put them back after the
+        // clients are re-inserted (see the restore loop below).
+        //
+        // Without that restore, `invoice_drafts` was the ONE table of the
+        // fifteen wiped here with a delete and no matching insert — the moment
+        // billing work saved a draft, the next owner autosave would erase it
+        // silently. Production has 0 rows today, so nothing was lost yet.
+        const preservedInvoiceDrafts = (
+          await client.query(
+            `select id, client_id, billing_period, status, total, payload, created_at
+               from invoice_drafts`,
+          )
+        ).rows
+
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
         await client.query('delete from checklist_template_items')
@@ -4187,6 +4205,34 @@ export class AppDataStore {
               [clientRecord.id, employeeId],
             )
           }
+        }
+
+        // Put back the invoice drafts snapshotted before the wipe, now that
+        // their clients exist again. A draft whose client is gone from this
+        // payload is dropped — the same rule every other client-scoped table
+        // here follows (a removed client's rows do not come back), and its FK
+        // would refuse the insert anyway. `updated_at` is re-stamped like
+        // every other row re-inserted by this transaction; `created_at` is
+        // preserved so a draft keeps its real age across a bulk save.
+        for (const draft of preservedInvoiceDrafts) {
+          if (!validClientIds.has(draft.client_id)) continue
+          await client.query(
+            `
+              insert into invoice_drafts (
+                id, client_id, billing_period, status, total, payload, created_at, updated_at
+              )
+              values ($1, $2, $3, $4, $5, $6::jsonb, $7, now())
+            `,
+            [
+              draft.id,
+              draft.client_id,
+              draft.billing_period,
+              draft.status,
+              draft.total,
+              JSON.stringify(draft.payload ?? {}),
+              draft.created_at,
+            ],
+          )
         }
 
         for (const entry of safeTimeEntries) {
@@ -5975,57 +6021,127 @@ export class AppDataStore {
    * is exactly what cardinal rule 4 says to avoid.
    *
    * Mirrors the shape `write()` uses for clients so the two agree, and rebuilds
-   * `client_assignments` from `assignedBookkeeperIds` the same way.
+   * `client_assignments` the same way.
+   *
+   * EVERY column the bulk save writes is written here too. The first version of
+   * this endpoint persisted twelve of them, so a client created through the Add
+   * form came back missing its monthly/annual rate, its estimated role hours,
+   * its invoice preferences and its whole team — the fields were entered, the
+   * insert simply had no columns for them. Any column added to `write()`'s
+   * clients insert must be added here as well.
    */
   async createClient(client) {
     const id = client.id ?? `client-${randomUUID().slice(0, 8)}`
     const name = String(client.name ?? '').trim()
     if (!name) return null
 
-    const record = {
+    const stringIds = (value) =>
+      Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry) : []
+
+    // Normalize through the same profile mapper the reads use, so the record
+    // handed back to the creating tab has the exact shape a reload produces.
+    const record = normalizeClientProfile({
       ...client,
       id,
       name,
       contact: String(client.contact ?? ''),
       billingMode: client.billingMode ?? 'hourly',
       hourlyRate: clampMoney(client.hourlyRate ?? 0),
-      planIds: Array.isArray(client.planIds) ? client.planIds : [],
-      contactIds: Array.isArray(client.contactIds) ? client.contactIds : [],
-      assignedBookkeeperIds: Array.isArray(client.assignedBookkeeperIds)
-        ? client.assignedBookkeeperIds
-        : [],
-      lifecycleStage: client.lifecycleStage ?? 'active',
-    }
+      planIds: stringIds(client.planIds),
+      contactIds: stringIds(client.contactIds),
+      // The team chosen on the Add-client form. `write()` rebuilds
+      // `client_assignments` from THIS field — reading `assignedBookkeeperIds`
+      // here instead dropped the entire team selection on every new client.
+      assignedEmployeeIds: stringIds(client.assignedEmployeeIds),
+      assignedBookkeeperIds: stringIds(client.assignedBookkeeperIds),
+      // Never let a bad value land in the stage column — absent/garbage is
+      // 'active', matching write() and the read mappers.
+      lifecycleStage:
+        client.lifecycleStage === 'proposal' || client.lifecycleStage === 'onboarding'
+          ? client.lifecycleStage
+          : 'active',
+    })
 
     if (this.pool) {
+      // Optional numeric column: null when absent, clamped otherwise — the
+      // treatment sanitizeAppData + write() give these on a bulk save.
+      const money = (value) =>
+        value === undefined || value === null || value === '' ? null : clampMoney(value)
+      const annualBillingMonth = Number(record.annualBillingMonth)
+
       const dbClient = await this.pool.connect()
       try {
         await dbClient.query('begin')
+        // `plan_id` (the legacy single-plan FK column) is deliberately left at
+        // its null default: `plan_ids` is the live field and the read mapper
+        // only falls back to `plan_id` when `plan_ids` is empty. Writing it
+        // would need the plan list on hand to avoid a dangling FK.
         await dbClient.query(
-          `insert into clients
-             (id, name, contact, billing_mode, hourly_rate, plan_ids, contact_ids,
-              assigned_bookkeeper_ids, email, contact_name, phone, lifecycle_stage, updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())`,
+          `insert into clients (
+             id, name, contact, billing_mode, hourly_rate,
+             custom_monthly_fee, monthly_rate, estimated_monthly_hours,
+             plan_ids, contact_ids,
+             email, contact_name, phone, address_line1, address_line2,
+             city, state, postal_code, logo_url, payment_terms,
+             footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
+             invoice_hide_internal_hours, invoice_group_by_category,
+             assigned_bookkeeper_ids,
+             estimated_bookkeeper_hours, estimated_accountant_hours,
+             estimated_cfo_hours, monthly_service_tier,
+             annual_rate, annual_billing_month, lifecycle_stage, updated_at
+           )
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33, now())`,
           [
             record.id,
             record.name,
             record.contact,
             record.billingMode,
             record.hourlyRate,
+            money(record.customMonthlyFee),
+            money(record.monthlyRate),
+            money(record.estimatedMonthlyHours),
             record.planIds,
             record.contactIds,
-            record.assignedBookkeeperIds,
-            record.email ?? null,
-            record.contactName ?? null,
-            record.phone ?? null,
+            record.email ?? '',
+            record.contactName ?? '',
+            record.phone ?? '',
+            record.addressLine1 ?? '',
+            record.addressLine2 ?? '',
+            record.city ?? '',
+            record.state ?? '',
+            record.postalCode ?? '',
+            record.logoUrl ?? '',
+            record.paymentTerms ?? '',
+            record.footerNote ?? '',
+            // Only persist a safe http(s) pay link — never a javascript:/data: URL.
+            isSafeHttpUrl(record.quickbooksPayUrl) ? record.quickbooksPayUrl : '',
+            record.invoiceShowTimeBreakdown ?? true,
+            record.invoiceHideInternalHours ?? true,
+            record.invoiceGroupByCategory ?? false,
+            [...new Set(record.assignedBookkeeperIds)],
+            money(record.estimatedBookkeeperHours),
+            money(record.estimatedAccountantHours),
+            money(record.estimatedCfoHours),
+            typeof record.monthlyServiceTier === 'string' && record.monthlyServiceTier.trim()
+              ? record.monthlyServiceTier
+              : null,
+            money(record.annualRate),
+            Number.isFinite(annualBillingMonth) &&
+            annualBillingMonth >= 1 &&
+            annualBillingMonth <= 12
+              ? Math.floor(annualBillingMonth)
+              : null,
             record.lifecycleStage,
           ],
         )
         // Same derivation the bulk save uses, so visibility works immediately
-        // rather than only after the next full save.
-        for (const userId of record.assignedBookkeeperIds) {
+        // rather than only after the next full save. The `where exists` guard
+        // mirrors write()'s user-id filter: an id with no matching user would
+        // violate the FK and abort the whole create.
+        for (const userId of record.assignedEmployeeIds) {
           await dbClient.query(
-            `insert into client_assignments (client_id, user_id) values ($1, $2)
+            `insert into client_assignments (client_id, user_id)
+             select $1, $2 where exists (select 1 from users where id = $2)
              on conflict do nothing`,
             [record.id, userId],
           )

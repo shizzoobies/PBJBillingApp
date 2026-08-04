@@ -745,3 +745,307 @@ describe('splitTimeEntry on a regular client entry (file backend)', () => {
     expect(created.every((slice) => slice.billable === true)).toBe(true)
   })
 })
+
+/**
+ * A minimal stand-in for a `pg` Pool, enough to drive the POSTGRES branch of
+ * `write()` without a database. Every statement is recorded so a test can
+ * assert on what the transaction actually issued and in what order.
+ *
+ * `write()` only ever consumes the result of three queries â€” the users
+ * pre-check, the (optional) version fingerprint, and the invoice-drafts
+ * snapshot â€” so returning an empty row set for everything else is faithful.
+ */
+function fakePostgres({ invoiceDrafts = [] } = {}) {
+  const statements = []
+  const record = (text, params) => {
+    const trimmed = String(text).trim()
+    statements.push({ text: trimmed, params })
+    if (/^select\b[\s\S]*\bfrom invoice_drafts\b/i.test(trimmed)) {
+      return { rows: invoiceDrafts }
+    }
+    return { rows: [] }
+  }
+  const client = {
+    async query(text, params) {
+      return record(text, params)
+    },
+    release() {},
+  }
+  const pool = {
+    async connect() {
+      return client
+    },
+    async query(text, params) {
+      return record(text, params)
+    },
+  }
+  const matching = (pattern) => statements.filter((s) => pattern.test(s.text))
+  const indexOf = (pattern) => statements.findIndex((s) => pattern.test(s.text))
+  return { pool, statements, matching, indexOf }
+}
+
+function postgresStore(fake) {
+  const pgStore = new AppDataStore()
+  pgStore.pool = fake.pool
+  pgStore.mode = 'postgres'
+  return pgStore
+}
+
+const existingDraft = {
+  id: 'draft-1',
+  client_id: 'c1',
+  billing_period: '2026-08',
+  status: 'draft',
+  total: '250.00',
+  payload: { lines: [{ label: 'August work', amount: 250 }] },
+  created_at: new Date('2026-08-01T12:00:00.000Z'),
+}
+
+/**
+ * `invoice_drafts` was the one table the bulk save wiped without re-inserting â€”
+ * fourteen others appeared in both lists, this one only in the deletes. Nothing
+ * has ever written a draft (production has 0 rows), so nothing was lost yet,
+ * but the first saved draft would have been erased by the next owner autosave.
+ *
+ * The delete itself cannot simply go away: `invoice_drafts.client_id` is
+ * `on delete restrict`, so `delete from clients` refuses to run while any draft
+ * exists. `write()` therefore snapshots the rows and puts them back.
+ */
+describe('bulk save preserves invoice_drafts (postgres branch)', () => {
+  it('re-inserts a pre-existing draft that the wipe removed', async () => {
+    const fake = fakePostgres({ invoiceDrafts: [existingDraft] })
+    await postgresStore(fake).write(workspace())
+
+    const inserts = fake.matching(/^insert into invoice_drafts/i)
+    expect(inserts).toHaveLength(1)
+    expect(inserts[0].params).toEqual([
+      'draft-1',
+      'c1',
+      '2026-08',
+      'draft',
+      '250.00',
+      JSON.stringify(existingDraft.payload),
+      existingDraft.created_at,
+    ])
+  })
+
+  it('still deletes first â€” the clients wipe cannot run past the FK otherwise', async () => {
+    const fake = fakePostgres({ invoiceDrafts: [existingDraft] })
+    await postgresStore(fake).write(workspace())
+
+    const deleteAt = fake.indexOf(/^delete from invoice_drafts$/i)
+    const clientsWipedAt = fake.indexOf(/^delete from clients$/i)
+    expect(deleteAt).toBeGreaterThan(-1)
+    expect(deleteAt).toBeLessThan(clientsWipedAt)
+  })
+
+  it('restores AFTER the clients are back, so the FK is satisfied', async () => {
+    const fake = fakePostgres({ invoiceDrafts: [existingDraft] })
+    await postgresStore(fake).write(workspace())
+
+    const clientInsertAt = fake.indexOf(/^insert into clients/i)
+    const draftRestoreAt = fake.indexOf(/^insert into invoice_drafts/i)
+    expect(clientInsertAt).toBeGreaterThan(-1)
+    expect(draftRestoreAt).toBeGreaterThan(clientInsertAt)
+  })
+
+  it('drops a draft whose client is gone from the payload', async () => {
+    const fake = fakePostgres({
+      invoiceDrafts: [existingDraft, { ...existingDraft, id: 'draft-2', client_id: 'deleted' }],
+    })
+    await postgresStore(fake).write(workspace())
+
+    const restoredIds = fake.matching(/^insert into invoice_drafts/i).map((s) => s.params[0])
+    expect(restoredIds).toEqual(['draft-1'])
+  })
+
+  it('issues no restore at all when there were no drafts', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace())
+
+    expect(fake.matching(/^insert into invoice_drafts/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * Every field the Add-client form collects must survive `createClient` and come
+ * back on the next read. Client creation moved off the debounced bulk save onto
+ * `POST /api/clients`, and the first version of that endpoint inserted twelve
+ * of the thirty-three columns `write()` writes â€” so the monthly/annual rate,
+ * the estimated role hours, the invoice preferences and the entire team
+ * selection were entered on the form and silently thrown away.
+ *
+ * File backend (cardinal rule 1: the Postgres branch is the one production
+ * runs, and is validated separately against real data with a rolled-back
+ * transaction â€” HANDOFF section 4). What this pins is the contract both
+ * branches implement: nothing the form sends is dropped.
+ */
+describe('createClient keeps every field the Add-client form sends (file backend)', () => {
+  // Exactly what the ClientBuilder onCreate call emits with every input filled
+  // in. The monthly and annual fields are mutually exclusive on the form
+  // itself, but the store must not drop either one.
+  const formValues = {
+    name: 'Northwind Traders',
+    contact: 'Dana Reyes',
+    billingMode: 'subscription',
+    hourlyRate: 125,
+    planIds: ['plan-1'],
+    contactIds: ['contact-1'],
+    monthlyRate: 900,
+    annualRate: 4800,
+    annualBillingMonth: 7,
+    estimatedBookkeeperHours: 12.5,
+    estimatedAccountantHours: 4,
+    estimatedCfoHours: 1.5,
+    paymentTerms: 'Net 15',
+    footerNote: 'Thanks for your business.',
+    invoiceShowTimeBreakdown: false,
+    invoiceHideInternalHours: false,
+    invoiceGroupByCategory: true,
+    lifecycleStage: 'proposal',
+    assignedEmployeeIds: ['emp-1'],
+  }
+
+  it('returns the created record with every field intact', async () => {
+    const created = await store.createClient(formValues)
+    expect(created).toMatchObject(formValues)
+    expect(created.id).toMatch(/^client-/)
+  })
+
+  it('reads every field back after the create', async () => {
+    const created = await store.createClient(formValues)
+    const data = await store.read()
+    const stored = data.clients.find((c) => c.id === created.id)
+    expect(stored).toBeTruthy()
+    expect(stored).toMatchObject(formValues)
+  })
+
+  it('does not coerce a chosen-false invoice preference back to true', async () => {
+    const created = await store.createClient(formValues)
+    const data = await store.read()
+    const stored = data.clients.find((c) => c.id === created.id)
+    expect(stored.invoiceShowTimeBreakdown).toBe(false)
+    expect(stored.invoiceHideInternalHours).toBe(false)
+    expect(stored.invoiceGroupByCategory).toBe(true)
+  })
+
+  it('keeps the team selection, which is what drives client visibility', async () => {
+    const created = await store.createClient(formValues)
+    const data = await store.read()
+    const stored = data.clients.find((c) => c.id === created.id)
+    expect(stored.assignedEmployeeIds).toEqual(['emp-1'])
+  })
+
+  it('still refuses a nameless client', async () => {
+    expect(await store.createClient({ ...formValues, name: '   ' })).toBeNull()
+  })
+})
+
+/**
+ * The same contract on the POSTGRES branch â€” and the branch that was actually
+ * broken. The file backend spreads the whole incoming object onto the record,
+ * so it never lost a field; the Postgres insert named its columns explicitly
+ * and named only twelve of them, which is why the fields vanished in
+ * production and nowhere else.
+ *
+ * Driven through a fake pool rather than a live database, so what it pins is
+ * the statement `createClient` issues: every field the form sends reaches a
+ * column.
+ */
+describe('createClient writes every form field to Postgres', () => {
+  // Same payload as the file-backend suite above.
+  const formValues = {
+    name: 'Northwind Traders',
+    contact: 'Dana Reyes',
+    billingMode: 'subscription',
+    hourlyRate: 125,
+    planIds: ['plan-1'],
+    contactIds: ['contact-1'],
+    monthlyRate: 900,
+    annualRate: 4800,
+    annualBillingMonth: 7,
+    estimatedBookkeeperHours: 12.5,
+    estimatedAccountantHours: 4,
+    estimatedCfoHours: 1.5,
+    paymentTerms: 'Net 15',
+    footerNote: 'Thanks for your business.',
+    invoiceShowTimeBreakdown: false,
+    invoiceHideInternalHours: false,
+    invoiceGroupByCategory: true,
+    lifecycleStage: 'proposal',
+    assignedEmployeeIds: ['emp-1'],
+  }
+
+  // Zip the statement's column list against its bound parameters, so a test can
+  // assert per COLUMN instead of by positional index. `updated_at` is last in
+  // the column list and is `now()` rather than a parameter, so it simply falls
+  // off the end of the shorter params array.
+  const boundColumns = (statement) => {
+    const match = /insert into clients\s*\(([\s\S]*?)\)\s*values/i.exec(statement.text)
+    const columns = match[1].split(',').map((column) => column.trim())
+    const bound = {}
+    statement.params.forEach((value, index) => {
+      bound[columns[index]] = value
+    })
+    return bound
+  }
+
+  it('binds every column the form fills', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createClient(formValues)
+
+    const inserts = fake.matching(/^insert into clients/i)
+    expect(inserts).toHaveLength(1)
+    expect(boundColumns(inserts[0])).toMatchObject({
+      name: 'Northwind Traders',
+      contact: 'Dana Reyes',
+      billing_mode: 'subscription',
+      hourly_rate: 125,
+      plan_ids: ['plan-1'],
+      contact_ids: ['contact-1'],
+      monthly_rate: 900,
+      annual_rate: 4800,
+      annual_billing_month: 7,
+      estimated_bookkeeper_hours: 12.5,
+      estimated_accountant_hours: 4,
+      estimated_cfo_hours: 1.5,
+      payment_terms: 'Net 15',
+      footer_note: 'Thanks for your business.',
+      invoice_show_time_breakdown: false,
+      invoice_hide_internal_hours: false,
+      invoice_group_by_category: true,
+      lifecycle_stage: 'proposal',
+    })
+  })
+
+  it('derives client_assignments from the team the form picked', async () => {
+    const fake = fakePostgres()
+    const created = await postgresStore(fake).createClient(formValues)
+
+    const assignments = fake.matching(/^insert into client_assignments/i)
+    expect(assignments.map((statement) => statement.params)).toEqual([[created.id, 'emp-1']])
+  })
+
+  it('leaves an unfilled optional column null rather than 0', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createClient({ name: 'Bare Co', contact: 'Someone' })
+
+    const bound = boundColumns(fake.matching(/^insert into clients/i)[0])
+    expect(bound.monthly_rate).toBeNull()
+    expect(bound.annual_rate).toBeNull()
+    expect(bound.annual_billing_month).toBeNull()
+    expect(bound.estimated_bookkeeper_hours).toBeNull()
+    expect(bound.lifecycle_stage).toBe('active')
+  })
+
+  it('refuses an unsafe pay URL instead of persisting it', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createClient({
+      name: 'Sketchy Co',
+      contact: 'Someone',
+      quickbooksPayUrl: 'javascript:alert(1)',
+    })
+
+    expect(boundColumns(fake.matching(/^insert into clients/i)[0]).quickbooks_pay_url).toBe('')
+  })
+})
