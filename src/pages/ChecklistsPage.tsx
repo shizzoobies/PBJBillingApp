@@ -15,7 +15,6 @@ import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { FilterBar } from '../components/FilterBar'
 import { ListSearch } from '../components/ListSearch'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
-import { isInReportPeriod } from '../lib/reportPeriod'
 import { useFilters } from '../components/useFilters'
 import { SaveBadge } from '../components/SectionKit'
 import { SharingControl } from '../components/SharingControl'
@@ -37,6 +36,8 @@ import type {
   WaitingOn,
 } from '../lib/types'
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
+import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
+import { filterInProgressChecklists } from '../lib/inProgressFilter'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import {
   addDays,
@@ -62,6 +63,12 @@ import {
 
 type Group = 'overdue' | 'week' | 'month' | 'later' | 'completed'
 type GroupByMode = 'status' | 'client'
+
+const TASK_AREAS: Array<{ key: TaskArea; label: string }> = [
+  { key: 'progress', label: 'In progress' },
+  { key: 'repeating', label: 'Repeating' },
+  { key: 'standard', label: 'Standard' },
+]
 type CreateMode = 'one-time' | 'repeating' | null
 
 function parseBulkLines(value: string): string[] {
@@ -69,15 +76,6 @@ function parseBulkLines(value: string): string[] {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith('#'))
-}
-
-function statusForChecklist(checklist: Checklist, todayDateOnly: string) {
-  const completed = checklist.items.filter((item) => item.done).length
-  const total = checklist.items.length
-  const allDone = total > 0 && completed === total
-  if (allDone) return 'completed'
-  if (checklist.dueDate < todayDateOnly) return 'overdue'
-  return 'active'
 }
 
 function firstName(employees: Employee[], employeeId: string) {
@@ -199,7 +197,15 @@ export function ChecklistsPage() {
     rejectPendingTaskEdit,
     restoreChecklist,
     emptyChecklistRecycleBin,
+    reportPeriod,
   } = useAppContext()
+
+  // Same filter state the in-progress list reads, so the tab count can apply it.
+  const {
+    assignee: areaAssignee,
+    client: areaClient,
+    status: areaStatus,
+  } = useFilters()
 
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -210,6 +216,59 @@ export function ChecklistsPage() {
     const next = new URLSearchParams(searchParams)
     next.set('focus', checklistId)
     setSearchParams(next, { replace: true })
+  }
+
+  // ---- Which area is open ------------------------------------------------
+  // DERIVED from the URL, not stored in state, so a deep link always wins and
+  // there is no flash from an effect correcting it after paint.
+  //
+  // Deep links MUST be able to switch area or they silently do nothing: a
+  // `?focusTemplate=` link (from the Plans page's "set up checklists" card)
+  // targets RepeatingTasksManager, which isn't even mounted unless its tab is
+  // open. Same for `?focus=`, which targets the in-progress list.
+  const activeArea = resolveTaskArea({
+    areaParam: searchParams.get('area'),
+    focusChecklist: searchParams.get('focus'),
+    focusTemplate: searchParams.get('focusTemplate'),
+  })
+
+  const setArea = (next: TaskArea) => {
+    const params = new URLSearchParams(searchParams)
+    // 'progress' is the default, so keep it out of the URL — a bare
+    // /checklists link should land somewhere sensible, not carry state.
+    if (next === 'progress') params.delete('area')
+    else params.set('area', next)
+    // Area-scoped params from another area would be dead weight (and could
+    // yank the user straight back out of the tab they just picked).
+    params.delete('focus')
+    params.delete('focusTemplate')
+    setSearchParams(params, { replace: true })
+  }
+
+  // Counts per area. `data.checklistTemplates` is already role-scoped by the
+  // server, so these read correctly for staff as well as the owner.
+  //
+  // The In-progress count applies the SAME report period + filters the list
+  // does. It previously used the raw total, which made the tab claim 568 above
+  // a body showing 13 whenever the report period was narrow — the count has to
+  // describe what is actually under it or it is just noise. Search text is
+  // excluded on purpose: the search box shows its own "N of M", and a tab count
+  // that moved on every keystroke would be worse than useless.
+  const inProgressCount = useMemo(
+    () =>
+      filterInProgressChecklists(visibleChecklists, {
+        reportPeriod,
+        assignee: areaAssignee,
+        client: areaClient,
+        status: areaStatus,
+        today: localDateOnly(),
+      }).length,
+    [visibleChecklists, reportPeriod, areaAssignee, areaClient, areaStatus],
+  )
+  const areaCounts: Record<TaskArea, number> = {
+    progress: inProgressCount,
+    repeating: data.checklistTemplates.filter((t) => !t.isStandard).length,
+    standard: data.checklistTemplates.filter((t) => t.isStandard).length,
   }
 
   // The unified "+ New" dropdown. Mode controls whether the create form is in
@@ -370,6 +429,35 @@ export function ChecklistsPage() {
           )}
         </div>
 
+        {/* In progress / Repeating / Standard. Lives in the Tasks panel header
+            so the "+ New" button stays reachable from every area. */}
+        <div className="task-area-tabs" role="tablist" aria-label="Task areas">
+          {TASK_AREAS.map((area) => {
+            const isActive = area.key === activeArea
+            const count = areaCounts[area.key]
+            const classes = [
+              'task-area-tab',
+              isActive ? 'is-active' : '',
+              count === 0 ? 'is-empty' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')
+            return (
+              <button
+                key={area.key}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                className={classes}
+                onClick={() => setArea(area.key)}
+              >
+                {area.label}
+                <span className="task-area-tab-count">{count}</span>
+              </button>
+            )
+          })}
+        </div>
+
         {createMode && (ownerMode || createMode === 'one-time') ? (
           <NewTaskForm
             mode={createMode}
@@ -383,6 +471,7 @@ export function ChecklistsPage() {
           />
         ) : null}
 
+        {activeArea !== 'progress' ? null : (
         <ChecklistInProgressSection
           activeEmployeeId={activeEmployeeId}
           checklists={visibleChecklists}
@@ -407,9 +496,10 @@ export function ChecklistsPage() {
           role={role}
           timeEntries={data.timeEntries}
         />
+        )}
       </section>
 
-      {ownerMode ? (
+      {ownerMode && activeArea === 'repeating' ? (
         <RepeatingTasksManager
           clients={data.clients}
           employees={data.employees}
@@ -440,7 +530,7 @@ export function ChecklistsPage() {
         />
       ) : null}
 
-      {ownerMode ? (
+      {ownerMode && activeArea === 'standard' ? (
         <StandardTemplatesManager
           clients={data.clients}
           employees={data.employees}
@@ -483,14 +573,14 @@ export function ChecklistsPage() {
       {/* Team members see the firm's standard blueprints read-only (the owner
           keeps the full editor above). Lets them know what standard work exists
           so they don't re-create it; an owner applies one to a client. */}
-      {!ownerMode ? (
-        <>
-          <StaffRecurringTemplatesView data={data} />
-          <StaffStandardTemplatesView
-            templates={data.checklistTemplates}
-            employees={data.employees}
-          />
-        </>
+      {!ownerMode && activeArea === 'repeating' ? (
+        <StaffRecurringTemplatesView data={data} />
+      ) : null}
+      {!ownerMode && activeArea === 'standard' ? (
+        <StaffStandardTemplatesView
+          templates={data.checklistTemplates}
+          employees={data.employees}
+        />
       ) : null}
     </section>
   )
@@ -1261,23 +1351,19 @@ function ChecklistInProgressSection({
     return () => window.clearTimeout(timer)
   }, [focusId, searchParams, setSearchParams])
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return checklists.filter((checklist) => {
-      if (!isInReportPeriod(effectiveChecklistDue(checklist), reportPeriod)) return false
-      if (assignee && checklist.assigneeId !== assignee) return false
-      if (client && checklist.clientId !== client) return false
-      if (status && status !== 'all') {
-        if (statusForChecklist(checklist, todayDateOnly) !== status) return false
-      }
-      if (q) {
-        const nameMatch = clientName(clients, checklist.clientId).toLowerCase().includes(q)
-        const titleMatch = checklist.title.toLowerCase().includes(q)
-        if (!nameMatch && !titleMatch) return false
-      }
-      return true
-    })
-  }, [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod])
+  const filtered = useMemo(
+    () =>
+      filterInProgressChecklists(checklists, {
+        reportPeriod,
+        assignee,
+        client,
+        status,
+        today: todayDateOnly,
+        query,
+        clients,
+      }),
+    [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod],
+  )
 
   // Status grouping (current behavior, unchanged).
   const groupedByStatus: Record<Group, Checklist[]> = {
@@ -3726,8 +3812,17 @@ type RepeatingTasksManagerProps = {
  */
 function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   const [openId, setOpenId] = useState<string | null>(null)
-  // Per-client groups collapse independently to cut clutter; default expanded.
-  const [collapsedClients, setCollapsedClients] = useState<Set<string>>(new Set())
+  const [query, setQuery] = useState('')
+  // Per-client groups, COLLAPSED BY DEFAULT — an empty set means nothing is
+  // open. With 135 repeating setups spread across clients, defaulting to
+  // expanded meant the tab opened as one continuous wall and you had to scroll
+  // to find a business. Collapsed by default turns it into a list of client
+  // names you can scan.
+  //
+  // Mirrors StaffRecurringTemplatesView, which already worked this way (same
+  // `openClients` shape, same searching-forces-open rule) — the owner's copy of
+  // this list was simply the one that never got it.
+  const [openClients, setOpenClients] = useState<Set<string>>(new Set())
   const [searchParams, setSearchParams] = useSearchParams()
   const focusTemplateId = searchParams.get('focusTemplate')
   const focusRef = useRef<HTMLElement | null>(null)
@@ -3736,7 +3831,7 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
     setOpenId((current) => (current === templateId ? null : templateId))
   }
   const toggleClient = (clientId: string) => {
-    setCollapsedClients((prev) => {
+    setOpenClients((prev) => {
       const next = new Set(prev)
       if (next.has(clientId)) next.delete(clientId)
       else next.add(clientId)
@@ -3746,7 +3841,20 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
 
   // Client-bound repeating tasks only — standard (client-agnostic) templates
   // live in their own section.
-  const regularTemplates = props.templates.filter((template) => !template.isStandard)
+  const allRegularTemplates = props.templates.filter((template) => !template.isStandard)
+
+  // Search by BUSINESS or task name. The whole reason this section was hard to
+  // use is that it holds 135 repeating setups across every client, so scrolling
+  // to one business was the only way in. Matching the client name first is the
+  // point: "jump to a business" is the actual job.
+  const q = query.trim().toLowerCase()
+  const regularTemplates = q
+    ? allRegularTemplates.filter(
+        (template) =>
+          clientName(props.clients, template.clientId).toLowerCase().includes(q) ||
+          template.title.toLowerCase().includes(q),
+      )
+    : allRegularTemplates
 
   // Group the repeating tasks under their client so the list stays organized.
   const clientGroups = (() => {
@@ -3771,19 +3879,26 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   // then strip the param so it doesn't keep re-firing.
   useEffect(() => {
     if (!focusTemplateId) return
-    const exists = regularTemplates.some((template) => template.id === focusTemplateId)
+    const exists = allRegularTemplates.some((template) => template.id === focusTemplateId)
     if (!exists) return
     // Defer the open + scroll out of the effect body (avoids a synchronous
     // setState-in-effect) and gives the row a tick to expand before scrolling.
     const scrollTimer = window.setTimeout(() => {
       setOpenId(focusTemplateId)
-      // Make sure the focused task's client group is expanded so it's visible.
-      const focusTemplate = regularTemplates.find((t) => t.id === focusTemplateId)
+      // Drop any active search, or the row we just opened stays filtered out
+      // and the deep link appears to do nothing. The lookup above deliberately
+      // uses the UNFILTERED list for the same reason.
+      setQuery('')
+      // Make sure the focused task's client group is OPEN so it's visible.
+      // Now that groups start collapsed this is load-bearing rather than a
+      // nicety: without it a ?focusTemplate= link would scroll to a row that is
+      // inside a closed group and therefore not rendered at all.
+      const focusTemplate = allRegularTemplates.find((t) => t.id === focusTemplateId)
       if (focusTemplate) {
-        setCollapsedClients((prev) => {
-          if (!prev.has(focusTemplate.clientId)) return prev
+        setOpenClients((prev) => {
+          if (prev.has(focusTemplate.clientId)) return prev
           const next = new Set(prev)
-          next.delete(focusTemplate.clientId)
+          next.add(focusTemplate.clientId)
           return next
         })
       }
@@ -3798,7 +3913,7 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
       window.clearTimeout(scrollTimer)
       window.clearTimeout(clearTimer)
     }
-  }, [focusTemplateId, regularTemplates, searchParams, setSearchParams])
+  }, [focusTemplateId, allRegularTemplates, searchParams, setSearchParams])
 
   return (
     <section className="panel">
@@ -3807,12 +3922,28 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
           <h2>Repeating tasks</h2>
         </div>
       </div>
+      <div className="filter-row">
+        <ListSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search by business or task…"
+          resultCount={regularTemplates.length}
+          total={allRegularTemplates.length}
+        />
+      </div>
       <div className="repeating-task-list">
-        {regularTemplates.length === 0 ? (
+        {allRegularTemplates.length === 0 ? (
           <p className="empty-state">No repeating tasks yet. Hit + New to add one.</p>
+        ) : regularTemplates.length === 0 ? (
+          // Distinguish "you have none" from "your search matched none" — the
+          // first is a prompt to create one, the second is a prompt to retype.
+          <p className="empty-state">No repeating tasks match "{query.trim()}".</p>
         ) : null}
         {clientGroups.map((group) => {
-          const collapsed = collapsedClients.has(group.clientId)
+          // A live search forces every matching group open — otherwise typing a
+          // business name would return a collapsed header and hide the very
+          // rows you searched for.
+          const collapsed = !(q.length > 0 || openClients.has(group.clientId))
           return (
             <div className="repeating-client-group" key={group.clientId}>
               <button
@@ -4776,8 +4907,15 @@ type StandardTemplatesManagerProps = Omit<
 function StandardTemplatesManager(props: StandardTemplatesManagerProps) {
   const [openId, setOpenId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
+  const [query, setQuery] = useState('')
 
-  const standardTemplates = props.templates.filter((template) => template.isStandard)
+  const allStandardTemplates = props.templates.filter((template) => template.isStandard)
+  // Standard blueprints are client-agnostic, so there is no business to match —
+  // title only, unlike the repeating list.
+  const sq = query.trim().toLowerCase()
+  const standardTemplates = sq
+    ? allStandardTemplates.filter((template) => template.title.toLowerCase().includes(sq))
+    : allStandardTemplates
 
   const toggleOpen = (templateId: string) => {
     setOpenId((current) => (current === templateId ? null : templateId))
@@ -4814,11 +4952,23 @@ function StandardTemplatesManager(props: StandardTemplatesManagerProps) {
         />
       ) : null}
 
+      <div className="filter-row">
+        <ListSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search standard templates…"
+          resultCount={standardTemplates.length}
+          total={allStandardTemplates.length}
+        />
+      </div>
+
       <div className="repeating-task-list">
-        {standardTemplates.length === 0 ? (
+        {allStandardTemplates.length === 0 ? (
           <p className="empty-state">
             No standard templates yet. Create one to reuse across clients.
           </p>
+        ) : standardTemplates.length === 0 ? (
+          <p className="empty-state">No standard templates match "{query.trim()}".</p>
         ) : null}
         {standardTemplates.map((template) => (
           <RepeatingTaskRow
