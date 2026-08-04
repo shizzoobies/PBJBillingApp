@@ -4,6 +4,13 @@ import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
 import { fetchTeam } from '../lib/api'
+import {
+  billableMinutes as sumBillableMinutes,
+  duplicateFullSliceIds,
+  internalMinutes as sumInternalMinutes,
+  laborCost,
+  trackedMinutes as sumTrackedMinutes,
+} from '../lib/payrollAggregation'
 import type {
   Checklist,
   Client,
@@ -98,29 +105,35 @@ export function ReportsPage() {
       ).total,
     0,
   )
-  const ownerBillableMinutes = billingPeriodEntries
-    .filter((entry) => entry.billable)
-    .reduce((total, entry) => total + entry.minutes, 0)
+  const ownerBillableMinutes = sumBillableMinutes(billingPeriodEntries)
   const ownerInternalMinutes = billingPeriodEntries
     .filter((entry) => !entry.billable)
     .reduce((total, entry) => total + entry.minutes, 0)
-  const ownerTrackedMinutes = ownerBillableMinutes + ownerInternalMinutes
+  /**
+   * Minutes as LOGGED — the denominator for anything that divides one slice of
+   * the logged time by the whole (billable mix, the hours-by-task bars). It
+   * deliberately still counts every full-mode slice, because those bars and
+   * ratios are built from the same un-deduped per-entry sums.
+   */
+  const ownerLoggedMinutes = ownerBillableMinutes + ownerInternalMinutes
+  /** Wall time actually worked: a full-mode group block counts once. */
+  const ownerTrackedMinutes = sumTrackedMinutes(billingPeriodEntries)
   const activeClientCount = new Set(billingPeriodEntries.map((entry) => entry.clientId)).size
 
   const employeeReportRows: EmployeeReportRow[] = employeesForReport
     .map((employee) => {
       const entries = billingPeriodEntries.filter((entry) => entry.employeeId === employee.id)
-      const billableEntryMinutes = entries
-        .filter((entry) => entry.billable)
-        .reduce((total, entry) => total + entry.minutes, 0)
-      const totalMinutes = entries.reduce((total, entry) => total + entry.minutes, 0)
+      const billableEntryMinutes = sumBillableMinutes(entries)
+      // Tracked is WALL TIME (full-mode group blocks counted once); billable is
+      // not deduped, so tracked is no longer billable + internal by definition.
+      const totalMinutes = sumTrackedMinutes(entries)
       const billRate = typeof employee.billRate === 'number' ? employee.billRate : 0
 
       return {
         employeeId: employee.id,
         minutes: totalMinutes,
         billableMinutes: billableEntryMinutes,
-        internalMinutes: totalMinutes - billableEntryMinutes,
+        internalMinutes: sumInternalMinutes(entries),
         entryCount: entries.length,
         clientCount: new Set(entries.map((entry) => entry.clientId)).size,
         billableAmount: (billableEntryMinutes / 60) * billRate,
@@ -226,11 +239,13 @@ export function ReportsPage() {
         taskRows={taskReportRows}
         clientRows={clientReportRows}
         clients={data.clients}
+        costRates={costRates}
         employeeRows={employeeReportRows}
         employees={employeesForNameLookup}
         ownerBillableMinutes={ownerBillableMinutes}
         ownerInternalMinutes={ownerInternalMinutes}
         ownerInvoiceTotal={ownerInvoiceTotal}
+        ownerLoggedMinutes={ownerLoggedMinutes}
         ownerTrackedMinutes={ownerTrackedMinutes}
       />
     </section>
@@ -246,12 +261,14 @@ export function ReportsPage() {
  * their pay period's first week; Prev/Next then steps by a full period, keeping
  * the cadence.
  */
-/** One (day × member × job × task) bucket of the payroll detail. */
-type PayrollDetailRow = {
+/**
+ * One (day × member × job × task) bucket — the COLLAPSED shape, used only by
+ * the "By day & job (summary)" CSV. The on-screen/printed table reports every
+ * entry individually (see {@link PayrollEntryRow}).
+ */
+type PayrollSummaryRow = {
   key: string
   date: string
-  /** Kept so the row can resolve its own person's bill rate. */
-  employeeId: string
   member: string
   /** The client the time is billed to; '(Admin)' for non-client time. */
   job: string
@@ -260,8 +277,40 @@ type PayrollDetailRow = {
   billableMinutes: number
 }
 
+/**
+ * ONE TIME ENTRY, reported on its own row. Entries are never merged: two
+ * stretches on the same client and task are two separate lines with their own
+ * clock in/out, because payroll has to be auditable entry by entry.
+ */
+type PayrollEntryRow = {
+  id: string
+  date: string
+  /** Kept so the row can resolve its own person's bill/cost rate. */
+  employeeId: string
+  member: string
+  job: string
+  task: string
+  /** First start / last stop of the entry; '' when it was logged as minutes only. */
+  clockIn: string
+  clockOut: string
+  sessionCount: number
+  minutes: number
+  billable: boolean
+  billableMinutes: number
+  groupId?: string
+  groupAllocation?: 'even' | 'full' | 'custom'
+  /** Sort key: clock-in epoch ms, `Infinity` when there are no timestamps. */
+  startedAtMs: number
+  /**
+   * True when this slice's WALL TIME was already counted on a sibling slice of
+   * the same full-mode group. The row still shows (and still bills) — it just
+   * doesn't add its minutes or cost to the day/grand totals a second time.
+   */
+  countedElsewhere: boolean
+}
+
 /** All the work logged on a single day, plus that day's total. */
-type PayrollDayGroup = { date: string; minutes: number; rows: PayrollDetailRow[] }
+type PayrollDayGroup = { date: string; minutes: number; rows: PayrollEntryRow[] }
 
 function PayrollHoursReport({
   checklists,
@@ -307,12 +356,11 @@ function PayrollHoursReport({
       employees
         .map((employee) => {
           const entries = inRange.filter((entry) => entry.employeeId === employee.id)
-          const billable = entries
-            .filter((entry) => entry.billable)
-            .reduce((sum, entry) => sum + entry.minutes, 0)
-          const internal = entries
-            .filter((entry) => !entry.billable)
-            .reduce((sum, entry) => sum + entry.minutes, 0)
+          // Billable is NOT deduped (a full-mode split bills each client the
+          // whole block on purpose); hours worked IS, so the two no longer add
+          // up to each other and `minutes` is computed on its own.
+          const billable = sumBillableMinutes(entries)
+          const internal = sumInternalMinutes(entries)
           // null = no rate configured, rendered as "—" rather than "$0.00".
           const rate =
             typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
@@ -321,7 +369,7 @@ function PayrollHoursReport({
           return {
             id: employee.id,
             name: employee.name,
-            minutes: billable + internal,
+            minutes: sumTrackedMinutes(entries),
             billable,
             internal,
             amount: rate === null ? null : (billable / 60) * rate,
@@ -359,10 +407,69 @@ function PayrollHoursReport({
     [inRange, memberFilter],
   )
 
-  // Total time by DAY by JOB: entries collapsed to one row per
-  // (day, member, job, task) so repeated sessions on the same work add up.
-  const dayGroups = useMemo(() => {
-    const byKey = new Map<string, PayrollDetailRow>()
+  /**
+   * EVERY time entry, on its own row, grouped under its day. Entries are NOT
+   * collapsed by (day, job, task) any more: two stretches of work on the same
+   * client are two separate lines with their own clock in/out, because payroll
+   * has to be auditable entry by entry. Within a day, rows run in clock-in
+   * order; minutes-only entries (no timestamps) come last.
+   *
+   * Day subtotals count a full-mode group's wall time ONCE — see
+   * `duplicateFullSliceIds`. Those rows still render (and still bill); they
+   * just carry a "counted once" hint so the subtotal is explainable.
+   */
+  const dayGroups = useMemo<PayrollDayGroup[]>(() => {
+    const rows = detailEntries.map((entry) => {
+      const spans = effectiveSessions(entry)
+      const first = spans[0]
+      const last = spans[spans.length - 1]
+      const startedAtMs = first ? Date.parse(first.startAt) : Number.NaN
+      return {
+        id: entry.id,
+        date: entry.date,
+        employeeId: entry.employeeId,
+        member: employeeName(employees, entry.employeeId),
+        job: jobOf(entry),
+        task: taskOf(entry),
+        clockIn: first ? formatAuditStamp(first.startAt) : '',
+        clockOut: last ? formatAuditStamp(last.endAt) : '',
+        sessionCount: spans.length,
+        minutes: entry.minutes,
+        billable: entry.billable,
+        billableMinutes: entry.billable ? entry.minutes : 0,
+        groupId: entry.groupId,
+        groupAllocation: entry.groupAllocation,
+        startedAtMs: Number.isNaN(startedAtMs) ? Number.POSITIVE_INFINITY : startedAtMs,
+        countedElsewhere: false,
+      }
+    })
+    rows.sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) ||
+        a.startedAtMs - b.startedAtMs ||
+        a.member.localeCompare(b.member) ||
+        a.job.localeCompare(b.job) ||
+        a.task.localeCompare(b.task),
+    )
+    // Computed AFTER the sort so the slice that "counts" is the first one the
+    // reader sees, and the hint lands on the repeats below it.
+    const duplicates = duplicateFullSliceIds(rows)
+    const byDate = new Map<string, PayrollDayGroup>()
+    for (const row of rows) {
+      const countedElsewhere = duplicates.has(row.id)
+      const group = byDate.get(row.date) ?? { date: row.date, minutes: 0, rows: [] }
+      group.rows.push({ ...row, countedElsewhere })
+      if (!countedElsewhere) group.minutes += row.minutes
+      byDate.set(row.date, group)
+    }
+    // `rows` is already date-ordered, so insertion order is date order.
+    return [...byDate.values()]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailEntries, employees, clients, checklistTitleById])
+
+  // The collapsed (day × member × job × task) view — CSV export only.
+  const daySummaryRows = useMemo<PayrollSummaryRow[]>(() => {
+    const byKey = new Map<string, PayrollSummaryRow>()
     for (const entry of detailEntries) {
       const job = jobOf(entry)
       const task = taskOf(entry)
@@ -375,7 +482,6 @@ function PayrollHoursReport({
         byKey.set(key, {
           key,
           date: entry.date,
-          employeeId: entry.employeeId,
           member: employeeName(employees, entry.employeeId),
           job,
           task,
@@ -384,31 +490,21 @@ function PayrollHoursReport({
         })
       }
     }
-    const byDate = new Map<string, PayrollDayGroup>()
-    for (const row of byKey.values()) {
-      const group = byDate.get(row.date) ?? { date: row.date, minutes: 0, rows: [] }
-      group.rows.push(row)
-      group.minutes += row.minutes
-      byDate.set(row.date, group)
-    }
-    return [...byDate.values()]
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .map((group) => ({
-        ...group,
-        rows: group.rows.sort(
-          (a, b) =>
-            a.member.localeCompare(b.member) ||
-            a.job.localeCompare(b.job) ||
-            a.task.localeCompare(b.task),
-        ),
-      }))
+    return [...byKey.values()].sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) ||
+        a.member.localeCompare(b.member) ||
+        a.job.localeCompare(b.job) ||
+        a.task.localeCompare(b.task),
+    )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detailEntries, employees, clients, checklistTitleById])
 
   const detailMinutes = dayGroups.reduce((sum, group) => sum + group.minutes, 0)
+  const detailRows = dayGroups.flatMap((group) => group.rows)
   const showMemberColumn = memberFilter === 'all'
-  // +1 for the new Billable $ column.
-  const labelSpan = showMemberColumn ? 3 : 2
+  // Columns before Hours: Day/job, [Team member], Task, Clock in, Clock out, Sessions.
+  const labelSpan = showMemberColumn ? 6 : 5
 
   // Billable $ from the person's bill rate — the SAME basis the overview's
   // `billableAmount` already uses, so the two reports can't disagree. It is
@@ -450,19 +546,15 @@ function PayrollHoursReport({
     return typeof rate === 'number' && !Number.isNaN(rate) ? (minutesWorked / 60) * rate : null
   }
 
-  const detailCost = dayGroups.reduce(
-    (sum, group) =>
-      sum + group.rows.reduce((s, row) => s + (costFor(row.employeeId, row.minutes) ?? 0), 0),
-    0,
-  )
+  // Cost counts a full-mode group's wall time once — the firm pays for the
+  // block, not for each client it was billed to.
+  const detailCost = laborCost(detailRows, (employeeId) => costRates[employeeId])
 
-  const detailBillableMinutes = dayGroups.reduce(
-    (sum, group) => sum + group.rows.reduce((s, row) => s + row.billableMinutes, 0),
-    0,
-  )
-  const detailAmount = dayGroups.reduce(
-    (sum, group) =>
-      sum + group.rows.reduce((s, row) => s + (amountFor(row.employeeId, row.billableMinutes) ?? 0), 0),
+  // Billable minutes and $ are NOT deduped: full mode bills each client the
+  // whole block deliberately, and this is the billing side of the report.
+  const detailBillableMinutes = detailRows.reduce((sum, row) => sum + row.billableMinutes, 0)
+  const detailAmount = detailRows.reduce(
+    (sum, row) => sum + (amountFor(row.employeeId, row.billableMinutes) ?? 0),
     0,
   )
 
@@ -482,21 +574,21 @@ function PayrollHoursReport({
       ],
     )
 
-  // Total time by day by job — the aggregated breakdown, ready to pivot.
+  // Total time by day by job — the aggregated breakdown, ready to pivot. This
+  // stays COLLAPSED on purpose; the table below (and the Raw hours CSV) are the
+  // per-entry surfaces.
   const exportByDayJob = () =>
     downloadCsv(
       `payroll-hours-by-day-job-${periodType}-${start}.csv`,
       ['Date', 'Team member', 'Job', 'Task', 'Hours', 'Billable hours'],
-      dayGroups.flatMap((group) =>
-        group.rows.map((row) => [
-          row.date,
-          row.member,
-          row.job,
-          row.task,
-          (row.minutes / 60).toFixed(2),
-          (row.billableMinutes / 60).toFixed(2),
-        ]),
-      ),
+      daySummaryRows.map((row) => [
+        row.date,
+        row.member,
+        row.job,
+        row.task,
+        (row.minutes / 60).toFixed(2),
+        (row.billableMinutes / 60).toFixed(2),
+      ]),
     )
 
   // Raw hours: one row per time entry, including the CLOCK IN / CLOCK OUT stamps
@@ -561,7 +653,7 @@ function PayrollHoursReport({
             <Download size={14} /> Summary CSV
           </button>
           <button type="button" className="ghost-action" onClick={exportByDayJob}>
-            <Download size={14} /> By day &amp; job
+            <Download size={14} /> By day &amp; job (summary)
           </button>
           <button type="button" className="ghost-action" onClick={exportRawHours}>
             <Download size={14} /> Raw hours
@@ -711,6 +803,9 @@ function PayrollHoursReport({
               <th>Day / job</th>
               {showMemberColumn ? <th>Team member</th> : null}
               <th>Task</th>
+              <th>Clock in</th>
+              <th>Clock out</th>
+              <th>Sessions</th>
               <th>Hours</th>
               <th>Billable</th>
               <th>Billable $</th>
@@ -739,18 +834,37 @@ function PayrollHoursReport({
                     <td />
                   </tr>
                   {group.rows.map((row) => (
-                    <tr key={row.key}>
+                    <tr key={row.id}>
                       <td className="payroll-job-cell">{row.job}</td>
                       {showMemberColumn ? <td>{row.member}</td> : null}
                       <td>{row.task}</td>
+                      {/* Blank for an entry logged as minutes only — it has no
+                          timestamps to report, which is itself worth seeing. */}
+                      <td>{row.clockIn || '—'}</td>
+                      <td>{row.clockOut || '—'}</td>
+                      <td>{row.sessionCount || '—'}</td>
                       {/* EXACT, not formatHours. Split allocations are small by
                           construction — 33 of the 138 in production render as
                           "0.0h" under one-decimal rounding, and the rounded rows
                           add up to 2.9h more than was actually entered. */}
-                      <td>{formatHoursMinutes(row.minutes)}</td>
+                      <td>
+                        {formatHoursMinutes(row.minutes)}
+                        {row.countedElsewhere ? (
+                          <div
+                            className="muted-text"
+                            title="Every client on this full-mode group split is billed the whole block. The hours and cost are counted once, on the first row of the group."
+                          >
+                            full block · counted once
+                          </div>
+                        ) : null}
+                      </td>
                       <td>{formatHoursMinutes(row.billableMinutes)}</td>
                       <td>{money(amountFor(row.employeeId, row.billableMinutes))}</td>
-                      <td>{money(costFor(row.employeeId, row.minutes))}</td>
+                      {/* Deduped rows show no cost: the firm pays for the block
+                          once, and the first row of the group carries it. */}
+                      <td>
+                        {row.countedElsewhere ? '—' : money(costFor(row.employeeId, row.minutes))}
+                      </td>
                     </tr>
                   ))}
                 </Fragment>
@@ -791,11 +905,13 @@ function ReportsOverview({
   taskRows,
   clientRows,
   clients,
+  costRates,
   employeeRows,
   employees,
   ownerBillableMinutes,
   ownerInternalMinutes,
   ownerInvoiceTotal,
+  ownerLoggedMinutes,
   ownerTrackedMinutes,
 }: {
   activeClientCount: number
@@ -806,26 +922,56 @@ function ReportsOverview({
   taskRows: TaskReportRow[]
   clientRows: ClientReportRow[]
   clients: Client[]
+  /** Cost/pay rate by member id; missing or null = no cost rate. */
+  costRates: Record<string, number | null>
   employeeRows: EmployeeReportRow[]
   employees: Employee[]
   ownerBillableMinutes: number
   ownerInternalMinutes: number
   ownerInvoiceTotal: number
+  /** Minutes as logged (full-mode slices included) — the ratio denominator. */
+  ownerLoggedMinutes: number
   ownerTrackedMinutes: number
 }) {
+  // Ratios and bars divide un-deduped sums, so they divide by the un-deduped
+  // total; dividing by wall time would let a full-mode split read over 100%.
   const billableRate =
-    ownerTrackedMinutes === 0 ? 0 : Math.round((ownerBillableMinutes / ownerTrackedMinutes) * 100)
+    ownerLoggedMinutes === 0 ? 0 : Math.round((ownerBillableMinutes / ownerLoggedMinutes) * 100)
+
+  /**
+   * Labor COST for this person's tracked hours — the same rule the payroll
+   * tables use: ALL hours worked (internal included) × their cost rate.
+   *
+   * `null` = no cost rate, which for an OWNER is the correct permanent answer
+   * rather than a missing setting — she draws no hourly wage, so her time
+   * carries no labor cost. It renders "—", never "$0.00".
+   */
+  const overviewCostFor = (employeeId: string, minutesWorked: number) => {
+    const rate = costRates[employeeId]
+    return typeof rate === 'number' && !Number.isNaN(rate) ? (minutesWorked / 60) * rate : null
+  }
 
   const periodSlug = billingPeriod || 'period'
   const exportEmployees = () =>
     downloadCsv(
       `employee-report-${periodSlug}.csv`,
-      ['Employee', 'Tracked hours', 'Billable hours', 'Billable $', 'Internal hours', 'Entries', 'Clients'],
+      [
+        'Employee',
+        'Tracked hours',
+        'Billable hours',
+        'Billable $',
+        'Cost',
+        'Internal hours',
+        'Entries',
+        'Clients',
+      ],
       employeeRows.map((row) => [
         employeeName(employees, row.employeeId),
         (row.minutes / 60).toFixed(2),
         (row.billableMinutes / 60).toFixed(2),
         row.billableAmount.toFixed(2),
+        // Blank, not 0.00, when the person has no cost rate.
+        overviewCostFor(row.employeeId, row.minutes)?.toFixed(2) ?? '',
         (row.internalMinutes / 60).toFixed(2),
         row.entryCount,
         row.clientCount,
@@ -970,16 +1116,30 @@ function ReportsOverview({
           </button>
         </div>
         <ReportTable
-          columns={['Employee', 'Tracked', 'Billable', 'Billable $', 'Internal', 'Entries', 'Clients']}
-          rows={employeeRows.map((row) => [
-            employeeName(employees, row.employeeId),
-            formatHours(row.minutes),
-            formatHours(row.billableMinutes),
-            currency.format(row.billableAmount),
-            formatHours(row.internalMinutes),
-            row.entryCount.toString(),
-            row.clientCount.toString(),
-          ])}
+          columns={[
+            'Employee',
+            'Tracked',
+            'Billable',
+            'Billable $',
+            'Cost',
+            'Internal',
+            'Entries',
+            'Clients',
+          ]}
+          rows={employeeRows.map((row) => {
+            const cost = overviewCostFor(row.employeeId, row.minutes)
+            return [
+              employeeName(employees, row.employeeId),
+              formatHours(row.minutes),
+              formatHours(row.billableMinutes),
+              currency.format(row.billableAmount),
+              // "—" (never $0.00) when there's no cost rate — see overviewCostFor.
+              cost === null ? '—' : currency.format(cost),
+              formatHours(row.internalMinutes),
+              row.entryCount.toString(),
+              row.clientCount.toString(),
+            ]
+          })}
         />
       </section>
 
@@ -1036,8 +1196,10 @@ function ReportsOverview({
             <p className="empty-state">No time entries have been logged for this billing month yet.</p>
           ) : (
             taskRows.map((row) => {
+              // Against minutes as LOGGED — `taskRows` sums every entry, so a
+              // full-mode split's slices are all in the numerator too.
               const width =
-                ownerTrackedMinutes === 0 ? 0 : (row.minutes / ownerTrackedMinutes) * 100
+                ownerLoggedMinutes === 0 ? 0 : (row.minutes / ownerLoggedMinutes) * 100
               return (
                 <div className="category-row" key={row.taskId ?? '__unassigned__'}>
                   <div className="category-row-header">

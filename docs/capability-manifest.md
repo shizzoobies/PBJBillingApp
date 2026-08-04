@@ -516,16 +516,29 @@ picker, notification bell, and account menu sit in the top bar on every page.
   - Anyone with no rate configured shows "—" rather than "$0.00", so an unset
     rate never reads as "billed nothing" or "cost nothing".
 - Payroll report detail — "Time by day and job": below the per-member summary,
-  the same period broken down to TOTAL TIME BY DAY BY JOB (the granularity of
-  the monthly report). Rows are grouped under each day with that day's total,
-  and within a day list the job (the client the time is billed to; '(Admin)'
-  for non-client time), the task, hours, billable hours, and Billable $. Repeat
-  sessions on the same day/job/task are summed into one row. A "Team member" filter scopes
-  the detail to one person (payroll is usually run per person) or all.
-- Payroll exports (three): "Summary CSV" (per-member totals), "By day & job"
-  (Date, Team member, Job, Task, Hours, Billable hours — the aggregated
-  breakdown, ready to pivot), and "Raw hours" (one row per time entry, scoped to
-  the pay period and member filter).
+  the same period broken down day by day. **EVERY TIME ENTRY IS LISTED
+  INDIVIDUALLY** — entries are never merged just because they share a day,
+  client or task. Each row shows the job (the client the time is billed to;
+  '(Admin)' for non-client time), team member, task, CLOCK IN, CLOCK OUT,
+  session count, hours, billable hours, Billable $ and Cost. Rows sit under
+  their day's header with that day's total, in clock-in order (entries logged
+  as minutes only, with no timestamps, come last and show "—" for the stamps).
+  A "Team member" filter scopes the detail to one person (payroll is usually run
+  per person) or all.
+- **Group splits made in "full" mode count ONCE toward payroll hours and cost.**
+  Full mode deliberately bills every client on the split the WHOLE block, so a
+  1-hour block across 3 clients is 3 billable hours — that is the intended
+  billing. But the person worked one hour and the firm pays for one hour, so
+  tracked hours, day subtotals, grand totals and Cost count the block a single
+  time. Every slice still appears as its own row and still counts toward
+  Billable / Billable $; the repeated rows carry a muted "full block · counted
+  once" note (and no Cost) so the subtotal always explains itself. Even and
+  custom splits carve the block up and count normally.
+- Payroll exports (three): "Summary CSV" (per-member totals), "By day & job
+  (summary)" (Date, Team member, Job, Task, Hours, Billable hours — the
+  COLLAPSED breakdown, ready to pivot; the on-screen table is the per-entry
+  view), and "Raw hours" (one row per time entry, scoped to the pay period and
+  member filter).
 - Both RAW exports carry "Billable hours" and "Billable $"; the payroll
   "Raw hours" export also carries "Cost". These match the printed report — blank
   rather than 0.00 when the person has no rate set.
@@ -537,8 +550,12 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Month summary: tracked hours, internal hours, billable mix, projected
   billing, employee coverage.
 - Employee report (hours by person, including billable $ = each person's
-  billable hours × their bill rate; owners are included) and Client report
-  (hours by client), each with Download CSV. Print-friendly output.
+  billable hours × their bill rate, and **Cost** = their tracked hours × their
+  COST rate; owners are included) and Client report (hours by client), each with
+  Download CSV. Print-friendly output — the Cost column is on the printed
+  employee table and in its CSV, matching the payroll tables: "—" (never
+  "$0.00") for anyone with no cost rate, which is the permanent, correct answer
+  for an owner.
 - Hours by month: a raw, line-by-line CSV export of every time entry in the
   selected period (Date, Employee, Client, Task, Hours, Billable, Description),
   sorted by date — for month-by-month detail / external bookkeeping.
