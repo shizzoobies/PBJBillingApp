@@ -306,6 +306,13 @@ export type TimeEntry = {
    */
   groupClientIds?: string[]
   /**
+   * Which allocation mode produced this SLICE of a split group block ('even' /
+   * 'full' / 'custom'). Absent on every other entry. `full` matters for payroll:
+   * that mode deliberately bills each client the whole block, so the group's
+   * wall time must be counted once rather than once per slice.
+   */
+  groupAllocation?: 'even' | 'full' | 'custom'
+  /**
    * ISO timestamp the entry was first logged/submitted (created). Preserved
    * across saves so the time page can show the most-recently-logged entry at
    * the top ("what I did last"). Absent only on very old legacy rows.

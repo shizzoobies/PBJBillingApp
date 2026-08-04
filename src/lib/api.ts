@@ -28,6 +28,7 @@
   type WaitingOnMeItem,
   type WeeklySubmission,
 } from './types'
+import type { GroupAllocationMode } from '../../lib/group-allocation.js'
 
 /**
  * Module-level preview state. `AppContext` calls `setPreviewModeActive`
@@ -312,6 +313,29 @@ export async function updateTimeEntryRequest(
     throw new ApiError(response.status, message || `Failed to update time entry (${response.status})`)
   }
   return (await response.json()) as TimeEntry
+}
+
+/**
+ * Split an unsplit group holding entry across its member clients in ONE
+ * atomic server call: the slices are created and the holding entry removed
+ * together, or nothing changes at all. Replaces the old create-loop-then-delete
+ * that could leave both halves behind.
+ */
+export async function splitTimeEntryRequest(
+  entryId: string,
+  body: { mode: GroupAllocationMode; customMinutes?: Record<string, number> },
+) {
+  const response = await apiFetch(`/api/time-entries/${encodeURIComponent(entryId)}/split`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to split time entry (${response.status})`)
+  }
+  return (await response.json()) as { created: TimeEntry[]; deletedId: string }
 }
 
 export async function deleteTimeEntryRequest(entryId: string) {

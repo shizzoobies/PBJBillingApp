@@ -108,6 +108,10 @@ alter table time_entries add column if not exists approved_at timestamptz;
 alter table time_entries add column if not exists entry_method text not null default 'timer';
 alter table time_entries add column if not exists manual_reason text;
 
+-- Allocation mode ('even' / 'full' / 'custom') recorded on each SLICE produced
+-- by splitting a group time block. Null everywhere else.
+alter table time_entries add column if not exists group_allocation text;
+
 -- Month-end timesheet locks: one per employee per 'YYYY-MM' period.
 create table if not exists timesheet_locks (
   id text primary key,

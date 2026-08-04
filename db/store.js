@@ -1028,6 +1028,31 @@ export function coerceEntryMinutes(value) {
 }
 
 /**
+ * The `group_allocation` column only ever holds one of the three split modes.
+ * Anything else (including absent) persists as NULL.
+ */
+export function normalizeGroupAllocation(value) {
+  return value === 'even' || value === 'full' || value === 'custom' ? value : null
+}
+
+/**
+ * Why a `splitTimeEntry` call could not proceed. `code` is one of:
+ *   - `not_found`  — no such entry (someone deleted it first).
+ *   - `not_holding` — the entry is not an UNSPLIT group holding entry, which
+ *     in practice means a concurrent request already split it.
+ * Both are clean conflicts, never a half-written split: the Postgres branch
+ * holds `select … for update` on the holding row, and the file branch validates
+ * before it writes anything.
+ */
+export class TimeEntrySplitError extends Error {
+  constructor(code, message) {
+    super(message)
+    this.name = 'TimeEntrySplitError'
+    this.code = code
+  }
+}
+
+/**
  * True only for a plain `YYYY-MM-DD` string whose year is in the sane window
  * (2000–2100) AND which round-trips as a real calendar date (so 2026-02-31 is
  * rejected). Conservative on purpose: a valid date returns true and is left
@@ -2351,6 +2376,11 @@ export class AppDataStore {
       await this.pool.query(
         `alter table time_entries add column if not exists group_client_ids text[] not null default '{}'`,
       )
+      // Which allocation mode produced a SLICE of a split group block ('even' /
+      // 'full' / 'custom'). Null on every other entry. Payroll needs it because
+      // a 'full'-mode group deliberately bills each client the whole block, so
+      // its wall time must be counted ONCE rather than once per slice.
+      await this.pool.query(`alter table time_entries add column if not exists group_allocation text`)
       // Free-text task name, used when the client has no active checklist task.
       await this.pool.query(`alter table time_entries add column if not exists task_label text`)
       // Sub-minute precision: store minutes as numeric (fractional, e.g. 0.75 =
@@ -3205,7 +3235,8 @@ export class AppDataStore {
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                    approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                   is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label, created_at
+                   is_administrative, started_at, ended_at, sessions, group_id, group_client_ids,
+                   group_allocation, task_label, created_at
             from time_entries
             order by entry_date desc, id desc
           `),
@@ -3539,6 +3570,7 @@ export class AppDataStore {
           groupClientIds: Array.isArray(row.group_client_ids)
             ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
             : [],
+          ...(row.group_allocation ? { groupAllocation: row.group_allocation } : {}),
           ...(row.task_label ? { taskLabel: row.task_label } : {}),
           ...(row.created_at ? { createdAt: row.created_at.toISOString() } : {}),
         })),
@@ -4157,8 +4189,8 @@ export class AppDataStore {
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                                         approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative,
-                                        started_at, ended_at, sessions, group_id, group_client_ids, task_label, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21, $22, $23, now())
+                                        started_at, ended_at, sessions, group_id, group_client_ids, group_allocation, task_label, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21, $22, $23, $24, now())
             `,
             [
               entry.id,
@@ -4185,6 +4217,7 @@ export class AppDataStore {
               Array.isArray(entry.groupClientIds)
                 ? entry.groupClientIds.filter((id) => typeof id === 'string' && id)
                 : [],
+              normalizeGroupAllocation(entry.groupAllocation),
               entry.taskId ? null : entry.taskLabel ? String(entry.taskLabel) : null,
               // Preserve the original creation time across the wipe-and-rewrite
               // so "most recently logged" ordering survives a bulk save.
@@ -4542,8 +4575,8 @@ export class AppDataStore {
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label, created_at, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, group_allocation, task_label, created_at, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, now())
         `,
         [
           nextEntry.id,
@@ -4568,6 +4601,7 @@ export class AppDataStore {
           Array.isArray(nextEntry.groupClientIds)
             ? nextEntry.groupClientIds.filter((id) => typeof id === 'string' && id)
             : [],
+          normalizeGroupAllocation(nextEntry.groupAllocation),
           nextEntry.taskId ? null : nextEntry.taskLabel ? String(nextEntry.taskLabel) : null,
           new Date(nextEntry.createdAt),
         ],
@@ -4583,6 +4617,218 @@ export class AppDataStore {
   }
 
   /**
+   * ATOMICALLY replace an unsplit group holding entry with one billable slice
+   * per client.
+   *
+   * This used to be a client-side loop: N calls to POST /api/time-entries then
+   * a DELETE. Any failure part-way through left BOTH the new slices and the
+   * holding entry counting toward the day's totals, and the slices were created
+   * from scratch so they carried NO `sessions` — the original clock-in/out was
+   * gone for good and the Raw report showed blank in/out for split time.
+   *
+   * Here the whole thing is one unit of work. Each slice INHERITS the holding
+   * entry's date, description, capture method + manual reason, task label,
+   * category, its `sessions` verbatim and its started_at/ended_at envelope, and
+   * the employee. Each slice gets its own client, `billable: true`,
+   * `isAdministrative: false`, the shared `groupId`, and `groupAllocation` set
+   * to the mode that produced it.
+   *
+   * Approval status mirrors `createTimeEntry` exactly (`entryMethod === 'timer'
+   * && !groupId` auto-approves): a slice always carries a groupId, so it always
+   * lands 'pending' in the daily queue — the per-client amounts are typed time,
+   * even when the block itself was timer-captured.
+   *
+   * @param {string} entryId - the holding entry to split.
+   * @param {Array<{clientId: string, minutes: number}>} allocations
+   * @param {string} actorUserId - who performed the split (for the audit row).
+   * @param {string} groupId - shared id stamped on every slice.
+   * @param {'even'|'full'|'custom'} allocationMode
+   * @returns {Promise<{created: object[], deletedId: string}>}
+   * @throws {TimeEntrySplitError} when the entry is gone or already split.
+   */
+  async splitTimeEntry(entryId, allocations, actorUserId, groupId, allocationMode) {
+    const rows = (Array.isArray(allocations) ? allocations : []).filter(
+      (row) => row && typeof row.clientId === 'string' && row.clientId && Number(row.minutes) > 0,
+    )
+    if (rows.length === 0) {
+      throw new TimeEntrySplitError('invalid_allocation', 'A split needs at least one allocation.')
+    }
+    const mode = normalizeGroupAllocation(allocationMode)
+    const sharedGroupId = String(groupId || '').slice(0, 64)
+    if (!sharedGroupId) {
+      throw new TimeEntrySplitError('invalid_allocation', 'A split needs a group id.')
+    }
+
+    // Build every slice from the holding entry. Shared by both backends so the
+    // two can never disagree on what a slice inherits.
+    const buildSlices = (holding) =>
+      rows.map((row) => ({
+        id: `time-${randomUUID().slice(0, 8)}`,
+        employeeId: holding.employeeId,
+        clientId: row.clientId,
+        isAdministrative: false,
+        date: holding.date,
+        minutes: coerceEntryMinutes(row.minutes),
+        category: holding.category ?? 'General',
+        description: holding.description ?? '',
+        billable: true,
+        taskId: null,
+        // Typed time → the daily pending queue. See the doc comment above.
+        approvalStatus: 'pending',
+        entryMethod: holding.entryMethod === 'manual' ? 'manual' : 'timer',
+        manualReason: holding.entryMethod === 'manual' ? holding.manualReason : undefined,
+        startAt: holding.startAt,
+        endAt: holding.endAt,
+        // Copied VERBATIM — this is what keeps the original clock-in/out on the
+        // Raw report instead of blanking it.
+        sessions: Array.isArray(holding.sessions) ? holding.sessions.map((s) => ({ ...s })) : [],
+        groupId: sharedGroupId,
+        groupClientIds: [],
+        groupAllocation: mode,
+        ...(holding.taskLabel ? { taskLabel: holding.taskLabel } : {}),
+        createdAt: nowIso(),
+      }))
+
+    const auditTarget = (holding, slices) => {
+      const label = (holding.description || '').trim() || 'Group time'
+      const totalMinutes = slices.reduce((sum, slice) => sum + Number(slice.minutes), 0)
+      const hours = (totalMinutes / 60).toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+      return `${label.slice(0, 120)} · ${slices.length} client${slices.length === 1 ? '' : 's'} · ${hours}h`
+    }
+
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        // FOR UPDATE: a second, concurrent split of the same block blocks here
+        // and then finds the row gone — a clean conflict instead of duplicates.
+        const held = await client.query(
+          `select id, user_id, client_id, entry_date, minutes, category, description, billable,
+                  entry_method, manual_reason, is_administrative, started_at, ended_at, sessions,
+                  group_client_ids, task_label
+           from time_entries where id = $1 for update`,
+          [entryId],
+        )
+        if (!held.rowCount) {
+          await client.query('rollback')
+          throw new TimeEntrySplitError('not_found', 'That time entry no longer exists.')
+        }
+        const row = held.rows[0]
+        const memberIds = Array.isArray(row.group_client_ids)
+          ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
+          : []
+        if (row.client_id || row.is_administrative || memberIds.length === 0) {
+          await client.query('rollback')
+          throw new TimeEntrySplitError(
+            'not_holding',
+            'That entry is not an unsplit group time block — it may have been split already.',
+          )
+        }
+        const holding = {
+          employeeId: row.user_id,
+          date: row.entry_date.toISOString().slice(0, 10),
+          category: row.category,
+          description: row.description,
+          entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
+          manualReason: row.manual_reason ?? undefined,
+          startAt: row.started_at ? row.started_at.toISOString() : undefined,
+          endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
+          sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
+          taskLabel: row.task_label ?? undefined,
+        }
+        const slices = buildSlices(holding)
+
+        for (const slice of slices) {
+          await client.query(
+            `insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description,
+                                       billable, task_id, approval_status, entry_method, manual_reason,
+                                       is_administrative, started_at, ended_at, sessions, group_id,
+                                       group_client_ids, group_allocation, task_label, created_at, updated_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, now())`,
+            [
+              slice.id,
+              slice.employeeId,
+              slice.clientId,
+              slice.date,
+              slice.minutes,
+              slice.category,
+              slice.description,
+              slice.billable,
+              slice.taskId,
+              slice.approvalStatus,
+              slice.entryMethod,
+              slice.manualReason ?? null,
+              false,
+              slice.startAt ?? null,
+              slice.endAt ?? null,
+              JSON.stringify(slice.sessions),
+              slice.groupId,
+              [],
+              slice.groupAllocation,
+              slice.taskLabel ?? null,
+              new Date(slice.createdAt),
+            ],
+          )
+        }
+
+        await client.query(`delete from time_entries where id = $1`, [entryId])
+
+        // Same table + trim rule as recordActivity, but inside this transaction
+        // so the split and its audit row land (or roll back) together.
+        await client.query(
+          `insert into activity_log (id, user_id, action, target, created_at) values ($1, $2, $3, $4, $5)`,
+          [
+            `act-${randomUUID().slice(0, 8)}`,
+            actorUserId,
+            'time_entry_split',
+            auditTarget(holding, slices),
+            nowIso(),
+          ],
+        )
+        await client.query(
+          `delete from activity_log
+           where user_id = $1
+             and id not in (select id from activity_log where user_id = $1 order by created_at desc limit 200)`,
+          [actorUserId],
+        )
+
+        await client.query('commit')
+        return { created: slices, deletedId: entryId }
+      } catch (error) {
+        if (!(error instanceof TimeEntrySplitError)) {
+          await client.query('rollback').catch(() => {})
+        }
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    // File backend: validate FIRST, then a single mutate + persist, so a bad
+    // allocation (or an already-split block) leaves the workspace untouched.
+    const data = await readJson(localDataPath)
+    const entries = Array.isArray(data.timeEntries) ? data.timeEntries : []
+    const holding = entries.find((entry) => entry.id === entryId)
+    if (!holding) {
+      throw new TimeEntrySplitError('not_found', 'That time entry no longer exists.')
+    }
+    const memberIds = Array.isArray(holding.groupClientIds)
+      ? holding.groupClientIds.filter((id) => typeof id === 'string' && id)
+      : []
+    if (holding.clientId || holding.isAdministrative || memberIds.length === 0) {
+      throw new TimeEntrySplitError(
+        'not_holding',
+        'That entry is not an unsplit group time block — it may have been split already.',
+      )
+    }
+    const slices = buildSlices(holding)
+    data.timeEntries = [...slices, ...entries.filter((entry) => entry.id !== entryId)]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await this.recordActivity(actorUserId, 'time_entry_split', auditTarget(holding, slices))
+    return { created: slices, deletedId: entryId }
+  }
+
+  /**
    * Look up a time entry by id from whichever backend is active.
    * Returns the app-shaped entry (camelCase) or null.
    */
@@ -4591,7 +4837,8 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                 approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, task_label, created_at
+                is_administrative, started_at, ended_at, sessions, group_id, group_client_ids,
+                group_allocation, task_label, created_at
          from time_entries where id = $1`,
         [entryId],
       )
@@ -4621,6 +4868,7 @@ export class AppDataStore {
         groupClientIds: Array.isArray(row.group_client_ids)
           ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
           : [],
+        ...(row.group_allocation ? { groupAllocation: row.group_allocation } : {}),
         ...(row.task_label ? { taskLabel: row.task_label } : {}),
         ...(row.created_at ? { createdAt: row.created_at.toISOString() } : {}),
       }

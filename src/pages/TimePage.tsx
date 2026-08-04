@@ -40,6 +40,7 @@ import {
   getWeekLabel,
   type GroupAllocationMode,
   makeId,
+  minutesToSeconds,
   sessionMinutes,
   shiftWeek,
   weekRangeOf,
@@ -1558,6 +1559,29 @@ function GroupSplitModal({
   )
   const totalBilled = Object.values(allocation).reduce((sum, minutes) => sum + (minutes || 0), 0)
 
+  // A custom split has to account for every SECOND of the block — the server
+  // refuses anything else, so show the exact gap here rather than letting the
+  // owner discover it from a 400. ('even' is exact by construction; 'full'
+  // deliberately bills each client the whole block.)
+  const blockSeconds = minutesToSeconds(entry.minutes)
+  const allocatedSeconds = memberIds.reduce(
+    (sum, id) => sum + minutesToSeconds(allocation[id] ?? 0),
+    0,
+  )
+  const remainderSeconds = blockSeconds - allocatedSeconds
+  const mustBalance = mode === 'custom' && remainderSeconds !== 0
+  // Auto-balance target: the last client in the group, so one click closes the
+  // gap instead of making the owner do the arithmetic.
+  const balanceTargetId = memberIds[memberIds.length - 1] ?? ''
+  const applyBalance = () => {
+    if (!balanceTargetId) return
+    const nextSeconds = Math.max(
+      0,
+      minutesToSeconds(allocation[balanceTargetId] ?? 0) + remainderSeconds,
+    )
+    setCustomMinutes((prev) => ({ ...prev, [balanceTargetId]: String(nextSeconds / 60) }))
+  }
+
   const handleConfirm = async () => {
     const hasAny = memberIds.some((id) => (allocation[id] ?? 0) > 0)
     if (!hasAny) {
@@ -1568,13 +1592,27 @@ function GroupSplitModal({
       )
       return
     }
+    if (mustBalance) {
+      setError(
+        `Allocations add up to ${formatHoursMinutes(allocatedSeconds / 60)} but the block is ${formatHoursMinutes(
+          blockSeconds / 60,
+        )} — ${formatHoursMinutes(Math.abs(remainderSeconds) / 60)} ${
+          remainderSeconds > 0 ? 'unassigned' : 'over'
+        }.`,
+      )
+      return
+    }
     setPending(true)
     setError('')
     try {
       await onSplit(entry, mode, customMinutesNumeric)
       onClose()
-    } catch {
-      setError('Could not split this group entry.')
+    } catch (splitError) {
+      setError(
+        splitError instanceof Error && splitError.message
+          ? splitError.message
+          : 'Could not split this group entry.',
+      )
       setPending(false)
     }
   }
@@ -1619,7 +1657,10 @@ function GroupSplitModal({
                         className="input group-allocation-input"
                         type="number"
                         min="0"
-                        step="1"
+                        // Minutes can be fractional (entries are seconds-exact),
+                        // so a whole-minute step would make some splits
+                        // impossible to balance.
+                        step="any"
                         value={customMinutes[id] ?? ''}
                         onChange={(event) =>
                           setCustomMinutes((prev) => ({ ...prev, [id]: event.target.value }))
@@ -1639,7 +1680,21 @@ function GroupSplitModal({
                 {mode === 'full' && memberIds.length > 1
                   ? ` — ${formatHoursMinutes(entry.minutes)} to each of ${memberIds.length} clients`
                   : ''}
+                {mode === 'custom' && remainderSeconds !== 0
+                  ? ` — ${formatHoursMinutes(Math.abs(remainderSeconds) / 60)} ${
+                      remainderSeconds > 0 ? 'still unassigned' : 'over the block'
+                    }`
+                  : ''}
+                {mode === 'custom' && remainderSeconds === 0 ? ' — the block is fully assigned' : ''}
               </p>
+              {mustBalance && balanceTargetId ? (
+                <button type="button" className="secondary-action" onClick={applyBalance}>
+                  {remainderSeconds > 0 ? 'Assign the remaining ' : 'Take '}
+                  {formatHoursMinutes(Math.abs(remainderSeconds) / 60)}
+                  {remainderSeconds > 0 ? ' to ' : ' off '}
+                  {clientName(clients, balanceTargetId)}
+                </button>
+              ) : null}
             </div>
           </div>
           {error ? <p className="auth-error">{error}</p> : null}
@@ -1650,7 +1705,7 @@ function GroupSplitModal({
             <button
               type="button"
               className="primary-action"
-              disabled={pending}
+              disabled={pending || mustBalance}
               onClick={() => void handleConfirm()}
             >
               <Clock3 size={16} />

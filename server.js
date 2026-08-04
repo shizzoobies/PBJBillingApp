@@ -4,7 +4,12 @@ import { createServer } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
-import { AppDataStore, coerceEntryMinutes } from './db/store.js'
+import { AppDataStore, coerceEntryMinutes, TimeEntrySplitError } from './db/store.js'
+import {
+  allocateGroupMinutes,
+  formatDurationLabel,
+  minutesToSeconds,
+} from './lib/group-allocation.js'
 import {
   buildActionProposal,
   confirmOwnerFeedback,
@@ -3137,6 +3142,174 @@ const server = createServer(async (request, response) => {
         `${updated} entr${updated === 1 ? 'y' : 'ies'}`,
       )
       sendJson(response, 200, { ok: true, approved: updated })
+      return
+    }
+
+    // Split an unsplit GROUP holding entry into one billable entry per member
+    // client. Defined before the :id routes so the literal `/split` suffix
+    // isn't shadowed by the parameterized matcher.
+    //
+    // This replaces a client-side loop (N creates, then a delete) that was not
+    // transactional: a failure part-way left the slices AND the holding entry
+    // both counting toward totals, and the slices were built from scratch so
+    // the block's clock-in/out was lost. The store now does the whole thing in
+    // one unit of work and copies the sessions across.
+    const splitMatch = normalizedPath.match(/^\/api\/time-entries\/([^/]+)\/split$/)
+    if (splitMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      const entryId = splitMatch[1]
+      const holding = await appDataStore.getTimeEntry(entryId)
+      if (!holding) {
+        sendJson(response, 404, { error: 'Time entry not found' })
+        return
+      }
+      const memberIds = Array.isArray(holding.groupClientIds)
+        ? holding.groupClientIds.filter((id) => typeof id === 'string' && id)
+        : []
+      if (holding.clientId || holding.isAdministrative || memberIds.length === 0) {
+        sendJson(response, 409, {
+          error: 'That entry is not an unsplit group time block — it may have been split already.',
+        })
+        return
+      }
+
+      const isOwner = session.user.role === 'owner'
+      if (!isOwner && holding.employeeId !== session.user.id) {
+        sendJson(response, 403, { error: 'You can only split your own time entries' })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const mode =
+        payload?.mode === 'even' || payload?.mode === 'full' || payload?.mode === 'custom'
+          ? payload.mode
+          : null
+      if (!mode) {
+        sendJson(response, 400, { error: 'mode must be one of: even, custom, full' })
+        return
+      }
+      const rawCustom =
+        payload?.customMinutes && typeof payload.customMinutes === 'object'
+          ? payload.customMinutes
+          : {}
+      // Allocation clients must be EXACTLY the block's members — a custom map
+      // may not smuggle in a client that was never part of the group.
+      const memberIdSet = new Set(memberIds)
+      const strayClientId = Object.keys(rawCustom).find((id) => !memberIdSet.has(id))
+      if (strayClientId) {
+        sendJson(response, 400, { error: 'A client in this split is not part of the group block.' })
+        return
+      }
+
+      const allData = await appDataStore.read()
+
+      // Same visibility rule the group-CREATE path enforces: every member client
+      // has to be one this user may bill (owners see them all).
+      const allowed = visibleClientIdSet(session, allData.clients ?? [])
+      if (!memberIds.every((id) => allowed.has(id))) {
+        sendJson(response, 403, { error: 'A group client is not visible to this user' })
+        return
+      }
+
+      // Month-end lock + weekly-submission gate, mirroring the create endpoint
+      // (owners are exempt from both there, so they are here too).
+      if (!isOwner) {
+        const period = String(holding.date).slice(0, 7)
+        if (await appDataStore.isTimesheetLocked(holding.employeeId, period)) {
+          sendJson(response, 423, {
+            error: 'This timesheet month is locked. Contact an owner to make changes.',
+          })
+          return
+        }
+        const lockedPeriods = new Set(
+          (allData.timesheetLocks ?? [])
+            .filter((lock) => lock.userId === holding.employeeId)
+            .map((lock) => lock.period),
+        )
+        const blockingWeeks = listBlockingWeeks(
+          weekStartOf(holding.date),
+          (allData.timeEntries ?? [])
+            .filter((entry) => entry.employeeId === holding.employeeId)
+            .map((entry) => weekStartOf(entry.date)),
+          (allData.weeklySubmissions ?? []).filter(
+            (entry) => entry.userId === holding.employeeId,
+          ),
+          lockedPeriods,
+        )
+        if (blockingWeeks.length > 0) {
+          sendJson(response, 423, {
+            error: `You have an unsubmitted or sent-back timesheet for the week of ${blockingWeeks[0].weekStart}. Submit that week before splitting this block.`,
+          })
+          return
+        }
+      }
+
+      // Allocate SERVER-side from the shared lib, so what the modal previewed
+      // and what gets saved come out of the same function.
+      const custom = {}
+      for (const id of memberIds) custom[id] = Number(rawCustom[id])
+      const allocation = allocateGroupMinutes(holding.minutes, memberIds, mode, custom)
+
+      // Zero-minute clients are simply dropped (nobody is billed 0), but the
+      // sum rule below still measures against the FULL block.
+      const allocations = memberIds
+        .map((clientId) => ({ clientId, minutes: allocation[clientId] ?? 0 }))
+        .filter((row) => minutesToSeconds(row.minutes) > 0)
+
+      if (allocations.length === 0) {
+        sendJson(response, 400, {
+          error:
+            mode === 'custom'
+              ? 'Enter minutes greater than 0 for at least one client.'
+              : 'The tracked time is too short to split.',
+        })
+        return
+      }
+
+      // 'even' and 'custom' divide the block, so they must account for every
+      // second of it. 'full' deliberately bills each client the whole block, so
+      // its parts are meant to exceed the total.
+      if (mode !== 'full') {
+        const blockSeconds = minutesToSeconds(holding.minutes)
+        const allocatedSeconds = allocations.reduce(
+          (sum, row) => sum + minutesToSeconds(row.minutes),
+          0,
+        )
+        if (allocatedSeconds !== blockSeconds) {
+          const gap = blockSeconds - allocatedSeconds
+          sendJson(response, 400, {
+            error: `Allocations add up to ${formatDurationLabel(allocatedSeconds / 60)} but the block is ${formatDurationLabel(
+              blockSeconds / 60,
+            )} — ${formatDurationLabel(Math.abs(gap) / 60)} ${gap > 0 ? 'unassigned' : 'over'}.`,
+          })
+          return
+        }
+      }
+
+      const groupId = `grp-${Math.random().toString(36).slice(2, 9)}`
+      try {
+        const result = await appDataStore.splitTimeEntry(
+          entryId,
+          allocations,
+          session.user.id,
+          groupId,
+          mode,
+        )
+        sendJson(response, 200, result)
+      } catch (error) {
+        if (error instanceof TimeEntrySplitError) {
+          sendJson(response, error.code === 'not_found' ? 404 : 409, { error: error.message })
+          return
+        }
+        console.error('[time-entry-split] failed:', error)
+        sendJson(response, 500, { error: 'Could not split this group entry — please try again.' })
+      }
       return
     }
 

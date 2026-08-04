@@ -73,6 +73,20 @@ picker, notification bell, and account menu sit in the top bar on every page.
   - Live timer → pick "A group" and the clients, track the block, then "Split
     across clients" on the saved entry (in Recent time) to divide it the same
     ways. (Splitting a running timer happens after stop.)
+  - Splitting is ATOMIC: the per-client entries are created and the un-split
+    block removed in ONE step, so a failure can never leave both behind
+    double-counting the same time.
+  - Each split entry KEEPS the original block's clock-in / clock-out times, so
+    the Raw report shows the real start and stop for split time instead of
+    leaving those columns blank.
+  - Every split is written to the activity log (who split what, how many
+    clients, how many hours).
+  - A CUSTOM split must add up EXACTLY to the tracked block — to the second, not
+    the minute. The modal shows how much is still unassigned (or over) and has a
+    one-click button to hand the remainder to the last client; the split can't
+    be saved until it balances. Even splits divide the block to the exact second
+    and always add up. "Full duration to each client" is the deliberate
+    exception: every client is billed the whole block.
 - Administrative work toggle: internal/company time with no client or task.
 - Log time manually: same fields plus date and duration, for after-the-fact
   entries. Manual entries are flagged for owner approval ("manual" badge) and

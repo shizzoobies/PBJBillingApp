@@ -32,6 +32,7 @@ import {
   restoreChecklistRequest,
   deleteTeamMember as deleteTeamMemberRequest,
   deleteTimeEntryRequest,
+  splitTimeEntryRequest,
   fetchAppData,
   fetchFirmSettings,
   fetchPublicFirmSettings,
@@ -122,7 +123,6 @@ import {
   type TimerState,
 } from './lib/types'
 import {
-  allocateGroupMinutes,
   currentBillingPeriod,
   ensureRecurringChecklists,
   formatTimeFromMs,
@@ -1198,53 +1198,27 @@ function App() {
     }
   }
 
-  // Split an unsplit group holding entry across its member clients: create one
-  // billable entry per client (sharing a fresh group id), then delete the
-  // holding entry — replacing it. Reuses the same validated create endpoint.
+  // Split an unsplit group holding entry across its member clients. ONE atomic
+  // server call replaces the old create-loop-then-delete: the slices and the
+  // removal of the holding entry now land together (or not at all), the server
+  // owns the allocation math, and each slice keeps the block's clock-in/out.
   const splitGroupEntry = async (
     holding: TimeEntry,
     mode: GroupAllocationMode,
     customMinutes: Record<string, number>,
   ) => {
     if (previewActiveRef.current) return
-    const memberIds = Array.isArray(holding.groupClientIds) ? holding.groupClientIds : []
-    const allocation = allocateGroupMinutes(holding.minutes, memberIds, mode, customMinutes)
-    const allocated = memberIds
-      .map((id) => ({ id, minutes: allocation[id] ?? 0 }))
-      .filter((row) => row.minutes > 0)
-    if (allocated.length === 0) {
-      throw new Error('Nothing to allocate')
-    }
-    const groupId = makeId('grp')
-    const isManual = holding.entryMethod === 'manual'
     try {
       setDataSyncState('saving')
-      const created: TimeEntry[] = []
-      for (const row of allocated) {
-        created.push(
-          await createTimeEntry({
-            employeeId: holding.employeeId,
-            clientId: row.id,
-            isAdministrative: false,
-            date: holding.date,
-            minutes: row.minutes,
-            description: holding.description,
-            billable: true,
-            taskId: null,
-            entryMethod: holding.entryMethod === 'manual' ? 'manual' : 'timer',
-            manualReason: isManual
-              ? holding.manualReason || 'Split from group time'
-              : undefined,
-            groupId,
-          }),
-        )
-      }
-      await deleteTimeEntryRequest(holding.id)
+      const { created, deletedId } = await splitTimeEntryRequest(holding.id, {
+        mode,
+        customMinutes,
+      })
       applyServerDataUpdate((current) => ({
         ...current,
         timeEntries: [
           ...created,
-          ...current.timeEntries.filter((entry) => entry.id !== holding.id),
+          ...current.timeEntries.filter((entry) => entry.id !== deletedId),
         ],
       }))
       setDataSyncState('synced')

@@ -28,8 +28,12 @@ import { StaleWorkspaceError } from '../lib/workspace-version.js'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const localDataPath = path.join(projectRoot, 'tmp', 'app-data.json')
+// `splitTimeEntry` writes an activity-log row, which on the file backend lives
+// in this second file — snapshot/restore it for the same reason.
+const localAuthPath = path.join(projectRoot, 'tmp', 'auth-state.json')
 
 let savedContents = null
+let savedAuthContents = null
 let savedDatabaseUrl
 
 function workspace(overrides = {}) {
@@ -58,6 +62,9 @@ beforeAll(async () => {
   if (existsSync(localDataPath)) {
     savedContents = await readFile(localDataPath, 'utf8')
   }
+  if (existsSync(localAuthPath)) {
+    savedAuthContents = await readFile(localAuthPath, 'utf8')
+  }
 })
 
 afterAll(async () => {
@@ -68,6 +75,11 @@ afterAll(async () => {
     await writeFile(localDataPath, savedContents)
   } else if (existsSync(localDataPath)) {
     await rm(localDataPath)
+  }
+  if (savedAuthContents !== null) {
+    await writeFile(localAuthPath, savedAuthContents)
+  } else if (existsSync(localAuthPath)) {
+    await rm(localAuthPath)
   }
 })
 
@@ -253,5 +265,248 @@ describe('time entry minutes precision (file backend)', () => {
       't-nan': 1,
       't-huge': 100000,
     })
+  })
+})
+
+/**
+ * `splitTimeEntry` — replacing an unsplit group holding entry with one billable
+ * slice per client, atomically.
+ *
+ * What this pins (all real defects of the old client-side create-loop):
+ *   - each slice keeps the block's `sessions` VERBATIM, so a split no longer
+ *     blanks the clock-in/out on the Raw report;
+ *   - the holding entry is gone, never left behind double-counting;
+ *   - the split is written to the activity log;
+ *   - a refused split (already split / gone / empty allocation) writes NOTHING;
+ *   - the allocation mode is persisted on every slice.
+ */
+describe('splitTimeEntry (file backend)', () => {
+  const SESSIONS = [
+    { startAt: '2026-07-01T14:00:00.000Z', endAt: '2026-07-01T14:30:00.000Z' },
+    { startAt: '2026-07-01T15:00:00.000Z', endAt: '2026-07-01T15:18:30.000Z' },
+  ]
+
+  const holdingEntry = (overrides = {}) => ({
+    id: 'hold-1',
+    employeeId: 'emp-1',
+    clientId: '',
+    isAdministrative: false,
+    date: '2026-07-01',
+    minutes: 48.5,
+    category: 'General',
+    description: 'Quarterly review call',
+    billable: false,
+    taskId: null,
+    approvalStatus: 'approved',
+    entryMethod: 'timer',
+    startAt: SESSIONS[0].startAt,
+    endAt: SESSIONS[1].endAt,
+    sessions: SESSIONS,
+    groupClientIds: ['c1', 'c2'],
+    ...overrides,
+  })
+
+  const seedHolding = async (overrides = {}) => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+        ],
+        timeEntries: [holdingEntry(overrides)],
+      }),
+    )
+  }
+
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  it('replaces the holding entry with one slice per client', async () => {
+    await seedHolding()
+
+    const result = await store.splitTimeEntry(
+      'hold-1',
+      [
+        { clientId: 'c1', minutes: 24.25 },
+        { clientId: 'c2', minutes: 24.25 },
+      ],
+      'owner-1',
+      'grp-abc',
+      'even',
+    )
+
+    expect(result.deletedId).toBe('hold-1')
+    expect(result.created).toHaveLength(2)
+
+    const data = await persisted()
+    expect(data.timeEntries.find((entry) => entry.id === 'hold-1')).toBeUndefined()
+    expect(data.timeEntries).toHaveLength(2)
+    expect(data.timeEntries.map((entry) => entry.clientId).sort()).toEqual(['c1', 'c2'])
+    // The block's minutes are fully accounted for, on the seconds grid.
+    const totalSeconds = data.timeEntries.reduce(
+      (sum, entry) => sum + Math.round(entry.minutes * 60),
+      0,
+    )
+    expect(totalSeconds).toBe(Math.round(48.5 * 60))
+  })
+
+  it('copies the block sessions + envelope + description onto every slice', async () => {
+    await seedHolding()
+
+    const { created } = await store.splitTimeEntry(
+      'hold-1',
+      [
+        { clientId: 'c1', minutes: 24.25 },
+        { clientId: 'c2', minutes: 24.25 },
+      ],
+      'owner-1',
+      'grp-abc',
+      'even',
+    )
+
+    for (const slice of created) {
+      // The whole point: a split no longer loses the original clock-in/out.
+      expect(slice.sessions).toEqual(SESSIONS)
+      expect(slice.startAt).toBe(SESSIONS[0].startAt)
+      expect(slice.endAt).toBe(SESSIONS[1].endAt)
+      expect(slice.description).toBe('Quarterly review call')
+      expect(slice.date).toBe('2026-07-01')
+      expect(slice.employeeId).toBe('emp-1')
+      expect(slice.entryMethod).toBe('timer')
+      expect(slice.billable).toBe(true)
+      expect(slice.isAdministrative).toBe(false)
+      expect(slice.groupId).toBe('grp-abc')
+      expect(slice.groupClientIds).toEqual([])
+      // Sessions are copied, not shared — mutating a slice can't corrupt a sibling.
+      expect(slice.sessions).not.toBe(SESSIONS)
+    }
+  })
+
+  it('queues every slice as pending — split allocations are typed time', async () => {
+    await seedHolding()
+    const { created } = await store.splitTimeEntry(
+      'hold-1',
+      [{ clientId: 'c1', minutes: 48.5 }],
+      'owner-1',
+      'grp-abc',
+      'full',
+    )
+    // Mirrors createTimeEntry: `entryMethod === 'timer' && !groupId` auto-approves,
+    // and a slice ALWAYS carries a groupId.
+    expect(created.every((slice) => slice.approvalStatus === 'pending')).toBe(true)
+  })
+
+  it('inherits the manual reason when the block was a manual entry', async () => {
+    await seedHolding({ entryMethod: 'manual', manualReason: 'Forgot to start the timer' })
+    const { created } = await store.splitTimeEntry(
+      'hold-1',
+      [{ clientId: 'c1', minutes: 48.5 }],
+      'owner-1',
+      'grp-abc',
+      'even',
+    )
+    expect(created[0].entryMethod).toBe('manual')
+    expect(created[0].manualReason).toBe('Forgot to start the timer')
+  })
+
+  it('stores the allocation mode on each slice', async () => {
+    await seedHolding()
+    await store.splitTimeEntry(
+      'hold-1',
+      [
+        { clientId: 'c1', minutes: 48.5 },
+        { clientId: 'c2', minutes: 48.5 },
+      ],
+      'owner-1',
+      'grp-full',
+      'full',
+    )
+    const data = await persisted()
+    expect(data.timeEntries.map((entry) => entry.groupAllocation)).toEqual(['full', 'full'])
+  })
+
+  it('records the split in the activity log', async () => {
+    await seedHolding()
+    // The activity log lives in its own file and is NOT reset between tests, so
+    // measure the delta rather than the absolute count.
+    const splitRows = async () => {
+      if (!existsSync(localAuthPath)) return []
+      const auth = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      return (auth.activityLog ?? []).filter((row) => row.action === 'time_entry_split')
+    }
+    const before = await splitRows()
+    await store.splitTimeEntry(
+      'hold-1',
+      [
+        { clientId: 'c1', minutes: 24.25 },
+        { clientId: 'c2', minutes: 24.25 },
+      ],
+      'owner-1',
+      'grp-abc',
+      'even',
+    )
+    const after = await splitRows()
+    expect(after).toHaveLength(before.length + 1)
+    const logged = after[after.length - 1]
+    expect(logged.userId).toBe('owner-1')
+    expect(logged.target).toContain('Quarterly review call')
+    expect(logged.target).toContain('2 clients')
+  })
+
+  it('writes NOTHING when the allocation is empty', async () => {
+    await seedHolding()
+    const before = await persisted()
+
+    await expect(store.splitTimeEntry('hold-1', [], 'owner-1', 'grp-abc', 'even')).rejects.toThrow()
+    await expect(
+      store.splitTimeEntry('hold-1', [{ clientId: 'c1', minutes: 0 }], 'owner-1', 'grp-abc', 'even'),
+    ).rejects.toThrow()
+
+    expect(await persisted()).toEqual(before)
+  })
+
+  it('fails cleanly on a second split of the same block (no duplicates)', async () => {
+    await seedHolding()
+    await store.splitTimeEntry(
+      'hold-1',
+      [
+        { clientId: 'c1', minutes: 24.25 },
+        { clientId: 'c2', minutes: 24.25 },
+      ],
+      'owner-1',
+      'grp-abc',
+      'even',
+    )
+    const afterFirst = await persisted()
+
+    await expect(
+      store.splitTimeEntry(
+        'hold-1',
+        [
+          { clientId: 'c1', minutes: 24.25 },
+          { clientId: 'c2', minutes: 24.25 },
+        ],
+        'owner-1',
+        'grp-def',
+        'even',
+      ),
+    ).rejects.toMatchObject({ code: 'not_found' })
+
+    expect(await persisted()).toEqual(afterFirst)
+  })
+
+  it('refuses an entry that is not an unsplit group block', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        timeEntries: [holdingEntry({ id: 'plain-1', clientId: 'c1', groupClientIds: [] })],
+      }),
+    )
+    const before = await persisted()
+
+    await expect(
+      store.splitTimeEntry('plain-1', [{ clientId: 'c1', minutes: 48.5 }], 'owner-1', 'g', 'even'),
+    ).rejects.toMatchObject({ code: 'not_holding' })
+
+    expect(await persisted()).toEqual(before)
   })
 })
