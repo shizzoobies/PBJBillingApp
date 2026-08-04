@@ -74,16 +74,64 @@ describe('sanitizeAppData — time entry minutes', () => {
     expect(cleaned.timeEntries[1].minutes).toBe(1)
   })
 
-  it('rounds fractional minutes to an integer and caps the ceiling', () => {
+  it('KEEPS fractional minutes (sub-minute precision is real data)', () => {
+    // Regression: this used to be `Math.round(...)`, so every owner-tab bulk
+    // save quietly rewrote each entry's real duration to a whole minute —
+    // 501 of 673 session-backed production rows had been flattened that way.
+    // Entries built from their `sessions` spans are seconds-exact and the
+    // Postgres column is `numeric` precisely so the fraction survives.
     const data = {
       timeEntries: [
-        { id: 't-1', clientId: 'client-1', minutes: 90.7, date: '2026-04-29' },
-        { id: 't-2', clientId: 'client-1', minutes: 5_000_000, date: '2026-04-29' },
+        { id: 't-1', clientId: 'client-1', minutes: 14.55, date: '2026-04-29' },
+        { id: 't-2', clientId: 'client-1', minutes: 90.7, date: '2026-04-29' },
+        { id: 't-3', clientId: 'client-1', minutes: 0.75, date: '2026-04-29' },
       ],
     }
     const cleaned = sanitizeAppData(data)
-    expect(cleaned.timeEntries[0].minutes).toBe(91)
+    expect(cleaned.timeEntries[0].minutes).toBe(14.55)
+    expect(cleaned.timeEntries[1].minutes).toBe(90.7)
+    expect(cleaned.timeEntries[2].minutes).toBe(0.75) // 45s, NOT rounded up to 1
+  })
+
+  it('snaps to the nearest whole second, not the nearest minute', () => {
+    const data = {
+      timeEntries: [
+        // 14m 32s exactly = 14.5333…; second-precise value is 872/60.
+        { id: 't-1', clientId: 'client-1', minutes: 14.533333333333333, date: '2026-04-29' },
+        // Float noise below a second is snapped away.
+        { id: 't-2', clientId: 'client-1', minutes: 30.0000004, date: '2026-04-29' },
+      ],
+    }
+    const cleaned = sanitizeAppData(data)
+    expect(cleaned.timeEntries[0].minutes).toBe(872 / 60)
+    expect(cleaned.timeEntries[0].minutes * 60).toBeCloseTo(872, 9)
+    expect(cleaned.timeEntries[1].minutes).toBe(30)
+  })
+
+  it('caps the ceiling', () => {
+    const data = {
+      timeEntries: [
+        { id: 't-1', clientId: 'client-1', minutes: 5_000_000, date: '2026-04-29' },
+        { id: 't-2', clientId: 'client-1', minutes: 100000.5, date: '2026-04-29' },
+      ],
+    }
+    const cleaned = sanitizeAppData(data)
+    expect(cleaned.timeEntries[0].minutes).toBe(100000)
     expect(cleaned.timeEntries[1].minutes).toBe(100000)
+  })
+
+  it('coerces non-numeric minutes to the 1-minute floor', () => {
+    const data = {
+      timeEntries: [
+        { id: 't-1', clientId: 'client-1', minutes: 'not-a-number', date: '2026-04-29' },
+        { id: 't-2', clientId: 'client-1', minutes: null, date: '2026-04-29' },
+        { id: 't-3', clientId: 'client-1', minutes: Infinity, date: '2026-04-29' },
+      ],
+    }
+    const cleaned = sanitizeAppData(data)
+    expect(cleaned.timeEntries[0].minutes).toBe(1)
+    expect(cleaned.timeEntries[1].minutes).toBe(1)
+    expect(cleaned.timeEntries[2].minutes).toBe(1)
   })
 
   it('leaves a normal minutes value untouched', () => {

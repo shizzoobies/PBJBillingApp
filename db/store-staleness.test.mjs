@@ -8,7 +8,12 @@ import { AppDataStore } from './store.js'
 import { StaleWorkspaceError } from '../lib/workspace-version.js'
 
 /**
- * End-to-end staleness guard on the FILE backend.
+ * End-to-end `appDataStore.write()` contracts on the FILE backend: the
+ * staleness guard, and the sub-minute precision of `timeEntries[].minutes`.
+ *
+ * Both live here (rather than in a second .mjs file) because they exercise the
+ * one real `tmp/app-data.json` path — tests in separate files run in parallel
+ * workers and would clobber each other's workspace.
  *
  * Cardinal rule 1: `db/store.js` has two backends and any persisted change must
  * touch both. Production is Postgres, so this file cannot prove the Postgres
@@ -182,5 +187,71 @@ describe('bulk save staleness guard (file backend)', () => {
     await expect(
       store.write(workspace(), { expectedVersion: first }),
     ).rejects.toBeInstanceOf(StaleWorkspaceError)
+  })
+})
+
+/**
+ * Sub-minute precision survives a real bulk save. `sanitizeAppData` runs at the
+ * top of `write()` for BOTH backends, and the owner-tab autosave re-inserts
+ * every time entry through it — so an integer coercion there rewrote the whole
+ * table's durations on each save (confirmed in production: 501 of 673
+ * session-backed rows stored round(session-sum) instead of the exact value).
+ */
+describe('time entry minutes precision (file backend)', () => {
+  const entriesFrom = (persisted) =>
+    Object.fromEntries(persisted.timeEntries.map((entry) => [entry.id, entry.minutes]))
+
+  it('round-trips fractional minutes through a bulk save unchanged', async () => {
+    await store.write(
+      workspace({
+        timeEntries: [
+          // 14m 33s — the shape normalizeWorkSessions produces from `sessions`.
+          { id: 't-frac', minutes: 14.55, clientId: 'c1' },
+          // 45s. Must NOT become 1 minute.
+          { id: 't-sub', minutes: 0.75, clientId: 'c1' },
+          { id: 't-whole', minutes: 30, clientId: 'c1' },
+        ],
+      }),
+    )
+
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(entriesFrom(persisted)).toEqual({
+      't-frac': 14.55,
+      't-sub': 0.75,
+      't-whole': 30,
+    })
+  })
+
+  it('survives repeated autosaves without drifting toward whole minutes', async () => {
+    const exact = 872 / 60 // 14m 32s
+    let payload = workspace({ timeEntries: [{ id: 't-1', minutes: exact, clientId: 'c1' }] })
+    for (let i = 0; i < 5; i += 1) {
+      await store.write(payload)
+      payload = workspace({ timeEntries: JSON.parse(await readFile(localDataPath, 'utf8')).timeEntries })
+    }
+
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.timeEntries[0].minutes).toBe(exact)
+  })
+
+  it('still floors bad values at 1 minute and clamps the ceiling', async () => {
+    await store.write(
+      workspace({
+        timeEntries: [
+          { id: 't-zero', minutes: 0, clientId: 'c1' },
+          { id: 't-neg', minutes: -30, clientId: 'c1' },
+          { id: 't-nan', minutes: 'not-a-number', clientId: 'c1' },
+          { id: 't-huge', minutes: 5_000_000, clientId: 'c1' },
+        ],
+      }),
+    )
+
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(entriesFrom(persisted)).toEqual({
+      't-zero': 1,
+      't-neg': 1,
+      't-nan': 1,
+      't-huge': 100000,
+    })
   })
 })

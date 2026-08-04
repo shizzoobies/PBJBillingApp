@@ -1009,6 +1009,25 @@ function clampMoney(value) {
 }
 
 /**
+ * The single rule for coercing a time entry's `minutes` on any write path.
+ *
+ * Minutes are NOT whole numbers. An entry built from its `sessions` spans
+ * carries a seconds-exact fraction (14.533… = 14m 32s) and the Postgres column
+ * is `numeric` precisely so that survives — so we snap to the nearest whole
+ * SECOND and never to the nearest minute. Rounding to an integer here silently
+ * rewrote the real duration of every entry on each owner-tab bulk save.
+ *
+ * Guards (unchanged): non-finite or <= 0 collapses to the 1-minute floor —
+ * never drop a logged entry — and absurd values clamp to MAX_ENTRY_MINUTES.
+ */
+export function coerceEntryMinutes(value) {
+  const minutes = Math.round(Number(value) * 60) / 60
+  if (!Number.isFinite(minutes) || minutes <= 0) return 1
+  if (minutes > MAX_ENTRY_MINUTES) return MAX_ENTRY_MINUTES
+  return minutes
+}
+
+/**
  * True only for a plain `YYYY-MM-DD` string whose year is in the sane window
  * (2000–2100) AND which round-trips as a real calendar date (so 2026-02-31 is
  * rejected). Conservative on purpose: a valid date returns true and is left
@@ -1090,7 +1109,8 @@ function parseCompanyEmails(value) {
  *    their array so one bad record can't crash the whole save.
  *  - Money/hours fields (client rates/hours, reimbursement amounts) are
  *    coerced finite and clamped to [0, 1e9].
- *  - timeEntries[].minutes is coerced to a positive integer in [1, 100000].
+ *  - timeEntries[].minutes is coerced to a positive number in (0, 100000],
+ *    keeping sub-minute precision (rounded to the nearest whole SECOND).
  *  - Date fields that are present but not a sane YYYY-MM-DD are dropped.
  */
 export function sanitizeAppData(data) {
@@ -1176,17 +1196,10 @@ export function sanitizeAppData(data) {
   }
 
   for (const entry of data.timeEntries) {
-    // Minutes must be a positive integer in a sane range. Non-finite or
-    // <= 0 collapses to the 1-minute floor (never drop a logged entry);
-    // huge values clamp to the ceiling.
-    const minutes = Math.round(Number(entry.minutes))
-    if (!Number.isFinite(minutes) || minutes <= 0) {
-      entry.minutes = 1
-    } else if (minutes > MAX_ENTRY_MINUTES) {
-      entry.minutes = MAX_ENTRY_MINUTES
-    } else {
-      entry.minutes = minutes
-    }
+    // Seconds-precise, floored at 1 and capped — see coerceEntryMinutes. The
+    // owner-tab bulk save re-inserts EVERY entry through here, so this line
+    // decides the stored duration of the whole table on each autosave.
+    entry.minutes = coerceEntryMinutes(entry.minutes)
     dropInvalidDateField(entry, 'date')
   }
 
@@ -2216,7 +2229,11 @@ export class AppDataStore {
           user_id text not null references users(id) on delete restrict,
           client_id text not null references clients(id) on delete restrict,
           entry_date date not null,
-          minutes integer not null check (minutes > 0),
+          -- numeric (not integer) so sub-minute precision survives: an
+          -- exact-seconds timer stop is a fraction (0.75 = 45s). A fresh
+          -- install must match the migrated production schema (see the
+          -- integer→numeric migration further down).
+          minutes numeric not null check (minutes > 0),
           category text not null,
           description text not null default '',
           billable boolean not null default true,

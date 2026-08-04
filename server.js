@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
-import { AppDataStore } from './db/store.js'
+import { AppDataStore, coerceEntryMinutes } from './db/store.js'
 import {
   buildActionProposal,
   confirmOwnerFeedback,
@@ -3256,7 +3256,11 @@ const server = createServer(async (request, response) => {
             sendJson(response, 400, { error: 'Invalid minutes' })
             return
           }
-          patch.minutes = Math.round(m)
+          // Snap to the nearest whole SECOND, not the nearest minute — an
+          // entry's minutes can legitimately be fractional (seconds-exact
+          // timer stops), and the column is numeric. Same rule the bulk save
+          // applies, so a later autosave can't rewrite what we store here.
+          patch.minutes = coerceEntryMinutes(m)
         }
         if (typeof payload?.description === 'string') patch.description = payload.description
         if (typeof payload?.billable === 'boolean') patch.billable = payload.billable
