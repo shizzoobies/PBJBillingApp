@@ -4909,13 +4909,31 @@ td strong {
   color: var(--red);
   font-size: 12px;
 }
+.apply-to-client-done {
+  color: var(--green);
+  font-size: 12px;
+}
 .repeating-task-explainer {
   color: var(--muted);
   font-size: 12px;
   margin: 0;
   padding: 0 14px 8px;
 }
-.repeating-task-row.open .repeating-task-explainer {
+/* Row-level actions ("Copy to client") share a line with the explainer so the
+   copy action is visible on a collapsed row. */
+.repeating-task-quick-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 0 14px 8px;
+}
+.repeating-task-quick-actions .repeating-task-explainer {
+  flex: 1 1 220px;
+  padding: 0;
+}
+.repeating-task-row.open .repeating-task-quick-actions {
   border-bottom: 1px solid var(--line);
   padding-bottom: 10px;
 }

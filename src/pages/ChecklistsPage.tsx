@@ -3625,9 +3625,11 @@ export function NewTaskForm({
 }
 
 /**
- * Inline "pick a client → apply" control. Used by both the regular
- * "Copy to client" action and the standard-template "Apply to client" action.
- * Opens a small client picker; on confirm, calls `onApply` and resets.
+ * Inline "pick a client → apply" control. Used by the row-level "Copy to
+ * client" action on every template on the Checklists tab — standard blueprints
+ * and client-bound repeating templates alike. Opens a small client picker; on
+ * confirm, calls `onApply`, then names the client it landed on so the copy is
+ * visibly confirmed without leaving the page.
  */
 function ApplyToClientControl({
   clients,
@@ -3648,6 +3650,7 @@ function ApplyToClientControl({
   const [clientId, setClientId] = useState(sortedClients[0]?.id ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [copiedTo, setCopiedTo] = useState('')
 
   const handleApply = async () => {
     if (!clientId || busy) return
@@ -3655,6 +3658,7 @@ function ApplyToClientControl({
     setError('')
     try {
       await onApply(clientId)
+      setCopiedTo(sortedClients.find((client) => client.id === clientId)?.name ?? '')
       setOpen(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not copy template.')
@@ -3665,15 +3669,23 @@ function ApplyToClientControl({
 
   if (!open) {
     return (
-      <button
-        type="button"
-        className="secondary-action"
-        title={title}
-        onClick={() => setOpen(true)}
-      >
-        <Copy size={14} />
-        {label}
-      </button>
+      <div className="apply-to-client">
+        <button
+          type="button"
+          className="secondary-action"
+          title={title}
+          onClick={() => {
+            setCopiedTo('')
+            setOpen(true)
+          }}
+        >
+          <Copy size={14} />
+          {label}
+        </button>
+        {copiedTo ? (
+          <span className="apply-to-client-done">Copied to {copiedTo}</span>
+        ) : null}
+      </div>
     )
   }
 
@@ -3994,7 +4006,7 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
   // Plain-language reminder that a repeating task is a recipe, not a checklist.
   // Standard templates are blueprints — they never generate on their own.
   const explainerLine = props.standardMode
-    ? 'A reusable blueprint — it never generates a checklist on its own. Use "Apply to client" to put it to work.'
+    ? 'A reusable blueprint — it never generates a checklist on its own. Use "Copy to client" to put it to work.'
     : isSpecificMonths
       ? specificMonthsSummary(template)
       : `Generates a checklist ${frequencyCadence(template.frequency)} — next on ${dueLabel}.`
@@ -4050,7 +4062,30 @@ function RepeatingTaskRow(props: RepeatingTaskRowProps) {
           {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
         </span>
       </button>
-      <p className="repeating-task-explainer">{explainerLine}</p>
+      {/* "Copy to client" sits on the row itself, not inside the expanded
+          editor: from the Checklists tab you must be able to pick a template
+          and copy it onto a client without first expanding anything (business
+          groups on the Repeating tab start collapsed, which buried it). Same
+          action for standard blueprints and client-bound repeating templates,
+          and the same apply-to-client call the Clients page uses. */}
+      <div className="repeating-task-quick-actions">
+        <p className="repeating-task-explainer">{explainerLine}</p>
+        <ApplyToClientControl
+          clients={props.clients}
+          label="Copy to client…"
+          title={
+            props.standardMode
+              ? 'Copy this standard template onto a client as a real repeating task'
+              : 'Copy this repeating checklist onto another client'
+          }
+          onApply={(clientId) =>
+            props.onApplyToClient(template.id, {
+              clientId,
+              frequency: template.frequency,
+            })
+          }
+        />
+      </div>
       {open ? <TemplateEditor {...props} /> : null}
     </article>
   )
@@ -4064,44 +4099,19 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
   const stages = template.stages ?? []
   return (
     <div className="repeating-task-body">
+      {/* "Copy to client" is not repeated here — it lives on the row header
+          above, visible whether or not this editor is open. */}
       <div className="template-card-actions">
-        {props.standardMode ? (
-          <ApplyToClientControl
-            clients={props.clients}
-            label="Apply to client"
-            title="Create a real, client-bound repeating task copied from this standard template"
-            onApply={(clientId) =>
-              props.onApplyToClient(template.id, {
-                clientId,
-                frequency: template.frequency,
-              })
-            }
-          />
-        ) : (
-          <>
-            {props.onGenerateNow ? (
-              <button
-                className="primary-action"
-                onClick={() => void props.onGenerateNow?.(template.id)}
-                type="button"
-                title="Pull the next occurrence forward — create a checkable checklist now without waiting for the schedule"
-              >
-                <Plus size={14} />
-                Start now
-              </button>
-            ) : null}
-            <ApplyToClientControl
-              clients={props.clients}
-              label="Copy to client"
-              title="Duplicate this repeating task onto another client"
-              onApply={(clientId) =>
-                props.onApplyToClient(template.id, {
-                  clientId,
-                  frequency: template.frequency,
-                })
-              }
-            />
-          </>
+        {props.standardMode || !props.onGenerateNow ? null : (
+          <button
+            className="primary-action"
+            onClick={() => void props.onGenerateNow?.(template.id)}
+            type="button"
+            title="Pull the next occurrence forward — create a checkable checklist now without waiting for the schedule"
+          >
+            <Plus size={14} />
+            Start now
+          </button>
         )}
         {props.onDuplicate ? (
           <button

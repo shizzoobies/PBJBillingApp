@@ -355,10 +355,18 @@ picker, notification bell, and account menu sit in the top bar on every page.
   to every team member on the Checklists page ("Standard templates" section) — they
   can browse the standard steps but only an owner can edit a blueprint or apply one
   to a client.
+- **Copy a template onto a client from the Checklists tab.** Every template row —
+  standard blueprints on the "Standard" tab AND recurring templates on the
+  "Repeating" tab — carries a "Copy to client…" button on the row itself (owner
+  only, no need to expand the row first). It opens a client picker; choosing a
+  client creates a new recurring checklist on that client from the template's
+  stages and steps, and the row confirms with "Copied to <client>". Same copy
+  used everywhere, so a standard blueprint and another client's recurring
+  checklist copy the same way.
 - Owners can apply a template **directly from the Clients page** too: every client
   row has a "Template" button that opens a picker of standard templates and
   recurring templates copied from other clients, and applies the chosen one to that
-  client (same underlying copy as the Checklists page's "Apply to client"). Works
+  client (same underlying copy as the Checklists page's "Copy to client…"). Works
   for brand-new clients the moment they're added to the list.
 - Time logged against a task shows on the card.
 
