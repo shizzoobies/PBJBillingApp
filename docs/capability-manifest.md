@@ -794,13 +794,16 @@ picker, notification bell, and account menu sit in the top bar on every page.
   Voice is owner-only. Typing still works alongside it.
 - Voice can set things up too — with the same guardrail as text: asking by
   voice only FILES A CONFIRMATION CARD in the panel (make a template
-  recurring, assign a client to a team member, generate a task list now).
+  recurring, assign a client to a team member, generate a task list now,
+  turn a switched-off recurring checklist back on).
   Nothing changes until the owner taps "Run it" on the card. The assistant
   never takes an action on its own, by voice or by text — every change
   requires the owner's explicit confirmation on a card.
 - The voice assistant pulls LIVE firm data when asked: client profitability,
   hours by client/staff, what's overdue or due soon, who's at capacity, and
-  the current workspace setup — same numbers as the app's reports.
+  the current workspace setup — same numbers as the app's reports. The
+  "why isn't this working?" diagnostics below work by voice too, with the
+  same answers.
 - The voice assistant REMEMBERS across calls: say "remember that…" and it
   saves the fact for future conversations (it also recalls older memories on
   request). Call summaries are kept after each conversation.
@@ -836,6 +839,7 @@ picker, notification bell, and account menu sit in the top bar on every page.
     weekly / monthly / quarterly / annual schedule).
   - Assign a client to a team member (give them access).
   - Generate a task list now from a template.
+  - Turn a switched-off recurring checklist back on.
   For anything else the app can't do, it still offers a feature request to
   Alex rather than pretending to act.
 - Optional weekly digest email: on Mondays (configurable) the owner gets an
@@ -852,6 +856,38 @@ picker, notification bell, and account menu sit in the top bar on every page.
   - Who's over or near capacity this week (hours vs a weekly target).
   Numbers come straight from time entries and billing settings — it reports,
   it doesn't change anything, and it never alters invoices.
+- **Diagnoses "why isn't this working?" against the firm's real settings**
+  (owner-only, read-only). Most "broken" reports here turn out to be a
+  setting, not a bug, so the assistant checks before it guesses. Ask in plain
+  words — by chat or by voice — and it answers with the exact row:
+  - **"Why can't [person] log time?"** — it checks the same two gates the
+    timer itself applies and names what's stopping them: a **locked
+    timesheet month** (only an owner can unlock it, on the Timesheet page),
+    or an **earlier week** that was never submitted or was sent back for
+    changes (that person submits/resubmits it). It names every blocking week
+    at once, says who fixes each, and says plainly when nothing is blocking
+    them. Owners are exempt from both gates, and a removed team member is
+    reported as such rather than as a gate.
+  - **"Why did [client]'s checklist never show up?"** — it runs the same gate
+    the generator uses and reports, per recurring checklist, whether it will
+    generate next cycle and, if not, exactly which ingredient is missing: no
+    client, no stages, no steps in the first stage, no months chosen (for
+    "specific months"), a scheduled year that isn't this year, no next due
+    date, or **switched off**. It also says whether the checklist has ever
+    generated anything, and warns when one will generate but has nobody
+    assigned or no Board column. Ask without naming anything and it lists
+    every recurring checklist that will never generate — the silent kind that
+    produces nothing and says nothing.
+  - **"What changed recently?"** — it reads the activity log for the last 7
+    days (or any window you ask for) and says who did what, in plain English.
+    Narrow it to a client, a checklist, or a person to trace a surprise back
+    to the change that caused it.
+- Can turn a **switched-off recurring checklist back on** — the one fix it
+  can make from a diagnosis. Like every other action it only proposes:
+  a confirmation card appears and nothing happens until the owner taps
+  "Run it", and switching it off again undoes it. For any OTHER missing
+  ingredient (no steps, no due date, no client) it tells the owner exactly
+  what to fix and where — it does not change those itself.
 
 ## Updates (owner only)
 

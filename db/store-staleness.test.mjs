@@ -1049,3 +1049,90 @@ describe('createClient writes every form field to Postgres', () => {
     expect(boundColumns(fake.matching(/^insert into clients/i)[0]).quickbooks_pay_url).toBe('')
   })
 })
+
+/**
+ * `setChecklistTemplateActive` — the write behind the assistant's one Tier 0
+ * config action ("turn a switched-off recurring checklist back on"). A
+ * switched-off recipe is one of the two historical causes of "my recurring
+ * checklist stopped appearing", and the materializer skips it silently.
+ *
+ * Cardinal rule 1: both backends. The file branch is exercised end-to-end
+ * below; the Postgres branch is pinned by the statement it emits.
+ */
+const templateWorkspace = () =>
+  workspace({
+    checklistTemplates: [
+      {
+        id: 'tmpl-off',
+        title: 'Annual Reports',
+        clientId: 'c1',
+        assigneeId: 'emp-1',
+        frequency: 'annually',
+        nextDueDate: '2026-12-01',
+        active: false,
+        viewerIds: [],
+        editorIds: [],
+        stages: [
+          {
+            id: 'stage-1',
+            name: 'Stage 1',
+            assigneeId: 'emp-1',
+            offsetDays: 0,
+            viewerIds: [],
+            editorIds: [],
+            items: [{ id: 'ti-1', label: 'File the report' }],
+          },
+        ],
+      },
+    ],
+  })
+
+describe('setChecklistTemplateActive (file backend)', () => {
+  beforeEach(async () => {
+    await store.write(templateWorkspace())
+  })
+
+  it('switches a recurring checklist back on and persists it', async () => {
+    const updated = await store.setChecklistTemplateActive('tmpl-off', true)
+    expect(updated).toMatchObject({ id: 'tmpl-off', active: true })
+
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.checklistTemplates[0].active).toBe(true)
+  })
+
+  it('switches one back off again — the change is reversible', async () => {
+    await store.setChecklistTemplateActive('tmpl-off', true)
+    await store.setChecklistTemplateActive('tmpl-off', false)
+
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.checklistTemplates[0].active).toBe(false)
+  })
+
+  it('returns null for an unknown id without touching the file', async () => {
+    const before = await readFile(localDataPath, 'utf8')
+    expect(await store.setChecklistTemplateActive('tmpl-nope', true)).toBeNull()
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+})
+
+describe('setChecklistTemplateActive (postgres branch)', () => {
+  it('updates the single row instead of rewriting the workspace', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).setChecklistTemplateActive('tmpl-off', true)
+
+    const updates = fake.matching(/^update checklist_templates\s+set active/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].params).toEqual(['tmpl-off', true])
+    // A one-flag fix must never take the bulk-save path.
+    expect(fake.matching(/^delete from clients/i)).toHaveLength(0)
+  })
+
+  it('coerces a truthy/falsy flag to a real boolean for the column', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).setChecklistTemplateActive('tmpl-off', 0)
+    expect(fake.matching(/^update checklist_templates\s+set active/i)[0].params).toEqual([
+      'tmpl-off',
+      false,
+    ])
+  })
+})

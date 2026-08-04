@@ -18,6 +18,7 @@ import type {
   Employee,
   SubscriptionPlan,
 } from './types'
+import { evaluateRecurringTemplate } from '../../lib/recurring-gate.js'
 import { missingPlanTemplatesForClient, unlinkedContacts } from './utils'
 
 /** The sidebar tab an issue belongs to — the page groups by these. */
@@ -190,8 +191,10 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
   // Recurring checklists that are MISCONFIGURED and will therefore never
   // generate. A recipe missing a mandatory field fails silently — nothing is
   // created and nothing says so — so these are surfaced by name with the exact
-  // field that's missing. Mirrors the materializer's own gate conditions
-  // (see materializeRecurringChecklists); if you change one, change both.
+  // field that's missing. The gate conditions themselves live in
+  // `lib/recurring-gate.js`, shared with the materializer's own skip rules and
+  // with the assistant's diagnose_recurring_checklist tool; only the wording
+  // of each issue is decided here.
   const instancesByTemplate = new Map<string, number>()
   for (const checklist of input.checklists ?? []) {
     if (!checklist.templateId) continue
@@ -203,11 +206,11 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
   const currentYear = new Date().getFullYear()
 
   for (const template of checklistTemplates) {
+    const verdict = evaluateRecurringTemplate(template, { currentYear })
     // Standard blueprints are recipes to copy, not schedules — they're never
     // meant to generate, so an empty one isn't a fault.
-    if (template.isStandard) continue
+    if (verdict.skipped) continue
 
-    const stages = template.stages ?? []
     const clientLabel = template.clientId
       ? (clients.find((client) => client.id === template.clientId)?.name ?? 'a client')
       : ''
@@ -229,7 +232,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
       })
     }
 
-    if (!template.clientId) {
+    if (verdict.reason === 'no-client') {
       flag(
         'no-client',
         `Pick a client for the "${template.title}" recurring checklist`,
@@ -239,7 +242,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     }
     // Switched off — that may well be deliberate, so it's flagged gently rather
     // than as a fault, but she still sees why nothing is appearing.
-    if (!template.active) {
+    if (verdict.reason === 'inactive') {
       flag(
         'inactive',
         `"${name}" is turned off`,
@@ -248,7 +251,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
       )
       continue
     }
-    if (stages.length === 0) {
+    if (verdict.reason === 'no-stages') {
       flag(
         'no-stages',
         `Add steps to the "${name}" recurring checklist`,
@@ -256,7 +259,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
       )
       continue
     }
-    if ((stages[0].items ?? []).length === 0) {
+    if (verdict.reason === 'no-steps') {
       flag(
         'no-steps',
         `Add steps to the "${name}" recurring checklist`,
@@ -264,26 +267,24 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
       )
       continue
     }
-    if (template.frequency === 'specific-months') {
-      const months = Array.isArray(template.scheduledMonths) ? template.scheduledMonths : []
-      if (months.filter((month) => Number.isInteger(month) && month >= 1 && month <= 12).length === 0) {
-        flag(
-          'no-months',
-          `Choose which months "${name}" runs in`,
-          `It repeats in specific months but no months are selected, so it never generates.${evidence}`,
-        )
-        continue
-      }
-      if (template.repeatAnnually === false && template.scheduleYear !== currentYear) {
-        flag(
-          'stale-year',
-          `"${name}" is scheduled for ${template.scheduleYear ?? 'another year'} only`,
-          `"Repeat every year" is off and its scheduled year isn't ${currentYear}, so it won't generate this year.`,
-          'medium',
-        )
-        continue
-      }
-    } else if (!template.nextDueDate) {
+    if (verdict.reason === 'no-months') {
+      flag(
+        'no-months',
+        `Choose which months "${name}" runs in`,
+        `It repeats in specific months but no months are selected, so it never generates.${evidence}`,
+      )
+      continue
+    }
+    if (verdict.reason === 'stale-year') {
+      flag(
+        'stale-year',
+        `"${name}" is scheduled for ${template.scheduleYear ?? 'another year'} only`,
+        `"Repeat every year" is off and its scheduled year isn't ${currentYear}, so it won't generate this year.`,
+        'medium',
+      )
+      continue
+    }
+    if (verdict.reason === 'no-due-date') {
       flag(
         'no-due-date',
         `Set a due date for the "${name}" recurring checklist`,
@@ -293,7 +294,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     }
     // It WILL generate — but with nobody named, only an owner could ever tick
     // its steps off (completing a step is limited to the assigned person).
-    if (!stages[0].assigneeId) {
+    if (verdict.warnings.includes('no-assignee')) {
       flag(
         'no-assignee',
         `Assign someone to the "${name}" recurring checklist`,
@@ -303,7 +304,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     }
     // Board tab: no column picked, so everything this recipe generates piles
     // into "Uncategorized" instead of its service column.
-    if (!template.categoryId) {
+    if (verdict.warnings.includes('no-board-column')) {
       issues.push({
         id: `board:no-column:${template.id}`,
         category: 'Board',

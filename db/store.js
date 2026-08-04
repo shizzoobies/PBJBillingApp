@@ -6664,6 +6664,59 @@ export class AppDataStore {
     return updatedTemplate
   }
 
+  /**
+   * Switch a recurring checklist template on or off.
+   *
+   * A switched-off template is one of the two historical causes of "my
+   * recurring checklist just stopped appearing" — the materializer skips it
+   * silently. Turning it back on is the reversible, visible fix, so it is the
+   * one config change the assistant is allowed to propose (behind the owner's
+   * confirm card). Returns the updated template, or null when the id is
+   * unknown. Targeted single-row update in Postgres; same field on the JSON
+   * backend.
+   */
+  async setChecklistTemplateActive(templateId, active) {
+    const nextActive = Boolean(active)
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `
+          update checklist_templates
+          set active = $2,
+              updated_at = now()
+          where id = $1
+          returning id
+        `,
+        [templateId, nextActive],
+      )
+
+      if (!result.rowCount) {
+        return null
+      }
+
+      const data = await this.read()
+      return data.checklistTemplates.find((template) => template.id === templateId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedTemplate = null
+    data.checklistTemplates = (data.checklistTemplates ?? []).map((template) => {
+      if (template.id !== templateId) {
+        return template
+      }
+
+      updatedTemplate = { ...template, active: nextActive }
+      return updatedTemplate
+    })
+
+    if (!updatedTemplate) {
+      return null
+    }
+
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedTemplate
+  }
+
   async reorderChecklistItems(checklistId, orderedIds) {
     if (this.pool) {
       // Update sort_order for each item using a CASE expression

@@ -39,7 +39,13 @@ import {
   listBlockingWeeks,
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
+  weekStartOf,
 } from './lib/time-entry.js'
+import {
+  diagnoseRecurringChecklists,
+  diagnoseTimeLogging,
+  summarizeRecentChanges,
+} from './lib/diagnostics.js'
 import { isTemplateVisibleToScope, isTimeEntryVisibleToScope } from './lib/data-scope.js'
 import { StaleWorkspaceError } from './lib/workspace-version.js'
 import {
@@ -417,6 +423,42 @@ function assistantReadTools() {
       const targetHours = Number(input.targetHours) > 0 ? Number(input.targetHours) : CAPACITY_TARGET_HOURS
       return capacity(data, { weekStart: weekStartOf(todayIso()), targetHours })
     },
+    // ---- Tier 0 diagnostics: "why isn't X working?" ----
+    // Read-only explanations of the two config traps this firm has actually
+    // hit (a locked timesheet month, a recurring recipe missing an
+    // ingredient), plus the activity log as plain English. The rules live in
+    // lib/diagnostics.js and are the SAME ones the timer gate and the
+    // materializer apply, so an answer here can't contradict the app.
+    diagnose_time_logging: async (input) => {
+      const data = await appDataStore.read()
+      return diagnoseTimeLogging(data, {
+        person: String(input.person ?? ''),
+        today: todayIso(),
+      })
+    },
+    diagnose_recurring_checklist: async (input) => {
+      const data = await appDataStore.read()
+      return diagnoseRecurringChecklists(data, {
+        subject: typeof input.subject === 'string' ? input.subject : '',
+        today: todayIso(),
+      })
+    },
+    recent_changes: async (input) => {
+      const days = Number(input.days) > 0 ? Math.min(Math.floor(Number(input.days)), 90) : 7
+      const now = new Date()
+      const nowStamp = now.toISOString()
+      const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString()
+      const [entries, members] = await Promise.all([
+        appDataStore.getActivityRange(since, nowStamp, 2000),
+        appDataStore.getTeamMembers(),
+      ])
+      return summarizeRecentChanges(entries, {
+        subject: typeof input.subject === 'string' ? input.subject : '',
+        days,
+        now: nowStamp,
+        nameById: Object.fromEntries(members.map((member) => [member.id, member.name])),
+      })
+    },
   }
 }
 
@@ -456,14 +498,8 @@ function isCrossSiteOrigin(request) {
  * everything. Non-owners see only clients where their user id appears in the
  * client's `assignedBookkeeperIds` array.
  */
-// The Sunday (yyyy-mm-dd) that anchors the US Sun–Sat work week containing
-// `dateStr`. Noon avoids any DST/timezone boundary flip; getDay() of a calendar
-// date's weekday is timezone-independent.
-function weekStartOf(dateStr) {
-  const d = new Date(`${dateStr}T12:00:00`)
-  d.setDate(d.getDate() - d.getDay())
-  return d.toISOString().slice(0, 10)
-}
+// `weekStartOf` (the Sun–Sat week anchor) now lives in lib/time-entry.js beside
+// the weekly gate that consumes it — imported above.
 
 function visibleClientIdSet(session, clients) {
   if (session.user.role === 'owner') {
@@ -1153,7 +1189,12 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
-      const ALLOWED_ACTIONS = new Set(['make_template_recurring', 'assign_client', 'generate_tasks_now'])
+      const ALLOWED_ACTIONS = new Set([
+        'make_template_recurring',
+        'assign_client',
+        'generate_tasks_now',
+        'reenable_recurring_template',
+      ])
       const body = await readJsonBody(request)
       const tool = String(body?.tool ?? '')
       const params = body?.params && typeof body.params === 'object' ? body.params : {}
@@ -1481,6 +1522,11 @@ const server = createServer(async (request, response) => {
           time_summary: 'get_time_summary',
           deadlines: 'get_deadlines',
           capacity: 'get_capacity',
+          // Tier 0 diagnostics — same handlers as the text assistant, so a
+          // spoken "why can't Lisa log time?" gets the identical answer.
+          diagnose_time_logging: 'diagnose_time_logging',
+          diagnose_recurring_checklist: 'diagnose_recurring_checklist',
+          recent_changes: 'recent_changes',
         }
 
         let result
@@ -1511,7 +1557,8 @@ const server = createServer(async (request, response) => {
         } else if (
           toolName === 'make_template_recurring' ||
           toolName === 'assign_client' ||
-          toolName === 'generate_tasks_now'
+          toolName === 'generate_tasks_now' ||
+          toolName === 'reenable_recurring_template'
         ) {
           // PROPOSE-ONLY, by design. This branch validates and parks a card
           // for the owner; it must never call executeAssistantAction. The

@@ -131,6 +131,34 @@ function toolDefinitions() {
       'workspace_snapshot',
       "Get the firm's current setup: client names and billing modes, recurring template names and frequencies, plans, and team members.",
     ),
+    // ---- Tier 0 diagnostics: "why isn't X working?" (read-only) ----
+    def(
+      'diagnose_time_logging',
+      'Explain whether a team member can log time right now and, if not, exactly what is stopping them: a locked timesheet month, or an earlier week that is unsubmitted or was sent back. Use for "she cannot log time", "the timer will not start", "my timesheet is refusing an entry".',
+      { person: { type: 'string', description: "The team member's name (or user id) to check." } },
+      ['person'],
+    ),
+    def(
+      'diagnose_recurring_checklist',
+      'Check whether recurring checklists will actually generate next cycle, and name the exact missing ingredient when they will not (no client, no steps, no months chosen, no due date, or switched off). A misconfigured recurring checklist generates nothing and says nothing. Omit the subject to list every recurring checklist that will never generate.',
+      {
+        subject: {
+          type: 'string',
+          description: 'A client name or checklist title to check. Omit to check them all.',
+        },
+      },
+    ),
+    def(
+      'recent_changes',
+      'Summarize what actually changed recently from the activity log — who did what, when. Use when something is suddenly different and nobody knows why. Optionally narrow to a client, checklist, or person.',
+      {
+        subject: {
+          type: 'string',
+          description: 'Optional client name, checklist title, or person to filter on.',
+        },
+        days: { type: 'number', description: 'How many days back to look. Defaults to 7.' },
+      },
+    ),
     def(
       'remember_fact',
       'Save one durable fact or preference the owner just told you, so future calls remember it. Use only for things worth keeping, not chit-chat.',
@@ -245,6 +273,15 @@ function toolDefinitions() {
         templateTitle: { type: 'string', description: 'Exact template title.' },
         clientName: { type: 'string', description: 'Optional client name to disambiguate.' },
         dueDate: { type: 'string', description: 'Optional due date yyyy-mm-dd.' },
+      },
+      ['templateTitle'],
+    ),
+    def(
+      'reenable_recurring_template',
+      'PROPOSE turning a switched-off recurring checklist back on so it starts generating again. Only files a confirmation card — nothing changes until the owner taps "Run it", and turning it off again undoes it. Offer this only after diagnose_recurring_checklist shows the checklist is switched off; other missing ingredients (no steps, no due date, no client) she has to fix herself.',
+      {
+        templateTitle: { type: 'string', description: 'Exact title of the switched-off recurring checklist.' },
+        clientName: { type: 'string', description: 'Optional client name to disambiguate.' },
       },
       ['templateTitle'],
     ),
