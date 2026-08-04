@@ -66,6 +66,8 @@ export type AppContextValue = {
     holding: TimeEntry,
     mode: GroupAllocationMode,
     customMinutes: Record<string, number>,
+    /** Target clients for a REGULAR entry; a group holding block ignores it. */
+    clientIds?: string[],
   ) => Promise<void>
   updateTimeEntry: (
     entryId: string,

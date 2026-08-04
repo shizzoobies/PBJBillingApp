@@ -1198,14 +1198,18 @@ function App() {
     }
   }
 
-  // Split an unsplit group holding entry across its member clients. ONE atomic
-  // server call replaces the old create-loop-then-delete: the slices and the
-  // removal of the holding entry now land together (or not at all), the server
-  // owns the allocation math, and each slice keeps the block's clock-in/out.
+  // Split a time entry across clients. ONE atomic server call replaces the old
+  // create-loop-then-delete: the slices and the removal of the source entry now
+  // land together (or not at all), the server owns the allocation math, and each
+  // slice keeps the block's clock-in/out.
+  //
+  // `clientIds` is the picked target set for a REGULAR client entry; an unsplit
+  // group holding block leaves it empty and the server uses its member list.
   const splitGroupEntry = async (
     holding: TimeEntry,
     mode: GroupAllocationMode,
     customMinutes: Record<string, number>,
+    clientIds: string[] = [],
   ) => {
     if (previewActiveRef.current) return
     try {
@@ -1213,6 +1217,7 @@ function App() {
       const { created, deletedId } = await splitTimeEntryRequest(holding.id, {
         mode,
         customMinutes,
+        clientIds,
       })
       applyServerDataUpdate((current) => ({
         ...current,

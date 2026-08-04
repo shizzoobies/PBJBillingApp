@@ -316,14 +316,21 @@ export async function updateTimeEntryRequest(
 }
 
 /**
- * Split an unsplit group holding entry across its member clients in ONE
- * atomic server call: the slices are created and the holding entry removed
- * together, or nothing changes at all. Replaces the old create-loop-then-delete
- * that could leave both halves behind.
+ * Split a time entry across clients in ONE atomic server call: the slices are
+ * created and the source entry removed together, or nothing changes at all.
+ * Replaces the old create-loop-then-delete that could leave both halves behind.
+ *
+ * `clientIds` names the targets for a REGULAR client entry. An unsplit group
+ * holding block ignores it — its member clients were fixed when the timer
+ * started, and the server refuses any other target for one.
  */
 export async function splitTimeEntryRequest(
   entryId: string,
-  body: { mode: GroupAllocationMode; customMinutes?: Record<string, number> },
+  body: {
+    mode: GroupAllocationMode
+    customMinutes?: Record<string, number>
+    clientIds?: string[]
+  },
 ) {
   const response = await apiFetch(`/api/time-entries/${encodeURIComponent(entryId)}/split`, {
     credentials: 'same-origin',

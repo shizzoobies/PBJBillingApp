@@ -73,8 +73,23 @@ picker, notification bell, and account menu sit in the top bar on every page.
   - Live timer → pick "A group" and the clients, track the block, then "Split
     across clients" on the saved entry (in Recent time) to divide it the same
     ways. (Splitting a running timer happens after stop.)
-  - Splitting is ATOMIC: the per-client entries are created and the un-split
-    block removed in ONE step, so a failure can never leave both behind
+  - ANY client time entry can be split after the fact — it does not have to
+    have been started as a "group". Every entry in Sent back / Recent time has
+    a "Split across clients" action (also inside its edit form, next to Save),
+    which opens a checkbox list of the clients that person may bill with the
+    entry's current client already ticked. Tick the others, choose evenly /
+    custom / full duration to each, confirm. This is what to use when someone
+    logged time to one client and then realized the work covered several.
+    - Splitting to a SINGLE client is refused on purpose: that's just moving
+      the entry, so use the Client dropdown in the edit form instead.
+    - Administrative time can't be split — it has no client. Give it a client
+      first.
+    - An entry that came out of an earlier split can be split again.
+    - The replacement entries go back into the daily approval queue as
+      pending, even if the original was already approved (same rule as any
+      other edit to an approved entry). Billable / internal is carried over.
+  - Splitting is ATOMIC: the per-client entries are created and the source
+    entry removed in ONE step, so a failure can never leave both behind
     double-counting the same time.
   - Each split entry KEEPS the original block's clock-in / clock-out times, so
     the Raw report shows the real start and stop for split time instead of

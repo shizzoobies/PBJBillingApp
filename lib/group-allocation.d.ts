@@ -18,3 +18,16 @@ export declare function allocateGroupMinutes(
   mode: GroupAllocationMode,
   custom?: Record<string, number>,
 ): Record<string, number>
+
+export type SplitTargetKind = 'holding' | 'regular' | 'administrative' | 'unsplittable'
+
+export declare function classifySplitTarget(entry: {
+  clientId?: string
+  isAdministrative?: boolean
+  groupClientIds?: string[]
+}): SplitTargetKind
+
+export declare function splitClientOptions(
+  clients: Array<{ id: string; name?: string }>,
+  currentClientId?: string,
+): Array<{ id: string; name: string }>

@@ -7,6 +7,7 @@ import QRCode from 'qrcode'
 import { AppDataStore, coerceEntryMinutes, TimeEntrySplitError } from './db/store.js'
 import {
   allocateGroupMinutes,
+  classifySplitTarget,
   formatDurationLabel,
   minutesToSeconds,
 } from './lib/group-allocation.js'
@@ -3145,9 +3146,18 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // Split an unsplit GROUP holding entry into one billable entry per member
-    // client. Defined before the :id routes so the literal `/split` suffix
-    // isn't shadowed by the parameterized matcher.
+    // Split a time entry into one billable entry per client. Defined before the
+    // :id routes so the literal `/split` suffix isn't shadowed by the
+    // parameterized matcher.
+    //
+    // TWO shapes of source entry land here:
+    //   - an unsplit GROUP holding block — its `groupClientIds` ARE the allowed
+    //     targets (chosen up front on the timer), and the body may not name
+    //     others;
+    //   - a REGULAR client-billed entry (a slice from an earlier split counts:
+    //     its minutes are just minutes) — the body names the target clients in
+    //     `clientIds`, and each one is checked against what this actor may bill
+    //     with the same `visibleClientIdSet` rule the create endpoint uses.
     //
     // This replaces a client-side loop (N creates, then a delete) that was not
     // transactional: a failure part-way left the slices AND the holding entry
@@ -3172,12 +3182,20 @@ const server = createServer(async (request, response) => {
       const memberIds = Array.isArray(holding.groupClientIds)
         ? holding.groupClientIds.filter((id) => typeof id === 'string' && id)
         : []
-      if (holding.clientId || holding.isAdministrative || memberIds.length === 0) {
+      const targetKind = classifySplitTarget(holding)
+      if (targetKind === 'administrative') {
+        sendJson(response, 400, {
+          error: 'Administrative time has no client to split — assign a client first.',
+        })
+        return
+      }
+      if (targetKind === 'unsplittable') {
         sendJson(response, 409, {
           error: 'That entry is not an unsplit group time block — it may have been split already.',
         })
         return
       }
+      const isHolding = targetKind === 'holding'
 
       const isOwner = session.user.role === 'owner'
       if (!isOwner && holding.employeeId !== session.user.id) {
@@ -3198,22 +3216,49 @@ const server = createServer(async (request, response) => {
         payload?.customMinutes && typeof payload.customMinutes === 'object'
           ? payload.customMinutes
           : {}
-      // Allocation clients must be EXACTLY the block's members — a custom map
-      // may not smuggle in a client that was never part of the group.
-      const memberIdSet = new Set(memberIds)
-      const strayClientId = Object.keys(rawCustom).find((id) => !memberIdSet.has(id))
+      // Where the target clients come from: a holding block's members are fixed
+      // (they were chosen on the timer), a regular entry's are named by the
+      // caller. Same 50-client cap and de-duplication the create endpoint uses
+      // for `groupClientIds`.
+      const requestedClientIds = Array.isArray(payload?.clientIds)
+        ? [...new Set(payload.clientIds.filter((id) => typeof id === 'string' && id))].slice(0, 50)
+        : []
+      const targetClientIds = isHolding ? memberIds : requestedClientIds
+
+      // Splitting to ONE client is not this feature — that's just re-billing the
+      // entry, which the edit form's client dropdown already does.
+      if (!isHolding && targetClientIds.length < 2) {
+        sendJson(response, 400, {
+          error: "To move this time to one other client, just edit the entry's client.",
+        })
+        return
+      }
+
+      // Allocation clients must be EXACTLY the targets — a custom map may not
+      // smuggle in a client that was never picked.
+      const targetIdSet = new Set(targetClientIds)
+      const strayClientId = Object.keys(rawCustom).find((id) => !targetIdSet.has(id))
       if (strayClientId) {
-        sendJson(response, 400, { error: 'A client in this split is not part of the group block.' })
+        sendJson(response, 400, {
+          error: isHolding
+            ? 'A client in this split is not part of the group block.'
+            : 'A client in this split was not selected.',
+        })
         return
       }
 
       const allData = await appDataStore.read()
 
-      // Same visibility rule the group-CREATE path enforces: every member client
-      // has to be one this user may bill (owners see them all).
+      // Same visibility rule the group-CREATE path enforces: every target client
+      // has to be one this user may bill (owners see them all). This is also
+      // what keeps an unknown client id out — it can't be in the allowed set.
       const allowed = visibleClientIdSet(session, allData.clients ?? [])
-      if (!memberIds.every((id) => allowed.has(id))) {
-        sendJson(response, 403, { error: 'A group client is not visible to this user' })
+      if (!targetClientIds.every((id) => allowed.has(id))) {
+        sendJson(response, 403, {
+          error: isHolding
+            ? 'A group client is not visible to this user'
+            : 'Client not visible to this user',
+        })
         return
       }
 
@@ -3253,12 +3298,12 @@ const server = createServer(async (request, response) => {
       // Allocate SERVER-side from the shared lib, so what the modal previewed
       // and what gets saved come out of the same function.
       const custom = {}
-      for (const id of memberIds) custom[id] = Number(rawCustom[id])
-      const allocation = allocateGroupMinutes(holding.minutes, memberIds, mode, custom)
+      for (const id of targetClientIds) custom[id] = Number(rawCustom[id])
+      const allocation = allocateGroupMinutes(holding.minutes, targetClientIds, mode, custom)
 
       // Zero-minute clients are simply dropped (nobody is billed 0), but the
       // sum rule below still measures against the FULL block.
-      const allocations = memberIds
+      const allocations = targetClientIds
         .map((clientId) => ({ clientId, minutes: allocation[clientId] ?? 0 }))
         .filter((row) => minutesToSeconds(row.minutes) > 0)
 
@@ -3268,6 +3313,16 @@ const server = createServer(async (request, response) => {
             mode === 'custom'
               ? 'Enter minutes greater than 0 for at least one client.'
               : 'The tracked time is too short to split.',
+        })
+        return
+      }
+
+      // Re-check after the zero-minute drop: a custom split that gives one
+      // selected client everything and the other 0 sums correctly but is still
+      // a re-bill, not a split.
+      if (!isHolding && allocations.length < 2) {
+        sendJson(response, 400, {
+          error: "To move this time to one other client, just edit the entry's client.",
         })
         return
       }
@@ -3304,11 +3359,19 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, result)
       } catch (error) {
         if (error instanceof TimeEntrySplitError) {
-          sendJson(response, error.code === 'not_found' ? 404 : 409, { error: error.message })
+          // 404 gone · 400 the caller asked for something invalid · 409 the
+          // entry changed kind under us (someone else split it first).
+          const status =
+            error.code === 'not_found'
+              ? 404
+              : error.code === 'not_splittable' || error.code === 'single_allocation'
+                ? 400
+                : 409
+          sendJson(response, status, { error: error.message })
           return
         }
         console.error('[time-entry-split] failed:', error)
-        sendJson(response, 500, { error: 'Could not split this group entry — please try again.' })
+        sendJson(response, 500, { error: 'Could not split this time entry — please try again.' })
       }
       return
     }

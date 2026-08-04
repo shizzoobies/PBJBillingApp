@@ -28,6 +28,7 @@ import type {
 } from '../lib/types'
 import {
   allocateGroupMinutes,
+  classifySplitTarget,
   clientName,
   currentBillingPeriod,
   currentWeekStart,
@@ -43,6 +44,7 @@ import {
   minutesToSeconds,
   sessionMinutes,
   shiftWeek,
+  splitClientOptions,
   weekRangeOf,
 } from '../lib/utils'
 
@@ -297,6 +299,7 @@ export function TimePage() {
         <GroupSplitModal
           entry={splitTarget}
           clients={data.clients}
+          billableClients={timeTrackingClients}
           onSplit={splitGroupEntry}
           onClose={() => setSplitTarget(null)}
         />
@@ -1510,34 +1513,65 @@ function ManualEntryModal({
 }
 
 /**
- * Splits an unsplit group holding entry across its member clients. The owner
- * picks how to divide the tracked block — evenly, the full duration to each, or
- * a custom per-client split — sees a live preview, and confirms. On confirm the
- * holding entry is replaced by one billable entry per client.
+ * Splits a time entry across clients. The user picks how to divide the tracked
+ * block — evenly, the full duration to each, or a custom per-client split —
+ * sees a live preview, and confirms. On confirm the source entry is replaced by
+ * one entry per client.
+ *
+ * Two shapes:
+ *   - an unsplit GROUP holding block: the member clients were fixed when the
+ *     timer started, so there is no picker (unchanged behavior);
+ *   - a REGULAR client entry: it opens with a checkbox list of the clients this
+ *     user may bill, its current client preselected. That's the fix for "it
+ *     will only let me split if I pick one client" — ordinary time can now be
+ *     divided too, not just group-timer blocks.
  */
 function GroupSplitModal({
   entry,
   clients,
+  billableClients,
   onSplit,
   onClose,
 }: {
   entry: TimeEntry
+  /** All visible clients — used for name lookup on already-chosen ids. */
   clients: Client[]
+  /** The clients this user may bill — the picker's options. */
+  billableClients: Client[]
   onSplit: (
     holding: TimeEntry,
     mode: GroupAllocationMode,
     customMinutes: Record<string, number>,
+    clientIds: string[],
   ) => Promise<void>
   onClose: () => void
 }) {
+  const isHolding = classifySplitTarget(entry) === 'holding'
   const memberIds = useMemo(
     () => (Array.isArray(entry.groupClientIds) ? entry.groupClientIds : []),
     [entry.groupClientIds],
+  )
+  const clientOptions = useMemo(
+    () => (isHolding ? [] : splitClientOptions(billableClients, entry.clientId)),
+    [isHolding, billableClients, entry.clientId],
+  )
+  // A regular split starts on the client the entry is already billed to, so the
+  // owner only has to add the ones they're splitting toward.
+  const [pickedIds, setPickedIds] = useState<string[]>(() =>
+    entry.clientId ? [entry.clientId] : [],
   )
   const [mode, setMode] = useState<GroupAllocationMode>('even')
   const [customMinutes, setCustomMinutes] = useState<Record<string, string>>({})
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
+  // The clients this split is actually dividing across. Keeps the picker's
+  // option order (current client first) so the preview list doesn't jump around
+  // as boxes are ticked.
+  const targetIds = useMemo(
+    () =>
+      isHolding ? memberIds : clientOptions.map((o) => o.id).filter((id) => pickedIds.includes(id)),
+    [isHolding, memberIds, clientOptions, pickedIds],
+  )
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1549,13 +1583,13 @@ function GroupSplitModal({
 
   const customMinutesNumeric = useMemo(() => {
     const out: Record<string, number> = {}
-    for (const id of memberIds) out[id] = Number(customMinutes[id])
+    for (const id of targetIds) out[id] = Number(customMinutes[id])
     return out
-  }, [memberIds, customMinutes])
+  }, [targetIds, customMinutes])
 
   const allocation = useMemo(
-    () => allocateGroupMinutes(entry.minutes, memberIds, mode, customMinutesNumeric),
-    [entry.minutes, memberIds, mode, customMinutesNumeric],
+    () => allocateGroupMinutes(entry.minutes, targetIds, mode, customMinutesNumeric),
+    [entry.minutes, targetIds, mode, customMinutesNumeric],
   )
   const totalBilled = Object.values(allocation).reduce((sum, minutes) => sum + (minutes || 0), 0)
 
@@ -1564,7 +1598,7 @@ function GroupSplitModal({
   // owner discover it from a 400. ('even' is exact by construction; 'full'
   // deliberately bills each client the whole block.)
   const blockSeconds = minutesToSeconds(entry.minutes)
-  const allocatedSeconds = memberIds.reduce(
+  const allocatedSeconds = targetIds.reduce(
     (sum, id) => sum + minutesToSeconds(allocation[id] ?? 0),
     0,
   )
@@ -1572,7 +1606,7 @@ function GroupSplitModal({
   const mustBalance = mode === 'custom' && remainderSeconds !== 0
   // Auto-balance target: the last client in the group, so one click closes the
   // gap instead of making the owner do the arithmetic.
-  const balanceTargetId = memberIds[memberIds.length - 1] ?? ''
+  const balanceTargetId = targetIds[targetIds.length - 1] ?? ''
   const applyBalance = () => {
     if (!balanceTargetId) return
     const nextSeconds = Math.max(
@@ -1583,7 +1617,13 @@ function GroupSplitModal({
   }
 
   const handleConfirm = async () => {
-    const hasAny = memberIds.some((id) => (allocation[id] ?? 0) > 0)
+    // Splitting to a single client is just re-billing the entry — the edit
+    // form's client dropdown already does that. The server refuses it too.
+    if (!isHolding && targetIds.length < 2) {
+      setError("Pick at least two clients — to move this time to one other client, edit the entry's client instead.")
+      return
+    }
+    const hasAny = targetIds.some((id) => (allocation[id] ?? 0) > 0)
     if (!hasAny) {
       setError(
         mode === 'custom'
@@ -1605,13 +1645,13 @@ function GroupSplitModal({
     setPending(true)
     setError('')
     try {
-      await onSplit(entry, mode, customMinutesNumeric)
+      await onSplit(entry, mode, customMinutesNumeric, targetIds)
       onClose()
     } catch (splitError) {
       setError(
         splitError instanceof Error && splitError.message
           ? splitError.message
-          : 'Could not split this group entry.',
+          : 'Could not split this time entry.',
       )
       setPending(false)
     }
@@ -1625,15 +1665,55 @@ function GroupSplitModal({
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="modal-panel" role="dialog" aria-modal="true" aria-label="Split group time">
+      <div className="modal-panel" role="dialog" aria-modal="true" aria-label="Split time across clients">
         <div className="modal-body">
-          <h2 className="modal-title">Split group time</h2>
+          <h2 className="modal-title">{isHolding ? 'Split group time' : 'Split across clients'}</h2>
           <p className="modal-intro">
-            {formatHoursMinutes(entry.minutes)} tracked across {memberIds.length}{' '}
-            {memberIds.length === 1 ? 'client' : 'clients'}. Choose how to bill it — this replaces
-            the group entry with one billable entry per client.
+            {isHolding ? (
+              <>
+                {formatHoursMinutes(entry.minutes)} tracked across {memberIds.length}{' '}
+                {memberIds.length === 1 ? 'client' : 'clients'}. Choose how to bill it — this
+                replaces the group entry with one billable entry per client.
+              </>
+            ) : (
+              <>
+                {formatHoursMinutes(entry.minutes)} currently billed to{' '}
+                {clientName(clients, entry.clientId)}. Pick every client this time should be split
+                across and choose how to divide it — this replaces the entry with one per client,
+                and they go back through approval.
+              </>
+            )}
           </p>
           <div className="form-grid">
+            {!isHolding ? (
+              <div className="field full-span group-time-block">
+                <span>Clients to split across</span>
+                <div className="group-client-grid">
+                  {clientOptions.map((option) => {
+                    const selected = pickedIds.includes(option.id)
+                    return (
+                      <label
+                        key={option.id}
+                        className={`group-client-chip${selected ? ' is-selected' : ''}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() =>
+                            setPickedIds((prev) =>
+                              prev.includes(option.id)
+                                ? prev.filter((id) => id !== option.id)
+                                : [...prev, option.id],
+                            )
+                          }
+                        />
+                        <span>{option.name}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : null}
             <label className="field full-span">
               <span>How should the time be split?</span>
               <select
@@ -1649,7 +1729,7 @@ function GroupSplitModal({
             <div className="field full-span group-allocation-preview">
               <span>{mode === 'custom' ? 'Minutes per client' : 'Allocation'}</span>
               <ul className="group-allocation-list">
-                {memberIds.map((id) => (
+                {targetIds.map((id) => (
                   <li key={id}>
                     <span className="group-allocation-name">{clientName(clients, id)}</span>
                     {mode === 'custom' ? (
@@ -1677,8 +1757,8 @@ function GroupSplitModal({
               </ul>
               <p className="group-allocation-total">
                 Total billed: {formatHoursMinutes(totalBilled)}
-                {mode === 'full' && memberIds.length > 1
-                  ? ` — ${formatHoursMinutes(entry.minutes)} to each of ${memberIds.length} clients`
+                {mode === 'full' && targetIds.length > 1
+                  ? ` — ${formatHoursMinutes(entry.minutes)} to each of ${targetIds.length} clients`
                   : ''}
                 {mode === 'custom' && remainderSeconds !== 0
                   ? ` — ${formatHoursMinutes(Math.abs(remainderSeconds) / 60)} ${
@@ -2400,6 +2480,23 @@ function TimeEntryRow({
             >
               {busy ? 'Saving...' : 'Save'}
             </button>
+            {/* The client dropdown above MOVES this time to one client; this
+                DIVIDES it across several. Offered on any client-billed entry —
+                the same `canEdit` gate that opened this form. */}
+            {!editIsAdmin && entry.clientId ? (
+              <button
+                className="secondary-action"
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setEditing(false)
+                  setError('')
+                  onSplitGroup(entry)
+                }}
+              >
+                Split across clients…
+              </button>
+            ) : null}
             <button
               className="secondary-action"
               type="button"
@@ -2525,6 +2622,18 @@ function TimeEntryRow({
             >
               {entry.approvalStatus === 'rejected' ? 'Edit & resubmit' : 'Edit'}
             </button>
+            {/* Same affordance a group holding block gets, on ordinary client
+                time. A slice from an earlier split qualifies too. */}
+            {entry.clientId && !entry.isAdministrative ? (
+              <button
+                type="button"
+                className="link-action"
+                disabled={busy}
+                onClick={() => onSplitGroup(entry)}
+              >
+                Split across clients
+              </button>
+            ) : null}
             {canResumeOrAdd ? (
               <>
                 <button

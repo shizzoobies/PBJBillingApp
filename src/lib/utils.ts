@@ -361,7 +361,14 @@ export function isGroupHoldingEntry(entry: {
  * saved entries can never disagree.
  */
 export type { GroupAllocationMode } from '../../lib/group-allocation.js'
-export { allocateGroupMinutes, minutesToSeconds } from '../../lib/group-allocation.js'
+export {
+  allocateGroupMinutes,
+  // Which entries can be split, and the client checkbox list a regular-entry
+  // split opens with — shared so the modal offers exactly what the server allows.
+  classifySplitTarget,
+  minutesToSeconds,
+  splitClientOptions,
+} from '../../lib/group-allocation.js'
 
 export function getAssignedEmployeeIds(client: Client) {
   return client.assignedEmployeeIds ?? []

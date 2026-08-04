@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { allocateGroupMinutes, isGroupHoldingEntry } from '../lib/utils'
+import {
+  allocateGroupMinutes,
+  classifySplitTarget,
+  isGroupHoldingEntry,
+  splitClientOptions,
+} from '../lib/utils'
 
 /**
  * allocateGroupMinutes splits one block of "group time" across multiple
@@ -116,5 +121,77 @@ describe('isGroupHoldingEntry', () => {
 
   it('is false when there are no members', () => {
     expect(isGroupHoldingEntry({ clientId: '', groupClientIds: [] })).toBe(false)
+  })
+})
+
+/**
+ * `classifySplitTarget` is the one rule the store, the split endpoint and the
+ * modal share for "can this entry be split, and where do its target clients
+ * come from?". Any client-billed entry qualifies now — the group timer is no
+ * longer the only way in.
+ */
+describe('classifySplitTarget', () => {
+  it('calls an unsplit group block a holding entry', () => {
+    expect(classifySplitTarget({ clientId: '', groupClientIds: ['a', 'b'] })).toBe('holding')
+  })
+
+  it('calls an ordinary client entry regular', () => {
+    expect(classifySplitTarget({ clientId: 'client-1' })).toBe('regular')
+  })
+
+  it('calls a slice from an earlier split regular — its minutes are just minutes', () => {
+    expect(classifySplitTarget({ clientId: 'client-1', groupClientIds: [] })).toBe('regular')
+  })
+
+  it('calls administrative time administrative, even with members attached', () => {
+    expect(
+      classifySplitTarget({ clientId: '', isAdministrative: true, groupClientIds: ['a'] }),
+    ).toBe('administrative')
+  })
+
+  it('calls an entry with no client and no members unsplittable', () => {
+    expect(classifySplitTarget({ clientId: '', groupClientIds: [] })).toBe('unsplittable')
+  })
+})
+
+/**
+ * `splitClientOptions` assembles the checkbox list a regular-entry split opens
+ * with. Alphabetical, except the entry's CURRENT client is pulled to the front
+ * so the client being split away from is never buried in a long list.
+ */
+describe('splitClientOptions', () => {
+  const clients = [
+    { id: 'c3', name: 'Zenith' },
+    { id: 'c1', name: 'Acme' },
+    { id: 'c2', name: 'Globex' },
+  ]
+
+  it('sorts by name and puts the current client first', () => {
+    expect(splitClientOptions(clients, 'c2').map((option) => option.id)).toEqual(['c2', 'c1', 'c3'])
+  })
+
+  it('is plain alphabetical when the current client is not in the list', () => {
+    expect(splitClientOptions(clients, 'missing').map((option) => option.id)).toEqual([
+      'c1',
+      'c2',
+      'c3',
+    ])
+  })
+
+  it('leaves an already-first current client where it is', () => {
+    expect(splitClientOptions(clients, 'c1').map((option) => option.id)).toEqual(['c1', 'c2', 'c3'])
+  })
+
+  it('drops duplicates and id-less rows', () => {
+    const messy = [...clients, { id: 'c1', name: 'Acme (dupe)' }, { id: '', name: 'Nameless' }]
+    expect(splitClientOptions(messy, 'c1')).toEqual([
+      { id: 'c1', name: 'Acme' },
+      { id: 'c2', name: 'Globex' },
+      { id: 'c3', name: 'Zenith' },
+    ])
+  })
+
+  it('handles an empty list', () => {
+    expect(splitClientOptions([], 'c1')).toEqual([])
   })
 })

@@ -494,19 +494,254 @@ describe('splitTimeEntry (file backend)', () => {
     expect(await persisted()).toEqual(afterFirst)
   })
 
-  it('refuses an entry that is not an unsplit group block', async () => {
+  it('refuses an entry with neither a client nor group members', async () => {
     await store.write(
       workspace({
         clients: [{ id: 'c1', name: 'Acme' }],
-        timeEntries: [holdingEntry({ id: 'plain-1', clientId: 'c1', groupClientIds: [] })],
+        timeEntries: [holdingEntry({ id: 'orphan-1', clientId: '', groupClientIds: [] })],
       }),
     )
     const before = await persisted()
 
     await expect(
-      store.splitTimeEntry('plain-1', [{ clientId: 'c1', minutes: 48.5 }], 'owner-1', 'g', 'even'),
+      store.splitTimeEntry(
+        'orphan-1',
+        [
+          { clientId: 'c1', minutes: 24.25 },
+          { clientId: 'c2', minutes: 24.25 },
+        ],
+        'owner-1',
+        'g',
+        'even',
+      ),
     ).rejects.toMatchObject({ code: 'not_holding' })
 
     expect(await persisted()).toEqual(before)
+  })
+})
+
+/**
+ * `splitTimeEntry` on a REGULAR client entry — the firm owner's report that
+ * editing time to split clients "will only let me if I pick one client".
+ * Splitting used to be a group-timer-only path; ordinary time (including a
+ * slice from an earlier split) can now be divided across clients too.
+ *
+ * What this pins beyond the holding-block suite above:
+ *   - a regular entry splits and its sessions survive verbatim;
+ *   - an APPROVED original becomes PENDING slices (same rule as any edit to an
+ *     approved entry) and the original is gone;
+ *   - the entry's own billable flag carries over — a split must not start
+ *     billing internal time;
+ *   - administrative time is refused (`not_splittable`), and a ONE-allocation
+ *     "split" is refused (`single_allocation`) because that's the edit form's
+ *     client dropdown, not a split;
+ *   - a slice can be re-split.
+ */
+describe('splitTimeEntry on a regular client entry (file backend)', () => {
+  const SESSIONS = [
+    { startAt: '2026-07-02T13:00:00.000Z', endAt: '2026-07-02T13:40:00.000Z' },
+    { startAt: '2026-07-02T14:00:00.000Z', endAt: '2026-07-02T14:20:30.000Z' },
+  ]
+
+  const regularEntry = (overrides = {}) => ({
+    id: 'reg-1',
+    employeeId: 'emp-1',
+    clientId: 'c1',
+    isAdministrative: false,
+    date: '2026-07-02',
+    minutes: 60.5,
+    category: 'General',
+    description: 'Month-end cleanup',
+    billable: true,
+    taskId: null,
+    approvalStatus: 'approved',
+    entryMethod: 'timer',
+    startAt: SESSIONS[0].startAt,
+    endAt: SESSIONS[1].endAt,
+    sessions: SESSIONS,
+    groupClientIds: [],
+    ...overrides,
+  })
+
+  const seedRegular = async (overrides = {}) => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+        ],
+        timeEntries: [regularEntry(overrides)],
+      }),
+    )
+  }
+
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  it('splits an ordinary client entry across clients, sessions intact', async () => {
+    await seedRegular()
+
+    const { created, deletedId } = await store.splitTimeEntry(
+      'reg-1',
+      [
+        { clientId: 'c1', minutes: 30.25 },
+        { clientId: 'c2', minutes: 30.25 },
+      ],
+      'owner-1',
+      'grp-reg',
+      'even',
+    )
+
+    expect(deletedId).toBe('reg-1')
+    expect(created).toHaveLength(2)
+    for (const slice of created) {
+      expect(slice.sessions).toEqual(SESSIONS)
+      expect(slice.startAt).toBe(SESSIONS[0].startAt)
+      expect(slice.endAt).toBe(SESSIONS[1].endAt)
+      expect(slice.description).toBe('Month-end cleanup')
+      expect(slice.date).toBe('2026-07-02')
+      expect(slice.employeeId).toBe('emp-1')
+      expect(slice.groupId).toBe('grp-reg')
+      expect(slice.groupAllocation).toBe('even')
+    }
+
+    const data = await persisted()
+    expect(data.timeEntries.find((entry) => entry.id === 'reg-1')).toBeUndefined()
+    expect(data.timeEntries.map((entry) => entry.clientId).sort()).toEqual(['c1', 'c2'])
+    const totalSeconds = data.timeEntries.reduce(
+      (sum, entry) => sum + Math.round(entry.minutes * 60),
+      0,
+    )
+    expect(totalSeconds).toBe(Math.round(60.5 * 60))
+  })
+
+  it('sends an approved original back through approval as pending slices', async () => {
+    await seedRegular({ approvalStatus: 'approved' })
+    const { created } = await store.splitTimeEntry(
+      'reg-1',
+      [
+        { clientId: 'c1', minutes: 30.25 },
+        { clientId: 'c2', minutes: 30.25 },
+      ],
+      'owner-1',
+      'grp-reg',
+      'even',
+    )
+    expect(created.every((slice) => slice.approvalStatus === 'pending')).toBe(true)
+  })
+
+  it('carries the entry own billable flag over — internal time stays internal', async () => {
+    await seedRegular({ billable: false })
+    const { created } = await store.splitTimeEntry(
+      'reg-1',
+      [
+        { clientId: 'c1', minutes: 30.25 },
+        { clientId: 'c2', minutes: 30.25 },
+      ],
+      'owner-1',
+      'grp-reg',
+      'even',
+    )
+    expect(created.every((slice) => slice.billable === false)).toBe(true)
+  })
+
+  it('refuses administrative time — there is no client to divide', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+        ],
+        timeEntries: [regularEntry({ id: 'admin-1', clientId: '', isAdministrative: true })],
+      }),
+    )
+    const before = await persisted()
+
+    await expect(
+      store.splitTimeEntry(
+        'admin-1',
+        [
+          { clientId: 'c1', minutes: 30.25 },
+          { clientId: 'c2', minutes: 30.25 },
+        ],
+        'owner-1',
+        'grp-reg',
+        'even',
+      ),
+    ).rejects.toMatchObject({ code: 'not_splittable' })
+
+    expect(await persisted()).toEqual(before)
+  })
+
+  it('refuses a one-allocation split — that is the edit form client dropdown', async () => {
+    await seedRegular()
+    const before = await persisted()
+
+    await expect(
+      store.splitTimeEntry('reg-1', [{ clientId: 'c2', minutes: 60.5 }], 'owner-1', 'g', 'even'),
+    ).rejects.toMatchObject({ code: 'single_allocation' })
+
+    expect(await persisted()).toEqual(before)
+  })
+
+  it('re-splits a slice from an earlier split', async () => {
+    await seedRegular()
+    const { created } = await store.splitTimeEntry(
+      'reg-1',
+      [
+        { clientId: 'c1', minutes: 30.25 },
+        { clientId: 'c2', minutes: 30.25 },
+      ],
+      'owner-1',
+      'grp-reg',
+      'even',
+    )
+    const slice = created[0]
+    expect(slice.groupId).toBe('grp-reg')
+
+    const second = await store.splitTimeEntry(
+      slice.id,
+      [
+        { clientId: 'c1', minutes: 15.125 },
+        { clientId: 'c2', minutes: 15.125 },
+      ],
+      'owner-1',
+      'grp-reg-2',
+      'even',
+    )
+    expect(second.deletedId).toBe(slice.id)
+    expect(second.created).toHaveLength(2)
+    // A fresh groupId replaces the old one, and the sessions still ride along.
+    expect(second.created.every((row) => row.groupId === 'grp-reg-2')).toBe(true)
+    expect(second.created[0].sessions).toEqual(SESSIONS)
+
+    const data = await persisted()
+    expect(data.timeEntries.find((entry) => entry.id === slice.id)).toBeUndefined()
+    expect(data.timeEntries).toHaveLength(3)
+  })
+
+  it('leaves the holding-block path alone — a group block still splits', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+        ],
+        timeEntries: [
+          regularEntry({ id: 'hold-x', clientId: '', groupClientIds: ['c1', 'c2'], billable: false }),
+        ],
+      }),
+    )
+    const { created } = await store.splitTimeEntry(
+      'hold-x',
+      [
+        { clientId: 'c1', minutes: 30.25 },
+        { clientId: 'c2', minutes: 30.25 },
+      ],
+      'owner-1',
+      'grp-hold',
+      'even',
+    )
+    // A holding block parks `billable: false` until split; its slices bill.
+    expect(created.every((slice) => slice.billable === true)).toBe(true)
   })
 })

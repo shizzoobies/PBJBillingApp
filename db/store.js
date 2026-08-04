@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile as fsWriteFile } from 'node:fs/promises'
+import { classifySplitTarget } from '../lib/group-allocation.js'
 import {
   StaleWorkspaceError,
   fileWorkspaceVersion,
@@ -1038,10 +1039,14 @@ export function normalizeGroupAllocation(value) {
 /**
  * Why a `splitTimeEntry` call could not proceed. `code` is one of:
  *   - `not_found`  — no such entry (someone deleted it first).
- *   - `not_holding` — the entry is not an UNSPLIT group holding entry, which
+ *   - `not_holding` — the entry has neither a client nor group members, which
  *     in practice means a concurrent request already split it.
- * Both are clean conflicts, never a half-written split: the Postgres branch
- * holds `select … for update` on the holding row, and the file branch validates
+ *   - `not_splittable` — administrative time: there is no client to divide.
+ *   - `single_allocation` — a regular client entry was handed ONE allocation.
+ *     Moving time to a different client is the edit form's client dropdown, not
+ *     a split; refusing here keeps a "split" from silently becoming a re-bill.
+ * All are clean conflicts, never a half-written split: the Postgres branch
+ * holds `select … for update` on the target row, and the file branch validates
  * before it writes anything.
  */
 export class TimeEntrySplitError extends Error {
@@ -4626,25 +4631,36 @@ export class AppDataStore {
    * from scratch so they carried NO `sessions` — the original clock-in/out was
    * gone for good and the Raw report showed blank in/out for split time.
    *
-   * Here the whole thing is one unit of work. Each slice INHERITS the holding
+   * Here the whole thing is one unit of work. Each slice INHERITS the source
    * entry's date, description, capture method + manual reason, task label,
    * category, its `sessions` verbatim and its started_at/ended_at envelope, and
-   * the employee. Each slice gets its own client, `billable: true`,
-   * `isAdministrative: false`, the shared `groupId`, and `groupAllocation` set
-   * to the mode that produced it.
+   * the employee. Each slice gets its own client, `isAdministrative: false`,
+   * the shared `groupId`, and `groupAllocation` set to the mode that produced
+   * it.
+   *
+   * The source may be an unsplit GROUP holding block (the original case) or a
+   * plain client-billed entry — the owner asked to divide ordinary time across
+   * clients, and a slice from an earlier split is just another such entry. The
+   * two differ only in where the allowed target clients come from (the block's
+   * `groupClientIds` vs. the caller's explicit list, validated at the endpoint)
+   * and in `billable`: a holding block is parked `billable: false` until split
+   * so its slices are forced `true`, while a regular entry already carries the
+   * user's own billable choice and keeps it. Administrative time has no client
+   * to divide and is refused.
    *
    * Approval status mirrors `createTimeEntry` exactly (`entryMethod === 'timer'
    * && !groupId` auto-approves): a slice always carries a groupId, so it always
    * lands 'pending' in the daily queue — the per-client amounts are typed time,
    * even when the block itself was timer-captured.
    *
-   * @param {string} entryId - the holding entry to split.
+   * @param {string} entryId - the entry to split (holding block or regular).
    * @param {Array<{clientId: string, minutes: number}>} allocations
    * @param {string} actorUserId - who performed the split (for the audit row).
    * @param {string} groupId - shared id stamped on every slice.
    * @param {'even'|'full'|'custom'} allocationMode
    * @returns {Promise<{created: object[], deletedId: string}>}
-   * @throws {TimeEntrySplitError} when the entry is gone or already split.
+   * @throws {TimeEntrySplitError} when the entry is gone, already split, not
+   *   splittable (administrative), or a regular entry got one allocation.
    */
   async splitTimeEntry(entryId, allocations, actorUserId, groupId, allocationMode) {
     const rows = (Array.isArray(allocations) ? allocations : []).filter(
@@ -4659,7 +4675,35 @@ export class AppDataStore {
       throw new TimeEntrySplitError('invalid_allocation', 'A split needs a group id.')
     }
 
-    // Build every slice from the holding entry. Shared by both backends so the
+    // The one gate both backends run, so a Postgres-only or file-only rule can
+    // never drift. Returns the error to throw, or null when the split may
+    // proceed. `not_holding` keeps its original wording: with a client and an
+    // administrative entry both handled above, what's left really is a group
+    // block someone already split.
+    const splitTargetError = (source) => {
+      const kind = classifySplitTarget(source)
+      if (kind === 'administrative') {
+        return new TimeEntrySplitError(
+          'not_splittable',
+          'Administrative time has no client to split — assign a client first.',
+        )
+      }
+      if (kind === 'unsplittable') {
+        return new TimeEntrySplitError(
+          'not_holding',
+          'That entry is not an unsplit group time block — it may have been split already.',
+        )
+      }
+      if (kind === 'regular' && rows.length < 2) {
+        return new TimeEntrySplitError(
+          'single_allocation',
+          "To move this time to one other client, just edit the entry's client.",
+        )
+      }
+      return null
+    }
+
+    // Build every slice from the source entry. Shared by both backends so the
     // two can never disagree on what a slice inherits.
     const buildSlices = (holding) =>
       rows.map((row) => ({
@@ -4671,7 +4715,11 @@ export class AppDataStore {
         minutes: coerceEntryMinutes(row.minutes),
         category: holding.category ?? 'General',
         description: holding.description ?? '',
-        billable: true,
+        // A group holding block is parked `billable: false` until it is split,
+        // so its slices become billable. A regular entry already carries the
+        // user's own Billable/Internal choice — dividing it across clients must
+        // not silently start billing internal time.
+        billable: holding.clientId ? Boolean(holding.billable) : true,
         taskId: null,
         // Typed time → the daily pending queue. See the doc comment above.
         approvalStatus: 'pending',
@@ -4714,17 +4762,13 @@ export class AppDataStore {
           throw new TimeEntrySplitError('not_found', 'That time entry no longer exists.')
         }
         const row = held.rows[0]
-        const memberIds = Array.isArray(row.group_client_ids)
-          ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
-          : []
-        if (row.client_id || row.is_administrative || memberIds.length === 0) {
-          await client.query('rollback')
-          throw new TimeEntrySplitError(
-            'not_holding',
-            'That entry is not an unsplit group time block — it may have been split already.',
-          )
-        }
         const holding = {
+          clientId: row.client_id ?? '',
+          isAdministrative: Boolean(row.is_administrative),
+          groupClientIds: Array.isArray(row.group_client_ids)
+            ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
+            : [],
+          billable: row.billable,
           employeeId: row.user_id,
           date: row.entry_date.toISOString().slice(0, 10),
           category: row.category,
@@ -4735,6 +4779,11 @@ export class AppDataStore {
           endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
           sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
           taskLabel: row.task_label ?? undefined,
+        }
+        const targetError = splitTargetError(holding)
+        if (targetError) {
+          await client.query('rollback')
+          throw targetError
         }
         const slices = buildSlices(holding)
 
@@ -4812,15 +4861,8 @@ export class AppDataStore {
     if (!holding) {
       throw new TimeEntrySplitError('not_found', 'That time entry no longer exists.')
     }
-    const memberIds = Array.isArray(holding.groupClientIds)
-      ? holding.groupClientIds.filter((id) => typeof id === 'string' && id)
-      : []
-    if (holding.clientId || holding.isAdministrative || memberIds.length === 0) {
-      throw new TimeEntrySplitError(
-        'not_holding',
-        'That entry is not an unsplit group time block — it may have been split already.',
-      )
-    }
+    const targetError = splitTargetError(holding)
+    if (targetError) throw targetError
     const slices = buildSlices(holding)
     data.timeEntries = [...slices, ...entries.filter((entry) => entry.id !== entryId)]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
