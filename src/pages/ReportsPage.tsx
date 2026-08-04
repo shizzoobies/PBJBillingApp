@@ -1,8 +1,9 @@
 import { ChevronLeft, ChevronRight, Download, Printer } from 'lucide-react'
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
+import { fetchTeam } from '../lib/api'
 import type {
   Checklist,
   Client,
@@ -37,6 +38,33 @@ export function ReportsPage() {
   // in former (soft-deleted) team members so their historical hours are
   // still attributed in the breakdown.
   const [currentTeamOnly, setCurrentTeamOnly] = useState(true)
+
+  /**
+   * Cost/pay rates, keyed by team member id.
+   *
+   * Sourced from /api/team rather than app-data ON PURPOSE. `cost_rate` is
+   * owner-only pay data and `read()` deliberately does not select it, so it
+   * never enters the shared workspace blob that staff sessions receive. The
+   * team endpoint is already owner-gated (403 otherwise) and this page is
+   * owner-only, so reading it here adds no new exposure.
+   *
+   * A missing entry means NO cost rate, which is not an error: an owner draws
+   * no hourly wage, so their time carries no labor cost and the column shows
+   * "—" for them permanently.
+   */
+  const [costRates, setCostRates] = useState<Record<string, number | null>>({})
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchTeam(controller.signal)
+      .then(({ users }) =>
+        setCostRates(
+          Object.fromEntries(users.map((member) => [member.id, member.costRate ?? null])),
+        ),
+      )
+      // Non-fatal: the Cost column simply reads "—" if rates can't be loaded.
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
 
   if (!ownerMode) {
     return null
@@ -186,6 +214,7 @@ export function ReportsPage() {
         checklists={data.checklists}
         clients={data.clients}
         employees={employeesForReport}
+        costRates={costRates}
         timeEntries={data.timeEntries}
       />
       <ReportsOverview
@@ -238,11 +267,14 @@ function PayrollHoursReport({
   checklists,
   clients,
   employees,
+  costRates,
   timeEntries,
 }: {
   checklists: Checklist[]
   clients: Client[]
   employees: Employee[]
+  /** Cost/pay rate by member id; missing or null = no cost rate (see below). */
+  costRates: Record<string, number | null>
   timeEntries: TimeEntry[]
 }) {
   const [periodType, setPeriodType] = useState<'weekly' | 'biweekly'>('biweekly')
@@ -400,6 +432,30 @@ function PayrollHoursReport({
   }
   const money = (amount: number | null) => (amount === null ? '—' : currency.format(amount))
 
+  /**
+   * Labor COST — what the firm pays for the time. Distinct from Billable $ in
+   * two ways that both matter:
+   *
+   *  - it uses the cost/pay rate, not the bill rate; and
+   *  - it applies to ALL hours worked, not just billable ones. You pay for
+   *    internal time too, which is the whole point of comparing the two.
+   *
+   * `null` = no cost rate, and for an OWNER that is the correct, permanent
+   * answer rather than a missing value: an owner draws no hourly wage, so her
+   * time carries no labor cost. Never render it as $0.00, and never treat the
+   * blank as something to be filled in.
+   */
+  const costFor = (employeeId: string, minutesWorked: number) => {
+    const rate = costRates[employeeId]
+    return typeof rate === 'number' && !Number.isNaN(rate) ? (minutesWorked / 60) * rate : null
+  }
+
+  const detailCost = dayGroups.reduce(
+    (sum, group) =>
+      sum + group.rows.reduce((s, row) => s + (costFor(row.employeeId, row.minutes) ?? 0), 0),
+    0,
+  )
+
   const detailBillableMinutes = dayGroups.reduce(
     (sum, group) => sum + group.rows.reduce((s, row) => s + row.billableMinutes, 0),
     0,
@@ -463,6 +519,7 @@ function PayrollHoursReport({
         'Billable',
         'Billable hours',
         'Billable $',
+        'Cost',
         'Description',
       ],
       [...detailEntries]
@@ -485,6 +542,8 @@ function PayrollHoursReport({
             // Blank, not 0.00, when the person has no bill rate configured —
             // a spreadsheet should not be told they billed nothing.
             amountFor(entry.employeeId, entry.billable ? entry.minutes : 0)?.toFixed(2) ?? '',
+            // Cost is on ALL minutes, billable or not. Blank when no cost rate.
+            costFor(entry.employeeId, entry.minutes)?.toFixed(2) ?? '',
             entry.description ?? '',
           ]
         }),
@@ -564,6 +623,7 @@ function PayrollHoursReport({
               <th>Hours</th>
               <th>Billable</th>
               <th>Billable $</th>
+              <th>Cost</th>
               <th className="no-print">Internal</th>
               <th className="no-print">Entries</th>
             </tr>
@@ -584,6 +644,9 @@ function PayrollHoursReport({
                   <td>{formatHoursMinutes(row.minutes)}</td>
                   <td>{formatHoursMinutes(row.billable)}</td>
                   <td>{money(row.amount)}</td>
+                  {/* Cost is on HOURS WORKED, not billable hours — the firm
+                      pays for internal time too. "—" for the owner. */}
+                  <td>{money(costFor(row.id, row.minutes))}</td>
                   <td className="no-print">{formatHoursMinutes(row.internal)}</td>
                   <td className="no-print">{row.count}</td>
                 </tr>
@@ -603,6 +666,15 @@ function PayrollHoursReport({
               </td>
               <td>
                 <strong>{currency.format(totalAmount)}</strong>
+              </td>
+              {/* Sums only members WITH a cost rate, so the owner's hours
+                  contribute nothing — which is the firm's real labor cost. */}
+              <td>
+                <strong>
+                  {currency.format(
+                    rows.reduce((sum, row) => sum + (costFor(row.id, row.minutes) ?? 0), 0),
+                  )}
+                </strong>
               </td>
               <td className="no-print" />
               <td className="no-print" />
@@ -642,12 +714,13 @@ function PayrollHoursReport({
               <th>Hours</th>
               <th>Billable</th>
               <th>Billable $</th>
+              <th>Cost</th>
             </tr>
           </thead>
           <tbody>
             {dayGroups.length === 0 ? (
               <tr>
-                <td colSpan={labelSpan + 3} className="muted-text">
+                <td colSpan={labelSpan + 4} className="muted-text">
                   No time logged in this period.
                 </td>
               </tr>
@@ -663,6 +736,7 @@ function PayrollHoursReport({
                     </td>
                     <td />
                     <td />
+                    <td />
                   </tr>
                   {group.rows.map((row) => (
                     <tr key={row.key}>
@@ -676,6 +750,7 @@ function PayrollHoursReport({
                       <td>{formatHoursMinutes(row.minutes)}</td>
                       <td>{formatHoursMinutes(row.billableMinutes)}</td>
                       <td>{money(amountFor(row.employeeId, row.billableMinutes))}</td>
+                      <td>{money(costFor(row.employeeId, row.minutes))}</td>
                     </tr>
                   ))}
                 </Fragment>
@@ -695,6 +770,9 @@ function PayrollHoursReport({
               </td>
               <td>
                 <strong>{currency.format(detailAmount)}</strong>
+              </td>
+              <td>
+                <strong>{currency.format(detailCost)}</strong>
               </td>
             </tr>
           </tfoot>

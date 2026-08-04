@@ -11,6 +11,7 @@ import './App.css'
 import { AppContext, useAppContext, type AppContextValue } from './AppContext'
 import { AppLayout } from './components/AppLayout'
 import { NewVersionToast } from './components/NewVersionToast'
+import { StaleWorkspaceNotice } from './components/StaleWorkspaceNotice'
 import { SignInScreen } from './components/SignInScreen'
 import {
   addChecklistSubItemRequest,
@@ -78,6 +79,7 @@ import {
   removeChecklistSubSubItemRequest,
   reorderChecklistItemsRequest,
   saveAppData,
+  StaleWorkspaceApiError,
   setChecklistViewersRequest,
   setPreviewModeActive,
   setTemplateViewersRequest,
@@ -327,6 +329,12 @@ function App() {
   const dirtyRef = useRef(false)
   const saveInFlightRef = useRef(false)
   const dataRef = useRef(data)
+  // Latched once the server refuses a bulk save as stale (409 stale_workspace).
+  // A ref because `saveNow` and the retry effect read it outside render; the
+  // companion state drives the blocking notice. Never un-latches — the only
+  // recovery is a reload.
+  const staleWorkspaceRef = useRef(false)
+  const [staleWorkspaceMessage, setStaleWorkspaceMessage] = useState<string | null>(null)
   // Real-time sync support: timestamp of the last local workspace edit (so an
   // incoming refetch never clobbers an in-flight edit), plus a live mirror of
   // the sync state readable inside the SSE refetch timer.
@@ -635,6 +643,10 @@ function App() {
 
     const attempt = () => {
       if (cancelled) return
+      // Stale tab: the blocking notice is up and a reload is imminent. Stop
+      // rescheduling — `dirtyRef` stays set (nothing was saved), so this would
+      // otherwise defer-and-retry every 1.5s forever behind the modal.
+      if (staleWorkspaceRef.current) return
       // Defer (rather than overwrite) whenever the user has unsaved or
       // in-progress work — including text typed into a focused field that hasn't
       // been committed to `data` yet. This is what stops a background refetch
@@ -864,6 +876,12 @@ function App() {
   // so a failure or a concurrent edit can never leave a real change unsaved
   // while the banner claims "All changes saved."
   const saveNow = useCallback(async () => {
+    // Once the server has refused this tab as stale, every further save would be
+    // refused too. Stop trying — the retry effect below fires every 4s and would
+    // otherwise hammer the endpoint forever while the blocking notice is up.
+    if (staleWorkspaceRef.current) {
+      return
+    }
     if (!dirtyRef.current) {
       setDataSyncState((s) => (s === 'offline' ? s : 'synced'))
       return
@@ -893,6 +911,16 @@ function App() {
             setSessionUser(null)
             setServerPersistenceEnabled(false)
             setDataSyncState('offline')
+            return
+          }
+          // The server refused this tab's snapshot as stale — nothing was
+          // written. This is NOT retryable: the tab can only recover by
+          // reloading, so latch it and put up the blocking notice. `dirtyRef`
+          // stays set, which keeps the indicator honest ("not saved").
+          if (error instanceof StaleWorkspaceApiError) {
+            staleWorkspaceRef.current = true
+            setStaleWorkspaceMessage(error.message)
+            setDataSyncState('error')
             return
           }
           // Leave dirtyRef set so the retry effect (and the next edit) try again
@@ -3707,6 +3735,12 @@ function App() {
             bundle. Twice a stale tab caused real trouble (features "missing",
             and the June stale-tab bulk-save data loss) — this closes that. */}
         <NewVersionToast />
+        {/* Data-loss watchdog: the server refused this tab's save because its
+            snapshot is stale. Blocking — every further save is refused too, and
+            a reload is the only recovery. */}
+        {staleWorkspaceMessage ? (
+          <StaleWorkspaceNotice message={staleWorkspaceMessage} />
+        ) : null}
       </AppContext.Provider>
     </BrowserRouter>
   )

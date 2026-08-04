@@ -1,0 +1,65 @@
+name: verify
+
+# Runs the repo's own gate — `npm run verify` (eslint + tsc -b && vite build +
+# vitest). Until now that had only ever run on Alex's machine, so a mistake was
+# caught only if he remembered to check before pushing.
+#
+# Runs on EVERY branch, not just main, deliberately: work here is parked on
+# branches for weeks at a time (see the month-close rule in docs/HANDOFF.md §7),
+# and CI that only runs on main would stay silent for exactly as long as the
+# work sits waiting.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# A newer push supersedes an in-flight run for the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned rather than inherited so a runner-image bump can't silently
+          # change what "green" means. NOTE: package.json has no `engines`
+          # field, so local (Node 24 on Alex's machine) and Railway's Railpack
+          # build may not match this. Adding `engines` would align all three —
+          # see the tracker item's notes.
+          node-version: '22'
+          # NO `cache: npm` here. package-lock.json is gitignored in this repo
+          # (.gitignore:32), and setup-node's npm cache keys off a lockfile —
+          # enabling it fails the step outright rather than degrading.
+
+      # `npm ci` REQUIRES a lockfile and would fail immediately. Same reason as
+      # above. The tradeoff is that CI resolves dependencies fresh, so a bad
+      # upstream release can turn CI red without anything in this repo changing.
+      # If that ever happens, committing the lockfile is the fix — a deliberate
+      # call with deploy implications, not something to change from inside a
+      # red build.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # The repo's own standard, unmodified — lint, typecheck+build, then tests.
+      # Kept as one command so CI and the ship ritual can never drift apart.
+      - name: Verify
+        run: npm run verify
+
+      # Cardinal rule 1: tests run the FILE backend (no DATABASE_URL here),
+      # production is Postgres. A green run here does NOT rule out a
+      # Postgres-only bug — those still need the production-data checks in
+      # docs/HANDOFF.md §4. Stated in the log so a green check is not misread.
+      - name: What this run does and does not prove
+        if: success()
+        run: |
+          echo "PASSED: eslint, tsc -b && vite build, vitest (file backend)."
+          echo "NOT COVERED: Postgres-only behaviour. store.js has two backends;"
+          echo "tests exercise the JSON file one. Validate DB-affecting changes"
+          echo "against production data per docs/HANDOFF.md section 4."

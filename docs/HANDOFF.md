@@ -137,6 +137,51 @@ snapshot first, single transaction, re-verify after.
 
 ## 5. Where things stand (newest first)
 
+**2026-07-26 — the bulk-save staleness guard: BUILT, VERIFIED, NOT DEPLOYED.**
+Lives on the branch **`guard/bulk-save-staleness`**, deliberately not merged —
+Alex parked it because it is month close. Tracker item **`featreq-f7d50027`**
+(EOM lane, high). It is the gate on the historical re-import
+(`featreq-deef43f1`), which is cross-referenced to it.
+
+`GET /api/app-data` returns an `X-Workspace-Version` fingerprint; the tab echoes
+it on `PUT`; `store.write()` re-checks it **inside its own transaction** and
+throws `StaleWorkspaceError` on mismatch → 409, nothing written. Client latches a
+blocking "This tab is out of date" notice and **stops the 4s retry loop**.
+
+Three findings that shaped it, worth keeping:
+
+1. **`read()` writes.** The materializer write-back means fingerprinting through
+   `read()` would be re-entrant during a PUT and nondeterministic. The digest
+   reads persisted state directly instead (`lib/workspace-version.js`).
+2. **`activity_log` is trimmed to 200 rows per user.** Logging every autosave —
+   as originally planned — would evict a session's real activity and break
+   ProductivityPage's `checklist_item_checked` stats. Accepted saves go to the
+   server log; only refusals go to `activity_log`.
+3. **15 concurrent digest queries cost ~1.3s** and grabbed most of the pool on
+   every page load. Collapsed to one `union all` (~200ms warm over the public
+   proxy from a laptop).
+
+Verified: `npm run verify` green (**568 tests / 55 files**, up from 542/53).
+Against prod in a rolled-back transaction the fingerprint was stable on repeat,
+moved on a one-column edit and on a deleted time entry, restored on undo, and did
+**not** move on a bare `updated_at` touch (718 entries intact after rollback).
+End-to-end on the file backend the June wipe was reproduced: the stale tab's save
+over a 50-row import was refused and all 54 entries survived; the same payload
+with a current token wipes it back to 4.
+
+Risk measured for EOM: bulk saves are **infrequent** — all 549 checklists carry
+`created_at = 2026-07-24` (`write()` restamps it), so the last one was two days
+before this was written. The materializer was probed read-only with `write`
+stubbed: three consecutive `read()`s, zero write-backs. Next wave is Aug 1
+(spawn gate is `nextDueDate <= today`).
+
+⚠️ **On the day this merges:** version-less PUTs are refused by design (Alex's
+explicit call), so **hard-refresh both owner tabs immediately after deploying** —
+because bulk saves are rare, an un-refreshed tab could otherwise be ambushed days
+later and lose an unsaved edit. The manifest changed, so re-provision the voice
+agent. Optional easy follow-up: skip the fingerprint for non-owners (staff can
+never PUT), removing its cost from most page loads.
+
 **2026-07-25 (later) — Updates tracker: notifications + a tabbed layout.**
 Four deploys, all verified live:
 
@@ -286,10 +331,12 @@ One interpretation flag left for Brittany inside a shipped item's dev_notes:
 the Board "sort by team member box" was built as a FILTER — the note invites a
 send-back if she meant ordering.
 
-**The single most important pending code change:** the bulk-save staleness
-guard (version token on GET, echoed on PUT, 409 on mismatch + log bulk saves
-to activity_log). It gates the historical re-import and closes the app's last
-known data-loss vector. Scheduled with the re-import ~Aug 6, after month close.
+**The bulk-save staleness guard is now BUILT** and waiting on the branch
+`guard/bulk-save-staleness` (§5, tracker `featreq-f7d50027`) — not merged,
+because it is month close. It closes the app's last known data-loss vector and
+gates the historical re-import. Merge after close, ~Aug 1–3, ahead of the
+re-import ~Aug 6. Note the one deviation from the original sketch: bulk saves are
+logged to the **server log, not `activity_log`** — see §5 finding 2 for why.
 
 These are things **flagged to Alex that he hasn't ruled on**; don't do them
 unprompted.
@@ -423,6 +470,7 @@ durable** — treat everything else as machine-local.
 | What | Where | Durable? |
 |---|---|---|
 | **This repo** (the only thing that matters) | `D:\PBJ Accounting Work\AP For Time Stuff` on the current machine; `github.com/shizzoobies/PBJBillingApp` | ✅ in git |
+| Previous handoff (2026-06-19) | `docs/archive/HANDOFF-2026-06-19.md` — sat at the repo ROOT until 2026-07-26 and was a trap (a fresh session could read month-old "current state" as fact). Archived, not deleted: its **Env vars (Railway) inventory** and the 06-10→06-19 shipped logs were never carried forward and exist nowhere else. One caveat when reading it: it flags the `ELEVENLABS_API_KEY` as needing rotation after being pasted into a chat during setup — **that has since been done** (confirmed by Alex 2026-07-26), so ignore that line. | ✅ in git |
 | Parent folder + its own `CLAUDE.md` | `D:\PBJ Accounting Work\` — a broader two-track project (QuickBooks training + AI bookkeeper). Loaded as context; **no work here happened there** | separate repo |
 | Agent scratch state | `.omc/` inside this repo | mostly gitignored |
 | Machine-local Claude memory | `~/.claude/projects/D--PBJ-Accounting-Work-AP-For-Time-Stuff/memory/` | ❌ per-machine, per-account |

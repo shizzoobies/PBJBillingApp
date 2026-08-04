@@ -87,6 +87,36 @@ export async function fetchPublicFirmSettings(signal?: AbortSignal) {
   return (await response.json()) as PublicFirmSettings
 }
 
+/**
+ * Header carrying the workspace staleness fingerprint (see
+ * `lib/workspace-version.js` on the server).
+ */
+const WORKSPACE_VERSION_HEADER = 'X-Workspace-Version'
+
+/**
+ * The fingerprint of the workspace this tab last saw. Captured from every
+ * `GET /api/app-data` and refreshed from every successful `PUT`, then echoed
+ * back on the next save so the server can refuse a stale snapshot.
+ *
+ * Module-level (like `previewModeActive`) rather than React state: it is a
+ * property of the last network exchange, not of the render tree, and every
+ * read/write of it already funnels through the two functions below.
+ */
+let workspaceVersion: string | null = null
+
+/**
+ * Thrown when the server refuses a bulk save because this tab's snapshot is out
+ * of date. Distinguished from the other 409 the endpoint can return (the
+ * empty-payload guard) by the body's `error` code, because the two need very
+ * different handling: this one is unrecoverable without a reload.
+ */
+export class StaleWorkspaceApiError extends ApiError {
+  constructor(message: string) {
+    super(409, message)
+    this.name = 'StaleWorkspaceApiError'
+  }
+}
+
 export async function fetchAppData(signal: AbortSignal, previewAs?: string | null) {
   const url = previewAs
     ? `/api/app-data?previewAs=${encodeURIComponent(previewAs)}`
@@ -95,23 +125,44 @@ export async function fetchAppData(signal: AbortSignal, previewAs?: string | nul
   if (!response.ok) {
     throw new ApiError(response.status, `Failed to load app data (${response.status})`)
   }
+  // Keep the previous token if the header is absent (e.g. the test fetch mock)
+  // rather than clearing it — a null token is refused by the server.
+  workspaceVersion = response.headers.get(WORKSPACE_VERSION_HEADER) ?? workspaceVersion
 
   return (await response.json()) as AppData
 }
 
 export async function saveAppData(data: AppData) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (workspaceVersion) {
+    headers[WORKSPACE_VERSION_HEADER] = workspaceVersion
+  }
   const response = await apiFetch('/api/app-data', {
     credentials: 'same-origin',
     method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify(data),
   })
 
   if (!response.ok) {
+    if (response.status === 409) {
+      const body = await response.json().catch(() => null)
+      const code = (body as { error?: string } | null)?.error
+      if (code === 'stale_workspace') {
+        // Adopt the server's current fingerprint so a subsequent reload-free
+        // recovery path (if one is ever added) starts from the truth.
+        workspaceVersion = response.headers.get(WORKSPACE_VERSION_HEADER) ?? workspaceVersion
+        throw new StaleWorkspaceApiError(
+          (body as { message?: string } | null)?.message ??
+            'This tab is out of date — please reload.',
+        )
+      }
+    }
     throw new ApiError(response.status, `Failed to save app data (${response.status})`)
   }
+  // The write moved the fingerprint; adopt the new one or this tab's very next
+  // save would be refused as stale against its own change.
+  workspaceVersion = response.headers.get(WORKSPACE_VERSION_HEADER) ?? workspaceVersion
 }
 
 export async function fetchSession(signal: AbortSignal) {
