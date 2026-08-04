@@ -60,8 +60,22 @@ picker, notification bell, and account menu sit in the top bar on every page.
 
 ## Time tracking (Time page)
 
-- Live timer: pick employee → client → optional task (checklist) → describe
+- Live timer: pick employee → client → optional task → describe
   the work → start/stop. The most accurate way to log time.
+- The TASK box on the Time page — in the live timer AND in "Log time manually" —
+  is pick-or-type, not a fixed dropdown. One box that suggests:
+  - that client's open tasks (picking one attaches the time to the real
+    checklist, exactly as the old dropdown did),
+  - that client's UPCOMING recurring tasks, shown as "Name (upcoming)" —
+    choosing one still generates the instance now and attaches to it,
+  - every STANDARD task in the workspace (the client-agnostic blueprints on the
+    Checklists page's "Standard" tab), and
+  - anything you TYPE. A name that isn't in the list is saved as the entry's
+    free-text task name, so it shows in the Task column on the Time page lists,
+    in daily/weekly approvals, and in the Raw report export.
+  Suggestions are de-duplicated by name with the client's real task winning a
+  tie; leaving the box empty means no task. This replaced a dropdown that made
+  custom task names impossible on any client that already had an open task.
 - Track time for a single client, or SPLIT it across multiple clients.
   Available to EVERYONE who logs time (not just owners); the server enforces
   that every client picked is one that person is allowed to bill.
@@ -106,9 +120,9 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - Log time manually: same fields plus date and duration, for after-the-fact
   entries. Manual entries are flagged for owner approval ("manual" badge) and
   notify the owner.
-- "Get ahead" tasks: the task dropdown includes upcoming recurring tasks that
-  haven't materialized yet; picking one generates it now so time can be logged
-  against it. Staff can do this for their assigned clients.
+- "Get ahead" tasks: the task box lists upcoming recurring tasks that
+  haven't materialized yet (marked "(upcoming)"); picking one generates it now so
+  time can be logged against it. Staff can do this for their assigned clients.
 - Recent time list: edit or delete your recent entries. The list is scoped by the
   shared Report period (defaults to this month); the live timer and the log form
   aren't affected by it. It shows EVERY entry in range (it used to cap at the 8

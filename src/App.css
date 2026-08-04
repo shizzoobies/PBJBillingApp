@@ -1115,6 +1115,15 @@ input[type='number'] {
   font-weight: 760;
 }
 
+/* Caption under the Time page's pick-or-type task box. The rule above bolds
+   every span in a field (it's meant for the label), so this out-specifies it. */
+.field span.task-pick-hint {
+  color: #6e6571;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
 .full-span {
   grid-column: 1 / -1;
 }

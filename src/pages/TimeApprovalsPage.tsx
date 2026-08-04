@@ -44,9 +44,17 @@ function previousPeriod(period: string): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
 }
 
-function taskTitleFor(checklists: Checklist[], taskId: string | null | undefined): string {
-  if (!taskId) return 'Unassigned'
-  return checklists.find((checklist) => checklist.id === taskId)?.title ?? 'Unassigned'
+/**
+ * The task name to show for an entry. An attached checklist reads back by id;
+ * otherwise the entry's free-text task name is shown — a custom task name the
+ * person typed on the Time page has to reach the approver, not read
+ * "Unassigned".
+ */
+function taskTitleFor(checklists: Checklist[], entry: TimeEntry): string {
+  if (entry.taskId) {
+    return checklists.find((checklist) => checklist.id === entry.taskId)?.title ?? 'Unassigned'
+  }
+  return entry.taskLabel?.trim() || 'Unassigned'
 }
 
 export function TimeApprovalsPage() {
@@ -1001,7 +1009,7 @@ function EmployeeApprovalGroup({
             clientLabel={
               entry.isAdministrative ? 'Administrative' : clientName(clients, entry.clientId)
             }
-            taskLabel={taskTitleFor(checklists, entry.taskId)}
+            taskLabel={taskTitleFor(checklists, entry)}
             reassignTargets={reassignTargets}
             knownEmployees={knownEmployees}
             onApprove={onApprove}

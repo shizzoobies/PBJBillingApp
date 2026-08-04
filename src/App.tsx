@@ -1326,7 +1326,9 @@ function App() {
       // Administrative time is never billable; the server enforces this too.
       billable: !isAdministrative,
       taskId: timer.taskId ?? null,
-      taskLabel: timer.taskId ? undefined : timer.taskLabel,
+      // The task box keeps what was typed verbatim so it can be edited mid-run;
+      // trim it here, on the way to the entry.
+      taskLabel: timer.taskId ? undefined : timer.taskLabel?.trim() || undefined,
       entryMethod: 'timer',
     })
     setTimer(null)

@@ -13,6 +13,11 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import { useAppContext } from '../AppContext'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
 import { isInReportPeriod } from '../lib/reportPeriod'
+import {
+  buildTimeTaskOptions,
+  resolveTimeTaskChoice,
+  type TimeTaskOption,
+} from '../lib/timeTaskOptions'
 import { ApiError } from '../lib/types'
 import type {
   Checklist,
@@ -97,6 +102,75 @@ function entryToEditSessions(entry: TimeEntry): Array<{ id: string; start: strin
     start: isoToLocalInput(s.startAt),
     stop: isoToLocalInput(s.endAt),
   }))
+}
+
+// ---- The Time page's pick-or-type task box --------------------------------
+
+/** Title of a checklist by id, for showing an attached task back to the user. */
+function checklistTitleById(checklists: Checklist[], taskId: string): string | undefined {
+  return checklists.find((checklist) => checklist.id === taskId)?.title
+}
+
+/**
+ * The task box used by BOTH Time-page forms (live timer and manual entry).
+ *
+ * It replaced a <select> that made custom task names impossible: on any client
+ * with an open task the dropdown was the only control, and the free-text box
+ * only appeared when the client had NO tasks at all. This is one input backed
+ * by a <datalist>, so the same field offers the client's open tasks, its
+ * upcoming recurring tasks, every standard task in the workspace — and
+ * anything the user types instead.
+ *
+ * The parent decides what a choice means; see {@link resolveTimeTaskChoice}.
+ */
+function TaskPickField({
+  value,
+  options,
+  datalistId,
+  placeholder,
+  disabled,
+  onTyped,
+}: {
+  value: string
+  options: TimeTaskOption[]
+  datalistId: string
+  placeholder: string
+  disabled?: boolean
+  onTyped: (typed: string) => void
+}) {
+  const ownCount = options.filter((option) => option.checklistId).length
+  const upcomingCount = options.filter((option) => option.templateId).length
+  return (
+    <>
+      <input
+        className="input"
+        type="text"
+        list={datalistId}
+        value={value}
+        placeholder={placeholder}
+        disabled={disabled}
+        onChange={(event) => onTyped(event.target.value)}
+      />
+      {/* Bare option values on purpose: browsers disagree about whether a
+          datalist option renders its value or its text, so the grouping is
+          said in the caption below instead of inside the list. */}
+      <datalist id={datalistId}>
+        {options.map((option) => (
+          <option key={option.label} value={option.label} />
+        ))}
+      </datalist>
+      <span className="task-pick-hint">
+        {ownCount > 0
+          ? `${ownCount} open task${ownCount === 1 ? '' : 's'} for this client`
+          : 'No open tasks for this client'}
+        {upcomingCount > 0 ? `, ${upcomingCount} upcoming` : ''}
+        {options.length - ownCount - upcomingCount > 0
+          ? `, plus every standard task`
+          : ''}
+        . Anything you type that isn&rsquo;t in the list is used exactly as typed.
+      </span>
+    </>
+  )
 }
 
 export function TimePage() {
@@ -184,6 +258,8 @@ export function TimePage() {
       description: entry.description,
       startedAt: Date.now(),
       taskId: entry.taskId ?? null,
+      // Carry a custom task name across the resume so the task box isn't blank.
+      taskLabel: entry.taskId ? undefined : entry.taskLabel,
       isAdministrative: Boolean(entry.isAdministrative),
       resumeEntryId: entry.id,
     })
@@ -623,6 +699,13 @@ function TimeCapture({
   // Reset taskId if the previously-chosen task isn't valid for the new client.
   const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
 
+  // Everything the pick-or-type task box offers: this client's open tasks, its
+  // upcoming recurring tasks, every standard task, and whatever is typed.
+  const taskOptions = useMemo(
+    () => buildTimeTaskOptions(eligibleTasks, templates, upcomingTemplates),
+    [eligibleTasks, templates, upcomingTemplates],
+  )
+
   // The timer panel is read-only when the timesheet is locked OR an owner is
   // previewing this person — preview mode must never be able to time work.
   const inputsDisabled = locked || previewMode
@@ -638,6 +721,43 @@ function TimeCapture({
   const shownDescription = isRunning ? timer?.description ?? '' : description
   const shownEmployeeId = isRunning ? timer?.employeeId ?? employeeId : employeeId
   const shownTaskLabel = isRunning ? timer?.taskLabel ?? '' : taskLabel
+  // What the task box shows: an attached task reads back as its real title,
+  // anything else as the free text that will be saved as `taskLabel`.
+  const shownTaskText = shownTaskId
+    ? checklistTitleById(checklists, shownTaskId) ?? shownTaskLabel
+    : shownTaskLabel
+
+  /**
+   * A keystroke (or a datalist pick) in the task box. An open task attaches by
+   * id; an UPCOMING recurring task is generated first and then attached — the
+   * same "get ahead" flow the old `template:<id>` dropdown option ran; anything
+   * else rides along as free text. While a timer runs the choice patches the
+   * timer instead of the compose-state, so it survives a refresh.
+   */
+  const handleTaskTyped = async (typed: string) => {
+    const choice = resolveTimeTaskChoice(typed, taskOptions)
+    if (choice.templateId) {
+      const newId = await onGenerateFromTemplate(choice.templateId)
+      if (!newId) {
+        window.alert("Couldn't start that upcoming task right now — try again in a moment.")
+        return
+      }
+      // Only the id — generating merges the new checklist into local data, so
+      // the box reads back its real title (without the "(upcoming)" marker).
+      if (isRunning) onUpdateTimer({ taskId: newId, taskLabel: undefined })
+      else {
+        setTaskId(newId)
+        setTaskLabel('')
+      }
+      return
+    }
+    if (isRunning) {
+      onUpdateTimer({ taskId: choice.taskId, taskLabel: choice.taskId ? undefined : typed })
+    } else {
+      setTaskId(choice.taskId ?? '')
+      setTaskLabel(choice.taskId ? '' : typed)
+    }
+  }
 
   const handleStartTimer = () => {
     if (groupMode) {
@@ -664,10 +784,11 @@ function TimeCapture({
         description || (isAdministrative ? 'Administrative time' : 'Timed bookkeeping work'),
       startedAt: Date.now(),
       taskId: isAdministrative ? null : effectiveTaskId || null,
+      // A typed name rides along whenever no real task is attached — the old
+      // "only when this client has zero tasks" gate is what made a custom task
+      // name impossible on any client that had one.
       taskLabel:
-        !isAdministrative && eligibleTasks.length === 0 && taskLabel.trim()
-          ? taskLabel.trim()
-          : undefined,
+        !isAdministrative && !effectiveTaskId && taskLabel.trim() ? taskLabel.trim() : undefined,
       isAdministrative,
     })
   }
@@ -830,60 +951,14 @@ function TimeCapture({
             </label>
             <label className="field">
               <span>Task</span>
-              {eligibleTasks.length > 0 || upcomingTemplates.length > 0 ? (
-                <select
-                  className="input"
-                  onChange={async (event) => {
-                    const value = event.target.value
-                    // Picking an upcoming recurring task generates its instance
-                    // now, then attaches the time to that real checklist.
-                    if (value.startsWith('template:')) {
-                      const newId = await onGenerateFromTemplate(value.slice('template:'.length))
-                      if (newId) {
-                        if (isRunning) onUpdateTimer({ taskId: newId })
-                        else setTaskId(newId)
-                      } else {
-                        window.alert(
-                          "Couldn't start that upcoming task right now — try again in a moment.",
-                        )
-                      }
-                      return
-                    }
-                    if (isRunning) onUpdateTimer({ taskId: value || null })
-                    else setTaskId(value)
-                  }}
-                  value={shownTaskId}
-                  disabled={inputsDisabled}
-                >
-                  <option value="">(none / general)</option>
-                  {eligibleTasks.map((task) => (
-                    <option key={task.id} value={task.id}>
-                      {task.title}
-                    </option>
-                  ))}
-                  {upcomingTemplates.length > 0 ? (
-                    <optgroup label="Get ahead — start a recurring task">
-                      {upcomingTemplates.map((template) => (
-                        <option key={template.id} value={`template:${template.id}`}>
-                          {template.title} (upcoming)
-                        </option>
-                      ))}
-                    </optgroup>
-                  ) : null}
-                </select>
-              ) : (
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="No active task — type what you're working on"
-                  value={shownTaskLabel}
-                  onChange={(event) => {
-                    if (isRunning) onUpdateTimer({ taskLabel: event.target.value })
-                    else setTaskLabel(event.target.value)
-                  }}
-                  disabled={inputsDisabled}
-                />
-              )}
+              <TaskPickField
+                value={shownTaskText}
+                options={taskOptions}
+                datalistId="time-timer-task-options"
+                placeholder="Pick a task or type your own"
+                disabled={inputsDisabled}
+                onTyped={(typed) => void handleTaskTyped(typed)}
+              />
             </label>
           </>
         )}
@@ -1051,6 +1126,33 @@ function ManualEntryModal({
   }, [templates, effectiveClientId, eligibleTasks])
   const effectiveTaskId = eligibleTasks.some((task) => task.id === taskId) ? taskId : ''
 
+  // Same pick-or-type task box as the live timer: this client's open tasks, its
+  // upcoming recurring tasks, every standard task, and free typing.
+  const taskOptions = useMemo(
+    () => buildTimeTaskOptions(eligibleTasks, templates, upcomingTemplates),
+    [eligibleTasks, templates, upcomingTemplates],
+  )
+  const shownTaskText = effectiveTaskId
+    ? checklistTitleById(checklists, effectiveTaskId) ?? taskLabel
+    : taskLabel
+
+  /** See {@link TaskPickField} — an upcoming task is generated, then attached. */
+  const handleTaskTyped = async (typed: string) => {
+    const choice = resolveTimeTaskChoice(typed, taskOptions)
+    if (choice.templateId) {
+      const newId = await onGenerateFromTemplate(choice.templateId)
+      if (!newId) {
+        window.alert("Couldn't start that upcoming task right now — try again in a moment.")
+        return
+      }
+      setTaskId(newId)
+      setTaskLabel('')
+      return
+    }
+    setTaskId(choice.taskId ?? '')
+    setTaskLabel(choice.taskId ? '' : typed)
+  }
+
   // Group ("split across clients"): log ONE block of time and divide it across
   // the selected clients in a single save — evenly, a custom amount each, or the
   // full duration to each. No separate "split later" step.
@@ -1179,10 +1281,10 @@ function ManualEntryModal({
         description,
         billable: isAdministrative ? false : billable,
         taskId: isAdministrative ? null : effectiveTaskId || null,
+        // Sent whenever no real task is attached (see the timer form) — the old
+        // zero-tasks gate silently dropped every custom name.
         taskLabel:
-          !isAdministrative && eligibleTasks.length === 0 && taskLabel.trim()
-            ? taskLabel.trim()
-            : undefined,
+          !isAdministrative && !effectiveTaskId && taskLabel.trim() ? taskLabel.trim() : undefined,
         entryMethod: 'manual',
         manualReason: reason.trim(),
         startAt: localInputToIso(startLocal),
@@ -1415,51 +1517,13 @@ function ManualEntryModal({
                   </label>
                   <label className="field">
                     <span>Task</span>
-                    {eligibleTasks.length > 0 || upcomingTemplates.length > 0 ? (
-                      <select
-                        className="input"
-                        value={effectiveTaskId}
-                        onChange={async (event) => {
-                          const value = event.target.value
-                          if (value.startsWith('template:')) {
-                            const newId = await onGenerateFromTemplate(
-                              value.slice('template:'.length),
-                            )
-                            if (newId) setTaskId(newId)
-                            else
-                              window.alert(
-                                "Couldn't start that upcoming task right now — try again in a moment.",
-                              )
-                            return
-                          }
-                          setTaskId(value)
-                        }}
-                      >
-                        <option value="">(none / general)</option>
-                        {eligibleTasks.map((task) => (
-                          <option key={task.id} value={task.id}>
-                            {task.title}
-                          </option>
-                        ))}
-                        {upcomingTemplates.length > 0 ? (
-                          <optgroup label="Get ahead — start a recurring task">
-                            {upcomingTemplates.map((template) => (
-                              <option key={template.id} value={`template:${template.id}`}>
-                                {template.title} (upcoming)
-                              </option>
-                            ))}
-                          </optgroup>
-                        ) : null}
-                      </select>
-                    ) : (
-                      <input
-                        className="input"
-                        type="text"
-                        placeholder="No active task — type what you worked on"
-                        value={taskLabel}
-                        onChange={(event) => setTaskLabel(event.target.value)}
-                      />
-                    )}
+                    <TaskPickField
+                      value={shownTaskText}
+                      options={taskOptions}
+                      datalistId="time-manual-task-options"
+                      placeholder="Pick a task or type your own"
+                      onTyped={(typed) => void handleTaskTyped(typed)}
+                    />
                   </label>
                   <label className="check-row full-span">
                     <input

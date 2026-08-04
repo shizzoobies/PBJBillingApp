@@ -21,11 +21,11 @@ describe('buildTimeTaskOptions', () => {
       ],
     )
     expect(options).toEqual([
-      { label: 'Reconcile checking', checklistId: 'chk-1' },
-      { label: 'Chase receipts', checklistId: 'chk-2' },
-      { label: 'Monthly close', checklistId: null },
-      { label: 'Payroll', checklistId: null },
-      { label: 'Sales tax', checklistId: null },
+      { label: 'Reconcile checking', checklistId: 'chk-1', templateId: null },
+      { label: 'Chase receipts', checklistId: 'chk-2', templateId: null },
+      { label: 'Monthly close', checklistId: null, templateId: null },
+      { label: 'Payroll', checklistId: null, templateId: null },
+      { label: 'Sales tax', checklistId: null, templateId: null },
     ])
   })
 
@@ -34,7 +34,7 @@ describe('buildTimeTaskOptions', () => {
       [],
       [template('tpl-1', 'Payroll', true), template('tpl-2', "Someone else's weekly", false)],
     )
-    expect(options).toEqual([{ label: 'Payroll', checklistId: null }])
+    expect(options).toEqual([{ label: 'Payroll', checklistId: null, templateId: null }])
   })
 
   it('de-duplicates by title case-insensitively, keeping the real checklist', () => {
@@ -46,8 +46,8 @@ describe('buildTimeTaskOptions', () => {
       [template('tpl-1', ' monthly bookkeeping ', true), template('tpl-2', 'Payroll', true)],
     )
     expect(options).toEqual([
-      { label: 'Monthly Bookkeeping', checklistId: 'chk-1' },
-      { label: 'Payroll', checklistId: null },
+      { label: 'Monthly Bookkeeping', checklistId: 'chk-1', templateId: null },
+      { label: 'Payroll', checklistId: null, templateId: null },
     ])
   })
 
@@ -56,11 +56,54 @@ describe('buildTimeTaskOptions', () => {
       [task('chk-1', 'Payroll'), task('chk-2', 'payroll'), task('chk-3', '   ')],
       [template('tpl-1', '', true)],
     )
-    expect(options).toEqual([{ label: 'Payroll', checklistId: 'chk-1' }])
+    expect(options).toEqual([{ label: 'Payroll', checklistId: 'chk-1', templateId: null }])
   })
 
   it('returns nothing when there is nothing to offer', () => {
     expect(buildTimeTaskOptions([], [])).toEqual([])
+  })
+
+  it('offers upcoming recurring tasks between the open tasks and the standards', () => {
+    const options = buildTimeTaskOptions(
+      [task('chk-1', 'Reconcile checking')],
+      [template('tpl-std', 'Payroll', true)],
+      [template('tpl-q1', 'Quarterly sales tax', false), template('tpl-1099', '1099 filing', false)],
+    )
+    expect(options).toEqual([
+      { label: 'Reconcile checking', checklistId: 'chk-1', templateId: null },
+      { label: 'Quarterly sales tax (upcoming)', checklistId: null, templateId: 'tpl-q1' },
+      { label: '1099 filing (upcoming)', checklistId: null, templateId: 'tpl-1099' },
+      { label: 'Payroll', checklistId: null, templateId: null },
+    ])
+  })
+
+  it('keeps an upcoming task distinct from an identically-named standard blueprint', () => {
+    // Both are pickable and mean different things — the upcoming one generates
+    // this client's instance, the standard one is just a name.
+    const options = buildTimeTaskOptions(
+      [],
+      [template('tpl-std', 'Payroll', true)],
+      [template('tpl-up', 'Payroll', false)],
+    )
+    expect(options).toEqual([
+      { label: 'Payroll (upcoming)', checklistId: null, templateId: 'tpl-up' },
+      { label: 'Payroll', checklistId: null, templateId: null },
+    ])
+  })
+
+  it('drops blank and duplicate upcoming titles', () => {
+    const options = buildTimeTaskOptions(
+      [],
+      [],
+      [
+        template('tpl-a', 'Payroll', false),
+        template('tpl-b', ' payroll ', false),
+        template('tpl-c', '  ', false),
+      ],
+    )
+    expect(options).toEqual([
+      { label: 'Payroll (upcoming)', checklistId: null, templateId: 'tpl-a' },
+    ])
   })
 })
 
@@ -68,12 +111,14 @@ describe('resolveTimeTaskChoice', () => {
   const options = buildTimeTaskOptions(
     [task('chk-1', 'Reconcile checking')],
     [template('tpl-1', 'Payroll', true)],
+    [template('tpl-2', 'Quarterly sales tax', false)],
   )
 
   it('attaches to the real checklist when an open task is chosen', () => {
     expect(resolveTimeTaskChoice('Reconcile checking', options)).toEqual({
       taskId: 'chk-1',
       taskLabel: undefined,
+      templateId: null,
     })
   })
 
@@ -81,6 +126,33 @@ describe('resolveTimeTaskChoice', () => {
     expect(resolveTimeTaskChoice('  reconcile CHECKING ', options)).toEqual({
       taskId: 'chk-1',
       taskLabel: undefined,
+      templateId: null,
+    })
+  })
+
+  it('asks the caller to generate the instance when an upcoming task is chosen', () => {
+    expect(resolveTimeTaskChoice('Quarterly sales tax (upcoming)', options)).toEqual({
+      taskId: null,
+      taskLabel: undefined,
+      templateId: 'tpl-2',
+    })
+  })
+
+  it('matches an upcoming task regardless of case and surrounding space', () => {
+    expect(resolveTimeTaskChoice(' quarterly SALES TAX (Upcoming) ', options)).toEqual({
+      taskId: null,
+      taskLabel: undefined,
+      templateId: 'tpl-2',
+    })
+  })
+
+  it('treats the upcoming title WITHOUT the suffix as free text, not a generate', () => {
+    // Only the exact row generates a checklist — typing the bare name is just a
+    // name, so nothing is created behind the user's back.
+    expect(resolveTimeTaskChoice('Quarterly sales tax', options)).toEqual({
+      taskId: null,
+      taskLabel: 'Quarterly sales tax',
+      templateId: null,
     })
   })
 
@@ -88,6 +160,7 @@ describe('resolveTimeTaskChoice', () => {
     expect(resolveTimeTaskChoice('Payroll', options)).toEqual({
       taskId: null,
       taskLabel: 'Payroll',
+      templateId: null,
     })
   })
 
@@ -95,11 +168,20 @@ describe('resolveTimeTaskChoice', () => {
     expect(resolveTimeTaskChoice('  Untangling the 2019 AP mess  ', options)).toEqual({
       taskId: null,
       taskLabel: 'Untangling the 2019 AP mess',
+      templateId: null,
     })
   })
 
   it('treats empty / whitespace as no task at all', () => {
-    expect(resolveTimeTaskChoice('', options)).toEqual({ taskId: null, taskLabel: undefined })
-    expect(resolveTimeTaskChoice('   ', options)).toEqual({ taskId: null, taskLabel: undefined })
+    expect(resolveTimeTaskChoice('', options)).toEqual({
+      taskId: null,
+      taskLabel: undefined,
+      templateId: null,
+    })
+    expect(resolveTimeTaskChoice('   ', options)).toEqual({
+      taskId: null,
+      taskLabel: undefined,
+      templateId: null,
+    })
   })
 })
