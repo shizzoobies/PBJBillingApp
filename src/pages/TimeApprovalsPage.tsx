@@ -1,5 +1,6 @@
 import { CheckCircle2, ChevronDown, ChevronRight, Eye, Lock, LockOpen, XCircle } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { useLocation, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import type {
   Checklist,
@@ -8,6 +9,11 @@ import type {
   TimeEntry,
   WeeklySubmission,
 } from '../lib/types'
+import {
+  APPROVAL_SECTION_ANCHORS,
+  resolveApprovalSection,
+  type ApprovalSection,
+} from '../lib/approvalSections'
 import {
   clientName,
   employeeName,
@@ -24,6 +30,13 @@ import {
 } from '../lib/utils'
 
 type StatusFilter = 'pending' | 'rejected' | 'all'
+
+/** Tab order — also the order `resolveApprovalSection` scans for pending work. */
+const APPROVAL_TABS: Array<{ key: ApprovalSection; label: string }> = [
+  { key: 'weekly', label: 'Weekly submissions' },
+  { key: 'queue', label: 'Approval queue' },
+  { key: 'locks', label: 'Timesheet locks' },
+]
 
 function previousPeriod(period: string): string {
   const [year, month] = period.split('-').map(Number)
@@ -58,6 +71,65 @@ export function TimeApprovalsPage() {
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('pending')
 
+  // Month-end's period lives HERE, not inside MonthEndSection, so its tab count
+  // describes the month actually shown in its table. A count that disagreed
+  // with the list under it would just be noise (the same trap the Checklists
+  // tabs fell into).
+  const [lockPeriod, setLockPeriod] = useState(() =>
+    previousPeriod(localDateOnly().slice(0, 7)),
+  )
+
+  // ---- Which section is open ---------------------------------------------
+  // DERIVED from the URL, not stored in state, so a deep link always wins.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const location = useLocation()
+
+  // Pending work per tab. These count exactly what each section lists as
+  // outstanding, so the label can't contradict the body.
+  const sectionCounts: Record<ApprovalSection, number> = useMemo(() => {
+    const weekly = (data.weeklySubmissions ?? []).filter(
+      (submission) => submission.status === 'pending',
+    ).length
+    // Same exclusion the queue itself applies: unsplit group holding entries
+    // are drafts, not submissions awaiting review.
+    const queue = data.timeEntries.filter(
+      (entry) => !isGroupHoldingEntry(entry) && entry.approvalStatus === 'pending',
+    ).length
+    // Only a month that has already ENDED can be locked, so a current/future
+    // month has nothing outstanding no matter how many people are unlocked.
+    const locks =
+      lockPeriod < localDateOnly().slice(0, 7)
+        ? data.employees.filter(
+            (employee) =>
+              !(data.timesheetLocks ?? []).some(
+                (lock) => lock.userId === employee.id && lock.period === lockPeriod,
+              ),
+          ).length
+        : 0
+    return { weekly, queue, locks }
+  }, [
+    data.weeklySubmissions,
+    data.timeEntries,
+    data.employees,
+    data.timesheetLocks,
+    lockPeriod,
+  ])
+
+  const activeSection = resolveApprovalSection({
+    sectionParam: searchParams.get('section'),
+    hash: location.hash,
+    counts: sectionCounts,
+  })
+
+  // Always WRITE the param, even for the first tab: without it the resolver
+  // would fall back to "first section with pending work" and yank the owner
+  // straight back out of the quiet tab they just picked.
+  const setSection = (next: ApprovalSection) => {
+    const params = new URLSearchParams(searchParams)
+    params.set('section', next)
+    setSearchParams(params, { replace: true })
+  }
+
   if (!ownerMode) {
     return null
   }
@@ -81,42 +153,76 @@ export function TimeApprovalsPage() {
             Review submitted time, then lock each month once it is signed off.
           </p>
         </div>
+
+        {/* Weekly submissions / Approval queue / Timesheet locks. Navigation
+            only — each section below is unchanged, it is just no longer at the
+            bottom of a very long scroll. */}
+        <div className="task-area-tabs" role="tablist" aria-label="Approval sections">
+          {APPROVAL_TABS.map((tab) => {
+            const isActive = tab.key === activeSection
+            const count = sectionCounts[tab.key]
+            const classes = ['task-area-tab', isActive ? 'is-active' : '', count === 0 ? 'is-empty' : '']
+              .filter(Boolean)
+              .join(' ')
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                className={classes}
+                onClick={() => setSection(tab.key)}
+              >
+                {tab.label}
+                <span className="task-area-tab-count">{count}</span>
+              </button>
+            )
+          })}
+        </div>
       </header>
 
-      <WeeklyReviewSection
-        submissions={data.weeklySubmissions ?? []}
-        employees={data.employees}
-        clients={data.clients}
-        checklists={data.checklists}
-        entries={data.timeEntries}
-        onApprove={approveWeeklySubmission}
-        onReopen={reopenWeeklySubmission}
-        onReject={rejectWeeklySubmission}
-        onApproveEntry={approveTimeEntry}
-        onRejectEntry={rejectTimeEntry}
-      />
+      {activeSection === 'weekly' ? (
+        <WeeklyReviewSection
+          submissions={data.weeklySubmissions ?? []}
+          employees={data.employees}
+          clients={data.clients}
+          checklists={data.checklists}
+          entries={data.timeEntries}
+          onApprove={approveWeeklySubmission}
+          onReopen={reopenWeeklySubmission}
+          onReject={rejectWeeklySubmission}
+          onApproveEntry={approveTimeEntry}
+          onRejectEntry={rejectTimeEntry}
+        />
+      ) : null}
 
-      <ApprovalQueue
-        employees={approvalEmployees}
-        reassignTargets={data.employees}
-        clients={data.clients}
-        checklists={data.checklists}
-        entries={data.timeEntries}
-        statusFilter={statusFilter}
-        onStatusFilter={setStatusFilter}
-        onApprove={approveTimeEntry}
-        onReject={rejectTimeEntry}
-        onApproveBatch={approveTimeEntriesBatch}
-        onReassign={reassignEntry}
-      />
+      {activeSection === 'queue' ? (
+        <ApprovalQueue
+          employees={approvalEmployees}
+          reassignTargets={data.employees}
+          clients={data.clients}
+          checklists={data.checklists}
+          entries={data.timeEntries}
+          statusFilter={statusFilter}
+          onStatusFilter={setStatusFilter}
+          onApprove={approveTimeEntry}
+          onReject={rejectTimeEntry}
+          onApproveBatch={approveTimeEntriesBatch}
+          onReassign={reassignEntry}
+        />
+      ) : null}
 
-      <MonthEndSection
-        employees={employees}
-        entries={data.timeEntries}
-        locks={data.timesheetLocks ?? []}
-        onLock={lockTimesheet}
-        onUnlock={unlockTimesheet}
-      />
+      {activeSection === 'locks' ? (
+        <MonthEndSection
+          employees={employees}
+          entries={data.timeEntries}
+          locks={data.timesheetLocks ?? []}
+          period={lockPeriod}
+          onPeriodChange={setLockPeriod}
+          onLock={lockTimesheet}
+          onUnlock={unlockTimesheet}
+        />
+      ) : null}
     </section>
   )
 }
@@ -235,7 +341,11 @@ function WeeklyReviewSection({
   }
 
   return (
-    <section className="panel" aria-label="Weekly submissions">
+    <section
+      className="panel"
+      id={APPROVAL_SECTION_ANCHORS.weekly}
+      aria-label="Weekly submissions"
+    >
       <div className="section-heading">
         <div>
           <h2 style={{ margin: 0 }}>Weekly submissions</h2>
@@ -772,7 +882,7 @@ function ApprovalQueue({
   }, [employees, filtered])
 
   return (
-    <section className="panel report-section">
+    <section className="panel report-section" id={APPROVAL_SECTION_ANCHORS.queue}>
       <div className="section-heading">
         <div>
           <p className="section-kicker">Submitted time</p>
@@ -1124,17 +1234,20 @@ function MonthEndSection({
   employees,
   entries,
   locks,
+  period,
+  onPeriodChange,
   onLock,
   onUnlock,
 }: {
   employees: Employee[]
   entries: TimeEntry[]
   locks: { userId: string; period: string; lockedBy: string; lockedAt: string }[]
+  /** Owned by the page so the "Timesheet locks" tab count matches this table. */
+  period: string
+  onPeriodChange: (period: string) => void
   onLock: (userId: string, period: string) => Promise<void>
   onUnlock: (userId: string, period: string) => Promise<void>
 }) {
-  const defaultPeriod = previousPeriod(localDateOnly().slice(0, 7))
-  const [period, setPeriod] = useState(defaultPeriod)
   const [busy, setBusy] = useState(false)
 
   const rows = useMemo(() => {
@@ -1161,7 +1274,7 @@ function MonthEndSection({
   const canLockPeriod = period < currentMonth
 
   return (
-    <section className="panel report-section">
+    <section className="panel report-section" id={APPROVAL_SECTION_ANCHORS.locks}>
       <div className="section-heading">
         <div>
           <p className="section-kicker">Month-end</p>
@@ -1173,7 +1286,7 @@ function MonthEndSection({
             <input
               type="month"
               value={period}
-              onChange={(event) => setPeriod(event.target.value)}
+              onChange={(event) => onPeriodChange(event.target.value)}
             />
           </label>
           {unlockedRows.length > 0 && canLockPeriod ? (

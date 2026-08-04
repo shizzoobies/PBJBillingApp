@@ -134,6 +134,20 @@ picker, notification bell, and account menu sit in the top bar on every page.
 
 ## Time Approvals (owner only)
 
+- **TABBED sections.** The page's three areas — **Weekly submissions**,
+  **Approval queue** and **Timesheet locks** — used to be stacked, so signing
+  off a month meant scrolling past every submitted week and every pending
+  entry. Each is now one click away, using the same tab bar as the Checklists
+  page. Each tab shows its own pending count in the label: weeks awaiting
+  review, entries awaiting approval, and people not yet locked for the month
+  shown in the Timesheet locks table (0 for a month that hasn't ended, since
+  those can't be locked). The page OPENS on the first tab that has pending
+  work, so the queue that needs attention is the one you land on; when
+  everything is clear it opens on Weekly submissions. The open tab is in the
+  URL (`?section=weekly|queue|locks`) so it can be linked and survives a
+  refresh, and an old `#weekly-submissions` / `#approval-queue` /
+  `#timesheet-locks` link opens the matching tab. Navigation only — nothing
+  about how time is approved, rejected or locked changed.
 - **What needs per-entry approval** (changed Jul 2026 per owner request): a
   pure TIMER capture is auto-approved the moment it's saved — it never appears
   in the daily approval queue, and the weekly submission / month lock is where
@@ -433,12 +447,22 @@ picker, notification bell, and account menu sit in the top bar on every page.
   notes-only modal (add a note + read history) for anyone who just needs to jot
   a note. A third "Time" button opens a TRACK-TIME modal for that client without
   leaving the list: shows how much time is logged for them this month, lets you
-  pick an optional task (their open checklists) and a note, and starts the shared
+  pick an optional task and a note, and starts the shared
   timer — the same one the Time page drives, so it keeps running as you navigate
   and stops there as usual. Only one timer runs at a time, so if one is already
   going the modal says so and offers the Time page instead. All three buttons
   work for owners and assigned staff (bookkeepers / accountants) on any client
   they can see.
+  - The "Time" modal's TASK box is pick-or-type, not a fixed dropdown: it
+    suggests that client's open tasks AND every STANDARD task in the workspace
+    (the client-agnostic blueprints on the Checklists page's "Standard" tab),
+    de-duplicated by name with the client's real task winning a tie — and you
+    can type anything that isn't listed, which is used exactly as typed. Picking
+    one of the client's own open tasks still attaches the entry to that real
+    checklist; a standard task or a typed name is stored as the entry's
+    free-text task name (the same field used when a client has no open task), so
+    it shows in the task column on reports instead of being lost in the notes.
+    Leaving the box empty means no task, as before.
 - The client's "Active checklists" section has a "Due this month" toggle that
   filters to checklists due in the current calendar month (with a count).
 - Client lifecycle / onboarding (owner): every client has a stage —

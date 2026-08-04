@@ -10473,6 +10473,9 @@ mark.list-search-hit {
 }
 
 /* Checklists page: In progress / Repeating / Standard.
+   Also the Time Approvals page: Weekly submissions / Approval queue /
+   Timesheet locks — the same tab treatment, deliberately reusing this class so
+   the two tab bars can never drift apart.
    Same underline treatment as .updates-tabs — deliberately its OWN class
    rather than a shared one, because the Updates tab bar is an approved surface
    and reworking it into a common class would put it at risk to style this. */

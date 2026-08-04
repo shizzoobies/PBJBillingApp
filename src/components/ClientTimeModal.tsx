@@ -4,24 +4,41 @@ import { ArrowRight, Play } from 'lucide-react'
 import { useAppContext } from '../AppContext'
 import { AddModal } from './AddModal'
 import type { Client } from '../lib/types'
+import { buildTimeTaskOptions, resolveTimeTaskChoice } from '../lib/timeTaskOptions'
 import { eligibleChecklistsFor, formatHours } from '../lib/utils'
+
+/** Shared id for the task suggestions <datalist>, same idiom as Contacts' Group input. */
+const TASK_DATALIST_ID = 'client-time-task-options'
 
 /**
  * Start tracking time for one client without leaving the client list. Picks an
- * optional task (the client's open checklists) and a note, then starts the
- * shared timer — the same timer the Time page drives, so it keeps running as
- * you navigate and stops there as usual. Only one timer runs at a time, so when
- * one is already going this just says so and offers the Time page instead.
+ * optional task and a note, then starts the shared timer — the same timer the
+ * Time page drives, so it keeps running as you navigate and stops there as
+ * usual. Only one timer runs at a time, so when one is already going this just
+ * says so and offers the Time page instead.
+ *
+ * The task box is a pick-or-type field (see {@link buildTimeTaskOptions}): the
+ * client's own open tasks, every standard blueprint in the workspace, and
+ * whatever you type. It replaced a plain <select> of the client's open tasks,
+ * which left you with nothing to pick on a client that had none.
  */
 export function ClientTimeModal({ client, onClose }: { client: Client; onClose: () => void }) {
   const { data, timer, timerElapsed, startTimer, sessionUser } = useAppContext()
-  const [taskId, setTaskId] = useState('')
+  const [task, setTask] = useState('')
   const [description, setDescription] = useState('')
 
-  const tasks = useMemo(
+  const clientTasks = useMemo(
     () => eligibleChecklistsFor(data.checklists, client.id),
     [data.checklists, client.id],
   )
+  const taskOptions = useMemo(
+    () => buildTimeTaskOptions(clientTasks, data.checklistTemplates),
+    [clientTasks, data.checklistTemplates],
+  )
+  // Counted off the deduped OPTIONS, not the raw inputs, so the caption always
+  // describes the list actually under it.
+  const ownCount = taskOptions.filter((option) => option.checklistId).length
+  const standardCount = taskOptions.length - ownCount
 
   // This month's logged time for the client — quick context before starting.
   const loggedMinutes = useMemo(() => {
@@ -32,12 +49,17 @@ export function ClientTimeModal({ client, onClose }: { client: Client; onClose: 
   }, [data.timeEntries, client.id])
 
   const start = () => {
+    // A typed name that IS one of this client's open tasks still attaches to the
+    // real checklist; anything else rides along as free text. Same two fields
+    // the entry always had — nothing new is persisted.
+    const { taskId, taskLabel } = resolveTimeTaskChoice(task, taskOptions)
     startTimer({
       employeeId: sessionUser.id,
       clientId: client.id,
       description: description.trim(),
       startedAt: Date.now(),
-      taskId: taskId || null,
+      taskId,
+      taskLabel,
     })
     onClose()
   }
@@ -63,19 +85,32 @@ export function ClientTimeModal({ client, onClose }: { client: Client; onClose: 
           </p>
           <label className="field">
             <span>Task (optional)</span>
-            <select
+            <input
               className="input"
-              value={taskId}
-              onChange={(event) => setTaskId(event.target.value)}
-            >
-              <option value="">No specific task</option>
-              {tasks.map((task) => (
-                <option key={task.id} value={task.id}>
-                  {task.title}
-                </option>
+              type="text"
+              list={TASK_DATALIST_ID}
+              value={task}
+              placeholder="No specific task — pick one or type your own"
+              onChange={(event) => setTask(event.target.value)}
+            />
+            {/* Bare option values on purpose: browsers disagree about whether a
+                datalist option renders its value or its text, so grouping is
+                said in the caption below instead of inside the list. */}
+            <datalist id={TASK_DATALIST_ID}>
+              {taskOptions.map((option) => (
+                <option key={option.label} value={option.label} />
               ))}
-            </select>
+            </datalist>
           </label>
+          <p className="muted-text" style={{ margin: '-4px 0 0 0' }}>
+            {ownCount > 0
+              ? `${ownCount} open task${ownCount === 1 ? '' : 's'} for this client`
+              : 'No open tasks for this client'}
+            {standardCount > 0
+              ? `, plus ${standardCount} standard task${standardCount === 1 ? '' : 's'}`
+              : ''}
+            . Anything you type that isn&rsquo;t in the list is used exactly as typed.
+          </p>
           <label className="field">
             <span>What are you working on? (optional)</span>
             <input

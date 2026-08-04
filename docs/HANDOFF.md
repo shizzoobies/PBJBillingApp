@@ -137,6 +137,27 @@ snapshot first, single transaction, re-verify after.
 
 ## 5. Where things stand (newest first)
 
+**2026-08-04 — the time-accuracy run.** One session: released the parked
+month-close branches, then a full audit of the time pipeline ("exact to the
+minute, every entry individual") and fixes for everything it found. All
+deployed and verified live; details in the tracker items' dev_notes.
+
+| Commit | What |
+|---|---|
+| `b7ce60e` | Released the parked branches: **bulk-save staleness guard** (X-Workspace-Version echo, 409 on stale tabs — closes the June-import wipe vector, un-gates the re-import), **CI** (verify on every push/PR), **client-create endpoint** (featreq-decb29e3; unblocked featreq-89b71f05). |
+| `ec4bcba` | **Seconds-exact minutes survive.** sanitizeAppData rounded minutes to integers and the owner-tab bulk save reinserts every entry through it — every autosave rounded the whole table (501/673 prod rows drifted). One shared `coerceEntryMinutes` (snap to the second) now serves sanitize + PATCH; fresh-install schema is numeric. |
+| — | **Approved 537-row backfill**: restored every artifact row to its exact sessions-derived minutes (+84.6 min firm-wide). Undo snapshot COMMITTED at `docs/prod-snapshots/2026-08-04-minutes-backfill.json` (`e8b7c05`) — first durable one. |
+| `492a09c` | **Atomic server-side splits** (`POST /api/time-entries/:id/split`, FOR UPDATE in PG, both backends): slices inherit the block's sessions/envelope verbatim (Raw report shows in/out for splits — featreq-98821327), splits hit activity_log, custom allocations must balance to the second (modal shows remainder + auto-balance), new `group_allocation` column. Killed the client-side create-loop-then-delete that could double entries on mid-sequence failure. |
+| `db852e6` | **Reports exactness**: hours-report detail lists EVERY entry individually with clock-in/out (collapsed view survives only as the "summary" CSV); full-mode group blocks count once in tracked hours/cost (billable per-slice by design — `src/lib/payrollAggregation.ts`); Cost column added to the overview employee table (the featreq-55212377 answer — it was only ever missing THERE). |
+| (this commit) | Time-task picker offers all standard blueprints + free typing via taskLabel (featreq-28170ae5); approvals page tabbed (featreq-ce7161e0). |
+
+Key facts settled by the audit: the Jul-23 "duplicate" entries were TWO real
+work rounds (Brittany confirmed — nothing deleted); `full` allocation mode
+deliberately bills each client the whole block, and payroll now counts it once
+(Alex's ruling). Historical split slices (23 groups) can never recover in/out —
+that data died at split time. Machine-local memory: `time-accuracy-audit-2026-08.md`.
+
+
 **2026-07-26 — the bulk-save staleness guard: BUILT, VERIFIED, NOT DEPLOYED.**
 Lives on the branch **`guard/bulk-save-staleness`**, deliberately not merged —
 Alex parked it because it is month close. Tracker item **`featreq-f7d50027`**
