@@ -370,6 +370,29 @@ export {
   splitClientOptions,
 } from '../../lib/group-allocation.js'
 
+import {
+  buildChecklistInstanceKeys,
+  checklistInstanceKey,
+  checklistMonthKey,
+} from '../../lib/checklist-identity.js'
+
+/**
+ * Recurring-instance identity, shared verbatim with the server materializer
+ * (db/store.js) so the two generators cannot disagree about what already
+ * exists. See lib/checklist-identity.js for why that matters.
+ */
+export {
+  buildChecklistInstanceKeys,
+  checklistInstanceKey,
+  checklistMonthKey,
+}
+
+/** Add the `(template, dueDate, stage 0)` key for a just-created instance. */
+function registerInstanceKey(keys: Set<string>, templateId: string, dueDate: string) {
+  const key = checklistInstanceKey(templateId, dueDate, 0)
+  if (key) keys.add(key)
+}
+
 export function getAssignedEmployeeIds(client: Client) {
   return client.assignedEmployeeIds ?? []
 }
@@ -749,6 +772,11 @@ function buildChecklistFromStage(
     stageId: stage.id,
     stageIndex,
     stageCount,
+    // Inherit the template's board column, exactly like the server materializer
+    // (db/store.js buildChecklistFromStage) does. Omitting it was why instances
+    // generated in the browser landed in "Uncategorized" on the Active board
+    // even when their template had a category.
+    categoryId: template.categoryId ?? null,
     items: stage.items.map((item) => {
       const itemDue = resolveNodeDueDate(item, cycleYear, cycleMonth)
       return {
@@ -874,22 +902,25 @@ export function ensureRecurringChecklists(data: AppData) {
   })
 
   // Materialise stage 1 instances for due/overdue templates.
+  //
+  // The SERVER runs the same materializer on every read (db/store.js
+  // `materializeRecurringChecklists`) and is the authoritative generator. This
+  // copy exists so a local workspace edit (e.g. creating a template) shows its
+  // first instance immediately instead of waiting for a refetch. Because both
+  // can run, they MUST agree on what "already exists" means down to the last
+  // character — that shared rule lives in lib/checklist-identity.js. When they
+  // disagreed, the two paths each spawned their own instance for the same
+  // period, which is how production collected duplicate checklists carrying two
+  // different id styles (server `check-<uuid8>` vs browser `check-<rand7>`).
   const today = new Date().toISOString().slice(0, 10)
-  const existingKeys = new Set(
-    checklistsBackfilled
-      .filter((checklist) => checklist.templateId)
-      .map((checklist) => `${checklist.templateId}:${checklist.dueDate}:${checklist.stageIndex ?? 0}`),
-  )
   const checklists = [...checklistsBackfilled]
 
-  // Year-month instance keys (`${templateId}:${YYYY-MM}`) for specific-months
-  // templates. Derived from each existing checklist's due date so re-running
-  // materialization never double-generates a designated month.
-  const existingMonthKeys = new Set(
-    checklistsBackfilled
-      .filter((checklist) => checklist.templateId && checklist.dueDate)
-      .map((checklist) => `${checklist.templateId}:${checklist.dueDate.slice(0, 7)}`),
-  )
+  // Recycled instances count as "this period already happened" — otherwise a
+  // checklist the user deleted gets respawned here and re-uploaded by the bulk
+  // save, undoing the delete. The server has always folded them in; this copy
+  // did not, which is the second way the two paths diverged.
+  const { instanceKeys: existingKeys, monthKeys: existingMonthKeys } =
+    buildChecklistInstanceKeys(checklistsBackfilled, data.recycledChecklists)
 
   const todayDate = new Date()
   const currentYear = todayDate.getFullYear()
@@ -916,10 +947,12 @@ export function ensureRecurringChecklists(data: AppData) {
         // Has this month started? (today on or after the 1st of that month.)
         const monthStart = new Date(currentYear, month - 1, 1)
         if (todayDate < monthStart) continue
-        const monthKey = `${template.id}:${currentYear}-${String(month).padStart(2, '0')}`
-        if (existingMonthKeys.has(monthKey)) continue
         const stageOne = stages[0]
+        // `resolveSpecificMonthsStageDueDate` always stays inside the designated
+        // month, so the due date's YYYY-MM IS the per-month key.
         const stageOneDue = resolveSpecificMonthsStageDueDate(template, stageOne, currentYear, month)
+        const monthKey = checklistMonthKey(template.id, stageOneDue)
+        if (monthKey && existingMonthKeys.has(monthKey)) continue
         // A designated month whose due date already passed is born completed
         // so the historical occurrence shows as finished; the current/future
         // month generates open exactly as before.
@@ -928,8 +961,8 @@ export function ensureRecurringChecklists(data: AppData) {
         checklists.push(
           buildChecklistFromStage(template, stageOne, 0, stages.length, caseId, stageOneDue, completed),
         )
-        existingMonthKeys.add(monthKey)
-        existingKeys.add(`${template.id}:${stageOneDue}:0`)
+        if (monthKey) existingMonthKeys.add(monthKey)
+        registerInstanceKey(existingKeys, template.id, stageOneDue)
         changed = true
       }
       continue
@@ -944,10 +977,20 @@ export function ensureRecurringChecklists(data: AppData) {
     const horizon = leadDays > 0 ? addDays(today, leadDays) : today
     let safetyCounter = 0
     while (template.nextDueDate <= horizon && safetyCounter < 60) {
-      const instanceKey = `${template.id}:${template.nextDueDate}:0`
-      if (!existingKeys.has(instanceKey)) {
-        const stageOne = stages[0]
-        const stageOneDue = resolveStageDueDate(stageOne, template.nextDueDate)
+      const stageOne = stages[0]
+      const stageOneDue = resolveStageDueDate(stageOne, template.nextDueDate)
+      // Check BOTH the cycle date and the due date we are about to write. They
+      // differ as soon as stage 1 carries an `offsetDays` / `dueDayOfMonth`, and
+      // checking only the cycle date meant the key set rebuilt on the next run
+      // (from the stored `dueDate`) never matched — so the same period spawned
+      // again. Mirrors db/store.js exactly.
+      const cycleKey = checklistInstanceKey(template.id, template.nextDueDate, 0)
+      const dueKey = checklistInstanceKey(template.id, stageOneDue, 0)
+      const alreadyExists =
+        (cycleKey !== null && existingKeys.has(cycleKey)) ||
+        (dueKey !== null && existingKeys.has(dueKey))
+
+      if (!alreadyExists) {
         const caseId = makeId('case')
         checklists.push(
           buildChecklistFromStage(
@@ -959,7 +1002,8 @@ export function ensureRecurringChecklists(data: AppData) {
             stageOneDue,
           ),
         )
-        existingKeys.add(instanceKey)
+        registerInstanceKey(existingKeys, template.id, template.nextDueDate)
+        registerInstanceKey(existingKeys, template.id, stageOneDue)
         changed = true
       }
 

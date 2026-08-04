@@ -121,6 +121,9 @@ export function ActiveChecklistsBoardPage() {
     return buildActiveBoard({
       checklists: scoped,
       categories: serviceCategories,
+      // Lets the board recover the column for instances that were generated
+      // before their template had a category (those carry categoryId: null).
+      templates: data.checklistTemplates,
       horizonEnd: reportPeriod.to,
       today,
       clientNameById,
@@ -131,6 +134,7 @@ export function ActiveChecklistsBoardPage() {
     clientFilterSet,
     assigneeFilterSet,
     serviceCategories,
+    data.checklistTemplates,
     reportPeriod.to,
     today,
     clientNameById,

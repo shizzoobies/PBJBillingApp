@@ -363,7 +363,11 @@ picker, notification bell, and account menu sit in the top bar on every page.
   up on their clients right where they work, without drilling into each client;
   and (2) each client's detail page has its own "Recurring checklists" section
   plus an "Upcoming (next 60 days)" list. Both exist so staff know what exists
-  and don't create duplicates. Staff can't create, restructure, or turn recurring
+  and don't create duplicates. A repeating checklist also can't generate the same
+  task twice for the same due date any more — one period gives exactly one task,
+  no matter how many people have the app open at once, and "Generate a task now"
+  on a date that already has one just opens the existing task instead of making a
+  second. Staff can't create, restructure, or turn recurring
   recipes on/off (that stays owner-only) — but they CAN add steps, both to the
   already-generated checklist instances and (via the "this + all future" prompt)
   APPEND a step to the recurring recipe itself for a client they're assigned to.
@@ -427,6 +431,12 @@ picker, notification bell, and account menu sit in the top bar on every page.
 - **Which column a checklist lands in:** set its "Board column" on the repeating
   template (or one-time task) — generated checklists inherit it. Anything with no
   column shows in an "Uncategorized" column.
+- **Setting the column later still fixes old tasks:** checklists that were
+  generated BEFORE their repeating template was given a Board column used to sit
+  in "Uncategorized" forever, even though the recurring checklist itself showed
+  the right board. They now follow their template's current column automatically,
+  so tagging the recipe is enough — there's nothing to re-tag one by one. A
+  checklist you moved by hand keeps where you put it and is never pulled back.
 - **Re-tagging an existing checklist:** open a checklist's Edit (the ⋯ menu on its
   card, on the board or the Checklists page) and pick a "Board column" (including
   "Uncategorized"). This moves it between columns — e.g. to pull an item out of

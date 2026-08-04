@@ -7,6 +7,8 @@ import {
   isChecklistComplete,
   weekRange,
   UNCATEGORIZED_ID,
+  buildTemplateCategoryMap,
+  resolveChecklistCategoryId,
 } from '../lib/activeBoard'
 import type { Checklist } from '../lib/types'
 
@@ -288,5 +290,89 @@ describe('buildActiveBoard', () => {
 
     const month = buildActiveBoard({ checklists, categories, periodType: 'month', today: '2026-06-16', clientNameById })
     expect(month.columns.find((c) => c.id === 'mb')!.openClientCount).toBe(2)
+  })
+})
+
+/**
+ * featreq-c395c79a — "several are in uncategorized but the recurring checklist
+ * shows the correct board".
+ *
+ * 25 production instances were generated BEFORE their template was given a
+ * category, so they carry `categoryId: null` forever and pile up in the
+ * Uncategorized column even though the template now names the right board.
+ * The board resolves the column through the template as a fallback, so those
+ * rows heal on screen with no data migration.
+ */
+describe('buildActiveBoard — category falls back to the template', () => {
+  it('files a null-category instance under its template current category', () => {
+    const board = buildActiveBoard({
+      checklists: [open({ id: 'a', clientId: 'c1', templateId: 'tpl-1', categoryId: null })],
+      categories,
+      templates: [{ id: 'tpl-1', categoryId: 'mb' }],
+      periodType: 'month',
+      today: '2026-06-16',
+      clientNameById,
+    })
+    expect(board.columns.find((c) => c.id === 'mb')!.openClientCount).toBe(1)
+    expect(board.columns.some((c) => c.id === UNCATEGORIZED_ID)).toBe(false)
+  })
+
+  it("does NOT override an instance's own explicit category", () => {
+    // Someone moved this checklist to Sales Tax by hand. The template must not
+    // drag it back to its own column.
+    const board = buildActiveBoard({
+      checklists: [open({ id: 'a', clientId: 'c1', templateId: 'tpl-1', categoryId: 'st' })],
+      categories,
+      templates: [{ id: 'tpl-1', categoryId: 'mb' }],
+      periodType: 'month',
+      today: '2026-06-16',
+      clientNameById,
+    })
+    expect(board.columns.find((c) => c.id === 'st')!.openClientCount).toBe(1)
+    expect(board.columns.find((c) => c.id === 'mb')!.openClientCount).toBe(0)
+  })
+
+  it('still lands in Uncategorized when neither instance nor template has one', () => {
+    const board = buildActiveBoard({
+      checklists: [
+        open({ id: 'a', clientId: 'c1', templateId: 'tpl-1', categoryId: null }),
+        open({ id: 'b', clientId: 'c2', categoryId: null }), // one-off, no template
+      ],
+      categories,
+      templates: [{ id: 'tpl-1', categoryId: null }],
+      periodType: 'month',
+      today: '2026-06-16',
+      clientNameById,
+    })
+    expect(board.columns.find((c) => c.id === UNCATEGORIZED_ID)!.openClientCount).toBe(2)
+  })
+
+  it('falls back to Uncategorized when the template points at a deleted column', () => {
+    const board = buildActiveBoard({
+      checklists: [open({ id: 'a', clientId: 'c1', templateId: 'tpl-1', categoryId: null })],
+      categories,
+      templates: [{ id: 'tpl-1', categoryId: 'cat-that-was-deleted' }],
+      periodType: 'month',
+      today: '2026-06-16',
+      clientNameById,
+    })
+    expect(board.columns.find((c) => c.id === UNCATEGORIZED_ID)!.openClientCount).toBe(1)
+  })
+})
+
+describe('resolveChecklistCategoryId', () => {
+  const templates = buildTemplateCategoryMap([{ id: 'tpl-1', categoryId: 'mb' }])
+
+  it('prefers the instance own category', () => {
+    expect(resolveChecklistCategoryId({ categoryId: 'st', templateId: 'tpl-1' }, templates)).toBe('st')
+  })
+  it('falls back to the template', () => {
+    expect(resolveChecklistCategoryId({ categoryId: null, templateId: 'tpl-1' }, templates)).toBe('mb')
+  })
+  it('returns null for an unknown template', () => {
+    expect(resolveChecklistCategoryId({ categoryId: null, templateId: 'gone' }, templates)).toBeNull()
+  })
+  it('returns null for a one-off checklist with no template', () => {
+    expect(resolveChecklistCategoryId({ categoryId: null }, templates)).toBeNull()
   })
 })

@@ -1,6 +1,13 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile as fsWriteFile } from 'node:fs/promises'
 import { classifySplitTarget } from '../lib/group-allocation.js'
+import {
+  CHECKLIST_INSTANCE_UNIQUE_INDEX,
+  buildChecklistInstanceKeys,
+  checklistInstanceKey,
+  checklistMonthKey,
+  findChecklistInstance,
+} from '../lib/checklist-identity.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import {
   StaleWorkspaceError,
@@ -1374,21 +1381,14 @@ export function materializeRecurringChecklists(data) {
   // they restore it from the recycle bin; otherwise we wait until the
   // template's nextDueDate advances and produce a new instance for the
   // next period naturally.
+  //
+  // Both key sets come from the SHARED identity module (lib/checklist-identity.js)
+  // so this materializer, the browser-side backfill and the on-demand generate
+  // endpoint can never drift into three slightly different notions of "already
+  // exists" — which is how production collected 21 duplicate instance groups.
   const recycled = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
-  const checklistsForKeys = [...nextChecklists, ...recycled]
-  const existingKeys = new Set(
-    checklistsForKeys
-      .filter((checklist) => checklist.templateId && checklist.dueDate)
-      .map((checklist) => `${checklist.templateId}:${checklist.dueDate}:${checklist.stageIndex ?? 0}`),
-  )
-
-  // Year-month instance keys (`${templateId}:${YYYY-MM}`) for specific-months
-  // templates — keep re-runs idempotent per designated month.
-  const existingMonthKeys = new Set(
-    checklistsForKeys
-      .filter((checklist) => checklist.templateId && checklist.dueDate)
-      .map((checklist) => `${checklist.templateId}:${String(checklist.dueDate).slice(0, 7)}`),
-  )
+  const { instanceKeys: existingKeys, monthKeys: existingMonthKeys } =
+    buildChecklistInstanceKeys(nextChecklists, recycled)
 
   const todayDate = new Date()
   const currentYear = todayDate.getFullYear()
@@ -1422,10 +1422,12 @@ export function materializeRecurringChecklists(data) {
         if (!Number.isInteger(month) || month < 1 || month > 12) continue
         const monthStart = new Date(currentYear, month - 1, 1)
         if (todayDate < monthStart) continue
-        const monthKey = `${template.id}:${currentYear}-${String(month).padStart(2, '0')}`
-        if (existingMonthKeys.has(monthKey)) continue
         const stageOne = stages[0]
+        // `resolveSpecificMonthsStageDueDate` is guaranteed to stay inside the
+        // designated month, so the due date's YYYY-MM IS the per-month key.
         const stageOneDue = resolveSpecificMonthsStageDueDate(template, stageOne, currentYear, month)
+        const monthKey = checklistMonthKey(template.id, stageOneDue)
+        if (existingMonthKeys.has(monthKey)) continue
         // A designated month whose due date already passed is born completed
         // so the historical occurrence shows as finished; the current/future
         // month generates open exactly as before.
@@ -1443,19 +1445,38 @@ export function materializeRecurringChecklists(data) {
           }),
         )
         existingMonthKeys.add(monthKey)
-        existingKeys.add(`${template.id}:${stageOneDue}:0`)
+        existingKeys.add(checklistInstanceKey(template.id, stageOneDue, 0))
         changed = true
       }
       continue
     }
 
-    let safetyCounter = 0
-    while (template.nextDueDate <= today && safetyCounter < 60) {
-      const instanceKey = `${template.id}:${template.nextDueDate}:0`
+    // Lead time: surface an upcoming instance up to `leadDays` BEFORE its due
+    // date so the team can start (and log time) early. This used to live ONLY
+    // in the browser copy of the materializer, which meant the client generated
+    // ahead of the server and then bulk-saved its own instance — the second
+    // writer that produced the mixed-id duplicates. The server is now the
+    // complete generator; the browser only backfills.
+    const leadDays =
+      typeof template.leadDays === 'number' && template.leadDays > 0
+        ? Math.min(Math.floor(template.leadDays), 120)
+        : 0
+    const horizon = leadDays > 0 ? addDays(today, leadDays) : today
 
-      if (!existingKeys.has(instanceKey)) {
-        const stageOne = stages[0]
-        const stageOneDue = resolveStageDueDate(stageOne, template.nextDueDate)
+    let safetyCounter = 0
+    while (template.nextDueDate <= horizon && safetyCounter < 60) {
+      const stageOne = stages[0]
+      const stageOneDue = resolveStageDueDate(stageOne, template.nextDueDate)
+      // TWO keys, because the cycle date and the instance's stored due date are
+      // not the same thing once stage 1 carries an `offsetDays` / `dueDayOfMonth`.
+      // The old code checked the cycle key but the row it wrote back carried
+      // `stageOneDue`, so the next run's key set never matched and the template
+      // spawned another instance on the very same due date. Checking the due
+      // date we are about to WRITE is what makes this actually idempotent.
+      const cycleKey = checklistInstanceKey(template.id, template.nextDueDate, 0)
+      const dueKey = checklistInstanceKey(template.id, stageOneDue, 0)
+
+      if (!existingKeys.has(cycleKey) && !existingKeys.has(dueKey)) {
         const caseId = `case-${randomUUID().slice(0, 8)}`
         nextChecklists.push(
           buildChecklistFromStage({
@@ -1467,7 +1488,8 @@ export function materializeRecurringChecklists(data) {
             dueDate: stageOneDue,
           }),
         )
-        existingKeys.add(instanceKey)
+        existingKeys.add(cycleKey)
+        existingKeys.add(dueKey)
         changed = true
       }
 
@@ -1976,6 +1998,47 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_templates add column if not exists category_id text`,
       )
+      // DUPLICATE-INSTANCE BACKSTOP.
+      //
+      // The materializer's idempotency was check-then-insert with nothing
+      // underneath it, so two simultaneous `GET /api/app-data` reads could each
+      // decide a period had no instance yet and each create one. Production
+      // collected 21 groups of ACTIVE checklists sharing an identical
+      // (template_id, due_date, stage_index). This UNIQUE partial index makes
+      // that physically impossible.
+      //
+      // Why the tuple is (template_id, due_date, stage_index) and not a month
+      // key: a weekly template legitimately has four instances inside one month.
+      // The due date is the finest identity that is still stable across runs.
+      // `deleted_at is null` keeps the recycle bin out of it (a restored-then-
+      // re-deleted instance must not collide), and `template_id is not null`
+      // leaves one-off manual checklists completely alone.
+      //
+      // WHY THIS IS WRAPPED IN try/catch: production still contains the 21
+      // duplicate groups today — the cleanup write is scheduled for AFTER this
+      // deploys. `create unique index` would fail on that dirty data and, since
+      // initialize() is the boot path, an unguarded throw would take the whole
+      // app down. So we attempt it on every boot and log loudly when it can't
+      // be built yet; the first boot after the cleanup lands creates it and the
+      // backstop arms itself with no further deploy. Each statement here runs
+      // in its own implicit transaction, so a failure leaves nothing poisoned.
+      // Until then the shared in-code guard (lib/checklist-identity.js) is what
+      // prevents new duplicates.
+      try {
+        await this.pool.query(`
+          create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX}
+            on checklists (template_id, due_date, stage_index)
+            where deleted_at is null and template_id is not null
+        `)
+      } catch (error) {
+        console.warn(
+          `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX} — most likely duplicate ` +
+            `(template_id, due_date, stage_index) rows still present. New duplicates are still ` +
+            `blocked in code; this will be retried on the next boot. Reason:`,
+          error && error.message ? error.message : error,
+        )
+      }
+
       // Templates cloned from another template stamp their origin id so the UI
       // can tell a plan's checklist is "already set up" on a client. Plain text
       // id, no FK (the source may later be deleted).
@@ -4443,10 +4506,20 @@ export class AppDataStore {
         // deleted locally) don't wedge the FK insert.
         const checklistsToWrite = [...safeChecklists, ...safeRecycledChecklists]
         for (const checklist of checklistsToWrite) {
-          await client.query(
+          // `on conflict do nothing` is the write-side half of the duplicate
+          // backstop. A stale tab that still holds a duplicate instance in
+          // memory would otherwise re-upload it here. Two conflicts are
+          // possible: the primary key (same id twice in one payload) and the
+          // UNIQUE partial index on (template_id, due_date, stage_index).
+          // Either way the row is skipped rather than aborting the transaction
+          // — an aborted bulk save 500s every read and takes the app offline
+          // (the 2026-06-17 incident), which is far worse than dropping a row
+          // we already have.
+          const insertResult = await client.query(
             `
               insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, updated_at)
               values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now())
+              on conflict do nothing
             `,
             [
               checklist.id,
@@ -4470,6 +4543,19 @@ export class AppDataStore {
               checklist.createdBy ?? null,
             ],
           )
+
+          // Nothing was inserted ⇒ an identical instance is already in this
+          // transaction. Its items MUST be skipped too: `checklist_items`
+          // references `checklists(id)`, so inserting them against a row that
+          // was never written would blow up the whole save.
+          if (insertResult.rowCount === 0) {
+            console.warn(
+              `[bulk-save] skipped duplicate checklist ${checklist.id} ` +
+                `(template ${checklist.templateId ?? 'none'}, due ${checklist.dueDate}, ` +
+                `stage ${checklist.stageIndex ?? 0}) — an identical instance is already being written`,
+            )
+            continue
+          }
 
           for (const [index, item] of checklist.items.entries()) {
             const subItems = normalizeSubItems(item.subItems, { withDone: true })
@@ -10651,6 +10737,15 @@ export class AppDataStore {
       ? dueDate
       : template.nextDueDate || formatDateOnly(new Date())
     const stageOneDue = resolveStageDueDate(stageOne, baseDate)
+
+    // "Generate a task now" is idempotent: if this template already has a
+    // Stage-1 instance on that due date, hand back the one that exists instead
+    // of minting a second. Two people clicking "start the first one now" (or one
+    // person double-clicking) used to produce two identical checklists; now it
+    // also can't violate the UNIQUE partial index and 500 the request.
+    const existing = findChecklistInstance(data.checklists, template.id, stageOneDue, 0)
+    if (existing) return existing
+
     const caseId = `case-${randomUUID().slice(0, 8)}`
     const checklist = buildChecklistFromStage({
       template,

@@ -15,7 +15,7 @@
  *      the view as you go week → month → quarter.
  */
 
-import type { Checklist, ServiceCategory } from './types'
+import type { Checklist, ChecklistTemplate, ServiceCategory } from './types'
 
 export type PeriodType = 'week' | 'month' | 'quarter'
 
@@ -42,6 +42,44 @@ export type ActiveBoard = {
 /** Synthetic column for checklists with no (or a deleted) category. */
 export const UNCATEGORIZED_ID = '__uncategorized__'
 export const UNCATEGORIZED_NAME = 'Uncategorized'
+
+/**
+ * Which board column a checklist belongs in.
+ *
+ * An instance normally copies its template's category at generation time, but
+ * instances generated BEFORE their template was categorized were stamped with
+ * `categoryId: null` and stayed that way — they sat in "Uncategorized" forever
+ * while the recurring checklist itself showed the right board. Falling back to
+ * the template's CURRENT category fixes those on screen, and keeps fixing any
+ * future instance whose template gets recategorized after the fact, without a
+ * data migration.
+ *
+ * Precedence:
+ *   1. the instance's own `categoryId` when explicitly set — a checklist the
+ *      user dragged to another column must never be pulled back by its template;
+ *   2. otherwise the owning template's current `categoryId`;
+ *   3. otherwise Uncategorized.
+ *
+ * A category id that no longer exists (deleted column) falls through to
+ * Uncategorized at the call site, exactly as before.
+ */
+export function resolveChecklistCategoryId(
+  checklist: Pick<Checklist, 'categoryId' | 'templateId'>,
+  templateCategoryById: Map<string, string | null | undefined>,
+): string | null {
+  if (checklist.categoryId) return checklist.categoryId
+  if (checklist.templateId) {
+    return templateCategoryById.get(checklist.templateId) ?? null
+  }
+  return null
+}
+
+/** `templateId -> categoryId` lookup for {@link resolveChecklistCategoryId}. */
+export function buildTemplateCategoryMap(
+  templates: readonly Pick<ChecklistTemplate, 'id' | 'categoryId'>[] = [],
+): Map<string, string | null | undefined> {
+  return new Map(templates.map((template) => [template.id, template.categoryId]))
+}
 
 const pad = (n: number) => String(n).padStart(2, '0')
 const lastDayOfMonth = (year: number, month1to12: number) =>
@@ -159,6 +197,7 @@ export function boardChecklistStatus(
 export function buildActiveBoard({
   checklists = [],
   categories = [],
+  templates = [],
   periodType = 'month',
   horizonEnd,
   today,
@@ -166,6 +205,12 @@ export function buildActiveBoard({
 }: {
   checklists?: Checklist[]
   categories?: ServiceCategory[]
+  /**
+   * The workspace's checklist templates — used only to recover the board column
+   * for instances generated before their template was categorized. Optional so
+   * existing callers/tests keep working (they just get no fallback).
+   */
+  templates?: Pick<ChecklistTemplate, 'id' | 'categoryId'>[]
   periodType?: PeriodType
   /**
    * Explicit horizon end ('YYYY-MM-DD') for the shared Report-period control.
@@ -197,10 +242,12 @@ export function buildActiveBoard({
     return map
   }
 
+  const templateCategoryById = buildTemplateCategoryMap(templates)
+
   for (const checklist of checklists) {
     if (isChecklistComplete(checklist)) continue // completed → drops off
     if (effectiveDue(checklist) > range.end) continue // beyond the horizon
-    const rawId = checklist.categoryId
+    const rawId = resolveChecklistCategoryId(checklist, templateCategoryById)
     const columnId = rawId && knownIds.has(rawId) ? rawId : UNCATEGORIZED_ID
     const clientsForColumn = ensure(columnId)
     const list = clientsForColumn.get(checklist.clientId) ?? []

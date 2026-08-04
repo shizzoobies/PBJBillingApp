@@ -519,3 +519,142 @@ describe('materializeRecurringChecklists — mixed weekly + monthly coexistence'
     expect(weekly).toBe(true)
   })
 })
+
+/**
+ * Duplicate-instance regressions (featreq-90809c87 — "Cooper got two monthly
+ * due, I removed one").
+ *
+ * Production held 21 groups of ACTIVE checklists sharing an identical
+ * (templateId, dueDate, stageIndex). The materializer's idempotency was
+ * check-then-insert with nothing underneath it, and its key was derived from
+ * the template's CYCLE date while the row it wrote back carried the STAGE's
+ * resolved due date — so the two never matched again on the next run.
+ */
+describe('materializeRecurringChecklists — duplicate prevention', () => {
+  const instanceKey = (c: { templateId?: string; dueDate?: string; stageIndex?: number }) =>
+    `${c.templateId}:${c.dueDate}:${c.stageIndex ?? 0}`
+
+  it('running it a second time on its own output adds nothing', () => {
+    const first = materializeRecurringChecklists(
+      makeData({ checklistTemplates: [makeMonthlyTemplate()] }),
+    )
+    const generated = first.data.checklists.filter(
+      (c: { templateId?: string }) => c.templateId === 'tpl-monthly',
+    )
+    expect(generated.length).toBe(1)
+
+    // This is exactly what the next `read()` does: re-materialize the state the
+    // previous read just wrote back.
+    const second = materializeRecurringChecklists(first.data)
+    const after = second.data.checklists.filter(
+      (c: { templateId?: string }) => c.templateId === 'tpl-monthly',
+    )
+    expect(after.length).toBe(1)
+    expect(after[0].id).toBe(generated[0].id)
+  })
+
+  it('two readers starting from the same state land on the SAME instance identity', () => {
+    // The concurrency shape from production: two simultaneous GET /api/app-data
+    // reads, each materializing from the same persisted snapshot. Both create an
+    // instance (different random ids) — but if their identity tuples match, the
+    // shared guard and the UNIQUE partial index both collapse them to one row.
+    const base = makeData({ checklistTemplates: [makeMonthlyTemplate()] })
+    const readerA = materializeRecurringChecklists(structuredClone(base))
+    const readerB = materializeRecurringChecklists(structuredClone(base))
+
+    const a = readerA.data.checklists.find(
+      (c: { templateId?: string }) => c.templateId === 'tpl-monthly',
+    )
+    const b = readerB.data.checklists.find(
+      (c: { templateId?: string }) => c.templateId === 'tpl-monthly',
+    )
+    expect(a).toBeTruthy()
+    expect(b).toBeTruthy()
+    expect(a.id).not.toBe(b.id) // genuinely two separate creations
+    expect(instanceKey(a)).toBe(instanceKey(b)) // …of the same instance
+
+    // Whichever one lost the race, replaying the materializer over the winner's
+    // state must not resurrect a second copy.
+    const settled = materializeRecurringChecklists(readerA.data)
+    expect(
+      settled.data.checklists.filter((c: { templateId?: string }) => c.templateId === 'tpl-monthly')
+        .length,
+    ).toBe(1)
+  })
+
+  it('never spawns two instances on the same due date when stage 1 has a FIXED due date', () => {
+    // A stage with a hard-coded `dueDate` resolves to the SAME date every cycle.
+    // The old cycle-date-only key changed each pass through the catch-up loop, so
+    // a template that was several periods overdue produced one identical
+    // instance per missed period — the duplicate signature seen in production.
+    const template = makeMonthlyTemplate({
+      nextDueDate: daysAgo(75),
+      stages: [
+        {
+          id: 'stage-1',
+          name: 'Stage 1',
+          assigneeId: 'emp-1',
+          offsetDays: 0,
+          dueDate: daysAgo(40),
+          viewerIds: [],
+          editorIds: [],
+          items: [{ id: 'ti-1', label: 'Reconcile bank feed' }],
+        },
+      ],
+    })
+    const result = materializeRecurringChecklists(makeData({ checklistTemplates: [template] }))
+    const generated = result.data.checklists.filter(
+      (c: { templateId?: string }) => c.templateId === 'tpl-monthly',
+    )
+    expect(generated.length).toBe(1)
+    expect(generated[0].dueDate).toBe(daysAgo(40))
+  })
+
+  it('a specific-months template generates one instance per designated month, once', () => {
+    const thisMonth = new Date().getMonth() + 1
+    const template = makeMonthlyTemplate({
+      id: 'tpl-sm',
+      frequency: 'specific-months',
+      nextDueDate: undefined,
+      scheduledMonths: [thisMonth],
+      dueDayOfMonth: 15,
+    })
+    const first = materializeRecurringChecklists(makeData({ checklistTemplates: [template] }))
+    const once = first.data.checklists.filter((c: { templateId?: string }) => c.templateId === 'tpl-sm')
+    expect(once.length).toBe(1)
+
+    const second = materializeRecurringChecklists(first.data)
+    expect(
+      second.data.checklists.filter((c: { templateId?: string }) => c.templateId === 'tpl-sm').length,
+    ).toBe(1)
+  })
+})
+
+/**
+ * Board/category regression (featreq-c395c79a — "several are in uncategorized
+ * but the recurring checklist shows the correct board"). Instances must carry
+ * their template's service category from birth; the display-level fallback in
+ * `src/lib/activeBoard.ts` covers the rows generated before this was true.
+ */
+describe('materializeRecurringChecklists — service category', () => {
+  it('copies the template category onto every generated instance', () => {
+    const data = makeData({
+      checklistTemplates: [makeMonthlyTemplate({ categoryId: 'cat-bookkeeping' })],
+    })
+    const result = materializeRecurringChecklists(data)
+    const generated = result.data.checklists.find(
+      (c: { templateId?: string }) => c.templateId === 'tpl-monthly',
+    )
+    expect(generated.categoryId).toBe('cat-bookkeeping')
+  })
+
+  it('leaves the instance category null when the template has none', () => {
+    const result = materializeRecurringChecklists(
+      makeData({ checklistTemplates: [makeMonthlyTemplate()] }),
+    )
+    const generated = result.data.checklists.find(
+      (c: { templateId?: string }) => c.templateId === 'tpl-monthly',
+    )
+    expect(generated.categoryId).toBeNull()
+  })
+})

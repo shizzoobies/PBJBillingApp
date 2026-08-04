@@ -358,3 +358,83 @@ describe('isChecklistItemDone — three-level (sub-sub-item) roll-up', () => {
     expect(isChecklistItemDone({ done: false, subItems: [] })).toBe(false)
   })
 })
+
+/**
+ * Parity with the SERVER materializer (db/store.js). Both run against the same
+ * workspace — the server on every read, this one on every local edit — so any
+ * disagreement about "does this instance already exist?" produces two
+ * checklists for one period. That is how production ended up with duplicate
+ * groups mixing server-style (`check-<uuid8>`) and browser-style
+ * (`check-<rand7>`) ids. The shared rule now lives in lib/checklist-identity.js.
+ */
+describe('ensureRecurringChecklists — parity with the server materializer', () => {
+  it('re-running it on its own output adds nothing', () => {
+    const first = ensureRecurringChecklists(makeData([makeTemplate({ nextDueDate: dateOffset(-5) })]))
+    expect(first.data.checklists.length).toBe(1)
+    const second = ensureRecurringChecklists(first.data)
+    expect(second.data.checklists.length).toBe(1)
+    expect(second.data.checklists[0].id).toBe(first.data.checklists[0].id)
+  })
+
+  it('treats a RECYCLED instance as already existing, so a delete stays deleted', () => {
+    // The server has always folded `recycledChecklists` into its key set; this
+    // copy did not, so a local edit respawned the instance the user had just
+    // deleted and the bulk save uploaded it again.
+    const dueDate = dateOffset(-3)
+    const data = makeData([makeTemplate({ nextDueDate: dueDate })])
+    data.recycledChecklists = [
+      {
+        id: 'check-deleted',
+        title: 'Monthly Close',
+        clientId: 'client-1',
+        assigneeId: 'emp-1',
+        templateId: 'tmpl-1',
+        frequency: 'monthly',
+        dueDate,
+        viewerIds: [],
+        editorIds: [],
+        caseId: 'case-deleted',
+        stageId: 'stage-1',
+        stageIndex: 0,
+        stageCount: 1,
+        deletedAt: new Date().toISOString(),
+        items: [{ id: 'item-1', label: 'Reconcile bank feed', done: false }],
+      },
+    ] as AppData['recycledChecklists']
+
+    const result = ensureRecurringChecklists(data)
+    expect(result.data.checklists).toHaveLength(0)
+  })
+
+  it('never spawns two instances on the same due date when stage 1 has a FIXED due date', () => {
+    const fixedDue = dateOffset(-40)
+    const result = ensureRecurringChecklists(
+      makeData([
+        makeTemplate({
+          nextDueDate: dateOffset(-75),
+          stages: [
+            {
+              id: 'stage-1',
+              name: 'Stage 1',
+              assigneeId: 'emp-1',
+              offsetDays: 0,
+              dueDate: fixedDue,
+              viewerIds: [],
+              editorIds: [],
+              items: [{ id: 'ti-1', label: 'Reconcile bank feed' }],
+            },
+          ],
+        }),
+      ]),
+    )
+    expect(result.data.checklists).toHaveLength(1)
+    expect(result.data.checklists[0].dueDate).toBe(fixedDue)
+  })
+
+  it('copies the template service category onto the instance, like the server does', () => {
+    const result = ensureRecurringChecklists(
+      makeData([makeTemplate({ nextDueDate: dateOffset(-2), categoryId: 'cat-bookkeeping' })]),
+    )
+    expect(result.data.checklists[0].categoryId).toBe('cat-bookkeeping')
+  })
+})
