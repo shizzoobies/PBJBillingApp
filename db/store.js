@@ -5004,6 +5004,227 @@ export class AppDataStore {
   }
 
   /**
+   * Re-divide an EXISTING split: replace every slice of `groupId` with a fresh
+   * set built from `allocations`, keeping the same `groupId`.
+   *
+   * Splitting was one-way — once time was divided, the only way to change the
+   * division was to delete the slices and start over, which is what "will not
+   * let me adjust my time entry without losing the client split I chose" is
+   * describing. This is the way back in: reopen the split with its current
+   * distribution and save a different one.
+   *
+   * The new slices INHERIT the group's invariant fields from the existing ones
+   * (they are identical across a group by construction: same user, date,
+   * description, category, billable flag, capture method + manual reason, task
+   * label, and the source block's `sessions` and start/stop envelope verbatim).
+   * What changes is the per-client split: which clients, and how many minutes
+   * each. Every slice lands `approval_status: 'pending'` — an adjustment is an
+   * edit, and an edit re-enters the daily queue.
+   *
+   * THE TOTAL MAY CHANGE. Unlike creating a split — which must account for every
+   * second of the block it divides — an adjustment is an explicit correction of
+   * what was billed, so 60 minutes across three clients may legitimately become
+   * 45 across two. `sessions` stay untouched as the audit trail of the clock
+   * time that was actually worked.
+   *
+   * Adjusting DOWN TO ONE client is allowed here, and deliberately asymmetric
+   * with `splitTimeEntry`, which refuses a single allocation. Creating a
+   * "split" with one client is just re-billing an entry (the edit form's client
+   * dropdown), but pulling a client back OUT of an existing split is a real
+   * correction — refusing it would leave no way to undo a two-client split
+   * short of deleting both slices.
+   *
+   * @param {string} groupId - the split group to replace.
+   * @param {Array<{clientId: string, minutes: number}>} allocations
+   * @param {string} actorUserId - who adjusted it (for the audit row).
+   * @param {'even'|'full'|'custom'} allocationMode
+   * @returns {Promise<{created: object[], deletedIds: string[], groupId: string}>}
+   * @throws {TimeEntrySplitError} `invalid_allocation` when nothing usable was
+   *   asked for, `not_found` when the group is gone or empty.
+   */
+  async adjustSplitGroup(groupId, allocations, actorUserId, allocationMode) {
+    const sharedGroupId = String(groupId || '').slice(0, 64)
+    if (!sharedGroupId) {
+      throw new TimeEntrySplitError('invalid_allocation', 'An adjustment needs a group id.')
+    }
+    const rows = (Array.isArray(allocations) ? allocations : []).filter(
+      (row) => row && typeof row.clientId === 'string' && row.clientId && Number(row.minutes) > 0,
+    )
+    if (rows.length === 0) {
+      throw new TimeEntrySplitError(
+        'invalid_allocation',
+        'An adjustment needs at least one client with time on it.',
+      )
+    }
+    const mode = normalizeGroupAllocation(allocationMode)
+
+    // Every field but the client and the minutes comes from the slices already
+    // in the group — they all carry the same values, so the first one is the
+    // template for the replacements.
+    const buildSlices = (template) =>
+      rows.map((row) => ({
+        id: `time-${randomUUID().slice(0, 8)}`,
+        employeeId: template.employeeId,
+        clientId: row.clientId,
+        isAdministrative: false,
+        date: template.date,
+        minutes: coerceEntryMinutes(row.minutes),
+        category: template.category ?? 'General',
+        description: template.description ?? '',
+        billable: Boolean(template.billable),
+        taskId: null,
+        // An adjustment is an edit: back through approval, like any other.
+        approvalStatus: 'pending',
+        entryMethod: template.entryMethod === 'manual' ? 'manual' : 'timer',
+        manualReason: template.entryMethod === 'manual' ? template.manualReason : undefined,
+        startAt: template.startAt,
+        endAt: template.endAt,
+        // The original clock-in/out, carried across untouched — re-dividing the
+        // billing does not rewrite what the timer recorded.
+        sessions: Array.isArray(template.sessions) ? template.sessions.map((s) => ({ ...s })) : [],
+        groupId: sharedGroupId,
+        groupClientIds: [],
+        groupAllocation: mode,
+        ...(template.taskLabel ? { taskLabel: template.taskLabel } : {}),
+        createdAt: nowIso(),
+      }))
+
+    const hoursLabel = (minutes) =>
+      (minutes / 60).toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+    const auditTarget = (template, slices, previousMinutes) => {
+      const label = (template.description || '').trim() || 'Group time'
+      const nextMinutes = slices.reduce((sum, slice) => sum + Number(slice.minutes), 0)
+      return `${label.slice(0, 120)} · ${slices.length} client${
+        slices.length === 1 ? '' : 's'
+      } · ${hoursLabel(previousMinutes)}h → ${hoursLabel(nextMinutes)}h`
+    }
+
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        // FOR UPDATE over the whole group: a second adjustment (or a delete of
+        // one slice) waits here and then sees the group as this one left it.
+        const held = await client.query(
+          `select id, user_id, client_id, entry_date, minutes, category, description, billable,
+                  entry_method, manual_reason, started_at, ended_at, sessions, task_label
+           from time_entries where group_id = $1 order by created_at, id for update`,
+          [sharedGroupId],
+        )
+        if (!held.rowCount) {
+          await client.query('rollback')
+          throw new TimeEntrySplitError('not_found', 'That split no longer exists.')
+        }
+        const row = held.rows[0]
+        const template = {
+          employeeId: row.user_id,
+          date: row.entry_date.toISOString().slice(0, 10),
+          minutes: Number(row.minutes),
+          category: row.category,
+          description: row.description,
+          billable: row.billable,
+          entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
+          manualReason: row.manual_reason ?? undefined,
+          startAt: row.started_at ? row.started_at.toISOString() : undefined,
+          endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
+          sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
+          taskLabel: row.task_label ?? undefined,
+        }
+        const previousMinutes = held.rows.reduce((sum, each) => sum + Number(each.minutes), 0)
+        const deletedIds = held.rows.map((each) => each.id)
+        const slices = buildSlices(template)
+
+        await client.query(`delete from time_entries where group_id = $1`, [sharedGroupId])
+
+        for (const slice of slices) {
+          await client.query(
+            `insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description,
+                                       billable, task_id, approval_status, entry_method, manual_reason,
+                                       is_administrative, started_at, ended_at, sessions, group_id,
+                                       group_client_ids, group_allocation, task_label, created_at, updated_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, now())`,
+            [
+              slice.id,
+              slice.employeeId,
+              slice.clientId,
+              slice.date,
+              slice.minutes,
+              slice.category,
+              slice.description,
+              slice.billable,
+              slice.taskId,
+              slice.approvalStatus,
+              slice.entryMethod,
+              slice.manualReason ?? null,
+              false,
+              slice.startAt ?? null,
+              slice.endAt ?? null,
+              JSON.stringify(slice.sessions),
+              slice.groupId,
+              [],
+              slice.groupAllocation,
+              slice.taskLabel ?? null,
+              new Date(slice.createdAt),
+            ],
+          )
+        }
+
+        // Inside the transaction, same as the split's audit row, so the change
+        // and its log entry land (or roll back) together.
+        await client.query(
+          `insert into activity_log (id, user_id, action, target, created_at) values ($1, $2, $3, $4, $5)`,
+          [
+            `act-${randomUUID().slice(0, 8)}`,
+            actorUserId,
+            'time_entry_split_adjusted',
+            auditTarget(template, slices, previousMinutes),
+            nowIso(),
+          ],
+        )
+        await client.query(
+          `delete from activity_log
+           where user_id = $1
+             and id not in (select id from activity_log where user_id = $1 order by created_at desc limit 200)`,
+          [actorUserId],
+        )
+
+        await client.query('commit')
+        return { created: slices, deletedIds, groupId: sharedGroupId }
+      } catch (error) {
+        if (!(error instanceof TimeEntrySplitError)) {
+          await client.query('rollback').catch(() => {})
+        }
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    // File backend: validate FIRST, then one mutate + persist, so a rejected
+    // adjustment leaves the workspace exactly as it was.
+    const data = await readJson(localDataPath)
+    const entries = Array.isArray(data.timeEntries) ? data.timeEntries : []
+    const existing = entries.filter((entry) => entry.groupId === sharedGroupId)
+    if (existing.length === 0) {
+      throw new TimeEntrySplitError('not_found', 'That split no longer exists.')
+    }
+    const previousMinutes = existing.reduce((sum, entry) => sum + Number(entry.minutes), 0)
+    const deletedIds = existing.map((entry) => entry.id)
+    const slices = buildSlices(existing[0])
+    data.timeEntries = [
+      ...slices,
+      ...entries.filter((entry) => entry.groupId !== sharedGroupId),
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await this.recordActivity(
+      actorUserId,
+      'time_entry_split_adjusted',
+      auditTarget(existing[0], slices, previousMinutes),
+    )
+    return { created: slices, deletedIds, groupId: sharedGroupId }
+  }
+
+  /**
    * Look up a time entry by id from whichever backend is active.
    * Returns the app-shaped entry (camelCase) or null.
    */

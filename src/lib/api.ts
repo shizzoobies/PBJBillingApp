@@ -345,6 +345,40 @@ export async function splitTimeEntryRequest(
   return (await response.json()) as { created: TimeEntry[]; deletedId: string }
 }
 
+/**
+ * Adjust an EXISTING split: hand the server the whole new distribution and it
+ * replaces the group's slices with it, in one transaction, under the same group
+ * id. The total is allowed to change — an adjustment is a correction — and
+ * dropping to a single client is allowed too (that's "unsplit this back to one
+ * client"), unlike creating a split.
+ */
+export async function adjustSplitGroupRequest(
+  groupId: string,
+  body: {
+    mode: GroupAllocationMode
+    allocations: { clientId: string; minutes: number }[]
+  },
+) {
+  const response = await apiFetch(
+    `/api/time-entries/split-groups/${encodeURIComponent(groupId)}/adjust`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to adjust split (${response.status})`)
+  }
+  return (await response.json()) as {
+    created: TimeEntry[]
+    deletedIds: string[]
+    groupId: string
+  }
+}
+
 export async function deleteTimeEntryRequest(entryId: string) {
   const response = await apiFetch(`/api/time-entries/${encodeURIComponent(entryId)}`, {
     credentials: 'same-origin',

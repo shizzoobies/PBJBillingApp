@@ -29,5 +29,22 @@ export declare function classifySplitTarget(entry: {
 
 export declare function splitClientOptions(
   clients: Array<{ id: string; name?: string }>,
-  currentClientId?: string,
+  /** One id, or an existing split's member ids — all pinned to the front. */
+  currentClientId?: string | string[],
 ): Array<{ id: string; name: string }>
+
+export declare function sliceMinutesAfterSessionEdit(
+  currentMinutes: number,
+  previousSessions: Array<{ startAt: string; endAt: string }>,
+  nextSessions: Array<{ startAt: string; endAt: string }>,
+): number
+
+export declare function splitGroupPrefill(
+  slices: Array<{ clientId?: string; minutes?: number; groupAllocation?: string }>,
+): {
+  clientIds: string[]
+  customMinutes: Record<string, string>
+  mode: GroupAllocationMode
+  blockMinutes: number
+  totalMinutes: number
+}

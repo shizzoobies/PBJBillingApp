@@ -69,6 +69,16 @@ export type AppContextValue = {
     /** Target clients for a REGULAR entry; a group holding block ignores it. */
     clientIds?: string[],
   ) => Promise<void>
+  /**
+   * Re-divide an existing split. The group keeps its id, every slice is
+   * replaced, and the new total may differ from the old one — an adjustment is
+   * a correction, not a re-division of a fixed block.
+   */
+  adjustSplitGroup: (
+    groupId: string,
+    mode: GroupAllocationMode,
+    allocations: { clientId: string; minutes: number }[],
+  ) => Promise<void>
   updateTimeEntry: (
     entryId: string,
     patch: {

@@ -10,6 +10,7 @@ import {
   classifySplitTarget,
   formatDurationLabel,
   minutesToSeconds,
+  sliceMinutesAfterSessionEdit,
 } from './lib/group-allocation.js'
 import {
   buildActionProposal,
@@ -3455,6 +3456,136 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Adjust an EXISTING split: replace the whole group with a new distribution,
+    // keeping the same `groupId`. This is the way back into a split — before it,
+    // a division was permanent unless every slice was deleted and re-entered
+    // ("will not let me adjust my time entry without losing the client split I
+    // chose"). The group is addressed by its group id rather than one slice
+    // because the unit of work is the group: all of its rows go, all of the new
+    // ones arrive, in one transaction.
+    //
+    // Same gates as splitting: your own time (or an owner's), only clients you
+    // may bill, and the month lock + weekly-submission gate for non-owners. The
+    // one rule that differs on purpose is the client count — see
+    // `adjustSplitGroup` for why one client is legitimate here.
+    const splitAdjustMatch = normalizedPath.match(
+      /^\/api\/time-entries\/split-groups\/([^/]+)\/adjust$/,
+    )
+    if (splitAdjustMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      const groupId = decodeURIComponent(splitAdjustMatch[1])
+      const allData = await appDataStore.read()
+      // Every slice of a group belongs to one person, one date — the split
+      // built them that way — so the first one answers every gate below.
+      const slices = (allData.timeEntries ?? []).filter((entry) => entry.groupId === groupId)
+      if (slices.length === 0) {
+        sendJson(response, 404, { error: 'That split no longer exists.' })
+        return
+      }
+      const first = slices[0]
+
+      const isOwner = session.user.role === 'owner'
+      if (!isOwner && first.employeeId !== session.user.id) {
+        sendJson(response, 403, { error: 'You can only adjust your own time entries' })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const mode =
+        payload?.mode === 'even' || payload?.mode === 'full' || payload?.mode === 'custom'
+          ? payload.mode
+          : null
+      if (!mode) {
+        sendJson(response, 400, { error: 'mode must be one of: even, custom, full' })
+        return
+      }
+
+      // The new distribution, as explicit per-client minutes. Unlike creating a
+      // split there is no fixed block to check the parts against: the total is
+      // allowed to change, because an adjustment is a correction of what gets
+      // billed. `sessions` stay as the record of the clock time.
+      const seen = new Set()
+      const allocations = []
+      for (const row of Array.isArray(payload?.allocations) ? payload.allocations : []) {
+        const clientId = typeof row?.clientId === 'string' ? row.clientId.trim() : ''
+        if (!clientId || seen.has(clientId)) continue
+        const minutes = Number(row?.minutes)
+        if (!Number.isFinite(minutes) || minutesToSeconds(minutes) <= 0) continue
+        seen.add(clientId)
+        allocations.push({ clientId, minutes })
+        if (allocations.length >= 50) break
+      }
+      if (allocations.length === 0) {
+        sendJson(response, 400, {
+          error: 'Give at least one client more than 0 minutes.',
+        })
+        return
+      }
+
+      // Same visibility rule as splitting — an unknown client id can't be in the
+      // allowed set, so this covers that too.
+      const allowed = visibleClientIdSet(session, allData.clients ?? [])
+      if (!allocations.every((row) => allowed.has(row.clientId))) {
+        sendJson(response, 403, { error: 'Client not visible to this user' })
+        return
+      }
+
+      // Month-end lock + weekly-submission gate, mirroring the split endpoint
+      // (owners are exempt from both there, so they are here too).
+      if (!isOwner) {
+        const period = String(first.date).slice(0, 7)
+        if (await appDataStore.isTimesheetLocked(first.employeeId, period)) {
+          sendJson(response, 423, {
+            error: 'This timesheet month is locked. Contact an owner to make changes.',
+          })
+          return
+        }
+        const lockedPeriods = new Set(
+          (allData.timesheetLocks ?? [])
+            .filter((lock) => lock.userId === first.employeeId)
+            .map((lock) => lock.period),
+        )
+        const blockingWeeks = listBlockingWeeks(
+          weekStartOf(first.date),
+          (allData.timeEntries ?? [])
+            .filter((entry) => entry.employeeId === first.employeeId)
+            .map((entry) => weekStartOf(entry.date)),
+          (allData.weeklySubmissions ?? []).filter((entry) => entry.userId === first.employeeId),
+          lockedPeriods,
+        )
+        if (blockingWeeks.length > 0) {
+          sendJson(response, 423, {
+            error: `You have an unsubmitted or sent-back timesheet for the week of ${blockingWeeks[0].weekStart}. Submit that week before adjusting this split.`,
+          })
+          return
+        }
+      }
+
+      try {
+        const result = await appDataStore.adjustSplitGroup(
+          groupId,
+          allocations,
+          session.user.id,
+          mode,
+        )
+        sendJson(response, 200, result)
+      } catch (error) {
+        if (error instanceof TimeEntrySplitError) {
+          sendJson(response, error.code === 'not_found' ? 404 : 400, { error: error.message })
+          return
+        }
+        console.error('[time-entry-split-adjust] failed:', error)
+        sendJson(response, 500, { error: 'Could not adjust this split — please try again.' })
+      }
+      return
+    }
+
     // Approve / reject / edit / delete a single time entry.
     const timeEntryActionMatch = normalizedPath.match(
       /^\/api\/time-entries\/([^/]+)(?:\/(approve|reject))?$/,
@@ -3689,9 +3820,26 @@ const server = createServer(async (request, response) => {
             return
           }
           patch.sessions = sessionsResult.sessions
-          patch.minutes = sessionsResult.minutes
           patch.startAt = sessionsResult.startAt ?? null
           patch.endAt = sessionsResult.endAt ?? null
+          // A SPLIT SLICE is the exception: it carries the whole block's
+          // sessions (its clock-in/out provenance) but only its own allocated
+          // minutes. Deriving minutes from those sessions blew the allocation
+          // back up to the full block, so saving any edit on a slice — even a
+          // typo fix — destroyed the split. Move a slice's minutes by the
+          // session DELTA instead, so an unchanged clock leaves the allocation
+          // untouched and Resume / Add time still add what they added.
+          patch.minutes = entry.groupId
+            ? sliceMinutesAfterSessionEdit(
+                entry.minutes,
+                entry.sessions?.length
+                  ? entry.sessions
+                  : entry.startAt && entry.endAt
+                    ? [{ startAt: entry.startAt, endAt: entry.endAt }]
+                    : [],
+                sessionsResult.sessions,
+              )
+            : sessionsResult.minutes
         }
 
         // Lock enforcement: bookkeepers cannot edit entries in a locked month.

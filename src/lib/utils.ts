@@ -368,6 +368,9 @@ export {
   classifySplitTarget,
   minutesToSeconds,
   splitClientOptions,
+  // Reopening a split with its current distribution intact — the prefill the
+  // "Adjust split" modal opens with.
+  splitGroupPrefill,
 } from '../../lib/group-allocation.js'
 
 import {

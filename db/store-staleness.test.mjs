@@ -755,13 +755,17 @@ describe('splitTimeEntry on a regular client entry (file backend)', () => {
  * pre-check, the (optional) version fingerprint, and the invoice-drafts
  * snapshot â€” so returning an empty row set for everything else is faithful.
  */
-function fakePostgres({ invoiceDrafts = [] } = {}) {
+function fakePostgres({ invoiceDrafts = [], groupSlices = [] } = {}) {
   const statements = []
   const record = (text, params) => {
     const trimmed = String(text).trim()
     statements.push({ text: trimmed, params })
     if (/^select\b[\s\S]*\bfrom invoice_drafts\b/i.test(trimmed)) {
       return { rows: invoiceDrafts }
+    }
+    // The `for update` read a split adjustment starts with.
+    if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
+      return { rows: groupSlices, rowCount: groupSlices.length }
     }
     return { rows: [] }
   }
@@ -1134,5 +1138,323 @@ describe('setChecklistTemplateActive (postgres branch)', () => {
       'tmpl-off',
       false,
     ])
+  })
+})
+
+/**
+ * `adjustSplitGroup` — re-dividing a split that already exists.
+ *
+ * Splitting used to be one-way: once time was divided the amounts were frozen,
+ * and the only way to change them was to delete every slice and retype the
+ * time. That is the firm owner's "still will not let me adjust my time entry
+ * without losing the client split I chose".
+ *
+ * What this pins:
+ *   - the group is replaced wholesale and keeps its SAME group id, so the raw
+ *     data still shows one split rather than a trail of abandoned ones;
+ *   - the block's `sessions` and envelope survive the adjustment — re-dividing
+ *     the billing never rewrites what the timer recorded;
+ *   - the total is ALLOWED to change (an adjustment is a correction), and going
+ *     down to a single client is allowed too, unlike creating a split;
+ *   - the new slices re-enter the approval queue as pending;
+ *   - a refused adjustment (unknown group / nothing allocated) writes NOTHING.
+ */
+describe('adjustSplitGroup (file backend)', () => {
+  const SESSIONS = [
+    { startAt: '2026-07-03T13:00:00.000Z', endAt: '2026-07-03T13:40:00.000Z' },
+    { startAt: '2026-07-03T14:00:00.000Z', endAt: '2026-07-03T14:20:00.000Z' },
+  ]
+
+  const slice = (id, clientId, minutes, overrides = {}) => ({
+    id,
+    employeeId: 'emp-1',
+    clientId,
+    isAdministrative: false,
+    date: '2026-07-03',
+    minutes,
+    category: 'General',
+    description: 'Payroll cleanup',
+    billable: true,
+    taskId: null,
+    approvalStatus: 'approved',
+    entryMethod: 'timer',
+    startAt: SESSIONS[0].startAt,
+    endAt: SESSIONS[1].endAt,
+    sessions: SESSIONS,
+    groupId: 'grp-live',
+    groupClientIds: [],
+    groupAllocation: 'custom',
+    taskLabel: 'Payroll',
+    ...overrides,
+  })
+
+  const seedGroup = async (slices, extraEntries = []) => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+          { id: 'c3', name: 'Initech' },
+        ],
+        timeEntries: [...slices, ...extraEntries],
+      }),
+    )
+  }
+
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const grouped = async () =>
+    (await persisted()).timeEntries.filter((entry) => entry.groupId === 'grp-live')
+
+  it('replaces the whole group with the new distribution, under the same group id', async () => {
+    await seedGroup([slice('s1', 'c1', 30), slice('s2', 'c2', 30)])
+
+    const result = await store.adjustSplitGroup(
+      'grp-live',
+      [
+        { clientId: 'c1', minutes: 45 },
+        { clientId: 'c2', minutes: 15 },
+      ],
+      'owner-1',
+      'custom',
+    )
+
+    expect(result.deletedIds.sort()).toEqual(['s1', 's2'])
+    expect(result.groupId).toBe('grp-live')
+    const rows = await grouped()
+    expect(rows).toHaveLength(2)
+    // Same group id — the split stays ONE group in the raw data.
+    expect(rows.every((row) => row.groupId === 'grp-live')).toBe(true)
+    expect(rows.every((row) => row.groupAllocation === 'custom')).toBe(true)
+    expect(
+      Object.fromEntries(rows.map((row) => [row.clientId, row.minutes])),
+    ).toEqual({ c1: 45, c2: 15 })
+    // The old rows are gone, not left behind double-counting.
+    expect((await persisted()).timeEntries.some((row) => row.id === 's1')).toBe(false)
+  })
+
+  it('carries the sessions, envelope and description across untouched', async () => {
+    await seedGroup([slice('s1', 'c1', 30), slice('s2', 'c2', 30)])
+
+    const { created } = await store.adjustSplitGroup(
+      'grp-live',
+      [
+        { clientId: 'c1', minutes: 20 },
+        { clientId: 'c3', minutes: 40 },
+      ],
+      'owner-1',
+      'custom',
+    )
+
+    for (const row of created) {
+      // The point of the group: the original clock-in/out is the audit trail
+      // and an adjustment must not rewrite it.
+      expect(row.sessions).toEqual(SESSIONS)
+      expect(row.startAt).toBe(SESSIONS[0].startAt)
+      expect(row.endAt).toBe(SESSIONS[1].endAt)
+      expect(row.description).toBe('Payroll cleanup')
+      expect(row.date).toBe('2026-07-03')
+      expect(row.employeeId).toBe('emp-1')
+      expect(row.entryMethod).toBe('timer')
+      expect(row.taskLabel).toBe('Payroll')
+      expect(row.billable).toBe(true)
+      expect(row.isAdministrative).toBe(false)
+      // Copied, not shared — editing one slice can't corrupt a sibling.
+      expect(row.sessions).not.toBe(SESSIONS)
+    }
+    expect(created.map((row) => row.clientId)).toEqual(['c1', 'c3'])
+  })
+
+  it('lets the TOTAL change — an adjustment is a correction, not a re-division', async () => {
+    await seedGroup([slice('s1', 'c1', 20), slice('s2', 'c2', 20), slice('s3', 'c3', 20)])
+
+    await store.adjustSplitGroup(
+      'grp-live',
+      [
+        { clientId: 'c1', minutes: 15 },
+        { clientId: 'c2', minutes: 15 },
+      ],
+      'owner-1',
+      'even',
+    )
+
+    const rows = await grouped()
+    expect(rows.reduce((sum, row) => sum + row.minutes, 0)).toBe(30)
+    // The sessions still say 60 minutes were worked — that record is untouched.
+    expect(rows[0].sessions).toEqual(SESSIONS)
+  })
+
+  it('adjusts down to ONE client — pulling a client back out of a split', async () => {
+    await seedGroup([slice('s1', 'c1', 30), slice('s2', 'c2', 30)])
+
+    const { created } = await store.adjustSplitGroup(
+      'grp-live',
+      [{ clientId: 'c1', minutes: 60 }],
+      'owner-1',
+      'custom',
+    )
+
+    expect(created).toHaveLength(1)
+    expect(created[0]).toMatchObject({ clientId: 'c1', minutes: 60, groupId: 'grp-live' })
+    expect(await grouped()).toHaveLength(1)
+  })
+
+  it('sends every adjusted slice back through approval', async () => {
+    // Seeded APPROVED — an edit to approved time has to be re-approved rather
+    // than keep its old sign-off, and an adjustment is an edit.
+    await seedGroup([slice('s1', 'c1', 30), slice('s2', 'c2', 30)])
+
+    const { created } = await store.adjustSplitGroup(
+      'grp-live',
+      [
+        { clientId: 'c1', minutes: 25 },
+        { clientId: 'c2', minutes: 35 },
+      ],
+      'owner-1',
+      'custom',
+    )
+    expect(created.every((row) => row.approvalStatus === 'pending')).toBe(true)
+  })
+
+  it('leaves every OTHER entry alone', async () => {
+    const other = slice('other-1', 'c3', 10, { id: 'other-1', groupId: undefined })
+    await seedGroup([slice('s1', 'c1', 30), slice('s2', 'c2', 30)], [other])
+
+    await store.adjustSplitGroup('grp-live', [{ clientId: 'c1', minutes: 60 }], 'owner-1', 'custom')
+
+    const untouched = (await persisted()).timeEntries.find((row) => row.id === 'other-1')
+    expect(untouched).toMatchObject({ clientId: 'c3', minutes: 10 })
+  })
+
+  it('records the adjustment in the activity log, old total → new total', async () => {
+    await seedGroup([slice('s1', 'c1', 30), slice('s2', 'c2', 30)])
+    // The activity log lives in its own file and is NOT reset between tests, so
+    // measure the delta rather than the absolute count.
+    const adjustRows = async () => {
+      if (!existsSync(localAuthPath)) return []
+      const auth = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      return (auth.activityLog ?? []).filter((row) => row.action === 'time_entry_split_adjusted')
+    }
+    const before = await adjustRows()
+
+    await store.adjustSplitGroup(
+      'grp-live',
+      [
+        { clientId: 'c1', minutes: 45 },
+        { clientId: 'c2', minutes: 45 },
+      ],
+      'owner-1',
+      'full',
+    )
+
+    const after = await adjustRows()
+    expect(after).toHaveLength(before.length + 1)
+    const logged = after[after.length - 1]
+    expect(logged.userId).toBe('owner-1')
+    expect(logged.target).toContain('Payroll cleanup')
+    expect(logged.target).toContain('2 clients')
+    expect(logged.target).toContain('1h → 1.5h')
+  })
+
+  it('fails cleanly on an unknown group and writes NOTHING', async () => {
+    await seedGroup([slice('s1', 'c1', 30), slice('s2', 'c2', 30)])
+    const before = await persisted()
+
+    await expect(
+      store.adjustSplitGroup('grp-gone', [{ clientId: 'c1', minutes: 30 }], 'owner-1', 'custom'),
+    ).rejects.toMatchObject({ code: 'not_found' })
+
+    expect(await persisted()).toEqual(before)
+  })
+
+  it('refuses an empty allocation and writes NOTHING', async () => {
+    await seedGroup([slice('s1', 'c1', 30), slice('s2', 'c2', 30)])
+    const before = await persisted()
+
+    await expect(
+      store.adjustSplitGroup('grp-live', [], 'owner-1', 'custom'),
+    ).rejects.toMatchObject({ code: 'invalid_allocation' })
+    await expect(
+      store.adjustSplitGroup('grp-live', [{ clientId: 'c1', minutes: 0 }], 'owner-1', 'custom'),
+    ).rejects.toMatchObject({ code: 'invalid_allocation' })
+
+    expect(await persisted()).toEqual(before)
+  })
+})
+
+/**
+ * The Postgres branch of the same call. Cardinal rule 1: both backends have to
+ * implement the contract, and production is Postgres — so pin the statements
+ * this branch issues (one delete of the whole group, one insert per new slice
+ * carrying the SAME group id, and the audit row) rather than trusting that the
+ * file-backend suite above covers it.
+ */
+describe('adjustSplitGroup (postgres branch)', () => {
+  const row = (id, clientId, minutes) => ({
+    id,
+    user_id: 'emp-1',
+    client_id: clientId,
+    entry_date: new Date('2026-07-03T00:00:00.000Z'),
+    minutes,
+    category: 'General',
+    description: 'Payroll cleanup',
+    billable: true,
+    entry_method: 'timer',
+    manual_reason: null,
+    started_at: new Date('2026-07-03T13:00:00.000Z'),
+    ended_at: new Date('2026-07-03T14:00:00.000Z'),
+    sessions: [{ startAt: '2026-07-03T13:00:00.000Z', endAt: '2026-07-03T14:00:00.000Z' }],
+    task_label: 'Payroll',
+  })
+
+  it('deletes the group once and re-inserts it under the same group id', async () => {
+    const fake = fakePostgres({ groupSlices: [row('s1', 'c1', 30), row('s2', 'c2', 30)] })
+    const result = await postgresStore(fake).adjustSplitGroup(
+      'grp-live',
+      [
+        { clientId: 'c1', minutes: 45 },
+        { clientId: 'c3', minutes: 15 },
+      ],
+      'owner-1',
+      'custom',
+    )
+
+    expect(fake.matching(/^select\b[\s\S]*for update$/i)).toHaveLength(1)
+    const deletes = fake.matching(/^delete from time_entries where group_id/i)
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0].params).toEqual(['grp-live'])
+
+    const inserts = fake.matching(/^insert into time_entries/i)
+    expect(inserts).toHaveLength(2)
+    // group_id ($17) is the same one, and it is set on every new slice.
+    expect(inserts.map((statement) => statement.params[16])).toEqual(['grp-live', 'grp-live'])
+    expect(inserts.map((statement) => statement.params[2])).toEqual(['c1', 'c3'])
+    expect(inserts.map((statement) => statement.params[4])).toEqual([45, 15])
+    // approval_status ($10): back in the queue.
+    expect(inserts.map((statement) => statement.params[9])).toEqual(['pending', 'pending'])
+    // sessions ($16) carried across verbatim as JSON.
+    expect(JSON.parse(inserts[0].params[15])).toEqual(row('s1', 'c1', 30).sessions)
+
+    const audit = fake.matching(/^insert into activity_log/i)
+    expect(audit).toHaveLength(1)
+    expect(audit[0].params[2]).toBe('time_entry_split_adjusted')
+    expect(audit[0].params[3]).toContain('1h → 1h')
+    expect(fake.matching(/^commit$/i)).toHaveLength(1)
+    expect(result.deletedIds).toEqual(['s1', 's2'])
+  })
+
+  it('rolls back and reports not_found when the group is gone', async () => {
+    const fake = fakePostgres({ groupSlices: [] })
+    await expect(
+      postgresStore(fake).adjustSplitGroup(
+        'grp-gone',
+        [{ clientId: 'c1', minutes: 30 }],
+        'owner-1',
+        'custom',
+      ),
+    ).rejects.toMatchObject({ code: 'not_found' })
+
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.matching(/^insert into time_entries/i)).toHaveLength(0)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
   })
 })

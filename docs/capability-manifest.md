@@ -98,10 +98,31 @@ picker, notification bell, and account menu sit in the top bar on every page.
       the entry, so use the Client dropdown in the edit form instead.
     - Administrative time can't be split — it has no client. Give it a client
       first.
-    - An entry that came out of an earlier split can be split again.
     - The replacement entries go back into the daily approval queue as
       pending, even if the original was already approved (same rule as any
       other edit to an approved entry). Billable / internal is carried over.
+  - A SPLIT CAN BE ADJUSTED AFTERWARD — it is not permanent. Any entry that came
+    out of a split shows "Adjust split" (in Recent time / Sent back, and inside
+    its edit form) instead of "Split across clients". It reopens the split with
+    the distribution that is actually saved: the clients already ticked, each
+    one's exact minutes filled in, the mode it was saved with preselected, and
+    the current total shown as "was". Change the amounts, add or remove clients,
+    switch modes, then save.
+    - THE TOTAL MAY CHANGE. Unlike creating a split, an adjustment does not have
+      to add up to the original block — it is an explicit correction of what
+      gets billed. The clock-in / clock-out times stay as the record of the time
+      that was actually worked.
+    - Adjusting down to ONE client is allowed: that's pulling a client back out
+      of a split. (Creating a one-client "split" is still refused — that's just
+      moving an entry.)
+    - The whole group is replaced in one step and keeps its identity, so the
+      time stays one split rather than becoming a trail of leftovers, and every
+      adjusted entry goes back through approval. Adjustments are written to the
+      activity log (who adjusted it, how many clients, old total → new total).
+  - Editing ONE entry of a split (a typo in the notes, the date, the client)
+    never disturbs the split: it keeps its own share of the time and stays part
+    of the group. Resume / Add time on one still adds exactly the time added.
+    To change how the time is DIVIDED, use "Adjust split".
   - Splitting is ATOMIC: the per-client entries are created and the source
     entry removed in ONE step, so a failure can never leave both behind
     double-counting the same time.

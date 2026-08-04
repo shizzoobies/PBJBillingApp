@@ -16,6 +16,7 @@ import { SignInScreen } from './components/SignInScreen'
 import {
   addChecklistSubItemRequest,
   addChecklistSubSubItemRequest,
+  adjustSplitGroupRequest,
   appendChecklistItemsRequest,
   applyTemplateToClientRequest,
   approveTimeEntriesBatchRequest,
@@ -1224,6 +1225,49 @@ function App() {
         timeEntries: [
           ...created,
           ...current.timeEntries.filter((entry) => entry.id !== deletedId),
+        ],
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      if (isCleanRejection(error)) {
+        // Clean server refusal (gate / lock / visibility) — not a save failure.
+        setDataSyncState('synced')
+        throw error
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
+  // Adjust an existing split: ONE atomic server call swaps the whole group for
+  // a new distribution under the same group id, so reopening a split to change
+  // the amounts (or the clients) no longer means deleting the slices and
+  // re-entering the time from scratch.
+  const adjustSplitGroup = async (
+    groupId: string,
+    mode: GroupAllocationMode,
+    allocations: { clientId: string; minutes: number }[],
+  ) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const { created, deletedIds } = await adjustSplitGroupRequest(groupId, { mode, allocations })
+      const removed = new Set(deletedIds)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        timeEntries: [
+          ...created,
+          // Drop by id AND by group: the group is replaced wholesale, so any
+          // slice this tab hadn't seen deleted must go too.
+          ...current.timeEntries.filter(
+            (entry) => !removed.has(entry.id) && entry.groupId !== groupId,
+          ),
         ],
       }))
       setDataSyncState('synced')
@@ -3588,6 +3632,7 @@ function App() {
     stopTimer,
     logTime,
     splitGroupEntry,
+    adjustSplitGroup,
     updateTimeEntry,
     deleteTimeEntry,
     approveTimeEntry,
