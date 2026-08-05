@@ -18,10 +18,11 @@ yet. P1 (sidebar regroup, week of Aug 6) still ships first.
    the QBO API (already rejected this morning). QBO remains Brittany's ledger;
    the app replaces her manual invoicing workflow, and reconciliation guidance
    (Stripe payouts → QBO) is part of I5.
-2. **ACH is the payment method; card costs the client.** The default pay link
-   is `us_bank_account` only (0.8% capped $5). The invoice also offers a
-   "prefer to pay by card?" alternative whose Checkout Session adds a
-   card-convenience-fee line the CLIENT pays (~the processing cost).
+2. **ACH is the payment method; card is PER-CLIENT OPT-IN only** (Brittany,
+   2026-08-05 review): the pay link and email show `us_bank_account` only
+   (0.8% capped $5) by default. A card alternative appears ONLY for clients
+   with a "card allowed" flag (default OFF, set when the client has asked),
+   and that client pays the convenience-fee line (~the processing cost).
    ⚠️ Compliance caveat baked in: card surcharging rules vary by state (FL
    permits with disclosure); the fee line wording needs Brittany's sign-off
    and a sanity check before I3 ships. Stripe has no native surcharge switch —
@@ -66,9 +67,26 @@ index — apply today's materializer lesson from day one.** Clients gain
 ### I2 — Review & edit (Invoices page rebuild)
 Monthly-run view: pick a period → every client's draft with status chips.
 Per-invoice editor: add/edit/remove lines, adjustment line, blurb (pre-filled
-from last month's), scope-flag review ("the girls won't know" surfaces here),
-mark Reviewed. Print stylesheet for a clean paper/PDF-via-print copy.
+from last month's — confirmed 2026-08-05, "QBO for some reason does not keep
+that"), scope-flag review ("the girls won't know" surfaces here), mark
+Reviewed. Print stylesheet for a clean paper/PDF-via-print copy.
 Owner-only throughout (staff never see invoicing).
+
+**Month-aware descriptions (Brittany, 2026-08-05):** her only recurring manual
+edit in QBO is changing each copied description to name the month being paid
+for. Descriptions carry over per client AND the month reference auto-advances:
+service lines name the SERVICE month; reimbursed-expense estimate lines name
+the FUTURE month (her estimate-ahead workflow); the prior-month true-up
+adjustment names the PRIOR month. Implement as a `{month}` token substituted
+at generation, so a hand-edited description stays hand-edited.
+
+**QBO bulk export (Brittany, 2026-08-05):** a "Download for QBO" button (per
+month, and per invoice) producing line-level CSV in the exact column shape
+QuickBooks Online's invoice import expects (InvoiceNo, Customer, InvoiceDate,
+DueDate, Item, ItemDescription, ItemQuantity, ItemRate, ItemAmount — verify
+against the current QBO import template at build time), so she bulk-adds the
+month's invoices into QBO in one pass. This replaces I5's vaguer
+"reconciliation guidance" as the concrete QBO bridge and ships WITH I2.
 
 ### I3 — Stripe rail
 Env on Railway: `STRIPE_SECRET_KEY` (**restricted key** — charges/customers/
