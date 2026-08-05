@@ -1,5 +1,11 @@
 # In-App Invoicing — plan of record (locked 2026-08-04)
 
+> **⛔ ON HOLD (Alex, 2026-08-05): do NOT start any invoicing phase (I1–I5) —
+> not in queue runs, not opportunistically.** Alex is pivoting to another
+> project and wants his full attention on this build once it starts; he will
+> give an explicit go. The plan below is complete and review-approved
+> (Brittany 2026-08-05) — it is ready to execute the moment he says so.
+
 Decided with Alex 2026-08-04 (structured questions, all answered). Covers
 tracker `featreq-2cd78b22` (Brittany's monthly invoicing braindump) and
 **supersedes** the "monthly prep packet" scope in
