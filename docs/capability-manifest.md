@@ -153,10 +153,29 @@ picker, notification bell, and account menu sit in the top bar on every page.
   push the other one (or anything below it) off the screen.
 - Editing an entry lets you change EVERY field, not just the time: the client it's
   billed to, the task, the date, the description, billable, the administrative
-  toggle, the work sessions (or hours/minutes), and — for owners — which team
-  member it belongs to. Picking a different client clears a task from the old
-  client (the task list follows the chosen client); switching an entry to
+  toggle, the work sessions AND the hours/minutes duration, and — for owners —
+  which team member it belongs to. Picking a different client clears a task from
+  the old client (the task list follows the chosen client); switching an entry to
   administrative drops its client/task and makes it non-billable.
+- THE TIME ITSELF IS EDITABLE TWO WAYS, on every entry — including ones captured
+  by the timer. The edit form offers both:
+    - the WORK SESSIONS (clock in / clock out) — when the work happened; and
+    - an HOURS + MINUTES duration — what actually gets BILLED.
+  They normally agree, so changing a clock time updates the duration with it.
+  But TYPING A DURATION WINS: the entry bills exactly what was typed, and the
+  clock-in / clock-out times stay untouched as the record of when the work
+  happened. (Previously a session-backed entry had no duration field at all, and
+  a typed time was silently recomputed from the unchanged clock — so the time
+  could not be edited before splitting.) A hint under the field shows what the
+  entry will bill and whether that came from the sessions or from you.
+- EDIT THE TIME FIRST, THEN SPLIT IT. Adjusting an entry down from 60 to 45
+  minutes and then splitting it divides 45 — the split always divides the
+  entry's current billed time, and each slice keeps the original clock-in /
+  clock-out. This works on a slice too: retyping one slice's duration bills that
+  amount without restoring the whole block or disturbing its siblings.
+- Typing a duration on a TIMER entry does not turn it into a manual entry — it
+  is an edit, and goes through the normal approval queue like any other edit. No
+  manual reason is required.
 - Saving an edit RESUBMITS the entry for approval: a rejected entry goes back to
   pending, and so does an already-approved one (a changed entry has to be
   re-approved rather than keeping its old sign-off). A save that changes nothing

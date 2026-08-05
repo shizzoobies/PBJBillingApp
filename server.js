@@ -9,8 +9,8 @@ import {
   allocateGroupMinutes,
   classifySplitTarget,
   formatDurationLabel,
+  minutesAfterEntryEdit,
   minutesToSeconds,
-  sliceMinutesAfterSessionEdit,
 } from './lib/group-allocation.js'
 import {
   buildActionProposal,
@@ -3696,6 +3696,11 @@ const server = createServer(async (request, response) => {
         }
         const payload = await readJsonBody(request)
         const patch = {}
+        // A duration the user actually TYPED, as opposed to one derived from
+        // the clock spans. Held separately because the sessions block below has
+        // to know which of the two the caller meant — a typed duration is the
+        // billed time and wins; see `minutesAfterEntryEdit`.
+        let typedMinutes = null
         if (typeof payload?.minutes === 'number' || typeof payload?.minutes === 'string') {
           const m = Number(payload.minutes)
           if (Number.isNaN(m) || m <= 0) {
@@ -3707,6 +3712,7 @@ const server = createServer(async (request, response) => {
           // timer stops), and the column is numeric. Same rule the bulk save
           // applies, so a later autosave can't rewrite what we store here.
           patch.minutes = coerceEntryMinutes(m)
+          typedMinutes = patch.minutes
         }
         if (typeof payload?.description === 'string') patch.description = payload.description
         if (typeof payload?.billable === 'boolean') patch.billable = payload.billable
@@ -3810,9 +3816,14 @@ const server = createServer(async (request, response) => {
           sendJson(response, 400, { error: 'Stop time must be after the start time.' })
           return
         }
-        // Sessions are authoritative when sent (Resume / Add time / edit): they
-        // override minutes and the start/stop envelope so everything stays in
-        // sync. Keeping the entry pending for re-approval is handled below.
+        // Sessions carry WHEN the work happened; `minutes` is what gets BILLED.
+        // Sending sessions rewrites the spans and the start/stop envelope, and
+        // — unless the caller also typed a duration — the billed minutes follow
+        // them. A typed duration is the deliberate statement of what to bill, so
+        // it wins and the spans stay verbatim as the audit trail. See
+        // `minutesAfterEntryEdit` for the full rule (including why a split slice
+        // moves by the session DELTA rather than being recomputed outright).
+        // Keeping the entry pending for re-approval is handled below.
         if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'sessions')) {
           const sessionsResult = normalizeWorkSessions(payload.sessions)
           if (sessionsResult.error) {
@@ -3822,24 +3833,20 @@ const server = createServer(async (request, response) => {
           patch.sessions = sessionsResult.sessions
           patch.startAt = sessionsResult.startAt ?? null
           patch.endAt = sessionsResult.endAt ?? null
-          // A SPLIT SLICE is the exception: it carries the whole block's
-          // sessions (its clock-in/out provenance) but only its own allocated
-          // minutes. Deriving minutes from those sessions blew the allocation
-          // back up to the full block, so saving any edit on a slice — even a
-          // typo fix — destroyed the split. Move a slice's minutes by the
-          // session DELTA instead, so an unchanged clock leaves the allocation
-          // untouched and Resume / Add time still add what they added.
-          patch.minutes = entry.groupId
-            ? sliceMinutesAfterSessionEdit(
-                entry.minutes,
-                entry.sessions?.length
-                  ? entry.sessions
-                  : entry.startAt && entry.endAt
-                    ? [{ startAt: entry.startAt, endAt: entry.endAt }]
-                    : [],
-                sessionsResult.sessions,
-              )
-            : sessionsResult.minutes
+          patch.minutes = coerceEntryMinutes(
+            minutesAfterEntryEdit({
+              typedMinutes,
+              sessionsMinutes: sessionsResult.minutes,
+              isSlice: Boolean(entry.groupId),
+              currentMinutes: entry.minutes,
+              previousSessions: entry.sessions?.length
+                ? entry.sessions
+                : entry.startAt && entry.endAt
+                  ? [{ startAt: entry.startAt, endAt: entry.endAt }]
+                  : [],
+              nextSessions: sessionsResult.sessions,
+            }),
+          )
         }
 
         // Lock enforcement: bookkeepers cannot edit entries in a locked month.

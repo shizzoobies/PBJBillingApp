@@ -46,6 +46,7 @@ import {
   getWeekLabel,
   type GroupAllocationMode,
   makeId,
+  minutesAfterEntryEdit,
   minutesToSeconds,
   sessionMinutes,
   shiftWeek,
@@ -2253,15 +2254,23 @@ function TimeEntryRow({
   onResume: (entry: TimeEntry) => void
   onSplitGroup: (entry: TimeEntry) => void
 }) {
-  // Entries captured with exact start/stop (timer + new manual entries) edit
-  // via a sessions editor; legacy entries without timestamps keep the simpler
-  // hours/minutes editor.
+  // Entries captured with exact start/stop (timer + new manual entries) get the
+  // sessions editor ON TOP OF the hours/minutes duration field; legacy entries
+  // without timestamps get the duration field alone.
   const sessions = effectiveSessions(entry)
   const hasSessions = sessions.length > 0
   const [editing, setEditing] = useState(false)
   const [hours, setHours] = useState(Math.floor(entry.minutes / 60).toString())
   const [minutes, setMinutes] = useState((entry.minutes % 60).toString())
   const [editSessions, setEditSessions] = useState(() => entryToEditSessions(entry))
+  // Which of the two time facts the user actually touched. The duration is what
+  // gets BILLED and the spans are WHEN the work happened; they normally agree,
+  // so an untouched duration follows the spans. Touching the duration makes it
+  // user-set — it is then sent as `minutes` and the server bills exactly that.
+  // Untouched spans are not sent at all, which is what stops a save from
+  // truncating a seconds-exact timer stop back to whole minutes.
+  const [durationTouched, setDurationTouched] = useState(false)
+  const [spansTouched, setSpansTouched] = useState(false)
   const [description, setDescription] = useState(entry.description)
   const [billable, setBillable] = useState(entry.billable)
   const [reassignTo, setReassignTo] = useState(entry.employeeId)
@@ -2273,6 +2282,15 @@ function TimeEntryRow({
   const [editDate, setEditDate] = useState(entry.date)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  // Does this entry bill something other than what its clock spans add up to?
+  // True only when a duration was typed — a split slice legitimately carries
+  // the whole block's spans against its own share, which is not an adjustment.
+  const billedDiffersFromClock =
+    hasSessions &&
+    !entry.groupId &&
+    Math.round(entry.minutes * 60) !==
+      Math.round(sessions.reduce((sum, session) => sum + sessionMinutes(session), 0) * 60)
 
   // Pending and rejected entries are always editable; approved entries stay
   // editable until the month is locked. So a locked month is the only blocker.
@@ -2298,7 +2316,11 @@ function TimeEntryRow({
     }
     setEditSessions(rows)
     setHours(Math.floor(entry.minutes / 60).toString())
-    setMinutes((entry.minutes % 60).toString())
+    setMinutes(Math.round(entry.minutes % 60).toString())
+    setDurationTouched(false)
+    // "Add time" appends a session, so the spans ARE edited before the form
+    // even opens — the appended time has to reach the server.
+    setSpansTouched(withExtraSession)
     setDescription(entry.description)
     setBillable(entry.billable)
     setReassignTo(entry.employeeId)
@@ -2342,9 +2364,12 @@ function TimeEntryRow({
   const reassignPatch =
     isOwner && reassignTo && reassignTo !== entry.employeeId ? { employeeId: reassignTo } : {}
 
-  const updateSessionRow = (id: string, patch: { start?: string; stop?: string }) =>
+  const updateSessionRow = (id: string, patch: { start?: string; stop?: string }) => {
+    setSpansTouched(true)
     setEditSessions((rows) => rows.map((row) => (row.id === id ? { ...row, ...patch } : row)))
-  const addSessionRow = () =>
+  }
+  const addSessionRow = () => {
+    setSpansTouched(true)
     setEditSessions((rows) => {
       const last = rows[rows.length - 1]
       return [
@@ -2356,8 +2381,11 @@ function TimeEntryRow({
         },
       ]
     })
-  const removeSessionRow = (id: string) =>
+  }
+  const removeSessionRow = (id: string) => {
+    setSpansTouched(true)
     setEditSessions((rows) => rows.filter((row) => row.id !== id))
+  }
 
   const editTotalMinutes = editSessions.reduce((sum, row) => {
     const startMs = row.start ? new Date(row.start).getTime() : NaN
@@ -2366,11 +2394,75 @@ function TimeEntryRow({
     return sum + Math.round((stopMs - startMs) / 60000)
   }, 0)
 
+  // The duration the user typed, or NaN while a field is mid-edit / invalid.
+  const typedDurationMinutes = (() => {
+    const hoursPart = hours.trim() === '' ? 0 : Number(hours)
+    const minutesPart = minutes.trim() === '' ? 0 : Number(minutes)
+    if (Number.isNaN(hoursPart) || Number.isNaN(minutesPart) || hoursPart < 0 || minutesPart < 0) {
+      return NaN
+    }
+    return Math.round(hoursPart * 60 + minutesPart)
+  })()
+
+  // What this entry will actually BILL if saved right now — the same rule the
+  // server applies, so the preview and the stored result cannot disagree. A
+  // typed duration wins; otherwise it follows the spans (and for a slice, moves
+  // by the session delta instead of snapping back to the whole block).
+  const previewMinutes = minutesAfterEntryEdit({
+    typedMinutes: durationTouched && !Number.isNaN(typedDurationMinutes) ? typedDurationMinutes : null,
+    sessionsMinutes: editTotalMinutes,
+    isSlice: Boolean(entry.groupId),
+    currentMinutes: entry.minutes,
+    previousSessions: sessions,
+    nextSessions: editSessions.flatMap((row) => {
+      const startIso = localInputToIso(row.start)
+      const stopIso = localInputToIso(row.stop)
+      return startIso && stopIso ? [{ startAt: startIso, endAt: stopIso }] : []
+    }),
+  })
+
+  // Until the user takes the duration over, the field MIRRORS the spans (so
+  // moving a clock time updates it live). Derived rather than synced into state
+  // — the displayed value is a function of the spans, not a second copy of them.
+  const durationFollowsSpans = hasSessions && !durationTouched
+  const displayHours = durationFollowsSpans ? Math.floor(previewMinutes / 60).toString() : hours
+  const displayMinutes = durationFollowsSpans
+    ? Math.round(previewMinutes % 60).toString()
+    : minutes
+
+  // Typing in either duration box takes BOTH over, seeded from what the spans
+  // say right now — otherwise editing just the minutes would silently revert
+  // the hours to whatever they were when the form opened.
+  const takeOverDuration = (next: { hours?: string; minutes?: string }) => {
+    if (!durationTouched) {
+      setHours(displayHours)
+      setMinutes(displayMinutes)
+      setDurationTouched(true)
+    }
+    if (next.hours !== undefined) setHours(next.hours)
+    if (next.minutes !== undefined) setMinutes(next.minutes)
+  }
+
   const handleSave = async () => {
     if (!editIsAdmin && !editClientId) {
       setError('Pick a client, or mark the entry as administrative.')
       return
     }
+    // The typed duration is only validated (and only sent) when the user
+    // actually took the field over — an untouched one is just mirroring the
+    // spans, and re-sending it would overwrite a seconds-exact total with its
+    // whole-minute rendering.
+    if (durationTouched || !hasSessions) {
+      if (Number.isNaN(typedDurationMinutes)) {
+        setError('Enter a valid number of hours and minutes.')
+        return
+      }
+      if (typedDurationMinutes <= 0) {
+        setError('Enter hours and/or minutes greater than zero.')
+        return
+      }
+    }
+
     if (hasSessions) {
       if (editSessions.length === 0) {
         setError('Keep at least one work session.')
@@ -2394,7 +2486,12 @@ function TimeEntryRow({
       setError('')
       try {
         await onUpdate(entry.id, {
-          sessions: built,
+          // Each of the two time facts travels only when it was edited: the
+          // spans as `sessions`, the billed duration as `minutes`. Sending a
+          // typed duration is what makes it stick — the server bills exactly
+          // that and keeps the spans as the record of when the work happened.
+          ...(spansTouched ? { sessions: built } : {}),
+          ...(durationTouched ? { minutes: typedDurationMinutes } : {}),
           description,
           billable,
           ...detailsPatch,
@@ -2409,27 +2506,11 @@ function TimeEntryRow({
       return
     }
 
-    const hoursPart = hours.trim() === '' ? 0 : Number(hours)
-    const minutesPart = minutes.trim() === '' ? 0 : Number(minutes)
-    if (
-      Number.isNaN(hoursPart) ||
-      Number.isNaN(minutesPart) ||
-      hoursPart < 0 ||
-      minutesPart < 0
-    ) {
-      setError('Enter a valid number of hours and minutes.')
-      return
-    }
-    const totalMinutes = Math.round(hoursPart * 60 + minutesPart)
-    if (totalMinutes <= 0) {
-      setError('Enter hours and/or minutes greater than zero.')
-      return
-    }
     setBusy(true)
     setError('')
     try {
       await onUpdate(entry.id, {
-        minutes: totalMinutes,
+        minutes: typedDurationMinutes,
         description,
         billable,
         ...detailsPatch,
@@ -2541,6 +2622,10 @@ function TimeEntryRow({
           {hasSessions ? (
             <div className="session-editor">
               <span className="session-editor-label">Work sessions</span>
+              <small className="session-editor-hint">
+                When the work happened. The billed time follows these unless you set it yourself
+                below.
+              </small>
               {editSessions.map((row) => (
                 <div className="session-edit-row" key={row.id}>
                   <label className="field">
@@ -2582,32 +2667,43 @@ function TimeEntryRow({
                 </span>
               </div>
             </div>
-          ) : (
-            <>
-              <label className="field">
-                <span>Hours</span>
-                <input
-                  className="input"
-                  min="0"
-                  step="1"
-                  type="number"
-                  value={hours}
-                  onChange={(event) => setHours(event.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span>Minutes</span>
-                <input
-                  className="input"
-                  min="0"
-                  step="1"
-                  type="number"
-                  value={minutes}
-                  onChange={(event) => setMinutes(event.target.value)}
-                />
-              </label>
-            </>
-          )}
+          ) : null}
+          {/* The billed duration. Offered on EVERY entry, not just the legacy
+              ones without timestamps: on a session-backed entry it used to be
+              missing entirely, so the only way to change the time was to move
+              the clock — "still will not let me edit the time before I split
+              it". Typing here sets what gets billed; the sessions above stay as
+              the record of when the work happened. */}
+          <div className="entry-duration-fields">
+            <label className="field">
+              <span>Hours</span>
+              <input
+                className="input"
+                min="0"
+                step="1"
+                type="number"
+                value={displayHours}
+                onChange={(event) => takeOverDuration({ hours: event.target.value })}
+              />
+            </label>
+            <label className="field">
+              <span>Minutes</span>
+              <input
+                className="input"
+                min="0"
+                step="1"
+                type="number"
+                value={displayMinutes}
+                onChange={(event) => takeOverDuration({ minutes: event.target.value })}
+              />
+            </label>
+          </div>
+          {hasSessions ? (
+            <small className="entry-duration-hint">
+              Billing {formatHoursMinutes(previewMinutes)}
+              {durationTouched ? ' — set by you' : ' — from the sessions above'}
+            </small>
+          ) : null}
           <label className="field">
             <span>What did you do?</span>
             <textarea
@@ -2756,6 +2852,15 @@ function TimeEntryRow({
                 {formatHoursMinutes(sessionMinutes(session))}
               </small>
             ))}
+            {/* The billed time is allowed to differ from the clock — someone
+                typed a duration. Say so, or the row shows two durations with no
+                explanation of which one is being invoiced. A SLICE is exempt:
+                its minutes differ because the block was split, not adjusted. */}
+            {billedDiffersFromClock ? (
+              <small className="entry-audit-adjusted">
+                Billed {formatHoursMinutes(entry.minutes)} — adjusted from the tracked clock
+              </small>
+            ) : null}
           </div>
         ) : null}
         <div className="entry-tags">

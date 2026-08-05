@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 // @ts-expect-error - plain-JS module without type declarations
 import { coerceEntryMinutes, coerceTimeEntryPatchValue } from '../../db/store.js'
+import { minutesAfterEntryEdit } from '../../lib/group-allocation.js'
 
 /**
  * Regression: editing a time entry can now change its client, including
@@ -79,5 +80,98 @@ describe('coerceEntryMinutes', () => {
     expect(coerceEntryMinutes(5_000_000)).toBe(100000)
     expect(coerceEntryMinutes(100000.5)).toBe(100000)
     expect(coerceEntryMinutes(100000)).toBe(100000)
+  })
+})
+
+/**
+ * The PATCH handler's minutes decision, composed exactly as server.js composes
+ * it: `coerceEntryMinutes(minutesAfterEntryEdit({...}))` inside the `sessions`
+ * branch. Pinned here because the branch itself is not importable and its two
+ * halves are easy to get right in isolation and wrong together — the round-2
+ * fix was correct on its own, yet a typed duration still could not survive it.
+ *
+ * The matrix, for a session-backed entry:
+ *   spans edited, duration untouched → derive (regular) / delta (slice)
+ *   duration typed                   → the typed minutes, regular AND slice
+ */
+describe('PATCH /api/time-entries/:id — sessions vs typed minutes', () => {
+  type Span = { startAt: string; endAt: string }
+
+  // One 60-minute session, and the same session shortened by 15 minutes.
+  const HOUR: Span[] = [{ startAt: '2026-07-04T13:00:00.000Z', endAt: '2026-07-04T14:00:00.000Z' }]
+  const SHORTER: Span[] = [
+    { startAt: '2026-07-04T13:00:00.000Z', endAt: '2026-07-04T13:45:00.000Z' },
+  ]
+  const totalMinutes = (spans: Span[]) =>
+    spans.reduce(
+      (sum, s) =>
+        sum + Math.round((new Date(s.endAt).getTime() - new Date(s.startAt).getTime()) / 1000) / 60,
+      0,
+    )
+
+  /** What server.js stores for a PATCH that carries `sessions`. */
+  const storedMinutes = (
+    entry: { minutes: number; sessions: Span[]; groupId?: string },
+    payload: { sessions: Span[]; minutes?: number },
+  ) =>
+    coerceEntryMinutes(
+      minutesAfterEntryEdit({
+        typedMinutes: payload.minutes ?? null,
+        sessionsMinutes: totalMinutes(payload.sessions),
+        isSlice: Boolean(entry.groupId),
+        currentMinutes: entry.minutes,
+        previousSessions: entry.sessions,
+        nextSessions: payload.sessions,
+      }),
+    ) as number
+
+  const timerEntry = { minutes: 60, sessions: HOUR }
+  const manualEntry = { minutes: 60, sessions: HOUR }
+  // 20 minutes of the same 60-minute block.
+  const sliceEntry = { minutes: 20, sessions: HOUR, groupId: 'grp-1' }
+
+  describe('(1) the user changed the DURATION', () => {
+    it('bills the typed minutes on a timer entry, sessions still sent', () => {
+      expect(storedMinutes(timerEntry, { sessions: HOUR, minutes: 45 })).toBe(45)
+    })
+
+    it('bills the typed minutes on a manual entry', () => {
+      expect(storedMinutes(manualEntry, { sessions: HOUR, minutes: 45 })).toBe(45)
+    })
+
+    it('bills the typed minutes on a SLICE without restoring the block', () => {
+      expect(storedMinutes(sliceEntry, { sessions: HOUR, minutes: 45 })).toBe(45)
+    })
+
+    it('keeps a seconds-exact typed duration through the coercion', () => {
+      const exact = 45 + 20 / 60
+      expect(storedMinutes(timerEntry, { sessions: HOUR, minutes: exact })).toBe(exact)
+      expect(storedMinutes(sliceEntry, { sessions: HOUR, minutes: exact })).toBe(exact)
+    })
+  })
+
+  describe('(2) the user changed a CLOCK IN/OUT', () => {
+    it('derives a timer entry from the new spans', () => {
+      expect(storedMinutes(timerEntry, { sessions: SHORTER })).toBe(45)
+    })
+
+    it('derives a manual entry from the new spans', () => {
+      expect(storedMinutes(manualEntry, { sessions: SHORTER })).toBe(45)
+    })
+
+    it('moves a SLICE by the delta, not back up to the block', () => {
+      expect(storedMinutes(sliceEntry, { sessions: SHORTER })).toBe(5)
+    })
+
+    it('leaves a slice untouched when the clock did not actually move', () => {
+      expect(storedMinutes(sliceEntry, { sessions: HOUR })).toBe(20)
+    })
+  })
+
+  describe('both at once', () => {
+    it('the typed minutes win and the new spans are still stored', () => {
+      expect(storedMinutes(timerEntry, { sessions: SHORTER, minutes: 90 })).toBe(90)
+      expect(storedMinutes(sliceEntry, { sessions: SHORTER, minutes: 90 })).toBe(90)
+    })
   })
 })

@@ -39,6 +39,17 @@ export declare function sliceMinutesAfterSessionEdit(
   nextSessions: Array<{ startAt: string; endAt: string }>,
 ): number
 
+export declare function minutesAfterEntryEdit(options: {
+  /** What the user typed, or null/undefined when the duration was untouched. */
+  typedMinutes?: number | null
+  /** Total across the NEW sessions. */
+  sessionsMinutes: number
+  isSlice: boolean
+  currentMinutes: number
+  previousSessions: Array<{ startAt: string; endAt: string }>
+  nextSessions: Array<{ startAt: string; endAt: string }>
+}): number
+
 export declare function splitGroupPrefill(
   slices: Array<{ clientId?: string; minutes?: number; groupAllocation?: string }>,
 ): {

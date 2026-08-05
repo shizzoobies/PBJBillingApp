@@ -6238,11 +6238,17 @@ h2 {
 }
 
 .entry-audit-times,
-.approval-audit-times {
+.approval-audit-times,
+.entry-audit-adjusted {
   color: var(--muted);
   display: block;
   font-variant-numeric: tabular-nums;
   margin-top: 3px;
+}
+
+/* The billed time was typed rather than taken from the clock — worth noticing. */
+.entry-audit-adjusted {
+  font-weight: 650;
 }
 
 .manual-duration-hint {
@@ -7396,11 +7402,31 @@ button.repeating-task-toggle-pill {
   text-transform: uppercase;
 }
 
+.session-editor-hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: -4px;
+}
+
 .session-edit-row {
   align-items: end;
   display: grid;
   gap: 8px;
   grid-template-columns: 1fr 1fr auto;
+}
+
+/* The billed duration, beside the spans that say when the work happened. */
+.entry-duration-fields {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.entry-duration-hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: -6px;
 }
 
 .session-editor-foot {

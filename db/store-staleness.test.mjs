@@ -747,6 +747,174 @@ describe('splitTimeEntry on a regular client entry (file backend)', () => {
 })
 
 /**
+ * EDIT THEN SPLIT — "still will not let me edit the time before I split it".
+ *
+ * The two halves have to compose: adjusting a session-backed entry's billed
+ * duration must actually stick, and the split that follows must divide the
+ * EDITED total rather than re-deriving the original from the untouched clock
+ * spans. Both are exercised here through the same store calls the PATCH handler
+ * and the split endpoint make, on the file backend, to the second.
+ *
+ * The minutes rule itself is `minutesAfterEntryEdit`, unit-tested in
+ * lib/group-allocation.test.mjs; what this pins is that the store persists its
+ * result and that `splitTimeEntry` divides what was persisted.
+ */
+describe('edit a session-backed entry, then split it (file backend)', () => {
+  // A single 60-minute timer session. The number to watch: the split below
+  // divides 45, not 60.
+  const SESSIONS = [{ startAt: '2026-07-03T13:00:00.000Z', endAt: '2026-07-03T14:00:00.000Z' }]
+
+  const seed = async (overrides = {}) => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+        ],
+        timeEntries: [
+          {
+            id: 'edit-1',
+            employeeId: 'emp-1',
+            clientId: 'c1',
+            isAdministrative: false,
+            date: '2026-07-03',
+            minutes: 60,
+            category: 'General',
+            description: 'Bank rec',
+            billable: true,
+            taskId: null,
+            approvalStatus: 'pending',
+            entryMethod: 'timer',
+            startAt: SESSIONS[0].startAt,
+            endAt: SESSIONS[0].endAt,
+            sessions: SESSIONS,
+            groupClientIds: [],
+            ...overrides,
+          },
+        ],
+      }),
+    )
+  }
+
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const entryById = async (id) => (await persisted()).timeEntries.find((e) => e.id === id)
+  const seconds = (minutes) => Math.round(Number(minutes) * 60)
+
+  it('keeps a typed duration that disagrees with the clock spans', async () => {
+    await seed()
+    // What the PATCH handler stores when the user typed 45 minutes: the billed
+    // minutes change, the sessions stay verbatim as the audit trail.
+    await store.updateTimeEntry('edit-1', { minutes: 45, sessions: SESSIONS })
+
+    const saved = await entryById('edit-1')
+    expect(saved.minutes).toBe(45)
+    expect(saved.sessions).toEqual(SESSIONS)
+  })
+
+  it('divides the EDITED total across clients, to the second', async () => {
+    await seed()
+    await store.updateTimeEntry('edit-1', { minutes: 45, sessions: SESSIONS })
+
+    const { created, deletedId } = await store.splitTimeEntry(
+      'edit-1',
+      [
+        { clientId: 'c1', minutes: 20 },
+        { clientId: 'c2', minutes: 25 },
+      ],
+      'owner-1',
+      'grp-edit',
+      'custom',
+    )
+
+    expect(deletedId).toBe('edit-1')
+    expect(created.map((slice) => slice.minutes).sort((a, b) => a - b)).toEqual([20, 25])
+    // The 60-minute clock is NOT what got divided.
+    const totalSeconds = created.reduce((sum, slice) => sum + seconds(slice.minutes), 0)
+    expect(totalSeconds).toBe(seconds(45))
+    // Every slice still carries the clock-in/out of when the work happened.
+    for (const slice of created) {
+      expect(slice.sessions).toEqual(SESSIONS)
+      expect(slice.startAt).toBe(SESSIONS[0].startAt)
+      expect(slice.endAt).toBe(SESSIONS[0].endAt)
+    }
+  })
+
+  it('survives seconds-exact edits — 45m 20s splits into 20m 20s + 25m', async () => {
+    await seed()
+    const edited = 45 + 20 / 60
+    await store.updateTimeEntry('edit-1', { minutes: edited, sessions: SESSIONS })
+    expect((await entryById('edit-1')).minutes).toBe(edited)
+
+    const { created } = await store.splitTimeEntry(
+      'edit-1',
+      [
+        { clientId: 'c1', minutes: 20 + 20 / 60 },
+        { clientId: 'c2', minutes: 25 },
+      ],
+      'owner-1',
+      'grp-edit-2',
+      'custom',
+    )
+    const totalSeconds = created.reduce((sum, slice) => sum + seconds(slice.minutes), 0)
+    expect(totalSeconds).toBe(seconds(edited))
+  })
+
+  it('keeps an edited SLICE at its typed minutes, split intact', async () => {
+    // A 60-minute block already split 20/40. Retyping one slice's duration must
+    // change that slice only — not blow it back up to the whole block.
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+        ],
+        timeEntries: [
+          {
+            id: 'slice-a',
+            employeeId: 'emp-1',
+            clientId: 'c1',
+            date: '2026-07-03',
+            minutes: 20,
+            description: 'Bank rec',
+            billable: true,
+            approvalStatus: 'pending',
+            entryMethod: 'timer',
+            startAt: SESSIONS[0].startAt,
+            endAt: SESSIONS[0].endAt,
+            sessions: SESSIONS,
+            groupId: 'grp-live',
+            groupAllocation: 'custom',
+          },
+          {
+            id: 'slice-b',
+            employeeId: 'emp-1',
+            clientId: 'c2',
+            date: '2026-07-03',
+            minutes: 40,
+            description: 'Bank rec',
+            billable: true,
+            approvalStatus: 'pending',
+            entryMethod: 'timer',
+            startAt: SESSIONS[0].startAt,
+            endAt: SESSIONS[0].endAt,
+            sessions: SESSIONS,
+            groupId: 'grp-live',
+            groupAllocation: 'custom',
+          },
+        ],
+      }),
+    )
+
+    await store.updateTimeEntry('slice-a', { minutes: 15, sessions: SESSIONS })
+
+    expect((await entryById('slice-a')).minutes).toBe(15)
+    expect((await entryById('slice-a')).sessions).toEqual(SESSIONS)
+    // The sibling is untouched — an edit on one slice is not a re-division.
+    expect((await entryById('slice-b')).minutes).toBe(40)
+  })
+})
+
+/**
  * A minimal stand-in for a `pg` Pool, enough to drive the POSTGRES branch of
  * `write()` without a database. Every statement is recorded so a test can
  * assert on what the transaction actually issued and in what order.

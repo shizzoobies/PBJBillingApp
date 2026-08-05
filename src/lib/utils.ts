@@ -366,6 +366,9 @@ export {
   // Which entries can be split, and the client checkbox list a regular-entry
   // split opens with — shared so the modal offers exactly what the server allows.
   classifySplitTarget,
+  // The one rule for what an edit does to an entry's billed minutes, so the
+  // edit form's live total and the server's stored result cannot disagree.
+  minutesAfterEntryEdit,
   minutesToSeconds,
   splitClientOptions,
   // Reopening a split with its current distribution intact — the prefill the
