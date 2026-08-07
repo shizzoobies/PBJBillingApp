@@ -84,6 +84,15 @@ picker, notification bell, and account menu sit in the top bar on every page.
     duration to each). Saving creates one billable entry per client in a single
     action (a live preview shows each client's share) — a true one-step split,
     no leftover "un-split" entry.
+  - **A tracked group block can be EDITED before it is split** — open Edit on it
+    and change the start/stop times, the duration, the date, the description or
+    billable, and it stays a group block across all its clients. You do NOT have
+    to pick a single client first; the client box offers "Keep as group time (N
+    clients) — split it below", and picking an actual client is optional and
+    collapses the block to that one client. Split it across its clients after
+    editing, as usual. (Previously the form refused to save unless you chose one
+    client or marked it administrative, which forced a group block to be
+    collapsed just to correct its clock in/out.)
   - Live timer → pick "A group" and the clients, track the block, then "Split
     across clients" on the saved entry (in Recent time) to divide it the same
     ways. (Splitting a running timer happens after stop.)

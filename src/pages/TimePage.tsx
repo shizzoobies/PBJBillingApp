@@ -44,6 +44,7 @@ import {
   formatHours,
   formatHoursMinutes,
   getWeekLabel,
+  isGroupHoldingEntry,
   type GroupAllocationMode,
   makeId,
   minutesAfterEntryEdit,
@@ -2337,6 +2338,15 @@ function TimeEntryRow({
     ? []
     : checklists.filter((checklist) => checklist.clientId === editClientId)
 
+  /**
+   * This entry is an unsplit GROUP-timer block: no single client, its members
+   * held in `groupClientIds` until it is split for billing. Such a block may be
+   * edited (start/stop, duration, date, notes) WITHOUT being collapsed to one
+   * client — see `handleSave`.
+   */
+  const editingGroupBlock = isGroupHoldingEntry(entry)
+  const groupMemberCount = entry.groupClientIds?.length ?? 0
+
   // The client / task / date / admin part of the patch, shared by both save
   // paths (sessions editor and legacy hours+minutes editor).
   const detailsPatch = (() => {
@@ -2444,7 +2454,18 @@ function TimeEntryRow({
   }
 
   const handleSave = async () => {
-    if (!editIsAdmin && !editClientId) {
+    // A group-timer block legitimately has NO single client — its members live
+    // in `groupClientIds` until it is split for billing. This guard predates
+    // group entries and applied a single-client assumption to the one entry
+    // type that is defined by not having one, so fixing a group block's
+    // start/stop meant first collapsing it to a single client: exactly the
+    // reported bug. The SERVER already allows it (see `isGroupPending` in the
+    // create path, and the PATCH handler imposes no client rule at all) — this
+    // was the client being stricter than the API.
+    //
+    // Picking a client here still works and still collapses the block to that
+    // one client; it just isn't forced any more.
+    if (!editIsAdmin && !editClientId && !editingGroupBlock) {
       setError('Pick a client, or mark the entry as administrative.')
       return
     }
@@ -2584,7 +2605,14 @@ function TimeEntryRow({
                     setEditTaskId('')
                   }}
                 >
-                  <option value="">Select a client…</option>
+                  {/* On a group block, blank is a real choice — it keeps the
+                      block multi-client so it can be split afterwards. Saying
+                      "Select a client…" there is what made it read as required. */}
+                  <option value="">
+                    {editingGroupBlock
+                      ? `Keep as group time (${groupMemberCount} ${groupMemberCount === 1 ? 'client' : 'clients'}) — split it below`
+                      : 'Select a client…'}
+                  </option>
                   {clients.map((client) => (
                     <option key={client.id} value={client.id}>
                       {client.name}
