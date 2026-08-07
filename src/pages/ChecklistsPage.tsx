@@ -146,6 +146,8 @@ export function ChecklistsPage() {
   const {
     activeEmployeeId,
     visibleChecklists,
+    visibleClients,
+    effectiveUser,
     data,
     role,
     ownerMode,
@@ -582,6 +584,12 @@ export function ChecklistsPage() {
         <StaffStandardTemplatesView
           templates={data.checklistTemplates}
           employees={data.employees}
+          // Accountants only — a bookkeeper still asks an owner. `visibleClients`
+          // is already scoped to this person's assignments, and the server
+          // re-checks it, so a stale client list can't widen anything.
+          canApply={effectiveUser?.staffRole === 'Accountant'}
+          clients={visibleClients}
+          onApplyToClient={applyTemplateToClient}
         />
       ) : null}
     </section>
@@ -746,9 +754,25 @@ function StaffRecurringTemplatesView({ data }: { data: AppData }) {
 function StaffStandardTemplatesView({
   templates,
   employees,
+  canApply,
+  clients,
+  onApplyToClient,
 }: {
   templates: ChecklistTemplate[]
   employees: Employee[]
+  /**
+   * ACCOUNTANTS may put a blueprint to work themselves; bookkeepers still ask
+   * an owner. Comes from `staffRole === 'Accountant'` — NOT from the session
+   * `role`, which is only ever 'owner' | 'employee'. The server enforces this
+   * independently, so hiding the control is convenience, not the boundary.
+   */
+  canApply: boolean
+  /** Only the clients this person is assigned to; the server re-checks. */
+  clients: Client[]
+  onApplyToClient: (
+    templateId: string,
+    payload: { clientId: string; firstDueDate?: string; frequency?: string },
+  ) => Promise<void>
 }) {
   const standards = useMemo(
     () =>
@@ -766,8 +790,9 @@ function StaffStandardTemplatesView({
           <p className="section-kicker">Blueprints</p>
           <h2>Standard templates</h2>
           <p className="section-subtitle">
-            Your firm&apos;s reusable checklist blueprints, shown read-only. Ask an owner to
-            apply one to a client to put it to work.
+            {canApply
+              ? 'Your firm’s reusable checklist blueprints. The blueprint itself stays read-only — copy one onto a client and that copy is yours to edit.'
+              : 'Your firm’s reusable checklist blueprints, shown read-only. Ask an owner to apply one to a client to put it to work.'}
           </p>
         </div>
       </div>
@@ -777,6 +802,9 @@ function StaffStandardTemplatesView({
             key={template.id}
             template={template}
             employees={employees}
+            canApply={canApply}
+            clients={clients}
+            onApplyToClient={onApplyToClient}
           />
         ))}
       </ul>
@@ -790,10 +818,19 @@ function StaffStandardTemplateRow({
   template,
   employees,
   extraMeta,
+  canApply = false,
+  clients = [],
+  onApplyToClient,
 }: {
   template: ChecklistTemplate
   employees: Employee[]
   extraMeta?: React.ReactNode
+  canApply?: boolean
+  clients?: Client[]
+  onApplyToClient?: (
+    templateId: string,
+    payload: { clientId: string; firstDueDate?: string; frequency?: string },
+  ) => Promise<void>
 }) {
   const [open, setOpen] = useState(false)
   const stages = ensureTemplateStages(template).stages
@@ -815,6 +852,22 @@ function StaffStandardTemplateRow({
           {extraMeta ? <> · {extraMeta}</> : null}
         </span>
       </button>
+      {/* Accountants can put a blueprint to work without waiting on an owner.
+          The list is already only their assigned clients, and the server
+          re-checks both that and "standard only" — this control is the
+          convenience, not the boundary. */}
+      {canApply && onApplyToClient && clients.length > 0 ? (
+        <div className="staff-template-actions">
+          <ApplyToClientControl
+            clients={clients}
+            label="Copy to client…"
+            title="Copy this standard checklist onto one of your clients — the copy is yours to edit, the blueprint stays unchanged"
+            onApply={(clientId) =>
+              onApplyToClient(template.id, { clientId, frequency: template.frequency })
+            }
+          />
+        </div>
+      ) : null}
       {open ? (
         <div className="staff-template-body">
           {totalSteps === 0 ? (

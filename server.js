@@ -50,6 +50,10 @@ import {
 import { isTemplateVisibleToScope, isTimeEntryVisibleToScope } from './lib/data-scope.js'
 import { StaleWorkspaceError } from './lib/workspace-version.js'
 import {
+  templateApplyRoleDenial,
+  templateApplyScopeDenial,
+} from './lib/template-apply-permission.js'
+import {
   generateBackupCodes,
   generateSecret,
   verifyBackupCode,
@@ -6613,15 +6617,27 @@ const server = createServer(async (request, response) => {
 
     // POST /api/checklist-templates/:id/apply-to-client — copy a standard OR
     // regular template onto a client, producing a NEW regular client-bound
-    // template. Owner only. Body: { clientId, firstDueDate?, frequency? }.
+    // template. Body: { clientId, firstDueDate?, frequency? }.
+    //
+    // Owners may apply ANY template to ANY client. ACCOUNTANTS
+    // (`senior_bookkeeper`) may apply a STANDARD blueprint to a client they are
+    // assigned to — they could already see the blueprint library read-only and
+    // were told to "ask an owner"; this lets them do it themselves. Bookkeepers
+    // are unchanged and still ask.
+    //
+    // The two extra restrictions on non-owners are deliberate and enforced HERE,
+    // not in the UI: a standard blueprint carries no other client's data, and the
+    // target must be a client they are actually assigned to — otherwise this
+    // endpoint would be a way to write into a client they cannot even see.
     const applyToClientMatch = normalizedPath.match(
       /^\/api\/checklist-templates\/([^/]+)\/apply-to-client$/,
     )
     if (applyToClientMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return
-      if (session.user.role !== 'owner') {
-        sendJson(response, 403, { error: 'Only owners can apply templates to clients' })
+      const roleDenial = templateApplyRoleDenial(session.user)
+      if (roleDenial) {
+        sendJson(response, roleDenial.status, { error: roleDenial.error })
         return
       }
       const sourceId = applyToClientMatch[1]
@@ -6642,6 +6658,19 @@ const server = createServer(async (request, response) => {
       }
       if (!data.clients.some((client) => client.id === clientId)) {
         sendJson(response, 400, { error: 'Invalid target client' })
+        return
+      }
+      // Standard blueprints only, and only onto a client they are assigned to.
+      // Scoped with the same visibility rule the rest of the app uses, so this
+      // endpoint cannot become a side door into a client they cannot see.
+      const scopeDenial = templateApplyScopeDenial({
+        user: session.user,
+        template: source,
+        clientId,
+        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+      })
+      if (scopeDenial) {
+        sendJson(response, scopeDenial.status, { error: scopeDenial.error })
         return
       }
       const copy = await appDataStore.copyTemplateToClient(sourceId, {

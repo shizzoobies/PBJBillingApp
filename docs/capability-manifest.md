@@ -425,16 +425,23 @@ picker, notification bell, and account menu sit in the top bar on every page.
   blueprints stay owner-only entirely.
 - Standard templates (the firm's client-agnostic blueprints) are visible READ-ONLY
   to every team member on the Checklists page ("Standard templates" section) — they
-  can browse the standard steps but only an owner can edit a blueprint or apply one
-  to a client.
+  can browse the standard steps but only an owner can EDIT a blueprint.
+- **Accountants can apply a standard checklist to their own clients.** Previously
+  every apply was owner-only and an accountant had to ask. Now a team member whose
+  staff role is **Accountant** gets the same "Copy to client…" control on standard
+  blueprint rows, with two limits: it works for **standard blueprints only** (not a
+  template bound to another client), and only onto a **client they are assigned
+  to**. Bookkeepers are unchanged and still ask an owner. Owners are unchanged and
+  can apply any template to any client. Both limits are enforced on the server, so
+  they hold no matter what the page shows.
 - **Copy a template onto a client from the Checklists tab.** Every template row —
   standard blueprints on the "Standard" tab AND recurring templates on the
-  "Repeating" tab — carries a "Copy to client…" button on the row itself (owner
-  only, no need to expand the row first). It opens a client picker; choosing a
-  client creates a new recurring checklist on that client from the template's
-  stages and steps, and the row confirms with "Copied to <client>". Same copy
-  used everywhere, so a standard blueprint and another client's recurring
-  checklist copy the same way.
+  "Repeating" tab — carries a "Copy to client…" button on the row itself (no need
+  to expand the row first; owners on any row, accountants on standard rows). It
+  opens a client picker; choosing a client creates a new recurring checklist on
+  that client from the template's stages and steps, and the row confirms with
+  "Copied to <client>". Same copy used everywhere, so a standard blueprint and
+  another client's recurring checklist copy the same way.
 - Owners can apply a template **directly from the Clients page** too: every client
   row has a "Template" button that opens a picker of standard templates and
   recurring templates copied from other clients, and applies the chosen one to that
