@@ -6,6 +6,7 @@
   type ChecklistTemplate,
   type ChecklistTemplateItem,
   type Client,
+  type NewClientInput,
   type ClientNote,
   type FeatureRequest,
   type FeatureRequestType,
@@ -2629,7 +2630,7 @@ export async function listClientNotes(clientId: string) {
  * local state rather than its own optimistic copy, so the id in the UI is the
  * id in the database.
  */
-export async function createClientRequest(payload: Omit<Client, 'id'>) {
+export async function createClientRequest(payload: NewClientInput) {
   const response = await apiFetch('/api/clients', {
     credentials: 'same-origin',
     method: 'POST',

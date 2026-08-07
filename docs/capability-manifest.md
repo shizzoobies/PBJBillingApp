@@ -553,13 +553,33 @@ picker, notification bell, and account menu sit in the top bar on every page.
   Add-client modal. Fields: name, primary contact,
   billing type, monthly/annual rate (for subscription/annual clients), estimated
   monthly hours per role (informational only — never affects invoices), assigned
-  bookkeeper(s), plans/services. NOTE: there is no per-client hourly rate
+  bookkeeper(s), other contacts, plans/services. NOTE: there is no per-client hourly rate
   anymore — Hourly clients are billed off each team member's own bill rate (set
   on the Team page). Right after saving, a prompt asks "Open their checklist
   now?" — choosing yes jumps straight into the new client's checklist + notes
   modal. (Contacts and Plans have the same "+" add-in-a-modal flow.) The header
   (title + "+" + search) stays pinned to the top as you scroll the list, so the
   add button is always reachable.
+- **Primary contact is a real contact, chosen from the directory.** It used to
+  be a free-text box: the name was stored on the client, and only on some later
+  page load did a repair step quietly turn it into a bare contact record (no
+  email, no phone). So right after saving there was nothing in Contacts to find,
+  and typing a variant of a name already on file ("Britt" for "Brittany
+  Ferguson") produced a second, emptier record. Now:
+  - The field is a **picker of existing contacts**, plus **"+ Add a new
+    contact…"** which opens name / email / phone right there in the form.
+  - The contact is created and linked **the moment you save** — open Contacts
+    straight after and it is there, with the email and phone you entered.
+  - Typing a name that exactly matches an existing contact (same name AND email,
+    ignoring case and spacing) **links that person instead of duplicating them**.
+    Matching is deliberately exact: a near-match that silently attached a client
+    to the wrong person would be worse than one extra record.
+  - The primary contact is simply the FIRST of the client's linked contacts —
+    not a separate field. The chip list below it is therefore labeled **"Other
+    contacts"**, and the primary is merged in ahead of them on save.
+  - Archived contacts are hidden from the picker, as everywhere else.
+  - The Add-client button stays disabled until a name, a primary contact, and at
+    least one assigned employee are filled in, rather than doing nothing on click.
 - Client detail page (owner): everything about one client in one place, split
   into four TABS instead of one long scroll —
   **Overview** (client name, contacts & address, assigned team, logo, notes),

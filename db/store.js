@@ -10,6 +10,7 @@ import {
 } from '../lib/checklist-identity.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import { waitingOnStage } from '../lib/waiting-on-state.js'
+import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
   StaleWorkspaceError,
   fileWorkspaceVersion,
@@ -6394,6 +6395,35 @@ export class AppDataStore {
       const dbClient = await this.pool.connect()
       try {
         await dbClient.query('begin')
+
+        // Resolve the primary contact to a REAL contact record, here and now.
+        // This used to be left to a backfill on the next read, so immediately
+        // after saving there was nothing in the Contacts directory to find.
+        // Done inside the transaction: if the client insert fails we must not
+        // leave an orphaned contact behind.
+        const { rows: existingContacts } = await dbClient.query(
+          'select id, name, email, archived_at as "archivedAt" from contacts',
+        )
+        const plan = planPrimaryContact({
+          contacts: existingContacts,
+          primaryContactId: client.primaryContactId,
+          newPrimaryContact: client.newPrimaryContact,
+          contactIds: record.contactIds,
+        })
+        let primaryContactId = plan.primaryContactId
+        if (plan.create) {
+          primaryContactId = `contact-${randomUUID().slice(0, 8)}`
+          await dbClient.query(
+            `insert into contacts (id, name, email, phone, updated_at)
+             values ($1, $2, $3, $4, now())`,
+            [primaryContactId, plan.create.name, plan.create.email, plan.create.phone],
+          )
+        }
+        record.contactIds = mergeContactIds(primaryContactId, plan.otherContactIds)
+        // Keep the denormalized display name in step — the client table renders
+        // it, and every existing client relies on it.
+        record.contact = plan.contactName || record.contact
+
         // `plan_id` (the legacy single-plan FK column) is deliberately left at
         // its null default: `plan_ids` is the live field and the read mapper
         // only falls back to `plan_id` when `plan_ids` is empty. Writing it
@@ -6481,6 +6511,25 @@ export class AppDataStore {
     const data = await readJson(localDataPath)
     if (!Array.isArray(data.clients)) data.clients = []
     if (data.clients.some((existing) => existing && existing.id === record.id)) return null
+
+    // Same primary-contact resolution as the Postgres branch above (cardinal
+    // rule 1) — created up front so the contact exists the moment the client
+    // does, rather than appearing later via the backfill.
+    if (!Array.isArray(data.contacts)) data.contacts = []
+    const plan = planPrimaryContact({
+      contacts: data.contacts,
+      primaryContactId: client.primaryContactId,
+      newPrimaryContact: client.newPrimaryContact,
+      contactIds: record.contactIds,
+    })
+    let primaryContactId = plan.primaryContactId
+    if (plan.create) {
+      primaryContactId = `contact-${randomUUID().slice(0, 8)}`
+      data.contacts = [{ id: primaryContactId, ...plan.create }, ...data.contacts]
+    }
+    record.contactIds = mergeContactIds(primaryContactId, plan.otherContactIds)
+    record.contact = plan.contactName || record.contact
+
     data.clients = [record, ...data.clients]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return record

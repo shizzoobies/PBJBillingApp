@@ -13,6 +13,7 @@ import type {
   FeatureRequestType,
   FirmSettings,
   ItemDeletionRequest,
+  NewClientInput,
   PendingTaskEdit,
   Role,
   ServiceCategory,
@@ -496,7 +497,7 @@ export type AppContextValue = {
    * SERVER's record. Rejects on failure so the caller can surface it — client
    * creation used to fail silently via the bulk save.
    */
-  addClient: (client: Omit<Client, 'id'>) => Promise<Client | null>
+  addClient: (client: NewClientInput) => Promise<Client | null>
   addPlan: (plan: Omit<SubscriptionPlan, 'id'>) => void
   /**
    * Owner-only: patch a subscription plan's editable fields (name / notes).

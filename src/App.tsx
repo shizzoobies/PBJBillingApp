@@ -109,6 +109,7 @@ import {
   type ChecklistTemplate,
   type ChecklistTemplateItem,
   type Client,
+  type NewClientInput,
   type Contact,
   type DataSyncState,
   type FeatureRequest,
@@ -3319,7 +3320,7 @@ function App() {
    * go through `updateWorkspaceData`: the workspace isn't dirty afterwards —
    * the server is already authoritative.
    */
-  const addClient = async (client: Omit<Client, 'id'>): Promise<Client | null> => {
+  const addClient = async (client: NewClientInput): Promise<Client | null> => {
     if (previewActiveRef.current) return null
     const created = await createClientRequest(client)
     setData((current) => ({ ...current, clients: [created, ...current.clients] }))

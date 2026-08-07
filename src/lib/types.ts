@@ -228,6 +228,18 @@ export type Contact = {
   group?: string
 }
 
+/**
+ * What the Add-client form posts. A client plus how to resolve its PRIMARY
+ * contact: either an existing contact chosen from the picker, or a new one to
+ * create. The server does the resolving — reusing an existing contact on an
+ * exact name+email match — and returns the client with `contactIds` already
+ * linked, primary first. Neither field is stored on the client itself.
+ */
+export type NewClientInput = Omit<Client, 'id'> & {
+  primaryContactId?: string
+  newPrimaryContact?: { name: string; email: string; phone: string }
+}
+
 export type TimeApprovalStatus = 'pending' | 'approved' | 'rejected'
 
 /**

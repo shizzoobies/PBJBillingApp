@@ -19,6 +19,7 @@ import type {
   Contact,
   Employee,
   LifecycleStage,
+  NewClientInput,
   SubscriptionPlan,
 } from '../lib/types'
 import {
@@ -34,6 +35,9 @@ const BILLING_LABELS: Record<BillingMode, string> = {
   subscription: 'Monthly',
   annual: 'Annual',
 }
+
+/** Sentinel for the "+ Add a new contact…" option in the primary-contact picker. */
+const NEW_CONTACT = '__new_contact__'
 
 // Lifecycle stages in display order, plus their human label. An absent
 // `lifecycleStage` is treated as 'active' everywhere (see `lifecycleOf`).
@@ -125,7 +129,7 @@ export function ClientsPage() {
 
   const [addError, setAddError] = useState<string | null>(null)
 
-  const handleCreateClient = async (values: Omit<Client, 'id'>) => {
+  const handleCreateClient = async (values: NewClientInput) => {
     setAddError(null)
     try {
       const created = await addClient(values)
@@ -358,7 +362,7 @@ function ClientBuilder({
   variant = 'panel',
 }: {
   employees: Employee[]
-  onCreate: (client: Omit<Client, 'id'>) => void
+  onCreate: (client: NewClientInput) => void
   plans: SubscriptionPlan[]
   contacts: Contact[]
   defaults?: ClientDefaults
@@ -372,7 +376,16 @@ function ClientBuilder({
   const defaultBillingMode: BillingMode = defaults?.billingMode ?? 'hourly'
 
   const [name, setName] = useState('')
-  const [contact, setContact] = useState('')
+  /**
+   * Primary contact: a contact id, '' for none, or NEW_CONTACT while typing a
+   * brand-new one. It used to be free text that quietly became a bare contact
+   * record on the next page load — you could not tell where the name had gone,
+   * and typing a slight variant of an existing person made a duplicate.
+   */
+  const [primaryContactId, setPrimaryContactId] = useState('')
+  const [newContactName, setNewContactName] = useState('')
+  const [newContactEmail, setNewContactEmail] = useState('')
+  const [newContactPhone, setNewContactPhone] = useState('')
   const [hourlyRate, setHourlyRate] = useState(defaultHourly)
   const [monthlyRate, setMonthlyRate] = useState(defaultMonthly)
   const [annualRate, setAnnualRate] = useState('')
@@ -398,6 +411,15 @@ function ClientBuilder({
     )
   }
 
+  const addingNewContact = primaryContactId === NEW_CONTACT
+  // Archived contacts are hidden from client pickers everywhere else, so they
+  // stay hidden here too.
+  const pickableContacts = contacts.filter((entry) => !entry.archivedAt)
+  /** A primary is required — either an existing contact or a name to create. */
+  const hasPrimaryContact = addingNewContact
+    ? newContactName.trim().length > 0
+    : primaryContactId.length > 0
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     // Hourly billing is now per-EMPLOYEE (bill rate set on the Team page), so
@@ -405,7 +427,7 @@ function ClientBuilder({
     // `hourlyRate` (the firm default) for back-compat with the stored column.
     const rate = Number(hourlyRate)
     const hourlyForStore = Number.isFinite(rate) && rate > 0 ? rate : 0
-    if (!name || !contact || assignedEmployeeIds.length === 0) {
+    if (!name || !hasPrimaryContact || assignedEmployeeIds.length === 0) {
       return
     }
 
@@ -414,9 +436,22 @@ function ClientBuilder({
     const parsedBookkeeper = Number(estimatedBookkeeperHours)
     const parsedAccountant = Number(estimatedAccountantHours)
     const parsedCfo = Number(estimatedCfoHours)
+    // The server resolves the primary contact to a real record (reusing an
+    // existing one on an exact name+email match) and returns the final linked
+    // list, so `contact` here is only the display name it starts from.
+    const chosenContact = pickableContacts.find((entry) => entry.id === primaryContactId)
     onCreate({
       name,
-      contact,
+      contact: addingNewContact ? newContactName.trim() : (chosenContact?.name ?? ''),
+      ...(addingNewContact
+        ? {
+            newPrimaryContact: {
+              name: newContactName.trim(),
+              email: newContactEmail.trim(),
+              phone: newContactPhone.trim(),
+            },
+          }
+        : { primaryContactId }),
       billingMode,
       hourlyRate: hourlyForStore,
       planIds,
@@ -456,7 +491,10 @@ function ClientBuilder({
       assignedEmployeeIds,
     })
     setName('')
-    setContact('')
+    setPrimaryContactId('')
+    setNewContactName('')
+    setNewContactEmail('')
+    setNewContactPhone('')
     setInitialStage('active')
     setHourlyRate(defaultHourly)
     setMonthlyRate(defaultMonthly)
@@ -487,12 +525,50 @@ function ClientBuilder({
         </label>
         <label className="field">
           <span>Primary contact</span>
-          <input
+          <select
             className="input"
-            onChange={(event) => setContact(event.target.value)}
-            value={contact}
-          />
+            onChange={(event) => setPrimaryContactId(event.target.value)}
+            value={primaryContactId}
+          >
+            <option value="">Choose a contact…</option>
+            {pickableContacts.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.name}
+              </option>
+            ))}
+            <option value={NEW_CONTACT}>+ Add a new contact…</option>
+          </select>
         </label>
+        {addingNewContact ? (
+          // Inline rather than a separate trip to the Contacts page — this is
+          // the moment you know who the contact is.
+          <div className="field new-contact-fields">
+            <span>New contact</span>
+            <input
+              className="input"
+              placeholder="Name (required)"
+              onChange={(event) => setNewContactName(event.target.value)}
+              value={newContactName}
+            />
+            <input
+              className="input"
+              placeholder="Email (optional)"
+              onChange={(event) => setNewContactEmail(event.target.value)}
+              type="email"
+              value={newContactEmail}
+            />
+            <input
+              className="input"
+              placeholder="Phone (optional)"
+              onChange={(event) => setNewContactPhone(event.target.value)}
+              value={newContactPhone}
+            />
+            <p className="field-helper">
+              Saved to Contacts and linked to this client. If someone with this exact name and
+              email already exists, they&apos;ll be linked instead of duplicated.
+            </p>
+          </div>
+        ) : null}
         <label className="field">
           <span>Billing type</span>
           <select
@@ -617,13 +693,17 @@ function ClientBuilder({
           />
         </div>
         <div className="field">
-          <span>Contacts</span>
+          <span>Other contacts</span>
+          {/* The primary is the FIRST of the client's linked contacts, not a
+              separate notion — so it is excluded here and merged in on save. */}
           <ChipMultiSelect
-            selectedIds={contactIds}
-            options={contacts.map((entry) => ({ id: entry.id, label: entry.name }))}
+            selectedIds={contactIds.filter((id) => id !== primaryContactId)}
+            options={pickableContacts
+              .filter((entry) => entry.id !== primaryContactId)
+              .map((entry) => ({ id: entry.id, label: entry.name }))}
             onChange={setContactIds}
             addLabel="+ Add contact"
-            emptyHelper="No contacts selected yet."
+            emptyHelper="Just the primary contact for now."
           />
         </div>
         <fieldset className="assignment-field">
@@ -639,7 +719,13 @@ function ClientBuilder({
             </label>
           ))}
         </fieldset>
-        <button className="primary-action" type="submit">
+        {/* Disabled rather than silently returning from submit — a button that
+            does nothing when a required field is missing reads as a bug. */}
+        <button
+          className="primary-action"
+          type="submit"
+          disabled={!name || !hasPrimaryContact || assignedEmployeeIds.length === 0}
+        >
           <Plus size={16} />
           Add client
         </button>
