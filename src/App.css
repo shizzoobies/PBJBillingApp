@@ -9954,6 +9954,34 @@ mark.list-search-hit {
   display: inline-flex;
 }
 
+/* Open / past-due task counts on a client row, beside the Checklist button.
+   Quiet by default — this sits in a dense list, so it reads as a label rather
+   than competing with the actions around it. */
+.client-task-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 2px;
+  white-space: nowrap;
+}
+.client-task-count {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+/* Late work is the one thing worth pulling the eye. Carried by the label text
+   too ("late"), never by color alone. */
+.client-task-count.is-late {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, var(--surface));
+  border-color: color-mix(in srgb, var(--red) 32%, var(--line));
+}
+
 /* "This tab is out of date" — blocking, because every further save from this
    tab is being refused and a reload is the only way forward. */
 .stale-workspace-backdrop {

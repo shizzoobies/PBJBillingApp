@@ -1,5 +1,5 @@
 import { ChevronRight, Copy, ListChecks, Plus, ShieldCheck, StickyNote, Timer } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { AddModal } from '../components/AddModal'
@@ -9,6 +9,7 @@ import { ClientTimeModal } from '../components/ClientTimeModal'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { FloatingAddButton } from '../components/FloatingAddButton'
 import { highlightMatch } from '../lib/highlight'
+import { buildClientTaskCounts, type ClientTaskCounts } from '../lib/clientTaskCounts'
 import { ListSearch } from '../components/ListSearch'
 import type {
   BillingMode,
@@ -22,7 +23,6 @@ import type {
 } from '../lib/types'
 import {
   currency,
-  deriveChecklistStatus,
   employeeName,
   getAssignedEmployeeIds,
   localDateOnly,
@@ -47,6 +47,36 @@ const LIFECYCLE_LABELS: Record<LifecycleStage, string> = {
 /** The effective lifecycle stage of a client — absent defaults to 'active'. */
 function lifecycleOf(client: Client): LifecycleStage {
   return client.lifecycleStage ?? 'active'
+}
+
+/**
+ * Open / past-due task counts for one client row, sitting with the Checklist
+ * and Note buttons so outstanding work is legible without opening anything.
+ *
+ * Past due is a SUBSET of active, so it is rendered as a qualifier ("3 open ·
+ * 1 late") rather than a second independent number — "3" and "1" side by side
+ * would read as four tasks. A client with nothing open renders nothing at all:
+ * a row of zeros across a 49-client list is noise, not information.
+ */
+function ClientTaskCountBadges({ counts }: { counts?: ClientTaskCounts }) {
+  const active = counts?.active ?? 0
+  if (active === 0) return null
+  const pastDue = counts?.pastDue ?? 0
+  return (
+    <span
+      className="client-task-counts"
+      title={
+        pastDue > 0
+          ? `${active} open task${active === 1 ? '' : 's'}, ${pastDue} past due`
+          : `${active} open task${active === 1 ? '' : 's'}, none past due`
+      }
+    >
+      <span className="client-task-count">{active} open</span>
+      {pastDue > 0 ? (
+        <span className="client-task-count is-late">{pastDue} late</span>
+      ) : null}
+    </span>
+  )
 }
 
 /** Small color-coded pill showing a client's lifecycle stage. */
@@ -123,18 +153,15 @@ export function ClientsPage() {
     ? searchedClients.filter((c) => stageSegment === 'all' || lifecycleOf(c) === stageSegment)
     : searchedClients
 
-  // Client ids that have at least one ACTIVE checklist — not soft-deleted and
-  // not fully Done. Drives the green tint on each row's Checklist button so a
-  // client with live work-in-progress stands out at a glance.
+  // Open + past-due task counts per client, shown on each row and also driving
+  // the green tint on the Checklist button. Deliberately ONE source for both:
+  // when the tint and the number are computed separately they eventually
+  // disagree, and a row saying "0 active" next to a lit-up button is worse than
+  // either on its own.
   const todayDateOnly = localDateOnly()
-  const clientsWithActiveChecklists = new Set(
-    (data.checklists ?? [])
-      .filter(
-        (checklist) =>
-          !checklist.deletedAt &&
-          deriveChecklistStatus(checklist, todayDateOnly) !== 'Done',
-      )
-      .map((checklist) => checklist.clientId),
+  const taskCounts = useMemo(
+    () => buildClientTaskCounts(data.checklists ?? [], todayDateOnly),
+    [data.checklists, todayDateOnly],
   )
 
   if (!ownerMode) {
@@ -159,7 +186,7 @@ export function ClientsPage() {
           ) : null}
           <ClientTable
             clients={filteredClients}
-            clientsWithActiveChecklists={clientsWithActiveChecklists}
+            taskCounts={taskCounts}
             employees={data.employees}
             onUpdatePlan={updateClientPlan}
             ownerMode={ownerMode}
@@ -217,7 +244,7 @@ export function ClientsPage() {
       </div>
       <ClientTable
         clients={filteredClients}
-        clientsWithActiveChecklists={clientsWithActiveChecklists}
+        taskCounts={taskCounts}
         employees={data.employees}
         onUpdatePlan={updateClientPlan}
         onUpdateClient={updateClient}
@@ -746,7 +773,7 @@ function ApplyTemplateForm({
 
 function ClientTable({
   clients,
-  clientsWithActiveChecklists,
+  taskCounts,
   employees,
   onUpdatePlan,
   onUpdateClient,
@@ -757,7 +784,7 @@ function ClientTable({
 }: {
   clients: Client[]
   /** Client ids with at least one active (not done, not deleted) checklist. */
-  clientsWithActiveChecklists: Set<string>
+  taskCounts: Map<string, ClientTaskCounts>
   employees: Employee[]
   onUpdatePlan: (clientId: string, billingMode: BillingMode, planId: string | null) => void
   /** Owner-only: manual lifecycle-stage override. Omitted in the staff view. */
@@ -916,12 +943,12 @@ function ClientTable({
                     <button
                       type="button"
                       className={
-                        clientsWithActiveChecklists.has(client.id)
+                        (taskCounts.get(client.id)?.active ?? 0) > 0
                           ? 'secondary-action compact-action has-active-checklists'
                           : 'secondary-action compact-action'
                       }
                       title={
-                        clientsWithActiveChecklists.has(client.id)
+                        (taskCounts.get(client.id)?.active ?? 0) > 0
                           ? 'Open checklist & notes — this client has active checklists'
                           : 'Open checklist & notes'
                       }
@@ -929,6 +956,7 @@ function ClientTable({
                     >
                       <ListChecks size={14} /> Checklist
                     </button>
+                    <ClientTaskCountBadges counts={taskCounts.get(client.id)} />
                     <button
                       type="button"
                       className="secondary-action compact-action"

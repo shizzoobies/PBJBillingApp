@@ -562,7 +562,15 @@ picker, notification bell, and account menu sit in the top bar on every page.
   opens a modal with that client's active (editable) checklists plus the notes
   panel (add + history) — no need to open the client and scroll. The button is
   tinted green for clients that currently have active checklists, so open work is
-  visible at a glance. Right next to it is a "Note" button that opens a
+  visible at a glance. **Beside it, each row shows that client's open task count
+  and — only when there is one — a "late" count** (e.g. "2 open · 1 late"), so
+  outstanding work per client is readable without opening anything. The late
+  count is a SUBSET of the open count, never a separate total: "2 open · 1 late"
+  means one of those two is past its due date, not three tasks. A task counts as
+  late if its due date has passed, including when an unfinished STEP inside it is
+  due earlier than the task itself — the same rule the Checklists page's
+  "Overdue" section uses, so the two can never disagree. A client with nothing
+  open shows no counts at all. Right next to it is a "Note" button that opens a
   notes-only modal (add a note + read history) for anyone who just needs to jot
   a note. A third "Time" button opens a TRACK-TIME modal for that client without
   leaving the list: shows how much time is logged for them this month, lets you
