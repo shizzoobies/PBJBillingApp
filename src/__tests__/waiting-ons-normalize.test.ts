@@ -63,4 +63,65 @@ describe('normalizeWaitingOns', () => {
     expect(out[0].createdAt.length).toBeGreaterThan(0)
     expect(out[0].note).toBeUndefined()
   })
+
+  /**
+   * The hand-off fields. This normalizer is the single choke point BOTH backends
+   * run through, so anything it silently drops is lost on Postgres too — and
+   * production is Postgres while the tests are the file backend. Dropping these
+   * would resurrect the exact bug Brittany reported: the name of whoever did the
+   * check disappearing once the wait finished.
+   */
+  it('carries the hand-off stamps through the round-trip', () => {
+    const input = {
+      id: 'wo-handoff1',
+      blockerId: 'emp-lisa',
+      requestedBy: 'emp-brit',
+      createdAt: '2026-08-07T10:00:00.000Z',
+      resolvedAt: '2026-08-07T11:00:00.000Z',
+      resolvedBy: 'emp-lisa',
+      verifiedAt: '2026-08-07T12:00:00.000Z',
+      verifiedBy: 'emp-brit',
+    }
+    expect((normalizeWaitingOns([input]) as Entry[])[0]).toEqual(input)
+  })
+
+  it('carries a client wait through the round-trip', () => {
+    const out = normalizeWaitingOns([
+      {
+        id: 'wo-client1',
+        blockerId: 'client-clover',
+        blockerType: 'client',
+        requestedBy: 'emp-brit',
+        createdAt: '2026-08-07T10:00:00.000Z',
+      },
+    ]) as Array<Entry & { blockerType?: string }>
+    expect(out[0].blockerType).toBe('client')
+    expect(out[0].blockerId).toBe('client-clover')
+  })
+
+  it('never invents a stage that has not happened', () => {
+    const out = normalizeWaitingOns([
+      { blockerId: 'emp-lisa', requestedBy: 'emp-brit' },
+    ]) as Array<Entry & Record<string, unknown>>
+    expect(out[0].resolvedAt).toBeUndefined()
+    expect(out[0].verifiedAt).toBeUndefined()
+    // Absent, not 'employee' — an untouched entry must look exactly as it did
+    // before this feature existed.
+    expect(out[0].blockerType).toBeUndefined()
+  })
+
+  it('ignores junk in the stage fields rather than half-resolving an entry', () => {
+    const out = normalizeWaitingOns([
+      {
+        blockerId: 'emp-lisa',
+        requestedBy: 'emp-brit',
+        blockerType: 'something-else',
+        resolvedAt: 12345,
+        verifiedBy: null,
+      },
+    ]) as Array<Entry & Record<string, unknown>>
+    expect(out[0].blockerType).toBeUndefined()
+    expect(out[0].resolvedAt).toBeUndefined()
+    expect(out[0].verifiedBy).toBeUndefined()
+  })
 })

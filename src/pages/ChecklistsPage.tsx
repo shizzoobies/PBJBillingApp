@@ -10,6 +10,12 @@ import {
   type RefObject,
 } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
+import {
+  canMarkWaitingOnDone,
+  canVerifyWaitingOn,
+  isClientWait,
+  waitingOnStage,
+} from '../../lib/waiting-on-state.js'
 import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { FilterBar } from '../components/FilterBar'
@@ -2241,6 +2247,9 @@ function WaitingEditor({
   waitingForChecklistId,
   waitingOns,
   activeEmployeeId,
+  isOwner,
+  stepAssigneeId,
+  clientName,
   onSetNote,
   onSetWaitingFor,
   onClear,
@@ -2248,14 +2257,23 @@ function WaitingEditor({
   onAddWaitingOn,
   onCancelWaitingOn,
   onDoneWaitingOn,
+  onVerifyWaitingOn,
 }: {
   note: string
   employees: Employee[]
   availableTasks: Array<{ id: string; title: string }>
   waitingForChecklistId?: string
-  /** Structured person-blockers on this node (pending). */
+  /**
+   * Structured blockers on this node — including ones already closed out, which
+   * stay as the record of who did the check.
+   */
   waitingOns: WaitingOn[]
   activeEmployeeId: string
+  isOwner: boolean
+  /** The step's assignee — they're the one actually held up, so they can confirm too. */
+  stepAssigneeId: string | null
+  /** This task's client, for the "waiting on the client" option and chip. */
+  clientName: string
   onSetNote: (next: string | null) => void
   onSetWaitingFor: (next: string | null) => void
   onClear: () => void
@@ -2265,12 +2283,17 @@ function WaitingEditor({
    * step off — completing stays with the checkboxes (owner feedback).
    */
   onDone: () => Promise<void> | void
-  /** Flag a new person-blocker on this step. */
-  onAddWaitingOn: (blockerId: string) => Promise<void> | void
+  /**
+   * Flag a new blocker on this step. `'client'` means this task's own client —
+   * which client is never asked, the server reads it off the checklist.
+   */
+  onAddWaitingOn: (blocker: string | 'client') => Promise<void> | void
   /** Cancel a pending blocker (the blocked side). */
   onCancelWaitingOn: (waitingOnId: string) => Promise<void> | void
-  /** Mark a pending blocker done (only shown when the current user IS the blocker). */
+  /** Stage 1 — the person being waited on reports their part finished. */
   onDoneWaitingOn: (waitingOnId: string) => Promise<void> | void
+  /** Stage 2 — the person who asked confirms and closes it out. */
+  onVerifyWaitingOn: (waitingOnId: string) => Promise<void> | void
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const { state, flash } = useSaveFlash()
@@ -2309,6 +2332,8 @@ function WaitingEditor({
       for (const step of planWaitingDone(waitingOns, activeEmployeeId)) {
         if (step.action === 'done') {
           await onDoneWaitingOn(step.id)
+        } else if (step.action === 'verify') {
+          await onVerifyWaitingOn(step.id)
         } else {
           await onCancelWaitingOn(step.id)
         }
@@ -2340,12 +2365,17 @@ function WaitingEditor({
             if (blockerId) void run(() => onAddWaitingOn(blockerId))
           }}
         >
-          <option value="">+ Waiting on a person…</option>
-          {employees.map((emp) => (
-            <option key={emp.id} value={emp.id}>
-              {emp.name}
-            </option>
-          ))}
+          <option value="">+ Waiting on…</option>
+          {/* Her words: "it should either be waiting on another employee or the
+              client". No client picker — the task already belongs to one. */}
+          <option value="client">{clientName || 'The client'}</option>
+          <optgroup label="Team">
+            {employees.map((emp) => (
+              <option key={emp.id} value={emp.id}>
+                {emp.name}
+              </option>
+            ))}
+          </optgroup>
         </select>
         <button
           type="button"
@@ -2382,15 +2412,44 @@ function WaitingEditor({
       {waitingOns.length > 0 ? (
         <ul className="waiting-blocker-list">
           {waitingOns.map((entry) => {
-            const blockerName = employeeName(employees, entry.blockerId)
-            const iAmBlocker = entry.blockerId === activeEmployeeId
+            // A client wait names the client; blockerId points at the client
+            // record, so looking it up among employees would print a stranger.
+            const blockerName = isClientWait(entry)
+              ? clientName || 'the client'
+              : employeeName(employees, entry.blockerId)
+            const stage = waitingOnStage(entry)
+            const permission = {
+              entry,
+              userId: activeEmployeeId,
+              isOwner,
+              assigneeId: stepAssigneeId,
+            }
+            const resolvedByName = entry.resolvedBy
+              ? employeeName(employees, entry.resolvedBy)
+              : null
             return (
-              <li key={entry.id} className="waiting-blocker-chip">
-                <span className="waiting-blocker-name">Waiting on {blockerName}</span>
+              <li key={entry.id} className={`waiting-blocker-chip is-${stage}`}>
+                {/* The name is the point: it survives both stages, so there is
+                    still a record of who did the check after it closes. */}
+                <span className="waiting-blocker-name">
+                  {stage === 'waiting' ? `Waiting on ${blockerName}` : blockerName}
+                </span>
+                {stage !== 'waiting' && resolvedByName ? (
+                  <span className="waiting-blocker-stamp">
+                    {`done by ${resolvedByName}${
+                      entry.resolvedAt
+                        ? ` · ${shortDate.format(new Date(entry.resolvedAt))}`
+                        : ''
+                    }`}
+                  </span>
+                ) : null}
+                {stage === 'resolved' ? (
+                  <span className="waiting-blocker-pending">awaiting your OK</span>
+                ) : null}
                 {entry.note ? (
                   <span className="waiting-blocker-note">{entry.note}</span>
                 ) : null}
-                {iAmBlocker ? (
+                {canMarkWaitingOnDone(permission) ? (
                   <button
                     type="button"
                     className="waiting-blocker-done"
@@ -2398,25 +2457,46 @@ function WaitingEditor({
                     title={
                       busy
                         ? 'Working on it — one moment…'
-                        : 'Mark what they needed as done — notifies the assignee and flagger'
+                        : isClientWait(entry)
+                          ? 'The client came back — close this out. Clients have no login, so there is nobody to hand it back to.'
+                          : 'Mark your part done — tells whoever asked that they can continue'
                     }
                     onClick={() => void run(() => onDoneWaitingOn(entry.id))}
                   >
-                    Mark done
+                    {isClientWait(entry) ? 'Heard back' : 'Mark done'}
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  className="waiting-blocker-cancel"
-                  aria-label={`Cancel waiting on ${blockerName}`}
-                  disabled={busy}
-                  title={
-                    busy ? 'Working on it — one moment…' : 'No longer waiting on this person'
-                  }
-                  onClick={() => void run(() => onCancelWaitingOn(entry.id))}
-                >
-                  ×
-                </button>
+                {canVerifyWaitingOn(permission) ? (
+                  <button
+                    type="button"
+                    className="waiting-blocker-verify"
+                    disabled={busy}
+                    title={
+                      busy
+                        ? 'Working on it — one moment…'
+                        : `${blockerName} says this is finished — confirm and close it out. It stays on the step, struck through, as the record.`
+                    }
+                    onClick={() => void run(() => onVerifyWaitingOn(entry.id))}
+                  >
+                    Confirm
+                  </button>
+                ) : null}
+                {stage !== 'verified' ? (
+                  <button
+                    type="button"
+                    className="waiting-blocker-cancel"
+                    aria-label={`Cancel waiting on ${blockerName}`}
+                    disabled={busy}
+                    title={
+                      busy
+                        ? 'Working on it — one moment…'
+                        : 'Never mind — remove this wait entirely (no record kept)'
+                    }
+                    onClick={() => void run(() => onCancelWaitingOn(entry.id))}
+                  >
+                    ×
+                  </button>
+                ) : null}
               </li>
             )
           })}
@@ -2521,7 +2601,17 @@ function DraggableTaskList({
     addWaitingOn,
     waitingOnCancel,
     waitingOnDone,
+    waitingOnVerify,
+    role,
   } = useAppContext()
+  const isOwner = role === 'owner'
+  // This task's client — the "waiting on the client" option needs a name to
+  // show, and a resolved client wait needs one to keep showing afterwards.
+  const clientName = useMemo(() => {
+    const current = appData.checklists.find((entry) => entry.id === checklistId)
+    if (!current) return ''
+    return appData.clients.find((client) => client.id === current.clientId)?.name ?? ''
+  }, [appData.checklists, appData.clients, checklistId])
   const hasPendingDeletion = (
     itemId: string,
     subItemId?: string | null,
@@ -2788,6 +2878,9 @@ function DraggableTaskList({
                 waitingForChecklistId={item.waitingForChecklistId}
                 waitingOns={item.waitingOns ?? []}
                 activeEmployeeId={meId}
+                isOwner={isOwner}
+                stepAssigneeId={item.assigneeId ?? null}
+                clientName={clientName}
                 onSetNote={(next) => void onUpdateItem(item.id, { waitingOn: next })}
                 onSetWaitingFor={(next) =>
                   void onUpdateItem(item.id, { waitingForChecklistId: next })
@@ -2809,13 +2902,21 @@ function DraggableTaskList({
                   await onUpdateItem(item.id, WAITING_DONE_PATCH)
                   markRetired(item.id)
                 }}
-                onAddWaitingOn={(blockerId) =>
-                  void addWaitingOn(checklistId, { itemId: item.id, blockerId })
+                onAddWaitingOn={(blocker) =>
+                  void addWaitingOn(
+                    checklistId,
+                    blocker === 'client'
+                      ? { itemId: item.id, blockerType: 'client' }
+                      : { itemId: item.id, blockerId: blocker },
+                  )
                 }
                 onCancelWaitingOn={(waitingOnId) =>
                   void waitingOnCancel(checklistId, waitingOnId)
                 }
                 onDoneWaitingOn={(waitingOnId) => void waitingOnDone(checklistId, waitingOnId)}
+                onVerifyWaitingOn={(waitingOnId) =>
+                  void waitingOnVerify(checklistId, waitingOnId)
+                }
               />
             ) : null}
             {(hasSubItems || canEdit) ? (
@@ -2922,6 +3023,9 @@ function DraggableTaskList({
                           waitingForChecklistId={sub.waitingForChecklistId}
                           waitingOns={sub.waitingOns ?? []}
                           activeEmployeeId={meId}
+                          isOwner={isOwner}
+                          stepAssigneeId={item.assigneeId ?? null}
+                          clientName={clientName}
                           onSetNote={(next) =>
                             void onUpdateSubItemWaiting(item.id, sub.id, { waitingOn: next })
                           }
@@ -2943,18 +3047,26 @@ function DraggableTaskList({
                             onUpdateSubItemWaiting(item.id, sub.id, WAITING_DONE_PATCH)
                             markRetired(sub.id)
                           }}
-                          onAddWaitingOn={(blockerId) =>
-                            void addWaitingOn(checklistId, {
-                              itemId: item.id,
-                              subItemId: sub.id,
-                              blockerId,
-                            })
+                          onAddWaitingOn={(blocker) =>
+                            void addWaitingOn(
+                              checklistId,
+                              blocker === 'client'
+                                ? {
+                                    itemId: item.id,
+                                    subItemId: sub.id,
+                                    blockerType: 'client',
+                                  }
+                                : { itemId: item.id, subItemId: sub.id, blockerId: blocker },
+                            )
                           }
                           onCancelWaitingOn={(waitingOnId) =>
                             void waitingOnCancel(checklistId, waitingOnId)
                           }
                           onDoneWaitingOn={(waitingOnId) =>
                             void waitingOnDone(checklistId, waitingOnId)
+                          }
+                          onVerifyWaitingOn={(waitingOnId) =>
+                            void waitingOnVerify(checklistId, waitingOnId)
                           }
                         />
                       ) : null}

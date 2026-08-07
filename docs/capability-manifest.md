@@ -355,6 +355,28 @@ picker, notification bell, and account menu sit in the top bar on every page.
   whoever flagged it that they can continue. A step can wait on several people
   independently; each is cleared (and notified) on its own. The blocked side can
   cancel a waiting-on, which notifies that person it's no longer needed.
+- **The hand-off has TWO steps, and the record is kept.** Clearing a wait used to
+  delete it, which meant the name of whoever did the check disappeared the moment
+  they finished. Now a wait moves through three states and is never destroyed:
+  1. **Waiting** — amber. Sits on the Delayed page of the person being waited on,
+     and of whoever asked (and the step's assignee, who is the one held up).
+  2. **Done** — the person being waited on presses **Mark done**. It leaves THEIR
+     Delayed page, notifies whoever asked, and shows green with "done by <name>"
+     and a date, tagged "awaiting your OK".
+  3. **Confirmed** — whoever asked presses **Confirm**. The wait closes out and
+     leaves their Delayed page too, staying on the step in grey with a line
+     through it, still naming who did the check and who confirmed.
+  You cannot confirm work nobody has reported finished (the app says so and
+  points you at Cancel instead), and the person who did the work cannot confirm
+  their own. Owners can do either step on anyone's behalf. **Cancel** is
+  unchanged and still erases the wait outright — that means "this never needed to
+  happen", so no record is kept.
+- **Waiting on the CLIENT.** The same picker offers the task's own client
+  alongside the team. You never choose which client — the task already belongs to
+  one. Because a client has no login, there is nobody to hand back to and nobody
+  to notify: it is a single press ("Heard back") by whoever flagged it or the
+  step's assignee, and it closes out in one go, keeping the same record of who
+  cleared it and when.
 - Recurring templates: build a template once (with steps/sub-steps); the app
   materializes an instance each period automatically. Frequencies: daily,
   weekly, biweekly, monthly, quarterly, annually, or specific months. Each
@@ -506,9 +528,17 @@ picker, notification bell, and account menu sit in the top bar on every page.
 ## Delayed page (owner + staff)
 
 - Every OPEN step flagged "waiting on", grouped by client, so you can see what's
-  blocked and why. Staff see it scoped to their assigned clients; the owner sees
-  the whole firm. Clear the flag from the Checklists page (or under the client)
-  once unblocked.
+  blocked and why. Staff see it scoped to their assigned clients. Clear the flag
+  from the Checklists page (or under the client) once unblocked.
+- **The list is now yours, not the whole firm's.** It shows waits that are
+  actually your move or that you are held up by — the ones you are being waited
+  on for, plus the ones you asked for or own the step for. Marking your part done
+  takes it off your list and moves it onto the asker's to confirm; confirming
+  takes it off theirs. This applies to owners too, so a firm-wide "everything
+  that is stuck anywhere" view is no longer on this page.
+- An older free-text wait with nobody attached to it still shows to the step's
+  assignee (or to everyone if the step has no assignee), so nothing that predates
+  the two-step hand-off silently vanishes from the page.
 - Each row has a "Done" button that checks the step off right here — the same
   toggle used on the Checklists page / dashboard — so whoever was tagged (e.g. a
   bookkeeper waiting-on'd for a step) can complete it without leaving this page.

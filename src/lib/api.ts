@@ -1276,14 +1276,19 @@ export async function rejectItemDeletion(requestId: string) {
 
 // ---- Structured "waiting on a person" blockers ----
 
-/** Flag a checklist step as waiting on an internal employee. Returns the updated checklist. */
+/**
+ * Flag a checklist step as waiting on a teammate — or on the task's own CLIENT
+ * (`blockerType: 'client'`, in which case `blockerId` is omitted and the server
+ * reads the client off the checklist). Returns the updated checklist.
+ */
 export async function addWaitingOnRequest(
   checklistId: string,
   body: {
     itemId: string
     subItemId?: string | null
     subSubItemId?: string | null
-    blockerId: string
+    blockerId?: string
+    blockerType?: 'employee' | 'client'
     note?: string
   },
 ) {
@@ -1306,7 +1311,31 @@ export async function addWaitingOnRequest(
   return ((await response.json()) as { checklist: Checklist }).checklist
 }
 
-/** Mark a waiting-on blocker done (the blocker, or an owner). Returns the updated checklist. */
+/**
+ * Stage 2 — the person who asked confirms the work and closes the wait out. The
+ * record is kept (struck through) so the name of whoever did the check stays on
+ * the step. Refused with 409 until the blocker has marked it done.
+ */
+export async function waitingOnVerifyRequest(checklistId: string, waitingOnId: string) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/waiting-ons/${encodeURIComponent(
+      waitingOnId,
+    )}/verify`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to confirm (${response.status})`)
+  }
+  return ((await response.json()) as { checklist: Checklist }).checklist
+}
+
+/** Stage 1 — the person being waited on reports their part done. */
 export async function waitingOnDoneRequest(checklistId: string, waitingOnId: string) {
   const response = await apiFetch(
     `/api/checklists/${encodeURIComponent(checklistId)}/waiting-ons/${encodeURIComponent(

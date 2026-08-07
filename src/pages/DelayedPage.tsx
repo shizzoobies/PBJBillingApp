@@ -1,8 +1,14 @@
 import { AlarmClock, Check, ChevronDown, ChevronRight } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
+import type { WaitingOn } from '../lib/types'
+import {
+  isClientWait,
+  isWaitingOnOpen,
+  waitingStepConcernsUser,
+} from '../../lib/waiting-on-state.js'
 import {
   clientName,
   employeeName,
@@ -13,9 +19,21 @@ import {
 } from '../lib/utils'
 
 /**
- * Owner-only "Delayed" page. Surfaces every checklist step that's been flagged
- * "waiting on" (the per-item / per-sub-item toggle), grouped by client so the
- * owner can see — at a glance — which clients are stuck and why.
+ * The "Delayed" page — every checklist step flagged as waiting, grouped by
+ * client so you can see which clients are stuck and why.
+ *
+ * Rows are filtered to the VIEWER. Brittany's hand-off flow asks that finishing
+ * your part removes the item "from Person B's delayed area" and that confirming
+ * removes it "from Person A's" — which only means anything if the two people
+ * are looking at different lists. So:
+ *
+ *   still waiting  → the person being waited on, plus whoever asked and the
+ *                    step's assignee (they are the ones actually held up)
+ *   marked done    → drops off the blocker's list, stays with the requester
+ *                    and assignee until they confirm
+ *   confirmed      → gone from everyone's
+ *
+ * Owners are filtered the same way rather than seeing everything (Alex's call).
  */
 
 type WaitingRow = {
@@ -51,9 +69,21 @@ type ClientGroup = {
 }
 
 export function DelayedPage() {
-  const { data, toggleChecklistItem, toggleSubItem } = useAppContext()
+  const { data, toggleChecklistItem, toggleSubItem, activeEmployeeId: meId } = useAppContext()
   const { clients, employees, checklists } = data
   const today = localDateOnly()
+
+  // A client wait names the CLIENT — its blockerId points at the client record,
+  // so resolving it against employees would print "Unknown" for the one thing
+  // the row is about. Memoized alongside the rows it feeds so the grouping
+  // below doesn't rebuild on every render.
+  const blockerLabel = useCallback(
+    (entry: WaitingOn, ownerClientId: string) =>
+      isClientWait(entry)
+        ? clientName(clients, ownerClientId)
+        : employeeName(employees, entry.blockerId),
+    [clients, employees],
+  )
 
   // Mark a delayed step done from here — the SAME toggle used on the dashboard /
   // Checklists page. Once done it no longer counts as an open waiting step, so
@@ -75,7 +105,11 @@ export function DelayedPage() {
       for (const item of checklist.items) {
         // A completed step isn't "delayed" any more — hide it so marking a step
         // done here makes it drop off the list.
-        if (stepIsWaiting(item) && !isChecklistItemDone(item)) {
+        if (
+          stepIsWaiting(item) &&
+          !isChecklistItemDone(item) &&
+          waitingStepConcernsUser(item, { userId: meId, assigneeId: item.assigneeId ?? null })
+        ) {
           rows.push({
             key: `${checklist.id}:${item.id}`,
             checklistId: checklist.id,
@@ -83,13 +117,19 @@ export function DelayedPage() {
             itemId: item.id,
             itemLabel: item.label,
             note: item.waitingOn,
-            blockerNames: (item.waitingOns ?? []).map((w) => employeeName(employees, w.blockerId)),
+            blockerNames: (item.waitingOns ?? [])
+              .filter(isWaitingOnOpen)
+              .map((w) => blockerLabel(w, checklist.clientId)),
             assigneeId: item.assigneeId,
             dueDate: item.dueDate,
           })
         }
         for (const sub of item.subItems ?? []) {
-          if (stepIsWaiting(sub) && !sub.done) {
+          if (
+            stepIsWaiting(sub) &&
+            !sub.done &&
+            waitingStepConcernsUser(sub, { userId: meId, assigneeId: item.assigneeId ?? null })
+          ) {
             rows.push({
               key: `${checklist.id}:${item.id}:${sub.id}`,
               checklistId: checklist.id,
@@ -99,9 +139,9 @@ export function DelayedPage() {
               subItemId: sub.id,
               subLabel: sub.title,
               note: sub.waitingOn,
-              blockerNames: (sub.waitingOns ?? []).map((w) =>
-                employeeName(employees, w.blockerId),
-              ),
+              blockerNames: (sub.waitingOns ?? [])
+                .filter(isWaitingOnOpen)
+                .map((w) => blockerLabel(w, checklist.clientId)),
               assigneeId: item.assigneeId,
               dueDate: sub.dueDate ?? item.dueDate,
             })
@@ -134,7 +174,7 @@ export function DelayedPage() {
         }
       })
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
-  }, [checklists, clients, employees])
+  }, [blockerLabel, checklists, clients, meId])
 
   const [query, setQuery] = useState('')
 

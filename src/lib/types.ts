@@ -378,16 +378,39 @@ export type TimesheetLock = {
 /**
  * A structured "waiting on a person" blocker on a checklist step. Additive to
  * (and independent of) the legacy free-text `waitingOn` note + `waiting` flag.
- * The entry's presence IS the pending state — resolving (done/cancel) removes
- * it; there's no status field. `blockerId` is the internal employee being
- * waited on; `requestedBy` is the employee who flagged it.
+ * `requestedBy` is the employee who flagged it.
+ *
+ * The entry used to be its own status — present meant pending, and done/cancel
+ * DELETED it. That is why the name of whoever was being waited on vanished the
+ * moment they finished. Now the record survives the whole hand-off and carries
+ * its stage in the timestamps below (see `lib/waiting-on-state.js`):
+ *
+ *   waiting ──their Done──▶ resolved ──your Done──▶ verified
+ *
+ * Cancel still removes the row outright — that means "this never needed to
+ * happen", which is not something worth keeping a receipt for.
+ *
+ * All five fields are optional so existing rows keep their present meaning: no
+ * timestamps = still waiting, absent `blockerType` = an employee.
  */
 export type WaitingOn = {
   id: string
+  /** The employee being waited on — or the CLIENT's id when `blockerType` is 'client'. */
   blockerId: string
   requestedBy: string
   note?: string
   createdAt: string
+  /**
+   * 'client' means the task's own client, filled in from the checklist rather
+   * than picked. Clients have no login, so these resolve in one click.
+   */
+  blockerType?: 'employee' | 'client'
+  /** The blocker reported their part finished. Record kept, name intact. */
+  resolvedAt?: string
+  resolvedBy?: string
+  /** The requester confirmed and retired the wait. Kept, shown struck through. */
+  verifiedAt?: string
+  verifiedBy?: string
 }
 
 export type SubSubChecklistItem = {

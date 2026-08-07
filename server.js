@@ -54,6 +54,12 @@ import {
   templateApplyScopeDenial,
 } from './lib/template-apply-permission.js'
 import {
+  canMarkWaitingOnDone,
+  canVerifyWaitingOn,
+  isClientWait,
+  waitingOnStage,
+} from './lib/waiting-on-state.js'
+import {
   generateBackupCodes,
   generateSecret,
   verifyBackupCode,
@@ -5462,9 +5468,16 @@ const server = createServer(async (request, response) => {
     // These routes MUST be matched BEFORE the generic
     // `/api/checklists/:id/items/...` matchers below so they aren't shadowed.
 
-    // POST /api/checklists/:id/waiting-ons/:waitingOnId/(done|cancel)
+    // POST /api/checklists/:id/waiting-ons/:waitingOnId/(done|cancel|verify)
+    //
+    // The two-stage hand-off (see lib/waiting-on-state.js):
+    //   done   — the blocker reports their part finished. Marks the record
+    //            resolved; does NOT delete it, because the record is what keeps
+    //            the name of whoever did the check.
+    //   verify — the requester confirms and retires the wait. Also keeps it.
+    //   cancel — unchanged: removes the row outright.
     const waitingOnActionMatch = normalizedPath.match(
-      /^\/api\/checklists\/([^/]+)\/waiting-ons\/([^/]+)\/(done|cancel)$/,
+      /^\/api\/checklists\/([^/]+)\/waiting-ons\/([^/]+)\/(done|cancel|verify)$/,
     )
     if (waitingOnActionMatch) {
       const session = await requireSession(request, response)
@@ -5495,10 +5508,40 @@ const server = createServer(async (request, response) => {
       const entry = existing.entry
       const isOwner = session.user.role === 'owner'
 
+      const permissionArgs = {
+        entry,
+        userId: session.user.id,
+        isOwner,
+        assigneeId: existing.assigneeId ?? null,
+      }
+      // A client wait has no second party to hand back to, so its Done goes
+      // straight through both stages in one click.
+      const clientWait = isClientWait(entry)
+
       if (action === 'done') {
-        // The blocker themselves (or an owner) marks it done.
-        if (entry.blockerId !== session.user.id && !isOwner) {
-          sendJson(response, 403, { error: 'Only the person being waited on can mark this done' })
+        if (!canMarkWaitingOnDone(permissionArgs)) {
+          sendJson(response, waitingOnStage(entry) === 'waiting' ? 403 : 409, {
+            error:
+              waitingOnStage(entry) === 'waiting'
+                ? clientWait
+                  ? 'Only the person who flagged this (or the step owner) can clear a client wait'
+                  : 'Only the person being waited on can mark this done'
+                : 'This wait has already been marked done',
+          })
+          return
+        }
+      } else if (action === 'verify') {
+        if (!canVerifyWaitingOn(permissionArgs)) {
+          sendJson(response, waitingOnStage(entry) === 'resolved' ? 403 : 409, {
+            error:
+              waitingOnStage(entry) === 'waiting'
+                ? // You cannot confirm work the other person has not reported
+                  // finished. Cancel is still available if you want out.
+                  'Nobody has marked this done yet — cancel it instead if you no longer need it'
+                : waitingOnStage(entry) === 'verified'
+                  ? 'This wait is already closed out'
+                  : 'You cannot confirm this waiting-on request',
+          })
           return
         }
       } else {
@@ -5510,7 +5553,17 @@ const server = createServer(async (request, response) => {
         }
       }
 
-      const resolved = await appDataStore.resolveWaitingOn(checklistId, waitingOnId)
+      const resolved =
+        action === 'done'
+          ? await appDataStore.markWaitingOnDone(checklistId, waitingOnId, {
+              userId: session.user.id,
+              alsoVerify: clientWait,
+            })
+          : action === 'verify'
+            ? await appDataStore.markWaitingOnVerified(checklistId, waitingOnId, {
+                userId: session.user.id,
+              })
+            : await appDataStore.resolveWaitingOn(checklistId, waitingOnId)
       if (!resolved) {
         sendJson(response, 404, { error: 'Waiting-on request not found' })
         return
@@ -5524,9 +5577,17 @@ const server = createServer(async (request, response) => {
 
       try {
         if (action === 'done') {
-          const blockerName = nameOf(resolved.entry.blockerId)
+          // A client wait names the CLIENT, not a teammate — blockerId points at
+          // the checklist's client, so resolving it against employees would
+          // print "A team member" for the very thing she wants named.
+          const blockerName = isClientWait(resolved.entry)
+            ? (data.clients ?? []).find((c) => c.id === resolved.entry.blockerId)?.name ??
+              'The client'
+            : nameOf(resolved.entry.blockerId)
           const message = `${blockerName} finished what you needed on "${resolved.label}" — you can continue`
           // Notify BOTH the step assignee AND the flagger; dedupe; skip the actor.
+          // On a client wait the actor is usually the flagger, so this often
+          // ends up notifying nobody — correct, there is no one to tell.
           const recipients = new Set()
           if (resolved.assigneeId) recipients.add(resolved.assigneeId)
           if (resolved.entry.requestedBy) recipients.add(resolved.entry.requestedBy)
@@ -5542,6 +5603,14 @@ const server = createServer(async (request, response) => {
           await appDataStore.recordActivity(
             session.user.id,
             'waiting_on_done',
+            `${checklistTitle}: ${resolved.label}`,
+          )
+        } else if (action === 'verify') {
+          // No notification: the person confirming is the one who was waiting,
+          // and her step 4 asks only that it check off and leave the list.
+          await appDataStore.recordActivity(
+            session.user.id,
+            'waiting_on_verified',
             `${checklistTitle}: ${resolved.label}`,
           )
         } else {
@@ -5618,9 +5687,21 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'itemId is required' })
         return
       }
-      // blockerId must be a real employee.
+      // Waiting on THE CLIENT rather than a teammate. Which client is never
+      // asked for — the checklist already belongs to one, so it is filled in
+      // here. That keeps `blockerId` populated (the normalizer drops entries
+      // without one) and leaves nothing for the caller to get wrong.
+      const isClientRequest = payload?.blockerType === 'client'
       const employees = data.employees ?? []
-      if (!blockerId || !employees.some((e) => e.id === blockerId)) {
+      const effectiveBlockerId = isClientRequest ? checklist.clientId : blockerId
+      if (isClientRequest) {
+        if (!checklist.clientId) {
+          sendJson(response, 400, {
+            error: 'This task has no client, so it cannot be marked as waiting on one',
+          })
+          return
+        }
+      } else if (!blockerId || !employees.some((e) => e.id === blockerId)) {
         sendJson(response, 400, { error: 'blockerId must be a valid employee' })
         return
       }
@@ -5628,7 +5709,12 @@ const server = createServer(async (request, response) => {
       const result = await appDataStore.addWaitingOn(
         checklistId,
         { itemId, subItemId, subSubItemId },
-        { blockerId, requestedBy: session.user.id, note },
+        {
+          blockerId: effectiveBlockerId,
+          requestedBy: session.user.id,
+          note,
+          blockerType: isClientRequest ? 'client' : 'employee',
+        },
       )
       if (!result) {
         sendJson(response, 404, { error: 'Step not found' })
@@ -5637,15 +5723,19 @@ const server = createServer(async (request, response) => {
 
       const flaggerName =
         employees.find((e) => e.id === session.user.id)?.name ?? session.user.name ?? 'A team member'
-      try {
-        await notify(appDataStore, blockerId, 'waiting_on_requested', {
-          checklistId,
-          message: `${flaggerName} is waiting on you: "${result.node.label}" in "${checklist.title}"`,
-          link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
-          appPublicUrl: getPublicAppUrl(request),
-        })
-      } catch (err) {
-        console.error('[notify] waiting_on_requested dispatch failed:', err?.message || err)
+      // A client has no login, so there is nobody to notify — the wait simply
+      // sits with whoever flagged it until they clear it.
+      if (!isClientRequest) {
+        try {
+          await notify(appDataStore, blockerId, 'waiting_on_requested', {
+            checklistId,
+            message: `${flaggerName} is waiting on you: "${result.node.label}" in "${checklist.title}"`,
+            link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        } catch (err) {
+          console.error('[notify] waiting_on_requested dispatch failed:', err?.message || err)
+        }
       }
       await appDataStore.recordActivity(
         session.user.id,

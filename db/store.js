@@ -9,6 +9,7 @@ import {
   findChecklistInstance,
 } from '../lib/checklist-identity.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
+import { waitingOnStage } from '../lib/waiting-on-state.js'
 import {
   StaleWorkspaceError,
   fileWorkspaceVersion,
@@ -615,10 +616,14 @@ function resolveSpecificMonthsStageDueDate(template, stage, year, month) {
  */
 /**
  * Normalize a raw "waiting on a person" list into a clean
- * `{ id, blockerId, requestedBy, note?, createdAt }[]`. Drops malformed entries
- * (any missing a blockerId/requestedBy). Defaults to `[]`. Used on every node
- * (item + sub + sub-sub) so structured blockers survive the JSONB / file
- * round-trip.
+ * `{ id, blockerId, requestedBy, note?, createdAt }[]`, plus the optional
+ * hand-off fields (`blockerType`, `resolvedAt/By`, `verifiedAt/By` — see
+ * `lib/waiting-on-state.js`). Drops malformed entries (any missing a
+ * blockerId/requestedBy). Defaults to `[]`. Used on every node (item + sub +
+ * sub-sub) so structured blockers survive the JSONB / file round-trip.
+ *
+ * A client wait still carries a `blockerId` — the server fills it in from the
+ * checklist's own client — so the drop rule below needs no exception.
  */
 export function normalizeWaitingOns(raw) {
   const list = Array.isArray(raw) ? raw : []
@@ -646,6 +651,15 @@ export function normalizeWaitingOns(raw) {
       }
       if (typeof entry.note === 'string' && entry.note.trim()) {
         base.note = entry.note.trim()
+      }
+      if (entry.blockerType === 'client') {
+        base.blockerType = 'client'
+      }
+      // Carried through verbatim; absent means that stage hasn't happened yet.
+      for (const field of ['resolvedAt', 'resolvedBy', 'verifiedAt', 'verifiedBy']) {
+        if (typeof entry[field] === 'string' && entry[field]) {
+          base[field] = entry[field]
+        }
       }
       return base
     })
@@ -7957,7 +7971,7 @@ export class AppDataStore {
    * `{ checklist, entry, node: { assigneeId, label } }` or null when the node
    * (or checklist) is missing.
    */
-  async addWaitingOn(checklistId, location, { blockerId, requestedBy, note }) {
+  async addWaitingOn(checklistId, location, { blockerId, requestedBy, note, blockerType }) {
     const entry = {
       id: `wo-${randomUUID().slice(0, 8)}`,
       blockerId: String(blockerId),
@@ -7965,6 +7979,9 @@ export class AppDataStore {
       createdAt: nowIso(),
     }
     if (typeof note === 'string' && note.trim()) entry.note = note.trim()
+    // Only 'client' is stored; an employee wait is the default and stays absent
+    // so existing rows and new ones look identical.
+    if (blockerType === 'client') entry.blockerType = 'client'
 
     if (this.pool) {
       const data = await this.read()
@@ -8028,92 +8045,115 @@ export class AppDataStore {
   }
 
   /**
-   * Remove the matching waiting-on entry from whatever node holds it. Returns
-   * `{ checklist, entry, assigneeId, label } | null`.
+   * Walk a checklist (item → sub-item → sub-sub-item) to the node holding
+   * `waitingOnId` and replace that entry with whatever `mutate` returns —
+   * returning `null` removes it. Yields `{ checklist, entry, assigneeId, label }
+   * | null`, where `entry` is the value AFTER the mutation.
+   *
+   * Both backends need this identical walk and differ only in how they persist.
+   * Cardinal rule 1 says a persisted change must touch both; the surest way to
+   * honor that is to leave only one body to change.
    */
-  async resolveWaitingOn(checklistId, waitingOnId) {
-    const removeFrom = (node) => {
+  async _mutateWaitingOn(checklistId, waitingOnId, mutate) {
+    const applyTo = (node) => {
       const list = node.waitingOns ?? []
-      const hit = list.find((w) => w.id === waitingOnId)
-      if (!hit) return null
-      node.waitingOns = list.filter((w) => w.id !== waitingOnId)
-      return hit
+      const index = list.findIndex((w) => w.id === waitingOnId)
+      if (index === -1) return null
+      const previous = list[index]
+      const next = mutate(previous)
+      node.waitingOns = next
+        ? [...list.slice(0, index), next, ...list.slice(index + 1)]
+        : list.filter((w) => w.id !== waitingOnId)
+      return next ?? previous
     }
 
-    if (this.pool) {
-      const data = await this.read()
-      const checklist = data.checklists.find((c) => c.id === checklistId)
-      if (!checklist) return null
+    const locate = (checklist) => {
       for (const item of checklist.items ?? []) {
-        let removed = removeFrom(item)
-        let isSubNode = false
-        let label = this._nodeLabel(item)
-        if (!removed) {
-          for (const sub of item.subItems ?? []) {
-            const atSub = removeFrom(sub)
-            if (atSub) {
-              removed = atSub
-              isSubNode = true
-              label = this._nodeLabel(sub)
-              break
-            }
-            for (const subSub of sub.subItems ?? []) {
-              const atSubSub = removeFrom(subSub)
-              if (atSubSub) {
-                removed = atSubSub
-                isSubNode = true
-                label = this._nodeLabel(subSub)
-                break
-              }
-            }
-            if (removed) break
-          }
+        const atItem = applyTo(item)
+        if (atItem) {
+          return { item, entry: atItem, isSubNode: false, label: this._nodeLabel(item) }
         }
-        if (removed) {
-          await this._persistItemWaitingOns(checklistId, item, isSubNode)
-          const fresh = await this.read()
-          return {
-            checklist: fresh.checklists.find((c) => c.id === checklistId) ?? checklist,
-            entry: removed,
-            assigneeId: item.assigneeId ?? null,
-            label,
+        for (const sub of item.subItems ?? []) {
+          const atSub = applyTo(sub)
+          if (atSub) {
+            return { item, entry: atSub, isSubNode: true, label: this._nodeLabel(sub) }
+          }
+          for (const subSub of sub.subItems ?? []) {
+            const atSubSub = applyTo(subSub)
+            if (atSubSub) {
+              return { item, entry: atSubSub, isSubNode: true, label: this._nodeLabel(subSub) }
+            }
           }
         }
       }
       return null
     }
 
+    if (this.pool) {
+      const data = await this.read()
+      const checklist = data.checklists.find((c) => c.id === checklistId)
+      if (!checklist) return null
+      const hit = locate(checklist)
+      if (!hit) return null
+      await this._persistItemWaitingOns(checklistId, hit.item, hit.isSubNode)
+      const fresh = await this.read()
+      return {
+        checklist: fresh.checklists.find((c) => c.id === checklistId) ?? checklist,
+        entry: hit.entry,
+        assigneeId: hit.item.assigneeId ?? null,
+        label: hit.label,
+      }
+    }
+
     const data = await readJson(localDataPath)
     const checklist = (data.checklists ?? []).find((c) => c.id === checklistId)
     if (!checklist) return null
-    for (const item of checklist.items ?? []) {
-      let removed = removeFrom(item)
-      let label = this._nodeLabel(item)
-      if (!removed) {
-        for (const sub of item.subItems ?? []) {
-          const atSub = removeFrom(sub)
-          if (atSub) {
-            removed = atSub
-            label = this._nodeLabel(sub)
-            break
-          }
-          for (const subSub of sub.subItems ?? []) {
-            const atSubSub = removeFrom(subSub)
-            if (atSubSub) {
-              removed = atSubSub
-              label = this._nodeLabel(subSub)
-              break
-            }
-          }
-          if (removed) break
-        }
-      }
-      if (removed) {
-        await writeFile(localDataPath, JSON.stringify(data, null, 2))
-        return { checklist, entry: removed, assigneeId: item.assigneeId ?? null, label }
-      }
+    const hit = locate(checklist)
+    if (!hit) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return {
+      checklist,
+      entry: hit.entry,
+      assigneeId: hit.item.assigneeId ?? null,
+      label: hit.label,
     }
-    return null
+  }
+
+  /**
+   * CANCEL — remove the entry outright. "This never needed to happen" is not
+   * worth keeping a receipt for, so this is the one path that still deletes.
+   * Returns `{ checklist, entry, assigneeId, label } | null`.
+   */
+  async resolveWaitingOn(checklistId, waitingOnId) {
+    return this._mutateWaitingOn(checklistId, waitingOnId, () => null)
+  }
+
+  /**
+   * Stage 1 of the hand-off: the blocker reports their part finished. The
+   * record is KEPT — that is what preserves the name of whoever did the check,
+   * which the old destructive version threw away. `alsoVerify` is for client
+   * waits: no second party exists, so they finish in a single click.
+   */
+  async markWaitingOnDone(checklistId, waitingOnId, { userId, alsoVerify = false }) {
+    const at = nowIso()
+    return this._mutateWaitingOn(checklistId, waitingOnId, (entry) => ({
+      ...entry,
+      resolvedAt: at,
+      resolvedBy: String(userId),
+      ...(alsoVerify ? { verifiedAt: at, verifiedBy: String(userId) } : {}),
+    }))
+  }
+
+  /**
+   * Stage 2: the requester confirms and retires the wait. Still not deleted —
+   * it stays on the step, struck through, as the record.
+   */
+  async markWaitingOnVerified(checklistId, waitingOnId, { userId }) {
+    return this._mutateWaitingOn(checklistId, waitingOnId, (entry) => ({
+      ...entry,
+      verifiedAt: nowIso(),
+      verifiedBy: String(userId),
+    }))
   }
 
   /**
@@ -8134,6 +8174,10 @@ export class AppDataStore {
       const push = (node, itemLabel, subLabel) => {
         for (const w of node.waitingOns ?? []) {
           if (w.blockerId !== userId) continue
+          // Entries now outlive their resolution (they carry the name of who
+          // did the check), so "pending" has to be asked for explicitly —
+          // otherwise you'd keep being told about work you already finished.
+          if (waitingOnStage(w) !== 'waiting') continue
           rows.push({
             checklistId: checklist.id,
             checklistTitle: checklist.title,

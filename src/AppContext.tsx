@@ -453,19 +453,26 @@ export type AppContextValue = {
    * waiting-on action.
    */
   waitingOnMe: WaitingOnMeItem[]
-  /** Flag a checklist step as waiting on an internal employee (the blocker). */
+  /**
+   * Flag a checklist step as waiting on a teammate, or on the task's own CLIENT
+   * (`blockerType: 'client'` — the server fills in which client from the
+   * checklist, so no client is ever picked).
+   */
   addWaitingOn: (
     checklistId: string,
     body: {
       itemId: string
       subItemId?: string | null
       subSubItemId?: string | null
-      blockerId: string
+      blockerId?: string
+      blockerType?: 'employee' | 'client'
       note?: string
     },
   ) => Promise<void>
-  /** Mark a waiting-on blocker done (notifies the assignee + flagger). */
+  /** Stage 1 — the blocker reports their part done (notifies the assignee + flagger). */
   waitingOnDone: (checklistId: string, waitingOnId: string) => Promise<void>
+  /** Stage 2 — the requester confirms and closes it out, keeping it as the record. */
+  waitingOnVerify: (checklistId: string, waitingOnId: string) => Promise<void>
   /** Cancel a waiting-on blocker (notifies the blocker it's no longer needed). */
   waitingOnCancel: (checklistId: string, waitingOnId: string) => Promise<void>
   /** Owner-only: restore a recycled checklist back to the active list. */

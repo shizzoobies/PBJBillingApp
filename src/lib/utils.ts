@@ -381,6 +381,12 @@ import {
   checklistInstanceKey,
   checklistMonthKey,
 } from '../../lib/checklist-identity.js'
+import {
+  isClientWait,
+  isWaitingOnOpen,
+  waitingOnStage,
+  type WaitingOnLike,
+} from '../../lib/waiting-on-state.js'
 
 /**
  * Recurring-instance identity, shared verbatim with the server materializer
@@ -555,9 +561,13 @@ export function isChecklistItemDone(item: {
  */
 export function stepIsWaiting(node: {
   waiting?: boolean
-  waitingOns?: unknown[]
+  waitingOns?: WaitingOnLike[]
 }): boolean {
-  return node.waiting === true || (node.waitingOns ?? []).length > 0
+  // Waits are no longer deleted when they finish — a closed-out one stays on
+  // the step as the record of who did the check. So counting entries is not
+  // enough any more; a verified entry must stop holding the step amber, or
+  // every completed hand-off would leave the step looking blocked forever.
+  return node.waiting === true || (node.waitingOns ?? []).some(isWaitingOnOpen)
 }
 
 /**
@@ -584,13 +594,30 @@ export const WAITING_DONE_PATCH: Readonly<{
  * editor open — the click produced no visible change whatsoever.
  */
 export function planWaitingDone(
-  waitingOns: ReadonlyArray<{ id: string; blockerId: string }>,
+  waitingOns: ReadonlyArray<{
+    id: string
+    blockerId: string
+    blockerType?: 'employee' | 'client'
+    resolvedAt?: string
+    verifiedAt?: string
+  }>,
   meId: string,
-): Array<{ id: string; action: 'done' | 'cancel' }> {
-  return waitingOns.map((entry) => ({
-    id: entry.id,
-    action: entry.blockerId === meId ? 'done' : 'cancel',
-  }))
+): Array<{ id: string; action: 'done' | 'cancel' | 'verify' }> {
+  return waitingOns
+    .filter(isWaitingOnOpen)
+    .map((entry) => {
+      // Already reported done by the other side — this press is the confirmation.
+      if (waitingOnStage(entry) === 'resolved') {
+        return { id: entry.id, action: 'verify' as const }
+      }
+      // Mine to finish (or a client wait, which nobody hands back), so this is
+      // the first Done. Anything else is someone else's to report, and pressing
+      // the step's Done means "I no longer need it" — a cancel.
+      if (entry.blockerId === meId || isClientWait(entry)) {
+        return { id: entry.id, action: 'done' as const }
+      }
+      return { id: entry.id, action: 'cancel' as const }
+    })
 }
 
 export type ChecklistStatus = 'Done' | 'Overdue' | 'In progress' | 'Not started'

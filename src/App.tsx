@@ -54,6 +54,7 @@ import {
   isItemDeletionFiled,
   addWaitingOnRequest,
   waitingOnDoneRequest,
+  waitingOnVerifyRequest,
   waitingOnCancelRequest,
   fetchWaitingOnMe,
   updateChecklistMetaRequest,
@@ -1110,7 +1111,8 @@ function App() {
         itemId: string
         subItemId?: string | null
         subSubItemId?: string | null
-        blockerId: string
+        blockerId?: string
+        blockerType?: 'employee' | 'client'
         note?: string
       },
     ) => {
@@ -1126,6 +1128,16 @@ function App() {
     async (checklistId: string, waitingOnId: string) => {
       if (previewActiveRef.current) return
       const updated = await waitingOnDoneRequest(checklistId, waitingOnId)
+      mergeChecklist(updated)
+      await refreshWaitingOnMe()
+    },
+    [mergeChecklist, refreshWaitingOnMe],
+  )
+
+  const waitingOnVerify = useCallback(
+    async (checklistId: string, waitingOnId: string) => {
+      if (previewActiveRef.current) return
+      const updated = await waitingOnVerifyRequest(checklistId, waitingOnId)
       mergeChecklist(updated)
       await refreshWaitingOnMe()
     },
@@ -3716,6 +3728,7 @@ function App() {
     waitingOnMe,
     addWaitingOn,
     waitingOnDone,
+    waitingOnVerify,
     waitingOnCancel,
     restoreChecklist,
     emptyChecklistRecycleBin,

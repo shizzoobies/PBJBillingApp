@@ -6976,6 +6976,74 @@ button.repeating-task-toggle-pill {
   filter: brightness(1.08);
 }
 
+/* Stage 2 of the hand-off: they've reported done, you confirm. Outlined rather
+   than solid so it reads as an acknowledgement, not another piece of work. */
+.waiting-blocker-verify {
+  background: #fff;
+  border: 1px solid var(--brand, #7d2a4d);
+  border-radius: 999px;
+  color: var(--brand, #7d2a4d);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.waiting-blocker-verify:hover {
+  background: var(--brand, #7d2a4d);
+  color: #fff;
+}
+
+/* Waiting → done-awaiting-confirmation → closed out. The chip never disappears:
+   it is the record of who did the check, which is exactly what used to be lost
+   when finishing a wait deleted it. */
+.waiting-blocker-chip.is-resolved {
+  background: #f4faf5;
+  border-color: rgba(38, 132, 74, 0.45);
+}
+
+.waiting-blocker-chip.is-resolved .waiting-blocker-name {
+  color: #1f6b3b;
+}
+
+.waiting-blocker-chip.is-verified {
+  background: var(--surface-muted, #f6f6f7);
+  border-color: rgba(120, 120, 130, 0.35);
+  padding-right: 11px;
+}
+
+/* "checks it off like a sub task and the waiting gets smaller with a line
+   through it like other task" — her words for the finished state. */
+.waiting-blocker-chip.is-verified .waiting-blocker-name {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: line-through;
+}
+
+.waiting-blocker-chip.is-verified .waiting-blocker-note {
+  font-size: 11px;
+  text-decoration: line-through;
+}
+
+.waiting-blocker-stamp {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.waiting-blocker-pending {
+  background: rgba(38, 132, 74, 0.12);
+  border-radius: 999px;
+  color: #1f6b3b;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  text-transform: uppercase;
+}
+
 .waiting-blocker-cancel {
   background: transparent;
   border: none;
