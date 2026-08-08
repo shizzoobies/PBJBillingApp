@@ -7,7 +7,6 @@ import type {
   Contact,
   Employee,
   Invoice,
-  InvoiceLine,
   RecurringReimbursement,
   Reimbursement,
   SubscriptionPlan,
@@ -376,6 +375,7 @@ export {
   splitGroupPrefill,
 } from '../../lib/group-allocation.js'
 
+import { buildInvoiceLines, PER_EMPLOYEE_BILLING_START as SHARED_CUTOVER } from '../../lib/invoice-lines.js'
 import {
   buildChecklistInstanceKeys,
   checklistInstanceKey,
@@ -1323,7 +1323,7 @@ export function recurringReimbursementAppliesToPeriod(
  * byte-for-byte exact (accounting firm — historical numbers must not change).
  * June 2026 is the first month invoiced under the new per-employee model.
  */
-export const PER_EMPLOYEE_BILLING_START = '2026-06'
+export const PER_EMPLOYEE_BILLING_START = SHARED_CUTOVER
 
 export function getInvoice(
   client: Client,
@@ -1335,195 +1335,29 @@ export function getInvoice(
   employees: Employee[] = [],
   defaultHourlyRate = 0,
 ): Invoice {
-  const billableEntries = entries.filter(
-    (entry) =>
-      entry.clientId === client.id && entry.billable && isInBillingPeriod(entry, billingPeriod),
-  )
-  const billableMinutes = billableEntries.reduce((total, entry) => total + entry.minutes, 0)
-  // The subscribed plans/services are now just labels (no fee). Resolve the
-  // names for the monthly invoice line; the amount comes from the client's
-  // own `monthlyRate`. `Invoice.plan` keeps the first matched plan for
-  // back-compat with callers that still read a single plan.
-  const planIds = Array.isArray(client.planIds) ? client.planIds : []
-  const subscribedPlans = planIds
-    .map((id) => plans.find((item) => item.id === id))
-    .filter((item): item is SubscriptionPlan => Boolean(item))
-  const plan = subscribedPlans[0] ?? null
-  const periodLabel = getBillingPeriodLabel(billingPeriod)
-
-  // Reimbursements for THIS client and THIS billing period. Sorted by date
-  // ascending so the invoice lines read chronologically.
-  const clientReimbursements = reimbursements
-    .filter(
-      (reimbursement) =>
-        reimbursement.clientId === client.id && reimbursement.date.startsWith(billingPeriod),
-    )
-    .slice()
-    .sort((a, b) => a.date.localeCompare(b.date))
-
-  const reimbursementLines: InvoiceLine[] = clientReimbursements.map((reimbursement) => ({
-    label: `Reimbursement: ${reimbursement.description}`,
-    detail: new Intl.DateTimeFormat('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    }).format(new Date(`${reimbursement.date}T12:00:00`)),
-    amount: reimbursement.amount,
-  }))
-  const reimbursementTotal = reimbursementLines.reduce((total, line) => total + line.amount, 0)
-
-  // Recurring reimbursements that should appear on this billing period for
-  // this client. Synthesized — no per-period row is stored. The detail
-  // notes the cadence so the invoice reads "Recurring: Software · monthly".
-  const recurringForClient = recurringReimbursements.filter(
-    (recurring) =>
-      recurring.clientId === client.id &&
-      recurringReimbursementAppliesToPeriod(recurring, billingPeriod),
-  )
-  const recurringLines: InvoiceLine[] = recurringForClient.map((recurring) => ({
-    label: `Recurring: ${recurring.description}`,
-    detail: recurring.frequency,
-    amount: recurring.amount,
-  }))
-  const recurringTotal = recurringLines.reduce((total, line) => total + line.amount, 0)
-
-  if (client.billingMode === 'annual') {
-    // Annual billing: a flat yearly fee billed ONCE per year, in the client's
-    // chosen `annualBillingMonth`. The fee appears on the invoice only when the
-    // billing period's month matches; every other month shows no subscription
-    // line (just any reimbursements that happen to fall in that month).
-    const annualRate =
-      typeof client.annualRate === 'number' && !Number.isNaN(client.annualRate)
-        ? client.annualRate
-        : 0
-    const billingMonth = normalizeBillingMonth(client.annualBillingMonth)
-    const periodMonth = Number(billingPeriod.slice(5, 7))
-    const lines: InvoiceLine[] = []
-    if (periodMonth === billingMonth) {
-      const serviceLabel =
-        client.monthlyServiceTier && client.monthlyServiceTier.trim()
-          ? client.monthlyServiceTier
-          : subscribedPlans.length > 0
-            ? subscribedPlans.map((item) => item.name).join(', ')
-            : 'Annual service'
-      lines.push({
-        label: serviceLabel,
-        detail: `Annual fee · billed in ${MONTH_NAMES[billingMonth]}`,
-        amount: annualRate,
-      })
-    }
-
-    lines.push(...reimbursementLines, ...recurringLines)
-
-    return {
-      client,
-      plan,
-      billableMinutes,
-      entryCount: billableEntries.length,
-      period: billingPeriod,
-      periodLabel,
-      lines,
-      total: lines.reduce((total, line) => total + line.amount, 0),
-    }
-  }
-
-  if (client.billingMode === 'subscription') {
-    // Monthly billing: the client's own `monthlyRate` is the line amount.
-    // There is NO included-hours / overage math anymore. The line is
-    // labeled with the subscribed plan/service names, or "Monthly service"
-    // when none are selected.
-    const monthlyRate =
-      typeof client.monthlyRate === 'number' && !Number.isNaN(client.monthlyRate)
-        ? client.monthlyRate
-        : 0
-    // Prefer the explicitly-picked monthly service package (e.g. "The
-    // Classic"); else fall back to the subscribed plan names; else generic.
-    const serviceLabel =
-      client.monthlyServiceTier && client.monthlyServiceTier.trim()
-        ? client.monthlyServiceTier
-        : subscribedPlans.length > 0
-          ? subscribedPlans.map((item) => item.name).join(', ')
-          : 'Monthly service'
-    const lines: InvoiceLine[] = [
-      {
-        label: serviceLabel,
-        detail: 'Monthly service',
-        amount: monthlyRate,
-      },
-    ]
-
-    lines.push(...reimbursementLines, ...recurringLines)
-
-    return {
-      client,
-      plan,
-      billableMinutes,
-      entryCount: billableEntries.length,
-      period: billingPeriod,
-      periodLabel,
-      lines,
-      total: lines.reduce((total, line) => total + line.amount, 0),
-    }
-  }
-
-  // Hourly billing has a CUTOVER (see PER_EMPLOYEE_BILLING_START).
-  //  - On/after the cutover: bill each person's hours at THEIR own bill rate
-  //    (set on the Team page); one line per employee. An employee with no bill
-  //    rate falls back to the firm's default hourly rate.
-  //  - Before the cutover: reproduce the LEGACY per-CLIENT rate exactly, so
-  //    invoices already sent for past months never change. Historical numbers
-  //    must stay exact for an accounting firm.
-  let employeeLines: InvoiceLine[]
-  let billableAmount: number
-  if (billingPeriod >= PER_EMPLOYEE_BILLING_START) {
-    const employeeById = new Map(employees.map((employee) => [employee.id, employee]))
-    const minutesByEmployee = new Map<string, number>()
-    for (const entry of billableEntries) {
-      minutesByEmployee.set(
-        entry.employeeId,
-        (minutesByEmployee.get(entry.employeeId) ?? 0) + entry.minutes,
-      )
-    }
-
-    employeeLines = Array.from(minutesByEmployee.entries())
-      .map(([employeeId, minutes]) => {
-        const employee = employeeById.get(employeeId)
-        const rate =
-          employee && typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
-            ? employee.billRate
-            : defaultHourlyRate
-        const amount = (minutes / 60) * rate
-        const name = employee?.name ?? 'Unknown'
-        return {
-          label: `Billable hours — ${name}`,
-          detail: `${formatHours(minutes)} at ${currency.format(rate)}/hr`,
-          amount,
-        }
-      })
-      .sort((a, b) => a.label.localeCompare(b.label))
-    billableAmount = employeeLines.reduce((total, line) => total + line.amount, 0)
-  } else {
-    // Legacy: a single per-client "Billable hours" line at the client's own
-    // stored hourly rate — the exact shape historical invoices were sent in.
-    billableAmount = (billableMinutes / 60) * client.hourlyRate
-    employeeLines = [
-      {
-        label: 'Billable hours',
-        detail: `${formatHours(billableMinutes)} at ${currency.format(client.hourlyRate)}/hr`,
-        amount: billableAmount,
-      },
-    ]
-  }
-
+  // Thin wrapper. The lines themselves are built by the SHARED builder in
+  // `lib/invoice-lines.js`, which the server-side draft generator and Client
+  // Recap also call — so what the UI shows, what gets invoiced, and what the
+  // profit figure is measured against can no longer drift apart.
+  const built = buildInvoiceLines({
+    client,
+    entries,
+    plans,
+    billingPeriod,
+    reimbursements,
+    recurringReimbursements,
+    employees,
+    defaultHourlyRate,
+  })
   return {
     client,
-    plan,
-    billableMinutes,
-    entryCount: billableEntries.length,
+    plan: built.plan as SubscriptionPlan | null,
+    billableMinutes: built.billableMinutes,
+    entryCount: built.entryCount,
     period: billingPeriod,
-    periodLabel,
-    lines: [...employeeLines, ...reimbursementLines, ...recurringLines],
-    total: billableAmount + reimbursementTotal + recurringTotal,
+    periodLabel: built.periodLabel,
+    lines: built.lines,
+    total: built.total,
   }
 }
 

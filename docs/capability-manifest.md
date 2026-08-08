@@ -691,6 +691,16 @@ Clients page meanwhile. Owner-only.
   period); Billing (revenue for the period, rate/plan, reimbursements); and
   Profitability (realized rate = fee ÷ hours, and margin when team cost rates are
   set).
+- **Revenue here is now the same number the invoice bills.** It used to value an
+  hourly client's time at that client's single hourly rate, but invoices have
+  charged each team member's own bill rate since June 2026. On July 2026 data
+  the two disagreed for 16 of 19 hourly clients — in both directions, so it was
+  not a consistent offset: one client read $4,400.83 in Recap against a real
+  invoice of $3,837.58, while another read $894.13 against $1,252.69. Recap and
+  the invoice are now produced by one shared calculator, so **profit figures for
+  hourly clients have shifted, some up and some down** — the new numbers are the
+  correct ones. Monthly and annual clients are unaffected. A quarter is summed
+  month by month rather than estimated as a rate times three.
 
 ## Contacts
 

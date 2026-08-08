@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { getInvoice } from '../lib/utils'
-import type { Client, Employee, SubscriptionPlan, TimeEntry } from '../lib/types'
+import type {
+  Client,
+  Employee,
+  RecurringReimbursement,
+  Reimbursement,
+  SubscriptionPlan,
+  TimeEntry,
+} from '../lib/types'
 
 /**
  * getInvoice billing model: a Monthly (subscription-mode) client bills its
@@ -268,5 +275,103 @@ describe('getInvoice — annual billing', () => {
     const invoice = getInvoice(client, [], plans, '2026-05')
     expect(invoice.total).toBe(0)
     expect(invoice.lines).toHaveLength(1)
+  })
+})
+
+/**
+ * Reimbursement + recurring-reimbursement lines. These were the ONLY part of
+ * getInvoice with no coverage, and they are money on a client-facing invoice —
+ * so they are pinned here before the line builder moves into `lib/` to be
+ * shared with the server-side generator (I1). The point is that extracting the
+ * builder changes nothing: if these still pass afterwards, the move was safe.
+ */
+describe('getInvoice — reimbursements', () => {
+  const reimb = (over: Partial<Reimbursement> = {}): Reimbursement => ({
+    id: 'r-1',
+    clientId: 'client-1',
+    date: '2026-06-15',
+    description: 'Filing fee',
+    amount: 125,
+    ...over,
+  })
+
+  const recurring = (over: Partial<RecurringReimbursement> = {}): RecurringReimbursement => ({
+    id: 'rr-1',
+    clientId: 'client-1',
+    description: 'Software',
+    amount: 40,
+    frequency: 'monthly',
+    startDate: '2026-01-01',
+    ...over,
+  })
+
+  it('adds one line per reimbursement in the period, and to the total', () => {
+    const client = makeClient({ billingMode: 'subscription', monthlyRate: 500 })
+    const invoice = getInvoice(client, [], plans, period, [reimb()])
+    expect(invoice.lines).toHaveLength(2)
+    expect(invoice.lines[1].label).toBe('Reimbursement: Filing fee')
+    expect(invoice.lines[1].amount).toBe(125)
+    expect(invoice.total).toBe(625)
+  })
+
+  it('excludes reimbursements from other clients and other periods', () => {
+    const client = makeClient({ billingMode: 'subscription', monthlyRate: 500 })
+    const invoice = getInvoice(client, [], plans, period, [
+      reimb({ id: 'r-2', clientId: 'client-other' }),
+      reimb({ id: 'r-3', date: '2026-05-31' }),
+      reimb({ id: 'r-4', date: '2026-07-01' }),
+    ])
+    expect(invoice.lines).toHaveLength(1)
+    expect(invoice.total).toBe(500)
+  })
+
+  it('sorts reimbursement lines by date', () => {
+    const client = makeClient({ billingMode: 'subscription', monthlyRate: 0 })
+    const invoice = getInvoice(client, [], plans, period, [
+      reimb({ id: 'r-b', date: '2026-06-20', description: 'Later' }),
+      reimb({ id: 'r-a', date: '2026-06-02', description: 'Earlier' }),
+    ])
+    expect(invoice.lines.map((line) => line.label)).toEqual([
+      'Monthly service',
+      'Reimbursement: Earlier',
+      'Reimbursement: Later',
+    ])
+  })
+
+  it('adds a recurring line when its cadence lands on the period', () => {
+    const client = makeClient({ billingMode: 'subscription', monthlyRate: 500 })
+    const invoice = getInvoice(client, [], plans, period, [], [recurring()])
+    expect(invoice.lines[1].label).toBe('Recurring: Software')
+    expect(invoice.lines[1].detail).toBe('monthly')
+    expect(invoice.total).toBe(540)
+  })
+
+  it('omits a quarterly recurring line on an off-cadence month', () => {
+    const client = makeClient({ billingMode: 'subscription', monthlyRate: 500 })
+    const quarterly = recurring({ frequency: 'quarterly', startDate: '2026-01-01' })
+    // Jan + 5 months = June, which is not a quarterly boundary from January.
+    expect(getInvoice(client, [], plans, '2026-06', [], [quarterly]).lines).toHaveLength(1)
+    expect(getInvoice(client, [], plans, '2026-07', [], [quarterly]).lines).toHaveLength(2)
+  })
+
+  it('never bills a recurring line before its start date', () => {
+    const client = makeClient({ billingMode: 'subscription', monthlyRate: 500 })
+    const later = recurring({ startDate: '2026-09-01' })
+    expect(getInvoice(client, [], plans, period, [], [later]).lines).toHaveLength(1)
+  })
+
+  it('carries reimbursements onto hourly and annual invoices too', () => {
+    const hourly = makeClient({ billingMode: 'hourly' })
+    const hourlyInvoice = getInvoice(hourly, [], plans, period, [reimb()], [recurring()])
+    expect(hourlyInvoice.total).toBe(165)
+
+    // An annual client in a NON-billing month still shows its reimbursements.
+    const annual = makeClient({ billingMode: 'annual', annualRate: 1200, annualBillingMonth: 1 })
+    const annualInvoice = getInvoice(annual, [], plans, period, [reimb()], [recurring()])
+    expect(annualInvoice.lines.map((line) => line.label)).toEqual([
+      'Reimbursement: Filing fee',
+      'Recurring: Software',
+    ])
+    expect(annualInvoice.total).toBe(165)
   })
 })
