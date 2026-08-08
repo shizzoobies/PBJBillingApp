@@ -2221,6 +2221,72 @@ const server = createServer(async (request, response) => {
     // was then overwritten by another tab, the client was simply gone with no
     // error shown. Cardinal rule 4: anything that must actually persist gets its
     // own endpoint.
+    // GET /api/invoices?period=YYYY-MM — the month's invoices (owner only).
+    // Invoices deliberately do NOT ride on /api/app-data: they are money, and
+    // keeping them off the bulk-save payload is what stops a stale owner tab
+    // from ever rewriting one.
+    if (normalizedPath === '/api/invoices' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see invoices' })
+        return
+      }
+      const period = requestUrl.searchParams.get('period')
+      if (period && !/^\d{4}-\d{2}$/.test(period)) {
+        sendJson(response, 400, { error: 'period must look like 2026-08' })
+        return
+      }
+      const invoices = await appDataStore.listInvoices({ period: period || null })
+      sendJson(response, 200, { invoices })
+      return
+    }
+
+    // POST /api/invoices/generate — build the month's drafts (owner only).
+    // Idempotent: a client that already has a live invoice for the period is
+    // skipped, never rewritten, so re-running cannot revert an edited draft.
+    if (normalizedPath === '/api/invoices/generate' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can generate invoices' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const period = typeof payload?.period === 'string' ? payload.period : ''
+      if (!/^\d{4}-\d{2}$/.test(period)) {
+        sendJson(response, 400, { error: 'period must look like 2026-08' })
+        return
+      }
+      let result
+      try {
+        result = await appDataStore.generateInvoicesForPeriod(period)
+      } catch (error) {
+        console.error('[invoices] generate failed:', error)
+        sendJson(response, 500, {
+          error: 'invoice_generate_failed',
+          message: 'Could not build this month’s invoices — please try again.',
+        })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'invoices_generated',
+        `${period}: ${result.created.length} created`,
+      )
+      sendJson(response, 200, result)
+      return
+    }
+
     if (normalizedPath === '/api/clients' && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return

@@ -12,6 +12,11 @@ import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import { waitingOnStage } from '../lib/waiting-on-state.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
+  buildInvoiceDraft,
+  nextInvoiceNumber,
+  previousPeriod,
+} from '../lib/invoice-draft.js'
+import {
   StaleWorkspaceError,
   fileWorkspaceVersion,
   postgresWorkspaceVersion,
@@ -664,6 +669,32 @@ export function normalizeWaitingOns(raw) {
       }
       return base
     })
+}
+
+/**
+ * One invoices row -> the camelCase shape the app and the API speak. jsonb
+ * columns come back parsed; numerics come back as STRINGS from pg, so money is
+ * coerced here rather than at every call site.
+ */
+function mapInvoiceRow(row) {
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    period: row.period,
+    number: row.number,
+    status: row.status,
+    lineItems: Array.isArray(row.line_items) ? row.line_items : [],
+    subtotal: Number(row.subtotal) || 0,
+    total: Number(row.total) || 0,
+    dueDate: row.due_date ?? null,
+    blurb: row.blurb ?? '',
+    scopeFlags: Array.isArray(row.scope_flags) ? row.scope_flags : [],
+    sentAt: row.sent_at ? new Date(row.sent_at).toISOString() : null,
+    paidAt: row.paid_at ? new Date(row.paid_at).toISOString() : null,
+    paymentMethod: row.payment_method ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  }
 }
 
 function normalizeSubSubItems(raw, { withDone = true } = {}) {
@@ -2787,19 +2818,62 @@ export class AppDataStore {
         `alter table checklist_templates add column if not exists onboarding_for_client_id text`,
       )
 
+      // The invoice of record (I1). The app — not Stripe, not QBO — owns the
+      // numbering, the lines and the history; see
+      // docs/plans/invoicing-in-app-2026-08.md.
+      //
+      // `client_id` is `on delete restrict`, which means the bulk save CANNOT
+      // `delete from clients` while any invoice exists. That table therefore has
+      // to be snapshotted and restored around the bulk save exactly like the
+      // `invoice_drafts` table it replaces — see the preserve/restore pair in
+      // `write()`. Getting that wrong does not fail loudly; it wedges every
+      // owner save.
       await this.pool.query(`
-        create table if not exists invoice_drafts (
+        create table if not exists invoices (
           id text primary key,
           client_id text not null references clients(id) on delete restrict,
-          billing_period text not null,
+          period text not null,
+          number text,
           status text not null default 'draft',
+          line_items jsonb not null default '[]'::jsonb,
+          subtotal numeric(12, 2) not null default 0,
           total numeric(12, 2) not null default 0,
-          payload jsonb not null default '{}'::jsonb,
+          due_date text,
+          blurb text not null default '',
+          scope_flags jsonb not null default '[]'::jsonb,
+          sent_at timestamptz,
+          paid_at timestamptz,
+          stripe_checkout_session_id text,
+          stripe_payment_intent_id text,
+          payment_method text,
+          email_log jsonb not null default '[]'::jsonb,
           created_at timestamptz not null default now(),
-          updated_at timestamptz not null default now(),
-          unique (client_id, billing_period)
+          updated_at timestamptz not null default now()
         )
       `)
+      // PARTIAL unique — one live invoice per client per month, but a VOIDED
+      // one must not block re-generating. Same lesson as the checklist
+      // materializer's instance index, applied from day one rather than after
+      // duplicates appeared.
+      await this.pool.query(`
+        create unique index if not exists invoices_client_period_live
+          on invoices (client_id, period)
+          where status <> 'void'
+      `)
+      await this.pool.query(`
+        create unique index if not exists invoices_number_unique
+          on invoices (number)
+          where number is not null
+      `)
+      // Stripe customer per client, filled in at first send (I3).
+      await this.pool.query(
+        `alter table clients add column if not exists stripe_customer_id text`,
+      )
+      // `invoice_drafts` was the placeholder for this and was never written to
+      // (0 rows in production, confirmed before dropping). `invoices`
+      // supersedes it; keeping both would mean two tables carrying the same
+      // bulk-save hazard, one of them dead.
+      await this.pool.query(`drop table if exists invoice_drafts`)
 
       await this.cleanupSeedEmployeesInPostgres()
       await this.seedUsersInPostgres()
@@ -4038,21 +4112,24 @@ export class AppDataStore {
           }
         }
 
-        // `invoice_drafts` is NOT part of the bulk-save payload — nothing in
-        // the app reads or writes that table, so `data` carries no drafts to
-        // re-insert. It still has to be DELETED below: its `client_id` FK is
+        // `invoices` is NOT part of the bulk-save payload — the app never sends
+        // invoices through the workspace save, so `data` carries none to
+        // re-insert. They still have to be DELETED below: `client_id` is
         // `on delete restrict`, so `delete from clients` cannot run while any
-        // draft row exists. Snapshot the rows here and put them back after the
+        // invoice row exists. Snapshot them here and put them back after the
         // clients are re-inserted (see the restore loop below).
         //
-        // Without that restore, `invoice_drafts` was the ONE table of the
-        // fifteen wiped here with a delete and no matching insert — the moment
-        // billing work saved a draft, the next owner autosave would erase it
-        // silently. Production has 0 rows today, so nothing was lost yet.
-        const preservedInvoiceDrafts = (
+        // Without that restore this would be the ONE table of the fifteen wiped
+        // here with a delete and no matching insert — and unlike the empty
+        // placeholder it replaces, this one holds real money. The first invoice
+        // Brittany generated would vanish on the next owner autosave, silently.
+        const preservedInvoices = (
           await client.query(
-            `select id, client_id, billing_period, status, total, payload, created_at
-               from invoice_drafts`,
+            `select id, client_id, period, number, status, line_items, subtotal, total,
+                    due_date, blurb, scope_flags, sent_at, paid_at,
+                    stripe_checkout_session_id, stripe_payment_intent_id, payment_method,
+                    email_log, created_at
+               from invoices`,
           )
         ).rows
 
@@ -4067,7 +4144,7 @@ export class AppDataStore {
         await client.query('delete from reimbursements')
         await client.query('delete from recurring_reimbursements')
         await client.query('delete from client_assignments')
-        await client.query('delete from invoice_drafts')
+        await client.query('delete from invoices')
         await client.query('delete from clients')
         await client.query('delete from subscription_plans')
         await client.query('delete from contacts')
@@ -4286,30 +4363,48 @@ export class AppDataStore {
           }
         }
 
-        // Put back the invoice drafts snapshotted before the wipe, now that
-        // their clients exist again. A draft whose client is gone from this
+        // Put back the invoices snapshotted before the wipe, now that their
+        // clients exist again. An invoice whose client is gone from this
         // payload is dropped — the same rule every other client-scoped table
         // here follows (a removed client's rows do not come back), and its FK
         // would refuse the insert anyway. `updated_at` is re-stamped like
         // every other row re-inserted by this transaction; `created_at` is
-        // preserved so a draft keeps its real age across a bulk save.
-        for (const draft of preservedInvoiceDrafts) {
-          if (!validClientIds.has(draft.client_id)) continue
+        // preserved so an invoice keeps its real age across a bulk save.
+        //
+        // This is a MONEY table: an invoice that has been sent or paid must
+        // survive an unrelated owner autosave untouched, so every column is
+        // restored verbatim rather than regenerated.
+        for (const invoice of preservedInvoices) {
+          if (!validClientIds.has(invoice.client_id)) continue
           await client.query(
             `
-              insert into invoice_drafts (
-                id, client_id, billing_period, status, total, payload, created_at, updated_at
+              insert into invoices (
+                id, client_id, period, number, status, line_items, subtotal, total,
+                due_date, blurb, scope_flags, sent_at, paid_at,
+                stripe_checkout_session_id, stripe_payment_intent_id, payment_method,
+                email_log, created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6::jsonb, $7, now())
+              values ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17::jsonb,$18, now())
             `,
             [
-              draft.id,
-              draft.client_id,
-              draft.billing_period,
-              draft.status,
-              draft.total,
-              JSON.stringify(draft.payload ?? {}),
-              draft.created_at,
+              invoice.id,
+              invoice.client_id,
+              invoice.period,
+              invoice.number,
+              invoice.status,
+              JSON.stringify(invoice.line_items ?? []),
+              invoice.subtotal,
+              invoice.total,
+              invoice.due_date,
+              invoice.blurb ?? '',
+              JSON.stringify(invoice.scope_flags ?? []),
+              invoice.sent_at,
+              invoice.paid_at,
+              invoice.stripe_checkout_session_id,
+              invoice.stripe_payment_intent_id,
+              invoice.payment_method,
+              JSON.stringify(invoice.email_log ?? []),
+              invoice.created_at,
             ],
           )
         }
@@ -6353,6 +6448,164 @@ export class AppDataStore {
    * insert simply had no columns for them. Any column added to `write()`'s
    * clients insert must be added here as well.
    */
+
+  /**
+   * Every invoice for a period (or all of them), newest client first. Invoices
+   * live OUTSIDE the bulk-save payload deliberately — they are money, and a
+   * stale owner tab must never be able to rewrite them — so they are read
+   * through here rather than off `read()`.
+   */
+  async listInvoices({ period = null } = {}) {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select id, client_id, period, number, status, line_items, subtotal, total,
+                due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
+                created_at, updated_at
+           from invoices
+          ${period ? 'where period = $1' : ''}
+          order by number nulls last, created_at`,
+        period ? [period] : [],
+      )
+      return rows.map(mapInvoiceRow)
+    }
+    const data = await readJson(localDataPath)
+    const all = Array.isArray(data.invoices) ? data.invoices : []
+    return all
+      .filter((invoice) => !period || invoice.period === period)
+      .slice()
+      .sort((a, b) => String(a.number ?? '').localeCompare(String(b.number ?? '')))
+  }
+
+  /**
+   * Generate the month's drafts — one per client, idempotently.
+   *
+   * Re-running is safe and is expected: Brittany will run it, log a missed
+   * hour, and run it again. A client that already has a live (non-void)
+   * invoice for the period is SKIPPED rather than rewritten, because a draft
+   * she has already edited must not be silently reverted by a second run.
+   * Regenerating one deliberately means voiding it first.
+   *
+   * Clients with nothing to bill produce no invoice at all — an hourly client
+   * with no time this month should not get a $0 document.
+   */
+  async generateInvoicesForPeriod(period, { defaultNetDays = 30 } = {}) {
+    const data = await this.read()
+    const existing = await this.listInvoices({ period })
+    const liveClientIds = new Set(
+      existing.filter((invoice) => invoice.status !== 'void').map((invoice) => invoice.clientId),
+    )
+    const takenNumbers = existing.map((invoice) => invoice.number).filter(Boolean)
+
+    // Last month's invoices, for the prior-month true-up.
+    const priorByClient = new Map(
+      (await this.listInvoices({ period: previousPeriod(period) })).map((invoice) => [
+        invoice.clientId,
+        invoice,
+      ]),
+    )
+
+    const created = []
+    const skipped = []
+    for (const client of data.clients ?? []) {
+      // Prospects and onboarding clients are not billed yet.
+      if ((client.lifecycleStage ?? 'active') !== 'active') continue
+      if (liveClientIds.has(client.id)) {
+        skipped.push({ clientId: client.id, reason: 'already-generated' })
+        continue
+      }
+
+      const draft = buildInvoiceDraft({
+        client,
+        period,
+        entries: data.timeEntries ?? [],
+        plans: data.plans ?? [],
+        reimbursements: data.reimbursements ?? [],
+        recurringReimbursements: data.recurringReimbursements ?? [],
+        employees: data.employees ?? [],
+        defaultHourlyRate: Number(client.hourlyRate) || 0,
+        priorInvoice: priorByClient.get(client.id) ?? null,
+        defaultNetDays,
+      })
+      if (draft.lineItems.length === 0) {
+        skipped.push({ clientId: client.id, reason: 'nothing-to-bill' })
+        continue
+      }
+
+      const number = nextInvoiceNumber(period, takenNumbers)
+      takenNumbers.push(number)
+      const record = {
+        id: `inv-${randomUUID().slice(0, 8)}`,
+        clientId: client.id,
+        period,
+        number,
+        status: 'draft',
+        lineItems: draft.lineItems,
+        subtotal: draft.subtotal,
+        total: draft.total,
+        dueDate: draft.dueDate,
+        blurb: '',
+        scopeFlags: draft.scopeFlags,
+        sentAt: null,
+        paidAt: null,
+        paymentMethod: null,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      }
+      const saved = await this._insertInvoice(record)
+      // A null return means the partial unique index refused it — another run
+      // created this client's invoice between our read and our write. That is
+      // the index doing its job, not an error.
+      if (saved) created.push(saved)
+      else skipped.push({ clientId: client.id, reason: 'already-generated' })
+    }
+
+    return { period, created, skipped }
+  }
+
+  /** Insert one invoice; null when the live-per-(client, period) index refuses it. */
+  async _insertInvoice(record) {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `insert into invoices (
+           id, client_id, period, number, status, line_items, subtotal, total,
+           due_date, blurb, scope_flags, created_at, updated_at
+         )
+         values ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb, now(), now())
+         on conflict (client_id, period) where status <> 'void' do nothing
+         returning id`,
+        [
+          record.id,
+          record.clientId,
+          record.period,
+          record.number,
+          record.status,
+          JSON.stringify(record.lineItems),
+          record.subtotal,
+          record.total,
+          record.dueDate,
+          record.blurb,
+          JSON.stringify(record.scopeFlags),
+        ],
+      )
+      return rows.length > 0 ? record : null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    // Mirror the partial unique index by hand — the file backend has no
+    // constraints, and cardinal rule 1 means it has to behave the same.
+    const clash = data.invoices.some(
+      (invoice) =>
+        invoice.clientId === record.clientId &&
+        invoice.period === record.period &&
+        invoice.status !== 'void',
+    )
+    if (clash) return null
+    data.invoices.push(record)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return record
+  }
+
   async createClient(client) {
     const id = client.id ?? `client-${randomUUID().slice(0, 8)}`
     const name = String(client.name ?? '').trim()

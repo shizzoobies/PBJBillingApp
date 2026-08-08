@@ -923,13 +923,13 @@ describe('edit a session-backed entry, then split it (file backend)', () => {
  * pre-check, the (optional) version fingerprint, and the invoice-drafts
  * snapshot â€” so returning an empty row set for everything else is faithful.
  */
-function fakePostgres({ invoiceDrafts = [], groupSlices = [] } = {}) {
+function fakePostgres({ invoices = [], groupSlices = [] } = {}) {
   const statements = []
   const record = (text, params) => {
     const trimmed = String(text).trim()
     statements.push({ text: trimmed, params })
-    if (/^select\b[\s\S]*\bfrom invoice_drafts\b/i.test(trimmed)) {
-      return { rows: invoiceDrafts }
+    if (/^select\b[\s\S]*\bfrom invoices\b/i.test(trimmed)) {
+      return { rows: invoices }
     }
     // The `for update` read a split adjustment starts with.
     if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
@@ -963,79 +963,92 @@ function postgresStore(fake) {
   return pgStore
 }
 
-const existingDraft = {
-  id: 'draft-1',
+const existingInvoice = {
+  id: 'inv-1',
   client_id: 'c1',
-  billing_period: '2026-08',
-  status: 'draft',
+  period: '2026-08',
+  number: 'INV-2026-08-001',
+  status: 'sent',
+  line_items: [{ kind: 'plan', label: 'August work', detail: 'Monthly service', amount: 250 }],
+  subtotal: '250.00',
   total: '250.00',
-  payload: { lines: [{ label: 'August work', amount: 250 }] },
+  due_date: '2026-09-30',
+  blurb: '',
+  scope_flags: [],
+  sent_at: new Date('2026-09-01T12:00:00.000Z'),
+  paid_at: null,
+  stripe_checkout_session_id: null,
+  stripe_payment_intent_id: null,
+  payment_method: null,
+  email_log: [],
   created_at: new Date('2026-08-01T12:00:00.000Z'),
 }
 
 /**
- * `invoice_drafts` was the one table the bulk save wiped without re-inserting â€”
- * fourteen others appeared in both lists, this one only in the deletes. Nothing
- * has ever written a draft (production has 0 rows), so nothing was lost yet,
- * but the first saved draft would have been erased by the next owner autosave.
+ * `invoices` is the one table the bulk save wipes without re-inserting from the
+ * payload — the other fourteen appear in both lists, this one only in the
+ * deletes. It replaces the empty `invoice_drafts` placeholder, and unlike that
+ * placeholder it holds real money: the first invoice Brittany generates would
+ * be erased by the next owner autosave if the restore were ever dropped.
  *
- * The delete itself cannot simply go away: `invoice_drafts.client_id` is
- * `on delete restrict`, so `delete from clients` refuses to run while any draft
- * exists. `write()` therefore snapshots the rows and puts them back.
+ * The delete itself cannot simply go away: `invoices.client_id` is
+ * `on delete restrict`, so `delete from clients` refuses to run while any
+ * invoice exists. `write()` therefore snapshots the rows and puts them back.
  */
-describe('bulk save preserves invoice_drafts (postgres branch)', () => {
-  it('re-inserts a pre-existing draft that the wipe removed', async () => {
-    const fake = fakePostgres({ invoiceDrafts: [existingDraft] })
+describe('bulk save preserves invoices (postgres branch)', () => {
+  it('re-inserts a pre-existing invoice that the wipe removed', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
     await postgresStore(fake).write(workspace())
 
-    const inserts = fake.matching(/^insert into invoice_drafts/i)
+    const inserts = fake.matching(/^insert into invoices/i)
     expect(inserts).toHaveLength(1)
-    expect(inserts[0].params).toEqual([
-      'draft-1',
+    // Every column restored verbatim — a SENT invoice must come back exactly
+    // as it was, not regenerated from current data.
+    expect(inserts[0].params.slice(0, 5)).toEqual([
+      'inv-1',
       'c1',
       '2026-08',
-      'draft',
-      '250.00',
-      JSON.stringify(existingDraft.payload),
-      existingDraft.created_at,
+      'INV-2026-08-001',
+      'sent',
     ])
+    expect(inserts[0].params).toContain(existingInvoice.created_at)
+    expect(inserts[0].params).toContain(existingInvoice.sent_at)
   })
 
-  it('still deletes first â€” the clients wipe cannot run past the FK otherwise', async () => {
-    const fake = fakePostgres({ invoiceDrafts: [existingDraft] })
+  it('still deletes first — the clients wipe cannot run past the FK otherwise', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
     await postgresStore(fake).write(workspace())
 
-    const deleteAt = fake.indexOf(/^delete from invoice_drafts$/i)
+    const deleteAt = fake.indexOf(/^delete from invoices$/i)
     const clientsWipedAt = fake.indexOf(/^delete from clients$/i)
     expect(deleteAt).toBeGreaterThan(-1)
     expect(deleteAt).toBeLessThan(clientsWipedAt)
   })
 
   it('restores AFTER the clients are back, so the FK is satisfied', async () => {
-    const fake = fakePostgres({ invoiceDrafts: [existingDraft] })
+    const fake = fakePostgres({ invoices: [existingInvoice] })
     await postgresStore(fake).write(workspace())
 
     const clientInsertAt = fake.indexOf(/^insert into clients/i)
-    const draftRestoreAt = fake.indexOf(/^insert into invoice_drafts/i)
+    const restoreAt = fake.indexOf(/^insert into invoices/i)
     expect(clientInsertAt).toBeGreaterThan(-1)
-    expect(draftRestoreAt).toBeGreaterThan(clientInsertAt)
+    expect(restoreAt).toBeGreaterThan(clientInsertAt)
   })
 
-  it('drops a draft whose client is gone from the payload', async () => {
+  it('drops an invoice whose client is gone from the payload', async () => {
     const fake = fakePostgres({
-      invoiceDrafts: [existingDraft, { ...existingDraft, id: 'draft-2', client_id: 'deleted' }],
+      invoices: [existingInvoice, { ...existingInvoice, id: 'inv-2', client_id: 'deleted' }],
     })
     await postgresStore(fake).write(workspace())
 
-    const restoredIds = fake.matching(/^insert into invoice_drafts/i).map((s) => s.params[0])
-    expect(restoredIds).toEqual(['draft-1'])
+    const restoredIds = fake.matching(/^insert into invoices/i).map((s) => s.params[0])
+    expect(restoredIds).toEqual(['inv-1'])
   })
-
-  it('issues no restore at all when there were no drafts', async () => {
+  it('issues no restore at all when there were no invoices', async () => {
     const fake = fakePostgres()
     await postgresStore(fake).write(workspace())
 
-    expect(fake.matching(/^insert into invoice_drafts/i)).toHaveLength(0)
+    expect(fake.matching(/^insert into invoices/i)).toHaveLength(0)
   })
 })
 

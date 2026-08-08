@@ -820,6 +820,20 @@ Clients page meanwhile. Owner-only.
 
 ## Invoices (owner only)
 
+> **Being rebuilt.** The Invoices page below is the CURRENT, view-only one.
+> Underneath, the first piece of real in-app invoicing now exists: the app can
+> generate and store a numbered draft invoice per client per month, with a due
+> date from that client's payment terms, a prior-month adjustment, and
+> out-of-scope flags. **There is no page for it yet** — that is the next step
+> (I2), which is where Brittany will review, edit and mark drafts as reviewed,
+> plus the Download-for-QBO file. Nothing is emailed and nothing is charged;
+> sending and payment links come later still. If asked whether she can send an
+> invoice from the app: not yet.
+>
+> Generated drafts are idempotent per client per month — running the month
+> again does not overwrite a draft she has already edited. Voiding one frees it
+> to be regenerated.
+
 - Per-client invoice drafts for the selected billing month: subscription
   plans and/or billable hours become line items; total due computed. For
   Hourly clients, billable hours are charged per team member at that person's
