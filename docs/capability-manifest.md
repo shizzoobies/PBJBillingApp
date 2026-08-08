@@ -820,19 +820,34 @@ Clients page meanwhile. Owner-only.
 
 ## Invoices (owner only)
 
-> **Being rebuilt.** The Invoices page below is the CURRENT, view-only one.
-> Underneath, the first piece of real in-app invoicing now exists: the app can
-> generate and store a numbered draft invoice per client per month, with a due
-> date from that client's payment terms, a prior-month adjustment, and
-> out-of-scope flags. **There is no page for it yet** — that is the next step
-> (I2), which is where Brittany will review, edit and mark drafts as reviewed,
-> plus the Download-for-QBO file. Nothing is emailed and nothing is charged;
-> sending and payment links come later still. If asked whether she can send an
-> invoice from the app: not yet.
+> **The monthly run is live.** At the top of the Invoices page: pick a month,
+> press **Generate**, and the app builds one numbered draft invoice per client
+> with something to bill — lines, a due date from that client's payment terms,
+> any prior-month adjustment carried forward, and out-of-scope flags.
 >
-> Generated drafts are idempotent per client per month — running the month
-> again does not overwrite a draft she has already edited. Voiding one frees it
-> to be regenerated.
+> The list is in INVOICE NUMBER order (it does not rearrange while you work
+> through it), with counts above for To review / Reviewed / Need a look and the
+> month total. Rows flagged for a second look get an amber rule down the left.
+> Click any row to edit it: change a line's wording or amount, add or remove
+> lines, write the note to the client, then **Mark reviewed**. Reviewed can go
+> **Back to draft**. **Void** keeps the invoice on the record, struck through,
+> and frees that client to be generated again.
+>
+> **Download for QBO** exports the month as a line-level CSV for QuickBooks'
+> invoice import. Voided invoices are left out. ⚠️ The `Item` column is a
+> placeholder until Brittany confirms the product/service names in her own QBO
+> file — everything else in the export is exact.
+>
+> Running Generate again is safe and expected: a client that already has an
+> invoice for that month is skipped, never rewritten, so a second run cannot
+> revert edits. A client with nothing to bill gets no invoice at all.
+>
+> **Nothing is emailed and nothing is charged yet** — sending and payment links
+> are still to come. If asked whether she can send an invoice from the app: not
+> yet, she reviews here and takes it to QuickBooks.
+>
+> The per-client section BELOW the run is the older live-calculation view, kept
+> for its preview and print.
 
 - Per-client invoice drafts for the selected billing month: subscription
   plans and/or billable hours become line items; total due computed. For

@@ -1,6 +1,7 @@
 import { ExternalLink, FileText, Mail, Plus, Printer, RotateCcw, Sliders, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppContext } from '../AppContext'
+import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import type {
   Client,
@@ -409,6 +410,10 @@ export function InvoicesPage() {
 
   return (
     <>
+      {/* The month run (I1/I2): the STORED invoices for a period. The
+          per-client section below is the older live-calculation view, kept
+          for its preview and print until they are pointed at stored data. */}
+      <InvoiceMonthRun clients={data.clients} />
       <section className="content-grid invoice-layout" id="invoices">
         <div className="panel">
           <div className="section-heading">

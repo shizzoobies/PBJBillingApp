@@ -7,6 +7,7 @@
   type ChecklistTemplateItem,
   type Client,
   type NewClientInput,
+  type PersistedInvoice,
   type ClientNote,
   type FeatureRequest,
   type FeatureRequestType,
@@ -2750,4 +2751,64 @@ export async function assistantDismissSuggestion(key: string) {
     throw new ApiError(response.status, `Failed to dismiss suggestion (${response.status})`)
   }
   return (await response.json()) as { ok: boolean }
+}
+
+/**
+ * Persisted invoices (I1/I2). These deliberately do NOT ride on /api/app-data:
+ * invoices are money, and keeping them off the bulk-save payload is what stops
+ * a stale owner tab from ever rewriting one. So the page fetches them itself.
+ */
+export async function listInvoicesRequest(period?: string) {
+  const query = period ? `?period=${encodeURIComponent(period)}` : ''
+  const response = await apiFetch(`/api/invoices${query}`, { credentials: 'same-origin' })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to load invoices (${response.status})`)
+  }
+  return ((await response.json()) as { invoices: PersistedInvoice[] }).invoices
+}
+
+/** Build the month's drafts. Idempotent — an existing invoice is never rewritten. */
+export async function generateInvoicesRequest(period: string) {
+  const response = await apiFetch('/api/invoices/generate', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ period }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to generate (${response.status})`)
+  }
+  return (await response.json()) as {
+    period: string
+    created: PersistedInvoice[]
+    skipped: Array<{ clientId: string; reason: string }>
+  }
+}
+
+/**
+ * Edit one invoice. Totals are NOT sent — the server recomputes them from the
+ * lines, so what is stored can never disagree with what is printed.
+ */
+export async function updateInvoiceRequest(
+  invoiceId: string,
+  patch: {
+    lineItems?: Array<{ kind: string; label: string; detail: string; amount: number }>
+    blurb?: string
+    dueDate?: string
+    status?: 'draft' | 'reviewed' | 'void'
+  },
+) {
+  const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}`, {
+    credentials: 'same-origin',
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to save (${response.status})`)
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }

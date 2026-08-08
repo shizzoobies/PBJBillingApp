@@ -240,6 +240,49 @@ export type NewClientInput = Omit<Client, 'id'> & {
   newPrimaryContact?: { name: string; email: string; phone: string }
 }
 
+
+/** A line on a PERSISTED invoice. `kind` records what produced it. */
+export type PersistedInvoiceLine = {
+  kind: 'plan' | 'hourly' | 'reimbursement' | 'recurring' | 'adjustment' | 'custom'
+  label: string
+  detail: string
+  amount: number
+}
+
+/** Something on the draft worth a decision before sending — never a charge. */
+export type InvoiceScopeFlag = {
+  kind: string
+  label: string
+  detail: string
+}
+
+/**
+ * An invoice as STORED (I1). Distinct from `Invoice`, which is the ephemeral
+ * per-client calculation the page renders from live data: this one has a
+ * number, a status, and edits that survive a reload.
+ */
+export type PersistedInvoice = {
+  id: string
+  clientId: string
+  /** 'YYYY-MM' */
+  period: string
+  number: string | null
+  status: 'draft' | 'reviewed' | 'sent' | 'processing' | 'paid' | 'overdue' | 'void'
+  lineItems: PersistedInvoiceLine[]
+  /** This month's work, excluding any prior-month adjustment. */
+  subtotal: number
+  /** What is owed: the subtotal plus any adjustment. */
+  total: number
+  dueDate: string | null
+  blurb: string
+  scopeFlags: InvoiceScopeFlag[]
+  sentAt: string | null
+  paidAt: string | null
+  paymentMethod: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
 export type TimeApprovalStatus = 'pending' | 'approved' | 'rejected'
 
 /**

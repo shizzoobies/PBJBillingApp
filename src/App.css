@@ -10910,3 +10910,225 @@ mark.list-search-hit {
   padding-top: 12px;
   width: 100%;
 }
+
+/* ---- Invoices: the monthly run (I2) ---------------------------------- */
+
+.invoice-run-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.invoice-run-stats {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  margin: 14px 0 6px;
+}
+
+.invoice-run-stat {
+  background: var(--surface-muted, #f6f6f7);
+  border-radius: 10px;
+  display: grid;
+  gap: 3px;
+  padding: 11px 13px;
+}
+
+.invoice-run-stat span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.invoice-run-stat strong {
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.invoice-run-stat.is-flagged strong {
+  color: #8a5a06;
+}
+
+.invoice-run-error {
+  background: rgba(197, 48, 48, 0.08);
+  border-radius: 8px;
+  color: #9b2226;
+  font-size: 13px;
+  margin: 10px 0 0;
+  padding: 9px 12px;
+}
+
+.invoice-run-note,
+.invoice-run-empty {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 10px 0 0;
+}
+
+.invoice-run-list {
+  border: 1px solid var(--border, #e2ddd6);
+  border-radius: 12px;
+  list-style: none;
+  margin: 14px 0 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.invoice-run-row + .invoice-run-row {
+  border-top: 1px solid var(--border, #e2ddd6);
+}
+
+/* Flagged rows get a left rule so they catch the eye while scrolling, without
+   moving them out of invoice-number order. */
+.invoice-run-row.is-flagged {
+  border-left: 3px solid rgba(211, 155, 42, 0.85);
+}
+
+.invoice-run-row.is-void {
+  opacity: 0.55;
+}
+
+.invoice-run-row.is-void .invoice-run-client,
+.invoice-run-row.is-void .invoice-run-amount strong {
+  text-decoration: line-through;
+}
+
+.invoice-run-summary {
+  align-items: flex-start;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 13px 15px;
+  text-align: left;
+  width: 100%;
+}
+
+.invoice-run-summary:hover {
+  background: var(--surface-muted, #f6f6f7);
+}
+
+.invoice-run-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.invoice-run-client {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.invoice-run-number {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.invoice-run-meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.invoice-run-flags {
+  display: grid;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.invoice-run-flag {
+  align-items: center;
+  background: rgba(211, 155, 42, 0.14);
+  border-radius: 8px;
+  color: #7a4f06;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 4px 9px;
+  width: fit-content;
+}
+
+.invoice-run-amount {
+  display: grid;
+  gap: 5px;
+  justify-items: end;
+  white-space: nowrap;
+}
+
+.invoice-run-amount strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.invoice-status {
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  text-transform: uppercase;
+}
+
+.invoice-status.is-draft {
+  background: var(--surface-muted, #f1efe8);
+  color: var(--muted);
+}
+
+.invoice-status.is-reviewed {
+  background: rgba(38, 132, 74, 0.14);
+  color: #1f6b3b;
+}
+
+.invoice-status.is-void {
+  background: var(--surface-muted, #f1efe8);
+  color: var(--muted);
+}
+
+.invoice-run-editor {
+  border-top: 1px solid var(--border, #e2ddd6);
+  display: grid;
+  gap: 12px;
+  padding: 14px 15px;
+}
+
+.invoice-run-lines {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.invoice-run-lines td {
+  padding: 5px 6px 5px 0;
+  vertical-align: top;
+}
+
+.invoice-run-detail {
+  margin-top: 5px;
+}
+
+.invoice-run-amount-cell {
+  width: 130px;
+}
+
+.invoice-run-blurb {
+  margin: 0;
+}
+
+.invoice-run-editor-footer {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.invoice-run-running-total {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.invoice-run-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
