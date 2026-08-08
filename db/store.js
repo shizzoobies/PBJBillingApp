@@ -671,6 +671,40 @@ export function normalizeWaitingOns(raw) {
     })
 }
 
+/** Statuses I2 may set. Sending and payment come later and are not settable here. */
+const EDITABLE_INVOICE_STATUSES = new Set(['draft', 'reviewed', 'void'])
+
+/** The line kinds an invoice may contain, including the ones only I2 adds. */
+const INVOICE_LINE_KINDS = new Set([
+  'plan',
+  'hourly',
+  'reimbursement',
+  'recurring',
+  'adjustment',
+  'custom',
+])
+
+const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
+
+/**
+ * Clean the line list coming off the page before it becomes a client-facing
+ * document. Amounts are coerced to numbers and rounded to cents (a NaN would
+ * otherwise poison every total downstream), labels are trimmed and capped, and
+ * an unrecognized `kind` falls back to 'custom' rather than being persisted
+ * verbatim. A line with no label and no amount is dropped — that is an empty
+ * row she left behind, not a charge.
+ */
+function sanitizeInvoiceLines(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .map((line) => ({
+      kind: INVOICE_LINE_KINDS.has(line?.kind) ? line.kind : 'custom',
+      label: String(line?.label ?? '').trim().slice(0, 300),
+      detail: String(line?.detail ?? '').trim().slice(0, 300),
+      amount: roundMoney(line?.amount),
+    }))
+    .filter((line) => line.label !== '' || line.amount !== 0)
+}
+
 /**
  * One invoices row -> the camelCase shape the app and the API speak. jsonb
  * columns come back parsed; numerics come back as STRINGS from pg, so money is
@@ -6560,6 +6594,69 @@ export class AppDataStore {
     }
 
     return { period, created, skipped }
+  }
+
+
+  /**
+   * Edit one invoice. Only the fields Brittany can change in I2 are accepted:
+   * the lines, the blurb, the due date, and the review status.
+   *
+   * MONEY IS RECOMPUTED HERE, never taken from the caller. The page sends the
+   * lines it wants; `subtotal` and `total` are derived from them server-side,
+   * so a stale or malformed tab cannot post a total that disagrees with its own
+   * lines. Returns the updated invoice, or null if it does not exist.
+   */
+  async updateInvoice(id, patch = {}) {
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === id)
+    if (!current) return null
+
+    const next = { ...current }
+    if (Array.isArray(patch.lineItems)) {
+      next.lineItems = sanitizeInvoiceLines(patch.lineItems)
+    }
+    if (typeof patch.blurb === 'string') next.blurb = patch.blurb
+    if (typeof patch.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(patch.dueDate)) {
+      next.dueDate = patch.dueDate
+    }
+    if (EDITABLE_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
+
+    // Adjustment lines sit outside the subtotal — the subtotal is this month's
+    // work, the total is what is owed once last month's true-up is applied.
+    next.subtotal = roundMoney(
+      next.lineItems
+        .filter((line) => line.kind !== 'adjustment')
+        .reduce((sum, line) => sum + line.amount, 0),
+    )
+    next.total = roundMoney(next.lineItems.reduce((sum, line) => sum + line.amount, 0))
+    next.updatedAt = nowIso()
+
+    if (this.pool) {
+      const { rowCount } = await this.pool.query(
+        `update invoices
+            set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
+                blurb = $6, status = $7, updated_at = now()
+          where id = $1`,
+        [
+          id,
+          JSON.stringify(next.lineItems),
+          next.subtotal,
+          next.total,
+          next.dueDate,
+          next.blurb,
+          next.status,
+        ],
+      )
+      if (rowCount === 0) return null
+      return (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === id)
+    if (index === -1) return null
+    data.invoices[index] = next
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return next
   }
 
   /** Insert one invoice; null when the live-per-(client, period) index refuses it. */

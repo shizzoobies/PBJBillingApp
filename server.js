@@ -53,6 +53,7 @@ import {
   templateApplyRoleDenial,
   templateApplyScopeDenial,
 } from './lib/template-apply-permission.js'
+import { buildQboCsv } from './lib/qbo-export.js'
 import {
   canMarkWaitingOnDone,
   canVerifyWaitingOn,
@@ -2239,6 +2240,79 @@ const server = createServer(async (request, response) => {
       }
       const invoices = await appDataStore.listInvoices({ period: period || null })
       sendJson(response, 200, { invoices })
+      return
+    }
+
+    // GET /api/invoices/export.csv?period=YYYY-MM — the month's invoices as a
+    // QBO import file (owner only). Declared BEFORE the /:id routes so the
+    // literal path is never mistaken for an invoice id.
+    if (normalizedPath === '/api/invoices/export.csv' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can export invoices' })
+        return
+      }
+      const period = requestUrl.searchParams.get('period') || ''
+      if (!/^\d{4}-\d{2}$/.test(period)) {
+        sendJson(response, 400, { error: 'period must look like 2026-08' })
+        return
+      }
+      const invoices = await appDataStore.listInvoices({ period })
+      const data = await appDataStore.read()
+      const clientsById = new Map((data.clients ?? []).map((client) => [client.id, client]))
+      const csv = buildQboCsv(invoices, clientsById)
+      response.writeHead(200, {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="invoices-${period}.csv"`,
+        'Cache-Control': 'no-store',
+      })
+      // A BOM so Excel opens it as UTF-8 — client names carry accents and the
+      // em dash in our descriptions would otherwise render as mojibake.
+      response.end(`\uFEFF${csv}`)
+      return
+    }
+
+    // PATCH /api/invoices/:id — edit a draft (owner only).
+    // The page sends lines, blurb, due date and review status; the SERVER
+    // recomputes subtotal and total from those lines, so a total can never
+    // disagree with the lines it is printed next to.
+    const invoicePatchMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)$/)
+    if (invoicePatchMatch && request.method === 'PATCH') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can edit invoices' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const invoiceId = decodeURIComponent(invoicePatchMatch[1])
+
+      let updated
+      try {
+        updated = await appDataStore.updateInvoice(invoiceId, payload ?? {})
+      } catch (error) {
+        console.error('[invoices] update failed:', error)
+        sendJson(response, 500, {
+          error: 'invoice_update_failed',
+          message: 'Could not save that change — please try again.',
+        })
+        return
+      }
+      if (!updated) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      sendJson(response, 200, { invoice: updated })
       return
     }
 
