@@ -253,6 +253,28 @@ html {
   gap: 7px;
 }
 
+/* One group of nav links. The gap inside a section is tighter than the gap
+   between sections, so the grouping reads from spacing alone even before you
+   get to the heading. */
+.nav-section {
+  display: grid;
+  gap: 3px;
+}
+
+.nav-section + .nav-section {
+  margin-top: 11px;
+}
+
+.nav-section-label {
+  color: color-mix(in srgb, var(--sidebar-text, #fffaf3) 52%, transparent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  margin: 0 0 3px;
+  padding: 0 12px;
+  text-transform: uppercase;
+}
+
 .nav-item {
   align-items: center;
   background: transparent;
@@ -10844,4 +10866,47 @@ mark.list-search-hit {
   .updates-card {
     transition: none;
   }
+}
+
+/* Placeholder body for a section that exists in the nav before it has content
+   (Engagements, until intake + proposals ship). Reads as "on the way", not as
+   a page that failed to load. */
+.under-construction {
+  border: 1px dashed var(--border, #e2ddd6);
+  border-radius: 12px;
+  color: var(--muted);
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  padding: 26px;
+}
+
+.under-construction h3 {
+  color: var(--text, #2b2724);
+  font-size: 17px;
+  margin: 0;
+}
+
+.under-construction p {
+  margin: 0;
+  max-width: 62ch;
+}
+
+.under-construction ul {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  max-width: 62ch;
+  padding-left: 20px;
+}
+
+.under-construction strong {
+  color: var(--text, #2b2724);
+}
+
+.under-construction-note {
+  border-top: 1px solid var(--border, #e2ddd6);
+  font-size: 13px;
+  padding-top: 12px;
+  width: 100%;
 }

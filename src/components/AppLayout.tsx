@@ -20,7 +20,7 @@ import { ConversationProvider } from '@elevenlabs/react'
 import { AssistantPanel } from './AssistantPanel'
 import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
-import { navItems } from './navItems'
+import { navItems, navSections, type NavItem } from './navItems'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
 // Who the user should contact when the app can't save. Surfaced in the big
@@ -105,6 +105,22 @@ export function AppLayout() {
     ? 'Owner access'
     : effectiveUser?.staffRole ?? 'Employee access'
 
+  /** One link, rendered identically whether it sits in a group or the flat list. */
+  const renderNavLink = (item: NavItem) => {
+    const Icon = item.icon
+    return (
+      <NavLink
+        className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
+        key={item.to}
+        to={item.to}
+        onClick={() => setNavOpen(false)}
+      >
+        <Icon size={17} />
+        <span>{item.label}</span>
+      </NavLink>
+    )
+  }
+
   return (
     <div className="app-shell">
       {navOpen ? (
@@ -137,23 +153,25 @@ export function AppLayout() {
           </div>
         )}
 
+        {/* Owners get the grouped sidebar (nineteen flat links was the problem
+            P1 set out to fix). Staff keep the flat list — at eight links the
+            headings would be more chrome than content. One item definition
+            feeds both, so labels and routes cannot drift apart. */}
         <nav className="nav-list">
-          {navItems
-            .filter((item) => ownerMode || !item.ownerOnly)
-            .map((item) => {
-              const Icon = item.icon
-              return (
-                <NavLink
-                  className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
-                  key={item.to}
-                  to={item.to}
-                  onClick={() => setNavOpen(false)}
-                >
-                  <Icon size={17} />
-                  <span>{item.label}</span>
-                </NavLink>
-              )
-            })}
+          {ownerMode
+            ? navSections.map((section, index) => {
+                const visible = section.items.filter((item) => ownerMode || !item.ownerOnly)
+                if (visible.length === 0) return null
+                return (
+                  <div className="nav-section" key={section.label ?? `section-${index}`}>
+                    {section.label ? (
+                      <p className="nav-section-label">{section.label}</p>
+                    ) : null}
+                    {visible.map(renderNavLink)}
+                  </div>
+                )
+              })
+            : navItems.filter((item) => !item.ownerOnly).map(renderNavLink)}
         </nav>
 
         <div className="security-note">

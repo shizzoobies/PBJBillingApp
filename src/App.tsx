@@ -154,6 +154,7 @@ import { SetupChecklistPage } from './pages/SetupChecklistPage'
 import { UpdatesPage } from './pages/UpdatesPage'
 import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
+import { EngagementsPage } from './pages/EngagementsPage'
 import { InvoicesPage } from './pages/InvoicesPage'
 import { NotificationsPage } from './pages/NotificationsPage'
 import { PlansPage } from './pages/PlansPage'
@@ -3891,6 +3892,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           }
         />
         <Route path="/gantt" element={<GanttPage />} />
+        <Route
+          path="/engagements"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <EngagementsPage />
+            </OwnerOnly>
+          }
+        />
         <Route
           path="/invoices"
           element={

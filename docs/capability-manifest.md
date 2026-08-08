@@ -10,10 +10,30 @@ see a reduced version of the app — owner-only abilities are marked.
 
 ## Navigation map
 
-Sidebar pages: Dashboard, Time, Timesheet, Time Approvals, Checklists, Board,
-Delayed, Clients, Client Recap, Contacts, Reports, Productivity, Gantt,
-Invoices, Plans, Team, To 100%, Updates (owner only), Settings. A billing-month
-picker, notification bell, and account menu sit in the top bar on every page.
+Sidebar pages: Dashboard, Engagements, Time, Timesheet, Time Approvals,
+Checklists, Board, Delayed, Clients, Client Recap, Contacts, Reports,
+Productivity, Gantt, Invoices, Plans, Team, To 100%, Updates (owner only),
+Settings. A billing-month picker, notification bell, and account menu sit in the
+top bar on every page.
+
+**The owner's sidebar is grouped into sections** (nineteen flat links was too
+many to scan). In order: Dashboard, Engagements, **Clients** (Clients, Contacts,
+Client Recap), **Billing** (Invoices, Plans), **Operations** (Time, Timesheet,
+Time Approvals, Checklists, Board, Delayed, Gantt), Team, **Reports** (Reports,
+Productivity), Updates, **Settings** (Settings, To 100%). Dashboard,
+Engagements, Team and Updates stand on their own without a heading — a heading
+over a single link is more clutter than help. Updates is deliberately top-level
+rather than filed under Settings, since that is where feature requests are filed
+and shipped work is reviewed.
+
+**Staff keep a flat sidebar** — they see eight links, where section headings
+would outweigh the content. Nothing moved for them and no route changed for
+anyone; this is purely how the list is presented.
+
+**Engagements is a placeholder.** The section is visible before it has content
+so it does not appear out of nowhere later; opening it explains that the intake
+form and proposals are on the way and that clients are still added on the
+Clients page meanwhile. Owner-only.
 - New-version prompt: a browser tab left open across a deploy shows a small
   "A new version of the app is ready — Refresh" toast (bottom-right) within a
   few minutes, and immediately when you come back to the tab. Click Refresh to
