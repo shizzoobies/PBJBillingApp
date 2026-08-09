@@ -1,6 +1,15 @@
-import { AlertTriangle, Download, Plus, Printer, RefreshCw, Trash2 } from 'lucide-react'
+import {
+  AlertTriangle,
+  Download,
+  Link as LinkIcon,
+  Plus,
+  Printer,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
   listInvoicesRequest,
   updateInvoiceRequest,
@@ -127,6 +136,12 @@ export function InvoiceMonthRun({
     }
   }
 
+  /** Replace one invoice in the list with a server-returned version. */
+  const mergeInvoice = (updated: PersistedInvoice) =>
+    setInvoices((current) =>
+      current.map((invoice) => (invoice.id === updated.id ? updated : invoice)),
+    )
+
   const patch = async (
     invoiceId: string,
     body: Parameters<typeof updateInvoiceRequest>[1],
@@ -222,6 +237,7 @@ export function InvoiceMonthRun({
             busy={busy}
             onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
             onPatch={(body) => patch(invoice.id, body)}
+            onInvoiceChanged={mergeInvoice}
             onPrint={() => onPrint(invoice)}
           />
         ))}
@@ -238,6 +254,7 @@ function InvoiceRow({
   onToggle,
   onPatch,
   onPrint,
+  onInvoiceChanged,
 }: {
   invoice: PersistedInvoice
   clientName: string
@@ -246,6 +263,8 @@ function InvoiceRow({
   onToggle: () => void
   onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PersistedInvoice | null>
   onPrint: () => void
+  /** Push a server-returned invoice back into the list (payment link marks it sent). */
+  onInvoiceChanged: (invoice: PersistedInvoice) => void
 }) {
   const isVoid = invoice.status === 'void'
   const flagged = invoice.scopeFlags.length > 0
@@ -299,6 +318,7 @@ function InvoiceRow({
           busy={busy}
           onPatch={onPatch}
           onPrint={onPrint}
+          onInvoiceChanged={onInvoiceChanged}
         />
       ) : null}
     </li>
@@ -315,15 +335,45 @@ function InvoiceEditor({
   busy,
   onPatch,
   onPrint,
+  onInvoiceChanged,
 }: {
   invoice: PersistedInvoice
   busy: boolean
   onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PersistedInvoice | null>
   onPrint: () => void
+  /** Push a server-returned invoice back into the list — creating a payment
+   *  link marks it sent, and the row must show that immediately. */
+  onInvoiceChanged: (invoice: PersistedInvoice) => void
 }) {
   const [lines, setLines] = useState<PersistedInvoiceLine[]>(invoice.lineItems)
   const [blurb, setBlurb] = useState(invoice.blurb)
   const [saved, setSaved] = useState(false)
+  const [paymentLink, setPaymentLink] = useState<string | null>(null)
+  const [payBusy, setPayBusy] = useState(false)
+  const [payError, setPayError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  /**
+   * Ask the server for a hosted Checkout URL. Deliberately does NOT open it —
+   * the owner sends this to the client; opening it here would just show her a
+   * payment page for her own client's invoice.
+   */
+  const createLink = async () => {
+    setPayBusy(true)
+    setPayError(null)
+    setCopied(false)
+    try {
+      const result = await createInvoicePaymentLinkRequest(invoice.id)
+      setPaymentLink(result.url)
+      // The invoice is now 'sent' server-side; reflect that in the list.
+      onInvoiceChanged(result.invoice)
+    } catch (err) {
+      // Stripe not configured, or Stripe declined — either way say which.
+      setPayError(err instanceof Error ? err.message : 'Could not create a payment link.')
+    } finally {
+      setPayBusy(false)
+    }
+  }
 
 
   const dirty =
@@ -422,6 +472,34 @@ function InvoiceEditor({
         />
       </label>
 
+      {payError ? (
+        <p className="invoice-run-error" role="alert">
+          {payError}
+        </p>
+      ) : null}
+
+      {paymentLink ? (
+        <div className="invoice-run-paylink">
+          <span className="invoice-run-paylink-label">
+            Send this to the client — they pay by bank transfer. It clears in about 4 business
+            days, so the invoice will read “processing” until then.
+          </span>
+          <div className="invoice-run-paylink-row">
+            <input className="input" readOnly value={paymentLink} aria-label="Payment link" />
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => {
+                void navigator.clipboard?.writeText(paymentLink)
+                setCopied(true)
+              }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="invoice-run-editor-footer">
         <span className="invoice-run-running-total">
           Total {currency.format(localTotal)}
@@ -462,6 +540,25 @@ function InvoiceEditor({
               onClick={() => void onPatch({ status: 'draft' })}
             >
               Back to draft
+            </button>
+          ) : null}
+          {/* Payment link. Brittany is not the payer, so this does NOT open
+              Checkout — it hands back a URL for her to send. Creating one marks
+              the invoice sent, which is why it waits until after review. */}
+          {invoice.status !== 'void' && invoice.total > 0 ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy || payBusy || dirty}
+              title={
+                dirty
+                  ? 'Save your changes first'
+                  : 'Create a bank-transfer payment link to send to this client'
+              }
+              onClick={() => void createLink()}
+            >
+              <LinkIcon size={15} />
+              {payBusy ? 'Creating…' : paymentLink ? 'New payment link' : 'Payment link'}
             </button>
           ) : null}
           {invoice.status !== 'void' ? (

@@ -855,6 +855,16 @@ Clients page meanwhile. Owner-only.
 > "processing" for several days before it reads "paid" - that is normal, not
 > stuck. Emailing invoices is still to come.
 >
+> **Payment link (bank transfer).** On an invoice with an amount owed there is a
+> **Payment link** button. It does NOT open a payment page - Brittany is not the
+> payer - it creates a secure Stripe link and shows it to copy and send to the
+> client. Creating one marks the invoice **Sent**. The client pays by bank
+> transfer (ACH), which takes about **4 business days to clear**, so the invoice
+> reads **Processing** for several days before it turns **Paid**. That delay is
+> normal and is how bank transfers work - it is not stuck. A failed payment puts
+> the invoice back to Sent and notifies the owners. There is no button on a
+> voided invoice or one with nothing owed.
+>
 > The per-client section BELOW the run is the older live-calculation view, kept
 > for its preview and print.
 

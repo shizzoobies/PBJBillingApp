@@ -1593,6 +1593,14 @@ export async function recordClientProfileActivity(clientId: string) {
 async function safeErrorMessage(response: Response): Promise<string> {
   try {
     const body = await response.json()
+    // Several endpoints answer with BOTH a machine-readable code and a sentence
+    // meant for a person: { error: 'stripe_not_configured', message: 'Stripe is
+    // not connected yet…' }. Prefer the sentence — showing the raw code put
+    // "stripe_not_configured" in front of Brittany, and the same was true of
+    // client_create_failed and invoice_generate_failed.
+    if (body && typeof body.message === 'string' && body.message.trim()) {
+      return body.message
+    }
     if (body && typeof body.error === 'string') {
       return body.error
     }
@@ -2811,4 +2819,31 @@ export async function updateInvoiceRequest(
     throw new ApiError(response.status, message || `Failed to save (${response.status})`)
   }
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
+}
+
+/**
+ * Create the ACH payment link for an invoice and return its URL.
+ *
+ * The server does the Stripe work; this only hands back the hosted Checkout URL
+ * to open. Refuses with a readable message when Stripe is not configured (503)
+ * or when Stripe itself declines (502), so the page can say what happened.
+ */
+export async function createInvoicePaymentLinkRequest(invoiceId: string) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/payment-link`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not create a payment link (${response.status})`,
+    )
+  }
+  return (await response.json()) as { url: string; invoice: PersistedInvoice }
 }

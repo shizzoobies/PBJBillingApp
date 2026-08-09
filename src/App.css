@@ -11132,3 +11132,49 @@ mark.list-search-hit {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* Payment link, shown after one is created. The owner SENDS this to the client
+   rather than opening it, so it presents as copyable text, not a link. */
+.invoice-run-paylink {
+  background: var(--surface-muted, #f6f6f7);
+  border-radius: 10px;
+  display: grid;
+  gap: 8px;
+  padding: 11px 13px;
+}
+
+.invoice-run-paylink-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.invoice-run-paylink-row {
+  display: flex;
+  gap: 8px;
+}
+
+.invoice-run-paylink-row .input {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.invoice-status.is-sent {
+  background: rgba(55, 138, 221, 0.14);
+  color: #185fa5;
+}
+
+.invoice-status.is-processing {
+  background: rgba(211, 155, 42, 0.16);
+  color: #7a4f06;
+}
+
+.invoice-status.is-paid {
+  background: rgba(38, 132, 74, 0.16);
+  color: #1f6b3b;
+}
+
+.invoice-status.is-overdue {
+  background: rgba(197, 48, 48, 0.12);
+  color: #9b2226;
+}
