@@ -731,6 +731,7 @@ function mapInvoiceRow(row) {
     paymentMethod: row.payment_method ?? null,
     stripeCheckoutSessionId: row.stripe_checkout_session_id ?? null,
     stripePaymentIntentId: row.stripe_payment_intent_id ?? null,
+    emailLog: Array.isArray(row.email_log) ? row.email_log : [],
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
   }
@@ -4176,7 +4177,7 @@ export class AppDataStore {
           await client.query(
             `select id, client_id, period, number, status, line_items, subtotal, total,
                     due_date, blurb, scope_flags, sent_at, paid_at,
-                    stripe_checkout_session_id, stripe_payment_intent_id, payment_method,
+                    stripe_checkout_session_id, stripe_payment_intent_id, email_log, payment_method,
                     email_log, created_at
                from invoices`,
           )
@@ -6774,6 +6775,53 @@ export class AppDataStore {
     data.invoices[index] = next
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return next
+  }
+
+
+  /**
+   * Record that an invoice was emailed, and mark it sent.
+   *
+   * The log is append-only and keeps every send, including re-sends — "did she
+   * actually send this, and when" is a question that comes up months later when
+   * a client says they never got it. `sentAt` keeps the FIRST send, because
+   * that is the date the clock started for payment terms.
+   */
+  async recordInvoiceSent(invoiceId, { to = [], subject = '', ok = true, error = null }) {
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+
+    const entry = {
+      at: nowIso(),
+      to: Array.isArray(to) ? to : [to].filter(Boolean),
+      subject: String(subject ?? ''),
+      ok: Boolean(ok),
+      ...(error ? { error: String(error).slice(0, 300) } : {}),
+    }
+    const emailLog = [...(current.emailLog ?? []), entry]
+    // A failed attempt is logged but must NOT claim the invoice was sent.
+    const sentAt = ok ? (current.sentAt ?? entry.at) : current.sentAt
+    const status = ok && current.status !== 'paid' && current.status !== 'processing'
+      ? 'sent'
+      : current.status
+
+    if (this.pool) {
+      const { rowCount } = await this.pool.query(
+        `update invoices
+            set email_log = $2::jsonb, sent_at = $3, status = $4, updated_at = now()
+          where id = $1`,
+        [invoiceId, JSON.stringify(emailLog), sentAt, status],
+      )
+      if (rowCount === 0) return null
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    data.invoices[index] = { ...current, emailLog, sentAt, status, updatedAt: nowIso() }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return data.invoices[index]
   }
 
   /** Find an invoice by the Stripe ids a webhook carries. */
