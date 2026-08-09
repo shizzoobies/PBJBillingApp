@@ -22,13 +22,16 @@ import type { Client, PersistedInvoice, PersistedInvoiceLine } from '../lib/type
 import { currency, formatSentOn, getBillingPeriodLabel } from '../lib/utils'
 
 /**
- * The month run (I2): every client's stored invoice for a period, in INVOICE
- * NUMBER order, each expanding to an editor.
+ * The month run (I2): every client's stored invoice for a period, grouped into
+ * status tabs, in INVOICE NUMBER order within a tab, each expanding to an
+ * editor.
  *
  * Number order is deliberate even though flagged invoices are the interesting
  * ones — a list that rearranges itself while you work through it is
  * disorienting, and the "needs a look" count above does the surfacing instead
- * (Alex's call).
+ * (Alex's call). Tabs don't break that rule: they split the run into groups
+ * that each stay in number order, which is what makes a 45-client month
+ * workable at all.
  *
  * These invoices are fetched directly rather than read off `data`, because they
  * are deliberately not part of the workspace bulk save — see the API module.
@@ -43,6 +46,35 @@ const STATUS_LABELS: Record<string, string> = {
   overdue: 'Overdue',
   void: 'Void',
 }
+
+type RunTabId = 'to-review' | 'reviewed' | 'sent' | 'paid' | 'voided'
+
+/**
+ * Which tab an invoice lands in. Keyed by the status union rather than a
+ * lookup with a fallback, so adding a status to `PersistedInvoice` fails the
+ * build here instead of quietly dropping those invoices out of the run.
+ *
+ * Sent, Processing and Overdue share one tab: they are all "it has gone out",
+ * and the row still shows its own status pill, so nothing is lost by grouping
+ * them.
+ */
+const TAB_OF_STATUS: Record<PersistedInvoice['status'], RunTabId> = {
+  draft: 'to-review',
+  reviewed: 'reviewed',
+  sent: 'sent',
+  processing: 'sent',
+  overdue: 'sent',
+  paid: 'paid',
+  void: 'voided',
+}
+
+const RUN_TABS: ReadonlyArray<{ id: RunTabId; label: string; empty: string }> = [
+  { id: 'to-review', label: 'To review', empty: 'Nothing left to review this month.' },
+  { id: 'reviewed', label: 'Reviewed', empty: 'Nothing reviewed and waiting to go out.' },
+  { id: 'sent', label: 'Sent', empty: 'Nothing has gone out for this month yet.' },
+  { id: 'paid', label: 'Paid', empty: 'Nothing paid for this month yet.' },
+  { id: 'voided', label: 'Voided', empty: 'Nothing voided this month.' },
+]
 
 /** The current month as YYYY-MM, in local time. */
 function currentPeriod() {
@@ -79,6 +111,13 @@ export function InvoiceMonthRun({
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [openId, setOpenId] = useState<string | null>(null)
+  // One status group at a time. Starts on the drafts, which is where the
+  // month's work actually begins.
+  const [activeTabId, setActiveTabId] = useState<RunTabId>('to-review')
+  // Whether the open editor has typed-but-unsaved edits. Switching tabs
+  // unmounts that row, so this is the only warning she would get before losing
+  // them. Only one editor is ever open, so one flag is enough.
+  const [openDirty, setOpenDirty] = useState(false)
 
   const clientName = useCallback(
     (clientId: string) => clients.find((c) => c.id === clientId)?.name ?? 'Unknown client',
@@ -127,6 +166,54 @@ export function InvoiceMonthRun({
       ),
     [invoices],
   )
+
+  // The run split into its tabs. Each group keeps the number order above, so
+  // moving between tabs never re-sorts anything.
+  const byTab = useMemo(() => {
+    const map = new Map<RunTabId, PersistedInvoice[]>()
+    for (const tab of RUN_TABS) map.set(tab.id, [])
+    for (const invoice of ordered) {
+      // A money document must never vanish from the run. If the server ever
+      // answers with a status this build does not know, it lands in To review
+      // rather than nowhere — that tab forces eyes on it.
+      const tabId: RunTabId = TAB_OF_STATUS[invoice.status] ?? 'to-review'
+      map.get(tabId)?.push(invoice)
+    }
+    return map
+  }, [ordered])
+
+  // Derived at render rather than stored, so an unknown id can never strand the
+  // panel on nothing. An EMPTY tab is still a valid place to stand: marking the
+  // last draft reviewed must not yank her into another tab mid-pass — she is
+  // working down this list, and the invoice simply leaves it.
+  const activeTab = RUN_TABS.find((tab) => tab.id === activeTabId) ?? RUN_TABS[0]
+  const activeInvoices = byTab.get(activeTab.id) ?? []
+
+  // Flagged invoices sit in whichever tab their status puts them in, so the
+  // "Need a look" count above needs somewhere to point: a tab holding any
+  // flagged invoice gets an amber marker. Voided rows drop their flags (nothing
+  // to decide about a voided invoice), same as the row rendering.
+  const flaggedIn = (tabId: RunTabId) =>
+    (byTab.get(tabId) ?? []).filter(
+      (invoice) => invoice.status !== 'void' && invoice.scopeFlags.length > 0,
+    ).length
+
+  /**
+   * Move to another tab. The open row unmounts on the way, taking any unsaved
+   * line edits and note with it — silently, and the row would look untouched
+   * when she came back — so a dirty editor asks first.
+   */
+  const selectTab = (tabId: RunTabId) => {
+    if (tabId === activeTab.id) return
+    if (
+      openDirty &&
+      !window.confirm('You have unsaved invoice edits. Discard them and switch tabs?')
+    ) {
+      return
+    }
+    setOpenDirty(false)
+    setActiveTabId(tabId)
+  }
 
   const live = ordered.filter((invoice) => invoice.status !== 'void')
   const toReview = live.filter((invoice) => invoice.status === 'draft').length
@@ -278,12 +365,19 @@ export function InvoiceMonthRun({
         </div>
         <div className="invoice-run-actions">
           <label className="period-control">
-            <span className="sr-only">Billing month</span>
+            {/* `.sr-only` is not a class this app defines — the label was
+                rendering as stray visible text next to the picker. */}
+            <span className="visually-hidden">Billing month</span>
             <input
               type="month"
               className="input"
               value={period}
-              onChange={(event) => setPeriod(event.target.value || currentPeriod())}
+              onChange={(event) => {
+                setPeriod(event.target.value || currentPeriod())
+                // A different month is a different pile of work — she has no
+                // position in it to protect, so start at the drafts again.
+                setActiveTabId('to-review')
+              }}
             />
           </label>
           <button type="button" className="secondary-action" disabled={busy} onClick={generate}>
@@ -351,21 +445,87 @@ export function InvoiceMonthRun({
         </p>
       ) : null}
 
-      <ul className="invoice-run-list">
-        {ordered.map((invoice) => (
-          <InvoiceRow
-            key={invoice.id}
-            invoice={invoice}
-            clientName={clientName(invoice.clientId)}
-            open={openId === invoice.id}
-            busy={busy}
-            onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
-            onPatch={(body) => patch(invoice.id, body)}
-            onInvoiceChanged={mergeInvoice}
-            onPrint={() => onPrint(invoice)}
-          />
-        ))}
-      </ul>
+      {ordered.length > 0 ? (
+        <>
+          {/* Reuses the shared tab-bar classes rather than a third copy of the
+              same underline styling — see .task-area-tabs in App.css. */}
+          <div className="task-area-tabs" role="tablist" aria-label="Filter invoices by status">
+            {RUN_TABS.map((tab) => {
+              const count = (byTab.get(tab.id) ?? []).length
+              const flagged = flaggedIn(tab.id)
+              const isActive = tab.id === activeTab.id
+              // An empty tab stays visible and clickable — "Voided 0" is worth
+              // knowing — but recedes so the eye lands on the groups with work
+              // in them.
+              const classes = [
+                'task-area-tab',
+                isActive ? 'is-active' : '',
+                count === 0 ? 'is-empty' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')
+              // Only the open tab's panel is in the DOM, so only the open tab
+              // points at one — a dangling aria-controls is worse than none.
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  id={`invoice-run-tab-${tab.id}`}
+                  aria-controls={isActive ? `invoice-run-panel-${tab.id}` : undefined}
+                  aria-selected={isActive}
+                  className={classes}
+                  onClick={() => selectTab(tab.id)}
+                >
+                  {tab.label}
+                  <span className="task-area-tab-count">{count}</span>
+                  {flagged > 0 ? (
+                    <>
+                      <span
+                        className="invoice-run-tab-flag"
+                        title={`${flagged} invoice${flagged === 1 ? '' : 's'} here need${
+                          flagged === 1 ? 's' : ''
+                        } a look`}
+                        aria-hidden="true"
+                      />
+                      <span className="visually-hidden">
+                        — {flagged} need{flagged === 1 ? 's' : ''} a look
+                      </span>
+                    </>
+                  ) : null}
+                </button>
+              )
+            })}
+          </div>
+          <div
+            className="invoice-run-panel"
+            role="tabpanel"
+            id={`invoice-run-panel-${activeTab.id}`}
+            aria-labelledby={`invoice-run-tab-${activeTab.id}`}
+          >
+            {activeInvoices.length === 0 ? (
+              <p className="invoice-run-empty">{activeTab.empty}</p>
+            ) : (
+              <ul className="invoice-run-list">
+                {activeInvoices.map((invoice) => (
+                  <InvoiceRow
+                    key={invoice.id}
+                    invoice={invoice}
+                    clientName={clientName(invoice.clientId)}
+                    open={openId === invoice.id}
+                    busy={busy}
+                    onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
+                    onPatch={(body) => patch(invoice.id, body)}
+                    onInvoiceChanged={mergeInvoice}
+                    onPrint={() => onPrint(invoice)}
+                    onDirtyChange={setOpenDirty}
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      ) : null}
     </div>
   )
 }
@@ -379,6 +539,7 @@ function InvoiceRow({
   onPatch,
   onPrint,
   onInvoiceChanged,
+  onDirtyChange,
 }: {
   invoice: PersistedInvoice
   clientName: string
@@ -389,6 +550,8 @@ function InvoiceRow({
   onPrint: () => void
   /** Push a server-returned invoice back into the list (payment link marks it sent). */
   onInvoiceChanged: (invoice: PersistedInvoice) => void
+  /** Tell the run whether this row's open editor has unsaved edits. */
+  onDirtyChange: (dirty: boolean) => void
 }) {
   const isVoid = invoice.status === 'void'
   const flagged = invoice.scopeFlags.length > 0
@@ -406,8 +569,12 @@ function InvoiceRow({
     <li className={rowClass}>
       <button type="button" className="invoice-run-summary" onClick={onToggle}>
         <span className="invoice-run-main">
-          <span className="invoice-run-client">{clientName}</span>
-          <span className="invoice-run-number">{invoice.number ?? '—'}</span>
+          {/* Name and number share a line: a 40-row tab scans far better when
+              each invoice is two lines rather than three. */}
+          <span className="invoice-run-title">
+            <span className="invoice-run-client">{clientName}</span>
+            <span className="invoice-run-number">{invoice.number ?? '—'}</span>
+          </span>
           <span className="invoice-run-meta">
             {invoice.lineItems.length} line{invoice.lineItems.length === 1 ? '' : 's'} ·{' '}
             {formatDue(invoice.dueDate)}
@@ -443,6 +610,7 @@ function InvoiceRow({
           onPatch={onPatch}
           onPrint={onPrint}
           onInvoiceChanged={onInvoiceChanged}
+          onDirtyChange={onDirtyChange}
         />
       ) : null}
     </li>
@@ -460,6 +628,7 @@ function InvoiceEditor({
   onPatch,
   onPrint,
   onInvoiceChanged,
+  onDirtyChange,
 }: {
   invoice: PersistedInvoice
   busy: boolean
@@ -468,6 +637,9 @@ function InvoiceEditor({
   /** Push a server-returned invoice back into the list — creating a payment
    *  link marks it sent, and the row must show that immediately. */
   onInvoiceChanged: (invoice: PersistedInvoice) => void
+  /** Report unsaved edits upward so switching tabs can warn before this
+   *  editor is unmounted out from under them. */
+  onDirtyChange: (dirty: boolean) => void
 }) {
   const [lines, setLines] = useState<PersistedInvoiceLine[]>(invoice.lineItems)
   const [blurb, setBlurb] = useState(invoice.blurb)
@@ -528,6 +700,14 @@ function InvoiceEditor({
   const dirty =
     JSON.stringify(lines) !== JSON.stringify(invoice.lineItems) || blurb !== invoice.blurb
   const localTotal = lines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0)
+
+  // Keep the run's copy of "this editor has unsaved edits" in step, and clear
+  // it on the way out — an unmounted editor cannot have anything unsaved, and a
+  // stale true would ask her to discard work that is no longer there.
+  useEffect(() => {
+    onDirtyChange(dirty)
+    return () => onDirtyChange(false)
+  }, [dirty, onDirtyChange])
 
   const setLine = (index: number, patch: Partial<PersistedInvoiceLine>) => {
     setLines((current) =>

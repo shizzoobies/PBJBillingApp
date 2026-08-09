@@ -10967,23 +10967,51 @@ mark.list-search-hit {
   margin: 10px 0 0;
 }
 
+/* Month-run status tabs — To review / Reviewed / Sent / Paid / Voided. The bar
+   itself is .task-area-tabs (the shared underline treatment); only the amber
+   marker below is specific to invoices.
+
+   Flagged invoices keep their number order, so they can be in any tab. This dot
+   is the same amber as the row's left rule and the "Need a look" stat, and says
+   which group they are sitting in. */
+.task-area-tab .invoice-run-tab-flag {
+  background: rgba(211, 155, 42, 0.85);
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+  height: 6px;
+  width: 6px;
+}
+
+.invoice-run-panel {
+  margin-top: 4px;
+}
+
+/* No card border: the tab bar's hairline already opens the list, and a boxed
+   list under a boxed panel reads as clutter at 40 rows. Hairline dividers do
+   the separating. */
 .invoice-run-list {
-  border: 1px solid var(--border, #e2ddd6);
-  border-radius: 12px;
   list-style: none;
-  margin: 14px 0 0;
-  overflow: hidden;
+  margin: 0;
   padding: 0;
 }
 
+/* --line, not --border: this app never defines --border, so that fallback was
+   the only thing doing any work. The tab rule above uses --line. */
 .invoice-run-row + .invoice-run-row {
-  border-top: 1px solid var(--border, #e2ddd6);
+  border-top: 1px solid var(--line);
+}
+
+/* Every row reserves the flag rule's width so a flagged row lines up with its
+   neighbors instead of nudging 3px to the right. */
+.invoice-run-row {
+  border-left: 3px solid transparent;
 }
 
 /* Flagged rows get a left rule so they catch the eye while scrolling, without
    moving them out of invoice-number order. */
 .invoice-run-row.is-flagged {
-  border-left: 3px solid rgba(211, 155, 42, 0.85);
+  border-left-color: rgba(211, 155, 42, 0.85);
 }
 
 .invoice-run-row.is-void {
@@ -10995,6 +11023,7 @@ mark.list-search-hit {
   text-decoration: line-through;
 }
 
+/* Tightened for a 40-row month: two lines per invoice, not three. */
 .invoice-run-summary {
   align-items: flex-start;
   background: transparent;
@@ -11003,7 +11032,7 @@ mark.list-search-hit {
   display: flex;
   gap: 12px;
   justify-content: space-between;
-  padding: 13px 15px;
+  padding: 10px 14px;
   text-align: left;
   width: 100%;
 }
@@ -11014,7 +11043,16 @@ mark.list-search-hit {
 
 .invoice-run-main {
   display: grid;
-  gap: 3px;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Client name and invoice number share the first line. */
+.invoice-run-title {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
   min-width: 0;
 }
 
@@ -11031,13 +11069,13 @@ mark.list-search-hit {
 
 .invoice-run-meta {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 .invoice-run-flags {
   display: grid;
   gap: 4px;
-  margin-top: 5px;
+  margin-top: 4px;
 }
 
 .invoice-run-flag {
@@ -11087,11 +11125,13 @@ mark.list-search-hit {
   color: var(--muted);
 }
 
+/* Same horizontal inset as the row above it, so the editor reads as the row
+   opening rather than as a differently-aligned panel. */
 .invoice-run-editor {
-  border-top: 1px solid var(--border, #e2ddd6);
+  border-top: 1px solid var(--line);
   display: grid;
   gap: 12px;
-  padding: 14px 15px;
+  padding: 14px;
 }
 
 .invoice-run-lines {

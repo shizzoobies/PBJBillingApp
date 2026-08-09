@@ -825,9 +825,23 @@ Clients page meanwhile. Owner-only.
 > with something to bill — lines, a due date from that client's payment terms,
 > any prior-month adjustment carried forward, and out-of-scope flags.
 >
-> The list is in INVOICE NUMBER order (it does not rearrange while you work
-> through it), with counts above for To review / Reviewed / Need a look and the
+> **The month's invoices are grouped into status tabs** — **To review**,
+> **Reviewed**, **Sent**, **Paid**, **Voided** — so you work one group at a time
+> instead of scrolling a single list of every client. Sent, Processing and
+> Overdue all live under **Sent** (each row still shows its own status). Every
+> tab carries its count, and all five counts stay visible at once, so you can
+> see the shape of the month without opening anything; a tab with nothing in it
+> is dimmed but still there. Within a tab the invoices are in INVOICE NUMBER
+> order (they do not rearrange while you work through them). When you mark one
+> reviewed, send it or void it, it simply leaves the tab you are on and its new
+> tab's count goes up — you are not dragged along after it.
+>
+> Above the tabs are the counts for To review / Reviewed / Need a look and the
 > month total. Rows flagged for a second look get an amber rule down the left.
+> Flagged invoices keep their place in number order, so they can turn up in any
+> tab — a small amber dot on a tab means some of the flagged ones are in there.
+> If you switch tabs with unsaved edits in an open invoice, it asks before
+> discarding them.
 > Click any row to edit it: change a line's wording or amount, add or remove
 > lines, write the note to the client, then **Print** it or **Mark reviewed**.
 > Print produces the SAME printed invoice the per-client view has always
