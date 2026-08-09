@@ -55,6 +55,13 @@ import {
 } from './lib/template-apply-permission.js'
 import { buildQboCsv } from './lib/qbo-export.js'
 import {
+  createInvoiceCheckoutSession,
+  isStripeConfigured,
+  isStripeWebhookConfigured,
+  stripeClient,
+  verifyStripeEvent,
+} from './lib/stripe-rail.js'
+import {
   canMarkWaitingOnDone,
   canVerifyWaitingOn,
   isClientWait,
@@ -2240,6 +2247,192 @@ const server = createServer(async (request, response) => {
       }
       const invoices = await appDataStore.listInvoices({ period: period || null })
       sendJson(response, 200, { invoices })
+      return
+    }
+
+    // POST /api/stripe/webhook — Stripe tells us money moved.
+    //
+    // UNAUTHENTICATED BY NECESSITY (Stripe cannot hold a session), so the
+    // signature check is the entire security boundary. It runs on the RAW bytes
+    // before anything is parsed, and an event that fails it is discarded
+    // without touching an invoice.
+    if (normalizedPath === '/api/stripe/webhook' && request.method === 'POST') {
+      if (!isStripeWebhookConfigured()) {
+        // No secret means we cannot tell Stripe from anyone else. Refuse rather
+        // than trust the body.
+        sendJson(response, 503, { error: 'Stripe webhooks are not configured' })
+        return
+      }
+      let rawBody
+      try {
+        rawBody = await readRawBody(request)
+      } catch {
+        sendJson(response, 400, { error: 'Could not read body' })
+        return
+      }
+      const event = verifyStripeEvent(rawBody, request.headers['stripe-signature'])
+      if (!event) {
+        console.warn('[stripe] rejected a webhook with an invalid signature')
+        sendJson(response, 400, { error: 'Invalid signature' })
+        return
+      }
+
+      // Retries and out-of-order delivery are normal. Returning 200 for an
+      // event we have already handled stops Stripe retrying forever WITHOUT
+      // applying it twice.
+      const isNewEvent = await appDataStore.recordStripeEventOnce(event.id, event.type)
+      if (!isNewEvent) {
+        sendJson(response, 200, { received: true, duplicate: true })
+        return
+      }
+
+      try {
+        const object = event.data?.object ?? {}
+        const metaInvoiceId = object.metadata?.invoiceId ?? null
+        const invoice = await appDataStore.findInvoiceByStripeRef({
+          invoiceId: metaInvoiceId,
+          checkoutSessionId: event.type === 'checkout.session.completed' ? object.id : null,
+          paymentIntentId:
+            typeof object.payment_intent === 'string' ? object.payment_intent : object.id ?? null,
+        })
+        if (!invoice) {
+          // Acknowledge anyway: an event for an invoice we cannot find is not
+          // something Stripe can fix by retrying.
+          console.warn('[stripe] event for an unknown invoice', event.type, metaInvoiceId)
+          sendJson(response, 200, { received: true, matched: false })
+          return
+        }
+
+        if (event.type === 'checkout.session.completed') {
+          // ACH does not settle here — it clears in about 4 business days, so
+          // this is 'processing', not 'paid'.
+          await appDataStore.applyInvoicePayment(invoice.id, {
+            status: 'processing',
+            checkoutSessionId: object.id,
+            paymentIntentId:
+              typeof object.payment_intent === 'string' ? object.payment_intent : undefined,
+          })
+        } else if (event.type === 'payment_intent.succeeded') {
+          await appDataStore.applyInvoicePayment(invoice.id, {
+            status: 'paid',
+            paidAt: new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
+            paymentIntentId: object.id,
+            paymentMethod: object.payment_method_types?.[0] ?? 'us_bank_account',
+          })
+        } else if (event.type === 'payment_intent.payment_failed') {
+          // Back to 'sent': it was invoiced and is still owed. Owners are told,
+          // because a failed ACH debit is something a person has to chase.
+          await appDataStore.applyInvoicePayment(invoice.id, {
+            status: 'sent',
+            paymentIntentId: object.id,
+          })
+          const failureMessage = object.last_payment_error?.message ?? 'the payment was declined'
+          const members = await appDataStore.getTeamMembers()
+          for (const owner of members.filter((member) => member.role === 'owner')) {
+            await notify(appDataStore, owner.id, 'invoice_payment_failed', {
+              message: `Payment failed on invoice ${invoice.number ?? invoice.id} — ${failureMessage}`,
+              link: '/invoices',
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+        }
+      } catch (error) {
+        // A 500 makes Stripe retry, which is what we want for a transient
+        // failure — the dedup ledger means the retry cannot double-apply.
+        console.error('[stripe] webhook handling failed:', error)
+        sendJson(response, 500, { error: 'webhook_failed' })
+        return
+      }
+
+      sendJson(response, 200, { received: true })
+      return
+    }
+
+    // POST /api/invoices/:id/payment-link — create the ACH Checkout Session.
+    // Owner-only. Does NOT email anything: that is I4.
+    const invoicePaymentLinkMatch = normalizedPath.match(
+      /^\/api\/invoices\/([^/]+)\/payment-link$/,
+    )
+    if (invoicePaymentLinkMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can take payment on an invoice' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isStripeConfigured()) {
+        sendJson(response, 503, {
+          error: 'stripe_not_configured',
+          message: 'Stripe is not connected yet, so a payment link cannot be created.',
+        })
+        return
+      }
+
+      const invoiceId = decodeURIComponent(invoicePaymentLinkMatch[1])
+      const invoice = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
+      if (!invoice) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      if (invoice.status === 'void') {
+        sendJson(response, 409, { error: 'This invoice is voided, so it cannot be paid.' })
+        return
+      }
+      const appData = await appDataStore.read()
+      const invoiceClient = (appData.clients ?? []).find((entry) => entry.id === invoice.clientId)
+      if (!invoiceClient) {
+        sendJson(response, 409, { error: 'This invoice has no client on file.' })
+        return
+      }
+
+      // Reuse the client's Stripe customer so a repeat payer is one customer in
+      // Stripe rather than one per invoice.
+      let customerId = invoiceClient.stripeCustomerId ?? null
+      try {
+        if (!customerId) {
+          const customer = await stripeClient().customers.create({
+            name: invoiceClient.name,
+            ...(invoiceClient.email ? { email: invoiceClient.email } : {}),
+            metadata: { clientId: invoiceClient.id },
+          })
+          customerId = customer.id
+          await appDataStore.setClientStripeCustomerId(invoiceClient.id, customerId)
+        }
+      } catch (error) {
+        console.error('[stripe] customer create failed:', error?.message || error)
+        sendJson(response, 502, {
+          error: 'stripe_customer_failed',
+          message: 'Stripe would not create a customer for this client.',
+        })
+        return
+      }
+
+      const result = await createInvoiceCheckoutSession({
+        invoice,
+        client: invoiceClient,
+        customerId,
+        appUrl: getPublicAppUrl(request),
+      })
+      if (!result.ok) {
+        sendJson(response, 502, { error: 'stripe_session_failed', message: result.reason })
+        return
+      }
+
+      const updated = await appDataStore.applyInvoicePayment(invoice.id, {
+        status: invoice.status === 'paid' ? 'paid' : 'sent',
+        checkoutSessionId: result.session.id,
+        sentAt: invoice.sentAt ?? new Date().toISOString(),
+      })
+      await appDataStore.recordActivity(
+        session.user.id,
+        'invoice_payment_link_created',
+        `${invoice.number ?? invoice.id}`,
+      )
+      sendJson(response, 200, { url: result.session.url, invoice: updated })
       return
     }
 

@@ -674,6 +674,9 @@ export function normalizeWaitingOns(raw) {
 /** Statuses I2 may set. Sending and payment come later and are not settable here. */
 const EDITABLE_INVOICE_STATUSES = new Set(['draft', 'reviewed', 'void'])
 
+/** Statuses the PAYMENT side may set. A webhook can never edit lines or amounts. */
+const PAYMENT_INVOICE_STATUSES = new Set(['sent', 'processing', 'paid', 'overdue'])
+
 /** The line kinds an invoice may contain, including the ones only I2 adds. */
 const INVOICE_LINE_KINDS = new Set([
   'plan',
@@ -726,6 +729,8 @@ function mapInvoiceRow(row) {
     sentAt: row.sent_at ? new Date(row.sent_at).toISOString() : null,
     paidAt: row.paid_at ? new Date(row.paid_at).toISOString() : null,
     paymentMethod: row.payment_method ?? null,
+    stripeCheckoutSessionId: row.stripe_checkout_session_id ?? null,
+    stripePaymentIntentId: row.stripe_payment_intent_id ?? null,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
   }
@@ -2898,6 +2903,16 @@ export class AppDataStore {
         create unique index if not exists invoices_number_unique
           on invoices (number)
           where number is not null
+      `)
+      // Webhook dedup ledger. Stripe retries until it gets a 2xx and can
+      // deliver out of order, so the same event id legitimately arrives more
+      // than once; the primary key is what makes re-delivery a no-op.
+      await this.pool.query(`
+        create table if not exists stripe_events (
+          id text primary key,
+          type text not null default '',
+          received_at timestamptz not null default now()
+        )
       `)
       // Stripe customer per client, filled in at first send (I3).
       await this.pool.query(
@@ -6494,6 +6509,7 @@ export class AppDataStore {
       const { rows } = await this.pool.query(
         `select id, client_id, period, number, status, line_items, subtotal, total,
                 due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
+                stripe_checkout_session_id, stripe_payment_intent_id,
                 created_at, updated_at
            from invoices
           ${period ? 'where period = $1' : ''}
@@ -6657,6 +6673,123 @@ export class AppDataStore {
     data.invoices[index] = next
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return next
+  }
+
+
+  /**
+   * Remember a Stripe customer id on a client, so a second invoice reuses the
+   * same customer rather than creating a duplicate in Stripe.
+   */
+  async setClientStripeCustomerId(clientId, customerId) {
+    if (this.pool) {
+      await this.pool.query(
+        'update clients set stripe_customer_id = $2, updated_at = now() where id = $1',
+        [clientId, customerId],
+      )
+      return
+    }
+    const data = await readJson(localDataPath)
+    const client = (data.clients ?? []).find((entry) => entry.id === clientId)
+    if (!client) return
+    client.stripeCustomerId = customerId
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  /**
+   * Record a Stripe event id the FIRST time we see it.
+   *
+   * @returns {boolean} true if this is new, false if already processed.
+   *
+   * Stripe retries a webhook until it gets a 2xx, and can deliver out of order,
+   * so the same event legitimately arrives more than once. Without this a retry
+   * of `payment_intent.succeeded` would re-stamp `paid_at` and re-notify — the
+   * ledger equivalent of counting the same payment twice.
+   */
+  async recordStripeEventOnce(eventId, eventType) {
+    if (!eventId) return false
+    if (this.pool) {
+      const { rowCount } = await this.pool.query(
+        `insert into stripe_events (id, type) values ($1, $2)
+         on conflict (id) do nothing`,
+        [eventId, String(eventType ?? '')],
+      )
+      return rowCount > 0
+    }
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.stripeEvents)) data.stripeEvents = []
+    if (data.stripeEvents.some((entry) => entry.id === eventId)) return false
+    data.stripeEvents.push({ id: eventId, type: String(eventType ?? ''), at: nowIso() })
+    // Keep the log bounded — this is a dedup ledger, not history.
+    if (data.stripeEvents.length > 500) data.stripeEvents = data.stripeEvents.slice(-500)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return true
+  }
+
+  /**
+   * Apply a payment-side change to one invoice: the Stripe ids, the status, and
+   * the paid stamp. Deliberately narrow — this is the only path a WEBHOOK can
+   * take into an invoice, so it cannot touch lines, amounts or the number.
+   */
+  async applyInvoicePayment(invoiceId, patch = {}) {
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+
+    const next = { ...current }
+    if (PAYMENT_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
+    if (typeof patch.checkoutSessionId === 'string') {
+      next.stripeCheckoutSessionId = patch.checkoutSessionId
+    }
+    if (typeof patch.paymentIntentId === 'string') {
+      next.stripePaymentIntentId = patch.paymentIntentId
+    }
+    if (typeof patch.paymentMethod === 'string') next.paymentMethod = patch.paymentMethod
+    if (patch.paidAt === null || typeof patch.paidAt === 'string') next.paidAt = patch.paidAt
+    if (patch.sentAt === null || typeof patch.sentAt === 'string') next.sentAt = patch.sentAt
+    next.updatedAt = nowIso()
+
+    if (this.pool) {
+      const { rowCount } = await this.pool.query(
+        `update invoices
+            set status = $2, stripe_checkout_session_id = $3, stripe_payment_intent_id = $4,
+                payment_method = $5, paid_at = $6, sent_at = $7, updated_at = now()
+          where id = $1`,
+        [
+          invoiceId,
+          next.status,
+          next.stripeCheckoutSessionId ?? null,
+          next.stripePaymentIntentId ?? null,
+          next.paymentMethod ?? null,
+          next.paidAt ?? null,
+          next.sentAt ?? null,
+        ],
+      )
+      if (rowCount === 0) return null
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    data.invoices[index] = next
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return next
+  }
+
+  /** Find an invoice by the Stripe ids a webhook carries. */
+  async findInvoiceByStripeRef({ invoiceId, checkoutSessionId, paymentIntentId }) {
+    const all = await this.listInvoices()
+    return (
+      all.find((invoice) => invoiceId && invoice.id === invoiceId) ??
+      all.find(
+        (invoice) =>
+          checkoutSessionId && invoice.stripeCheckoutSessionId === checkoutSessionId,
+      ) ??
+      all.find(
+        (invoice) => paymentIntentId && invoice.stripePaymentIntentId === paymentIntentId,
+      ) ??
+      null
+    )
   }
 
   /** Insert one invoice; null when the live-per-(client, period) index refuses it. */

@@ -53,6 +53,23 @@ yet. P1 (sidebar regroup, week of Aug 6) still ships first.
 | 4g–h. Add blurb, send | Blurb editor + Send with pay link (I4) |
 | 5. Evaluate monthly profit per client | Recap profit line (already locked; same data) (I1) |
 
+## Decision changes after the lock
+
+- **2026-08-08 (Alex, relaying Brittany): card is available to EVERY client,
+  not per-client opt-in.** Decision 2 originally hid card unless a client was
+  switched on. Brittany wants ACH required and card simply allowed, with the
+  client paying the fee. Supersedes that half of decision 2; the ACH-default
+  and client-pays-the-fee halves are unchanged.
+  
+  ⚠️ STILL UNRESOLVED, and it gates the card path (not ACH): in the US you
+  cannot surcharge DEBIT cards, and Stripe Checkout does not reveal
+  credit-vs-debit before payment — so a fee line added up front would surcharge
+  debit too. The likely structure is a flat CONVENIENCE FEE on the card channel
+  (ACH being the default channel), which is a different category from a
+  surcharge, plus the network notification/registration surcharging normally
+  requires. Needs confirming with Stripe or her advisor before card ships.
+  ACH-only is unaffected and is what I3 built.
+
 ## Phases
 
 ### I1 — Invoice engine (drafts, no sending)

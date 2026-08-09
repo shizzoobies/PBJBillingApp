@@ -847,9 +847,13 @@ Clients page meanwhile. Owner-only.
 > invoice for that month is skipped, never rewritten, so a second run cannot
 > revert edits. A client with nothing to bill gets no invoice at all.
 >
-> **Nothing is emailed and nothing is charged yet** — sending and payment links
-> are still to come. If asked whether she can send an invoice from the app: not
-> yet, she reviews here and takes it to QuickBooks.
+> **Nothing is emailed and nothing is charged yet.** The payment plumbing (ACH
+> via Stripe) is BUILT but not switched on: no Stripe keys are configured, so
+> there is no Pay button and no payment link can be created. If asked whether a
+> client can pay from the app: not yet. When it is switched on, paying by bank
+> transfer takes about 4 business days to clear, so an invoice will sit in
+> "processing" for several days before it reads "paid" - that is normal, not
+> stuck. Emailing invoices is still to come.
 >
 > The per-client section BELOW the run is the older live-calculation view, kept
 > for its preview and print.
