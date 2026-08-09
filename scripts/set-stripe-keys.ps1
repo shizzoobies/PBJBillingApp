@@ -11,8 +11,11 @@
   back and nothing is written to disk.
 
   Usage:
-    pwsh -File scripts/set-stripe-keys.ps1
-    (or right-click -> Run with PowerShell, from the repo root)
+    powershell -ExecutionPolicy Bypass -File scripts/set-stripe-keys.ps1
+    (or right-click the file -> Run with PowerShell)
+
+  Entirely optional - putting the two variables into the Railway
+  dashboard by hand does exactly the same thing.
 #>
 
 [CmdletBinding()]
