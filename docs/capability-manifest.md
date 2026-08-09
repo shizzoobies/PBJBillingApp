@@ -930,6 +930,48 @@ Clients page meanwhile. Owner-only.
 > nothing to bill — no hours, plan or reimbursements that month — it says that
 > instead of creating an empty invoice.
 >
+> **History — every month, on the same page.** At the very top of the Invoices
+> page there is a switch: **This month** and **History**. This month is
+> everything described above (the run, and the per-client view below it) and is
+> where the page always opens; History is the archive. It is not remembered
+> between visits, because the month you are billing is what this page is for.
+>
+> History lists **every month that has ever been generated, newest first**, each
+> one collapsed to a single line until you open it: "August 2026 · 14 invoices ·
+> $12,400.00 billed · $9,800.00 paid · $2,600.00 outstanding". **Voided invoices
+> are left out of all four figures** — a void is a document that was withdrawn,
+> and counting it would say the firm billed money it never asked for — but they
+> are counted separately on the end of the line ("· 2 voided") so a month that
+> is half voids never looks like a month where invoices went missing. **Paid**
+> is the invoices that have actually settled; **outstanding** is billed minus
+> paid, which means a **Processing** invoice counts as OUTSTANDING. That is
+> deliberate: a bank transfer that has not cleared is money that has not
+> arrived.
+>
+> Open a month and you get a compact table — **Number, Client, Status, Total,
+> Sent, Paid** — in invoice-number order, with voided rows dimmed and struck
+> through exactly as they are in the run. Click any column heading to sort by it
+> (click again to reverse). Sorting applies **within** each month; the months
+> themselves always stay newest first.
+>
+> Above the months are three filters — **Year**, **Client** and **Status**.
+> Year and Client offer only what is actually in the archive (no clients who
+> have never been invoiced, no years with nothing in them); Status is the full
+> lifecycle list every time. They narrow the rows AND recompute every total, so
+> filtering to one client turns each month line into that client's month; a
+> month with nothing left in it disappears from the list entirely.
+>
+> **History is read-only.** There is no edit, send or void here — the month run
+> is where invoices are worked on, and one place has to own that. Each row does
+> two things: **Print** (the same printed invoice everything else produces, from
+> the stored lines), and **clicking the invoice number opens that month in the
+> run** — the switch flips back to This month and the run's picker moves to that
+> month, ready to work. If an invoice is open in the run with unsaved edits, it
+> asks first, naming the month holding them ("You have unsaved invoice edits in
+> August 2026"); choosing to keep them leaves you in History with a line saying
+> so, rather than moving you somewhere nothing happened. Until months have been
+> generated, History says so and shows nothing.
+>
 > The per-client section BELOW the run is the older live-calculation view, kept
 > for its preview and print.
 

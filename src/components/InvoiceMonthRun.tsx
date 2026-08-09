@@ -9,7 +9,15 @@ import {
   RotateCcw,
   Trash2,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type Ref,
+} from 'react'
 import {
   createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
@@ -19,7 +27,12 @@ import {
   updateInvoiceRequest,
 } from '../lib/api'
 import type { Client, PersistedInvoice, PersistedInvoiceLine } from '../lib/types'
-import { currency, formatSentOn, getBillingPeriodLabel } from '../lib/utils'
+import {
+  INVOICE_STATUS_LABELS,
+  currency,
+  formatSentOn,
+  getBillingPeriodLabel,
+} from '../lib/utils'
 
 /**
  * The month run (I2): every client's stored invoice for a period, grouped into
@@ -37,17 +50,34 @@ import { currency, formatSentOn, getBillingPeriodLabel } from '../lib/utils'
  * are deliberately not part of the workspace bulk save — see the API module.
  */
 
-const STATUS_LABELS: Record<string, string> = {
-  draft: 'Draft',
-  reviewed: 'Reviewed',
-  sent: 'Sent',
-  processing: 'Processing',
-  paid: 'Paid',
-  overdue: 'Overdue',
-  void: 'Void',
-}
-
 type RunTabId = 'to-review' | 'reviewed' | 'sent' | 'paid' | 'voided'
+
+/**
+ * What the page can ask of the run from outside — History's "Open in month
+ * run", and nothing else.
+ *
+ * Imperative rather than a `period` prop on purpose. The month is genuinely
+ * this component's own: the picker, the loading and the in-flight guards all
+ * hang off it, and lifting it to the page so one button could set it would put
+ * the page in charge of state it has no other reason to hold. This is a tap on
+ * the shoulder — "show August" — which is also the only shape that works when
+ * she asks for the SAME month twice, having moved the picker herself in
+ * between.
+ *
+ * `showPeriod` answers FALSE when it refused, which only happens when there
+ * were unsaved edits open and she chose to keep them. The caller has to respect
+ * that: putting her on a month view that did not move would be the worst of
+ * both, so History stays where it is.
+ */
+export type InvoiceMonthRunHandle = {
+  showPeriod: (period: string) => boolean
+  /**
+   * The month the run is sitting on right now. Only worth asking after a
+   * refusal, so the page can name the month holding the edits instead of
+   * pointing vaguely at "the month run".
+   */
+  showingPeriod: () => string
+}
 
 /**
  * Which tab an invoice lands in. Keyed by the status union rather than a
@@ -93,6 +123,7 @@ export function InvoiceMonthRun({
   clients,
   onPrint,
   refreshToken = 0,
+  ref,
 }: {
   clients: Client[]
   /** Hand a stored invoice up to the page, which owns the print document. */
@@ -103,6 +134,8 @@ export function InvoiceMonthRun({
    * sections must not disagree about whether something has been sent.
    */
   refreshToken?: number
+  /** See `InvoiceMonthRunHandle` — the page's one way to move this run. */
+  ref?: Ref<InvoiceMonthRunHandle>
 }) {
   const [period, setPeriod] = useState(currentPeriod)
   const [invoices, setInvoices] = useState<PersistedInvoice[]>([])
@@ -122,6 +155,59 @@ export function InvoiceMonthRun({
   const clientName = useCallback(
     (clientId: string) => clients.find((c) => c.id === clientId)?.name ?? 'Unknown client',
     [clients],
+  )
+
+  /**
+   * Move the run to another month — the ONE way the period changes, whether it
+   * was the picker or History that asked.
+   *
+   * Changing months reloads the list, which unmounts the open editor and takes
+   * any typed-but-unsaved line edits and note with it, silently, leaving the
+   * row looking untouched when she comes back. That is the same loss switching
+   * tabs causes, so it asks the same question. Answering "keep them" returns
+   * false and nothing moves.
+   *
+   * The month is NAMED, because this can be asked from History — where the run
+   * is off screen and "you have unsaved edits" would be about an invoice she
+   * cannot see and may not remember opening.
+   *
+   * A request for the month already on screen is not a change: it prompts about
+   * nothing and leaves her tab position alone.
+   *
+   * `openDirty` is deliberately NOT cleared here. It belongs to the editor, and
+   * the editor clears it itself when the new list lands and the old row
+   * unmounts. Clearing it up front would be claiming the change had happened:
+   * if the reload then fails, the old row is still on screen with her edits
+   * still in it, and the NEXT thing she does has to ask about them again.
+   */
+  const changePeriod = useCallback(
+    (next: string) => {
+      if (next === period) return true
+      if (
+        openDirty &&
+        !window.confirm(
+          `You have unsaved invoice edits in ${getBillingPeriodLabel(period)}. ` +
+            'Discard them and change months?',
+        )
+      ) {
+        return false
+      }
+      setPeriod(next)
+      // A different month is a different pile of work — she has no position in
+      // it to protect, so start at the drafts again.
+      setActiveTabId('to-review')
+      return true
+    },
+    [period, openDirty],
+  )
+
+  // Land on a month History asked for. Goes through the same guarded path the
+  // picker uses, so "Open in month run" cannot discard edits the picker would
+  // have asked about.
+  useImperativeHandle(
+    ref,
+    () => ({ showPeriod: changePeriod, showingPeriod: () => period }),
+    [changePeriod, period],
   )
 
   // The month the list on screen belongs to. The button handlers below are
@@ -372,12 +458,9 @@ export function InvoiceMonthRun({
               type="month"
               className="input"
               value={period}
-              onChange={(event) => {
-                setPeriod(event.target.value || currentPeriod())
-                // A different month is a different pile of work — she has no
-                // position in it to protect, so start at the drafts again.
-                setActiveTabId('to-review')
-              }}
+              // Controlled, so a refused change simply re-renders the old month
+              // back into the input — there is no stray value left behind.
+              onChange={(event) => changePeriod(event.target.value || currentPeriod())}
             />
           </label>
           <button type="button" className="secondary-action" disabled={busy} onClick={generate}>
@@ -596,7 +679,7 @@ function InvoiceRow({
         <span className="invoice-run-amount">
           <strong>{currency.format(invoice.total)}</strong>
           <span className={`invoice-status is-${invoice.status}`}>
-            {STATUS_LABELS[invoice.status] ?? invoice.status}
+            {INVOICE_STATUS_LABELS[invoice.status] ?? invoice.status}
           </span>
         </span>
       </button>

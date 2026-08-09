@@ -11228,6 +11228,194 @@ mark.list-search-hit {
   color: #9b2226;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Invoices page: This month / History                                        */
+/* -------------------------------------------------------------------------- */
+
+/* The page-level switch. Deliberately not .task-area-tabs: the month run puts
+   one of those bars a few pixels below this for its status groups, and two
+   identical underline bars stacked read as one control that was cut in half.
+   Two words and a hairline is the right weight for something that changes what
+   the page IS rather than filtering what is in it. */
+.invoice-view-switch {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+}
+
+.invoice-view-choice {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 2px 0;
+  transition: color var(--ease);
+}
+
+.invoice-view-choice:hover {
+  color: var(--ink);
+}
+
+/* Weight as well as color, so the choice is never signaled by hue alone. */
+.invoice-view-choice.is-active {
+  color: var(--pink);
+  font-weight: 700;
+}
+
+.invoice-view-divider {
+  background: var(--line);
+  height: 15px;
+  width: 1px;
+}
+
+/* Holds the month view's two panels. `.workspace` is a grid with an 18px gap
+   and these used to be its direct children, so the wrapper has to restate that
+   spacing or the run and the per-client section close up against each other. */
+.invoice-view {
+  display: grid;
+  gap: 18px;
+}
+
+/* Beats `.invoice-view` on specificity, which the UA's own [hidden] rule does
+   not. The month view is hidden rather than unmounted so an open editor's
+   unsaved edits survive a look at the archive. */
+.invoice-view[hidden] {
+  display: none;
+}
+
+/* One month of the archive. No card of its own — the header line IS the
+   summary, and boxing a dozen of them would turn a year into a wall. */
+.invoice-history-month + .invoice-history-month {
+  border-top: 1px solid var(--line);
+}
+
+.invoice-history-head {
+  align-items: baseline;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  padding: 11px 4px;
+  text-align: left;
+  width: 100%;
+}
+
+.invoice-history-head:hover {
+  background: var(--surface-muted, #f6f6f7);
+}
+
+/* The chevron sits on the text baseline rather than above it. */
+.invoice-history-head svg {
+  align-self: center;
+  color: var(--muted);
+  flex: none;
+}
+
+.invoice-history-month-label {
+  flex: none;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.invoice-history-month-summary {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Seven columns do not fit a phone. The table scrolls inside its own box so a
+   narrow screen never pushes the whole page sideways. */
+.invoice-history-scroll {
+  overflow-x: auto;
+}
+
+/* A year of months at a glance means small type and tight rows — this is a
+   table you scan, not one you work in. */
+.invoice-history-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 0 0 10px;
+  width: 100%;
+}
+
+.invoice-history-table th,
+.invoice-history-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.invoice-history-table th {
+  padding: 0;
+}
+
+.invoice-history-sort {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 700;
+  gap: 4px;
+  letter-spacing: 0.04em;
+  padding: 7px 8px;
+  text-transform: uppercase;
+  transition: color var(--ease);
+}
+
+.invoice-history-sort:hover {
+  color: var(--ink);
+}
+
+.invoice-history-sort.is-active {
+  color: var(--pink);
+}
+
+/* Same treatment a voided row gets in the month run, so a void looks like a
+   void wherever you meet it. */
+.invoice-history-row.is-void {
+  opacity: 0.55;
+}
+
+.invoice-history-row.is-void .invoice-history-open,
+.invoice-history-row.is-void .invoice-history-amount {
+  text-decoration: line-through;
+}
+
+/* The invoice number is the way back into the month run — it is the one thing
+   on the row that names the document, so it is the thing worth clicking. */
+.invoice-history-open {
+  background: none;
+  border: 0;
+  color: var(--ink);
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 0;
+  transition: color var(--ease);
+}
+
+.invoice-history-open:hover {
+  color: var(--pink);
+  text-decoration: underline;
+}
+
+.invoice-history-amount {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.invoice-history-actions {
+  text-align: right;
+  width: 1%;
+  white-space: nowrap;
+}
+
 /* The billing-queue rows are real buttons now — they used to be inert
    <article> elements that looked clickable and did nothing. Picking one drives
    the invoice shown above. */

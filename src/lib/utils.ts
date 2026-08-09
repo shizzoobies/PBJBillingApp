@@ -7,6 +7,7 @@ import type {
   Contact,
   Employee,
   Invoice,
+  PersistedInvoice,
   RecurringReimbursement,
   Reimbursement,
   SubscriptionPlan,
@@ -169,6 +170,72 @@ export function getBillingPeriodLabel(period: string) {
 
 export function isInBillingPeriod(entry: TimeEntry, period: string) {
   return entry.date.startsWith(period)
+}
+
+/**
+ * What each stored-invoice status is CALLED on screen. Kept here rather than in
+ * either invoice view because both the month run and History render the same
+ * status pill: two copies would eventually disagree, and a status that reads
+ * one way in the run and another way in the archive is the kind of thing that
+ * gets reported as a missing invoice.
+ */
+export const INVOICE_STATUS_LABELS: Record<PersistedInvoice['status'], string> = {
+  draft: 'Draft',
+  reviewed: 'Reviewed',
+  sent: 'Sent',
+  processing: 'Processing',
+  paid: 'Paid',
+  overdue: 'Overdue',
+  void: 'Void',
+}
+
+export type InvoiceMonthSummary = {
+  /** Non-void invoices — what every figure below is counted from. */
+  liveCount: number
+  voidCount: number
+  billed: number
+  paid: number
+  outstanding: number
+}
+
+/**
+ * What a month of invoices adds up to, for the History view's header line.
+ *
+ * Two rules, both of which are the kind of thing that would be reported as a
+ * bug in the other direction:
+ *
+ *  - VOIDED invoices are excluded from all of it. A void is a document that was
+ *    withdrawn, and counting it would say the firm billed money it never asked
+ *    for. They are counted separately so a month that is half voids does not
+ *    look like a month where invoices went missing.
+ *  - `outstanding` is billed minus paid, which means PROCESSING counts as
+ *    outstanding. An ACH payment takes about four business days to clear, and
+ *    money that has not arrived is not settled.
+ *
+ * Every figure is rounded to cents on the way out. Summing floats leaves
+ * residue — a fully paid month can land on -0.0000000001 outstanding, which
+ * `Intl.NumberFormat` renders as "-$0.00". A month that is square has to read
+ * as square.
+ */
+function toCents(amount: number) {
+  return Math.round(amount * 100) / 100
+}
+
+export function summarizeInvoiceMonth(invoices: PersistedInvoice[]): InvoiceMonthSummary {
+  const live = invoices.filter((invoice) => invoice.status !== 'void')
+  const billed = toCents(live.reduce((sum, invoice) => sum + invoice.total, 0))
+  const paid = toCents(
+    live
+      .filter((invoice) => invoice.status === 'paid')
+      .reduce((sum, invoice) => sum + invoice.total, 0),
+  )
+  return {
+    liveCount: live.length,
+    voidCount: invoices.length - live.length,
+    billed,
+    paid,
+    outstanding: toCents(billed - paid),
+  }
 }
 
 /**

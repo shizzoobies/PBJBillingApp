@@ -1,7 +1,8 @@
 import { ExternalLink, FileText, Mail, Plus, Printer, RotateCcw, Sliders, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppContext } from '../AppContext'
-import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
+import { InvoiceHistory } from '../components/InvoiceHistory'
+import { InvoiceMonthRun, type InvoiceMonthRunHandle } from '../components/InvoiceMonthRun'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import type {
   Client,
@@ -407,6 +408,51 @@ export function InvoicesPage() {
   const [monthRunRefresh, setMonthRunRefresh] = useState(0)
   const shownSend = sendResult?.key === seedKey ? sendResult : null
 
+  // Which half of the page is on screen. Deliberately NOT remembered across
+  // visits: the month you are in the middle of billing is what this page is
+  // for, and landing in the archive because you were last there in March is
+  // the wrong place to start a month.
+  const [view, setView] = useState<'month' | 'history'>('month')
+  const monthRunRef = useRef<InvoiceMonthRunHandle>(null)
+  // Why a click in History did nothing. See `openMonthRun`.
+  const [historyNote, setHistoryNote] = useState<string | null>(null)
+
+  const showView = (next: 'month' | 'history') => {
+    setHistoryNote(null)
+    setView(next)
+  }
+
+  // History's "Open in month run". The run keeps its own month — this only
+  // asks it to move, then brings it back on screen. It is still mounted behind
+  // History, so the handle is always there; the null check is belt and braces
+  // rather than a real case.
+  //
+  // It can refuse: an open editor with unsaved edits asks before they are
+  // thrown away, and "keep them" has to mean the view stays put too — putting
+  // her on a month run sitting on a different month from the row she clicked
+  // would be the worst of both answers. A refusal must not be a silent no-op
+  // either, so it says which month is holding the edits; the run is off screen
+  // and she may not remember leaving an invoice open in it.
+  const openMonthRun = (period: string) => {
+    const run = monthRunRef.current
+    if (run && !run.showPeriod(period)) {
+      setHistoryNote(
+        `Kept your unsaved edits — finish or discard them in the ${getBillingPeriodLabel(
+          run.showingPeriod(),
+        )} month run first.`,
+      )
+      return
+    }
+    setHistoryNote(null)
+    setView('month')
+  }
+
+  const printStored = (stored: PersistedInvoice) => {
+    setStoredPrint(stored)
+    // One tick so the document renders before the print dialog opens.
+    window.setTimeout(printInvoice, 60)
+  }
+
   const storedPrintDisplay = useMemo(() => {
     if (!storedPrint) return null
     const storedClient = data.clients.find((c) => c.id === storedPrint.clientId)
@@ -545,129 +591,171 @@ export function InvoicesPage() {
 
   return (
     <>
-      {/* The month run (I1/I2): the STORED invoices for a period. The
-          per-client section below is the older live-calculation view, kept
-          for its preview and print until they are pointed at stored data. */}
-      <InvoiceMonthRun
-        clients={data.clients}
-        refreshToken={monthRunRefresh}
-        onPrint={(stored) => {
-          setStoredPrint(stored)
-          // One tick so the document renders before the print dialog opens.
-          window.setTimeout(printInvoice, 60)
-        }}
-      />
-      <section className="content-grid invoice-layout" id="invoices">
-        <div className="panel">
-          <div className="section-heading">
-            <div>
-              <p className="section-kicker">Owner billing</p>
-              <h2>Invoices</h2>
-            </div>
-            <div className="invoice-header-actions">
-              <button
-                className="ghost-action"
-                onClick={() => setCustomizing((value) => !value)}
-                type="button"
-              >
-                <Sliders size={16} />
-                {customizing ? 'Use generated' : 'Customize'}
-              </button>
-              {/* Email sends the STORED invoice, so it is held back while
-                  Customize is open: what that panel changes reaches the printed
-                  sheet only, and a button that silently ignored her edits would
-                  be worse than one she has to close a panel to reach. */}
-              <button
-                className="ghost-action"
-                disabled={sendBusy || customizing}
-                onClick={() => void emailInvoice()}
-                title={
-                  customizing
-                    ? 'Email sends the stored invoice — close Customize first; edit lines in the month run'
-                    : 'Email this invoice to the client'
-                }
-                type="button"
-              >
-                <Mail size={16} />
-                {sendBusy ? 'Sending…' : 'Email invoice'}
-              </button>
-              <button
-                className="primary-action"
-                onClick={() => {
-                  setStoredPrint(null)
-                  printInvoice()
-                }}
-                type="button"
-              >
-                <Printer size={16} />
-                Print invoice
-              </button>
-            </div>
-          </div>
-          <label className="field">
-            <span>Client</span>
-            {/* Frozen mid-send: the confirm names a client, and switching
-                underneath it would attribute the send to the wrong one. */}
-            <select
-              className="input"
-              disabled={sendBusy}
-              onChange={(event) => setSelectedClientId(event.target.value)}
-              value={selectedClientId}
-            >
-              {data.clients.map((client) => (
-                <option key={client.id} value={client.id}>
-                  {client.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          {shownSend?.error ? (
-            <p className="invoice-run-error" role="alert">
-              {shownSend.error}
-            </p>
-          ) : null}
-          {shownSend?.note ? <p className="invoice-run-sent">{shownSend.note}</p> : null}
-          <div className="invoice-context">
-            <span>{billingPeriodLabel}</span>
-            <span>{baseInvoice.entryCount} billable entries</span>
-            <span>{formatHours(baseInvoice.billableMinutes)} tracked</span>
-          </div>
-          {customizing && draft ? (
-            <InvoiceBuilder
-              draft={draft}
-              total={effectiveDisplay.invoice.total}
-              onToggleInclude={setInclude}
-              onUpdateLine={updateLine}
-              onAddLine={addLine}
-              onRemoveLine={removeLine}
-              onIntro={setIntro}
-              onFooter={setFooter}
-              onReset={resetDraft}
-            />
-          ) : null}
-          <InvoicePreview display={effectiveDisplay} custom={customMeta} />
-          {ownerMode ? (
-            <ReimbursementsCard
-              clientId={selectedClient.id}
-              periodFilter={billingPeriod}
-              title="This invoice's reimbursements"
-              subtitle={`Out-of-pocket expenses for ${selectedClient.name} that show up on the ${billingPeriodLabel} invoice. Each entry becomes a line above.`}
-            />
-          ) : null}
-        </div>
-        <BillingQueue
-          selectedClientId={selectedClient?.id ?? null}
-          onSelect={setSelectedClientId}
-          billingPeriod={billingPeriod}
+      {/* One page owns everything invoice: this month, and every month.
+          Deliberately NOT a second `.task-area-tabs` bar — the month run has
+          one of those a few pixels below for its status groups, and two
+          identical underline bars stacked would read as one control split in
+          half. A page-level switch is also a different kind of thing from a
+          filter: it changes what the page IS, so it gets its own quiet
+          treatment rather than borrowing the filtering one. */}
+      <div className="invoice-view-switch" role="group" aria-label="Invoice view">
+        <button
+          type="button"
+          className={view === 'month' ? 'invoice-view-choice is-active' : 'invoice-view-choice'}
+          aria-pressed={view === 'month'}
+          onClick={() => showView('month')}
+        >
+          This month
+        </button>
+        <span className="invoice-view-divider" aria-hidden="true" />
+        <button
+          type="button"
+          className={view === 'history' ? 'invoice-view-choice is-active' : 'invoice-view-choice'}
+          aria-pressed={view === 'history'}
+          onClick={() => showView('history')}
+        >
+          History
+        </button>
+      </div>
+
+      {/* HIDDEN rather than unmounted while History is up. The month run holds
+          the picker position and, more to the point, an open editor that may
+          have unsaved line edits in it — glancing at the archive must not throw
+          those away. History is the other way round (mounted only while shown,
+          so it re-reads the archive every time): it holds nothing but filter
+          choices, and an archive that has gone stale behind a hidden div is
+          worth less than one that is simply current. */}
+      <div className="invoice-view" hidden={view !== 'month'}>
+        {/* The month run (I1/I2): the STORED invoices for a period. The
+            per-client section below is the older live-calculation view, kept
+            for its preview and print until they are pointed at stored data. */}
+        <InvoiceMonthRun
           clients={data.clients}
-          entries={data.timeEntries}
-          plans={data.plans}
-          reimbursements={data.reimbursements ?? []}
-          recurringReimbursements={data.recurringReimbursements ?? []}
-          employees={data.employees}
-          defaultHourlyRate={firmSettings.clientDefaults?.hourlyRate ?? 0}
+          refreshToken={monthRunRefresh}
+          ref={monthRunRef}
+          onPrint={printStored}
         />
-      </section>
+        <section className="content-grid invoice-layout" id="invoices">
+          <div className="panel">
+            <div className="section-heading">
+              <div>
+                <p className="section-kicker">Owner billing</p>
+                <h2>Invoices</h2>
+              </div>
+              <div className="invoice-header-actions">
+                <button
+                  className="ghost-action"
+                  onClick={() => setCustomizing((value) => !value)}
+                  type="button"
+                >
+                  <Sliders size={16} />
+                  {customizing ? 'Use generated' : 'Customize'}
+                </button>
+                {/* Email sends the STORED invoice, so it is held back while
+                    Customize is open: what that panel changes reaches the printed
+                    sheet only, and a button that silently ignored her edits would
+                    be worse than one she has to close a panel to reach. */}
+                <button
+                  className="ghost-action"
+                  disabled={sendBusy || customizing}
+                  onClick={() => void emailInvoice()}
+                  title={
+                    customizing
+                      ? 'Email sends the stored invoice — close Customize first; edit lines in the month run'
+                      : 'Email this invoice to the client'
+                  }
+                  type="button"
+                >
+                  <Mail size={16} />
+                  {sendBusy ? 'Sending…' : 'Email invoice'}
+                </button>
+                <button
+                  className="primary-action"
+                  onClick={() => {
+                    setStoredPrint(null)
+                    printInvoice()
+                  }}
+                  type="button"
+                >
+                  <Printer size={16} />
+                  Print invoice
+                </button>
+              </div>
+            </div>
+            <label className="field">
+              <span>Client</span>
+              {/* Frozen mid-send: the confirm names a client, and switching
+                  underneath it would attribute the send to the wrong one. */}
+              <select
+                className="input"
+                disabled={sendBusy}
+                onChange={(event) => setSelectedClientId(event.target.value)}
+                value={selectedClientId}
+              >
+                {data.clients.map((client) => (
+                  <option key={client.id} value={client.id}>
+                    {client.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {shownSend?.error ? (
+              <p className="invoice-run-error" role="alert">
+                {shownSend.error}
+              </p>
+            ) : null}
+            {shownSend?.note ? <p className="invoice-run-sent">{shownSend.note}</p> : null}
+            <div className="invoice-context">
+              <span>{billingPeriodLabel}</span>
+              <span>{baseInvoice.entryCount} billable entries</span>
+              <span>{formatHours(baseInvoice.billableMinutes)} tracked</span>
+            </div>
+            {customizing && draft ? (
+              <InvoiceBuilder
+                draft={draft}
+                total={effectiveDisplay.invoice.total}
+                onToggleInclude={setInclude}
+                onUpdateLine={updateLine}
+                onAddLine={addLine}
+                onRemoveLine={removeLine}
+                onIntro={setIntro}
+                onFooter={setFooter}
+                onReset={resetDraft}
+              />
+            ) : null}
+            <InvoicePreview display={effectiveDisplay} custom={customMeta} />
+            {ownerMode ? (
+              <ReimbursementsCard
+                clientId={selectedClient.id}
+                periodFilter={billingPeriod}
+                title="This invoice's reimbursements"
+                subtitle={`Out-of-pocket expenses for ${selectedClient.name} that show up on the ${billingPeriodLabel} invoice. Each entry becomes a line above.`}
+              />
+            ) : null}
+          </div>
+          <BillingQueue
+            selectedClientId={selectedClient?.id ?? null}
+            onSelect={setSelectedClientId}
+            billingPeriod={billingPeriod}
+            clients={data.clients}
+            entries={data.timeEntries}
+            plans={data.plans}
+            reimbursements={data.reimbursements ?? []}
+            recurringReimbursements={data.recurringReimbursements ?? []}
+            employees={data.employees}
+            defaultHourlyRate={firmSettings.clientDefaults?.hourlyRate ?? 0}
+          />
+        </section>
+      </div>
+
+      {view === 'history' ? (
+        <InvoiceHistory
+          clients={data.clients}
+          note={historyNote}
+          onOpenMonth={openMonthRun}
+          onPrint={printStored}
+        />
+      ) : null}
 
       <div className="print-document" aria-hidden="true">
         {storedPrintDisplay ? (
