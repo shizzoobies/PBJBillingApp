@@ -847,13 +847,10 @@ Clients page meanwhile. Owner-only.
 > invoice for that month is skipped, never rewritten, so a second run cannot
 > revert edits. A client with nothing to bill gets no invoice at all.
 >
-> **Nothing is emailed and nothing is charged yet.** The payment plumbing (ACH
-> via Stripe) is BUILT but not switched on: no Stripe keys are configured, so
-> there is no Pay button and no payment link can be created. If asked whether a
-> client can pay from the app: not yet. When it is switched on, paying by bank
-> transfer takes about 4 business days to clear, so an invoice will sit in
-> "processing" for several days before it reads "paid" - that is normal, not
-> stuck. Emailing invoices is still to come.
+> **Stripe is connected in TEST (sandbox) mode.** Payment links and the payment
+> flow work end-to-end, but no real money can move until live Stripe keys are
+> set. If asked whether a client can actually pay from the app: the plumbing is
+> live, but it is still running on test keys — real payments are not taken yet.
 >
 > **Payment link (bank transfer).** On an invoice with an amount owed there is a
 > **Payment link** button. It does NOT open a payment page - Brittany is not the
@@ -864,6 +861,22 @@ Clients page meanwhile. Owner-only.
 > normal and is how bank transfers work - it is not stuck. A failed payment puts
 > the invoice back to Sent and notifies the owners. There is no button on a
 > voided invoice or one with nothing owed.
+>
+> **Send (email the invoice).** In the month-run editor, next to Payment link,
+> there is a **Send** button. It emails the invoice to the client's linked
+> contacts (honoring a per-client email override on a shared contact), falling
+> back to the email on the client record; if nobody has an address on file, it
+> says exactly what is missing instead of failing quietly. The email carries the
+> full breakdown, total, due date and the note to the client, plus a **Pay by
+> bank transfer** button when there is an amount owed — each send gets a fresh
+> payment link, and a re-send of a Paid or Processing invoice goes out as a
+> statement with NO pay button so nobody can pay twice. Sending marks the
+> invoice **Sent**; the first send's date is kept as THE sent date. The editor
+> shows the last send ("Sent to ann@acme.com on Aug 9") and the button becomes
+> **Send again**. A draft must be **marked reviewed** before it can be sent. A
+> failed send shows the email provider's actual error and never marks the
+> invoice sent — every attempt, including failures, is kept in a permanent
+> per-invoice email log along with the total that was billed at the time.
 >
 > The per-client section BELOW the run is the older live-calculation view, kept
 > for its preview and print.

@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   Download,
   Link as LinkIcon,
+  Mail,
   Plus,
   Printer,
   RefreshCw,
@@ -12,6 +13,7 @@ import {
   createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
   listInvoicesRequest,
+  sendInvoiceRequest,
   updateInvoiceRequest,
 } from '../lib/api'
 import type { Client, PersistedInvoice, PersistedInvoiceLine } from '../lib/types'
@@ -51,6 +53,22 @@ function formatDue(due: string | null) {
   const parsed = new Date(`${due}T12:00:00`)
   if (Number.isNaN(parsed.getTime())) return 'no due date'
   return `due ${new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(parsed)}`
+}
+
+/**
+ * When an invoice was emailed: "Aug 9", or "Aug 9, 2025" once the year is no
+ * longer the current one — the year is noise on this month's run and the whole
+ * point on an invoice someone dug up from last year.
+ */
+function formatSentOn(iso: string) {
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime())) return ''
+  const thisYear = parsed.getFullYear() === new Date().getFullYear()
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    ...(thisYear ? {} : { year: 'numeric' }),
+  }).format(parsed)
 }
 
 export function InvoiceMonthRun({
@@ -352,6 +370,13 @@ function InvoiceEditor({
   const [payBusy, setPayBusy] = useState(false)
   const [payError, setPayError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [sendBusy, setSendBusy] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
+
+  // The last send that actually landed. Read off the invoice rather than local
+  // state on purpose: a send remounts this editor, so anything transient is gone
+  // by the time she looks, and this line has to survive that.
+  const lastSent = [...(invoice.emailLog ?? [])].reverse().find((entry) => entry.ok) ?? null
 
   /**
    * Ask the server for a hosted Checkout URL. Deliberately does NOT open it —
@@ -375,6 +400,24 @@ function InvoiceEditor({
     }
   }
 
+  /**
+   * Email the invoice to the client. The server picks the recipients, mints a
+   * fresh pay link and writes the send log, so there is nothing to hand it but
+   * the id — and on failure we keep the invoice we have, because pushing a new
+   * one up would remount this editor and wipe the message before it was read.
+   */
+  const sendInvoice = async () => {
+    setSendBusy(true)
+    setSendError(null)
+    try {
+      const result = await sendInvoiceRequest(invoice.id)
+      onInvoiceChanged(result.invoice)
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : 'Could not send the invoice.')
+    } finally {
+      setSendBusy(false)
+    }
+  }
 
   const dirty =
     JSON.stringify(lines) !== JSON.stringify(invoice.lineItems) || blurb !== invoice.blurb
@@ -478,6 +521,12 @@ function InvoiceEditor({
         </p>
       ) : null}
 
+      {sendError ? (
+        <p className="invoice-run-error" role="alert">
+          {sendError}
+        </p>
+      ) : null}
+
       {paymentLink ? (
         <div className="invoice-run-paylink">
           <span className="invoice-run-paylink-label">
@@ -498,6 +547,14 @@ function InvoiceEditor({
             </button>
           </div>
         </div>
+      ) : null}
+
+      {/* The durable receipt for a send — there is no toast, because the editor
+          remounts on the server's new invoice and a toast would not survive it. */}
+      {lastSent ? (
+        <p className="invoice-run-sent">
+          Sent to {lastSent.to.join(', ')} on {formatSentOn(lastSent.at)}
+        </p>
       ) : null}
 
       <div className="invoice-run-editor-footer">
@@ -559,6 +616,29 @@ function InvoiceEditor({
             >
               <LinkIcon size={15} />
               {payBusy ? 'Creating…' : paymentLink ? 'New payment link' : 'Payment link'}
+            </button>
+          ) : null}
+          {/* Emails the invoice. The pay link inside it is minted fresh by the
+              server on every send, so "Send again" is safe — the client never
+              gets an expired Checkout URL. A draft is shown but not sendable:
+              review comes before send, and the button that does it is right
+              here. */}
+          {invoice.status !== 'void' ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy || sendBusy || dirty || invoice.status === 'draft'}
+              title={
+                dirty
+                  ? 'Save your changes first'
+                  : invoice.status === 'draft'
+                    ? 'Mark this invoice reviewed first'
+                    : 'Email this invoice to the client'
+              }
+              onClick={() => void sendInvoice()}
+            >
+              <Mail size={15} />
+              {sendBusy ? 'Sending…' : lastSent ? 'Send again' : 'Send'}
             </button>
           ) : null}
           {invoice.status !== 'void' ? (

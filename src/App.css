@@ -11159,6 +11159,13 @@ mark.list-search-hit {
   font-size: 12px;
 }
 
+/* The last successful send. Quiet by design — it is a record, not an alert. */
+.invoice-run-sent {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 10px 0 0;
+}
+
 .invoice-status.is-sent {
   background: rgba(55, 138, 221, 0.14);
   color: #185fa5;

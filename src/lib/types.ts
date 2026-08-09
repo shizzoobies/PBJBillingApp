@@ -279,6 +279,23 @@ export type PersistedInvoice = {
   sentAt: string | null
   paidAt: string | null
   paymentMethod: string | null
+  /**
+   * Every send attempt, oldest first — append-only, and failures are kept too.
+   * `sentAt` says when the clock started; this says what actually happened, which
+   * is the question that comes up when a client claims the invoice never arrived.
+   *
+   * Optional because the file backend only grows the field on the first send —
+   * Postgres always answers with an array.
+   */
+  emailLog?: Array<{
+    at: string
+    to: string[]
+    subject: string
+    ok: boolean
+    /** What was billed when it went out — the lines can be edited afterwards. */
+    total?: number
+    error?: string
+  }>
   createdAt: string | null
   updatedAt: string | null
 }

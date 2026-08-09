@@ -2847,3 +2847,22 @@ export async function createInvoicePaymentLinkRequest(invoiceId: string) {
   }
   return (await response.json()) as { url: string; invoice: PersistedInvoice }
 }
+
+/**
+ * Email an invoice to the client (I4). The server owns the whole act — it picks
+ * the recipients, mints a fresh pay link and writes the send log — so there is
+ * nothing to pass but the id, and the returned invoice is the one to trust.
+ */
+export async function sendInvoiceRequest(invoiceId: string) {
+  const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/send`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Could not send the invoice (${response.status})`)
+  }
+  return (await response.json()) as { invoice: PersistedInvoice }
+}

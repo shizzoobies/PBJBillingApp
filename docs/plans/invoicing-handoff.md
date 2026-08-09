@@ -14,17 +14,31 @@ Everything below is committed. Nothing depends on machine-local memory.
 | **I1** invoice engine — numbered drafts, idempotent per (client, period) | shipped |
 | **I2** monthly run — review, edit, print, Download-for-QBO | shipped |
 | **I3** ACH rail — Checkout session, webhook, payment link + button | shipped |
-| **I4** email the invoice | **part 1 committed, not reachable** |
+| **I4** email the invoice | **shipped** — see the note on `INVOICE_EMAIL_FROM` below |
 | **I5** dashboard tiles, reminders, reconciliation | not started |
 | Card payments | **blocked** — see "Card" below |
 
 Production is live at `https://app.pbjsa.com` with real Stripe sandbox keys.
 No invoice has been emailed and no real payment has been taken yet.
 
-## EXACTLY where I4 stopped
+## I4 is wired end-to-end (2026-08-08)
 
-Commit `82a8441` added three inert pieces. **Nothing calls them** — there is no
-send endpoint and no Send button, so production behavior is unchanged.
+`POST /api/invoices/:id/send` + the Send button in the month-run editor now
+call the part-1 pieces. Behavior worth knowing beyond the original spec:
+- A re-send of a `paid`/`processing` invoice goes out as a statement with NO
+  pay button (fresh Checkout links are minted only for unpaid, unsettled
+  invoices — double-pay guard).
+- The Send button is disabled on `draft` (UI-only nudge; the endpoint itself
+  does not enforce review — deliberate, matches the payment-link route).
+- Post-delivery bookkeeping failures return 200 with a console error — once
+  the email is out, the response never claims "send failed".
+- The email log entry now records the `total` billed at send time.
+- Still Alex's job: set `INVOICE_EMAIL_FROM=billing@pbjsa.com` in Railway once
+  that mailbox is real; until then sends go from `EMAIL_FROM`
+  (notifications@pbjsa.com — probably not a monitored mailbox).
+
+Commit `82a8441` added the three part-1 pieces. Original state of that commit,
+for history:
 
 Already built and tested (20 unit tests, `lib/invoice-email.test.mjs`):
 - `lib/invoice-email.js` — `buildInvoiceEmail()` (subject + HTML + plain text)

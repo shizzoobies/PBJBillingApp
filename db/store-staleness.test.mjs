@@ -1639,3 +1639,116 @@ describe('adjustSplitGroup (postgres branch)', () => {
     expect(fake.matching(/^commit$/i)).toHaveLength(0)
   })
 })
+
+/**
+ * `recordInvoiceSent` — the append-only send log behind I4 (emailing an
+ * invoice).
+ *
+ * Invoices sit deliberately outside the workspace bulk save, so they are seeded
+ * straight into the file the store reads rather than through `write()`.
+ *
+ * File backend (cardinal rule 1: Postgres is the branch production runs, and is
+ * validated separately against real data with a rolled-back transaction —
+ * HANDOFF section 4). What this pins is the contract both branches implement: a
+ * failed attempt is kept but never claims the invoice was sent, `sentAt` holds
+ * the FIRST send because that is when the payment clock started, and the entry
+ * records what was billed at the time.
+ */
+describe('recordInvoiceSent (file backend)', () => {
+  const seedInvoice = {
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-08',
+    number: '1042',
+    status: 'reviewed',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-09-15',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: null,
+    paidAt: null,
+    paymentMethod: null,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [{ ...seedInvoice, ...overrides }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('logs a failed attempt without claiming the invoice was sent', async () => {
+    await seed()
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1042',
+      ok: false,
+      error: 'The domain is not verified.',
+    })
+
+    expect(updated.emailLog).toHaveLength(1)
+    expect(updated.emailLog[0]).toMatchObject({
+      ok: false,
+      error: 'The domain is not verified.',
+      to: ['ann@acme.com'],
+    })
+    // The two fields that would tell Brittany a failed send succeeded.
+    expect(updated.sentAt).toBeNull()
+    expect(updated.status).toBe('reviewed')
+  })
+
+  it('keeps every attempt and flips the status on a successful send', async () => {
+    await seed()
+    await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1042',
+      ok: true,
+    })
+    const second = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com', 'ap@acme.com'],
+      subject: 'Invoice 1042',
+      ok: true,
+    })
+
+    expect(second.emailLog).toHaveLength(2)
+    expect(second.status).toBe('sent')
+    expect(second.sentAt).toBe(second.emailLog[0].at)
+    expect(second.emailLog[1].to).toEqual(['ann@acme.com', 'ap@acme.com'])
+  })
+
+  it('leaves an earlier sentAt alone on a re-send', async () => {
+    // Seeded rather than sent twice in a row: two sends in the same millisecond
+    // would make "kept the first" true by accident.
+    await seed({
+      status: 'sent',
+      sentAt: '2026-08-09T12:00:00.000Z',
+      emailLog: [
+        { at: '2026-08-09T12:00:00.000Z', to: ['ann@acme.com'], subject: 'Invoice 1042', ok: true, total: 400 },
+      ],
+    })
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1042',
+      ok: true,
+    })
+
+    expect(updated.sentAt).toBe('2026-08-09T12:00:00.000Z')
+    expect(updated.emailLog).toHaveLength(2)
+  })
+
+  it('records what was billed, so a later edit cannot rewrite what went out', async () => {
+    await seed()
+    await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1042',
+      ok: true,
+    })
+
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const stored = data.invoices.find((entry) => entry.id === 'inv-1')
+    expect(stored.emailLog[0].total).toBe(400)
+  })
+})

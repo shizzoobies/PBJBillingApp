@@ -6795,6 +6795,10 @@ export class AppDataStore {
       to: Array.isArray(to) ? to : [to].filter(Boolean),
       subject: String(subject ?? ''),
       ok: Boolean(ok),
+      // What was actually billed at the moment it went out. The lines can be
+      // edited after a send, so without this the log records that an email left
+      // but not what the client was asked to pay.
+      total: Number(current.total) || 0,
       ...(error ? { error: String(error).slice(0, 300) } : {}),
     }
     const emailLog = [...(current.emailLog ?? []), entry]

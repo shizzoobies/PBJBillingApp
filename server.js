@@ -32,9 +32,11 @@ import {
   notify,
   sendDigestEmail,
   sendFeatureRequestEmail,
+  sendInvoiceEmail,
   sendLoginLinkEmail,
   sendReportEmail,
 } from './lib/notify.js'
+import { buildInvoiceEmail, resolveInvoiceRecipients } from './lib/invoice-email.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
 import {
   listBlockingWeeks,
@@ -2433,6 +2435,166 @@ const server = createServer(async (request, response) => {
         `${invoice.number ?? invoice.id}`,
       )
       sendJson(response, 200, { url: result.session.url, invoice: updated })
+      return
+    }
+
+    // POST /api/invoices/:id/send — email the invoice to the client (I4).
+    // Owner-only. An email cannot be unsent, so everything that can fail is made
+    // to fail BEFORE the send: no recipient, no client, or a Stripe that is
+    // connected but refusing all stop the request with nothing delivered.
+    const invoiceSendMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)\/send$/)
+    if (invoiceSendMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can send an invoice' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const sendContentType = String(request.headers['content-type'] || '')
+      if (!sendContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+
+      const invoiceId = decodeURIComponent(invoiceSendMatch[1])
+      const invoice = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
+      if (!invoice) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      if (invoice.status === 'void') {
+        sendJson(response, 409, { error: 'This invoice is voided, so it cannot be sent.' })
+        return
+      }
+
+      const sendAppData = await appDataStore.read()
+      const sendClient = (sendAppData.clients ?? []).find((entry) => entry.id === invoice.clientId)
+      if (!sendClient) {
+        sendJson(response, 409, { error: 'This invoice has no client on file.' })
+        return
+      }
+
+      const recipients = resolveInvoiceRecipients({
+        client: sendClient,
+        contacts: sendAppData.contacts ?? [],
+      })
+      if (recipients.to.length === 0) {
+        // Carry the reason through: "no email on file for this client" is
+        // something she can act on, "could not send" is not.
+        sendJson(response, 409, { error: 'invoice_no_recipient', message: recipients.reason })
+        return
+      }
+
+      // A fresh Checkout session on EVERY send — hosted Checkout URLs expire in
+      // about a day, so reusing the one from an earlier send would email a dead
+      // button. A zero-total invoice gets no link because there is nothing to pay,
+      // and with Stripe not connected the email stands on its own by design.
+      //
+      // Money already in flight gets NO pay button either: a re-send of a 'paid'
+      // invoice, or a 'processing' one whose ACH is still the ~4 days it takes to
+      // clear, would otherwise invite the client to pay a second time. Those
+      // re-sends go out as a statement.
+      const settled = invoice.status === 'paid' || invoice.status === 'processing'
+      let payUrl = ''
+      if (isStripeConfigured() && invoice.total > 0 && !settled) {
+        // Reuse the client's Stripe customer so a repeat payer is one customer
+        // in Stripe rather than one per invoice.
+        let customerId = sendClient.stripeCustomerId ?? null
+        try {
+          if (!customerId) {
+            const customer = await stripeClient().customers.create({
+              name: sendClient.name,
+              ...(sendClient.email ? { email: sendClient.email } : {}),
+              metadata: { clientId: sendClient.id },
+            })
+            customerId = customer.id
+            await appDataStore.setClientStripeCustomerId(sendClient.id, customerId)
+          }
+        } catch (error) {
+          console.error('[stripe] customer create failed:', error?.message || error)
+          sendJson(response, 502, {
+            error: 'stripe_customer_failed',
+            message: 'Stripe would not create a customer for this client, so nothing was sent.',
+          })
+          return
+        }
+
+        const linkResult = await createInvoiceCheckoutSession({
+          invoice,
+          client: sendClient,
+          customerId,
+          appUrl: getPublicAppUrl(request),
+        })
+        if (!linkResult.ok) {
+          // Stripe is connected but refused. Sending a link-less email here would
+          // quietly downgrade the invoice, so stop instead and let her retry.
+          sendJson(response, 502, { error: 'stripe_session_failed', message: linkResult.reason })
+          return
+        }
+        payUrl = linkResult.session.url
+        // Persist the session id only. The status flip belongs to
+        // recordInvoiceSent, which refuses to claim "sent" if the email fails.
+        await appDataStore.applyInvoicePayment(invoice.id, {
+          checkoutSessionId: linkResult.session.id,
+        })
+      }
+
+      // The firm's own name, so the client sees who is billing them rather than
+      // the builder's default. A settings read that fails is not worth failing a
+      // send over — buildInvoiceEmail's default is the fallback.
+      const firmSettings = await appDataStore.getFirmSettings().catch(() => null)
+      const email = buildInvoiceEmail({
+        invoice,
+        client: sendClient,
+        payUrl,
+        firmName: firmSettings?.name || undefined,
+      })
+      const sendResult = await sendInvoiceEmail({
+        to: recipients.to,
+        subject: email.subject,
+        html: email.html,
+        text: email.text,
+      })
+
+      if (!sendResult.ok) {
+        // The failed attempt is still logged — it is the evidence that answers
+        // "she says she sent it, the client says it never arrived" — and
+        // recordInvoiceSent refuses to mark a failed send as sent.
+        await appDataStore.recordInvoiceSent(invoice.id, {
+          to: recipients.to,
+          subject: email.subject,
+          ok: false,
+          error: sendResult.error,
+        })
+        sendJson(response, 502, { error: 'invoice_send_failed', message: sendResult.error })
+        return
+      }
+
+      // Past this point the email HAS been delivered, and no bookkeeping failure
+      // may make the response say otherwise — telling her the send failed when it
+      // did not is how a client ends up billed twice.
+      let sentInvoice = invoice
+      try {
+        sentInvoice =
+          (await appDataStore.recordInvoiceSent(invoice.id, {
+            to: recipients.to,
+            subject: email.subject,
+            ok: true,
+            error: null,
+          })) ?? invoice
+        await appDataStore.recordActivity(
+          session.user.id,
+          'invoice_sent',
+          `${invoice.number ?? invoice.id}`,
+        )
+      } catch (error) {
+        console.error('[invoice] send bookkeeping failed after delivery:', error)
+      }
+      sendJson(response, 200, { invoice: sentInvoice })
       return
     }
 
