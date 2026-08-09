@@ -6538,8 +6538,16 @@ export class AppDataStore {
    *
    * Clients with nothing to bill produce no invoice at all — an hourly client
    * with no time this month should not get a $0 document.
+   *
+   * `clientId` narrows the run to ONE client, which is how the per-client
+   * "Email invoice" button builds a missing invoice without touching anyone
+   * else's month. The shape of the answer is unchanged — `created` and
+   * `skipped` simply end up at most one entry long. In that mode the reasons a
+   * client produces nothing are reported rather than passed over in silence:
+   * on a month-wide run "no invoice appeared for a prospect" is expected, but
+   * someone who asked for one specific client deserves to be told why.
    */
-  async generateInvoicesForPeriod(period, { defaultNetDays = 30 } = {}) {
+  async generateInvoicesForPeriod(period, { defaultNetDays = 30, clientId = null } = {}) {
     const data = await this.read()
     const existing = await this.listInvoices({ period })
     const liveClientIds = new Set(
@@ -6547,21 +6555,36 @@ export class AppDataStore {
     )
     const takenNumbers = existing.map((invoice) => invoice.number).filter(Boolean)
 
-    // Last month's invoices, for the prior-month true-up.
+    // Last month's invoices, for the prior-month true-up. Voids are excluded
+    // for the same reason `liveClientIds` excludes them: a voided invoice was
+    // withdrawn, so truing up against what it said would carry forward an
+    // amount nobody was ever asked to pay.
     const priorByClient = new Map(
-      (await this.listInvoices({ period: previousPeriod(period) })).map((invoice) => [
-        invoice.clientId,
-        invoice,
-      ]),
+      (await this.listInvoices({ period: previousPeriod(period) }))
+        .filter((invoice) => invoice.status !== 'void')
+        .map((invoice) => [invoice.clientId, invoice]),
     )
 
     const created = []
     const skipped = []
-    for (const client of data.clients ?? []) {
-      // Prospects and onboarding clients are not billed yet.
-      if ((client.lifecycleStage ?? 'active') !== 'active') continue
+    const scoped = clientId
+      ? (data.clients ?? []).filter((client) => client.id === clientId)
+      : (data.clients ?? [])
+    if (clientId && scoped.length === 0) {
+      return { period, created, skipped: [{ clientId, reason: 'no-such-client' }] }
+    }
+    for (const client of scoped) {
+      // "Already has one" is checked FIRST because it is the more useful answer
+      // when both are true: a client who was invoiced and has since been moved
+      // back to prospect still has that invoice, and being told they are not
+      // billable yet would send someone looking for a document that exists.
       if (liveClientIds.has(client.id)) {
         skipped.push({ clientId: client.id, reason: 'already-generated' })
+        continue
+      }
+      // Prospects and onboarding clients are not billed yet.
+      if ((client.lifecycleStage ?? 'active') !== 'active') {
+        if (clientId) skipped.push({ clientId: client.id, reason: 'not-billable-yet' })
         continue
       }
 
@@ -6613,6 +6636,47 @@ export class AppDataStore {
     return { period, created, skipped }
   }
 
+  /**
+   * Void every UNSENT invoice in a period — the voiding half of "Void &
+   * regenerate", which refreshes a whole month that was built mid-month and has
+   * since gone stale.
+   *
+   * Only `draft` and `reviewed` are touched, and only in this period. Anything
+   * that has left the building — `sent`, `processing`, `paid`, `overdue` — is
+   * the client's copy of a promise and must never be rewritten behind their
+   * back; an already-`void` row has nothing left to void. The partial unique
+   * index allows any number of voids per (client, period), so the generation
+   * pass that follows is free to insert a fresh live invoice for each one.
+   *
+   * Voiding is deliberately destructive to edits: the whole point is to throw
+   * away a stale snapshot, so the lines, the note to the client and the review
+   * status of the voided invoices are gone. The caller warns about that first.
+   */
+  async voidUnsentInvoicesForPeriod(period) {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update invoices
+            set status = 'void', updated_at = now()
+          where period = $1 and status in ('draft', 'reviewed')
+        returning id`,
+        [period],
+      )
+      return { voided: rows.length, ids: rows.map((row) => row.id) }
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const ids = []
+    for (const invoice of data.invoices) {
+      if (invoice.period !== period) continue
+      if (invoice.status !== 'draft' && invoice.status !== 'reviewed') continue
+      invoice.status = 'void'
+      invoice.updatedAt = nowIso()
+      ids.push(invoice.id)
+    }
+    if (ids.length > 0) await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return { voided: ids.length, ids }
+  }
 
   /**
    * Edit one invoice. Only the fields Brittany can change in I2 are accepted:
@@ -6734,6 +6798,14 @@ export class AppDataStore {
   async applyInvoicePayment(invoiceId, patch = {}) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
+    // Same race as `recordInvoiceSent`: a webhook or a payment-link request can
+    // land after "Void & regenerate" voided the row it names. Reviving it would
+    // break the live-per-(client, period) index on Postgres and duplicate the
+    // live invoice on the file backend, so the late write is dropped instead.
+    if (current.status === 'void') {
+      console.warn(`[invoices] applyInvoicePayment skipped: ${invoiceId} is void`)
+      return null
+    }
 
     const next = { ...current }
     if (PAYMENT_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
@@ -6789,6 +6861,17 @@ export class AppDataStore {
   async recordInvoiceSent(invoiceId, { to = [], subject = '', ok = true, error = null }) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
+    // A void invoice is not a thing that can be sent. The send route already
+    // refuses one up front; what this catches is the MID-FLIGHT race that "Void
+    // & regenerate" made real — the invoice was voided while this send was in
+    // the air. Writing 'sent' back onto it would collide with the live-per-
+    // (client, period) index on Postgres (a 500 after the email had already
+    // left), and on the file backend would quietly leave two live invoices for
+    // one client. Refusing is the only safe answer; the caller sees null.
+    if (current.status === 'void') {
+      console.warn(`[invoices] recordInvoiceSent skipped: ${invoiceId} is void`)
+      return null
+    }
 
     const entry = {
       at: nowIso(),

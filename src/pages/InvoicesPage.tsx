@@ -24,7 +24,7 @@ import {
   isSafeHttpUrl,
   isSafeImageSrc,
 } from '../lib/utils'
-import { listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
+import { generateInvoicesRequest, listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
 
 type DisplayLine = InvoiceLine & { groupKey?: string }
 
@@ -105,6 +105,30 @@ function getServiceLabel(client: Client) {
     return client.monthlyServiceTier || 'Annual service'
   }
   return 'Billable hours'
+}
+
+/**
+ * Why a single-client generate produced nothing. A month-wide run can pass
+ * these over in silence — one prospect among forty clients is not news — but
+ * someone who just asked for ONE invoice and got none is owed the reason.
+ */
+function generateSkipMessage(
+  reason: string | undefined,
+  clientName: string,
+  periodLabel: string,
+) {
+  switch (reason) {
+    case 'nothing-to-bill':
+      return `${clientName} has nothing to bill for ${periodLabel} — no hours, plan, or reimbursements — so no invoice was created.`
+    case 'already-generated':
+      return `${clientName} already has an invoice for ${periodLabel}. Reload the page and try again.`
+    case 'not-billable-yet':
+      return `${clientName} is not an active client yet, so there is nothing to bill.`
+    case 'no-such-client':
+      return `${clientName} is no longer on file.`
+    default:
+      return `No invoice was created for ${clientName} for ${periodLabel}.`
+  }
 }
 
 function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean): InvoiceDraft {
@@ -428,9 +452,12 @@ export function InvoicesPage() {
    * month run keeps its own list on its own period, and a second copy on this
    * page would be one more thing that can quietly go stale between the two.
    *
-   * Nothing is generated on the way — a month that has not been built yet is a
-   * message, not a side effect, because this is a header button and building a
-   * whole month is not what someone clicking "Email invoice" asked for.
+   * A month that has not been built yet used to be a dead end here. It now
+   * offers to build THIS client's invoice and nothing else — a whole month is
+   * not what someone clicking "Email invoice" asked for, but one invoice for
+   * the client already named on screen plainly is. It stops at the draft:
+   * review comes before send, always, so she is pointed at the month run
+   * rather than having an email leave on the back of one confirm.
    */
   const emailInvoice = async () => {
     // Stamped with the invoice on screen when the click happened.
@@ -440,18 +467,47 @@ export function InvoicesPage() {
     try {
       const invoices = await listInvoicesRequest(billingPeriod)
       const forClient = invoices.filter((entry) => entry.clientId === selectedClient.id)
-      // A voided invoice keeps its row, so prefer the live one and fall back to
-      // the void one only to explain why there is nothing to send.
-      const stored = forClient.find((entry) => entry.status !== 'void') ?? forClient[0] ?? null
+      // Only a LIVE invoice can be sent. Rows that are all void count as no
+      // invoice rather than as a refusal: "Void & regenerate" makes void-only a
+      // routine state (voided, then skipped on the rebuild because there was
+      // nothing left to bill), and dead-ending on it would be telling her the
+      // one thing she cannot act on instead of offering the thing she can.
+      const stored = forClient.find((entry) => entry.status !== 'void') ?? null
 
       if (!stored) {
-        fail(
-          `${selectedClient.name} has no invoice for ${billingPeriodLabel} yet — build the month with Generate in the month run above, then send.`,
+        const buildIt = window.confirm(
+          `${selectedClient.name} has no invoice for ${billingPeriodLabel} yet. Generate it now? (Just this client — nothing else is created.)`,
         )
-        return
-      }
-      if (stored.status === 'void') {
-        fail('This invoice is voided, so it cannot be sent.')
+        if (!buildIt) {
+          // Declining is not an error — leave the old pointer as a quiet note.
+          setSendResult({
+            key: seedKey,
+            note: 'Nothing sent. Build the month with Generate in the month run above, then send.',
+          })
+          return
+        }
+
+        const built = await generateInvoicesRequest(billingPeriod, selectedClient.id)
+        // The month run keeps its own list; tell it to reload so the new draft
+        // shows up there, which is where she has to go to review it.
+        setMonthRunRefresh((token) => token + 1)
+        const made = built.created[0] ?? null
+        if (!made) {
+          fail(
+            generateSkipMessage(
+              built.skipped[0]?.reason,
+              selectedClient.name,
+              billingPeriodLabel,
+            ),
+          )
+          return
+        }
+        setSendResult({
+          key: seedKey,
+          // The month is named because the month run keeps its OWN picker and
+          // may well be sitting on a different one.
+          note: `${made.number ? `Invoice ${made.number}` : 'The invoice'} created as a draft — mark it reviewed in the ${billingPeriodLabel} month run above, then send.`,
+        })
         return
       }
       if (stored.status === 'draft') {

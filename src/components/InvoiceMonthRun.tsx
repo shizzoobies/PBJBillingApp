@@ -6,18 +6,20 @@ import {
   Plus,
   Printer,
   RefreshCw,
+  RotateCcw,
   Trash2,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
   listInvoicesRequest,
+  regenerateInvoicesRequest,
   sendInvoiceRequest,
   updateInvoiceRequest,
 } from '../lib/api'
 import type { Client, PersistedInvoice, PersistedInvoiceLine } from '../lib/types'
-import { currency, formatSentOn } from '../lib/utils'
+import { currency, formatSentOn, getBillingPeriodLabel } from '../lib/utils'
 
 /**
  * The month run (I2): every client's stored invoice for a period, in INVOICE
@@ -83,11 +85,18 @@ export function InvoiceMonthRun({
     [clients],
   )
 
+  // The month the list on screen belongs to. The button handlers below are
+  // async and the month picker is not frozen while they run, so they check this
+  // before writing anything back — the effect's own `cancelled` flag only
+  // covers the effect.
+  const shownPeriod = useRef(period)
+
   // Load whenever the period changes, or the page tells us an invoice moved
   // under us. `cancelled` guards against a slow response for a month she has
   // already navigated away from landing on top of the newer one — same shape
   // as the Client Recap page.
   useEffect(() => {
+    shownPeriod.current = period
     let cancelled = false
     const load = async () => {
       setLoading(true)
@@ -126,12 +135,17 @@ export function InvoiceMonthRun({
   const monthTotal = live.reduce((sum, invoice) => sum + invoice.total, 0)
 
   const generate = async () => {
+    const target = period
     setBusy(true)
     setError(null)
     setNote(null)
     try {
-      const result = await generateInvoicesRequest(period)
-      setInvoices(await listInvoicesRequest(period))
+      const result = await generateInvoicesRequest(target)
+      const rows = await listInvoicesRequest(target)
+      // She changed months while this was in the air. The work landed, but
+      // saying so over September's list would be describing the wrong month.
+      if (shownPeriod.current !== target) return
+      setInvoices(rows)
       // Say what happened, including the nothing-case: running this and seeing
       // the list unchanged otherwise looks like a broken button.
       setNote(
@@ -140,7 +154,90 @@ export function InvoiceMonthRun({
           : 'Nothing new to build — every client already has one for this month.',
       )
     } catch (err) {
+      if (shownPeriod.current !== target) return
       setError(err instanceof Error ? err.message : 'Could not build this month.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Void this month's unsent invoices and build them again.
+   *
+   * The counts in the confirm are re-fetched FIRST rather than read off state.
+   * There are two owners and a tab can sit open for hours: a sentence promising
+   * to void "12 drafts" while the month has since become 12 reviewed invoices
+   * with notes on them would be asking for consent to something else entirely.
+   * Sent and paid invoices are not in the count because they are not touched —
+   * but the edits, notes and review status on what this does void are genuinely
+   * gone, which is why the sentence says so rather than implying a refresh.
+   */
+  const regenerate = async () => {
+    const target = period
+    setBusy(true)
+    setError(null)
+    setNote(null)
+    try {
+      let fresh: PersistedInvoice[]
+      try {
+        fresh = await listInvoicesRequest(target)
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : 'Could not check this month before rebuilding.',
+        )
+        return
+      }
+      if (shownPeriod.current !== target) return
+      setInvoices(fresh)
+
+      const freshDrafts = fresh.filter((invoice) => invoice.status === 'draft').length
+      const freshReviewed = fresh.filter((invoice) => invoice.status === 'reviewed').length
+      if (freshDrafts + freshReviewed === 0) {
+        // The list she was looking at was out of date — nothing left to rebuild.
+        setNote('Nothing to regenerate — this month has no unsent invoices.')
+        return
+      }
+
+      const confirmed = window.confirm(
+        `Void ${freshDrafts} draft${freshDrafts === 1 ? '' : 's'} and ${freshReviewed} reviewed invoice${
+          freshReviewed === 1 ? '' : 's'
+        } for ${getBillingPeriodLabel(target)} and rebuild them from current data? ` +
+          'Sent and paid invoices are not touched. Edits, notes, and review status on the voided invoices are discarded.',
+      )
+      if (!confirmed) return
+
+      const result = await regenerateInvoicesRequest(target)
+      const rows = await listInvoicesRequest(target)
+      if (shownPeriod.current !== target) return
+      setInvoices(rows)
+      // 'already-generated' after a regenerate means the client's live invoice
+      // was one of the ones we deliberately left alone.
+      const leftAlone = result.skipped.filter((row) => row.reason === 'already-generated').length
+      const nothingToBill = result.skipped.filter((row) => row.reason === 'nothing-to-bill').length
+      setNote(
+        `Voided ${result.voided} and rebuilt ${result.created.length} invoice${
+          result.created.length === 1 ? '' : 's'
+        }.` +
+          (leftAlone > 0
+            ? ` ${leftAlone} sent or paid invoice${leftAlone === 1 ? '' : 's'} left alone.`
+            : '') +
+          (nothingToBill > 0
+            ? ` ${nothingToBill} client${nothingToBill === 1 ? '' : 's'} had nothing to bill.`
+            : ''),
+      )
+    } catch (err) {
+      // Includes the half-done case: the server says the voids landed and that
+      // Generate rebuilds the month, and that sentence has to reach her. Reload
+      // anyway, because the list on screen may now be describing voided rows —
+      // a failed reload must not replace the message that explains what to do.
+      if (shownPeriod.current !== target) return
+      setError(err instanceof Error ? err.message : 'Could not rebuild this month.')
+      try {
+        const rows = await listInvoicesRequest(target)
+        if (shownPeriod.current === target) setInvoices(rows)
+      } catch {
+        /* keep the list we have; the message above is the important part */
+      }
     } finally {
       setBusy(false)
     }
@@ -192,6 +289,23 @@ export function InvoiceMonthRun({
           <button type="button" className="secondary-action" disabled={busy} onClick={generate}>
             <RefreshCw size={15} />
             {busy ? 'Working…' : 'Generate'}
+          </button>
+          {/* Rebuilds a month that has moved on since it was generated.
+              Disabled when there is nothing unsent to throw away — the button
+              would otherwise look like it refreshes sent invoices too. */}
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={busy || toReview + reviewed === 0}
+            title={
+              toReview + reviewed === 0
+                ? 'Nothing to regenerate — no unsent invoices this month'
+                : 'Void this month’s unsent invoices and build them again from current data'
+            }
+            onClick={() => void regenerate()}
+          >
+            <RotateCcw size={15} />
+            Void &amp; regenerate
           </button>
           <a
             className="secondary-action"

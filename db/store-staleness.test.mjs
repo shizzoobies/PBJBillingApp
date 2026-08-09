@@ -1752,3 +1752,300 @@ describe('recordInvoiceSent (file backend)', () => {
     expect(stored.emailLog[0].total).toBe(400)
   })
 })
+
+/**
+ * The void guard on the two invoice WRITERS.
+ *
+ * "Void & regenerate" made a race real that used to be unreachable: a send or a
+ * Stripe webhook can already be in the air when the invoice it names is voided.
+ * Letting that late write land would flip a void row back to sent/paid — which
+ * on Postgres collides with the live-per-(client, period) partial index (a 500
+ * raised AFTER the email has gone out, taking the send log with it) and on the
+ * file backend silently leaves the client with two live invoices for one month.
+ *
+ * Both writers therefore refuse a void row outright and change nothing.
+ */
+describe('invoice writers refuse a voided invoice (file backend)', () => {
+  const voidInvoice = {
+    id: 'inv-void',
+    clientId: 'c1',
+    period: '2026-08',
+    number: 'INV-2026-08-001',
+    status: 'void',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-09-15',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: null,
+    paidAt: null,
+    paymentMethod: null,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [{ ...voidInvoice }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  })
+
+  async function storedVoidInvoice() {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.invoices.find((entry) => entry.id === 'inv-void')
+  }
+
+  it('recordInvoiceSent leaves it void and writes nothing', async () => {
+    const result = await store.recordInvoiceSent('inv-void', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+    })
+
+    expect(result).toBeNull()
+    const stored = await storedVoidInvoice()
+    expect(stored.status).toBe('void')
+    expect(stored.sentAt).toBeNull()
+    expect(stored.emailLog).toBeUndefined()
+    expect(stored.updatedAt).toBe('2026-08-01T00:00:00.000Z')
+  })
+
+  it('applyInvoicePayment leaves it void and writes nothing', async () => {
+    const result = await store.applyInvoicePayment('inv-void', {
+      status: 'paid',
+      paymentIntentId: 'pi_123',
+      paidAt: '2026-08-20T00:00:00.000Z',
+    })
+
+    expect(result).toBeNull()
+    const stored = await storedVoidInvoice()
+    expect(stored.status).toBe('void')
+    expect(stored.paidAt).toBeNull()
+    expect(stored.stripePaymentIntentId).toBeUndefined()
+    expect(stored.updatedAt).toBe('2026-08-01T00:00:00.000Z')
+  })
+})
+
+/**
+ * `voidUnsentInvoicesForPeriod` — the voiding half of "Void & regenerate".
+ *
+ * The one thing this must never do is touch an invoice the client has already
+ * seen. Everything else about the feature is recoverable (press Generate
+ * again); rewriting a sent or paid invoice is not, so each protected status
+ * gets its own row here rather than a single representative one.
+ *
+ * File backend, same reasoning as the block above: Postgres is what production
+ * runs and is validated separately with a rolled-back transaction (HANDOFF §4);
+ * what is pinned here is the contract both branches implement.
+ */
+describe('voidUnsentInvoicesForPeriod (file backend)', () => {
+  function invoice(id, overrides = {}) {
+    return {
+      id,
+      clientId: `c-${id}`,
+      period: '2026-08',
+      number: id,
+      status: 'draft',
+      lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+      subtotal: 400,
+      total: 400,
+      dueDate: '2026-09-15',
+      blurb: '',
+      scopeFlags: [],
+      sentAt: null,
+      paidAt: null,
+      paymentMethod: null,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  async function seedInvoices(rows) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = rows
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  async function storedStatuses() {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return Object.fromEntries(data.invoices.map((entry) => [entry.id, entry.status]))
+  }
+
+  it('voids the drafts and the reviewed invoices, and counts them', async () => {
+    await seedInvoices([
+      invoice('a', { status: 'draft' }),
+      invoice('b', { status: 'reviewed' }),
+      invoice('c', { status: 'draft' }),
+    ])
+
+    const result = await store.voidUnsentInvoicesForPeriod('2026-08')
+
+    expect(result.voided).toBe(3)
+    expect(result.ids.sort()).toEqual(['a', 'b', 'c'])
+    expect(await storedStatuses()).toEqual({ a: 'void', b: 'void', c: 'void' })
+  })
+
+  it('never touches an invoice that has left the building', async () => {
+    await seedInvoices([
+      invoice('sent', { status: 'sent', sentAt: '2026-08-05T00:00:00.000Z' }),
+      invoice('processing', { status: 'processing' }),
+      invoice('paid', { status: 'paid', paidAt: '2026-08-06T00:00:00.000Z' }),
+      invoice('overdue', { status: 'overdue' }),
+      invoice('void', { status: 'void' }),
+      invoice('draft', { status: 'draft' }),
+    ])
+
+    const result = await store.voidUnsentInvoicesForPeriod('2026-08')
+
+    // Only the draft moved; the already-void row is not re-voided or counted.
+    expect(result.voided).toBe(1)
+    expect(result.ids).toEqual(['draft'])
+    expect(await storedStatuses()).toEqual({
+      sent: 'sent',
+      processing: 'processing',
+      paid: 'paid',
+      overdue: 'overdue',
+      void: 'void',
+      draft: 'void',
+    })
+  })
+
+  it('leaves every other month alone', async () => {
+    await seedInvoices([
+      invoice('july', { period: '2026-07', status: 'draft' }),
+      invoice('august', { period: '2026-08', status: 'reviewed' }),
+      invoice('september', { period: '2026-09', status: 'draft' }),
+    ])
+
+    const result = await store.voidUnsentInvoicesForPeriod('2026-08')
+
+    expect(result.voided).toBe(1)
+    expect(await storedStatuses()).toEqual({
+      july: 'draft',
+      august: 'void',
+      september: 'draft',
+    })
+  })
+
+  it('reports nothing voided for a month with no unsent invoices', async () => {
+    await seedInvoices([invoice('sent', { status: 'sent' })])
+    expect(await store.voidUnsentInvoicesForPeriod('2026-08')).toEqual({ voided: 0, ids: [] })
+  })
+})
+
+/**
+ * Single-client generation — `generateInvoicesForPeriod(period, { clientId })`,
+ * behind the per-client "Email invoice" button offering to build the one
+ * invoice that is missing.
+ *
+ * The point of the scope is blast radius: a click on one client's header must
+ * not quietly create invoices for everyone else. The idempotence check is the
+ * same rule the month run relies on — a second run must not rewrite a draft
+ * that has already been edited.
+ */
+describe('generateInvoicesForPeriod with a single client (file backend)', () => {
+  const period = '2026-08'
+
+  async function seedBillableWorkspace() {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 },
+          { id: 'c2', name: 'Globex', billingMode: 'hourly', hourlyRate: 100 },
+          { id: 'c3', name: 'Initech', billingMode: 'hourly', hourlyRate: 100 },
+        ],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [
+          {
+            id: 't1',
+            clientId: 'c1',
+            employeeId: 'emp-1',
+            date: `${period}-04`,
+            minutes: 120,
+            billable: true,
+          },
+          {
+            id: 't2',
+            clientId: 'c2',
+            employeeId: 'emp-1',
+            date: `${period}-05`,
+            minutes: 60,
+            billable: true,
+          },
+        ],
+      }),
+    )
+    // Invoices live outside the bulk save, so start the period genuinely empty.
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('creates that client’s invoice and nobody else’s', async () => {
+    await seedBillableWorkspace()
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    expect(result.created).toHaveLength(1)
+    expect(result.created[0].clientId).toBe('c1')
+    // c2 also has billable time this month and must still have no invoice.
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.invoices.map((entry) => entry.clientId)).toEqual(['c1'])
+  })
+
+  it('is idempotent — a second run skips rather than rewriting', async () => {
+    await seedBillableWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    const second = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    expect(second.created).toHaveLength(0)
+    expect(second.skipped).toEqual([{ clientId: 'c1', reason: 'already-generated' }])
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.invoices).toHaveLength(1)
+  })
+
+  it('says why when the client has nothing to bill', async () => {
+    await seedBillableWorkspace()
+
+    // c3 has no time, no plan and no reimbursements this month.
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'c3' })
+
+    expect(result.created).toHaveLength(0)
+    expect(result.skipped).toEqual([{ clientId: 'c3', reason: 'nothing-to-bill' }])
+  })
+
+  it('reports the existing invoice, not the lifecycle, when both apply', async () => {
+    await seedBillableWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    // c1 is then moved back to prospect — the invoice it already has is still
+    // the more useful answer than "not billable yet".
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients.find((entry) => entry.id === 'c1').lifecycleStage = 'proposal'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    expect(result.skipped).toEqual([{ clientId: 'c1', reason: 'already-generated' }])
+  })
+
+  it('says why when the client is not on file at all', async () => {
+    await seedBillableWorkspace()
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'ghost' })
+    expect(result.created).toHaveLength(0)
+    expect(result.skipped).toEqual([{ clientId: 'ghost', reason: 'no-such-client' }])
+  })
+
+  it('still builds every billable client when no clientId is given', async () => {
+    await seedBillableWorkspace()
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    expect(result.created.map((entry) => entry.clientId).sort()).toEqual(['c1', 'c2'])
+    // The month run passes prospects over in silence; only c3 (nothing to bill)
+    // is worth a reason.
+    expect(result.skipped).toEqual([{ clientId: 'c3', reason: 'nothing-to-bill' }])
+  })
+})

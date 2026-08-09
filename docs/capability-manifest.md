@@ -847,6 +847,30 @@ Clients page meanwhile. Owner-only.
 > invoice for that month is skipped, never rewritten, so a second run cannot
 > revert edits. A client with nothing to bill gets no invoice at all.
 >
+> **Void & regenerate.** Next to Generate. Because Generate leaves an existing
+> invoice alone, it cannot refresh a month that was built early and has since
+> moved on — that is what this button is for. It voids every **Draft** and
+> **Reviewed** invoice for the chosen month and immediately builds them again
+> from current data. It NEVER touches an invoice that has already gone out:
+> Sent, Processing, Paid and Overdue are left exactly as they are, and so is
+> every other month. The trade is real and the confirm says so with the actual
+> counts ("Void 12 drafts and 3 reviewed invoices for August 2026…"): line
+> edits, the note to the client and the review status on the voided invoices
+> are **discarded**, not carried forward. The voided invoices stay on the
+> record, struck through, as they always do. The button is greyed out when
+> there are no unsent invoices to rebuild. Afterwards it reports what happened
+> — how many were voided, how many rebuilt, and how many were left alone
+> because they had been sent or paid.
+>
+> **Expect the invoice numbers to jump after a regenerate, and don't worry
+> about it.** Numbers run `INV-2026-08-001`, `INV-2026-08-002`, … within a
+> month. A voided invoice KEEPS its number, and numbers are never reused, so
+> the rebuilt invoices get fresh higher ones: regenerating a 12-invoice August
+> moves the live invoices from `INV-2026-08-001`–`012` to `INV-2026-08-013`–
+> `024`. That gap is deliberate — a number that was on a document must never
+> point at a different document later. Voided invoices are also left out of
+> **Download for QBO**, so the export has no gap in it at all.
+>
 > **Stripe is connected in TEST (sandbox) mode.** Payment links and the payment
 > flow work end-to-end, but no real money can move until live Stripe keys are
 > set. If asked whether a client can actually pay from the app: the plumbing is
@@ -877,6 +901,20 @@ Clients page meanwhile. Owner-only.
 > failed send shows the email provider's actual error and never marks the
 > invoice sent — every attempt, including failures, is kept in a permanent
 > per-invoice email log along with the total that was billed at the time.
+>
+> **Email invoice can build the invoice first.** The per-client **Email
+> invoice** button sends the STORED invoice for the client and month on screen.
+> If that client has no live invoice for that month — none at all, or only
+> voided ones — it no longer stops. It asks: "<Client> has no invoice for August 2026 yet. Generate it now? (Just
+> this client — nothing else is created.)" Saying yes builds ONE invoice, for
+> that client only; no other client's month is touched. It stops at a **draft**
+> and says so ("Invoice INV-2026-08-043 created as a draft — mark it reviewed
+> in the August 2026 month run above, then send"). It does NOT send it and does
+> NOT mark it reviewed:
+> review before send is the rule everywhere, and nothing is emailed off the
+> back of that one question. Saying no changes nothing. If there is genuinely
+> nothing to bill — no hours, plan or reimbursements that month — it says that
+> instead of creating an empty invoice.
 >
 > The per-client section BELOW the run is the older live-calculation view, kept
 > for its preview and print.

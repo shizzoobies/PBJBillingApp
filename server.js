@@ -2429,6 +2429,16 @@ const server = createServer(async (request, response) => {
         checkoutSessionId: result.session.id,
         sentAt: invoice.sentAt ?? new Date().toISOString(),
       })
+      // Refused means the invoice was voided while we were talking to Stripe —
+      // the check at the top of this route passed two round-trips ago. The
+      // session exists but has not been handed to anyone, so abandoning it is
+      // free, and handing back a pay link for a voided invoice is not.
+      if (!updated) {
+        sendJson(response, 409, {
+          error: 'This invoice was voided while the payment link was being created.',
+        })
+        return
+      }
       await appDataStore.recordActivity(
         session.user.id,
         'invoice_payment_link_created',
@@ -2696,9 +2706,15 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'period must look like 2026-08' })
         return
       }
+      // Optional: build just ONE client's invoice. That is how the per-client
+      // "Email invoice" button offers to create a missing invoice on the spot
+      // without generating the whole month behind her.
+      const onlyClientId = typeof payload?.clientId === 'string' ? payload.clientId : null
       let result
       try {
-        result = await appDataStore.generateInvoicesForPeriod(period)
+        result = await appDataStore.generateInvoicesForPeriod(period, {
+          ...(onlyClientId ? { clientId: onlyClientId } : {}),
+        })
       } catch (error) {
         console.error('[invoices] generate failed:', error)
         sendJson(response, 500, {
@@ -2710,9 +2726,84 @@ const server = createServer(async (request, response) => {
       await appDataStore.recordActivity(
         session.user.id,
         'invoices_generated',
-        `${period}: ${result.created.length} created`,
+        `${period}: ${result.created.length} created${onlyClientId ? ' (one client)' : ''}`,
       )
       sendJson(response, 200, result)
+      return
+    }
+
+    // POST /api/invoices/regenerate — throw away the month's unsent drafts and
+    // build them again from current data (owner only).
+    //
+    // Generate alone cannot do this: it skips a client that already has a live
+    // invoice, which is exactly right for "I logged one more hour" and exactly
+    // wrong for "this month was built two weeks ago and everything has moved".
+    // Voiding first is what frees each client to be generated again.
+    //
+    // Sent, processing, paid and overdue invoices are never touched — see the
+    // store method. Edits on the voided drafts are discarded on purpose.
+    if (normalizedPath === '/api/invoices/regenerate' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can generate invoices' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const regenContentType = String(request.headers['content-type'] || '')
+      if (!regenContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const regenPayload = await readJsonBody(request)
+      const regenPeriod =
+        typeof regenPayload?.period === 'string' ? regenPayload.period : ''
+      if (!/^\d{4}-\d{2}$/.test(regenPeriod)) {
+        sendJson(response, 400, { error: 'period must look like 2026-08' })
+        return
+      }
+
+      let voided
+      try {
+        voided = await appDataStore.voidUnsentInvoicesForPeriod(regenPeriod)
+      } catch (error) {
+        console.error('[invoices] regenerate void failed:', error)
+        sendJson(response, 500, {
+          error: 'invoice_regenerate_failed',
+          message: 'Could not void this month’s drafts — nothing was changed.',
+        })
+        return
+      }
+
+      let rebuilt
+      try {
+        rebuilt = await appDataStore.generateInvoicesForPeriod(regenPeriod)
+      } catch (error) {
+        // The voids have already landed. There is no transaction spanning both
+        // halves and inventing one here would mean restructuring generation, so
+        // say plainly what state the month is in and what fixes it.
+        console.error('[invoices] regenerate rebuild failed:', error)
+        sendJson(response, 500, {
+          error: 'invoice_regenerate_rebuild_failed',
+          message: `Voided ${voided.voided} invoice${voided.voided === 1 ? '' : 's'}, but rebuilding them failed. Nothing sent or paid was touched — press Generate to build the month again.`,
+        })
+        return
+      }
+
+      await appDataStore.recordActivity(
+        session.user.id,
+        'invoices_regenerated',
+        `${regenPeriod}: ${voided.voided} voided, ${rebuilt.created.length} rebuilt`,
+      )
+      sendJson(response, 200, {
+        period: regenPeriod,
+        voided: voided.voided,
+        created: rebuilt.created,
+        skipped: rebuilt.skipped,
+      })
       return
     }
 

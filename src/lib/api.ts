@@ -2776,13 +2776,19 @@ export async function listInvoicesRequest(period?: string) {
   return ((await response.json()) as { invoices: PersistedInvoice[] }).invoices
 }
 
-/** Build the month's drafts. Idempotent — an existing invoice is never rewritten. */
-export async function generateInvoicesRequest(period: string) {
+/**
+ * Build the month's drafts. Idempotent — an existing invoice is never rewritten.
+ *
+ * `clientId` narrows it to one client (the per-client "Email invoice" button
+ * offering to create the missing invoice). The answer keeps the same shape
+ * either way; `created` and `skipped` just end up at most one entry long.
+ */
+export async function generateInvoicesRequest(period: string, clientId?: string) {
   const response = await apiFetch('/api/invoices/generate', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ period }),
+    body: JSON.stringify(clientId ? { period, clientId } : { period }),
   })
   if (!response.ok) {
     const message = await safeErrorMessage(response)
@@ -2790,6 +2796,33 @@ export async function generateInvoicesRequest(period: string) {
   }
   return (await response.json()) as {
     period: string
+    created: PersistedInvoice[]
+    skipped: Array<{ clientId: string; reason: string }>
+  }
+}
+
+/**
+ * Void the month's unsent invoices and build them again from current data.
+ *
+ * Not the same button as Generate: Generate leaves an existing invoice alone,
+ * which is right for a late time entry and wrong for a month whose drafts were
+ * snapshotted weeks ago. Sent and paid invoices are never touched — but edits
+ * on the drafts this voids are discarded, so the caller confirms first.
+ */
+export async function regenerateInvoicesRequest(period: string) {
+  const response = await apiFetch('/api/invoices/regenerate', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ period }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to regenerate (${response.status})`)
+  }
+  return (await response.json()) as {
+    period: string
+    voided: number
     created: PersistedInvoice[]
     skipped: Array<{ clientId: string; reason: string }>
   }
