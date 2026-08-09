@@ -11178,3 +11178,25 @@ mark.list-search-hit {
   background: rgba(197, 48, 48, 0.12);
   color: #9b2226;
 }
+
+/* The billing-queue rows are real buttons now — they used to be inert
+   <article> elements that looked clickable and did nothing. Picking one drives
+   the invoice shown above. */
+.queue-row {
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  width: 100%;
+}
+
+.queue-row:hover {
+  background: var(--surface-muted, #f6f6f7);
+  border-color: var(--border-strong, #cfc9c0);
+}
+
+.queue-row.is-selected {
+  background: color-mix(in srgb, var(--brand, #7d2a4d) 7%, transparent);
+  border-color: var(--brand, #7d2a4d);
+}

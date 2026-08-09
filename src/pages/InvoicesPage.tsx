@@ -549,6 +549,8 @@ export function InvoicesPage() {
           ) : null}
         </div>
         <BillingQueue
+          selectedClientId={selectedClient?.id ?? null}
+          onSelect={setSelectedClientId}
           billingPeriod={billingPeriod}
           clients={data.clients}
           entries={data.timeEntries}
@@ -811,6 +813,8 @@ function InvoicePreview({ display, custom }: { display: DisplayInvoice; custom?:
 }
 
 function BillingQueue({
+  selectedClientId,
+  onSelect,
   billingPeriod,
   clients,
   entries,
@@ -820,6 +824,10 @@ function BillingQueue({
   employees,
   defaultHourlyRate,
 }: {
+  selectedClientId: string | null
+  /** Picking a row drives the invoice shown above - the rows looked
+   *  clickable but were inert <article> elements. */
+  onSelect: (clientId: string) => void
   billingPeriod: string
   clients: Client[]
   entries: TimeEntry[]
@@ -850,7 +858,15 @@ function BillingQueue({
             defaultHourlyRate,
           )
           return (
-            <article className="queue-row" key={client.id}>
+            <button
+              type="button"
+              className={
+                client.id === selectedClientId ? 'queue-row is-selected' : 'queue-row'
+              }
+              key={client.id}
+              aria-pressed={client.id === selectedClientId}
+              onClick={() => onSelect(client.id)}
+            >
               <div>
                 <strong>{client.name}</strong>
                 <span>
@@ -863,7 +879,7 @@ function BillingQueue({
                 </span>
               </div>
               <strong>{currency.format(invoice.total)}</strong>
-            </article>
+            </button>
           )
         })}
       </div>
