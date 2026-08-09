@@ -1,105 +1,165 @@
-# Invoicing build — pickup handoff
+# Invoicing — pickup handoff
 
-Written 2026-08-05 for a fresh Claude session (or human) starting the in-app
-invoicing build with no context from prior sessions. Read this, then the two
-plan docs, then `docs/HANDOFF.md` for house rules. Everything here is
-committed; nothing depends on any machine-local memory.
+Rewritten 2026-08-09. **Supersedes the 2026-08-05 version of this file**, which
+said "Nothing is built / ON HOLD" — both are now wrong. Read this, then
+`docs/plans/invoicing-in-app-2026-08.md` (the plan of record, including the
+decision changes at the top), then `docs/HANDOFF.md` for house rules.
 
-## Status: ON HOLD — wait for Alex's explicit go
+Everything below is committed. Nothing depends on machine-local memory.
 
-Alex paused this before build start (2026-08-05) to give it full attention
-later. **Do not start any phase until he says go in a live session.** When he
-does, confirm whether the P1 sidebar regroup (Track A of
-`billing-and-engagements-2026-08.md`) already happened — it was scheduled
-for the week of Aug 6 and I1 was sequenced after it.
+## Status: I1–I3 shipped and live. I4 is half-built.
 
-## What this is
+| Phase | State |
+|---|---|
+| **I1** invoice engine — numbered drafts, idempotent per (client, period) | shipped |
+| **I2** monthly run — review, edit, print, Download-for-QBO | shipped |
+| **I3** ACH rail — Checkout session, webhook, payment link + button | shipped |
+| **I4** email the invoice | **part 1 committed, not reachable** |
+| **I5** dashboard tiles, reminders, reconciliation | not started |
+| Card payments | **blocked** — see "Card" below |
 
-Move Brittany's entire monthly invoicing routine into the app: generate a
-draft invoice per client per month → she reviews/edits each → one click
-emails it from `billing@pbjsa.com` with a Stripe pay link → the app tracks
-sent / processing / paid / overdue. QuickBooks Online stays her ledger; a
-**Download-for-QBO** CSV lets her bulk-import the month's invoices there.
-Plan of record: **`docs/plans/invoicing-in-app-2026-08.md`** (read it fully —
-phases I1–I5, data model, decisions). Parent roadmap:
-`docs/plans/billing-and-engagements-2026-08.md`.
+Production is live at `https://app.pbjsa.com` with real Stripe sandbox keys.
+No invoice has been emailed and no real payment has been taken yet.
 
-## State of play (2026-08-05)
+## EXACTLY where I4 stopped
 
-- **Nothing is built.** Zero invoicing code exists beyond what's listed under
-  "already in the codebase" below.
-- The plan is **locked by Alex** (8 structured decisions, 2026-08-04) and
-  **reviewed by Brittany** (email 2026-08-05, all refinements folded in):
-  descriptions carry over with the month auto-advancing (`{month}` token);
-  reimbursed-expense estimate lines name the FUTURE month; blurb carries
-  over; QBO line-level export ships with I2; **card payments are per-client
-  opt-in only** (default = ACH-only link, opted-in client pays the card fee).
-- Tracker: `featreq-96afce66`-style contract applies; the invoicing item is
-  **`featreq-2cd78b22`** (status planned, ON HOLD note in dev_notes). Its
-  dev_notes carry the plain-English read-back Brittany approved.
-- She has a 2-page PDF of the plan (Alex emailed it).
+Commit `82a8441` added three inert pieces. **Nothing calls them** — there is no
+send endpoint and no Send button, so production behavior is unchanged.
 
-## Pre-build gates (owner actions, confirm before I3/I4)
+Already built and tested (20 unit tests, `lib/invoice-email.test.mjs`):
+- `lib/invoice-email.js` — `buildInvoiceEmail()` (subject + HTML + plain text)
+  and `resolveInvoiceRecipients()` (linked contacts first, honoring a
+  per-client email override on a shared contact, falling back to the client
+  record, returning a `reason` when there is nobody).
+- `db/store.js` → `recordInvoiceSent()` — appends to the append-only
+  `email_log`, marks the invoice sent, keeps the FIRST `sentAt`, and does NOT
+  claim sent when the attempt failed.
+- `lib/notify.js` → `sendInvoiceEmail()` — uses `INVOICE_EMAIL_FROM` falling
+  back to `EMAIL_FROM`; returns the provider's own error text rather than a
+  generic message.
 
-1. Firm Stripe account + **restricted** API key in Railway env
-   (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`). Not needed for I1/I2.
-2. `pbjsa.com` verified in Resend; sender `billing@pbjsa.com`. Gates I4 —
-   current `EMAIL_FROM` is a testing domain; client invoices must not use it.
-3. Brittany's sign-off on the literal card-convenience-fee wording (policy is
-   decided; the sentence is not). Card surcharge legality varies by state —
-   sanity-check FL disclosure rules.
+### The remaining work, in order
 
-## Already in the codebase — build on, don't duplicate
+1. **`POST /api/invoices/:id/send`** in `server.js`. Owner-only, `isCrossSiteOrigin`
+   guard, `application/json` guard — copy the shape of the neighbouring
+   `/payment-link` route. It should:
+   - refuse a `void` invoice (409)
+   - `resolveInvoiceRecipients()`; if `to` is empty return 409 **with the
+     `reason` string** so the page can say what is missing
+   - create a **fresh** Checkout session (hosted Checkout URLs expire, roughly
+     24h — do not reuse `stripeCheckoutSessionId` from an earlier send)
+   - `buildInvoiceEmail()` → `sendInvoiceEmail()` → `recordInvoiceSent()`
+   - return the updated invoice
+   - if Stripe is unconfigured, still allow sending WITHOUT a pay link — the
+     email is built to stand alone, and `payUrl` is optional by design
+2. **Send button** in `src/components/InvoiceMonthRun.tsx`, next to
+   "Payment link" in the editor footer. Show the last send from `emailLog`
+   ("Sent to ann@acme.com on Aug 9") and label the repeat action "Send again".
+3. **Set `INVOICE_EMAIL_FROM`** in Railway to `billing@pbjsa.com` (Alex's job —
+   see the mailbox warning below).
+4. `docs/capability-manifest.md`, then re-provision the voice agent.
 
-- `getInvoice()` in `src/lib/utils.ts` — per-client invoice line builder
-  (per-employee bill-rate lines or legacy flat rate). The I1 generator wraps
-  THIS, plus reimbursements (one-time + recurring, both exist), prior-month
-  adjustment (new), scope flags (new), profit (cost rates exist).
-- `invoice_drafts` table — exists, empty, and **bulk-save-safe** since
-  `32976f4` (the bulk save snapshots/restores it; removing its delete would
-  wedge saves via the `ON DELETE RESTRICT` FK — don't "simplify").
-- Per-client fields already stored: `payment_terms`, `footer_note`, invoice
-  display prefs, rates. Firm settings: logo (pink SVG data-URL), name.
-- Email: Resend via `lib/notify.js` (`buildEmailHtml` — root links only, no
-  tokens in email; keep that rule for invoice mail).
-- Idempotency pattern to copy: the checklists materializer's partial unique
-  index + `ON CONFLICT DO NOTHING` (`lib/checklist-identity.js`,
-  `db/store.js`). I1 invoices need the same per `(client_id, period)`.
-- Time data is seconds-exact (`minutes` numeric); a typed duration wins over
-  sessions (93cdcec). Payroll dedup for full-mode splits:
-  `src/lib/payrollAggregation.ts`.
+## Environment — what is set and what is proven
 
-## House rules that WILL bite you (full list: docs/HANDOFF.md + CLAUDE.md)
+| | |
+|---|---|
+| `STRIPE_SECRET_KEY` | set, **sandbox** (`sk_test_`) |
+| `STRIPE_WEBHOOK_SECRET` | set; rolled 2026-08-09 after I leaked the old one to the transcript |
+| Stripe webhook endpoint | exists in the sandbox, enabled, `https://app.pbjsa.com/api/stripe/webhook`, exactly the three events |
+| ACH + Financial Connections | Alex confirmed the account is live and set up for payments |
+| `RESEND_API_KEY` | set — **replaced 2026-08-09**; the previous key was domain-scoped and 403'd with a misleading "domain is not verified" |
+| `pbjsa.com` in Resend | verified. DKIM at the root, envelope SPF on `send.pbjsa.com`, root SPF untouched |
+| `EMAIL_FROM` | `PB&J Strategic Accounting <notifications@pbjsa.com>` — magic-link sign-in confirmed working |
+| `INVOICE_EMAIL_FROM` | **not set** — I4 falls back to `EMAIL_FROM` until it is |
 
-1. `db/store.js` has **two backends** (Postgres + JSON file) — every
-   persisted change touches both; tests only run the file backend, so do a
-   rolled-back (`BEGIN…ROLLBACK`) statement test against prod Postgres for
-   new SQL before deploying (HANDOFF §4).
-2. `npm run verify` green before every push. Deploy = push to `main` → poll
-   Railway until SUCCESS **on your commit's hash** (a failed push followed by
-   a poll shows the PREVIOUS deploy's SUCCESS — always match hashes) →
-   `/health` 200.
-3. Pushing: this machine hosts TWO GitHub accounts (another project pushes as
-   `pmuf-code`). Push exactly like this, every time:
-   `gh auth switch --user shizzoobies && git push ; gh auth switch --user pmuf-code`
-4. User-visible changes → update `docs/capability-manifest.md` → after deploy
-   run `node scripts/provision-voice-agent.mjs` (env vars from Railway).
-5. Production DB writes need Alex's explicit approval + a durable undo
-   snapshot committed to the repo (`docs/prod-snapshots/` pattern). Tracker
-   `feature_requests` single-row status/dev_notes writes have standing
-   approval; set `shipped_at=now()` manually when flipping to shipped.
-6. Dev notes to Brittany are plain-English, honest about limits, and re-read
-   her words before re-coding — "still not working" usually means the
-   interpretation missed, not the code (this repo's most-repeated lesson;
-   see featreq-96afce66's three rounds).
-7. Month-close freeze: risky changes don't ship the 24th–5th.
+**⚠️ UNPROVEN: the Stripe signing secret has never verified a genuinely
+Stripe-signed event.** Config is verified; the secret itself is not. Alex chose
+to find out during the live test. The failure is recoverable — the payment
+still succeeds, the invoice just stays at `processing`, Stripe logs 400s, and
+after fixing the secret a Resend/retry lands (the `stripe_events` dedup ledger
+prevents double-apply).
 
-## Environment quick refs
+**⚠️ `notifications@pbjsa.com` is probably not a real mailbox** (MX is
+Microsoft 365). Fine for sign-in links; **not** fine for invoices — clients
+reply to invoices. `billing@pbjsa.com` should be a real monitored mailbox
+before I4 sends anything.
 
-- Repo: `D:\PBJ Accounting Work\AP For Time Stuff` (this machine); GitHub
-  `shizzoobies/PBJBillingApp`; Railway service `PBJBillingApp`, DB service
-  `Postgres` (`npx @railway/cli variables --service Postgres` for
-  `DATABASE_PUBLIC_URL`). Prod: `https://app.pbjsa.com`.
-- Tracker = the app's own Updates page, table `feature_requests`.
-- People: Alex (developer/owner, the human you talk to), Brittany (firm
-  owner / end client; her feedback arrives via tracker items + Alex).
+## Decisions made this session (some supersede the locked plan)
+
+- **Card is available to every client, not per-client opt-in** (Alex relaying
+  Brittany). Supersedes half of decision 2; recorded at the top of the plan.
+- **Card is blocked on a real constraint, not on code.** US rules forbid
+  surcharging DEBIT cards, and Checkout does not reveal credit-vs-debit before
+  payment, so a fee line added up front would surcharge debit too. Likely
+  answer is a flat convenience fee on the card channel (ACH being the default
+  channel), plus the network notification surcharging normally requires. Needs
+  Stripe or her advisor to confirm. **ACH is unaffected.**
+- **Month run is in invoice-number order**, not flagged-first — a list that
+  rearranges while you work through it is disorienting.
+- **Download-for-QBO is always enabled**, not gated on everything being reviewed.
+- **No bulk "mark all reviewed"** — decision 4 is review-then-send per client
+  until trust is earned.
+- **Delayed page is filtered per viewer**, owners included.
+
+## Things that will bite you
+
+1. **`db/store.js` has two backends.** Tests run the file backend; production is
+   Postgres. New SQL gets a rolled-back `BEGIN…ROLLBACK` test against prod
+   before deploying (HANDOFF §4). That is how the partial unique index and the
+   `ON CONFLICT` predicate were validated.
+2. **`invoices` must stay snapshot-and-restored in the bulk save.** `client_id`
+   is `on delete restrict`, so `delete from clients` cannot run while an invoice
+   exists. Break the restore and every owner autosave wedges — silently. Four
+   tests in `db/store-staleness.test.mjs` pin it.
+3. **`invoices` is deliberately OUT of the bulk-save payload and out of the
+   staleness fingerprint.** A stale owner tab must never rewrite an invoice.
+4. **The QBO export's `Item` column is a placeholder.** It matches against the
+   product/service list in Brittany's own QBO file, which we cannot see. Needs
+   one real import to confirm. Everything else in that file is exact.
+5. **Money is recomputed server-side.** `PATCH /api/invoices/:id` ignores any
+   totals in the payload and derives them from the lines.
+6. **One calculator for money.** `lib/invoice-lines.js` is shared by the UI, the
+   generator and Client Recap. Do not add a fourth implementation — the third
+   one is what made Recap disagree with the invoice for 16 of 19 hourly clients.
+
+## Local dev gotchas that cost time today
+
+- **`pkill` does not see Windows node processes.** A "restart" silently fails
+  with `EADDRINUSE` and the OLD binary keeps answering, so your change appears
+  not to work. Kill by port through PowerShell (`Get-NetTCPConnection -LocalPort
+  N` → `Stop-Process`).
+- **`npm run dev` collides under the preview harness.** It sets `PORT`, so
+  `server.js` grabs Vite's port, Vite falls back to 5174, and Vite's proxy
+  points at 4173 where nothing listens. Run the API separately on **4173**.
+- **Mutating endpoints 403 through the Vite proxy** — `Origin` is
+  `localhost:5173` while `Host` is `127.0.0.1:4173`, so the cross-site guard
+  correctly refuses. Start the API with
+  `APP_PUBLIC_URL=http://localhost:5173`. Does not arise in production.
+- **A stale HttpOnly session cookie cannot be overwritten from JS.** `POST
+  /api/logout` first, then set one. Owners are forced into TOTP enrollment on
+  magic-link login, so that path will not get you a session.
+- **Sessions must be minted BEFORE the server boots**, or it clears the cookie.
+- **Never print a secret.** A "show only the prefix" helper split on `_` and
+  emitted an entire `whsec_` value into the transcript. Report set/not-set.
+
+## Verify before every push
+
+`npm run verify` (eslint + `tsc -b && vite build` + vitest). Currently **975
+tests / 73 files**. Then push to `main` → poll Railway until SUCCESS **on your
+commit's hash** → `/health` 200 → update the manifest for user-visible changes
+→ `node scripts/provision-voice-agent.mjs`.
+
+## Where the pieces live
+
+```
+lib/invoice-lines.js      the ONE money calculator (UI + generator + Recap)
+lib/invoice-draft.js      due dates, numbering, adjustments, scope flags
+lib/invoice-email.js      I4 — subject/HTML/text + recipient resolution
+lib/qbo-export.js         Download-for-QBO CSV
+lib/stripe-rail.js        Checkout session, signature verification
+db/store.js               invoices table, generate/list/update, webhook writes
+server.js                 /api/invoices*, /api/stripe/webhook
+src/components/InvoiceMonthRun.tsx   the monthly run + editor
+src/pages/InvoicesPage.tsx           older per-client view (preview + print)
+scripts/set-stripe-keys.ps1          optional interactive key setter
+```
