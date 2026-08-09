@@ -90,12 +90,14 @@ Already built and tested (20 unit tests, `lib/invoice-email.test.mjs`):
 | `EMAIL_FROM` | `PB&J Strategic Accounting <notifications@pbjsa.com>` — magic-link sign-in confirmed working |
 | `INVOICE_EMAIL_FROM` | `billing@pbjsa.com` — set 2026-08-09, applied via redeploy |
 
-**⚠️ UNPROVEN: the Stripe signing secret has never verified a genuinely
-Stripe-signed event.** Config is verified; the secret itself is not. Alex chose
-to find out during the live test. The failure is recoverable — the payment
-still succeeds, the invoice just stays at `processing`, Stripe logs 400s, and
-after fixing the secret a Resend/retry lands (the `stripe_events` dedup ledger
-prevents double-apply).
+**✅ PROVEN 2026-08-09: the signing secret verified real Stripe-signed events.**
+Alex ran a full end-to-end test (his Test client, $15, sandbox ACH): the email
+went out, he paid through Checkout, and both webhooks — `checkout.session.completed`
+then `payment_intent.succeeded` — passed signature verification and moved the
+invoice Sent → Processing → Paid (`INV-2026-08-001`, `paid_at` stamped,
+`payment_method us_bank_account`). Note test-mode ACH settles in seconds; live
+ACH takes ~4 business days between those two events. Nobody is emailed on a
+successful payment by design — only a FAILED debit notifies the owners.
 
 **⚠️ `notifications@pbjsa.com` is probably not a real mailbox** (MX is
 Microsoft 365). Fine for sign-in links; **not** fine for invoices — clients
