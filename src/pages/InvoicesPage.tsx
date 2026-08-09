@@ -17,12 +17,14 @@ import type {
 import {
   currency,
   formatHours,
+  formatSentOn,
   getBillingPeriodLabel,
   getInvoice,
   isInBillingPeriod,
   isSafeHttpUrl,
   isSafeImageSrc,
 } from '../lib/utils'
+import { listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
 
 type DisplayLine = InvoiceLine & { groupKey?: string }
 
@@ -147,56 +149,6 @@ function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoi
     hideInternal: true,
     groupByCategory: false,
   }
-}
-
-// Build a clean plain-text invoice for the body of an email. Reflects the
-// prepared/customized invoice (lines, total, intro/footer, included fields)
-// so "Email invoice" matches what would print.
-function buildEmailParts(
-  display: DisplayInvoice,
-  custom: CustomMeta | null,
-  firmName: string,
-): { to: string; subject: string; body: string } {
-  const { invoice } = display
-  const client = invoice.client
-  const show = (key: keyof IncludeFlags) => (custom ? custom.include[key] : true)
-  const greetingName =
-    (show('contactName') && hasText(client.contactName) ? client.contactName!.trim() : '') ||
-    client.name
-  const footer = custom
-    ? custom.include.footerNote
-      ? custom.footer
-      : ''
-    : client.footerNote ?? ''
-
-  const lines: string[] = [
-    `Hi ${greetingName},`,
-    '',
-    `Please find your invoice for ${invoice.periodLabel} below.`,
-  ]
-  if (custom && custom.intro.trim()) {
-    lines.push('', custom.intro.trim())
-  }
-  lines.push('', `${firmName}`, `Invoice — ${invoice.periodLabel}`, `Bill to: ${client.name}`, '', 'Line items:')
-  for (const line of display.lines) {
-    const detail = line.detail ? ` (${line.detail})` : ''
-    lines.push(`  • ${line.label}${detail} — ${currency.format(line.amount)}`)
-  }
-  lines.push('', `Total due: ${currency.format(invoice.total)}`)
-  if (show('paymentTerms') && hasText(client.paymentTerms)) {
-    lines.push(`Payment terms: ${client.paymentTerms!.trim()}`)
-  }
-  if (show('payLink') && hasText(client.quickbooksPayUrl)) {
-    lines.push(`Pay online: ${client.quickbooksPayUrl!.trim()}`)
-  }
-  if (footer.trim()) {
-    lines.push('', footer.trim())
-  }
-  lines.push('', 'Thank you,', firmName)
-
-  const to = show('email') && hasText(client.email) ? client.email!.trim() : ''
-  const subject = `${firmName} invoice — ${invoice.periodLabel}`
-  return { to, subject, body: lines.join('\n') }
 }
 
 function formatEntryDate(date: string) {
@@ -416,6 +368,21 @@ export function InvoicesPage() {
   // cannot print each other's content.
   const [storedPrint, setStoredPrint] = useState<PersistedInvoice | null>(null)
 
+  // "Email invoice" really sends. Its outcome is reported here rather than in a
+  // toast because it is the only evidence a client was just emailed.
+  //
+  // The result carries the client+month it belongs to, so switching either one
+  // simply stops rendering it. Stamping beats clearing it from an effect: the
+  // message can never briefly survive onto the next client's invoice.
+  const [sendBusy, setSendBusy] = useState(false)
+  const [sendResult, setSendResult] = useState<{
+    key: string
+    note?: string
+    error?: string
+  } | null>(null)
+  const [monthRunRefresh, setMonthRunRefresh] = useState(0)
+  const shownSend = sendResult?.key === seedKey ? sendResult : null
+
   const storedPrintDisplay = useMemo(() => {
     if (!storedPrint) return null
     const storedClient = data.clients.find((c) => c.id === storedPrint.clientId)
@@ -453,11 +420,71 @@ export function InvoicesPage() {
   const setIntro = (intro: string) => setDraft((prev) => (prev ? { ...prev, intro } : prev))
   const setFooter = (footer: string) => setDraft((prev) => (prev ? { ...prev, footer } : prev))
 
-  const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
-  const emailInvoice = () => {
-    const { to, subject, body } = buildEmailParts(effectiveDisplay, customMeta, firmName)
-    const href = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
-    window.location.href = href
+  /**
+   * Really send this client's invoice for the selected billing month, through
+   * the same rail as the month run's Send button.
+   *
+   * The stored invoice is fetched at click time rather than cached here: the
+   * month run keeps its own list on its own period, and a second copy on this
+   * page would be one more thing that can quietly go stale between the two.
+   *
+   * Nothing is generated on the way — a month that has not been built yet is a
+   * message, not a side effect, because this is a header button and building a
+   * whole month is not what someone clicking "Email invoice" asked for.
+   */
+  const emailInvoice = async () => {
+    // Stamped with the invoice on screen when the click happened.
+    const fail = (message: string) => setSendResult({ key: seedKey, error: message })
+    setSendResult(null)
+    setSendBusy(true)
+    try {
+      const invoices = await listInvoicesRequest(billingPeriod)
+      const forClient = invoices.filter((entry) => entry.clientId === selectedClient.id)
+      // A voided invoice keeps its row, so prefer the live one and fall back to
+      // the void one only to explain why there is nothing to send.
+      const stored = forClient.find((entry) => entry.status !== 'void') ?? forClient[0] ?? null
+
+      if (!stored) {
+        fail(
+          `${selectedClient.name} has no invoice for ${billingPeriodLabel} yet — build the month with Generate in the month run above, then send.`,
+        )
+        return
+      }
+      if (stored.status === 'void') {
+        fail('This invoice is voided, so it cannot be sent.')
+        return
+      }
+      if (stored.status === 'draft') {
+        // The same review-then-send rule the month run enforces.
+        fail('Mark this invoice reviewed first, in the month run above.')
+        return
+      }
+
+      const label = stored.number ? `invoice ${stored.number}` : 'this invoice'
+      const confirmed = window.confirm(
+        `Email ${label} for ${selectedClient.name} to the client's contacts on file?`,
+      )
+      if (!confirmed) return
+
+      const { invoice: updated } = await sendInvoiceRequest(stored.id)
+      const lastSent = [...(updated.emailLog ?? [])].reverse().find((entry) => entry.ok) ?? null
+      setSendResult({
+        key: seedKey,
+        note: lastSent
+          ? `Sent to ${lastSent.to.join(', ')} on ${formatSentOn(lastSent.at)}`
+          : 'Sent.',
+      })
+      // Tell the month run to reload so it does not still read "Reviewed". It
+      // keeps its own month picker, so this only shows up there when it happens
+      // to be on the same month as this page.
+      setMonthRunRefresh((token) => token + 1)
+    } catch (err) {
+      // The endpoint answers with sentences meant for a person — no recipients
+      // on file, the provider refused — so show what it said.
+      fail(err instanceof Error ? err.message : 'Could not send the invoice.')
+    } finally {
+      setSendBusy(false)
+    }
   }
 
   return (
@@ -467,6 +494,7 @@ export function InvoicesPage() {
           for its preview and print until they are pointed at stored data. */}
       <InvoiceMonthRun
         clients={data.clients}
+        refreshToken={monthRunRefresh}
         onPrint={(stored) => {
           setStoredPrint(stored)
           // One tick so the document renders before the print dialog opens.
@@ -489,9 +517,23 @@ export function InvoicesPage() {
                 <Sliders size={16} />
                 {customizing ? 'Use generated' : 'Customize'}
               </button>
-              <button className="ghost-action" onClick={emailInvoice} type="button">
+              {/* Email sends the STORED invoice, so it is held back while
+                  Customize is open: what that panel changes reaches the printed
+                  sheet only, and a button that silently ignored her edits would
+                  be worse than one she has to close a panel to reach. */}
+              <button
+                className="ghost-action"
+                disabled={sendBusy || customizing}
+                onClick={() => void emailInvoice()}
+                title={
+                  customizing
+                    ? 'Email sends the stored invoice — close Customize first; edit lines in the month run'
+                    : 'Email this invoice to the client'
+                }
+                type="button"
+              >
                 <Mail size={16} />
-                Email invoice
+                {sendBusy ? 'Sending…' : 'Email invoice'}
               </button>
               <button
                 className="primary-action"
@@ -508,8 +550,11 @@ export function InvoicesPage() {
           </div>
           <label className="field">
             <span>Client</span>
+            {/* Frozen mid-send: the confirm names a client, and switching
+                underneath it would attribute the send to the wrong one. */}
             <select
               className="input"
+              disabled={sendBusy}
               onChange={(event) => setSelectedClientId(event.target.value)}
               value={selectedClientId}
             >
@@ -520,6 +565,12 @@ export function InvoicesPage() {
               ))}
             </select>
           </label>
+          {shownSend?.error ? (
+            <p className="invoice-run-error" role="alert">
+              {shownSend.error}
+            </p>
+          ) : null}
+          {shownSend?.note ? <p className="invoice-run-sent">{shownSend.note}</p> : null}
           <div className="invoice-context">
             <span>{billingPeriodLabel}</span>
             <span>{baseInvoice.entryCount} billable entries</span>

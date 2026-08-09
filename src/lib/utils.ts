@@ -172,6 +172,25 @@ export function isInBillingPeriod(entry: TimeEntry, period: string) {
 }
 
 /**
+ * When an invoice was emailed: "Aug 9", or "Aug 9, 2025" once the year is no
+ * longer the current one — the year is noise on this month's run and the whole
+ * point on an invoice someone dug up from last year.
+ *
+ * Shared by the month run and the per-client view so the two cannot report the
+ * same send in two different formats.
+ */
+export function formatSentOn(iso: string) {
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime())) return ''
+  const thisYear = parsed.getFullYear() === new Date().getFullYear()
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    ...(thisYear ? {} : { year: 'numeric' }),
+  }).format(parsed)
+}
+
+/**
  * Client Recap period helpers (UI-side mirror of lib/periods.js). The server
  * validates and labels periods; these just drive the page's selector. A period
  * is "2026-08" (month) or "2026-Q3" (quarter).

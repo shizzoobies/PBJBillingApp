@@ -891,9 +891,21 @@ Clients page meanwhile. Owner-only.
 - This invoice's reimbursements: add out-of-pocket expenses (date,
   description, amount) — each becomes a line on the invoice. Recurring
   reimbursements supported.
-- Customize: adjust line items before sending.
-- Email invoice (via the configured email service) or Print invoice
-  (print-formatted sheet with firm branding).
+- Customize: adjust line items, the intro/footer notes and which client fields
+  appear — on the PRINTED sheet only. These edits are session-only and are not
+  emailed: Email invoice always sends the stored invoice. To change what a
+  client receives by email, edit the lines in the month-run editor and save.
+  Email invoice is unavailable while Customize is open, so the two cannot
+  disagree about what went out.
+- Email invoice: actually sends the stored invoice for the selected client and
+  billing month to that client's contacts on file, through the same rail as the
+  month run's Send button — it does not open a mail draft. It sends the STORED
+  invoice, never the Customize panel's version, so line edits meant for the
+  client belong in the month-run editor. The month must have been generated
+  first, and the invoice must be past Draft (mark it reviewed in the month run),
+  otherwise the button explains what is missing instead of sending. Asks for
+  confirmation first, and reports who it went to and when.
+- Print invoice (print-formatted sheet with firm branding).
 - Billing queue: all clients with their month total, ready to review.
 - Estimated hours fields anywhere in the app are informational only and
   never change invoice amounts.

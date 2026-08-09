@@ -17,7 +17,7 @@ import {
   updateInvoiceRequest,
 } from '../lib/api'
 import type { Client, PersistedInvoice, PersistedInvoiceLine } from '../lib/types'
-import { currency } from '../lib/utils'
+import { currency, formatSentOn } from '../lib/utils'
 
 /**
  * The month run (I2): every client's stored invoice for a period, in INVOICE
@@ -55,29 +55,20 @@ function formatDue(due: string | null) {
   return `due ${new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(parsed)}`
 }
 
-/**
- * When an invoice was emailed: "Aug 9", or "Aug 9, 2025" once the year is no
- * longer the current one — the year is noise on this month's run and the whole
- * point on an invoice someone dug up from last year.
- */
-function formatSentOn(iso: string) {
-  const parsed = new Date(iso)
-  if (Number.isNaN(parsed.getTime())) return ''
-  const thisYear = parsed.getFullYear() === new Date().getFullYear()
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-    ...(thisYear ? {} : { year: 'numeric' }),
-  }).format(parsed)
-}
-
 export function InvoiceMonthRun({
   clients,
   onPrint,
+  refreshToken = 0,
 }: {
   clients: Client[]
   /** Hand a stored invoice up to the page, which owns the print document. */
   onPrint: (invoice: PersistedInvoice) => void
+  /**
+   * Bumped by the page when it changes an invoice outside this component — the
+   * per-client "Email invoice" button sends through the same rail, and the two
+   * sections must not disagree about whether something has been sent.
+   */
+  refreshToken?: number
 }) {
   const [period, setPeriod] = useState(currentPeriod)
   const [invoices, setInvoices] = useState<PersistedInvoice[]>([])
@@ -92,9 +83,10 @@ export function InvoiceMonthRun({
     [clients],
   )
 
-  // Load whenever the period changes. `cancelled` guards against a slow
-  // response for a month she has already navigated away from landing on top
-  // of the newer one — same shape as the Client Recap page.
+  // Load whenever the period changes, or the page tells us an invoice moved
+  // under us. `cancelled` guards against a slow response for a month she has
+  // already navigated away from landing on top of the newer one — same shape
+  // as the Client Recap page.
   useEffect(() => {
     let cancelled = false
     const load = async () => {
@@ -115,7 +107,7 @@ export function InvoiceMonthRun({
     return () => {
       cancelled = true
     }
-  }, [period])
+  }, [period, refreshToken])
 
   // Number order. A voided invoice keeps its number and its place, so the run
   // reads the same way before and after something is voided.
