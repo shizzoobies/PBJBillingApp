@@ -829,7 +829,12 @@ Clients page meanwhile. Owner-only.
 > through it), with counts above for To review / Reviewed / Need a look and the
 > month total. Rows flagged for a second look get an amber rule down the left.
 > Click any row to edit it: change a line's wording or amount, add or remove
-> lines, write the note to the client, then **Mark reviewed**. Reviewed can go
+> lines, write the note to the client, then **Print** it or **Mark reviewed**.
+> Print produces the SAME printed invoice the per-client view has always
+> produced — one format, not two — using the stored lines rather than
+> recalculating. Save your changes first; Print is disabled while there are
+> unsaved edits so you can never print something different from what is stored.
+> Reviewed can go
 > **Back to draft**. **Void** keeps the invoice on the record, struck through,
 > and frees that client to be generated again.
 >

@@ -7,6 +7,7 @@ import type {
   Client,
   Employee,
   Invoice,
+  PersistedInvoice,
   InvoiceLine,
   RecurringReimbursement,
   Reimbursement,
@@ -305,6 +306,45 @@ function buildDisplayInvoice(
   }
 }
 
+
+/**
+ * Adapt a STORED invoice into the shape the preview / print document already
+ * speaks, so a generated invoice prints through exactly the same renderer the
+ * live per-client view uses — one printed format, not two that drift.
+ *
+ * The time-breakdown flags are forced off: a stored invoice carries its lines,
+ * not the underlying entries, so there is no per-entry detail to expand and
+ * pretending otherwise would print an empty section.
+ */
+function persistedToDisplay(
+  stored: PersistedInvoice,
+  client: Client,
+  periodLabel: string,
+): DisplayInvoice {
+  const lines: DisplayLine[] = stored.lineItems.map((line) => ({
+    label: line.label,
+    detail: line.detail,
+    amount: line.amount,
+  }))
+  return {
+    invoice: {
+      client,
+      plan: null,
+      billableMinutes: 0,
+      entryCount: 0,
+      period: stored.period,
+      periodLabel,
+      lines,
+      total: stored.total,
+    },
+    lines,
+    groupSubtotals: [],
+    hideTimeBreakdown: true,
+    hideInternal: true,
+    groupByCategory: false,
+  }
+}
+
 export function InvoicesPage() {
   const {
     data,
@@ -371,9 +411,21 @@ export function InvoicesPage() {
     [customizing, draft, baseInvoice],
   )
 
+  // When set, the print document renders this STORED invoice instead of the
+  // live per-client calculation. Cleared by the live Print button so the two
+  // cannot print each other's content.
+  const [storedPrint, setStoredPrint] = useState<PersistedInvoice | null>(null)
+
+  const storedPrintDisplay = useMemo(() => {
+    if (!storedPrint) return null
+    const storedClient = data.clients.find((c) => c.id === storedPrint.clientId)
+    if (!storedClient) return null
+    return persistedToDisplay(storedPrint, storedClient, getBillingPeriodLabel(storedPrint.period))
+  }, [storedPrint, data.clients])
   if (!ownerMode || !selectedClient || !baseInvoice || !display) {
     return null
   }
+
 
   const effectiveDisplay = customizing && customDisplay ? customDisplay : display
   const customMeta: CustomMeta | null =
@@ -413,7 +465,14 @@ export function InvoicesPage() {
       {/* The month run (I1/I2): the STORED invoices for a period. The
           per-client section below is the older live-calculation view, kept
           for its preview and print until they are pointed at stored data. */}
-      <InvoiceMonthRun clients={data.clients} />
+      <InvoiceMonthRun
+        clients={data.clients}
+        onPrint={(stored) => {
+          setStoredPrint(stored)
+          // One tick so the document renders before the print dialog opens.
+          window.setTimeout(printInvoice, 60)
+        }}
+      />
       <section className="content-grid invoice-layout" id="invoices">
         <div className="panel">
           <div className="section-heading">
@@ -434,7 +493,14 @@ export function InvoicesPage() {
                 <Mail size={16} />
                 Email invoice
               </button>
-              <button className="primary-action" onClick={printInvoice} type="button">
+              <button
+                className="primary-action"
+                onClick={() => {
+                  setStoredPrint(null)
+                  printInvoice()
+                }}
+                type="button"
+              >
                 <Printer size={16} />
                 Print invoice
               </button>
@@ -495,7 +561,11 @@ export function InvoicesPage() {
       </section>
 
       <div className="print-document" aria-hidden="true">
-        <InvoiceDocument display={effectiveDisplay} custom={customMeta} />
+        {storedPrintDisplay ? (
+          <InvoiceDocument display={storedPrintDisplay} custom={null} />
+        ) : (
+          <InvoiceDocument display={effectiveDisplay} custom={customMeta} />
+        )}
       </div>
     </>
   )

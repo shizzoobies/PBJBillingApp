@@ -1,4 +1,4 @@
-import { AlertTriangle, Download, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { AlertTriangle, Download, Plus, Printer, RefreshCw, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   generateInvoicesRequest,
@@ -44,7 +44,14 @@ function formatDue(due: string | null) {
   return `due ${new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(parsed)}`
 }
 
-export function InvoiceMonthRun({ clients }: { clients: Client[] }) {
+export function InvoiceMonthRun({
+  clients,
+  onPrint,
+}: {
+  clients: Client[]
+  /** Hand a stored invoice up to the page, which owns the print document. */
+  onPrint: (invoice: PersistedInvoice) => void
+}) {
   const [period, setPeriod] = useState(currentPeriod)
   const [invoices, setInvoices] = useState<PersistedInvoice[]>([])
   const [loading, setLoading] = useState(false)
@@ -215,6 +222,7 @@ export function InvoiceMonthRun({ clients }: { clients: Client[] }) {
             busy={busy}
             onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
             onPatch={(body) => patch(invoice.id, body)}
+            onPrint={() => onPrint(invoice)}
           />
         ))}
       </ul>
@@ -229,6 +237,7 @@ function InvoiceRow({
   busy,
   onToggle,
   onPatch,
+  onPrint,
 }: {
   invoice: PersistedInvoice
   clientName: string
@@ -236,6 +245,7 @@ function InvoiceRow({
   busy: boolean
   onToggle: () => void
   onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PersistedInvoice | null>
+  onPrint: () => void
 }) {
   const isVoid = invoice.status === 'void'
   const flagged = invoice.scopeFlags.length > 0
@@ -288,6 +298,7 @@ function InvoiceRow({
           invoice={invoice}
           busy={busy}
           onPatch={onPatch}
+          onPrint={onPrint}
         />
       ) : null}
     </li>
@@ -303,10 +314,12 @@ function InvoiceEditor({
   invoice,
   busy,
   onPatch,
+  onPrint,
 }: {
   invoice: PersistedInvoice
   busy: boolean
   onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PersistedInvoice | null>
+  onPrint: () => void
 }) {
   const [lines, setLines] = useState<PersistedInvoiceLine[]>(invoice.lineItems)
   const [blurb, setBlurb] = useState(invoice.blurb)
@@ -415,6 +428,18 @@ function InvoiceEditor({
           {dirty ? ' · unsaved' : ''}
         </span>
         <div className="invoice-run-editor-actions">
+          {/* Prints through the SAME document the per-client view uses, so
+              there is one printed format rather than two that drift. */}
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={dirty}
+            title={dirty ? 'Save your changes first' : 'Print this invoice'}
+            onClick={onPrint}
+          >
+            <Printer size={15} />
+            Print
+          </button>
           <button type="button" className="secondary-action" disabled={busy || !dirty} onClick={save}>
             {saved && !dirty ? 'Saved' : 'Save changes'}
           </button>
