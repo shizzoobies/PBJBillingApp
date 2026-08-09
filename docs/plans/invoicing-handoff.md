@@ -33,9 +33,13 @@ call the part-1 pieces. Behavior worth knowing beyond the original spec:
 - Post-delivery bookkeeping failures return 200 with a console error — once
   the email is out, the response never claims "send failed".
 - The email log entry now records the `total` billed at send time.
-- Still Alex's job: set `INVOICE_EMAIL_FROM=billing@pbjsa.com` in Railway once
-  that mailbox is real; until then sends go from `EMAIL_FROM`
-  (notifications@pbjsa.com — probably not a monitored mailbox).
+- `INVOICE_EMAIL_FROM=billing@pbjsa.com` was set in Railway by Alex on
+  2026-08-09 and applied via redeploy — invoice sends come from billing@.
+- Recipient scoping confirmed by Alex 2026-08-09: one client per send is the
+  rule, and the code already guarantees it — `resolveInvoiceRecipients` only
+  ever returns THAT client's linked contacts + the client record address, so
+  two clients' emails can never share a To: line. Multiple addresses for the
+  SAME client going out together is intended.
 
 Commit `82a8441` added the three part-1 pieces. Original state of that commit,
 for history:
@@ -84,7 +88,7 @@ Already built and tested (20 unit tests, `lib/invoice-email.test.mjs`):
 | `RESEND_API_KEY` | set — **replaced 2026-08-09**; the previous key was domain-scoped and 403'd with a misleading "domain is not verified" |
 | `pbjsa.com` in Resend | verified. DKIM at the root, envelope SPF on `send.pbjsa.com`, root SPF untouched |
 | `EMAIL_FROM` | `PB&J Strategic Accounting <notifications@pbjsa.com>` — magic-link sign-in confirmed working |
-| `INVOICE_EMAIL_FROM` | **not set** — I4 falls back to `EMAIL_FROM` until it is |
+| `INVOICE_EMAIL_FROM` | `billing@pbjsa.com` — set 2026-08-09, applied via redeploy |
 
 **⚠️ UNPROVEN: the Stripe signing secret has never verified a genuinely
 Stripe-signed event.** Config is verified; the secret itself is not. Alex chose
