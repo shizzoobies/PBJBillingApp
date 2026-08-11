@@ -1196,6 +1196,14 @@ function InvoiceSettingsSectionBody({
         label="Group by category"
         onChange={(value) => onCommit({ invoiceGroupByCategory: value })}
       />
+      {/* Off for everyone until someone turns it on for one client. Bank
+          transfer stays the default and the no-fee channel either way. */}
+      <SaveToggleField
+        checked={client.cardPaymentsEnabled ?? false}
+        description="Also offer a card option in the emailed invoice. The client pays the card processing fee, so the firm still receives the invoice total in full."
+        label="Pay by card"
+        onChange={(value) => onCommit({ cardPaymentsEnabled: value })}
+      />
     </div>
   )
 }

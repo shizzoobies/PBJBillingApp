@@ -168,6 +168,12 @@ export type Client = {
   invoiceHideInternalHours?: boolean
   invoiceGroupByCategory?: boolean
   /**
+   * Offer this client a card option alongside bank transfer, with the client
+   * covering the processing fee. Off unless someone switched it on — bank
+   * transfer is the no-fee default for everyone.
+   */
+  cardPaymentsEnabled?: boolean
+  /**
    * Onboarding lifecycle stage (Proposal → Onboarding → Active). Optional —
    * absent is treated as 'active' (existing clients default to active and must
    * never silently become a prospect). See {@link LifecycleStage}.
@@ -252,7 +258,15 @@ export type NewClientInput = Omit<Client, 'id'> & {
 
 /** A line on a PERSISTED invoice. `kind` records what produced it. */
 export type PersistedInvoiceLine = {
-  kind: 'plan' | 'hourly' | 'reimbursement' | 'recurring' | 'adjustment' | 'custom'
+  /** `card-fee` is appended by the payment webhook when a client pays by card. */
+  kind:
+    | 'plan'
+    | 'hourly'
+    | 'reimbursement'
+    | 'recurring'
+    | 'adjustment'
+    | 'custom'
+    | 'card-fee'
   label: string
   detail: string
   amount: number

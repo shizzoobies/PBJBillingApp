@@ -69,3 +69,15 @@ export function recurringReimbursementAppliesToPeriod(
   period: string,
 ): boolean
 export function buildInvoiceLines(args: BuildInvoiceLinesArgs): BuildInvoiceLinesResult
+
+export const STRIPE_CARD_PERCENT: number
+export const STRIPE_CARD_FIXED: number
+export const CARD_PROCESSING_FEE_LABEL: string
+export function cardProcessingFee(total: number): number
+export function cardChargedTotal(total: number): number
+export function cardProcessingFeeLine(invoice: { total?: number }): {
+  kind: 'card-fee'
+  label: string
+  detail: string
+  amount: number
+}

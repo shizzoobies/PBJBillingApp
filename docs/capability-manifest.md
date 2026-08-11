@@ -948,6 +948,36 @@ Clients page meanwhile. Owner-only.
 > invoice sent — every attempt, including failures, is kept in a permanent
 > per-invoice email log along with the total that was billed at the time.
 >
+> **Pay by card — a per-client option, off by default.** On a client's **Billing**
+> tab (owner only) there is a **Pay by card** toggle. Every client is bank
+> transfer only until someone switches it on for that one client; **bank transfer
+> is the no-fee default for everyone and always stays available.**
+>
+> With it on, the emailed invoice keeps the **Pay by bank transfer** button and
+> adds a smaller card option underneath it: "Prefer to pay by card? Pay $103.30
+> (includes a $3.30 card processing fee — bank transfer has no fee)." The client
+> chooses. Both links are minted fresh on every send, and paying through one
+> **immediately kills the other**, so an invoice can never be paid twice.
+>
+> **The fee is calculated so the firm receives the invoice total exactly.** It is
+> not a flat percentage added on top — that would leave the firm short, because
+> the card processor takes its cut of the larger amount actually charged. The fee
+> is worked backwards from what the firm must net (2.9% + 30¢ on the charged
+> amount), rounded so it is never a penny under. On a $100.00 invoice the client
+> pays $103.30 and the firm receives $100.00.
+>
+> **Where the fee shows up.** Nowhere, unless the client actually pays by card.
+> The invoice, the month run and QuickBooks all show the ordinary total while it
+> is unpaid. When a card payment lands, a **Card processing fee** line is added to
+> that invoice and its total is recalculated, so History, the month run and the
+> Download-for-QBO export all show the money that actually arrived. A client who
+> pays by bank transfer is never charged a fee and no fee line ever appears.
+>
+> **The Payment link button stays bank transfer only**, even for a card-enabled
+> client. It hands back a bare URL to paste somewhere else, and the sentence
+> explaining the fee would not travel with it. Card is offered through **Send**,
+> where the email carries the explanation.
+>
 > **Email invoice can build the invoice first.** The per-client **Email
 > invoice** button sends the STORED invoice for the client and month on screen.
 > If that client has no live invoice for that month — none at all, or only

@@ -157,6 +157,12 @@ export function InvoiceMonthRun({
     [clients],
   )
 
+  /** Whether this invoice went out with a card option beside bank transfer. */
+  const cardEnabled = useCallback(
+    (clientId: string) => clients.find((c) => c.id === clientId)?.cardPaymentsEnabled ?? false,
+    [clients],
+  )
+
   /**
    * Move the run to another month — the ONE way the period changes, whether it
    * was the picker or History that asked.
@@ -595,6 +601,7 @@ export function InvoiceMonthRun({
                     key={invoice.id}
                     invoice={invoice}
                     clientName={clientName(invoice.clientId)}
+                    cardEnabled={cardEnabled(invoice.clientId)}
                     open={openId === invoice.id}
                     busy={busy}
                     onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
@@ -616,6 +623,7 @@ export function InvoiceMonthRun({
 function InvoiceRow({
   invoice,
   clientName,
+  cardEnabled,
   open,
   busy,
   onToggle,
@@ -626,6 +634,8 @@ function InvoiceRow({
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** This client is offered a card option, so its invoices go out with two ways to pay. */
+  cardEnabled: boolean
   open: boolean
   busy: boolean
   onToggle: () => void
@@ -664,6 +674,9 @@ function InvoiceRow({
             {adjustment
               ? ` · carries ${currency.format(adjustment.amount)} from last month`
               : ''}
+            {/* So she can tell at a glance which invoices went out with two ways
+                to pay, without opening each one. */}
+            {cardEnabled && !isVoid ? ' · card enabled' : ''}
           </span>
           {flagged && !isVoid ? (
             <span className="invoice-run-flags">

@@ -721,6 +721,9 @@ export function InvoicesPage() {
               <span>{billingPeriodLabel}</span>
               <span>{baseInvoice.entryCount} billable entries</span>
               <span>{formatHours(baseInvoice.billableMinutes)} tracked</span>
+              {/* Only for the clients who have it — the absence of this says
+                  "bank transfer only", which is everyone else. */}
+              {selectedClient.cardPaymentsEnabled ? <span>Card enabled</span> : null}
             </div>
             {customizing && draft ? (
               <InvoiceBuilder

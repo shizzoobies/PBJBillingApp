@@ -40,6 +40,7 @@ import {
   sendReportEmail,
 } from './lib/notify.js'
 import { buildInvoiceEmail, resolveInvoiceRecipients } from './lib/invoice-email.js'
+import { cardProcessingFeeLine } from './lib/invoice-lines.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
 import {
   listBlockingWeeks,
@@ -60,10 +61,12 @@ import {
 } from './lib/template-apply-permission.js'
 import { buildQboCsv } from './lib/qbo-export.js'
 import {
+  createInvoiceCardCheckoutSession,
   createInvoiceCheckoutSession,
   expireCheckoutSession,
   isStripeConfigured,
   isStripeWebhookConfigured,
+  resolveWebhookChannel,
   stripeClient,
   verifyStripeEvent,
 } from './lib/stripe-rail.js'
@@ -2349,21 +2352,46 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // Which channel paid, and which link that leaves stale. A card-enabled
+        // client holds two live sessions for one invoice and the two are treated
+        // differently — only the card one adds a fee line.
+        const { isCard: isCardChannel, siblingSessionId } = resolveWebhookChannel({
+          eventType: event.type,
+          object,
+          invoice,
+        })
+        // Appended by the store only if the invoice does not already carry one,
+        // so the two events a single card payment fires cannot add it twice.
+        const cardFeeLines = isCardChannel ? [cardProcessingFeeLine(invoice)] : []
+
         if (event.type === 'checkout.session.completed') {
           // ACH does not settle here — it clears in about 4 business days, so
-          // this is 'processing', not 'paid'.
+          // this is 'processing', not 'paid'. A card payment passes through the
+          // same state, just far more briefly.
           await appDataStore.applyInvoicePayment(invoice.id, {
             status: 'processing',
-            checkoutSessionId: object.id,
+            // The card session must NOT overwrite the ACH column: both ids are
+            // needed, and losing one means the sibling below can never be
+            // expired.
+            ...(isCardChannel
+              ? { cardCheckoutSessionId: object.id }
+              : { checkoutSessionId: object.id }),
             paymentIntentId:
               typeof object.payment_intent === 'string' ? object.payment_intent : undefined,
+            appendLines: cardFeeLines,
           })
+          // One of the two links has now been used. Retire the OTHER one: a
+          // client holding both emails could otherwise pay the same invoice
+          // twice, once per channel. Best effort — an already-expired or
+          // already-completed sibling is not a reason to fail the webhook.
+          if (siblingSessionId) await expireCheckoutSession(siblingSessionId)
         } else if (event.type === 'payment_intent.succeeded') {
           await appDataStore.applyInvoicePayment(invoice.id, {
             status: 'paid',
             paidAt: new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
             paymentIntentId: object.id,
             paymentMethod: object.payment_method_types?.[0] ?? 'us_bank_account',
+            appendLines: cardFeeLines,
           })
         } else if (event.type === 'payment_intent.payment_failed') {
           // Back to 'sent': it was invoiced and is still owed. Owners are told,
@@ -2396,6 +2424,14 @@ const server = createServer(async (request, response) => {
 
     // POST /api/invoices/:id/payment-link — create the ACH Checkout Session.
     // Owner-only. Does NOT email anything: that is I4.
+    //
+    // Deliberately ACH-ONLY, even for a client with card payments switched on.
+    // The card option is a promise made in words — "includes a $X card
+    // processing fee, bank transfer has no fee" — and this route hands back a
+    // bare URL to paste into some other message, where that sentence would not
+    // travel with it. A client pasted a card link would open Checkout showing a
+    // total that does not match their invoice, with nothing explaining why. Card
+    // is offered through Send, where the email carries the explanation.
     const invoicePaymentLinkMatch = normalizedPath.match(
       /^\/api\/invoices\/([^/]+)\/payment-link$/,
     )
@@ -2564,6 +2600,7 @@ const server = createServer(async (request, response) => {
       // re-sends go out as a statement.
       const settled = invoice.status === 'paid' || invoice.status === 'processing'
       let payUrl = ''
+      let cardPayUrl = ''
       if (isStripeConfigured() && invoice.total > 0 && !settled) {
         // Reuse the client's Stripe customer so a repeat payer is one customer
         // in Stripe rather than one per invoice.
@@ -2616,6 +2653,41 @@ const server = createServer(async (request, response) => {
         ) {
           await expireCheckoutSession(invoice.stripeCheckoutSessionId)
         }
+
+        // The SECOND session, for a client who has card payments switched on.
+        // Same rules as the ACH one above, one channel later: minted fresh every
+        // send, persisted before the old one is expired, and never minted at all
+        // for a settled invoice (the `settled` guard wraps both). It carries the
+        // grossed-up processing fee as an extra line so the firm nets the same
+        // amount either way.
+        if (sendClient.cardPaymentsEnabled) {
+          const cardResult = await createInvoiceCardCheckoutSession({
+            invoice,
+            client: sendClient,
+            customerId,
+            appUrl: getPublicAppUrl(request),
+          })
+          if (!cardResult.ok) {
+            // Stop rather than send. Nothing has left yet, and quietly dropping
+            // the card option from a client who was promised it is exactly the
+            // kind of silent downgrade the ACH branch above refuses to make.
+            sendJson(response, 502, {
+              error: 'stripe_session_failed',
+              message: cardResult.reason,
+            })
+            return
+          }
+          cardPayUrl = cardResult.session.url
+          await appDataStore.applyInvoicePayment(invoice.id, {
+            cardCheckoutSessionId: cardResult.session.id,
+          })
+          if (
+            invoice.stripeCardSessionId &&
+            invoice.stripeCardSessionId !== cardResult.session.id
+          ) {
+            await expireCheckoutSession(invoice.stripeCardSessionId)
+          }
+        }
       }
 
       // The firm's own name, so the client sees who is billing them rather than
@@ -2626,6 +2698,7 @@ const server = createServer(async (request, response) => {
         invoice,
         client: sendClient,
         payUrl,
+        cardPayUrl,
         firmName: firmSettings?.name || undefined,
       })
       const sendResult = await sendInvoiceEmail({

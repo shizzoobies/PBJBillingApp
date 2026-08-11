@@ -469,6 +469,11 @@ export function normalizeClientProfile(client) {
       typeof client.invoiceHideInternalHours === 'boolean' ? client.invoiceHideInternalHours : true,
     invoiceGroupByCategory:
       typeof client.invoiceGroupByCategory === 'boolean' ? client.invoiceGroupByCategory : false,
+    // Card payments are OFF unless a person switched them on. Bank transfer is
+    // the no-fee default for everyone, and a client who never agreed to cover a
+    // processing fee must never be offered one by accident.
+    cardPaymentsEnabled:
+      typeof client.cardPaymentsEnabled === 'boolean' ? client.cardPaymentsEnabled : false,
   }
 }
 
@@ -699,7 +704,17 @@ const EDITABLE_INVOICE_STATUSES = new Set(['draft', 'reviewed', 'void'])
 /** Statuses the PAYMENT side may set. A webhook can never edit lines or amounts. */
 const PAYMENT_INVOICE_STATUSES = new Set(['sent', 'processing', 'paid', 'overdue'])
 
-/** The line kinds an invoice may contain, including the ones only I2 adds. */
+/**
+ * The line kinds an invoice may contain, including the ones only I2 adds.
+ *
+ * `card-fee` is written by the payment webhook, not by a person: it is the
+ * grossed-up processing fee, appended to the stored lines when a client actually
+ * pays by card so the invoice of record shows the money that actually arrived.
+ * It is in this set because every line goes through `sanitizeInvoiceLines`, and
+ * a kind that is not listed here is rewritten to 'custom' — which would make the
+ * fee indistinguishable from a hand-typed line and break the guard that stops it
+ * being appended twice.
+ */
 const INVOICE_LINE_KINDS = new Set([
   'plan',
   'hourly',
@@ -707,6 +722,7 @@ const INVOICE_LINE_KINDS = new Set([
   'recurring',
   'adjustment',
   'custom',
+  'card-fee',
 ])
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
@@ -731,6 +747,26 @@ function sanitizeInvoiceLines(raw) {
 }
 
 /**
+ * Subtotal and total from a line list — the ONE server-side money recompute.
+ *
+ * Adjustment lines sit outside the subtotal: the subtotal is this month's work,
+ * the total is what is owed once last month's true-up is applied. Shared by the
+ * PATCH (which recomputes from whatever the page sent) and by the webhook path
+ * that appends a card processing fee, so a payment can never leave an invoice
+ * whose total disagrees with the lines printed next to it.
+ */
+function recomputeInvoiceMoney(lineItems) {
+  return {
+    subtotal: roundMoney(
+      lineItems
+        .filter((line) => line.kind !== 'adjustment')
+        .reduce((sum, line) => sum + line.amount, 0),
+    ),
+    total: roundMoney(lineItems.reduce((sum, line) => sum + line.amount, 0)),
+  }
+}
+
+/**
  * The column list every invoice read selects. It lives beside `mapInvoiceRow`
  * because the two are one contract: a column missing here is not an error, it
  * is `undefined` on the row, and the mapper turns that into a plausible empty
@@ -746,7 +782,8 @@ function sanitizeInvoiceLines(raw) {
  */
 export const INVOICE_SELECT_COLUMNS = `id, client_id, period, number, status, line_items, subtotal, total,
           due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
-          stripe_checkout_session_id, stripe_payment_intent_id, email_log,
+          stripe_checkout_session_id, stripe_card_session_id,
+          stripe_payment_intent_id, email_log,
           created_at, updated_at`
 
 /**
@@ -773,6 +810,10 @@ export function mapInvoiceRow(row) {
     paidAt: row.paid_at ? new Date(row.paid_at).toISOString() : null,
     paymentMethod: row.payment_method ?? null,
     stripeCheckoutSessionId: row.stripe_checkout_session_id ?? null,
+    // The CARD channel's sibling session, for a card-enabled client. Separate
+    // from the ACH column rather than replacing it: both are live at once, and
+    // whichever one is paid has to be able to expire the other.
+    stripeCardSessionId: row.stripe_card_session_id ?? null,
     stripePaymentIntentId: row.stripe_payment_intent_id ?? null,
     emailLog: Array.isArray(row.email_log) ? row.email_log : [],
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
@@ -2397,6 +2438,12 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists invoice_group_by_category boolean not null default false`,
       )
+      // Per-client card payments. Default FALSE deliberately: every existing
+      // client keeps bank transfer only, and card is something a person turns on
+      // for one client at a time after agreeing the client covers the fee.
+      await this.pool.query(
+        `alter table clients add column if not exists card_payments_enabled boolean not null default false`,
+      )
       await this.pool.query(
         `alter table clients add column if not exists assigned_bookkeeper_ids text[] not null default '{}'`,
       )
@@ -2979,6 +3026,7 @@ export class AppDataStore {
           sent_at timestamptz,
           paid_at timestamptz,
           stripe_checkout_session_id text,
+          stripe_card_session_id text,
           stripe_payment_intent_id text,
           payment_method text,
           email_log jsonb not null default '[]'::jsonb,
@@ -2986,6 +3034,12 @@ export class AppDataStore {
           updated_at timestamptz not null default now()
         )
       `)
+      // The table above already exists in production, so the card column needs
+      // its own additive migration — `create table if not exists` is a no-op
+      // there and would leave every deployed row without it.
+      await this.pool.query(
+        `alter table invoices add column if not exists stripe_card_session_id text`,
+      )
       // PARTIAL unique — one live invoice per client per month, but a VOIDED
       // one must not block re-generating. Same lesson as the checklist
       // materializer's instance index, applied from day one rather than after
@@ -3525,6 +3579,7 @@ export class AppDataStore {
                    city, state, postal_code, logo_url, payment_terms,
                    footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
                    invoice_hide_internal_hours, invoice_group_by_category,
+                   card_payments_enabled,
                    assigned_bookkeeper_ids, monthly_service_tier,
                    annual_rate, annual_billing_month, lifecycle_stage
             from clients
@@ -3844,6 +3899,7 @@ export class AppDataStore {
             invoiceShowTimeBreakdown: row.invoice_show_time_breakdown ?? true,
             invoiceHideInternalHours: row.invoice_hide_internal_hours ?? true,
             invoiceGroupByCategory: row.invoice_group_by_category ?? false,
+            cardPaymentsEnabled: row.card_payments_enabled ?? false,
             // Default 'active' when null so legacy/absent rows are never treated
             // as prospects.
             lifecycleStage: row.lifecycle_stage ?? 'active',
@@ -4272,7 +4328,8 @@ export class AppDataStore {
           await client.query(
             `select id, client_id, period, number, status, line_items, subtotal, total,
                     due_date, blurb, scope_flags, sent_at, paid_at,
-                    stripe_checkout_session_id, stripe_payment_intent_id, email_log, payment_method,
+                    stripe_checkout_session_id, stripe_card_session_id,
+                    stripe_payment_intent_id, payment_method,
                     email_log, created_at
                from invoices`,
           )
@@ -4416,9 +4473,10 @@ export class AppDataStore {
                 assigned_bookkeeper_ids,
                 estimated_bookkeeper_hours, estimated_accountant_hours,
                 estimated_cfo_hours, monthly_service_tier,
-                annual_rate, annual_billing_month, lifecycle_stage, updated_at
+                annual_rate, annual_billing_month, lifecycle_stage,
+                card_payments_enabled, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, now())
             `,
             [
               clientRecord.id,
@@ -4487,6 +4545,7 @@ export class AppDataStore {
                 ? null
                 : Number(clientRecord.annualBillingMonth),
               coerceLifecycleStage(clientRecord.lifecycleStage),
+              clientRecord.cardPaymentsEnabled ?? false,
             ],
           )
 
@@ -4521,10 +4580,11 @@ export class AppDataStore {
               insert into invoices (
                 id, client_id, period, number, status, line_items, subtotal, total,
                 due_date, blurb, scope_flags, sent_at, paid_at,
-                stripe_checkout_session_id, stripe_payment_intent_id, payment_method,
+                stripe_checkout_session_id, stripe_card_session_id,
+                stripe_payment_intent_id, payment_method,
                 email_log, created_at, updated_at
               )
-              values ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17::jsonb,$18, now())
+              values ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17,$18::jsonb,$19, now())
             `,
             [
               invoice.id,
@@ -4541,6 +4601,7 @@ export class AppDataStore {
               invoice.sent_at,
               invoice.paid_at,
               invoice.stripe_checkout_session_id,
+              invoice.stripe_card_session_id,
               invoice.stripe_payment_intent_id,
               invoice.payment_method,
               JSON.stringify(invoice.email_log ?? []),
@@ -6797,14 +6858,7 @@ export class AppDataStore {
     }
     if (EDITABLE_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
 
-    // Adjustment lines sit outside the subtotal — the subtotal is this month's
-    // work, the total is what is owed once last month's true-up is applied.
-    next.subtotal = roundMoney(
-      next.lineItems
-        .filter((line) => line.kind !== 'adjustment')
-        .reduce((sum, line) => sum + line.amount, 0),
-    )
-    next.total = roundMoney(next.lineItems.reduce((sum, line) => sum + line.amount, 0))
+    Object.assign(next, recomputeInvoiceMoney(next.lineItems))
     next.updatedAt = nowIso()
 
     if (this.pool) {
@@ -6889,7 +6943,17 @@ export class AppDataStore {
   /**
    * Apply a payment-side change to one invoice: the Stripe ids, the status, and
    * the paid stamp. Deliberately narrow — this is the only path a WEBHOOK can
-   * take into an invoice, so it cannot touch lines, amounts or the number.
+   * take into an invoice, so it cannot rewrite lines, amounts or the number.
+   *
+   * The ONE exception is `appendLines`, which exists for the card processing
+   * fee. When a client pays by card they are charged the invoice plus a fee, and
+   * the invoice of record has to show the money that actually arrived — History,
+   * the month run and the QBO export all read those lines. So the fee line is
+   * appended and the totals are recomputed by the SAME calculator the PATCH uses,
+   * in the same write that marks the payment. It can only ADD, never edit or
+   * remove, and a line kind already present is not appended again: Stripe sends
+   * both `checkout.session.completed` and `payment_intent.succeeded` for one card
+   * payment, and two fee lines for one fee would be an overcharge on the record.
    */
   async applyInvoicePayment(invoiceId, patch = {}) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
@@ -6908,29 +6972,55 @@ export class AppDataStore {
     if (typeof patch.checkoutSessionId === 'string') {
       next.stripeCheckoutSessionId = patch.checkoutSessionId
     }
+    if (typeof patch.cardCheckoutSessionId === 'string') {
+      next.stripeCardSessionId = patch.cardCheckoutSessionId
+    }
     if (typeof patch.paymentIntentId === 'string') {
       next.stripePaymentIntentId = patch.paymentIntentId
     }
     if (typeof patch.paymentMethod === 'string') next.paymentMethod = patch.paymentMethod
     if (patch.paidAt === null || typeof patch.paidAt === 'string') next.paidAt = patch.paidAt
     if (patch.sentAt === null || typeof patch.sentAt === 'string') next.sentAt = patch.sentAt
+
+    // Additive only, and only for a kind the invoice does not already carry.
+    const appended = sanitizeInvoiceLines(patch.appendLines).filter(
+      (line) => !(current.lineItems ?? []).some((existing) => existing.kind === line.kind),
+    )
+    const linesChanged = appended.length > 0
+    if (linesChanged) {
+      next.lineItems = [...(current.lineItems ?? []), ...appended]
+      Object.assign(next, recomputeInvoiceMoney(next.lineItems))
+    }
     next.updatedAt = nowIso()
 
     if (this.pool) {
+      // The money columns are only in the statement when a line was actually
+      // appended. Writing them on every payment event would turn this into a
+      // read-modify-write over the lines, and an edit made between the read
+      // above and this update would be silently reverted by a webhook.
+      const params = [
+        invoiceId,
+        next.status,
+        next.stripeCheckoutSessionId ?? null,
+        next.stripePaymentIntentId ?? null,
+        next.paymentMethod ?? null,
+        next.paidAt ?? null,
+        next.sentAt ?? null,
+        next.stripeCardSessionId ?? null,
+      ]
+      if (linesChanged) params.push(JSON.stringify(next.lineItems), next.subtotal, next.total)
       const { rowCount } = await this.pool.query(
         `update invoices
             set status = $2, stripe_checkout_session_id = $3, stripe_payment_intent_id = $4,
-                payment_method = $5, paid_at = $6, sent_at = $7, updated_at = now()
+                payment_method = $5, paid_at = $6, sent_at = $7,
+                stripe_card_session_id = $8${
+                  linesChanged
+                    ? ', line_items = $9::jsonb, subtotal = $10, total = $11'
+                    : ''
+                },
+                updated_at = now()
           where id = $1`,
-        [
-          invoiceId,
-          next.status,
-          next.stripeCheckoutSessionId ?? null,
-          next.stripePaymentIntentId ?? null,
-          next.paymentMethod ?? null,
-          next.paidAt ?? null,
-          next.sentAt ?? null,
-        ],
+        params,
       )
       if (rowCount === 0) return null
       return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
@@ -7025,14 +7115,22 @@ export class AppDataStore {
     return data.invoices[index]
   }
 
-  /** Find an invoice by the Stripe ids a webhook carries. */
+  /**
+   * Find an invoice by the Stripe ids a webhook carries.
+   *
+   * A card-enabled client's invoice has TWO live Checkout sessions, so a session
+   * id is matched against either column — the card session is just as valid a
+   * name for the invoice as the ACH one.
+   */
   async findInvoiceByStripeRef({ invoiceId, checkoutSessionId, paymentIntentId }) {
     const all = await this.listInvoices()
     return (
       all.find((invoice) => invoiceId && invoice.id === invoiceId) ??
       all.find(
         (invoice) =>
-          checkoutSessionId && invoice.stripeCheckoutSessionId === checkoutSessionId,
+          checkoutSessionId &&
+          (invoice.stripeCheckoutSessionId === checkoutSessionId ||
+            invoice.stripeCardSessionId === checkoutSessionId),
       ) ??
       all.find(
         (invoice) => paymentIntentId && invoice.stripePaymentIntentId === paymentIntentId,
@@ -7169,9 +7267,10 @@ export class AppDataStore {
              assigned_bookkeeper_ids,
              estimated_bookkeeper_hours, estimated_accountant_hours,
              estimated_cfo_hours, monthly_service_tier,
-             annual_rate, annual_billing_month, lifecycle_stage, updated_at
+             annual_rate, annual_billing_month, lifecycle_stage,
+             card_payments_enabled, updated_at
            )
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33, now())`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34, now())`,
           [
             record.id,
             record.name,
@@ -7213,6 +7312,7 @@ export class AppDataStore {
               ? Math.floor(annualBillingMonth)
               : null,
             record.lifecycleStage,
+            record.cardPaymentsEnabled ?? false,
           ],
         )
         // Same derivation the bulk save uses, so visibility works immediately

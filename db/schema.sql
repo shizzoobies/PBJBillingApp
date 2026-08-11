@@ -72,6 +72,9 @@ alter table clients add column if not exists invoice_show_time_breakdown boolean
 alter table clients add column if not exists invoice_hide_internal_hours boolean not null default true;
 alter table clients add column if not exists invoice_group_by_category boolean not null default false;
 alter table clients add column if not exists assigned_bookkeeper_ids text[] not null default '{}';
+-- Per-client card payments. Off by default: bank transfer is the no-fee channel
+-- everyone gets, card is opted into one client at a time.
+alter table clients add column if not exists card_payments_enabled boolean not null default false;
 
 create table if not exists client_assignments (
   client_id text not null references clients(id) on delete cascade,

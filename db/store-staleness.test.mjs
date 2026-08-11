@@ -981,7 +981,8 @@ const existingInvoice = {
   scope_flags: [],
   sent_at: new Date('2026-09-01T12:00:00.000Z'),
   paid_at: null,
-  stripe_checkout_session_id: null,
+  stripe_checkout_session_id: 'cs_ach_1',
+  stripe_card_session_id: 'cs_card_1',
   stripe_payment_intent_id: null,
   payment_method: null,
   email_log: [],
@@ -1054,6 +1055,196 @@ describe('bulk save preserves invoices (postgres branch)', () => {
 
     expect(fake.matching(/^insert into invoices/i)).toHaveLength(0)
   })
+
+  /**
+   * The card session id is the newest column on this table, and a column added
+   * to the restore's INSERT but not to its snapshot SELECT (or the other way
+   * round) loses the id silently. Losing it means the card link a client is
+   * holding can never be expired when they pay by bank transfer — two live ways
+   * to pay one invoice, which is the exact thing the sibling expiry prevents.
+   */
+  it('carries both channels’ session ids through the wipe', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).write(workspace())
+
+    const snapshot = fake.matching(/^select[\s\S]*from invoices$/i)[0]
+    expect(snapshot.text).toMatch(/stripe_card_session_id/)
+
+    const restore = fake.matching(/^insert into invoices/i)[0]
+    expect(restore.text).toMatch(/stripe_card_session_id/)
+    expect(restore.params).toContain('cs_ach_1')
+    expect(restore.params).toContain('cs_card_1')
+  })
+})
+
+/**
+ * `applyInvoicePayment` — the ONE path a webhook can take into an invoice.
+ *
+ * It was deliberately unable to touch money at all. The card fee forces one
+ * exception: a client who pays by card is charged the invoice plus a fee, and
+ * the invoice of record has to show what actually arrived or History, the month
+ * run and the QBO export all disagree with the bank. The rules that make that
+ * exception safe are what this pins — it can only ADD, it recomputes the totals
+ * itself rather than trusting a caller, and it cannot add the same fee twice.
+ *
+ * File backend; the Postgres statement shapes are pinned separately below.
+ */
+describe('applyInvoicePayment and the card fee (file backend)', () => {
+  const feeLine = {
+    kind: 'card-fee',
+    label: 'Card processing fee',
+    detail: 'Paid by card',
+    amount: 3.3,
+  }
+
+  async function seedInvoice(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-card',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-001',
+        status: 'sent',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-05T00:00:00.000Z',
+        paidAt: null,
+        paymentMethod: null,
+        stripeCheckoutSessionId: 'cs_ach',
+        stripeCardSessionId: 'cs_card',
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('appends the fee and recomputes the total when a card payment lands', async () => {
+    await seedInvoice()
+
+    const updated = await store.applyInvoicePayment('inv-card', {
+      status: 'paid',
+      paymentMethod: 'card',
+      paidAt: '2026-08-20T00:00:00.000Z',
+      appendLines: [feeLine],
+    })
+
+    expect(updated.lineItems).toHaveLength(2)
+    expect(updated.lineItems[1]).toMatchObject({ kind: 'card-fee', amount: 3.3 })
+    // Recomputed from the lines, not handed in by the caller.
+    expect(updated.total).toBe(103.3)
+    expect(updated.subtotal).toBe(103.3)
+    expect(updated.status).toBe('paid')
+  })
+
+  // One card payment fires both `checkout.session.completed` and
+  // `payment_intent.succeeded`. Two fee lines would be an overcharge on the record.
+  it('does not append a second fee when the second event arrives', async () => {
+    await seedInvoice()
+    await store.applyInvoicePayment('inv-card', { status: 'processing', appendLines: [feeLine] })
+    const updated = await store.applyInvoicePayment('inv-card', {
+      status: 'paid',
+      appendLines: [feeLine],
+    })
+
+    expect(updated.lineItems.filter((line) => line.kind === 'card-fee')).toHaveLength(1)
+    expect(updated.total).toBe(103.3)
+  })
+
+  it('leaves an ACH payment’s lines and totals exactly as they were', async () => {
+    await seedInvoice()
+
+    const updated = await store.applyInvoicePayment('inv-card', {
+      status: 'processing',
+      checkoutSessionId: 'cs_ach',
+      paymentIntentId: 'pi_1',
+    })
+
+    expect(updated.lineItems).toHaveLength(1)
+    expect(updated.total).toBe(100)
+    expect(updated.subtotal).toBe(100)
+  })
+
+  it('records the card session without disturbing the ACH one', async () => {
+    await seedInvoice({ stripeCardSessionId: null })
+
+    const updated = await store.applyInvoicePayment('inv-card', {
+      cardCheckoutSessionId: 'cs_card_new',
+    })
+
+    expect(updated.stripeCardSessionId).toBe('cs_card_new')
+    expect(updated.stripeCheckoutSessionId).toBe('cs_ach')
+  })
+
+  // The narrow-by-design rule still holds: this is not a way to edit an invoice.
+  it('refuses to append anything to a voided invoice', async () => {
+    await seedInvoice({ status: 'void' })
+
+    const result = await store.applyInvoicePayment('inv-card', {
+      status: 'paid',
+      appendLines: [feeLine],
+    })
+
+    expect(result).toBeNull()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const stored = data.invoices.find((entry) => entry.id === 'inv-card')
+    expect(stored.status).toBe('void')
+    expect(stored.lineItems).toHaveLength(1)
+    expect(stored.total).toBe(100)
+  })
+})
+
+/**
+ * The same contract's POSTGRES statement shapes — the branch production runs.
+ *
+ * The one worth naming: the money columns must be ABSENT from the update unless
+ * a line was actually appended. Writing them on every payment event would turn
+ * this into a read-modify-write over the lines, and an edit made between the
+ * read and the update would be silently reverted by a webhook.
+ */
+describe('applyInvoicePayment statement shape (postgres branch)', () => {
+  const row = {
+    ...existingInvoice,
+    id: 'inv-1',
+    status: 'sent',
+    line_items: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+    subtotal: '100.00',
+    total: '100.00',
+  }
+
+  it('leaves line_items out of the update when nothing was appended', async () => {
+    const fake = fakePostgres({ invoices: [row] })
+    await postgresStore(fake).applyInvoicePayment('inv-1', {
+      status: 'processing',
+      checkoutSessionId: 'cs_ach_1',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).not.toMatch(/line_items/)
+    expect(update.text).toMatch(/stripe_card_session_id/)
+  })
+
+  it('writes the recomputed lines and totals when a fee was appended', async () => {
+    const fake = fakePostgres({ invoices: [row] })
+    await postgresStore(fake).applyInvoicePayment('inv-1', {
+      status: 'paid',
+      appendLines: [{ kind: 'card-fee', label: 'Card processing fee', detail: '', amount: 3.3 }],
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).toMatch(/line_items = \$9::jsonb/)
+    expect(update.text).toMatch(/subtotal = \$10/)
+    expect(update.text).toMatch(/total = \$11/)
+    expect(JSON.parse(update.params[8])).toHaveLength(2)
+    expect(update.params[9]).toBe(103.3)
+    expect(update.params[10]).toBe(103.3)
+  })
 })
 
 /**
@@ -1091,6 +1282,7 @@ describe('createClient keeps every field the Add-client form sends (file backend
     invoiceShowTimeBreakdown: false,
     invoiceHideInternalHours: false,
     invoiceGroupByCategory: true,
+    cardPaymentsEnabled: true,
     lifecycleStage: 'proposal',
     assignedEmployeeIds: ['emp-1'],
   }
@@ -1116,6 +1308,9 @@ describe('createClient keeps every field the Add-client form sends (file backend
     expect(stored.invoiceShowTimeBreakdown).toBe(false)
     expect(stored.invoiceHideInternalHours).toBe(false)
     expect(stored.invoiceGroupByCategory).toBe(true)
+    // Same rule for the card toggle: chosen-true must not read back as the
+    // default false, or a client would silently lose the option she gave them.
+    expect(stored.cardPaymentsEnabled).toBe(true)
   })
 
   it('keeps the team selection, which is what drives client visibility', async () => {
@@ -1161,6 +1356,7 @@ describe('createClient writes every form field to Postgres', () => {
     invoiceShowTimeBreakdown: false,
     invoiceHideInternalHours: false,
     invoiceGroupByCategory: true,
+    cardPaymentsEnabled: true,
     lifecycleStage: 'proposal',
     assignedEmployeeIds: ['emp-1'],
   }
@@ -1203,6 +1399,7 @@ describe('createClient writes every form field to Postgres', () => {
       invoice_show_time_breakdown: false,
       invoice_hide_internal_hours: false,
       invoice_group_by_category: true,
+      card_payments_enabled: true,
       lifecycle_stage: 'proposal',
     })
   })
