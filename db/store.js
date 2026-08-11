@@ -767,6 +767,29 @@ function recomputeInvoiceMoney(lineItems) {
 }
 
 /**
+ * Tag an invoice returned by `applyInvoicePayment` with whether that write
+ * actually MOVED its status.
+ *
+ * The webhook emails the client on a transition — an acknowledgment when a bank
+ * payment starts, a receipt when it lands — and "the status is now paid" is not
+ * the same fact as "the status just became paid". Stripe replays events, and a
+ * replay that changes nothing must email nothing.
+ *
+ * Non-enumerable on purpose: this is a fact about the WRITE, not a column, and
+ * it must never ride along into `JSON.stringify` and out of the API as though
+ * it were part of the invoice.
+ */
+function withStatusChanged(invoice, statusChanged) {
+  if (!invoice) return invoice
+  Object.defineProperty(invoice, 'statusChanged', {
+    value: Boolean(statusChanged),
+    enumerable: false,
+    configurable: true,
+  })
+  return invoice
+}
+
+/**
  * The column list every invoice read selects. It lives beside `mapInvoiceRow`
  * because the two are one contract: a column missing here is not an error, it
  * is `undefined` on the row, and the mapper turns that into a plausible empty
@@ -6969,6 +6992,9 @@ export class AppDataStore {
 
     const next = { ...current }
     if (PAYMENT_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
+    // Surfaced to the caller (never persisted) so the webhook can tell a real
+    // transition from a replay before it emails the client about it.
+    const statusChanged = next.status !== current.status
     if (typeof patch.checkoutSessionId === 'string') {
       next.stripeCheckoutSessionId = patch.checkoutSessionId
     }
@@ -7023,7 +7049,10 @@ export class AppDataStore {
         params,
       )
       if (rowCount === 0) return null
-      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+      return withStatusChanged(
+        (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null,
+        statusChanged,
+      )
     }
 
     const data = await readJson(localDataPath)
@@ -7032,19 +7061,30 @@ export class AppDataStore {
     if (index === -1) return null
     data.invoices[index] = next
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return next
+    return withStatusChanged(next, statusChanged)
   }
 
 
   /**
-   * Record that an invoice was emailed, and mark it sent.
+   * Record that an email about an invoice went out, and — for the invoice
+   * itself — mark it sent.
    *
    * The log is append-only and keeps every send, including re-sends — "did she
    * actually send this, and when" is a question that comes up months later when
    * a client says they never got it. `sentAt` keeps the FIRST send, because
    * that is the date the clock started for payment terms.
+   *
+   * `kind` tags the payment-side emails the Stripe webhook sends the client:
+   * `'ack'` when a bank payment starts, `'receipt'` when it completes. Those
+   * are records of a PAYMENT, not of the invoice going out, so they are logged
+   * without touching `sentAt` or the status — an untouched `kind` (every entry
+   * written before this existed, and every real invoice send) keeps the
+   * original behavior exactly.
    */
-  async recordInvoiceSent(invoiceId, { to = [], subject = '', ok = true, error = null }) {
+  async recordInvoiceSent(
+    invoiceId,
+    { to = [], subject = '', ok = true, error = null, kind = null } = {},
+  ) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
     // A void invoice is not a thing that can be sent. The send route already
@@ -7068,8 +7108,13 @@ export class AppDataStore {
       // edited after a send, so without this the log records that an email left
       // but not what the client was asked to pay.
       total: Number(current.total) || 0,
+      ...(kind ? { kind: String(kind) } : {}),
       ...(error ? { error: String(error).slice(0, 300) } : {}),
     }
+    // Only the invoice going out marks the invoice sent. A payment receipt is
+    // logged on the same append-only trail but must not restart the payment
+    // clock or rewrite a status the webhook just set.
+    const marksSent = Boolean(ok) && !kind
     if (this.pool) {
       // The entry is APPENDED server-side, deliberately: `current` above is a
       // read, and building `[...current.emailLog, entry]` in JS means the log
@@ -7090,7 +7135,7 @@ export class AppDataStore {
                               then 'sent' else status end,
                 updated_at = now()
           where id = $1`,
-        [invoiceId, JSON.stringify([entry]), ok, entry.at],
+        [invoiceId, JSON.stringify([entry]), marksSent, entry.at],
       )
       if (rowCount === 0) return null
       return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
@@ -7100,9 +7145,10 @@ export class AppDataStore {
     // file, so appending here cannot drop entries the way the Postgres
     // read-modify-write did — the branch above concatenates in SQL on purpose.
     const emailLog = [...(current.emailLog ?? []), entry]
-    // A failed attempt is logged but must NOT claim the invoice was sent.
-    const sentAt = ok ? (current.sentAt ?? entry.at) : current.sentAt
-    const status = ok && current.status !== 'paid' && current.status !== 'processing'
+    // A failed attempt — and a payment-side email of any kind — is logged but
+    // must NOT claim the invoice was sent.
+    const sentAt = marksSent ? (current.sentAt ?? entry.at) : current.sentAt
+    const status = marksSent && current.status !== 'paid' && current.status !== 'processing'
       ? 'sent'
       : current.status
 

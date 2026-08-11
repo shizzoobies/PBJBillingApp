@@ -39,7 +39,13 @@ import {
   sendLoginLinkEmail,
   sendReportEmail,
 } from './lib/notify.js'
-import { buildInvoiceEmail, resolveInvoiceRecipients } from './lib/invoice-email.js'
+import {
+  buildInvoiceEmail,
+  paymentEmailKindFor,
+  resolveInvoiceRecipients,
+  sendInvoicePaymentEmail,
+} from './lib/invoice-email.js'
+import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
 import { cardProcessingFeeLine } from './lib/invoice-lines.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
 import {
@@ -2335,6 +2341,14 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // The invoice AS IT NOW STANDS, once the payment has been applied, plus
+      // which channel paid it. Both are read after the try below, by the
+      // client-email step — which is deliberately outside it, because an email
+      // problem must never turn a payment we have already recorded into a 500
+      // that makes Stripe replay it.
+      let settledInvoice = null
+      let settledByCard = false
+
       try {
         const object = event.data?.object ?? {}
         const metaInvoiceId = object.metadata?.invoiceId ?? null
@@ -2363,12 +2377,13 @@ const server = createServer(async (request, response) => {
         // Appended by the store only if the invoice does not already carry one,
         // so the two events a single card payment fires cannot add it twice.
         const cardFeeLines = isCardChannel ? [cardProcessingFeeLine(invoice)] : []
+        settledByCard = isCardChannel
 
         if (event.type === 'checkout.session.completed') {
           // ACH does not settle here — it clears in about 4 business days, so
           // this is 'processing', not 'paid'. A card payment passes through the
           // same state, just far more briefly.
-          await appDataStore.applyInvoicePayment(invoice.id, {
+          settledInvoice = await appDataStore.applyInvoicePayment(invoice.id, {
             status: 'processing',
             // The card session must NOT overwrite the ACH column: both ids are
             // needed, and losing one means the sibling below can never be
@@ -2386,7 +2401,7 @@ const server = createServer(async (request, response) => {
           // already-completed sibling is not a reason to fail the webhook.
           if (siblingSessionId) await expireCheckoutSession(siblingSessionId)
         } else if (event.type === 'payment_intent.succeeded') {
-          await appDataStore.applyInvoicePayment(invoice.id, {
+          settledInvoice = await appDataStore.applyInvoicePayment(invoice.id, {
             status: 'paid',
             paidAt: new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
             paymentIntentId: object.id,
@@ -2416,6 +2431,53 @@ const server = createServer(async (request, response) => {
         console.error('[stripe] webhook handling failed:', error)
         sendJson(response, 500, { error: 'webhook_failed' })
         return
+      }
+
+      // Tell the CLIENT their money arrived: an acknowledgment when a bank
+      // payment is authorized, a receipt — with the PAID invoice attached —
+      // when it settles. Card settles at once, so it gets the receipt only.
+      //
+      // Everything here is best-effort. The payment is already recorded; a mail
+      // provider having a bad afternoon is not a reason to make Stripe replay
+      // the event, so this cannot fail the webhook.
+      if (
+        settledInvoice &&
+        settledInvoice.statusChanged &&
+        paymentEmailKindFor(settledInvoice.status, { isCard: settledByCard })
+      ) {
+        try {
+          const paidData = await appDataStore.read()
+          const paidClient = (paidData.clients ?? []).find(
+            (entry) => entry.id === settledInvoice.clientId,
+          )
+          if (paidClient) {
+            const paidFirmSettings = await appDataStore.getFirmSettings().catch(() => null)
+            await sendInvoicePaymentEmail({
+              invoice: settledInvoice,
+              client: paidClient,
+              contacts: paidData.contacts ?? [],
+              firmName: paidFirmSettings?.name || undefined,
+              statusChanged: settledInvoice.statusChanged,
+              isCard: settledByCard,
+              // Rebuilt AFTER the payment landed, so it carries the PAID stamp
+              // and — for a card payment — the fee line the store just appended.
+              buildPdf: async () => [
+                {
+                  filename: invoicePdfFilename(settledInvoice),
+                  content: await buildInvoicePdf({
+                    invoice: settledInvoice,
+                    client: paidClient,
+                    firmSettings: paidFirmSettings,
+                  }),
+                },
+              ],
+              sendEmail: sendInvoiceEmail,
+              recordSent: (id, entry) => appDataStore.recordInvoiceSent(id, entry),
+            })
+          }
+        } catch (error) {
+          console.error('[stripe] payment email failed after the payment landed:', error)
+        }
       }
 
       sendJson(response, 200, { received: true })
@@ -2701,11 +2763,28 @@ const server = createServer(async (request, response) => {
         cardPayUrl,
         firmName: firmSettings?.name || undefined,
       })
+      // The invoice as a document, built from the invoice as it stands right
+      // now. Best-effort on purpose: the email is the payment vehicle and the
+      // PDF is a nicety, so a rendering failure sends the email without it
+      // rather than holding back the thing the client is waiting for.
+      let sendAttachments = []
+      try {
+        const pdf = await buildInvoicePdf({
+          invoice,
+          client: sendClient,
+          firmSettings,
+        })
+        sendAttachments = [{ filename: invoicePdfFilename(invoice), content: pdf }]
+      } catch (error) {
+        console.error('[invoice] PDF attachment failed, sending without it:', error?.message || error)
+      }
+
       const sendResult = await sendInvoiceEmail({
         to: recipients.to,
         subject: email.subject,
         html: email.html,
         text: email.text,
+        attachments: sendAttachments,
       })
 
       if (!sendResult.ok) {

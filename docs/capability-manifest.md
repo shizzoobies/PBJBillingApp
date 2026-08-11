@@ -948,6 +948,36 @@ Clients page meanwhile. Owner-only.
 > invoice sent — every attempt, including failures, is kept in a permanent
 > per-invoice email log along with the total that was billed at the time.
 >
+> **Every invoice email carries a PDF of the invoice.** The attachment is named
+> after the invoice number (`INV-2026-08-001.pdf`) and is built from the invoice
+> as it stands at that moment, so an edit made before sending is in the file the
+> client receives. It holds the same content as the printed invoice: the firm's
+> logo and details, the invoice number, the month, the issue and due dates, who
+> it bills, every line with its detail and amount, the subtotal and total,
+> payment terms, the note to the client and the footer note. If the PDF cannot
+> be built for any reason the email still goes out — without the attachment,
+> never held back.
+>
+> **After the client pays, the client hears from us.** Nobody had to do anything
+> for this and nothing is queued for Brittany to send.
+>
+> - **Bank transfer, when the payment starts:** an acknowledgment — "Payment
+>   received… your receipt will follow when the transfer completes, typically a
+>   few business days from now" — with the amount and the invoice number, and no
+>   attachment, because the money has not landed yet.
+> - **When the payment completes (either channel):** a receipt with the amount,
+>   the method, the date and the invoice number — and the invoice **PDF stamped
+>   PAID** attached, rebuilt after the payment so the stamp names the date and
+>   channel, and so a card-paid invoice's fee line is in the attachment.
+> - **Card payments go straight to paid**, so a card client gets the receipt
+>   only, never the acknowledgment.
+>
+> Both go to exactly the same addresses the invoice went to. Each is sent **once
+> per invoice** — a repeated notice from the payment processor cannot produce a
+> second thank-you — and each is recorded in that invoice's email log alongside
+> the sends. If one of these emails fails, the payment is still recorded
+> correctly; only the notice is lost.
+>
 > **Pay by card — a per-client option, off by default.** On a client's **Billing**
 > tab (owner only) there is a **Pay by card** toggle. Every client is bank
 > transfer only until someone switches it on for that one client; **bank transfer

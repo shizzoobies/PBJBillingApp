@@ -1182,6 +1182,36 @@ describe('applyInvoicePayment and the card fee (file backend)', () => {
     expect(updated.stripeCheckoutSessionId).toBe('cs_ach')
   })
 
+  /**
+   * `statusChanged` — the fact the webhook's client emails turn on.
+   *
+   * "The invoice is now paid" and "the invoice just became paid" are different
+   * statements, and only the second one earns a receipt. Stripe replays events,
+   * so without this a client can be thanked twice for one payment.
+   */
+  it('reports that the status moved', async () => {
+    await seedInvoice()
+    const updated = await store.applyInvoicePayment('inv-card', { status: 'processing' })
+    expect(updated.statusChanged).toBe(true)
+  })
+
+  it('reports that a replay of the same status moved nothing', async () => {
+    await seedInvoice({ status: 'processing' })
+    const updated = await store.applyInvoicePayment('inv-card', { status: 'processing' })
+    expect(updated.statusChanged).toBe(false)
+  })
+
+  // It is a fact about the WRITE, not a column. It must never reach the API as
+  // though it were part of the invoice, nor land in the stored record.
+  it('keeps statusChanged out of the JSON and off the stored row', async () => {
+    await seedInvoice()
+    const updated = await store.applyInvoicePayment('inv-card', { status: 'processing' })
+
+    expect(JSON.parse(JSON.stringify(updated))).not.toHaveProperty('statusChanged')
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.invoices[0]).not.toHaveProperty('statusChanged')
+  })
+
   // The narrow-by-design rule still holds: this is not a way to edit an invoice.
   it('refuses to append anything to a voided invoice', async () => {
     await seedInvoice({ status: 'void' })
@@ -1244,6 +1274,12 @@ describe('applyInvoicePayment statement shape (postgres branch)', () => {
     expect(JSON.parse(update.params[8])).toHaveLength(2)
     expect(update.params[9]).toBe(103.3)
     expect(update.params[10]).toBe(103.3)
+  })
+
+  it('surfaces the transition on this branch too', async () => {
+    const fake = fakePostgres({ invoices: [row] })
+    const updated = await postgresStore(fake).applyInvoicePayment('inv-1', { status: 'paid' })
+    expect(updated.statusChanged).toBe(true)
   })
 })
 
@@ -1951,6 +1987,90 @@ describe('recordInvoiceSent (file backend)', () => {
     const data = JSON.parse(await readFile(localDataPath, 'utf8'))
     const stored = data.invoices.find((entry) => entry.id === 'inv-1')
     expect(stored.emailLog[0].total).toBe(400)
+  })
+
+  /**
+   * The payment-side emails ride the SAME append-only log, tagged with a
+   * `kind`. That tag is what stops a webhook retry sending a second receipt —
+   * and what stops a receipt being mistaken for the invoice going out.
+   */
+  it('tags a payment email and leaves sentAt and the status alone', async () => {
+    await seed({ status: 'processing', sentAt: '2026-08-09T12:00:00.000Z' })
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Receipt for invoice 1042',
+      ok: true,
+      kind: 'receipt',
+    })
+
+    expect(updated.emailLog[0].kind).toBe('receipt')
+    expect(updated.emailLog[0].ok).toBe(true)
+    expect(updated.status).toBe('processing')
+    expect(updated.sentAt).toBe('2026-08-09T12:00:00.000Z')
+  })
+
+  // A receipt must never be the thing that starts the payment clock.
+  it('does not stamp sentAt on an invoice that never actually went out', async () => {
+    await seed()
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Payment received',
+      ok: true,
+      kind: 'ack',
+    })
+
+    expect(updated.emailLog).toHaveLength(1)
+    expect(updated.sentAt).toBeNull()
+    expect(updated.status).toBe('reviewed')
+  })
+
+  it('leaves an ordinary invoice send untagged, exactly as before', async () => {
+    await seed()
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1042',
+      ok: true,
+    })
+
+    expect(updated.emailLog[0]).not.toHaveProperty('kind')
+    expect(updated.status).toBe('sent')
+  })
+})
+
+/**
+ * The Postgres statement behind the same contract. No NEW shape: the payment
+ * emails reuse the existing `email_log` append verbatim, and the only thing
+ * that changes is the boolean deciding whether this entry marks the invoice
+ * sent — false for anything with a kind.
+ */
+describe('recordInvoiceSent statement shape (postgres branch)', () => {
+  it('reuses the email_log append and refuses to call a receipt a send', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice, status: 'processing' }] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Receipt for invoice INV-2026-08-001',
+      ok: true,
+      kind: 'receipt',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    expect(JSON.parse(update.params[1])[0]).toMatchObject({ kind: 'receipt', ok: true })
+    // $3 is "this marks the invoice sent" — false for a payment email.
+    expect(update.params[2]).toBe(false)
+  })
+
+  it('still marks a real invoice send as sent', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.params[2]).toBe(true)
+    expect(JSON.parse(update.params[1])[0]).not.toHaveProperty('kind')
   })
 })
 
