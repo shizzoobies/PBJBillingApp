@@ -56,26 +56,16 @@ Already built and tested (20 unit tests, `lib/invoice-email.test.mjs`):
   back to `EMAIL_FROM`; returns the provider's own error text rather than a
   generic message.
 
-### The remaining work, in order
+### The remaining work — DONE (2026-08-09/10)
 
-1. **`POST /api/invoices/:id/send`** in `server.js`. Owner-only, `isCrossSiteOrigin`
-   guard, `application/json` guard — copy the shape of the neighbouring
-   `/payment-link` route. It should:
-   - refuse a `void` invoice (409)
-   - `resolveInvoiceRecipients()`; if `to` is empty return 409 **with the
-     `reason` string** so the page can say what is missing
-   - create a **fresh** Checkout session (hosted Checkout URLs expire, roughly
-     24h — do not reuse `stripeCheckoutSessionId` from an earlier send)
-   - `buildInvoiceEmail()` → `sendInvoiceEmail()` → `recordInvoiceSent()`
-   - return the updated invoice
-   - if Stripe is unconfigured, still allow sending WITHOUT a pay link — the
-     email is built to stand alone, and `payUrl` is optional by design
-2. **Send button** in `src/components/InvoiceMonthRun.tsx`, next to
-   "Payment link" in the editor footer. Show the last send from `emailLog`
-   ("Sent to ann@acme.com on Aug 9") and label the repeat action "Send again".
-3. **Set `INVOICE_EMAIL_FROM`** in Railway to `billing@pbjsa.com` (Alex's job —
-   see the mailbox warning below).
-4. `docs/capability-manifest.md`, then re-provision the voice agent.
+Everything below shipped; kept for history. The send endpoint + Send button
+(`08b77d8`), `INVOICE_EMAIL_FROM` set, manifest + voice agent updated. Then
+beyond the original list, same session: the per-client Email invoice button
+sends for real (`517a620`), Void & regenerate + single-client generate
+(`07235b8`), the tabbed month run (`3362519`), and the History archive
+(`a9461d8`). See `docs/HANDOFF.md` §5's 2026-08-09/10 entry for the full
+table, the settled facts, and the open decisions (card / payment-received
+notification / Customize-in-email).
 
 ## Environment — what is set and what is proven
 
@@ -164,8 +154,8 @@ before I4 sends anything.
 
 ## Verify before every push
 
-`npm run verify` (eslint + `tsc -b && vite build` + vitest). Currently **975
-tests / 73 files**. Then push to `main` → poll Railway until SUCCESS **on your
+`npm run verify` (eslint + `tsc -b && vite build` + vitest). Currently **1021
+tests / 78 files**. Then push to `main` → poll Railway until SUCCESS **on your
 commit's hash** → `/health` 200 → update the manifest for user-visible changes
 → `node scripts/provision-voice-agent.mjs`.
 
@@ -177,9 +167,18 @@ lib/invoice-draft.js      due dates, numbering, adjustments, scope flags
 lib/invoice-email.js      I4 — subject/HTML/text + recipient resolution
 lib/qbo-export.js         Download-for-QBO CSV
 lib/stripe-rail.js        Checkout session, signature verification
-db/store.js               invoices table, generate/list/update, webhook writes
-server.js                 /api/invoices*, /api/stripe/webhook
-src/components/InvoiceMonthRun.tsx   the monthly run + editor
-src/pages/InvoicesPage.tsx           older per-client view (preview + print)
+db/store.js               invoices table, generate/list/update, webhook writes,
+                          recordInvoiceSent / applyInvoicePayment (both REFUSE
+                          voided invoices), voidUnsentInvoicesForPeriod
+server.js                 /api/invoices* (incl. :id/send, regenerate),
+                          /api/stripe/webhook
+src/components/InvoiceMonthRun.tsx   the monthly run: status tabs, editor,
+                                     Send, Void & regenerate; imperative
+                                     showPeriod() handle, dirty-edit guards
+src/components/InvoiceHistory.tsx    the History archive (read-only)
+src/lib/utils.ts                     summarizeInvoiceMonth, status labels,
+                                     formatSentOn (shared so views can't drift)
+src/pages/InvoicesPage.tsx           per-client view (preview + print + real
+                                     Email invoice), This month/History switch
 scripts/set-stripe-keys.ps1          optional interactive key setter
 ```

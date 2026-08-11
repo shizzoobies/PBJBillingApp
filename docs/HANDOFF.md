@@ -137,6 +137,46 @@ snapshot first, single transaction, re-verify after.
 
 ## 5. Where things stand (newest first)
 
+**2026-08-09/10 — the invoicing ship run.** One long session with Alex actively
+testing as features landed: I4 finished, then five follow-on features, then a
+queue item — eight deploys, all verified live (deploy SUCCESS on the pushed
+hash → `/health` 200 → manifest + voice re-provision on every user-visible
+change). Suite grew 975 → **1021 tests / 78 files**. Read
+[`docs/plans/invoicing-handoff.md`](plans/invoicing-handoff.md) for the
+invoicing state; the short version:
+
+| Commit | What |
+|---|---|
+| `525673a` | **Weekly gate allows past-week backfill** (queue `featreq-cf658ebd`, shipped + stamped). `listBlockingWeeks` gains a REQUIRED `todayWeekStart` (throws if omitted); an entry in a week that already ended never gates. Current/future weeks gate as before; month locks untouched. |
+| `a9461d8` | **Invoice History**: "This month / History" switch on the Invoices page; months collapsible newest-first with billed/paid/outstanding (voids excluded, **processing counts as outstanding** — pinned by tests); Year/Client/Status filters; read-only rows + "Open in month run". The month view HIDES (never unmounts) under History so unsaved editor work survives; the months-change confirm names the month holding edits. |
+| `3362519` | **Month run tabbed**: To review / Reviewed / Sent / Paid / Voided on the shared `.task-area-tabs` underline bar (NOT a new copy), amber dot on tabs holding flagged invoices, dirty-editor confirm on tab switch, number order within tabs, no auto-follow when an invoice changes tab. |
+| `07235b8` | **Void & regenerate** (voids ONLY draft+reviewed of the period — validated against prod in a rolled-back txn — then rebuilds; confirm re-fetches counts) + **single-client generate** offered by Email invoice when no live invoice exists. Hardening: `recordInvoiceSent`/`applyInvoicePayment` refuse voided invoices (send/payment landing after a bulk void was a unique-index 500 after the email left). |
+| `517a620` | **Per-client "Email invoice" really sends** (mailto path deleted). Gates: month generated → not void → reviewed; confirm; sends via the I4 rail. Customize is PRINT-ONLY and Email is disabled while it is open. |
+| `08b77d8` | **I4 part 2**: `POST /api/invoices/:id/send` + Send button in the month run. Fresh Checkout link per send but NEVER on a paid/processing invoice (double-pay guard); post-delivery bookkeeping failures still return 200; email log records the billed total; recordInvoiceSent got its first tests. |
+
+**Facts settled this session (do not re-derive):** the full rail is PROVEN —
+Alex sent his Test-client invoice, received the email (from
+`billing@pbjsa.com`; `INVOICE_EMAIL_FROM` is set in Railway), paid via sandbox
+ACH, and both webhooks passed signature verification (`INV-2026-08-001` sits
+`paid` in prod — Brittany may want it voided before real August billing).
+**Successful payments notify nobody by design** — only a failed debit notifies
+owners. One client per send is the recipient rule and the code guarantees it.
+
+**Open DECISIONS (Alex's/Brittany's — don't build unprompted, don't re-ask as
+if new):** (1) card payments — ACH-only is deliberate (US debit-surcharge law);
+options on the table: no-fee card / flat convenience fee once confirmed
+compliant / stay ACH-only; (2) a "payment received" owner notification for when
+real money lands; (3) whether emailed invoices should carry Customize's
+intro/footer (print-only today).
+
+**Small deferred items from reviews, none blocking:** the draft-send gate is
+UI-only (the send endpoint will send a draft if called directly); `storedPrint`
+stays sticky after a History print (pre-existing); `priorByClient` adjustments
+are dormant until adjustment carry-forward is wired; the assistant's time
+diagnostics answer "can they log time TODAY" only. Testing note: happy-dom has
+no `window.confirm` — use `vi.stubGlobal('confirm', vi.fn())`
+(see `src/__tests__/invoice-month-run-dirty-guard.test.tsx`).
+
 **2026-08-04 — the time-accuracy run.** One session: released the parked
 month-close branches, then a full audit of the time pipeline ("exact to the
 minute, every entry individual") and fixes for everything it found. All
