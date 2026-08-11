@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { AppDataStore } from './store.js'
+import { AppDataStore, INVOICE_SELECT_COLUMNS, mapInvoiceRow } from './store.js'
 import { StaleWorkspaceError } from '../lib/workspace-version.js'
 
 /**
@@ -1750,6 +1750,51 @@ describe('recordInvoiceSent (file backend)', () => {
     const data = JSON.parse(await readFile(localDataPath, 'utf8'))
     const stored = data.invoices.find((entry) => entry.id === 'inv-1')
     expect(stored.emailLog[0].total).toBe(400)
+  })
+})
+
+/**
+ * Column parity between the invoice SELECT and the row mapper.
+ *
+ * This is the Postgres guard for the whole invoice read path, and it has to be
+ * one, because nothing else can be: every test in this file runs the FILE
+ * backend, and the file backend returns whatever it stored — it cannot notice a
+ * missing column. The Postgres branch can, silently. `email_log` was left out
+ * of the select for the life of the feature, so `mapInvoiceRow` read
+ * `row.email_log` as `undefined`, mapped it to `[]`, and production served an
+ * empty send log that the UI faithfully rendered as "never sent" while
+ * `recordInvoiceSent` rebuilt the log from it and threw the earlier sends away.
+ *
+ * A missing column has no error to catch; the only thing to test is that the
+ * two lists agree. The mapper is handed a recording Proxy so the check is on
+ * what it actually reads rather than on a copy of the list that would drift.
+ */
+describe('listInvoices selects every column mapInvoiceRow reads', () => {
+  it('has no column the mapper reads but the select omits', () => {
+    const readColumns = new Set()
+    mapInvoiceRow(
+      new Proxy(
+        {},
+        {
+          get(_target, key) {
+            if (typeof key === 'string') readColumns.add(key)
+            return undefined
+          },
+        },
+      ),
+    )
+
+    const selected = new Set(
+      INVOICE_SELECT_COLUMNS.split(',')
+        .map((column) => column.trim())
+        .filter(Boolean),
+    )
+
+    // Sanity: a mapper that read nothing would pass the real assertion.
+    expect(readColumns.size).toBeGreaterThan(10)
+    expect([...readColumns].filter((column) => !selected.has(column))).toEqual([])
+    // Named outright, because this is the one that got out.
+    expect(selected.has('email_log')).toBe(true)
   })
 })
 

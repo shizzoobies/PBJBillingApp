@@ -709,11 +709,32 @@ function sanitizeInvoiceLines(raw) {
 }
 
 /**
+ * The column list every invoice read selects. It lives beside `mapInvoiceRow`
+ * because the two are one contract: a column missing here is not an error, it
+ * is `undefined` on the row, and the mapper turns that into a plausible empty
+ * value that reaches the UI as fact.
+ *
+ * That is not hypothetical. `email_log` was left out of this list, so every
+ * Postgres read returned `emailLog: []` — the "Sent to … on …" line never
+ * rendered in production, and `recordInvoiceSent` rebuilt the log from that
+ * empty array, so each send OVERWROTE the previous one. The file backend
+ * returned the log intact, so every test passed. Cardinal rule 1, exactly.
+ *
+ * A unit test pins the parity (see db/store-staleness.test.mjs).
+ */
+export const INVOICE_SELECT_COLUMNS = `id, client_id, period, number, status, line_items, subtotal, total,
+          due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
+          stripe_checkout_session_id, stripe_payment_intent_id, email_log,
+          created_at, updated_at`
+
+/**
  * One invoices row -> the camelCase shape the app and the API speak. jsonb
  * columns come back parsed; numerics come back as STRINGS from pg, so money is
  * coerced here rather than at every call site.
+ *
+ * Exported so the column-parity test can watch which columns it reads.
  */
-function mapInvoiceRow(row) {
+export function mapInvoiceRow(row) {
   return {
     id: row.id,
     clientId: row.client_id,
@@ -6508,10 +6529,7 @@ export class AppDataStore {
   async listInvoices({ period = null } = {}) {
     if (this.pool) {
       const { rows } = await this.pool.query(
-        `select id, client_id, period, number, status, line_items, subtotal, total,
-                due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
-                stripe_checkout_session_id, stripe_payment_intent_id,
-                created_at, updated_at
+        `select ${INVOICE_SELECT_COLUMNS}
            from invoices
           ${period ? 'where period = $1' : ''}
           order by number nulls last, created_at`,
@@ -6884,23 +6902,41 @@ export class AppDataStore {
       total: Number(current.total) || 0,
       ...(error ? { error: String(error).slice(0, 300) } : {}),
     }
+    if (this.pool) {
+      // The entry is APPENDED server-side, deliberately: `current` above is a
+      // read, and building `[...current.emailLog, entry]` in JS means the log
+      // is only as complete as that read was. It was not — `email_log` was
+      // missing from the select, so every send rewrote the log with a
+      // one-entry array. Concatenating in SQL is immune to both that and to
+      // two sends racing: whatever is in the column, this adds to it.
+      //
+      // `sent_at` and `status` are decided from the row's OWN values for the
+      // same reason, and a failed attempt (ok = false) is logged without
+      // touching either. The void guard stays a pre-read above.
+      const { rowCount } = await this.pool.query(
+        `update invoices
+            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                sent_at = case when $3::boolean then coalesce(sent_at, $4::timestamptz)
+                               else sent_at end,
+                status = case when $3::boolean and status <> 'paid' and status <> 'processing'
+                              then 'sent' else status end,
+                updated_at = now()
+          where id = $1`,
+        [invoiceId, JSON.stringify([entry]), ok, entry.at],
+      )
+      if (rowCount === 0) return null
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    // Same semantics, spelled out in JS. The file backend's read IS the whole
+    // file, so appending here cannot drop entries the way the Postgres
+    // read-modify-write did — the branch above concatenates in SQL on purpose.
     const emailLog = [...(current.emailLog ?? []), entry]
     // A failed attempt is logged but must NOT claim the invoice was sent.
     const sentAt = ok ? (current.sentAt ?? entry.at) : current.sentAt
     const status = ok && current.status !== 'paid' && current.status !== 'processing'
       ? 'sent'
       : current.status
-
-    if (this.pool) {
-      const { rowCount } = await this.pool.query(
-        `update invoices
-            set email_log = $2::jsonb, sent_at = $3, status = $4, updated_at = now()
-          where id = $1`,
-        [invoiceId, JSON.stringify(emailLog), sentAt, status],
-      )
-      if (rowCount === 0) return null
-      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
-    }
 
     const data = await readJson(localDataPath)
     if (!Array.isArray(data.invoices)) data.invoices = []

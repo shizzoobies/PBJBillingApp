@@ -58,6 +58,7 @@ import {
 import { buildQboCsv } from './lib/qbo-export.js'
 import {
   createInvoiceCheckoutSession,
+  expireCheckoutSession,
   isStripeConfigured,
   isStripeWebhookConfigured,
   stripeClient,
@@ -2439,6 +2440,16 @@ const server = createServer(async (request, response) => {
         })
         return
       }
+      // Retire the link this invoice used to point at — but only AFTER the new
+      // one is safely persisted, so the invoice never names an expired session.
+      // Two live links for one invoice is two ways to pay it, and a client who
+      // still has the earlier email can do exactly that.
+      if (
+        invoice.stripeCheckoutSessionId &&
+        invoice.stripeCheckoutSessionId !== result.session.id
+      ) {
+        await expireCheckoutSession(invoice.stripeCheckoutSessionId)
+      }
       await appDataStore.recordActivity(
         session.user.id,
         'invoice_payment_link_created',
@@ -2551,6 +2562,17 @@ const server = createServer(async (request, response) => {
         await appDataStore.applyInvoicePayment(invoice.id, {
           checkoutSessionId: linkResult.session.id,
         })
+        // The link the PREVIOUS send emailed is now superseded. Expiring it
+        // only after the new id is persisted keeps the invoice from ever
+        // pointing at a dead session; leaving it live would put two working
+        // pay buttons in the client's inbox for one invoice, and both of them
+        // charge.
+        if (
+          invoice.stripeCheckoutSessionId &&
+          invoice.stripeCheckoutSessionId !== linkResult.session.id
+        ) {
+          await expireCheckoutSession(invoice.stripeCheckoutSessionId)
+        }
       }
 
       // The firm's own name, so the client sees who is billing them rather than
