@@ -7,8 +7,12 @@ import { fetchTeam } from '../lib/api'
 import {
   billableMinutes as sumBillableMinutes,
   duplicateFullSliceIds,
+  exactHoursCell,
+  exactMinutesCell,
   internalMinutes as sumInternalMinutes,
   laborCost,
+  personPeriodCost,
+  sumPersonCosts,
   trackedMinutes as sumTrackedMinutes,
 } from '../lib/payrollAggregation'
 import type {
@@ -36,6 +40,22 @@ import {
   shortDate,
   weekStartOf,
 } from '../lib/utils'
+
+/**
+ * The one sentence that tells the reader how a Cost figure was built. It is on
+ * the page because the alternative is the owner re-deriving cost from the
+ * 2-decimal Hours column, getting a different answer by a dime, and reporting a
+ * bug — which is exactly what happened.
+ */
+const COST_BASIS_NOTE = 'Cost is calculated per person from exact clock time.'
+
+/**
+ * The honest footnote for the per-entry Cost column: row cents are each rounded
+ * on their own, the total is the per-person figure, and those two can differ by
+ * a penny or two. Said out loud here rather than left to be discovered.
+ */
+const COST_ROW_ROUNDING_NOTE =
+  'Cost totals are per person from exact seconds, rounded to the cent — row cents may differ by a penny or two from the total.'
 
 export function ReportsPage() {
   const { data, billingPeriod, ownerMode, firmSettings } = useAppContext()
@@ -536,18 +556,22 @@ function PayrollHoursReport({
    *  - it applies to ALL hours worked, not just billable ones. You pay for
    *    internal time too, which is the whole point of comparing the two.
    *
-   * `null` = no cost rate, and for an OWNER that is the correct, permanent
-   * answer rather than a missing value: an owner draws no hourly wage, so her
-   * time carries no labor cost. Never render it as $0.00, and never treat the
-   * blank as something to be filled in.
+   * Cent-rounded per person by `personPeriodCost`, so a column of these adds up
+   * to the total printed underneath it. `null` = no cost rate, and for an OWNER
+   * that is the correct, permanent answer rather than a missing value: an owner
+   * draws no hourly wage, so her time carries no labor cost. Never render it as
+   * $0.00, and never treat the blank as something to be filled in.
    */
-  const costFor = (employeeId: string, minutesWorked: number) => {
-    const rate = costRates[employeeId]
-    return typeof rate === 'number' && !Number.isNaN(rate) ? (minutesWorked / 60) * rate : null
-  }
+  const costFor = (employeeId: string, minutesWorked: number) =>
+    personPeriodCost(minutesWorked, costRates[employeeId])
+
+  // Every cost total is the SUM OF THE PER-PERSON CENTS, never a float sum of
+  // the parts — that is what lets the owner add the Cost column up by hand.
+  const totalCost = sumPersonCosts(rows.map((row) => costFor(row.id, row.minutes)))
 
   // Cost counts a full-mode group's wall time once — the firm pays for the
-  // block, not for each client it was billed to.
+  // block, not for each client it was billed to — and `laborCost` groups by
+  // person before rounding, so this lands on the same rule as the table above.
   const detailCost = laborCost(detailRows, (employeeId) => costRates[employeeId])
 
   // Billable minutes and $ are NOT deduped: full mode bills each client the
@@ -558,10 +582,23 @@ function PayrollHoursReport({
     0,
   )
 
+  // The original five columns keep their names and positions — they are what
+  // the owner's own spreadsheets point at. The reconciliation columns are
+  // APPENDED: exact minutes as stored, hours at 4dp, and the Cost the report
+  // shows, so `Tracked hours (4dp)` × rate reproduces `Cost` to the cent.
   const exportCsv = () =>
     downloadCsv(
       `payroll-hours-${periodType}-${start}.csv`,
-      ['Employee', 'Tracked hours', 'Billable hours', 'Internal hours', 'Entries'],
+      [
+        'Employee',
+        'Tracked hours',
+        'Billable hours',
+        'Internal hours',
+        'Entries',
+        'Tracked minutes (exact)',
+        'Tracked hours (4dp)',
+        'Cost',
+      ],
       [
         ...rows.map((row) => [
           row.name,
@@ -569,8 +606,21 @@ function PayrollHoursReport({
           (row.billable / 60).toFixed(2),
           (row.internal / 60).toFixed(2),
           row.count,
+          exactMinutesCell(row.minutes),
+          exactHoursCell(row.minutes),
+          // Blank, not 0.00, when the person has no cost rate.
+          costFor(row.id, row.minutes)?.toFixed(2) ?? '',
         ]),
-        ['TOTAL', (totalMinutes / 60).toFixed(2), '', '', ''],
+        [
+          'TOTAL',
+          (totalMinutes / 60).toFixed(2),
+          '',
+          '',
+          '',
+          exactMinutesCell(totalMinutes),
+          exactHoursCell(totalMinutes),
+          totalCost.toFixed(2),
+        ],
       ],
     )
 
@@ -613,6 +663,10 @@ function PayrollHoursReport({
         'Billable $',
         'Cost',
         'Description',
+        // Appended, not inserted: anything already pointing at column H stays
+        // pointing at Hours. These two make the Cost column re-derivable.
+        'Minutes (exact)',
+        'Hours (4dp)',
       ],
       [...detailEntries]
         .sort((a, b) => a.date.localeCompare(b.date))
@@ -634,9 +688,13 @@ function PayrollHoursReport({
             // Blank, not 0.00, when the person has no bill rate configured —
             // a spreadsheet should not be told they billed nothing.
             amountFor(entry.employeeId, entry.billable ? entry.minutes : 0)?.toFixed(2) ?? '',
-            // Cost is on ALL minutes, billable or not. Blank when no cost rate.
+            // Cost is on ALL minutes, billable or not, cent-rounded per row.
+            // Blank when no cost rate. Row cents can differ by a penny or two
+            // from the report's per-person total — see COST_ROW_ROUNDING_NOTE.
             costFor(entry.employeeId, entry.minutes)?.toFixed(2) ?? '',
             entry.description ?? '',
+            exactMinutesCell(entry.minutes),
+            exactHoursCell(entry.minutes),
           ]
         }),
     )
@@ -759,14 +817,11 @@ function PayrollHoursReport({
               <td>
                 <strong>{currency.format(totalAmount)}</strong>
               </td>
-              {/* Sums only members WITH a cost rate, so the owner's hours
-                  contribute nothing — which is the firm's real labor cost. */}
+              {/* The sum of the cent-rounded cells directly above, so adding
+                  the column up by hand lands here exactly. Members with no cost
+                  rate contribute nothing — which is the firm's real labor cost. */}
               <td>
-                <strong>
-                  {currency.format(
-                    rows.reduce((sum, row) => sum + (costFor(row.id, row.minutes) ?? 0), 0),
-                  )}
-                </strong>
+                <strong>{currency.format(totalCost)}</strong>
               </td>
               <td className="no-print" />
               <td className="no-print" />
@@ -774,6 +829,8 @@ function PayrollHoursReport({
           </tfoot>
         </table>
       </div>
+
+      <p className="report-caption muted-text">{COST_BASIS_NOTE}</p>
 
       <div className="section-heading payroll-detail-heading">
         <div>
@@ -892,6 +949,8 @@ function PayrollHoursReport({
           </tfoot>
         </table>
       </div>
+
+      <p className="report-caption muted-text">{COST_ROW_ROUNDING_NOTE}</p>
     </section>
   )
 }
@@ -939,17 +998,16 @@ function ReportsOverview({
     ownerLoggedMinutes === 0 ? 0 : Math.round((ownerBillableMinutes / ownerLoggedMinutes) * 100)
 
   /**
-   * Labor COST for this person's tracked hours — the same rule the payroll
-   * tables use: ALL hours worked (internal included) × their cost rate.
+   * Labor COST for this person's tracked hours — literally the same rule the
+   * payroll tables use, via the same helper: ALL hours worked (internal
+   * included) × their cost rate, cent-rounded once per person.
    *
    * `null` = no cost rate, which for an OWNER is the correct permanent answer
    * rather than a missing setting — she draws no hourly wage, so her time
    * carries no labor cost. It renders "—", never "$0.00".
    */
-  const overviewCostFor = (employeeId: string, minutesWorked: number) => {
-    const rate = costRates[employeeId]
-    return typeof rate === 'number' && !Number.isNaN(rate) ? (minutesWorked / 60) * rate : null
-  }
+  const overviewCostFor = (employeeId: string, minutesWorked: number) =>
+    personPeriodCost(minutesWorked, costRates[employeeId])
 
   const periodSlug = billingPeriod || 'period'
   const exportEmployees = () =>

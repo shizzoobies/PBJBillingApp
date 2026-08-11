@@ -787,6 +787,24 @@ Clients page meanwhile. Owner-only.
     total is therefore the firm's real STAFF labor cost.
   - Anyone with no rate configured shows "—" rather than "$0.00", so an unset
     rate never reads as "billed nothing" or "cost nothing".
+- **Cost is calculated PER PERSON from exact clock time, and every Cost total is
+  the sum of those per-person figures.** The rule, everywhere on every surface:
+  add up one person's exact minutes for the period (seconds included — nothing
+  is rounded to the minute along the way), convert to hours, multiply by their
+  cost rate, and round to the cent ONCE. A total is then the sum of those
+  cent-rounded per-person amounts. The consequence that matters: **adding up the
+  visible Cost column with a calculator always lands exactly on the total
+  printed underneath it.** A line saying "Cost is calculated per person from
+  exact clock time." sits under the summary totals.
+  - Recomputing cost from a report's 2-decimal Hours column will NOT match, and
+    that is expected, not a bug: two decimals of an hour is 36 seconds of slack,
+    so the hand figure can land a dime or two off over a pay period. Use the
+    exact minutes in the exports (below) to re-derive a cost figure.
+  - Per-ENTRY Cost cells in the day-and-job detail table and the "Raw hours"
+    export are each rounded to the cent on their own, so each row is readable
+    by itself. The detail table's Cost TOTAL is still the per-person figure, so
+    the row cents can differ from it by a penny or two — a muted note under the
+    detail totals says so on the page rather than leaving it to be discovered.
 - Payroll report detail — "Time by day and job": below the per-member summary,
   the same period broken down day by day. **EVERY TIME ENTRY IS LISTED
   INDIVIDUALLY** — entries are never merged just because they share a day,
@@ -814,6 +832,14 @@ Clients page meanwhile. Owner-only.
 - Both RAW exports carry "Billable hours" and "Billable $"; the payroll
   "Raw hours" export also carries "Cost". These match the printed report — blank
   rather than 0.00 when the person has no rate set.
+- **The payroll exports carry EXACT MINUTES so any cost figure can be re-derived
+  by hand.** "Summary CSV" gains "Tracked minutes (exact)", "Tracked hours
+  (4dp)" and "Cost"; "Raw hours" gains "Minutes (exact)" and "Hours (4dp)". The
+  minutes are the value as stored (seconds included), so minutes ÷ 60 × the cost
+  rate reproduces the shown cost to the cent, every time; the 4-decimal hours
+  are the quick eyeball check, good to about a tenth of a cent. All of these
+  columns are APPENDED — the existing columns keep their names and their
+  positions, so an existing spreadsheet or pivot pointing at them still works.
 - Both RAW exports (payroll "Raw hours" and the monthly "Hours by month") include
   CLOCK IN and CLOCK OUT stamps plus a Sessions count, so hours can be audited
   against when the work actually happened: clock in = the first start, clock out

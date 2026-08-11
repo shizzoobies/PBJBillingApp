@@ -76,20 +76,95 @@ export function internalMinutes(
 }
 
 /**
- * Labor cost — hours actually worked × the person's cost rate, deduped the same
- * way tracked time is. `costRateOf` returns `null`/`undefined` for someone with
- * NO cost rate (an owner draws no hourly wage); those minutes contribute
- * nothing, which is why the caller must never render the result as their $0.00.
+ * Round money to whole cents.
+ *
+ * The ×100 product goes through a fixed-precision string first so a figure that
+ * is arithmetically a half-cent — but stored as 4.00499999… — still rounds up
+ * instead of silently down.
+ */
+export function roundToCent(amount: number): number {
+  const cents = Math.round(Number((amount * 100).toFixed(6)))
+  // `Math.round` hands back -0 for anything in [-0.5, 0), and Intl renders that
+  // as "-$0.00" on a payroll document. Normalize it away.
+  return cents === 0 ? 0 : cents / 100
+}
+
+/**
+ * THE canonical payroll cost rule: one person, one period.
+ *
+ * Minutes are kept seconds-exact right up to the end, then the dollar figure is
+ * rounded ONCE, to the cent. Rounding hours first (the natural thing to do by
+ * hand off a 2-decimal report) gives a different answer, and rounding per entry
+ * and adding gives a third — this is the one the firm pays and the one every
+ * cost cell and cost total on every surface must show.
+ *
+ * `null` = the person has NO cost rate. For an owner that is the correct,
+ * permanent answer rather than a missing setting: she draws no hourly wage, so
+ * her time carries no labor cost. Never render it as $0.00.
+ */
+export function personPeriodCost(
+  minutes: number,
+  rate: number | null | undefined,
+): number | null {
+  if (typeof rate !== 'number' || Number.isNaN(rate)) return null
+  return roundToCent((minutes / 60) * rate)
+}
+
+/**
+ * A cost TOTAL: the sum of already-cent-rounded per-person costs, added in whole
+ * cents so no float dust survives. Every total is built this way, which is what
+ * makes adding up a visible Cost column by hand land exactly on the shown total.
+ * People with no rate contribute nothing.
+ */
+export function sumPersonCosts(costs: readonly (number | null | undefined)[]): number {
+  const cents = costs.reduce<number>(
+    (sum, cost) =>
+      typeof cost === 'number' && !Number.isNaN(cost) ? sum + Math.round(cost * 100) : sum,
+    0,
+  )
+  return cents / 100
+}
+
+/**
+ * Labor cost for a set of slices: hours actually worked × the person's cost
+ * rate, deduped the same way tracked time is, and — because it is a total —
+ * assembled per person under {@link personPeriodCost}. Slices are grouped by
+ * employee FIRST so each person's minutes are summed exactly and rounded once.
  */
 export function laborCost(
   entries: readonly PayrollSlice[],
   costRateOf: (employeeId: string) => number | null | undefined,
   duplicates: ReadonlySet<string> = duplicateFullSliceIds(entries),
 ): number {
-  return entries.reduce((sum, entry) => {
-    if (duplicates.has(entry.id)) return sum
-    const rate = costRateOf(entry.employeeId)
-    if (typeof rate !== 'number' || Number.isNaN(rate)) return sum
-    return sum + (entry.minutes / 60) * rate
-  }, 0)
+  const minutesByEmployee = new Map<string, number>()
+  for (const entry of entries) {
+    if (duplicates.has(entry.id)) continue
+    minutesByEmployee.set(
+      entry.employeeId,
+      (minutesByEmployee.get(entry.employeeId) ?? 0) + entry.minutes,
+    )
+  }
+  return sumPersonCosts(
+    [...minutesByEmployee].map(([employeeId, minutes]) =>
+      personPeriodCost(minutes, costRateOf(employeeId)),
+    ),
+  )
+}
+
+/**
+ * Export cell: the minutes as stored, verbatim. Trimmed at six decimals only to
+ * strip binary dust (3.6500000000000004 → 3.65), never to round the value away.
+ * This is the column that makes a cost figure re-derivable by hand.
+ */
+export function exactMinutesCell(minutes: number): string {
+  return String(Number(minutes.toFixed(6)))
+}
+
+/**
+ * Export cell: hours at FOUR decimals. Two decimals cannot reproduce a cost
+ * built from exact seconds — that mismatch is the whole reason this column
+ * exists — and four is enough that hours × rate lands back on the same cent.
+ */
+export function exactHoursCell(minutes: number): string {
+  return (minutes / 60).toFixed(4)
 }
