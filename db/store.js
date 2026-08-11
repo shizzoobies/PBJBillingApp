@@ -2034,6 +2034,47 @@ export class AppDataStore {
         )
       `)
 
+      // "Just spitballing" brainstorm sessions (Britt's Brain). The modal used
+      // to hold the whole conversation in React state, so closing the window
+      // destroyed it and every new session started from nothing. One ACTIVE
+      // session per user lives here instead: it survives close/reopen, follows
+      // her across devices, and once archived its `summary` feeds the NEXT
+      // session's context ("like we talked about last time").
+      //
+      // Endpoint-managed and deliberately OUT of the bulk /api/app-data payload
+      // AND out of the staleness fingerprint — exactly like `invoices` (see
+      // docs/plans/invoicing-handoff.md "Things that will bite you" #3). A stale
+      // owner tab must never rewrite a conversation, and a live brainstorm must
+      // never invalidate her other tabs for writes.
+      //
+      // `user_id` is a plain text column with NO foreign key, matching the other
+      // user-scoped side tables (assistant_messages, voice_memories), so this
+      // table sits entirely outside the clients-wipe FK dance in `write()`.
+      await this.pool.query(`
+        create table if not exists spitball_sessions (
+          id text primary key,
+          user_id text not null,
+          status text not null default 'active',
+          messages jsonb not null default '[]'::jsonb,
+          summary text,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+      // PARTIAL unique — at most one ACTIVE session per user, while any number
+      // of archived ones coexist. Same shape (and same reasoning) as
+      // `invoices_client_period_live`; the one-active rule is enforced by the
+      // index rather than by hope.
+      await this.pool.query(`
+        create unique index if not exists spitball_sessions_one_active
+          on spitball_sessions (user_id)
+          where status = 'active'
+      `)
+      await this.pool.query(
+        `create index if not exists spitball_sessions_user_idx
+           on spitball_sessions (user_id, updated_at)`,
+      )
+
       // Sales-tax figures recorded per client + period (Client Recap page).
       // Owner-only financial data, deliberately endpoint-managed (NOT part of
       // the bulk /api/app-data wipe-and-reinsert) so it can't be clobbered.
@@ -10240,6 +10281,304 @@ export class AppDataStore {
     const list = Array.isArray(authState.featureRequests) ? authState.featureRequests : []
     const found = list.find((r) => r.id === id)
     return found ? AppDataStore.mapFeatureRequest(found) : null
+  }
+
+  /**
+   * One `spitball_sessions` row -> the camelCase shape the API speaks. Handles
+   * both a pg row (snake_case, jsonb `messages` usually already parsed) and a
+   * file-backend record (already camelCase).
+   */
+  static mapSpitballSession(row) {
+    if (!row) return null
+    const rawMessages =
+      typeof row.messages === 'string' ? safeJsonParse(row.messages) : row.messages
+    return {
+      id: row.id,
+      userId: row.user_id ?? row.userId ?? null,
+      status: row.status === 'archived' ? 'archived' : 'active',
+      messages: (Array.isArray(rawMessages) ? rawMessages : []).map((message) => ({
+        role: message?.role === 'user' ? 'user' : 'assistant',
+        text: String(message?.text ?? ''),
+        at: message?.at ?? null,
+      })),
+      summary: row.summary ?? null,
+      createdAt: row.created_at
+        ? new Date(row.created_at).toISOString()
+        : (row.createdAt ?? nowIso()),
+      updatedAt: row.updated_at
+        ? new Date(row.updated_at).toISOString()
+        : (row.updatedAt ?? null),
+    }
+  }
+
+  /** Normalize turns on the way in: role + text only, each text hard-capped. */
+  static cleanSpitballTurns(turns) {
+    return (Array.isArray(turns) ? turns : [])
+      .filter(
+        (turn) =>
+          turn &&
+          (turn.role === 'user' || turn.role === 'assistant') &&
+          typeof turn.text === 'string' &&
+          turn.text.trim() !== '',
+      )
+      .map((turn) => ({
+        role: turn.role,
+        text: turn.text.trim().slice(0, 8000),
+        at: turn.at ?? nowIso(),
+      }))
+  }
+
+  /**
+   * The user's ACTIVE brainstorm session, or null. Creates nothing — the GET
+   * endpoint must be able to say "no session yet" without minting an empty row
+   * every time the modal is opened and closed.
+   */
+  async getActiveSpitballSession(userId) {
+    if (!userId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, user_id, status, messages, summary, created_at, updated_at
+           from spitball_sessions
+          where user_id = $1 and status = 'active'
+          order by created_at desc
+          limit 1`,
+        [userId],
+      )
+      return result.rowCount ? AppDataStore.mapSpitballSession(result.rows[0]) : null
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.spitballSessions) ? authState.spitballSessions : []
+    const found = list.filter((s) => s.userId === userId && s.status === 'active').pop()
+    return found ? AppDataStore.mapSpitballSession(found) : null
+  }
+
+  /** The user's active session, creating an empty one if she has none. */
+  async ensureActiveSpitballSession(userId) {
+    if (!userId) return null
+    const existing = await this.getActiveSpitballSession(userId)
+    if (existing) return existing
+
+    const createdAt = nowIso()
+    const record = {
+      id: `spit-${randomUUID().slice(0, 8)}`,
+      userId,
+      status: 'active',
+      messages: [],
+      summary: null,
+      createdAt,
+      updatedAt: createdAt,
+    }
+
+    if (this.pool) {
+      // The conflict target is the PARTIAL index, so a second tab racing to
+      // open the modal loses harmlessly and reads back the winner's session
+      // rather than erroring or minting a second active one.
+      const inserted = await this.pool.query(
+        `insert into spitball_sessions
+           (id, user_id, status, messages, summary, created_at, updated_at)
+         values ($1, $2, 'active', $3::jsonb, $4, $5, $6)
+         on conflict (user_id) where status = 'active' do nothing`,
+        [record.id, record.userId, JSON.stringify(record.messages), record.summary, createdAt, createdAt],
+      )
+      if (!inserted.rowCount) return this.getActiveSpitballSession(userId)
+      return record
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.spitballSessions)) authState.spitballSessions = []
+    authState.spitballSessions.push(record)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return record
+  }
+
+  /**
+   * Append turns (the owner's message + the AI's reply) to an active session
+   * and return the updated session.
+   *
+   * Postgres appends IN the row (`messages || $2::jsonb`) rather than
+   * read-modify-write, so two turns in flight at once cannot clobber each
+   * other. Returns null when the session is gone or already archived.
+   */
+  async appendSpitballTurn(sessionId, turns) {
+    if (!sessionId) return null
+    const clean = AppDataStore.cleanSpitballTurns(turns)
+    if (clean.length === 0) return null
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update spitball_sessions
+            set messages = messages || $2::jsonb,
+                updated_at = now()
+          where id = $1 and status = 'active'
+          returning id, user_id, status, messages, summary, created_at, updated_at`,
+        [sessionId, JSON.stringify(clean)],
+      )
+      return result.rowCount ? AppDataStore.mapSpitballSession(result.rows[0]) : null
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.spitballSessions)) authState.spitballSessions = []
+    const found = authState.spitballSessions.find(
+      (s) => s.id === sessionId && s.status === 'active',
+    )
+    if (!found) return null
+    if (!Array.isArray(found.messages)) found.messages = []
+    found.messages.push(...clean)
+    found.updatedAt = nowIso()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapSpitballSession(found)
+  }
+
+  /**
+   * Compaction: fold everything but the most recent `keepRecent` turns into the
+   * session's running `summary`. Nothing is ever silently dropped — the old
+   * `.slice(-30)` in `spitballChat` forgot the START of a long brainstorm with
+   * no trace, which is half of what the client reported.
+   *
+   * The trim runs in SQL off the row's own value so it stays correct even if a
+   * turn landed between the caller's read and this write.
+   */
+  async compactSpitballSession(sessionId, { summary, keepRecent } = {}) {
+    if (!sessionId) return null
+    const keep = Math.max(1, Math.min(200, Number(keepRecent) || 12))
+    const text = summary === null || summary === undefined ? null : String(summary).slice(0, 6000)
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update spitball_sessions
+            set summary = $2,
+                messages = coalesce((
+                  select jsonb_agg(t.elem order by t.ord)
+                    from jsonb_array_elements(spitball_sessions.messages)
+                         with ordinality as t(elem, ord)
+                   where t.ord > jsonb_array_length(spitball_sessions.messages) - $3::int
+                ), '[]'::jsonb),
+                updated_at = now()
+          where id = $1 and status = 'active'
+          returning id, user_id, status, messages, summary, created_at, updated_at`,
+        [sessionId, text, keep],
+      )
+      return result.rowCount ? AppDataStore.mapSpitballSession(result.rows[0]) : null
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.spitballSessions)) authState.spitballSessions = []
+    const found = authState.spitballSessions.find(
+      (s) => s.id === sessionId && s.status === 'active',
+    )
+    if (!found) return null
+    found.summary = text
+    found.messages = (Array.isArray(found.messages) ? found.messages : []).slice(-keep)
+    found.updatedAt = nowIso()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapSpitballSession(found)
+  }
+
+  /**
+   * "Start fresh": archive the active session under `summary` so it can inform
+   * later brainstorms. Trims each user's archive to the 50 most recent.
+   */
+  async archiveSpitballSession(sessionId, summary) {
+    if (!sessionId) return null
+    const text = summary === null || summary === undefined ? null : String(summary).slice(0, 6000)
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update spitball_sessions
+            set status = 'archived', summary = $2, updated_at = now()
+          where id = $1 and status = 'active'
+          returning id, user_id, status, messages, summary, created_at, updated_at`,
+        [sessionId, text],
+      )
+      if (!result.rowCount) return null
+      const archived = AppDataStore.mapSpitballSession(result.rows[0])
+      await this.pool.query(
+        `delete from spitball_sessions
+          where user_id = $1
+            and status = 'archived'
+            and id not in (
+              select id from spitball_sessions
+              where user_id = $1 and status = 'archived'
+              order by updated_at desc
+              limit 50
+            )`,
+        [archived.userId],
+      )
+      return archived
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.spitballSessions)) authState.spitballSessions = []
+    const found = authState.spitballSessions.find(
+      (s) => s.id === sessionId && s.status === 'active',
+    )
+    if (!found) return null
+    found.status = 'archived'
+    found.summary = text
+    found.updatedAt = nowIso()
+    const mine = authState.spitballSessions
+      .filter((s) => s.userId === found.userId && s.status === 'archived')
+      .sort((a, b) => String(a.updatedAt ?? '').localeCompare(String(b.updatedAt ?? '')))
+    if (mine.length > 50) {
+      const drop = new Set(mine.slice(0, mine.length - 50).map((s) => s.id))
+      authState.spitballSessions = authState.spitballSessions.filter((s) => !drop.has(s.id))
+    }
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapSpitballSession(found)
+  }
+
+  /**
+   * Cross-session memory: the summaries of this user's archived brainstorms,
+   * newest first. Sessions archived without a summary are skipped — there is
+   * nothing to recall.
+   */
+  async listSpitballSummaries(userId, limit = 5) {
+    if (!userId) return []
+    const cap = Math.max(1, Math.min(20, Number(limit) || 5))
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, summary, updated_at
+           from spitball_sessions
+          where user_id = $1
+            and status = 'archived'
+            and summary is not null
+            and summary <> ''
+          order by updated_at desc
+          limit $2`,
+        [userId, cap],
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        summary: row.summary,
+        at: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+      }))
+    }
+
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.spitballSessions) ? authState.spitballSessions : []
+    return (
+      list
+        .map((session, index) => ({ session, index }))
+        .filter(
+          ({ session }) =>
+            session.userId === userId && session.status === 'archived' && session.summary,
+        )
+        // Two sessions archived inside the same millisecond would otherwise tie
+        // and fall back to insertion order, i.e. OLDEST first — the opposite of
+        // the contract. Later position in the file breaks the tie.
+        .sort(
+          (a, b) =>
+            String(b.session.updatedAt ?? '').localeCompare(String(a.session.updatedAt ?? '')) ||
+            b.index - a.index,
+        )
+        .slice(0, cap)
+        .map(({ session }) => ({
+          id: session.id,
+          summary: session.summary,
+          at: session.updatedAt ?? null,
+        }))
+    )
   }
 
   /** Suggestion keys this user has dismissed (assistant insights). */

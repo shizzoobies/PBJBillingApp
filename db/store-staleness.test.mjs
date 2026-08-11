@@ -5,7 +5,11 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { AppDataStore, INVOICE_SELECT_COLUMNS, mapInvoiceRow } from './store.js'
-import { StaleWorkspaceError } from '../lib/workspace-version.js'
+import {
+  BULK_SAVE_TABLES,
+  StaleWorkspaceError,
+  workspaceVersionSql,
+} from '../lib/workspace-version.js'
 
 /**
  * End-to-end `appDataStore.write()` contracts on the FILE backend: the
@@ -2092,5 +2096,256 @@ describe('generateInvoicesForPeriod with a single client (file backend)', () => 
     // The month run passes prospects over in silence; only c3 (nothing to bill)
     // is worth a reason.
     expect(result.skipped).toEqual([{ clientId: 'c3', reason: 'nothing-to-bill' }])
+  })
+})
+
+/**
+ * "Just spitballing" brainstorm sessions.
+ *
+ * The client reported that the assistant "stops partway through a brainstorming
+ * session, and its memory does not persist across separate conversations". The
+ * modal held the whole conversation in React state, so closing the window threw
+ * it away. The conversation now lives in `spitball_sessions`; these pin the
+ * store contract both backends implement.
+ */
+describe('spitball sessions (file backend)', () => {
+  beforeEach(async () => {
+    // These share the one real tmp/auth-state.json, so clear the slice first —
+    // otherwise an earlier test's active session leaks into the next one.
+    if (existsSync(localAuthPath)) {
+      const auth = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      auth.spitballSessions = []
+      await writeFile(localAuthPath, JSON.stringify(auth, null, 2))
+    }
+  })
+
+  it('creates exactly one active session per user and reuses it', async () => {
+    expect(await store.getActiveSpitballSession('emp-patrice')).toBeNull()
+
+    const first = await store.ensureActiveSpitballSession('emp-patrice')
+    expect(first.status).toBe('active')
+    expect(first.messages).toEqual([])
+
+    const second = await store.ensureActiveSpitballSession('emp-patrice')
+    expect(second.id).toBe(first.id)
+
+    // A second owner gets her own, not Brittany's.
+    const other = await store.ensureActiveSpitballSession('emp-alex')
+    expect(other.id).not.toBe(first.id)
+  })
+
+  it('round-trips a turn — the conversation survives a fresh store instance', async () => {
+    const session = await store.ensureActiveSpitballSession('emp-patrice')
+    await store.appendSpitballTurn(session.id, [
+      { role: 'user', text: 'what if clients could see their own checklist' },
+      { role: 'assistant', text: 'Ooh — who would use it?' },
+    ])
+
+    // A brand new store reading the same files is the closest stand-in for
+    // "she closed the window and came back".
+    const reopened = new AppDataStore()
+    await reopened.initialize()
+    const loaded = await reopened.getActiveSpitballSession('emp-patrice')
+
+    expect(loaded.id).toBe(session.id)
+    expect(loaded.messages.map((m) => m.role)).toEqual(['user', 'assistant'])
+    expect(loaded.messages[0].text).toContain('own checklist')
+    expect(loaded.messages[0].at).toBeTruthy()
+  })
+
+  it('refuses to append to an archived session', async () => {
+    const session = await store.ensureActiveSpitballSession('emp-patrice')
+    await store.appendSpitballTurn(session.id, [{ role: 'user', text: 'an idea' }])
+    await store.archiveSpitballSession(session.id, 'She wants client-visible checklists.')
+
+    expect(await store.appendSpitballTurn(session.id, [{ role: 'user', text: 'more' }])).toBeNull()
+  })
+
+  it('compaction keeps the recent turns verbatim and folds the rest into a summary', async () => {
+    const session = await store.ensureActiveSpitballSession('emp-patrice')
+    const turns = Array.from({ length: 32 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      text: `turn ${index}`,
+    }))
+    await store.appendSpitballTurn(session.id, turns)
+
+    const compacted = await store.compactSpitballSession(session.id, {
+      summary: 'She is circling client-visible checklists.',
+      keepRecent: 12,
+    })
+
+    expect(compacted.summary).toBe('She is circling client-visible checklists.')
+    expect(compacted.messages).toHaveLength(12)
+    // The RECENT end is what survives verbatim — turns 20..31.
+    expect(compacted.messages[0].text).toBe('turn 20')
+    expect(compacted.messages[11].text).toBe('turn 31')
+  })
+
+  it('archives with a summary and recalls it, newest first', async () => {
+    const first = await store.ensureActiveSpitballSession('emp-patrice')
+    await store.appendSpitballTurn(first.id, [{ role: 'user', text: 'idea one' }])
+    await store.archiveSpitballSession(first.id, 'Session one: client-visible checklists.')
+
+    const second = await store.ensureActiveSpitballSession('emp-patrice')
+    expect(second.id).not.toBe(first.id)
+    await store.appendSpitballTurn(second.id, [{ role: 'user', text: 'idea two' }])
+    await store.archiveSpitballSession(second.id, 'Session two: reminder emails.')
+
+    const summaries = await store.listSpitballSummaries('emp-patrice', 5)
+    expect(summaries.map((entry) => entry.summary)).toEqual([
+      'Session two: reminder emails.',
+      'Session one: client-visible checklists.',
+    ])
+  })
+
+  it('skips archived sessions that have no summary — there is nothing to recall', async () => {
+    const session = await store.ensureActiveSpitballSession('emp-patrice')
+    await store.appendSpitballTurn(session.id, [{ role: 'user', text: 'idea' }])
+    await store.archiveSpitballSession(session.id, '')
+
+    expect(await store.listSpitballSummaries('emp-patrice', 5)).toEqual([])
+  })
+
+  it('survives a bulk save — the session is not part of the workspace payload', async () => {
+    const session = await store.ensureActiveSpitballSession('emp-patrice')
+    await store.appendSpitballTurn(session.id, [{ role: 'user', text: 'mid-brainstorm' }])
+
+    // Exactly the write that wiped the historical import: a full workspace
+    // save. A live brainstorm must be untouched by it.
+    await store.write(workspace())
+
+    const after = await store.getActiveSpitballSession('emp-patrice')
+    expect(after.id).toBe(session.id)
+    expect(after.messages[0].text).toBe('mid-brainstorm')
+  })
+
+  it('is not part of the staleness fingerprint', async () => {
+    const before = await store.computeWorkspaceVersion()
+    const session = await store.ensureActiveSpitballSession('emp-patrice')
+    await store.appendSpitballTurn(session.id, [{ role: 'user', text: 'typing away' }])
+
+    // Brainstorming while another tab is open must not invalidate that tab for
+    // writes — same reasoning as `invoices` (invoicing-handoff, gotcha #3).
+    expect(await store.computeWorkspaceVersion()).toBe(before)
+    expect(BULK_SAVE_TABLES).not.toContain('spitball_sessions')
+    expect(workspaceVersionSql()).not.toMatch(/spitball/i)
+  })
+})
+
+/**
+ * A recorder pool for the spitball statements. `fakePostgres` above answers
+ * every select with no rows, which would make `ensureActiveSpitballSession`
+ * look like a lost insert race; this one lets a test script the reads.
+ */
+function fakeSpitballPostgres(responder = () => null) {
+  const statements = []
+  const pool = {
+    async query(text, params) {
+      const trimmed = String(text).trim()
+      statements.push({ text: trimmed, params })
+      return responder(trimmed, params) ?? { rows: [], rowCount: 0 }
+    },
+  }
+  return {
+    pool,
+    statements,
+    matching: (pattern) => statements.filter((s) => pattern.test(s.text)),
+  }
+}
+
+const spitballRow = (overrides = {}) => ({
+  id: 'spit-1',
+  user_id: 'emp-patrice',
+  status: 'active',
+  messages: [{ role: 'user', text: 'an idea', at: '2026-08-11T12:00:00.000Z' }],
+  summary: null,
+  created_at: new Date('2026-08-11T12:00:00.000Z'),
+  updated_at: new Date('2026-08-11T12:00:00.000Z'),
+  ...overrides,
+})
+
+/**
+ * Production is Postgres, so the file tests above cannot prove the shipped
+ * path. These pin the SQL shapes that matter — the ones a rolled-back
+ * validation against production then confirms for real (HANDOFF §4).
+ */
+describe('spitball sessions (postgres branch)', () => {
+  it('inserts against the PARTIAL unique index, and re-reads the winner on a race', async () => {
+    let selects = 0
+    const fake = fakeSpitballPostgres((text) => {
+      if (/^select\b[\s\S]*from spitball_sessions/i.test(text)) {
+        selects += 1
+        // First read: no session. Second read (after the lost insert race):
+        // whatever the other tab created.
+        return selects === 1 ? { rows: [], rowCount: 0 } : { rows: [spitballRow()], rowCount: 1 }
+      }
+      // The insert loses the race.
+      return { rows: [], rowCount: 0 }
+    })
+
+    const session = await postgresStore(fake).ensureActiveSpitballSession('emp-patrice')
+
+    const insert = fake.matching(/^insert into spitball_sessions/i)[0]
+    expect(insert.text).toMatch(/on conflict \(user_id\) where status = 'active' do nothing/i)
+    expect(session.id).toBe('spit-1')
+  })
+
+  it('appends IN the row, so two turns in flight cannot clobber each other', async () => {
+    const fake = fakeSpitballPostgres(() => ({ rows: [spitballRow()], rowCount: 1 }))
+
+    await postgresStore(fake).appendSpitballTurn('spit-1', [
+      { role: 'user', text: 'an idea' },
+      { role: 'assistant', text: 'say more?' },
+    ])
+
+    const update = fake.matching(/^update spitball_sessions/i)[0]
+    expect(update.text).toMatch(/set messages = messages \|\| \$2::jsonb/i)
+    expect(update.text).toMatch(/where id = \$1 and status = 'active'/i)
+    expect(JSON.parse(update.params[1])).toHaveLength(2)
+  })
+
+  it('compacts by trimming the row in SQL, not by rewriting a stale array', async () => {
+    const fake = fakeSpitballPostgres(() => ({ rows: [spitballRow()], rowCount: 1 }))
+
+    await postgresStore(fake).compactSpitballSession('spit-1', {
+      summary: 'the gist so far',
+      keepRecent: 12,
+    })
+
+    const update = fake.matching(/^update spitball_sessions/i)[0]
+    expect(update.text).toMatch(/jsonb_array_elements\(spitball_sessions\.messages\)/i)
+    expect(update.text).toMatch(/with ordinality as t\(elem, ord\)/i)
+    expect(update.params).toEqual(['spit-1', 'the gist so far', 12])
+  })
+
+  it('archives the active session and prunes the old end of the archive', async () => {
+    const fake = fakeSpitballPostgres(() => ({
+      rows: [spitballRow({ status: 'archived', summary: 'the gist' })],
+      rowCount: 1,
+    }))
+
+    await postgresStore(fake).archiveSpitballSession('spit-1', 'the gist')
+
+    expect(fake.matching(/^update spitball_sessions/i)[0].text).toMatch(
+      /set status = 'archived', summary = \$2/i,
+    )
+    expect(fake.matching(/^delete from spitball_sessions/i)).toHaveLength(1)
+  })
+
+  it('recalls only archived sessions that actually carry a summary', async () => {
+    const fake = fakeSpitballPostgres(() => ({ rows: [], rowCount: 0 }))
+
+    await postgresStore(fake).listSpitballSummaries('emp-patrice', 5)
+
+    const select = fake.matching(/^select\b[\s\S]*from spitball_sessions/i)[0]
+    expect(select.text).toMatch(/status = 'archived'/i)
+    expect(select.text).toMatch(/summary is not null/i)
+    expect(select.params).toEqual(['emp-patrice', 5])
+  })
+
+  it('the bulk save never touches the table', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace())
+    expect(fake.matching(/spitball_sessions/i)).toHaveLength(0)
   })
 })

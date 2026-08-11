@@ -1,4 +1,4 @@
-import { useMemo, useState, type DragEvent, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type DragEvent, type FormEvent } from 'react'
 import {
   Brain,
   Bug,
@@ -16,7 +16,12 @@ import {
   X,
 } from 'lucide-react'
 import { useAppContext } from '../AppContext'
-import { confirmRejectFeedbackRequest, spitballRequest } from '../lib/api'
+import {
+  confirmRejectFeedbackRequest,
+  spitballNewSessionRequest,
+  spitballRequest,
+  spitballSessionRequest,
+} from '../lib/api'
 import {
   formatBacklogForClaude,
   formatRequestForClaude,
@@ -1040,30 +1045,89 @@ const SPITBALL_GREETING: SpitballMessage = {
  * has enough shape the AI offers an organized draft; saving files it into
  * Britt's Brain (status 'brainstorm', NOT the dev queue) with the transcript
  * kept in dev notes. If the AI is down, the raw notes can still be saved.
+ *
+ * The conversation lives on the SERVER (`spitball_sessions`), not in this
+ * component's state: closing the window used to destroy it, which is exactly
+ * what "it stops partway through" meant. On open we load whatever session is
+ * active, so the chat is simply THERE — across close/reopen and across devices.
+ * "Start fresh" archives the current one (summarized, so the next brainstorm
+ * can recall it) rather than deleting it.
  */
 function SpitballModal({ onClose }: { onClose: () => void }) {
   const { addFeatureRequest, updateFeatureRequest } = useAppContext()
-  const [messages, setMessages] = useState<SpitballMessage[]>([SPITBALL_GREETING])
+  const [messages, setMessages] = useState<SpitballMessage[]>([])
+  const [loading, setLoading] = useState(true)
+  const [remembers, setRemembers] = useState(false)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [draft, setDraft] = useState<{ title: string; description: string } | null>(null)
 
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const state = await spitballSessionRequest()
+        if (cancelled) return
+        setMessages(state.session?.messages ?? [])
+        setRemembers(state.pastSummaries.length > 0)
+      } catch (err) {
+        if (cancelled) return
+        // A failed load must not lock her out of thinking out loud — fall back
+        // to an empty conversation and let the send surface any real problem.
+        setError(err instanceof Error ? err.message : 'Could not load your brainstorm.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // The greeting is a UI affordance for an EMPTY conversation, never a stored
+  // turn — otherwise it would be re-persisted on every reopen.
+  const shown: SpitballMessage[] = messages.length === 0 ? [SPITBALL_GREETING] : messages
+
   const sendText = async (text: string) => {
     const trimmed = text.trim()
-    if (!trimmed || busy || saving) return
-    const next: SpitballMessage[] = [...messages, { role: 'user', text: trimmed }]
-    setMessages(next)
+    if (!trimmed || busy || saving || loading) return
+    setMessages([...messages, { role: 'user', text: trimmed }])
     setInput('')
     setBusy(true)
     setError('')
     try {
-      const result = await spitballRequest(next)
-      setMessages([...next, { role: 'assistant', text: result.reply }])
+      const result = await spitballRequest(trimmed)
+      setMessages((current) => [...current, { role: 'assistant', text: result.reply }])
       if (result.draft) setDraft(result.draft)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The spitballing chat hit a snag.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const startFresh = async () => {
+    if (busy || saving || loading) return
+    if (
+      messages.length > 0 &&
+      !window.confirm(
+        "Start a fresh brainstorm? This one gets tucked away — I'll still remember it next time.",
+      )
+    ) {
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      const state = await spitballNewSessionRequest()
+      setMessages(state.session?.messages ?? [])
+      setRemembers(state.pastSummaries.length > 0)
+      setDraft(null)
+      setInput('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not start a fresh brainstorm.')
     } finally {
       setBusy(false)
     }
@@ -1126,17 +1190,24 @@ function SpitballModal({ onClose }: { onClose: () => void }) {
         <p className="muted-text spitball-subtitle">
           Think out loud — this lands in Britt&apos;s Brain, not the work queue. Alex moves an
           idea to Planned when you&apos;re ready.
+          {remembers ? ' I remember your past brainstorms, so you can pick a thread back up.' : ''}
         </p>
 
         <div className="spitball-messages">
-          {messages.map((message, index) => (
-            <div
-              key={index}
-              className={`spitball-message spitball-message--${message.role}`}
-            >
-              {message.text}
+          {loading ? (
+            <div className="spitball-message spitball-message--assistant">
+              Picking up where we left off…
             </div>
-          ))}
+          ) : (
+            shown.map((message, index) => (
+              <div
+                key={index}
+                className={`spitball-message spitball-message--${message.role}`}
+              >
+                {message.text}
+              </div>
+            ))
+          )}
           {busy ? <div className="spitball-message spitball-message--assistant">…</div> : null}
         </div>
 
@@ -1193,7 +1264,7 @@ function SpitballModal({ onClose }: { onClose: () => void }) {
             maxLength={2000}
             placeholder="Type like you'd talk…"
             aria-label="Your thought"
-            disabled={busy || saving}
+            disabled={busy || saving || loading}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
@@ -1205,7 +1276,7 @@ function SpitballModal({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             className="primary-action"
-            disabled={busy || saving || !input.trim()}
+            disabled={busy || saving || loading || !input.trim()}
             onClick={() => void sendText(input)}
             aria-label="Send"
           >
@@ -1223,6 +1294,14 @@ function SpitballModal({ onClose }: { onClose: () => void }) {
               Wrap it up &amp; organize
             </button>
           ) : null}
+          <button
+            type="button"
+            className="link-button"
+            disabled={busy || saving || loading}
+            onClick={() => void startFresh()}
+          >
+            Start fresh
+          </button>
           <button type="button" className="secondary-action" disabled={saving} onClick={onClose}>
             Close
           </button>

@@ -1269,6 +1269,18 @@ Clients page meanwhile. Owner-only.
   runs until Alex moves one to Planned via the normal status dropdown. The
   full chat transcript is kept in the item's notes. If the AI is unavailable,
   "Save my notes as-is" still files the raw idea so nothing is ever lost.
+- **Just spitballing remembers.** The brainstorm is saved as you go, on the
+  server — close the window, come back tomorrow, or open the app on a different
+  device and the conversation is simply there, right where you left it. A long
+  session is never forgotten either: once it runs past about thirty messages the
+  earlier part is condensed into a running summary the AI keeps referring to,
+  instead of quietly dropping off the front. And each finished brainstorm is
+  remembered for the next one — say "like we talked about last time" and it
+  knows, because it can see the gist of your past sessions plus the titles of
+  everything already parked in Britt's Brain. **"Start fresh"** (at the bottom of
+  the window) tucks the current brainstorm away — it asks first if there's
+  anything in it — and starts a clean one; nothing is deleted, and the archived
+  session is exactly what the AI recalls later.
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
   Planned (not near EOM) → In Progress → Needs answer → Shipped → Done, or
   Won't do), and a color-coded priority level — Urgent (red), High (orange),

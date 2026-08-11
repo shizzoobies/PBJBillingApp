@@ -17,10 +17,13 @@ import {
   confirmOwnerFeedback,
   executeAssistantAction,
   refineFeatureRequest,
+  planSpitballCompaction,
   runAssistantChat,
   sanitizeReport,
   spitballChat,
+  summarizeSpitballSession,
   validateAssistantAction,
+  SPITBALL_CONTEXT_CAPS,
 } from './lib/assistant.js'
 import { createPendingActionStore } from './lib/pending-actions.js'
 import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
@@ -619,6 +622,41 @@ const UPDATE_STATUS_LABELS = {
   wont_do: "Won't do",
 }
 const updateStatusLabel = (status) => UPDATE_STATUS_LABELS[status] ?? String(status ?? 'unknown')
+
+/**
+ * The context that makes "Just spitballing" feel continuous: the summaries of
+ * her archived brainstorm sessions, and the titles of the ideas already parked
+ * in Britt's Brain. Both are hard-capped in `buildSpitballContext` too; the
+ * caps here keep the reads small as well.
+ *
+ * Best-effort by design — a brainstorm must never fail because the recall
+ * lookup did, so a failure degrades to "no memory" rather than an error.
+ */
+async function loadSpitballMemory(userId) {
+  try {
+    const [pastSummaries, requests] = await Promise.all([
+      appDataStore.listSpitballSummaries(userId, SPITBALL_CONTEXT_CAPS.pastSummaries),
+      appDataStore.listFeatureRequests(),
+    ])
+    const brainstormTitles = requests
+      .filter((item) => item.status === 'brainstorm')
+      .slice(0, SPITBALL_CONTEXT_CAPS.draftTitles)
+      .map((item) => item.title)
+    return { pastSummaries, brainstormTitles }
+  } catch (error) {
+    console.error('[updates] spitball memory lookup failed:', error?.message || error)
+    return { pastSummaries: [], brainstormTitles: [] }
+  }
+}
+
+/** The session shape the SpitballModal consumes — turns only, no user ids. */
+function serializeSpitballSession(session) {
+  if (!session) return null
+  return {
+    id: session.id,
+    messages: session.messages.map((message) => ({ role: message.role, text: message.text })),
+  }
+}
 
 /**
  * Tell the OTHER owners about Updates-tracker activity — a new item logged, or
@@ -3050,11 +3088,41 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // POST /api/feature-requests/spitball — the "Just spitballing" thought-
-    // partner chat. Stateless: body { messages: [{role, text}, …] }, returns
-    // { reply, draft|null }. Nothing is saved here — the UI files the draft
-    // via the normal create endpoint when the owner clicks save. Declared
-    // before the parameterized routes so the literal segment isn't an id.
+    // GET /api/feature-requests/spitball/session — the owner's ACTIVE
+    // brainstorm, so the modal shows the conversation exactly where she left it
+    // no matter which window or device closed it. Creates nothing: `session` is
+    // null until she actually says something. `pastSummaries` is what lets the
+    // UI say the assistant remembers her earlier brainstorms. Declared before
+    // the parameterized routes so the literal segment isn't read as an id.
+    if (
+      normalizedPath === '/api/feature-requests/spitball/session' &&
+      request.method === 'GET'
+    ) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      const active = await appDataStore.getActiveSpitballSession(session.user.id)
+      const pastSummaries = await appDataStore.listSpitballSummaries(
+        session.user.id,
+        SPITBALL_CONTEXT_CAPS.pastSummaries,
+      )
+      sendJson(response, 200, {
+        session: serializeSpitballSession(active),
+        pastSummaries: pastSummaries.map((entry) => ({ id: entry.id, at: entry.at })),
+      })
+      return
+    }
+
+    // POST /api/feature-requests/spitball — ONE turn of the "Just spitballing"
+    // thought-partner chat. Body { text }. The session is server-side, so this
+    // takes her message, appends it, answers with the model, persists the
+    // reply, and returns { reply, draft|null, sessionId }.
+    //
+    // Back-compat: a cached bundle may still POST the whole { messages } array.
+    // Treat its last user message as the turn rather than 400-ing at her.
     if (normalizedPath === '/api/feature-requests/spitball' && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return
@@ -3072,9 +3140,47 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = await readJsonBody(request)
+      const legacyTurn = Array.isArray(payload?.messages)
+        ? [...payload.messages].reverse().find((m) => m?.role === 'user' && m?.text)?.text
+        : ''
+      const text = String(payload?.text ?? legacyTurn ?? '').trim().slice(0, 2000)
+      if (!text) {
+        sendJson(response, 400, { error: 'The conversation needs a user message to respond to.' })
+        return
+      }
       try {
-        const result = await spitballChat(payload?.messages)
-        sendJson(response, 200, result)
+        const active = await appDataStore.ensureActiveSpitballSession(session.user.id)
+        const memory = await loadSpitballMemory(session.user.id)
+        const history = [...active.messages, { role: 'user', text }]
+
+        const result = await spitballChat(history, {
+          summary: active.summary,
+          pastSummaries: memory.pastSummaries,
+          brainstormTitles: memory.brainstormTitles,
+        })
+
+        // Persist BOTH turns together, so the stored conversation can never end
+        // on a user message the AI already answered.
+        const updated = await appDataStore.appendSpitballTurn(active.id, [
+          { role: 'user', text },
+          { role: 'assistant', text: result.reply },
+        ])
+
+        // Compaction, not truncation: past the threshold the older turns are
+        // folded into the session's running summary (which rides along in the
+        // system prompt above) instead of being silently dropped.
+        const plan = planSpitballCompaction(updated?.messages)
+        if (plan.needed) {
+          const summary = await summarizeSpitballSession(plan.older, {
+            priorSummary: active.summary,
+          })
+          await appDataStore.compactSpitballSession(active.id, {
+            summary,
+            keepRecent: plan.keepRecent,
+          })
+        }
+
+        sendJson(response, 200, { ...result, sessionId: active.id })
       } catch (error) {
         const status = error?.statusCode ?? error?.status ?? 502
         console.error('[updates] spitball failed:', error?.message || error)
@@ -3084,6 +3190,58 @@ const server = createServer(async (request, response) => {
             'The AI is unavailable right now — your notes can still be saved as-is.',
         })
       }
+      return
+    }
+
+    // POST /api/feature-requests/spitball/new — "Start fresh". Archives the
+    // active session under a summary (so the next one can recall it) and hands
+    // back an empty session. The summary call NEVER blocks: on a model failure
+    // `summarizeSpitballSession` falls back to a truncated first message.
+    if (normalizedPath === '/api/feature-requests/spitball/new' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const active = await appDataStore.getActiveSpitballSession(session.user.id)
+      if (active && active.messages.length > 0) {
+        const summary = await summarizeSpitballSession(active.messages, {
+          priorSummary: active.summary,
+        })
+        await appDataStore.archiveSpitballSession(active.id, summary)
+      } else if (active) {
+        // An untouched session has nothing to remember — reuse it as-is rather
+        // than piling up empty archived rows.
+        sendJson(response, 200, {
+          session: serializeSpitballSession(active),
+          pastSummaries: (
+            await appDataStore.listSpitballSummaries(
+              session.user.id,
+              SPITBALL_CONTEXT_CAPS.pastSummaries,
+            )
+          ).map((entry) => ({ id: entry.id, at: entry.at })),
+        })
+        return
+      }
+      const fresh = await appDataStore.ensureActiveSpitballSession(session.user.id)
+      const pastSummaries = await appDataStore.listSpitballSummaries(
+        session.user.id,
+        SPITBALL_CONTEXT_CAPS.pastSummaries,
+      )
+      sendJson(response, 200, {
+        session: serializeSpitballSession(fresh),
+        pastSummaries: pastSummaries.map((entry) => ({ id: entry.id, at: entry.at })),
+      })
       return
     }
 

@@ -2566,17 +2566,49 @@ export async function refineFeatureRequest(id: string) {
     .suggestion
 }
 
+export type SpitballSession = {
+  id: string
+  messages: Array<{ role: 'user' | 'assistant'; text: string }>
+}
+
+export type SpitballSessionState = {
+  session: SpitballSession | null
+  pastSummaries: Array<{ id: string; at: string | null }>
+}
+
+/**
+ * Owner-only: the brainstorm session as the SERVER holds it. The conversation
+ * lives in `spitball_sessions`, so this is what makes it survive closing the
+ * modal (and follow her to another device). `session` is null until she has
+ * actually said something; `pastSummaries` is non-empty once she has archived
+ * an earlier brainstorm the AI can now recall.
+ */
+export async function spitballSessionRequest(): Promise<SpitballSessionState> {
+  const response = await apiFetch('/api/feature-requests/spitball/session', {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Could not load your brainstorm (${response.status})`,
+    )
+  }
+  return (await response.json()) as SpitballSessionState
+}
+
 /**
  * Owner-only: one turn of the "Just spitballing" thought-partner chat. Sends
- * the whole conversation; returns the AI's reply plus an organized draft once
- * the idea has enough shape (null until then). Nothing is saved by this call.
+ * just HER message — the server owns the conversation — and returns the AI's
+ * reply plus an organized draft once the idea has enough shape (null until
+ * then). The turn is persisted; the draft is not saved until she files it.
  */
-export async function spitballRequest(messages: Array<{ role: 'user' | 'assistant'; text: string }>) {
+export async function spitballRequest(text: string) {
   const response = await apiFetch('/api/feature-requests/spitball', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ text }),
   })
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { error?: string } | null
@@ -2588,7 +2620,29 @@ export async function spitballRequest(messages: Array<{ role: 'user' | 'assistan
   return (await response.json()) as {
     reply: string
     draft: { title: string; description: string } | null
+    sessionId: string
   }
+}
+
+/**
+ * Owner-only "Start fresh": archives the current brainstorm (summarized, so
+ * later sessions can recall it) and returns an empty one.
+ */
+export async function spitballNewSessionRequest(): Promise<SpitballSessionState> {
+  const response = await apiFetch('/api/feature-requests/spitball/new', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Could not start a fresh brainstorm (${response.status})`,
+    )
+  }
+  return (await response.json()) as SpitballSessionState
 }
 
 /**
