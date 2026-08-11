@@ -937,8 +937,8 @@ Clients page meanwhile. Owner-only.
 > contacts (honoring a per-client email override on a shared contact), falling
 > back to the email on the client record; if nobody has an address on file, it
 > says exactly what is missing instead of failing quietly. The email carries the
-> full breakdown, total, due date and the note to the client, plus a **Pay by
-> bank transfer** button when there is an amount owed — each send gets a fresh
+> full breakdown, total, due date and the note to the client, plus a big pink
+> **Pay $[amount]** button (bank transfer) when there is an amount owed — each send gets a fresh
 > payment link, and a re-send of a Paid or Processing invoice goes out as a
 > statement with NO pay button so nobody can pay twice. Sending marks the
 > invoice **Sent**; the first send's date is kept as THE sent date. The editor
@@ -947,6 +947,16 @@ Clients page meanwhile. Owner-only.
 > failed send shows the email provider's actual error and never marks the
 > invoice sent — every attempt, including failures, is kept in a permanent
 > per-invoice email log along with the total that was billed at the time.
+>
+> **All three client emails are branded.** The invoice, the payment
+> acknowledgment and the receipt share one design: the PB&J logo at the top, a
+> white rounded card on a pale ice-blue page, teal headings and labels with the
+> amount due and the pay button in brand pink, and Brittany's script quote —
+> "Spread success, not stress, thanks for choosing PB&J Strategic Accounting." —
+> above the footer. The quote's words are also the image's alt text and a line in
+> the plain-text version, so a client whose inbox blocks images still reads it,
+> and the pay button is a colored button rather than an image, so it works with
+> images off too.
 >
 > **Every invoice email carries a PDF of the invoice.** The attachment is named
 > after the invoice number (`INV-2026-08-001.pdf`) and is built from the invoice
