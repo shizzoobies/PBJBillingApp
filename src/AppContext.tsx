@@ -371,6 +371,13 @@ export type AppContextValue = {
    * false if onboarding was already started or the client was missing.
    */
   startOnboarding: (clientId: string) => Promise<boolean>
+  /**
+   * Owner-only: retire a client ('inactive') or bring them back ('active').
+   * Nothing is deleted — the client drops out of new-work pickers, invoice
+   * generation and recurring materialization, and every existing entry,
+   * checklist and invoice stays exactly where it is. Returns true on success.
+   */
+  setClientLifecycle: (clientId: string, stage: 'inactive' | 'active') => Promise<boolean>
   reorderChecklistItems: (checklistId: string, orderedIds: string[]) => void
   bulkAddChecklistItems: (checklistId: string, labels: string[]) => void
   createChecklist: (payload: {

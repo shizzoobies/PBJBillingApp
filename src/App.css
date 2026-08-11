@@ -9791,6 +9791,41 @@ mark.list-search-hit {
   color: var(--green);
   border-color: rgba(35, 116, 90, 0.34);
 }
+/* Retired: deliberately the flattest badge of the four. A former client is
+   not an alert and not a problem — they are simply out of the way. */
+.lifecycle-badge-inactive {
+  background: rgba(90, 90, 90, 0.1);
+  color: #6b6b6b;
+  border-color: rgba(90, 90, 90, 0.28);
+}
+
+/* Explains, on the client's own page, why they have disappeared from every
+   dropdown — and offers the one action that reverses it. */
+.client-inactive-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(90, 90, 90, 0.08);
+  border: 1px solid rgba(90, 90, 90, 0.24);
+  font-size: 13px;
+  color: var(--bluegray);
+}
+.client-inactive-banner > span:nth-child(2) {
+  flex: 1 1 320px;
+}
+
+/* A retired client's row reads as archived rather than active work, without
+   going so faint that their history becomes hard to read. */
+tr.is-inactive-client > td {
+  opacity: 0.72;
+}
+tr.is-inactive-client .client-name-link {
+  font-style: italic;
+}
 
 @media (max-width: 640px) {
   .stage-segment {

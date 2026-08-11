@@ -8,7 +8,7 @@
  * bad value can never reject the whole save or persist unparseable garbage.
  */
 // @ts-expect-error - plain-JS module without type declarations
-import { sanitizeAppData } from '../../db/store.js'
+import { coerceLifecycleStage, sanitizeAppData } from '../../db/store.js'
 import { describe, expect, it } from 'vitest'
 
 describe('sanitizeAppData — number clamping', () => {
@@ -327,5 +327,64 @@ describe('sanitizeAppData — normal save is left untouched', () => {
   it('returns the input as-is for non-object input (never throws)', () => {
     expect(sanitizeAppData(null)).toBeNull()
     expect(sanitizeAppData(undefined)).toBeUndefined()
+  })
+})
+
+/**
+ * `lifecycle_stage` is the flag that decides whether a client appears in any
+ * picker in the app. The Postgres insert clamps it column-side; on the file
+ * backend the bulk save is the only chokepoint, so `coerceLifecycleStage` runs
+ * here — one helper shared by both, or a stage one backend accepts becomes a
+ * retirement the other quietly reverses.
+ */
+describe('sanitizeAppData — lifecycle stage', () => {
+  it('passes every real stage through untouched', () => {
+    const data = {
+      clients: [
+        { id: 'c1', name: 'A', lifecycleStage: 'proposal' },
+        { id: 'c2', name: 'B', lifecycleStage: 'onboarding' },
+        { id: 'c3', name: 'C', lifecycleStage: 'active' },
+        { id: 'c4', name: 'D', lifecycleStage: 'inactive' },
+      ],
+    }
+    const cleaned = sanitizeAppData(data)
+    expect(cleaned.clients.map((c: { lifecycleStage: string }) => c.lifecycleStage)).toEqual([
+      'proposal',
+      'onboarding',
+      'active',
+      'inactive',
+    ])
+  })
+
+  it('clamps an unknown stage to active — a bad value must not hide a client', () => {
+    const data = {
+      clients: [
+        { id: 'c1', name: 'A', lifecycleStage: 'archived' },
+        { id: 'c2', name: 'B', lifecycleStage: 42 },
+        { id: 'c3', name: 'C', lifecycleStage: null },
+      ],
+    }
+    const cleaned = sanitizeAppData(data)
+    expect(cleaned.clients.map((c: { lifecycleStage: string }) => c.lifecycleStage)).toEqual([
+      'active',
+      'active',
+      'active',
+    ])
+  })
+
+  it('does not invent the field on a client that never had one', () => {
+    const cleaned = sanitizeAppData({ clients: [{ id: 'c1', name: 'A' }] })
+    expect('lifecycleStage' in cleaned.clients[0]).toBe(false)
+  })
+})
+
+describe('coerceLifecycleStage', () => {
+  it('accepts the four real stages and rejects everything else', () => {
+    for (const stage of ['proposal', 'onboarding', 'active', 'inactive']) {
+      expect(coerceLifecycleStage(stage)).toBe(stage)
+    }
+    for (const bad of ['archived', 'ACTIVE', '', null, undefined, 0, {}]) {
+      expect(coerceLifecycleStage(bad)).toBe('active')
+    }
   })
 })

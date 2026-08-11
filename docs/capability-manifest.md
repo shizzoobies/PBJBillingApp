@@ -684,6 +684,34 @@ Clients page meanwhile. Owner-only.
   client automatically advances (Proposal → Onboarding → Active). The owner can
   also set a client's stage directly. New clients can be added straight into any
   stage (defaults to Active). Staff see the badge but don't manage stages.
+- Inactive clients (owner): a client who has left is retired rather than
+  deleted. "Mark inactive" sits on each client row and on the client's own page
+  (next to Delete), asks for confirmation naming exactly what changes, and sets
+  the client's stage to Inactive. "Reactivate" is in the same two places and
+  puts them straight back to Active. Both are written to the activity log.
+  - What an inactive client is hidden from: the Clients list (they move to
+    the "Inactive" tab, with a count, and are gone from Active/Onboarding/
+    Proposal — "All" still shows them); the staff Clients list entirely; the
+    time-tracking client pickers (timer, group timer, manual entry, the
+    split-across-clients list, the Track time modal, and the client dropdown
+    when editing an entry); the "For which client" picker when creating a task
+    or recurring checklist; template copy targets; the Team page's "+ Add
+    client"; and the Invoices billing queue and its client picker.
+  - What is NOT touched: every time entry, checklist, invoice, note,
+    reimbursement, contact link, plan, and assigned-team member stays exactly
+    as it was. Nothing is deleted, and reactivating restores the client with
+    all of it intact — the stage flag is the only thing that changed.
+  - What still shows them: reports and analytics for any period they have data
+    in, timesheets, time approvals, Client Recap, the Board and Gantt filters,
+    invoice history (including the monthly archive), and their own client page,
+    which stays fully viewable across all tabs with an "Inactive" banner.
+  - What stops happening: their recurring checklists generate no new instances
+    (existing ones stay open and visible, and generation resumes on
+    reactivation), and the monthly invoice run skips them (existing invoices
+    are untouched). The Start onboarding, Track time, Template and "Add
+    recurring checklist" buttons are hidden while they are inactive. Inactive
+    clients are not counted as a To-100% setup problem — retiring a client is
+    an intended state, not an unfinished step.
 - Assigned team controls which staff can see/log time for the client.
 
 ## Client Recap (owner only)

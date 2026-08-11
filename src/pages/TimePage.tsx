@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import { useAppContext } from '../AppContext'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
 import { isInReportPeriod } from '../lib/reportPeriod'
+import { selectableClients } from '../lib/clientLifecycle'
 import {
   buildTimeTaskOptions,
   resolveTimeTaskChoice,
@@ -2613,7 +2614,11 @@ function TimeEntryRow({
                       ? `Keep as group time (${groupMemberCount} ${groupMemberCount === 1 ? 'client' : 'clients'}) — split it below`
                       : 'Select a client…'}
                   </option>
-                  {clients.map((client) => (
+                  {/* Re-pointing an entry bills someone new, so retired clients
+                      are not offered — but the entry's CURRENT client stays
+                      listed even if retired, or an old entry would open showing
+                      "Select a client…" and lose its attribution on save. */}
+                  {selectableClients(clients, [entry.clientId]).map((client) => (
                     <option key={client.id} value={client.id}>
                       {client.name}
                     </option>

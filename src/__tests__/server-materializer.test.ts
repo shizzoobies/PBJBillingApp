@@ -658,3 +658,111 @@ describe('materializeRecurringChecklists — service category', () => {
     expect(generated.categoryId).toBeNull()
   })
 })
+
+/**
+ * Retiring a client closes the tap on NEW work without touching a thing that
+ * already exists. The gate lives in `lib/recurring-gate.js`
+ * (`inactiveClientIds`) so the server materializer, the browser's
+ * `ensureRecurringChecklists`, and the Board/Gantt projection cannot drift
+ * apart on which clients have stopped producing.
+ */
+describe('materializeRecurringChecklists — inactive clients', () => {
+  const retiredClient = [
+    {
+      id: 'client-1',
+      name: 'Acme',
+      contact: 'A. Person',
+      billingMode: 'hourly',
+      hourlyRate: 100,
+      planId: null,
+      lifecycleStage: 'inactive',
+    },
+  ]
+
+  it('generates nothing for an overdue template whose client is inactive', () => {
+    const data = makeData({
+      clients: retiredClient,
+      checklistTemplates: [makeMonthlyTemplate()],
+    })
+    const result = materializeRecurringChecklists(data)
+
+    // Asserted on the instances rather than `changed`, which also flips for
+    // the unrelated legacy backfills this function performs on every read.
+    expect(
+      result.data.checklists.filter((c: { templateId?: string }) => c.templateId === 'tpl-monthly'),
+    ).toHaveLength(0)
+  })
+
+  it('leaves the retired client’s existing instances exactly where they are', () => {
+    const existing = {
+      id: 'cl-old-1',
+      title: 'Monthly Close',
+      clientId: 'client-1',
+      assigneeId: 'emp-1',
+      templateId: 'tpl-monthly',
+      frequency: 'monthly',
+      dueDate: daysAgo(40),
+      viewerIds: [],
+      editorIds: [],
+      caseId: 'case-old',
+      stageId: 'stage-1',
+      stageIndex: 0,
+      stageCount: 1,
+      items: [{ id: 'item-1', label: 'Reconcile bank feed', done: true }],
+    }
+    const data = makeData({
+      clients: retiredClient,
+      checklistTemplates: [makeMonthlyTemplate()],
+      checklists: [existing],
+    })
+    const result = materializeRecurringChecklists(data)
+
+    expect(result.data.checklists).toHaveLength(1)
+    expect(result.data.checklists[0]).toMatchObject({ id: 'cl-old-1', clientId: 'client-1' })
+  })
+
+  it('still generates for every other client in the same pass', () => {
+    const data = makeData({
+      clients: [
+        ...retiredClient,
+        {
+          id: 'client-2',
+          name: 'Beta',
+          contact: 'B. Person',
+          billingMode: 'hourly',
+          hourlyRate: 100,
+          planId: null,
+        },
+      ],
+      checklistTemplates: [
+        makeMonthlyTemplate(),
+        makeMonthlyTemplate({ id: 'tpl-beta', clientId: 'client-2' }),
+      ],
+    })
+    const result = materializeRecurringChecklists(data)
+
+    const generatedFor = result.data.checklists.map((c: { clientId: string }) => c.clientId)
+    expect(generatedFor).toEqual(['client-2'])
+  })
+
+  it('resumes generating once the client is reactivated', () => {
+    const template = makeMonthlyTemplate()
+    expect(
+      materializeRecurringChecklists(
+        makeData({ clients: retiredClient, checklistTemplates: [template] }),
+      ).data.checklists,
+    ).toHaveLength(0)
+
+    // Reactivate = flip the one flag back. Nothing else about the workspace
+    // needs restoring, which is the whole point of the design.
+    const reactivated = [{ ...retiredClient[0], lifecycleStage: 'active' }]
+    const result = materializeRecurringChecklists(
+      makeData({ clients: reactivated, checklistTemplates: [template] }),
+    )
+    expect(result.changed).toBe(true)
+    expect(
+      result.data.checklists.filter((c: { templateId?: string }) => c.templateId === 'tpl-monthly')
+        .length,
+    ).toBeGreaterThanOrEqual(1)
+  })
+})

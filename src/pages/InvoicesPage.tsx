@@ -26,6 +26,7 @@ import {
   isSafeImageSrc,
 } from '../lib/utils'
 import { generateInvoicesRequest, listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
+import { selectableClients } from '../lib/clientLifecycle'
 
 type DisplayLine = InvoiceLine & { groupKey?: string }
 
@@ -333,8 +334,19 @@ export function InvoicesPage() {
     firmSettings,
   } = useAppContext()
 
+  // The billing queue and its client picker are a to-do list for THIS month's
+  // invoicing, so retired clients drop out — the monthly run skips them too, and
+  // a queue row you can never action is just a row you learn to ignore. Their
+  // invoices are untouched and stay in History (which builds its own filter
+  // list from the invoice rows, so it keeps every former client it ever billed).
+  // A retired client that is somehow still selected stays listed rather than
+  // vanishing mid-look.
+  const billableClients = useMemo(
+    () => selectableClients(data.clients, [selectedClientId]),
+    [data.clients, selectedClientId],
+  )
   const selectedClient =
-    data.clients.find((client) => client.id === selectedClientId) ?? data.clients[0]
+    data.clients.find((client) => client.id === selectedClientId) ?? billableClients[0]
   const baseInvoice = useMemo(
     () =>
       selectedClient
@@ -692,7 +704,7 @@ export function InvoicesPage() {
                 onChange={(event) => setSelectedClientId(event.target.value)}
                 value={selectedClientId}
               >
-                {data.clients.map((client) => (
+                {billableClients.map((client) => (
                   <option key={client.id} value={client.id}>
                     {client.name}
                   </option>
@@ -737,7 +749,7 @@ export function InvoicesPage() {
             selectedClientId={selectedClient?.id ?? null}
             onSelect={setSelectedClientId}
             billingPeriod={billingPeriod}
-            clients={data.clients}
+            clients={billableClients}
             entries={data.timeEntries}
             plans={data.plans}
             reimbursements={data.reimbursements ?? []}

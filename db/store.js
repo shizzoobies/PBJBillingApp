@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile as fsWriteFile } from 'node:fs/promises'
 import { classifySplitTarget } from '../lib/group-allocation.js'
+import { inactiveClientIds, isInactiveClientStage } from '../lib/recurring-gate.js'
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
   buildChecklistInstanceKeys,
@@ -392,6 +393,27 @@ function mapEstimatedRoleHours({ legacy, bookkeeper, accountant, cfo }) {
   if (ac !== undefined) out.estimatedAccountantHours = ac
   if (cf !== undefined) out.estimatedCfoHours = cf
   return out
+}
+
+/**
+ * Every lifecycle stage a client may legitimately hold. 'inactive' is the
+ * retirement stage: it is a real, persisted value (a retired client keeps all
+ * of their history), it is just never reachable from the stage dropdown — only
+ * from the explicit Mark inactive / Reactivate actions.
+ */
+export const LIFECYCLE_STAGES = ['proposal', 'onboarding', 'active', 'inactive']
+
+/**
+ * Clamp a lifecycle stage to a value the column and the UI both understand.
+ * Absent or garbage becomes 'active': a client saved without the field (legacy
+ * payload, older client build) must never silently become a prospect — or, now,
+ * silently disappear from every picker in the app.
+ *
+ * ONE copy, because three write paths set this column and a stage only one of
+ * them accepts is a stage that flips back on the next save.
+ */
+export function coerceLifecycleStage(stage) {
+  return LIFECYCLE_STAGES.includes(stage) ? stage : 'active'
 }
 
 export function normalizeClientProfile(client) {
@@ -1308,6 +1330,13 @@ export function sanitizeAppData(data) {
   }
 
   for (const client of data.clients) {
+    // The file backend has no column to clamp against, so the bulk save is the
+    // only place a bad stage can be caught before it reaches every picker in
+    // the app. Guarded on presence so a client that never had the field keeps
+    // not having it (absent already reads as 'active' everywhere).
+    if ('lifecycleStage' in client) {
+      client.lifecycleStage = coerceLifecycleStage(client.lifecycleStage)
+    }
     if ('hourlyRate' in client) client.hourlyRate = clampMoney(client.hourlyRate)
     if ('monthlyRate' in client) client.monthlyRate = clampMoney(client.monthlyRate)
     if ('annualRate' in client) client.annualRate = clampMoney(client.annualRate)
@@ -1499,6 +1528,9 @@ export function materializeRecurringChecklists(data) {
 
   const todayDate = new Date()
   const currentYear = todayDate.getFullYear()
+  // Retired clients stop producing NEW work. Their existing instances are
+  // untouched above and stay visible forever; this only closes the tap.
+  const retiredClients = inactiveClientIds(data.clients)
 
   for (const template of nextTemplates) {
     const stages = template.stages ?? []
@@ -1508,6 +1540,7 @@ export function materializeRecurringChecklists(data) {
     if (
       template.isStandard ||
       !template.active ||
+      retiredClients.has(template.clientId) ||
       stages.length === 0 ||
       stages[0].items.length === 0 ||
       (template.frequency !== 'specific-months' && !template.nextDueDate)
@@ -4453,12 +4486,7 @@ export class AppDataStore {
               clientRecord.annualBillingMonth === null
                 ? null
                 : Number(clientRecord.annualBillingMonth),
-              // Default 'active' so a client saved without the field set (legacy
-              // payload / older client) never becomes a prospect.
-              clientRecord.lifecycleStage === 'proposal' ||
-              clientRecord.lifecycleStage === 'onboarding'
-                ? clientRecord.lifecycleStage
-                : 'active',
+              coerceLifecycleStage(clientRecord.lifecycleStage),
             ],
           )
 
@@ -6641,6 +6669,15 @@ export class AppDataStore {
         skipped.push({ clientId: client.id, reason: 'already-generated' })
         continue
       }
+      // A retired client generates no new drafts. Reported separately from
+      // 'not-billable-yet' because the two are opposite ends of the lifecycle
+      // and the fix differs: a prospect is waiting to start, a retired client
+      // has finished. Their existing invoices are untouched and stay in
+      // History — the `liveClientIds` check above already protects those.
+      if (isInactiveClientStage(client.lifecycleStage)) {
+        if (clientId) skipped.push({ clientId: client.id, reason: 'client-inactive' })
+        continue
+      }
       // Prospects and onboarding clients are not billed yet.
       if ((client.lifecycleStage ?? 'active') !== 'active') {
         if (clientId) skipped.push({ clientId: client.id, reason: 'not-billable-yet' })
@@ -7074,10 +7111,7 @@ export class AppDataStore {
       assignedBookkeeperIds: stringIds(client.assignedBookkeeperIds),
       // Never let a bad value land in the stage column — absent/garbage is
       // 'active', matching write() and the read mappers.
-      lifecycleStage:
-        client.lifecycleStage === 'proposal' || client.lifecycleStage === 'onboarding'
-          ? client.lifecycleStage
-          : 'active',
+      lifecycleStage: coerceLifecycleStage(client.lifecycleStage),
     })
 
     if (this.pool) {
@@ -7511,14 +7545,24 @@ export class AppDataStore {
   }
 
   /**
-   * Set a single client's onboarding `lifecycleStage`. Authoritative,
-   * server-side counterpart of the manual-override the owner can set via the
-   * bulk save — used by the onboarding case ↔ client sync so a stage advance
-   * moves the client without a round-trip through the bulk app-data write.
-   * Returns the updated client, or null when the client doesn't exist.
+   * Set a single client's `lifecycleStage`. Authoritative, server-side
+   * counterpart of the manual-override the owner can set via the bulk save —
+   * used by the onboarding case ↔ client sync so a stage advance moves the
+   * client without a round-trip through the bulk app-data write, and by the
+   * Mark inactive / Reactivate actions.
+   *
+   * Deliberately touches NOTHING else: no assignments, no plans, no templates,
+   * no entries. Retiring a client is a single flag so that reactivating them
+   * puts the workspace back exactly as it was.
+   *
+   * Returns the updated client, or null when the client doesn't exist or the
+   * stage isn't a real one (an unknown stage is rejected outright here rather
+   * than silently coerced to 'active', which would look like a successful
+   * retirement that didn't happen).
    */
   async setClientLifecycleStage(clientId, lifecycleStage) {
     if (!clientId) return null
+    if (!LIFECYCLE_STAGES.includes(lifecycleStage)) return null
     if (this.pool) {
       const result = await this.pool.query(
         `update clients set lifecycle_stage = $2, updated_at = now()

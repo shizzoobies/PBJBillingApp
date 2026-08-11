@@ -38,6 +38,7 @@ import {
   resolveSpecificMonthsStageDueDate,
   resolveStageDueDate,
 } from './utils'
+import { inactiveClientIds } from '../../lib/recurring-gate.js'
 
 /** Default cap on ghosts emitted per template, so an annual horizon doesn't explode weekly templates. */
 const DEFAULT_MAX_PER_TEMPLATE = 6
@@ -162,11 +163,20 @@ export function projectUpcomingChecklists(data: AppData, opts: ProjectOptions): 
 
   const ghosts: Checklist[] = []
   const currentYear = new Date(`${fromDateOnly}T12:00:00`).getFullYear()
+  const retiredClients = inactiveClientIds(data.clients)
 
   for (const template of templates) {
     const stages = template.stages ?? []
-    // Same skip rule the materializer uses: blueprints/inactive/no-stages/empty-stage-1 never produce.
-    if (template.isStandard || !template.active || stages.length === 0 || stages[0].items.length === 0) {
+    // Same skip rule the materializer uses: blueprints / switched-off templates
+    // / retired clients / no-stages / empty-stage-1 never produce. A ghost for a
+    // retired client would promise work that will never be generated.
+    if (
+      template.isStandard ||
+      !template.active ||
+      retiredClients.has(template.clientId) ||
+      stages.length === 0 ||
+      stages[0].items.length === 0
+    ) {
       continue
     }
 

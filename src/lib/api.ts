@@ -1857,6 +1857,35 @@ export async function startOnboardingRequest(clientId: string) {
   }
 }
 
+/**
+ * Owner-only: retire a client ('inactive') or bring them back ('active').
+ * Nothing is deleted either way — the stage alone decides whether they are
+ * offered for new work. Returns the updated client so the caller can merge it
+ * into local state without a refetch.
+ */
+export async function setClientLifecycleStageRequest(
+  clientId: string,
+  stage: 'inactive' | 'active',
+) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/lifecycle-stage`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to update the client’s stage (${response.status})`,
+    )
+  }
+  return (await response.json()) as { client: Client }
+}
+
 // ---- Phase 5: notifications ----
 
 export async function fetchNotifications(

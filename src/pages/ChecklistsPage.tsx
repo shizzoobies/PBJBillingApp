@@ -45,6 +45,7 @@ import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { filterInProgressChecklists } from '../lib/inProgressFilter'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
+import { selectableClients } from '../lib/clientLifecycle'
 import {
   addDays,
   checklistFrequencies,
@@ -3475,9 +3476,10 @@ export function NewTaskForm({
     return employees.filter((employee) => employee.id === activeEmployeeId)
   }, [employees, role, activeEmployeeId])
 
-  // Smart defaults
+  // Smart defaults. Retired clients are out: this form only ever creates NEW
+  // work, and a task or recipe aimed at a former client would never be worked.
   const sortedClients = useMemo(
-    () => [...clients].sort((a, b) => a.name.localeCompare(b.name)),
+    () => selectableClients(clients).sort((a, b) => a.name.localeCompare(b.name)),
     [clients],
   )
   const defaultAssigneeId =
@@ -3907,8 +3909,10 @@ function ApplyToClientControl({
   title: string
   onApply: (clientId: string) => Promise<void>
 }) {
+  // Copy targets exclude retired clients — copying a template onto a former
+  // client produces a recipe the materializer will refuse to run.
   const sortedClients = useMemo(
-    () => [...clients].sort((a, b) => a.name.localeCompare(b.name)),
+    () => selectableClients(clients).sort((a, b) => a.name.localeCompare(b.name)),
     [clients],
   )
   const [open, setOpen] = useState(false)
@@ -4424,7 +4428,11 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
               }
               value={template.clientId}
             >
-              {props.clients.map((client) => (
+              {/* Retired clients are not offered as a new owner for this
+                  recipe — except the one it is already bound to, which has to
+                  stay listed or the select would render blank and silently
+                  re-point the template on the next edit. */}
+              {selectableClients(props.clients, [template.clientId]).map((client) => (
                 <option key={client.id} value={client.id}>
                   {client.name}
                 </option>

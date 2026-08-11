@@ -473,6 +473,7 @@ import {
   waitingOnStage,
   type WaitingOnLike,
 } from '../../lib/waiting-on-state.js'
+import { inactiveClientIds } from '../../lib/recurring-gate.js'
 
 /**
  * Recurring-instance identity, shared verbatim with the server materializer
@@ -1043,11 +1044,20 @@ export function ensureRecurringChecklists(data: AppData) {
 
   const todayDate = new Date()
   const currentYear = todayDate.getFullYear()
+  // Same gate the server materializer applies: a retired client generates
+  // nothing new. Its existing instances are already in `checklists` and stay.
+  const retiredClients = inactiveClientIds(data.clients)
 
   for (const template of templates) {
     const stages = template.stages ?? []
     // Standard templates are blueprints only — they never materialize.
-    if (template.isStandard || !template.active || stages.length === 0 || stages[0].items.length === 0) {
+    if (
+      template.isStandard ||
+      !template.active ||
+      retiredClients.has(template.clientId) ||
+      stages.length === 0 ||
+      stages[0].items.length === 0
+    ) {
       continue
     }
 
@@ -1543,6 +1553,10 @@ export function describeActivityAction(action: string): string {
       return 'updated client profile'
     case 'client_team_updated':
       return 'updated client assigned team'
+    case 'client_marked_inactive':
+      return 'marked inactive'
+    case 'client_reactivated':
+      return 'reactivated'
     case 'case_started':
       return 'started case'
     case 'case_advanced':

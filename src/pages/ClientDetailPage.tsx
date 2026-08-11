@@ -1,4 +1,15 @@
-import { ArrowLeft, Check, Copy, ExternalLink, Pencil, Plus, Timer, Trash2 } from 'lucide-react'
+import {
+  Archive,
+  ArrowLeft,
+  Check,
+  Copy,
+  ExternalLink,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Timer,
+  Trash2,
+} from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
@@ -10,6 +21,7 @@ import { ClientTimeModal } from '../components/ClientTimeModal'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
+import { isInactiveClient, markInactiveConfirm } from '../lib/clientLifecycle'
 import {
   activeChecklistsForClient,
   CLIENT_SECTION_ANCHORS,
@@ -79,10 +91,13 @@ import {
 export function ClientDetailPage() {
   const { clientId } = useParams<{ clientId: string }>()
   const navigate = useNavigate()
-  const { data, ownerMode, sessionUser, updateClient, deleteClient } = useAppContext()
+  const { data, ownerMode, sessionUser, updateClient, deleteClient, setClientLifecycle } =
+    useAppContext()
   const [assignedTeamError, setAssignedTeamError] = useState('')
   // Whether the shared "Track time" modal is open for this client.
   const [trackingTime, setTrackingTime] = useState(false)
+  // True while a retire/reactivate round-trip is in flight.
+  const [lifecycleBusy, setLifecycleBusy] = useState(false)
 
   const client = useMemo(
     () => data.clients.find((entry) => entry.id === clientId),
@@ -176,6 +191,18 @@ export function ClientDetailPage() {
     navigate('/clients', { replace: true })
   }
 
+  const retired = isInactiveClient(client)
+
+  const handleLifecycle = async (stage: 'inactive' | 'active') => {
+    if (stage === 'inactive' && !window.confirm(markInactiveConfirm(client.name))) return
+    setLifecycleBusy(true)
+    try {
+      await setClientLifecycle(client.id, stage)
+    } finally {
+      setLifecycleBusy(false)
+    }
+  }
+
   const recentChecklists = sortChecklists(
     data.checklists.filter((checklist) => checklist.clientId === client.id),
   ).slice(0, 8)
@@ -188,6 +215,30 @@ export function ClientDetailPage() {
           <ArrowLeft size={14} />
           Back to clients
         </Link>
+        {/* A retired client's page stays fully readable — every tab, every
+            entry, every invoice. The banner exists so nobody wonders why this
+            client has vanished from their dropdowns, and it carries the one
+            action that undoes it. */}
+        {retired ? (
+          <div className="client-inactive-banner" role="status">
+            <span className="lifecycle-badge lifecycle-badge-inactive">Inactive</span>
+            <span>
+              This client is inactive. Their full history is here, but they are hidden from
+              client lists and pickers, no new time or checklists are generated for them, and
+              they are skipped by the monthly invoice run.
+            </span>
+            {ownerMode ? (
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={lifecycleBusy}
+                onClick={() => handleLifecycle('active')}
+              >
+                <RotateCcw size={14} /> {lifecycleBusy ? 'Saving…' : 'Reactivate'}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {/* Overview / Billing / Checklists / Time. Navigation only: every panel
@@ -230,10 +281,37 @@ export function ClientDetailPage() {
           title="Client name"
           lockable
           headerAction={
-            <button className="danger-action" onClick={handleDelete} type="button">
-              <Trash2 size={14} />
-              Delete client
-            </button>
+            <div className="button-row">
+              {/* Sits beside Delete on purpose: this is the answer for the
+                  client who has left but whose books you still need. Retiring
+                  keeps everything; deleting does not. */}
+              {retired ? (
+                <button
+                  className="secondary-action"
+                  disabled={lifecycleBusy}
+                  onClick={() => handleLifecycle('active')}
+                  type="button"
+                >
+                  <RotateCcw size={14} />
+                  {lifecycleBusy ? 'Saving…' : 'Reactivate'}
+                </button>
+              ) : (
+                <button
+                  className="secondary-action"
+                  disabled={lifecycleBusy}
+                  onClick={() => handleLifecycle('inactive')}
+                  title="Retire this client: hide them from lists and pickers, keeping all their history"
+                  type="button"
+                >
+                  <Archive size={14} />
+                  {lifecycleBusy ? 'Saving…' : 'Mark inactive'}
+                </button>
+              )}
+              <button className="danger-action" onClick={handleDelete} type="button">
+                <Trash2 size={14} />
+                Delete client
+              </button>
+            </div>
           }
         >
           <NameField client={client} onCommit={commit} />
@@ -361,6 +439,9 @@ export function ClientDetailPage() {
               data={data}
               month={monthTime}
               onTrackTime={() => setTrackingTime(true)}
+              // Every entry below still lists in full; only the button that
+              // would log a NEW one goes away.
+              canTrackTime={!retired}
             />
           </CollapsibleSection>
         </div>
@@ -398,12 +479,15 @@ function ClientTimeBody({
   data,
   month,
   onTrackTime,
+  canTrackTime,
 }: {
   client: Client
   data: AppData
   /** This month's totals — the same numbers the Time tab's count label uses. */
   month: ClientMonthTime
   onTrackTime: () => void
+  /** False for a retired client: read their time, don't log more of it. */
+  canTrackTime: boolean
 }) {
   const [showAll, setShowAll] = useState(false)
 
@@ -439,9 +523,11 @@ function ClientTimeBody({
       </div>
 
       <div className="button-row">
-        <button type="button" className="primary-action" onClick={onTrackTime}>
-          <Timer size={14} /> Track time
-        </button>
+        {canTrackTime ? (
+          <button type="button" className="primary-action" onClick={onTrackTime}>
+            <Timer size={14} /> Track time
+          </button>
+        ) : null}
         <Link to="/time" className="secondary-action">
           Open Time page
         </Link>
@@ -1469,9 +1555,14 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
     setAdding(false)
   }
 
+  // A retired client's existing recipes stay listed below (they are history,
+  // and they come back live the moment the client is reactivated) — but there
+  // is no point authoring a new one that the materializer will skip.
+  const retired = isInactiveClient(client)
+
   return (
     <>
-      {ownerMode && !adding ? (
+      {ownerMode && !adding && !retired ? (
         <div className="recurring-add-row">
           <button type="button" className="primary-action" onClick={() => setAdding(true)}>
             <Plus size={14} /> Add recurring checklist
@@ -1480,6 +1571,12 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
             <Copy size={14} /> Add from existing
           </button>
         </div>
+      ) : null}
+      {retired ? (
+        <p className="muted-text">
+          This client is inactive, so no new checklists are generated for them. Their recipes are
+          kept below and resume if the client is reactivated.
+        </p>
       ) : null}
 
       {ownerMode && picking ? (

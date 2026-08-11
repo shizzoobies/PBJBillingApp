@@ -2,15 +2,24 @@ export type Role = 'employee' | 'owner'
 export type BillingMode = 'hourly' | 'subscription' | 'annual'
 
 /**
- * A client's onboarding lifecycle stage, in order: Proposal → Onboarding →
- * Active. Optional on {@link Client}; an absent value is treated as 'active'
- * everywhere (existing clients predate this field and must never silently
- * become a prospect). Driven primarily by the 3-stage onboarding case (see
- * {@link Checklist.onboardingForClientId}): stage 0 ⇒ 'proposal', stage 1 ⇒
- * 'onboarding', final stage complete ⇒ 'active'. The owner can also set it
+ * A client's lifecycle stage. The onboarding run is in order: Proposal →
+ * Onboarding → Active. Optional on {@link Client}; an absent value is treated
+ * as 'active' everywhere (existing clients predate this field and must never
+ * silently become a prospect). Driven primarily by the 3-stage onboarding case
+ * (see {@link Checklist.onboardingForClientId}): stage 0 ⇒ 'proposal', stage 1
+ * ⇒ 'onboarding', final stage complete ⇒ 'active'. The owner can also set it
  * directly on the Clients page as a manual override.
+ *
+ * 'inactive' is the retirement stage and sits OUTSIDE that run: a former client
+ * who is no longer worked on. It is reached and left only by the dedicated
+ * "Mark inactive" / "Reactivate" owner actions — never by the stage dropdown,
+ * never by onboarding sync. Nothing is deleted when a client goes inactive;
+ * the flag alone drives visibility (they drop out of new-work pickers, invoice
+ * generation and recurring materialization, while every existing entry,
+ * checklist, invoice and report row stays exactly where it was). Reactivating
+ * restores 'active', which is why nothing else is touched on the way out.
  */
-export type LifecycleStage = 'proposal' | 'onboarding' | 'active'
+export type LifecycleStage = 'proposal' | 'onboarding' | 'active' | 'inactive'
 
 /**
  * The firm's named monthly service packages. Picked per-client when billing

@@ -2097,6 +2097,165 @@ describe('generateInvoicesForPeriod with a single client (file backend)', () => 
     // is worth a reason.
     expect(result.skipped).toEqual([{ clientId: 'c3', reason: 'nothing-to-bill' }])
   })
+
+  /** Retire a seeded client without disturbing anything else about them. */
+  async function retire(clientId) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients.find((entry) => entry.id === clientId).lifecycleStage = 'inactive'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('skips a retired client on the month run, even with billable time', async () => {
+    await seedBillableWorkspace()
+    await retire('c1')
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    // c1 has two hours of billable time and would otherwise have invoiced.
+    expect(result.created.map((entry) => entry.clientId)).toEqual(['c2'])
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.invoices.map((entry) => entry.clientId)).toEqual(['c2'])
+  })
+
+  it('names the retirement, not "not billable yet", when asked for that client', async () => {
+    await seedBillableWorkspace()
+    await retire('c1')
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    expect(result.created).toHaveLength(0)
+    expect(result.skipped).toEqual([{ clientId: 'c1', reason: 'client-inactive' }])
+  })
+
+  it('leaves a retired client’s existing invoices untouched', async () => {
+    await seedBillableWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const before = JSON.parse(await readFile(localDataPath, 'utf8')).invoices
+    await retire('c1')
+
+    await store.generateInvoicesForPeriod(period)
+
+    const after = JSON.parse(await readFile(localDataPath, 'utf8')).invoices
+    expect(after.filter((entry) => entry.clientId === 'c1')).toEqual(
+      before.filter((entry) => entry.clientId === 'c1'),
+    )
+  })
+
+  it('invoices the client again once they are reactivated', async () => {
+    await seedBillableWorkspace()
+    await retire('c1')
+    expect(await store.generateInvoicesForPeriod(period, { clientId: 'c1' })).toMatchObject({
+      created: [],
+    })
+
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients.find((entry) => entry.id === 'c1').lifecycleStage = 'active'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    expect(result.created).toHaveLength(1)
+    expect(result.created[0].clientId).toBe('c1')
+  })
+})
+
+/**
+ * Stage validation. `lifecycle_stage` decides whether a client appears in ANY
+ * picker in the app, so a value neither backend recognizes is a client who
+ * silently disappears — or a retirement that silently undoes itself on the
+ * next save. One `coerceLifecycleStage` guards all three write paths.
+ */
+describe('lifecycle stage validation (file backend)', () => {
+  it('accepts all four real stages through a bulk save', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Prospect', billingMode: 'hourly', lifecycleStage: 'proposal' },
+          { id: 'c2', name: 'Starting', billingMode: 'hourly', lifecycleStage: 'onboarding' },
+          { id: 'c3', name: 'Working', billingMode: 'hourly', lifecycleStage: 'active' },
+          { id: 'c4', name: 'Former', billingMode: 'hourly', lifecycleStage: 'inactive' },
+        ],
+      }),
+    )
+
+    const data = await store.read()
+    expect(data.clients.map((entry) => entry.lifecycleStage)).toEqual([
+      'proposal',
+      'onboarding',
+      'active',
+      'inactive',
+    ])
+  })
+
+  it('clamps a garbage stage to active rather than hiding the client', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme', billingMode: 'hourly', lifecycleStage: 'retired' },
+          { id: 'c2', name: 'Globex', billingMode: 'hourly', lifecycleStage: null },
+        ],
+      }),
+    )
+
+    const data = await store.read()
+    expect(data.clients.map((entry) => entry.lifecycleStage)).toEqual(['active', 'active'])
+  })
+
+  it('leaves a client with no stage field alone — absent already reads as active', async () => {
+    await store.write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly' }] }),
+    )
+
+    const data = await store.read()
+    expect(data.clients[0].lifecycleStage).toBeUndefined()
+  })
+
+  it('setClientLifecycleStage retires and reactivates, touching nothing else', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            billingMode: 'hourly',
+            hourlyRate: 125,
+            planIds: ['plan-1'],
+            assignedBookkeeperIds: ['emp-1'],
+          },
+        ],
+        plans: [{ id: 'plan-1', name: 'Classic', monthlyFee: 500 }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper' }],
+      }),
+    )
+    const before = (await store.read()).clients[0]
+
+    const retired = await store.setClientLifecycleStage('c1', 'inactive')
+    expect(retired.lifecycleStage).toBe('inactive')
+    // Everything that decides how this client is worked survives the round trip.
+    expect(retired).toMatchObject({
+      hourlyRate: before.hourlyRate,
+      planIds: before.planIds,
+      assignedBookkeeperIds: before.assignedBookkeeperIds,
+    })
+
+    const back = await store.setClientLifecycleStage('c1', 'active')
+    expect({ ...back, lifecycleStage: before.lifecycleStage }).toEqual(before)
+  })
+
+  it('setClientLifecycleStage refuses a stage that is not real', async () => {
+    await store.write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly' }] }),
+    )
+
+    // Rejected outright rather than coerced to 'active': a silent coercion here
+    // would look like a retirement that succeeded and did nothing.
+    expect(await store.setClientLifecycleStage('c1', 'archived')).toBeNull()
+    expect((await store.read()).clients[0].lifecycleStage).toBeUndefined()
+  })
+
+  it('setClientLifecycleStage returns null for a client that is not on file', async () => {
+    await store.write(workspace({ clients: [] }))
+    expect(await store.setClientLifecycleStage('ghost', 'inactive')).toBeNull()
+  })
 })
 
 /**

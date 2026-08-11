@@ -204,9 +204,15 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     )
   }
   const currentYear = new Date().getFullYear()
+  const stageByClientId = new Map(
+    clients.map((client) => [client.id, client.lifecycleStage ?? 'active']),
+  )
 
   for (const template of checklistTemplates) {
-    const verdict = evaluateRecurringTemplate(template, { currentYear })
+    const verdict = evaluateRecurringTemplate(template, {
+      currentYear,
+      clientStage: template.clientId ? stageByClientId.get(template.clientId) : undefined,
+    })
     // Standard blueprints are recipes to copy, not schedules — they're never
     // meant to generate, so an empty one isn't a fault.
     if (verdict.skipped) continue
@@ -232,6 +238,11 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
       })
     }
 
+    // The client was retired on purpose, so this recipe going quiet is the
+    // intended outcome, not an unfinished setup step. Flagging it would mean
+    // retiring one client permanently dented the To-100% score with issues
+    // whose only "fix" is to un-retire them.
+    if (verdict.reason === 'inactive-client') continue
     if (verdict.reason === 'no-client') {
       flag(
         'no-client',

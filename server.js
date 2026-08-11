@@ -370,8 +370,13 @@ function consumeAssistantRateSlot(userId) {
 // billing line detail.
 function buildWorkspaceSnapshot(data) {
   return {
+    // Retired clients are deliberately still listed: the assistant is asked
+    // "why did X stop generating?" and "what did we bill X last year?", and it
+    // can only answer those if it can still find them. The flag is only
+    // emitted when true, so the common case costs no tokens.
     clients: (data.clients ?? []).map((client) => ({
       name: client.name,
+      ...(client.lifecycleStage === 'inactive' ? { inactive: true } : {}),
       billing: client.billingMode,
       plan: client.planId
         ? ((data.plans ?? []).find((plan) => plan.id === client.planId)?.name ?? null)
@@ -7670,6 +7675,58 @@ const server = createServer(async (request, response) => {
         })
       }
       sendJson(response, 201, result)
+      return
+    }
+
+    // POST /api/clients/:id/lifecycle-stage — owner-only: retire a client
+    // ("Mark inactive") or bring them back ("Reactivate"). Body: { stage }.
+    //
+    // A dedicated endpoint rather than the bulk app-data save because this is
+    // an ACTION, not an edit: it has to land in the activity log so "who
+    // retired this client, and when?" is answerable, and the bulk autosave is
+    // a whole-workspace overwrite with no notion of individual intent.
+    // Deliberately narrow — it sets the one flag and touches nothing else, so
+    // Reactivate restores the client exactly as they were.
+    const lifecycleStageMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/lifecycle-stage$/,
+    )
+    if (lifecycleStageMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can change a client’s stage' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const body = (await readJsonBody(request)) ?? {}
+      const stage = String(body.stage ?? '')
+      // Only the two retirement transitions go through here. Proposal /
+      // onboarding stages belong to the onboarding case and its dropdown, and
+      // letting this endpoint set them would give the sync two masters.
+      if (stage !== 'inactive' && stage !== 'active') {
+        sendJson(response, 400, { error: 'stage must be "inactive" or "active"' })
+        return
+      }
+      const clientId = decodeURIComponent(lifecycleStageMatch[1])
+      const updated = await appDataStore.setClientLifecycleStage(clientId, stage)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        stage === 'inactive' ? 'client_marked_inactive' : 'client_reactivated',
+        updated.name ?? clientId,
+      )
+      sendJson(response, 200, { client: updated })
       return
     }
 

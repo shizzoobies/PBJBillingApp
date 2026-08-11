@@ -1,4 +1,14 @@
-import { ChevronRight, Copy, ListChecks, Plus, ShieldCheck, StickyNote, Timer } from 'lucide-react'
+import {
+  Archive,
+  ChevronRight,
+  Copy,
+  ListChecks,
+  Plus,
+  RotateCcw,
+  ShieldCheck,
+  StickyNote,
+  Timer,
+} from 'lucide-react'
 import { useMemo, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
@@ -9,6 +19,12 @@ import { ClientTimeModal } from '../components/ClientTimeModal'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { FloatingAddButton } from '../components/FloatingAddButton'
 import { highlightMatch } from '../lib/highlight'
+import {
+  isInactiveClient,
+  lifecycleOf,
+  markInactiveConfirm,
+  selectableClients,
+} from '../lib/clientLifecycle'
 import { buildClientTaskCounts, type ClientTaskCounts } from '../lib/clientTaskCounts'
 import { ListSearch } from '../components/ListSearch'
 import type {
@@ -39,19 +55,21 @@ const BILLING_LABELS: Record<BillingMode, string> = {
 /** Sentinel for the "+ Add a new contact…" option in the primary-contact picker. */
 const NEW_CONTACT = '__new_contact__'
 
-// Lifecycle stages in display order, plus their human label. An absent
+// The onboarding run, in display order, plus their human label. An absent
 // `lifecycleStage` is treated as 'active' everywhere (see `lifecycleOf`).
+//
+// 'inactive' is deliberately NOT in this list: retiring and reactivating a
+// client are explicit, confirmed actions, not one more option in a dropdown
+// that also holds "Proposal". Picking the wrong line of a select should never
+// be able to pull a client out of every picker in the app.
 const LIFECYCLE_STAGES: readonly LifecycleStage[] = ['proposal', 'onboarding', 'active']
 const LIFECYCLE_LABELS: Record<LifecycleStage, string> = {
   proposal: 'Proposal',
   onboarding: 'Onboarding',
   active: 'Active',
+  inactive: 'Inactive',
 }
 
-/** The effective lifecycle stage of a client — absent defaults to 'active'. */
-function lifecycleOf(client: Client): LifecycleStage {
-  return client.lifecycleStage ?? 'active'
-}
 
 /**
  * Open / past-due task counts for one client row, sitting with the Checklist
@@ -90,13 +108,23 @@ function StageBadge({ stage }: { stage: LifecycleStage }) {
   )
 }
 
-// Segment control over the stage list: Active · Onboarding · Proposal · All.
+// Segment control over the stage list: Active · Onboarding · Proposal ·
+// Inactive · All. 'all' genuinely means all, retired clients included — it is
+// an explicit choice, and the default segment is 'active', so a former client
+// never appears in the list anyone actually works from.
 type StageSegment = LifecycleStage | 'all'
-const STAGE_SEGMENTS: readonly StageSegment[] = ['active', 'onboarding', 'proposal', 'all']
+const STAGE_SEGMENTS: readonly StageSegment[] = [
+  'active',
+  'onboarding',
+  'proposal',
+  'inactive',
+  'all',
+]
 const SEGMENT_LABELS: Record<StageSegment, string> = {
   active: 'Active',
   onboarding: 'Onboarding',
   proposal: 'Proposal',
+  inactive: 'Inactive',
   all: 'All',
 }
 
@@ -150,12 +178,15 @@ export function ClientsPage() {
     active: searchedClients.filter((c) => lifecycleOf(c) === 'active').length,
     onboarding: searchedClients.filter((c) => lifecycleOf(c) === 'onboarding').length,
     proposal: searchedClients.filter((c) => lifecycleOf(c) === 'proposal').length,
+    inactive: searchedClients.filter((c) => lifecycleOf(c) === 'inactive').length,
     all: searchedClients.length,
   }
-  // Owner list also respects the stage segment; staff list is search-only.
+  // Owner list also respects the stage segment; the staff list is search-only,
+  // minus retired clients — staff have no stage controls, so a former client
+  // in their list is a row they can neither work nor explain.
   const filteredClients = ownerMode
     ? searchedClients.filter((c) => stageSegment === 'all' || lifecycleOf(c) === stageSegment)
-    : searchedClients
+    : selectableClients(searchedClients)
 
   // Open + past-due task counts per client, shown on each row and also driving
   // the green tint on the Checklist button. Deliberately ONE source for both:
@@ -183,7 +214,10 @@ export function ClientsPage() {
             onChange={setQuery}
             placeholder="Search clients…"
             resultCount={filteredClients.length}
-            total={visibleClients.length}
+            // Retired clients are not in this list, so they must not be in its
+            // denominator either — "3 of 12" with only 9 reachable rows reads
+            // as a bug.
+            total={selectableClients(visibleClients).length}
           />
           {query.trim() && filteredClients.length === 0 ? (
             <p className="list-search-empty">No clients match &ldquo;{query.trim()}&rdquo;.</p>
@@ -881,7 +915,7 @@ function ClientTable({
   plans: SubscriptionPlan[]
   query?: string
 }) {
-  const { sessionUser, data, applyTemplateToClient } = useAppContext()
+  const { sessionUser, data, applyTemplateToClient, setClientLifecycle } = useAppContext()
   const [modalClient, setModalClient] = useState<Client | null>(null)
   const [notesClient, setNotesClient] = useState<Client | null>(null)
   // Client whose "Track time" modal is open (start a timer without leaving the list).
@@ -891,6 +925,8 @@ function ClientTable({
   // Client id currently mid-onboarding-request, so its button shows a pending
   // state and can't be double-clicked.
   const [onboardingId, setOnboardingId] = useState<string | null>(null)
+  // Client id currently mid retire/reactivate, for the same reason.
+  const [lifecycleId, setLifecycleId] = useState<string | null>(null)
 
   const handleStartOnboarding = async (clientId: string) => {
     if (!onStartOnboarding) return
@@ -899,6 +935,16 @@ function ClientTable({
       await onStartOnboarding(clientId)
     } finally {
       setOnboardingId(null)
+    }
+  }
+
+  const handleLifecycle = async (client: Client, stage: 'inactive' | 'active') => {
+    if (stage === 'inactive' && !window.confirm(markInactiveConfirm(client.name))) return
+    setLifecycleId(client.id)
+    try {
+      await setClientLifecycle(client.id, stage)
+    } finally {
+      setLifecycleId(null)
     }
   }
 
@@ -922,8 +968,12 @@ function ClientTable({
             const clientPlans = (client.planIds ?? [])
               .map((id) => plans.find((item) => item.id === id))
               .filter((item): item is SubscriptionPlan => Boolean(item))
+            // A retired client's row is a doorway to their history and a
+            // Reactivate button — every affordance that would START something
+            // new is hidden, so the row can't quietly put them back to work.
+            const retired = isInactiveClient(client)
             return (
-              <tr key={client.id}>
+              <tr key={client.id} className={retired ? 'is-inactive-client' : undefined}>
                 <td>
                   {/* Everyone links through to the client detail page — staff
                       get a read-only, staff-scoped view (recurring checklists,
@@ -938,7 +988,10 @@ function ClientTable({
                 <td>
                   <div className="stage-cell">
                     <StageBadge stage={lifecycleOf(client)} />
-                    {ownerMode && onUpdateClient ? (
+                    {/* No stage dropdown on a retired client: the only move
+                        available to them is Reactivate, which lives with the
+                        other row actions. */}
+                    {ownerMode && onUpdateClient && !retired ? (
                       <select
                         className="compact-input stage-override"
                         aria-label={`Set stage for ${client.name}`}
@@ -1014,8 +1067,12 @@ function ClientTable({
                 <td>
                   <div className="client-row-actions">
                     {/* Only for clients who haven't finished onboarding — an Active
-                        client is already onboarded, so the button is just noise. */}
-                    {ownerMode && onStartOnboarding && lifecycleOf(client) !== 'active' ? (
+                        client is already onboarded, so the button is just noise,
+                        and a retired one is finished, not starting. */}
+                    {ownerMode &&
+                    onStartOnboarding &&
+                    !retired &&
+                    lifecycleOf(client) !== 'active' ? (
                       <button
                         type="button"
                         className="secondary-action compact-action"
@@ -1043,15 +1100,20 @@ function ClientTable({
                       <ListChecks size={14} /> Checklist
                     </button>
                     <ClientTaskCountBadges counts={taskCounts.get(client.id)} />
-                    <button
-                      type="button"
-                      className="secondary-action compact-action"
-                      title="Start tracking time for this client"
-                      onClick={() => setTimeClient(client)}
-                    >
-                      <Timer size={14} /> Time
-                    </button>
-                    {ownerMode ? (
+                    {/* New time and new templates are exactly what "inactive"
+                        stops. The Checklist and Note buttons above stay: both
+                        open history, which retiring never takes away. */}
+                    {!retired ? (
+                      <button
+                        type="button"
+                        className="secondary-action compact-action"
+                        title="Start tracking time for this client"
+                        onClick={() => setTimeClient(client)}
+                      >
+                        <Timer size={14} /> Time
+                      </button>
+                    ) : null}
+                    {ownerMode && !retired ? (
                       <button
                         type="button"
                         className="secondary-action compact-action"
@@ -1069,6 +1131,26 @@ function ClientTable({
                     >
                       <StickyNote size={14} /> Note
                     </button>
+                    {ownerMode ? (
+                      <button
+                        type="button"
+                        className="secondary-action compact-action"
+                        disabled={lifecycleId === client.id}
+                        title={
+                          retired
+                            ? 'Bring this client back — they reappear everywhere they were before'
+                            : 'Retire this client: hide them from lists and pickers, keeping all their history'
+                        }
+                        onClick={() => handleLifecycle(client, retired ? 'active' : 'inactive')}
+                      >
+                        {retired ? <RotateCcw size={14} /> : <Archive size={14} />}{' '}
+                        {lifecycleId === client.id
+                          ? 'Saving…'
+                          : retired
+                            ? 'Reactivate'
+                            : 'Mark inactive'}
+                      </button>
+                    ) : null}
                   </div>
                 </td>
               </tr>

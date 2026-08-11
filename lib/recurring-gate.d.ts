@@ -4,9 +4,15 @@
  * TypeScript copy of the rules drifting away from the server's.
  */
 
-/** The first missing ingredient that stops a recipe from generating. */
+/**
+ * The first missing ingredient that stops a recipe from generating.
+ *
+ * 'inactive' is the TEMPLATE's own on/off switch; 'inactive-client' is a
+ * retired client behind an otherwise healthy template.
+ */
 export type RecurringGateReason =
   | 'no-client'
+  | 'inactive-client'
   | 'inactive'
   | 'no-stages'
   | 'no-steps'
@@ -40,5 +46,17 @@ export declare function evaluateRecurringTemplate(
     // Nullable on ChecklistTemplate: unset = "Uncategorized".
     categoryId?: string | null
   },
-  options?: { currentYear?: number },
+  options?: {
+    currentYear?: number
+    /** The `lifecycleStage` of the template's client; absent ⇒ 'active'. */
+    clientStage?: string
+  },
 ): RecurringGateVerdict
+
+/** The single definition of "this client has been retired". */
+export declare function isInactiveClientStage(stage: string | undefined | null): boolean
+
+/** The ids of every retired client in a snapshot, for a generator's skip test. */
+export declare function inactiveClientIds(
+  clients?: { id?: string; lifecycleStage?: string }[],
+): Set<string>

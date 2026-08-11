@@ -27,6 +27,7 @@ import {
   type TeamSession,
 } from '../lib/types'
 import { describeActivityAction, formatActivityTimestamp, relativeTime } from '../lib/utils'
+import { selectableClients } from '../lib/clientLifecycle'
 
 const STAFF_ROLES = ['Owner', 'Accountant', 'Bookkeeper'] as const
 
@@ -710,7 +711,11 @@ function ClientsTheyCanSeeSection({
   const visibleClients = clients.filter((client) =>
     (client.assignedBookkeeperIds ?? []).includes(memberId),
   )
-  const addableClients = clients.filter(
+  // Nobody gets newly assigned to a retired client — that assignment's only
+  // effect would be to put the client back in their time dropdown, which is
+  // exactly what retiring took away. Existing assignments stay listed above
+  // (and untouched on the record) so reactivating restores the team as it was.
+  const addableClients = selectableClients(clients).filter(
     (client) => !(client.assignedBookkeeperIds ?? []).includes(memberId),
   )
 

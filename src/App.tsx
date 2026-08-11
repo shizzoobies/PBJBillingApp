@@ -64,6 +64,7 @@ import {
   isTaskEditPending,
   generateChecklistFromTemplateRequest,
   startOnboardingRequest,
+  setClientLifecycleStageRequest,
   addRecurringReimbursementRequest,
   addReimbursementRequest,
   approveWeeklySubmissionRequest,
@@ -137,6 +138,7 @@ import {
   makeId,
   sortChecklists,
 } from './lib/utils'
+import { selectableClients } from './lib/clientLifecycle'
 import {
   defaultReportPeriod,
   normalizeReportPeriod,
@@ -3259,6 +3261,37 @@ function App() {
     }
   }
 
+  // Owner-only: retire a client, or bring them back. Goes through its own
+  // endpoint rather than `updateClient` + the bulk autosave so the transition
+  // lands in the activity log — and so a stale tab's next bulk save can't
+  // quietly resurrect (or re-retire) the client as a side effect of an
+  // unrelated edit.
+  const setClientLifecycle = async (
+    clientId: string,
+    stage: 'inactive' | 'active',
+  ): Promise<boolean> => {
+    if (previewActiveRef.current) return false
+    try {
+      setDataSyncState('saving')
+      const { client: updated } = await setClientLifecycleStageRequest(clientId, stage)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        clients: current.clients.map((client) => (client.id === clientId ? updated : client)),
+      }))
+      setDataSyncState('synced')
+      return true
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return false
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
   const updateClientPlan = (clientId: string, billingMode: BillingMode, planId: string | null) => {
     updateWorkspaceData((current) => ({
       ...current,
@@ -3549,13 +3582,19 @@ function App() {
   // While an owner previews a bookkeeper `effectiveRole` is downgraded to
   // 'employee' and `effectiveEmployeeId` is the bookkeeper's id, so the
   // same rule naturally scopes the dropdown to the bookkeeper's view.
+  // Retired clients are filtered out on top of the scoping rule: no new time
+  // may be logged against a former client. Entries ALREADY logged against them
+  // still render everywhere (reports, timesheets, approvals, their Time tab) —
+  // this list only decides what may be picked.
   const timeTrackingClients = useMemo(
     () =>
-      effectiveRole === 'owner'
-        ? data.clients
-        : data.clients.filter((client) =>
-            (client.assignedBookkeeperIds ?? []).includes(effectiveEmployeeId),
-          ),
+      selectableClients(
+        effectiveRole === 'owner'
+          ? data.clients
+          : data.clients.filter((client) =>
+              (client.assignedBookkeeperIds ?? []).includes(effectiveEmployeeId),
+            ),
+      ),
     [data.clients, effectiveRole, effectiveEmployeeId],
   )
   const syncMessage =
@@ -3710,6 +3749,7 @@ function App() {
     applyTemplateToClient,
     generateChecklistFromTemplate,
     startOnboarding,
+    setClientLifecycle,
     reorderChecklistItems,
     bulkAddChecklistItems,
     createChecklist,

@@ -225,6 +225,27 @@ describe('computeSetupIssues — recurring checklists that will never generate',
     expect(issues[0].detail).toContain('never generated')
   })
 
+  it('stays silent when the recipe’s client has been retired', () => {
+    // Retiring a client is an intended state, not an unfinished setup step.
+    // Flagging it would mean every retirement permanently dented the score
+    // with issues whose only "fix" is to un-retire the client.
+    const issues = computeSetupIssues({
+      ...emptyInput,
+      clients: [makeClient({ lifecycleStage: 'inactive' })],
+      checklistTemplates: [makeTemplate({ stages: [] })],
+    }).filter((issue) => issue.category === 'Checklists')
+    expect(issues).toEqual([])
+  })
+
+  it('flags that same recipe again once the client is reactivated', () => {
+    const issues = computeSetupIssues({
+      ...emptyInput,
+      clients: [makeClient({ lifecycleStage: 'active' })],
+      checklistTemplates: [makeTemplate({ stages: [] })],
+    }).filter((issue) => issue.category === 'Checklists')
+    expect(issues[0].id).toBe('checklist-template:no-stages:tmpl-1')
+  })
+
   it('flags a recipe with no stages at all', () => {
     expect(run(makeTemplate({ stages: [] }))[0].id).toBe('checklist-template:no-stages:tmpl-1')
   })

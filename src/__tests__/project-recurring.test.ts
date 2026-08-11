@@ -202,3 +202,42 @@ describe('projectUpcomingChecklists', () => {
     expect(ghosts.filter((g) => g.templateId === 'tmpl-weekly')).toHaveLength(6)
   })
 })
+
+/**
+ * The Board/Gantt projection has to skip exactly what the materializer skips,
+ * or the ghosts promise work that will never appear. A retired client is the
+ * newest way those two could drift, so it is pinned here.
+ */
+describe('projectUpcomingChecklists — inactive clients', () => {
+  const horizon = { fromDateOnly: TODAY, horizonEndDateOnly: dateOffset(60) }
+
+  function retire(data: AppData): AppData {
+    return {
+      ...data,
+      clients: data.clients.map((client) => ({ ...client, lifecycleStage: 'inactive' as const })),
+    }
+  }
+
+  it('projects nothing for a retired client’s template', () => {
+    const data = makeData([makeTemplate({})])
+    expect(projectUpcomingChecklists(data, horizon).length).toBeGreaterThan(0)
+    expect(projectUpcomingChecklists(retire(data), horizon)).toEqual([])
+  })
+
+  it('still projects for every other client', () => {
+    const data = makeData([
+      makeTemplate({}),
+      makeTemplate({ id: 'tmpl-2', clientId: 'client-2' }),
+    ])
+    const withRetired: AppData = {
+      ...data,
+      clients: [
+        { ...data.clients[0], lifecycleStage: 'inactive' },
+        { ...data.clients[0], id: 'client-2', name: 'Beta' },
+      ],
+    }
+    const ghosts = projectUpcomingChecklists(withRetired, horizon)
+    expect(ghosts.length).toBeGreaterThan(0)
+    expect([...new Set(ghosts.map((ghost) => ghost.clientId))]).toEqual(['client-2'])
+  })
+})
