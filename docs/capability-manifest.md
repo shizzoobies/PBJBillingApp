@@ -213,12 +213,16 @@ Clients page meanwhile. Owner-only.
   assigned to.
 - Billable vs non-billable is determined by the client's billing setup.
 - Weekly-submission gate: staff must SUBMIT (or resubmit) a prior week that has
-  logged time before they can log time in a LATER week. A prior week blocks when
-  it's un-submitted (never submitted) OR was sent back for changes (rejected) —
-  they get a message naming the week to submit/fix. A week that's already
-  submitted (pending owner approval) or approved does NOT block, so an
-  awaiting-approval week never locks them out. Logging in the current week is
-  always fine.
+  logged time before they can log NEW time — time dated in the CURRENT week or a
+  future one. A prior week blocks when it's un-submitted (never submitted) OR was
+  sent back for changes (rejected) — they get a message naming the week to
+  submit/fix. A week that's already submitted (pending owner approval) or
+  approved does NOT block, so an awaiting-approval week never locks them out.
+- Catching up on a PAST week is always allowed: adding a forgotten entry to, or
+  fixing an entry in, any week that has already ended never hits this gate, even
+  if an older week is un-submitted or was sent back. (Editing an entry never hit
+  it either — adding one now matches.) The only thing that stops a past-week
+  change is a LOCKED timesheet month, which an owner has to unlock.
 
 ## Timesheet page
 
@@ -1221,8 +1225,10 @@ Clients page meanwhile. Owner-only.
     or an **earlier week** that was never submitted or was sent back for
     changes (that person submits/resubmits it). It names every blocking week
     at once, says who fixes each, and says plainly when nothing is blocking
-    them. Owners are exempt from both gates, and a removed team member is
-    reported as such rather than as a gate.
+    them. It answers for logging time TODAY; backfilling a week that has
+    already ended is never gated, so only the month lock can stop that. Owners
+    are exempt from both gates, and a removed team member is reported as such
+    rather than as a gate.
   - **"Why did [client]'s checklist never show up?"** — it runs the same gate
     the generator uses and reports, per recurring checklist, whether it will
     generate next cycle and, if not, exactly which ingredient is missing: no

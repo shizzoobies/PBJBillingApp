@@ -3649,7 +3649,8 @@ const server = createServer(async (request, response) => {
         // week blocks when it's UN-SUBMITTED (no submission) or REJECTED (sent
         // back). A submitted/pending/approved week does NOT block — once it's
         // submitted it's out of staff's hands, so an awaiting-approval week never
-        // locks them out of the timer. See `listBlockingWeeks`.
+        // locks them out of the timer. Backfilling a week that has already ended
+        // never gates — only the current week or later. See `listBlockingWeeks`.
         if (session.user.role !== 'owner') {
           const entryWeekStart = weekStartOf(date)
           const priorWeeksWithTime = (allData.timeEntries ?? [])
@@ -3668,6 +3669,7 @@ const server = createServer(async (request, response) => {
             priorWeeksWithTime,
             (allData.weeklySubmissions ?? []).filter((entry) => entry.userId === employeeId),
             lockedPeriods,
+            weekStartOf(todayIso()),
           )
           if (blockingWeeks.length > 0) {
             // Name EVERY blocking week so the bookkeeper submits them all in one
@@ -3962,6 +3964,7 @@ const server = createServer(async (request, response) => {
             (entry) => entry.userId === holding.employeeId,
           ),
           lockedPeriods,
+          weekStartOf(todayIso()),
         )
         if (blockingWeeks.length > 0) {
           sendJson(response, 423, {
@@ -4154,6 +4157,7 @@ const server = createServer(async (request, response) => {
             .map((entry) => weekStartOf(entry.date)),
           (allData.weeklySubmissions ?? []).filter((entry) => entry.userId === first.employeeId),
           lockedPeriods,
+          weekStartOf(todayIso()),
         )
         if (blockingWeeks.length > 0) {
           sendJson(response, 423, {

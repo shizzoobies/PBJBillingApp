@@ -16,16 +16,22 @@ declare module '*/lib/time-entry.js' {
     manualReason: string | undefined
     error: string | null
   }
+  // `todayWeekStart` is REQUIRED (and so `lockedPeriods` can no longer be
+  // elided): the weekly gate only fires for an entry in the current week or
+  // later, and a caller that omits today's week would silently gate past-week
+  // backfills again. Missing it is a compile error here and a throw at runtime.
   export function findBlockingWeek(
     entryWeekStart: string,
     priorWeekStarts: Iterable<string>,
     submissions: ReadonlyArray<{ weekStart: string; status: string }>,
-    lockedPeriods?: Iterable<string>,
+    lockedPeriods: Iterable<string> | undefined,
+    todayWeekStart: string,
   ): { weekStart: string; reason: 'unsubmitted' | 'rejected' } | null
   export function listBlockingWeeks(
     entryWeekStart: string,
     priorWeekStarts: Iterable<string>,
     submissions: ReadonlyArray<{ weekStart: string; status: string }>,
-    lockedPeriods?: Iterable<string>,
+    lockedPeriods: Iterable<string> | undefined,
+    todayWeekStart: string,
   ): Array<{ weekStart: string; reason: 'unsubmitted' | 'rejected' }>
 }
