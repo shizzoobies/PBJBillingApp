@@ -80,8 +80,28 @@ Clients page meanwhile. Owner-only.
 
 ## Time tracking (Time page)
 
-- Live timer: pick employee → client → optional task → describe
-  the work → start/stop. The most accurate way to log time.
+- Live timer: pick employee → client → task → describe the work → start/stop.
+  The most accurate way to log time.
+- **Client, task and detail are REQUIRED before time can be logged.** Nothing is
+  auto-filled any more: the description box starts empty and the app never
+  invents a "standard" note, so what's saved is only what a person typed.
+  - **Starting a timer is still instant** — start the clock with nothing filled
+    in and fill the fields in while it runs (from the Time page, or the Track
+    time button on a client).
+  - The rule bites at **Stop & log**. If something is missing the save is
+    blocked and a prompt appears under each field that needs it ("Add a detail
+    to log this time."). **The timer keeps running and no tracked time is lost**
+    — answer the prompts and Stop & log works immediately.
+  - Manual entries follow the same rule (on top of the required "why manually?"
+    reason).
+  - Administrative time has no client or task by definition, but **still needs a
+    note** describing the work.
+  - A group block (one block spanning several clients) is covered by its member
+    clients and needs no single task — its slices get tasks when it is split —
+    but it does need a detail.
+  - Editing an entry can't blank a detail that was filled in. Older entries
+    saved before this rule (blank description) still load and stay fully
+    editable — their minutes, client and date can be fixed as before.
 - The TASK box on the Time page — in the live timer AND in "Log time manually" —
   is pick-or-type, not a fixed dropdown. One box that suggests:
   - that client's open tasks (picking one attaches the time to the real
@@ -679,8 +699,10 @@ Clients page meanwhile. Owner-only.
   notes-only modal (add a note + read history) for anyone who just needs to jot
   a note. A third "Time" button opens a TRACK-TIME modal for that client without
   leaving the list: shows how much time is logged for them this month, lets you
-  pick an optional task and a note, and starts the shared
-  timer — the same one the Time page drives, so it keeps running as you navigate
+  pick a task and a note, and starts the shared
+  timer. Both boxes may be left blank to start the clock right away — the task
+  and detail are required only at Stop & log, and can be filled in on the Time
+  page while it runs. It is the same timer the Time page drives, so it keeps running as you navigate
   and stops there as usual. Only one timer runs at a time, so if one is already
   going the modal says so and offers the Time page instead. All three buttons
   work for owners and assigned staff (bookkeepers / accountants) on any client

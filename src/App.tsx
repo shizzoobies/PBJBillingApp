@@ -1313,10 +1313,13 @@ function App() {
     // Use the latest edited description (the timer panel lets users keep
     // editing "what did you do?" while the timer runs). Fall back to the
     // description captured at start if the field was cleared.
-    const description =
+    // Trimmed on the way to the entry: what gets saved is exactly what a human
+    // typed, with no invented default behind it (there used to be one).
+    const description = (
       descriptionOverride && descriptionOverride.trim()
         ? descriptionOverride
-        : timer.description
+        : timer.description ?? ''
+    ).trim()
     // Audit timestamps: the timer knows exactly when it started and stopped.
     const stoppedAtMs = new Date().getTime()
     const session = {

@@ -84,7 +84,7 @@ export function ClientTimeModal({ client, onClose }: { client: Client; onClose: 
               : 'No time logged for this client yet this month.'}
           </p>
           <label className="field">
-            <span>Task (optional)</span>
+            <span>Task</span>
             <input
               className="input"
               type="text"
@@ -112,7 +112,7 @@ export function ClientTimeModal({ client, onClose }: { client: Client; onClose: 
             . Anything you type that isn&rsquo;t in the list is used exactly as typed.
           </p>
           <label className="field">
-            <span>What are you working on? (optional)</span>
+            <span>What are you working on?</span>
             <input
               className="input"
               type="text"
@@ -121,6 +121,11 @@ export function ClientTimeModal({ client, onClose }: { client: Client; onClose: 
               onChange={(event) => setDescription(event.target.value)}
             />
           </label>
+          <p className="muted-text" style={{ margin: '-4px 0 0 0' }}>
+            Both can be left blank to start the clock right now — the task and detail are
+            required only when you stop and log the time, and can be filled in on the Time page
+            while it runs.
+          </p>
           <div className="button-row">
             <button type="button" className="primary-action" onClick={start}>
               <Play size={14} /> Start timer

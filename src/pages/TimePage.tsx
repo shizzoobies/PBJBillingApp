@@ -13,6 +13,11 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import { useAppContext } from '../AppContext'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
 import { SubmitTimesheetModal } from '../components/SubmitTimesheetModal'
+import {
+  TIME_ENTRY_FIELD_PROMPTS,
+  validateTimeEntryRequiredFields,
+  type TimeEntryRequiredField,
+} from '../../lib/time-entry.js'
 import { isInReportPeriod } from '../lib/reportPeriod'
 import { selectableClients } from '../lib/clientLifecycle'
 import {
@@ -605,7 +610,9 @@ function ManualBadge() {
  * into its own gated modal (see `ManualEntryModal`) — the timer is the
  * default, accurate flow.
  */
-function TimeCapture({
+// Exported for the timer tests: a blocked Stop & log must never eat the elapsed
+// time, which is only provable by driving this panel directly.
+export function TimeCapture({
   activeEmployeeId,
   clients,
   checklists,
@@ -642,12 +649,18 @@ function TimeCapture({
 }) {
   const [clientId, setClientId] = useState(clients[0]?.id ?? '')
   const [employeeId, setEmployeeId] = useState(activeEmployeeId)
-  const [description, setDescription] = useState('Reviewed transactions and added client notes.')
+  // Starts EMPTY. It used to be pre-filled with a standard sentence, which meant
+  // every untouched entry logged a description nobody wrote; what's saved now is
+  // only what a human typed.
+  const [description, setDescription] = useState('')
   const [taskId, setTaskId] = useState<string>('')
   const [taskLabel, setTaskLabel] = useState('')
   const [isAdministrative, setIsAdministrative] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopError, setStopError] = useState('')
+  // A Stop & log has been attempted and blocked — see `fieldPrompt`. Prompts
+  // appear only after that, because the timer is deliberately free to start.
+  const [stopAttempted, setStopAttempted] = useState(false)
   // Group timing: track one block against several clients, chosen up front, then
   // split it across them for billing. Available to everyone who logs time —
   // staff can split their own time across their assigned clients (the server
@@ -765,13 +778,19 @@ function TimeCapture({
     }
   }
 
+  // Starting is FREE: the timer runs with nothing filled in (that's the point —
+  // start the clock, then say what you're doing). No description is invented on
+  // the way in; the fields are demanded at Stop & log instead.
   const handleStartTimer = () => {
+    // A fresh timer starts with a clean slate — prompts belong to the stop that
+    // was actually blocked, not to the next run.
+    setStopAttempted(false)
     if (groupMode) {
       if (groupClientIds.length === 0) return
       onStartTimer({
         employeeId: effectiveEmployeeId,
         clientId: '',
-        description: description || 'Group time',
+        description: description.trim(),
         startedAt: Date.now(),
         taskId: null,
         isAdministrative: false,
@@ -786,8 +805,7 @@ function TimeCapture({
     onStartTimer({
       employeeId: effectiveEmployeeId,
       clientId: isAdministrative ? '' : effectiveClientId,
-      description:
-        description || (isAdministrative ? 'Administrative time' : 'Timed bookkeeping work'),
+      description: description.trim(),
       startedAt: Date.now(),
       taskId: isAdministrative ? null : effectiveTaskId || null,
       // A typed name rides along whenever no real task is attached — the old
@@ -799,7 +817,44 @@ function TimeCapture({
     })
   }
 
+  /**
+   * What's still missing before this running timer may be LOGGED. The rule is
+   * the server's own (`validateTimeEntryRequiredFields`), so the inline prompts
+   * and the 400 can never disagree.
+   *
+   * Resuming an existing entry is exempt: stopping only appends a session to
+   * that entry, it doesn't write these fields, so demanding them would be a
+   * dead end on a legacy entry that has none.
+   */
+  const missingStopFields = useMemo(() => {
+    if (!timer || timer.resumeEntryId) return []
+    return validateTimeEntryRequiredFields({
+      isAdministrative: Boolean(timer.isAdministrative),
+      clientId: timer.clientId ?? '',
+      groupClientIds: timer.groupClientIds ?? [],
+      taskId: timer.taskId ?? '',
+      taskLabel: timer.taskLabel ?? '',
+      description: timer.description ?? '',
+    }).missing
+  }, [timer])
+  // Prompts appear only after a stop was actually attempted — the timer starts
+  // free, so nagging before then would be wrong. They clear themselves as each
+  // field is filled because `missingStopFields` is derived from the live timer.
+  const fieldPrompt = (field: TimeEntryRequiredField) =>
+    stopAttempted && missingStopFields.includes(field) ? (
+      <span className="field-error">{TIME_ENTRY_FIELD_PROMPTS[field]}</span>
+    ) : null
+
   const handleStopTimer = async () => {
+    // Blocked stop: the elapsed time is NOT lost. Nothing is saved, nothing is
+    // cleared — the timer keeps running with everything it has while the user
+    // fills in the prompts, and Stop & log works the moment they do.
+    if (missingStopFields.length > 0) {
+      setStopAttempted(true)
+      setStopError('')
+      return
+    }
+    setStopAttempted(false)
     setBusy(true)
     setStopError('')
     try {
@@ -829,8 +884,9 @@ function TimeCapture({
       </div>
 
       <p className="panel-intro">
-        The timer is the most accurate way to log time. Pick a client and task, then start it
-        when you begin work.
+        The timer is the most accurate way to log time. Start it the moment you begin work —
+        the client, task and detail can be filled in while it runs, but all three are required
+        before the time can be logged.
       </p>
 
       {timer?.resumeEntryId ? (
@@ -954,6 +1010,7 @@ function TimeCapture({
                   </option>
                 ))}
               </select>
+              {fieldPrompt('client')}
             </label>
             <label className="field">
               <span>Task</span>
@@ -965,6 +1022,7 @@ function TimeCapture({
                 disabled={inputsDisabled}
                 onTyped={(typed) => void handleTaskTyped(typed)}
               />
+              {fieldPrompt('task')}
             </label>
           </>
         )}
@@ -981,7 +1039,9 @@ function TimeCapture({
             rows={4}
             value={shownDescription}
             disabled={inputsDisabled}
+            placeholder="Required to log this time — e.g. reconciled the operating account."
           />
+          {fieldPrompt('detail')}
         </label>
         {stopError ? <p className="auth-error full-span">{stopError}</p> : null}
         <div className="button-row full-span">
@@ -1001,6 +1061,7 @@ function TimeCapture({
                 disabled={busy || inputsDisabled}
                 onClick={() => {
                   if (window.confirm('Discard this timer without logging the time?')) {
+                    setStopAttempted(false)
                     onCancelTimer()
                   }
                 }}
@@ -1203,12 +1264,27 @@ function ManualEntryModal({
       setSubmitError('Start and stop must be at least a minute apart.')
       return
     }
-    if (!isAdministrative && !effectiveClientId) {
+    if (!isAdministrative && !effectiveClientId && !groupMode) {
       setSubmitError('Select a client, or check "Administrative work".')
       return
     }
-    if (isAdministrative && !description.trim()) {
-      setSubmitError('Add notes describing the administrative work.')
+    if (groupMode && groupClientIds.length === 0) {
+      setSubmitError('Pick at least one client to split across.')
+      return
+    }
+    // Client + task + detail are mandatory here too — the same rule the timer's
+    // Stop & log and the server both apply. A group block is exempt from the
+    // task (its slices are per-client) but never from the detail.
+    const requiredFields = validateTimeEntryRequiredFields({
+      isAdministrative,
+      clientId: isAdministrative || groupMode ? '' : effectiveClientId,
+      groupClientIds: groupMode ? groupClientIds : [],
+      taskId: isAdministrative || groupMode ? '' : effectiveTaskId,
+      taskLabel: isAdministrative || groupMode ? '' : taskLabel,
+      description,
+    })
+    if (requiredFields.error) {
+      setSubmitError(requiredFields.error)
       return
     }
     if (!reason.trim()) {
@@ -1220,10 +1296,6 @@ function ManualEntryModal({
     // ONE billable entry per client in a single action (a shared groupId ties
     // them together). No leftover "un-split" holding entry.
     if (groupMode) {
-      if (groupClientIds.length === 0) {
-        setSubmitError('Pick at least one client to split across.')
-        return
-      }
       const allocation = allocateGroupMinutes(
         totalMinutes,
         groupClientIds,
@@ -1254,7 +1326,7 @@ function ManualEntryModal({
             // Allocated minutes only (no session span) so the server keeps each
             // client's split amount instead of recomputing the full duration.
             minutes: row.minutes,
-            description,
+            description: description.trim(),
             billable: true,
             taskId: null,
             entryMethod: 'manual',
@@ -1284,7 +1356,7 @@ function ManualEntryModal({
         // Entry date follows the (local) start day.
         date: startLocal.slice(0, 10),
         minutes: totalMinutes,
-        description,
+        description: description.trim(),
         billable: isAdministrative ? false : billable,
         taskId: isAdministrative ? null : effectiveTaskId || null,
         // Sent whenever no real task is attached (see the timer form) — the old
@@ -1548,6 +1620,7 @@ function ManualEntryModal({
                   rows={3}
                   value={description}
                   onChange={(event) => setDescription(event.target.value)}
+                  placeholder="Required — what did you work on?"
                 />
               </label>
               <label className="field full-span">
@@ -2456,6 +2529,13 @@ function TimeEntryRow({
     // one client; it just isn't forced any more.
     if (!editIsAdmin && !editClientId && !editingGroupBlock) {
       setError('Pick a client, or mark the entry as administrative.')
+      return
+    }
+    // An edit may not empty a detail that was filled in (the server refuses it
+    // too). An entry saved before details were mandatory is left alone: its
+    // minutes, client and date stay editable, blank detail and all.
+    if ((entry.description ?? '').trim() && !description.trim()) {
+      setError(TIME_ENTRY_FIELD_PROMPTS.detail)
       return
     }
     // The typed duration is only validated (and only sent) when the user

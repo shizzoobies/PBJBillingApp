@@ -30,6 +30,29 @@ export declare function normalizeTimeEntryMethod(payload?: {
   error: string | null
 }
 
+/** The three fields a human must fill in before time can be logged. */
+export type TimeEntryRequiredField = 'client' | 'task' | 'detail'
+
+/** Field-level prompts, so each one renders under the field it belongs to. */
+export declare const TIME_ENTRY_FIELD_PROMPTS: Record<TimeEntryRequiredField, string>
+
+export declare function validateTimeEntryRequiredFields(input?: {
+  isAdministrative?: unknown
+  clientId?: unknown
+  groupClientIds?: unknown
+  groupId?: unknown
+  taskId?: unknown
+  taskLabel?: unknown
+  description?: unknown
+}): { missing: TimeEntryRequiredField[]; error: string | null }
+
+export declare function validateTimeEntryEdit(
+  entry?: { description?: unknown },
+  // The whole PATCH body: only `description` is inspected, but any other field
+  // may ride along (that IS the case being allowed — editing everything else).
+  payload?: ({ description?: unknown } & Record<string, unknown>) | null,
+): { error: string | null }
+
 export declare function normalizeWorkSessions(rawSessions?: unknown): {
   sessions?: { startAt: string; endAt: string }[]
   minutes?: number

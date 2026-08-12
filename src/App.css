@@ -368,6 +368,15 @@ html {
   margin: 0;
 }
 
+/* A prompt for ONE field, rendered inside its label (e.g. "Add a detail to log
+   this time."). Phrasing content so it stays valid inside <label>. */
+.field-error {
+  color: #8a3d12;
+  display: block;
+  font-size: 0.85rem;
+  margin-top: 4px;
+}
+
 .auth-submit {
   justify-content: center;
 }

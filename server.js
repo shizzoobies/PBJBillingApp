@@ -52,6 +52,8 @@ import {
   listBlockingWeeks,
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
+  validateTimeEntryEdit,
+  validateTimeEntryRequiredFields,
   weekStartOf,
 } from './lib/time-entry.js'
 import {
@@ -3925,10 +3927,23 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        if (isAdministrative && !description.trim()) {
-          sendJson(response, 400, {
-            error: 'Administrative time needs a note describing the work.',
-          })
+        // Client + task + detail are MANDATORY to log time (the firm owner's
+        // rule). One shared check with the Time page's inline prompts, so the
+        // 400 and the field-level nudge can never disagree; group blocks and
+        // administrative time carve out what they genuinely don't have. See
+        // `validateTimeEntryRequiredFields`. This is a clean rejection — the UI
+        // shows it under the field, not as a data-loss alarm.
+        const requiredFields = validateTimeEntryRequiredFields({
+          isAdministrative,
+          clientId,
+          groupClientIds,
+          groupId,
+          taskId,
+          taskLabel,
+          description,
+        })
+        if (requiredFields.error) {
+          sendJson(response, 400, { error: requiredFields.error })
           return
         }
 
@@ -4632,6 +4647,15 @@ const server = createServer(async (request, response) => {
           }
         }
         const payload = await readJsonBody(request)
+        // An edit may not empty a required field that was filled in: blanking
+        // the detail on an entry that had one is refused with the same message
+        // the create path uses. Legacy rows saved before the rule (blank
+        // description) stay fully editable — see `validateTimeEntryEdit`.
+        const editFields = validateTimeEntryEdit(entry, payload)
+        if (editFields.error) {
+          sendJson(response, 400, { error: editFields.error })
+          return
+        }
         const patch = {}
         // A duration the user actually TYPED, as opposed to one derived from
         // the clock spans. Held separately because the sessions block below has
