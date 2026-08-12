@@ -223,14 +223,38 @@ Clients page meanwhile. Owner-only.
   if an older week is un-submitted or was sent back. (Editing an entry never hit
   it either — adding one now matches.) The only thing that stops a past-week
   change is a LOCKED timesheet month, which an owner has to unlock.
+- **Guided "Submit timesheet" flow** (Aug 2026, client request): the submit
+  button on the Time page and the Timesheet page no longer sends whatever week
+  is on screen. One click opens a prompt that works PAST WEEKS FIRST. If any
+  week before this one still needs submitting, the prompt auto-selects the
+  OLDEST one, names it plainly ("Submitting week of Sun Jul 26 – Sat Aug 1")
+  with its hours, and says how many more past weeks are queued behind it
+  ("2 more past weeks still need submitting after this one"). Confirming sends
+  that one week; the prompt then advances to the next oldest, and the person can
+  close it at any point. A week that was SENT BACK appears in the same queue as
+  a resubmit and says so.
+- When nothing prior is outstanding, the prompt says "All past weeks are
+  submitted — nothing prior to submit." and then asks the completion question:
+  "Are you finished logging time for the current week (Sun Aug 9 – Sat Aug 15)?
+  Submitting sends it to the owner for approval." — Yes submits it, "Not yet"
+  closes. **That explicit yes is the only way the current week gets submitted
+  from the app.** The prompt's list of outstanding past weeks uses the SAME rule
+  as the weekly-submission gate above (logged time, un-submitted or sent back,
+  sealed months excluded), so the prompt and the gate can never disagree.
+- If nothing prior is outstanding AND the current week can't be submitted
+  (already pending, already approved, or its month is locked), the prompt says
+  so and offers only "Done". The server still accepts a submission for any week,
+  so an owner can still ask someone to submit early.
 
 ## Timesheet page
 
 - Day-by-day view of what each person worked on, scoped by the shared Report
   period, with a total. Owner can switch between team members; staff see their own.
 - Single-week mode (Report period = This week, or a one-week range): navigate
-  weeks with ◀ ▶ arrows or "This week", and the per-week Submit / approval /
-  lock workflow shows for that week.
+  weeks with ◀ ▶ arrows or "This week", and the approval / lock status for that
+  week shows alongside. The "Submit timesheet" button opens the guided flow
+  described above — it always starts with the oldest past week still owed, not
+  the week being viewed.
 - Multi-week range: the day list + total are read-only (no Submit/lock); pick a
   single week to submit or lock — the weekly submission model is unchanged.
 

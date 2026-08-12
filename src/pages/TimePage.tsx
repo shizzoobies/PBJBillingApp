@@ -12,6 +12,7 @@ import {
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { useAppContext } from '../AppContext'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
+import { SubmitTimesheetModal } from '../components/SubmitTimesheetModal'
 import { isInReportPeriod } from '../lib/reportPeriod'
 import { selectableClients } from '../lib/clientLifecycle'
 import {
@@ -311,6 +312,7 @@ export function TimePage() {
           activeEmployeeId={activeEmployeeId}
           entries={visibleEntries}
           submissions={data.weeklySubmissions ?? []}
+          locks={data.timesheetLocks ?? []}
           employees={data.employees}
           previewMode={previewMode}
           onSubmit={submitWeeklyTimesheet}
@@ -407,14 +409,20 @@ export function TimePage() {
  * bookkeepers / accountants. Lets the user pick a Sun-Sat week (defaulting
  * to the current week), shows the total hours logged that week, and the
  * submission's current status (none / pending / approved / rejected with
- * note). The "Submit week" button creates or upgrades the submission
- * server-side via `submitWeeklyTimesheet`. Owners aren't shown this
- * widget — they're the reviewers, not the submitters.
+ * note). Owners aren't shown this widget — they're the reviewers, not the
+ * submitters.
+ *
+ * The week picker here is a VIEWER. Submitting deliberately does not follow it:
+ * "Submit timesheet" opens `SubmitTimesheetModal`, which works the oldest
+ * outstanding past week first and only sends the current week after an explicit
+ * "yes, I'm finished." Otherwise the week on screen — usually the current one —
+ * went out ahead of older weeks that were still owed.
  */
 function WeeklySubmissionWidget({
   activeEmployeeId,
   entries,
   submissions,
+  locks,
   employees,
   previewMode,
   onSubmit,
@@ -422,13 +430,13 @@ function WeeklySubmissionWidget({
   activeEmployeeId: string
   entries: TimeEntry[]
   submissions: WeeklySubmission[]
+  locks: TimesheetLock[]
   employees: Employee[]
   previewMode: boolean
   onSubmit: (weekStart: string) => Promise<void>
 }) {
   const [weekStart, setWeekStart] = useState(currentWeekStart)
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState('')
+  const [flowOpen, setFlowOpen] = useState(false)
 
   const { start, end } = weekRangeOf(weekStart)
   const submission = submissions.find(
@@ -461,33 +469,6 @@ function WeeklySubmissionWidget({
       ).length,
     [entries, activeEmployeeId, start, end],
   )
-
-  // Approved weeks are sealed — submitter can't re-submit; an owner would
-  // need to unlock first (a future affordance). Pending blocks resubmit
-  // until status changes. Rejected re-allows submit so the user can
-  // resubmit after fixing whatever the owner flagged.
-  const canSubmit = !previewMode && (!submission || submission.status === 'rejected')
-  const buttonLabel =
-    submission?.status === 'rejected'
-      ? 'Resubmit this week'
-      : submission?.status === 'pending'
-        ? 'Awaiting review'
-        : submission?.status === 'approved'
-          ? 'Approved'
-          : 'Submit week for review'
-
-  const handleSubmit = async () => {
-    if (!canSubmit || submitting) return
-    setSubmitting(true)
-    setError('')
-    try {
-      await onSubmit(weekStart)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Submit failed')
-    } finally {
-      setSubmitting(false)
-    }
-  }
 
   const reviewer =
     submission?.reviewedBy && submission.status !== 'pending'
@@ -570,19 +551,15 @@ function WeeklySubmissionWidget({
           <button
             type="button"
             className="primary-action"
-            disabled={!canSubmit || submitting}
-            onClick={handleSubmit}
+            disabled={previewMode}
+            onClick={() => setFlowOpen(true)}
             title={
-              submission?.status === 'approved'
-                ? 'This week is already approved.'
-                : submission?.status === 'pending'
-                  ? 'Already submitted — an owner is reviewing.'
-                  : previewMode
-                    ? 'Cannot submit while previewing as another user.'
-                    : 'Lock this week and send it to an owner for review.'
+              previewMode
+                ? 'Cannot submit while previewing as another user.'
+                : 'Check any past weeks you still owe, then send a week for review.'
             }
           >
-            {submitting ? 'Submitting…' : buttonLabel}
+            Submit timesheet
           </button>
         </div>
       </div>
@@ -592,7 +569,18 @@ function WeeklySubmissionWidget({
           <strong>Rejection note:</strong> {submission.reviewNote}
         </p>
       ) : null}
-      {error ? <p className="auth-error">{error}</p> : null}
+
+      {flowOpen ? (
+        <SubmitTimesheetModal
+          employeeId={activeEmployeeId}
+          entries={entries}
+          submissions={submissions}
+          locks={locks}
+          previewMode={previewMode}
+          onSubmit={onSubmit}
+          onClose={() => setFlowOpen(false)}
+        />
+      ) : null}
     </section>
   )
 }

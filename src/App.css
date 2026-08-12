@@ -7998,6 +7998,42 @@ button.repeating-task-toggle-pill {
   margin-top: 1rem;
 }
 
+/* Guided "Submit timesheet" flow: names the oldest past week still owed, then
+   asks the current-week completion question. Same compact-confirm proportions
+   as .add-confirm-modal — one decision per screen. */
+.submit-timesheet-modal {
+  max-width: 460px;
+}
+
+/* The sentence naming the week being submitted is the headline here, not the
+   muted lead-in .modal-intro usually is. */
+.submit-timesheet-modal .modal-intro,
+.submit-flow-question {
+  color: var(--ink);
+  font-size: 14px;
+  margin: 0;
+}
+
+.submit-flow-note {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.submit-flow-confirm {
+  background: rgba(35, 116, 90, 0.1);
+  border-radius: var(--radius-sm);
+  color: var(--green);
+  font-size: 13px;
+  margin: 0;
+  padding: 8px 10px;
+}
+
+.submit-timesheet-modal .button-row {
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
 .assistant-title-avatar {
   border-radius: 999px;
   flex: 0 0 auto;

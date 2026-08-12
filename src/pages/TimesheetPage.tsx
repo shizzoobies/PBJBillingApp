@@ -2,6 +2,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
+import { SubmitTimesheetModal } from '../components/SubmitTimesheetModal'
 import {
   isInReportPeriod,
   isSingleWeek,
@@ -254,6 +255,11 @@ export function TimesheetPage() {
  * mode so the weekly workflow stays intact (a bookkeeper submits their week for
  * owner review; the owner locks it). Owners don't submit — they review — so the
  * submit button is shown only to staff for their own week.
+ *
+ * The button submits through the guided flow (`SubmitTimesheetModal`), not the
+ * week on screen: oldest outstanding past week first, current week only after
+ * an explicit "yes, I'm finished." The status pills below still describe the
+ * VIEWED week.
  */
 function WeeklyTimesheetControls({
   weekStart,
@@ -269,8 +275,7 @@ function WeeklyTimesheetControls({
   const submissions: WeeklySubmission[] = data.weeklySubmissions ?? []
   const locks = data.timesheetLocks ?? []
 
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState('')
+  const [flowOpen, setFlowOpen] = useState(false)
 
   // The submitting/owned timesheet is the viewed employee's; a staff member can
   // only submit their OWN week.
@@ -297,36 +302,6 @@ function WeeklyTimesheetControls({
       entry.date <= weekTo &&
       entry.approvalStatus === 'rejected',
   ).length
-
-  // Owners review, they don't submit; staff submit only their own week and only
-  // when it isn't already pending/approved (a rejected week can be resubmitted).
-  const canSubmit =
-    role !== 'owner' &&
-    isOwnWeek &&
-    !previewMode &&
-    (!submission || submission.status === 'rejected')
-
-  const buttonLabel =
-    submission?.status === 'rejected'
-      ? 'Resubmit this week'
-      : submission?.status === 'pending'
-        ? 'Awaiting review'
-        : submission?.status === 'approved'
-          ? 'Approved'
-          : 'Submit week for review'
-
-  const handleSubmit = async () => {
-    if (!canSubmit || submitting) return
-    setSubmitting(true)
-    setError('')
-    try {
-      await submitWeeklyTimesheet(weekStart)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Submit failed')
-    } finally {
-      setSubmitting(false)
-    }
-  }
 
   return (
     <div className="timesheet-week-controls">
@@ -356,19 +331,15 @@ function WeeklyTimesheetControls({
         <button
           type="button"
           className="primary-action"
-          disabled={!canSubmit || submitting}
-          onClick={handleSubmit}
+          disabled={previewMode}
+          onClick={() => setFlowOpen(true)}
           title={
-            submission?.status === 'approved'
-              ? 'This week is already approved.'
-              : submission?.status === 'pending'
-                ? 'Already submitted — an owner is reviewing.'
-                : previewMode
-                  ? 'Cannot submit while previewing as another user.'
-                  : 'Lock this week and send it to an owner for review.'
+            previewMode
+              ? 'Cannot submit while previewing as another user.'
+              : 'Check any past weeks you still owe, then send a week for review.'
           }
         >
-          {submitting ? 'Submitting…' : buttonLabel}
+          Submit timesheet
         </button>
       ) : null}
 
@@ -377,7 +348,18 @@ function WeeklyTimesheetControls({
           <strong>Rejection note:</strong> {submission.reviewNote}
         </p>
       ) : null}
-      {error ? <p className="auth-error">{error}</p> : null}
+
+      {flowOpen ? (
+        <SubmitTimesheetModal
+          employeeId={activeEmployeeId}
+          entries={data.timeEntries ?? []}
+          submissions={submissions}
+          locks={locks}
+          previewMode={previewMode}
+          onSubmit={submitWeeklyTimesheet}
+          onClose={() => setFlowOpen(false)}
+        />
+      ) : null}
     </div>
   )
 }
