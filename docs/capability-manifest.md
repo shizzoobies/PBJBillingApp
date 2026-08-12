@@ -140,9 +140,9 @@ Clients page meanwhile. Owner-only.
     have been started as a "group". Every entry in Sent back / Recent time has
     a "Split across clients" action (also inside its edit form, next to Save),
     which opens a checkbox list of the clients that person may bill with the
-    entry's current client already ticked. Tick the others, choose evenly /
-    custom / full duration to each, confirm. This is what to use when someone
-    logged time to one client and then realized the work covered several.
+    entry's current client already ticked. Tick the others, choose how to divide
+    it, confirm. This is what to use when someone logged time to one client and
+    then realized the work covered several.
     - Splitting to a SINGLE client is refused on purpose: that's just moving
       the entry, so use the Client dropdown in the edit form instead.
     - Administrative time can't be split — it has no client. Give it a client
@@ -156,7 +156,9 @@ Clients page meanwhile. Owner-only.
     the distribution that is actually saved: the clients already ticked, each
     one's exact minutes filled in, the mode it was saved with preselected, and
     the current total shown as "was". Change the amounts, add or remove clients,
-    switch modes, then save.
+    switch modes, then save. Switching a reopened split to **By percentage**
+    fills the boxes with what is billed today (36m and 24m of an hour show up as
+    60% and 40%), so it can be re-divided without any arithmetic.
     - THE TOTAL MAY CHANGE. Unlike creating a split, an adjustment does not have
       to add up to the original block — it is an explicit correction of what
       gets billed. The clock-in / clock-out times stay as the record of the time
@@ -180,11 +182,29 @@ Clients page meanwhile. Owner-only.
     leaving those columns blank.
   - Every split is written to the activity log (who split what, how many
     clients, how many hours).
-  - A CUSTOM split must add up EXACTLY to the tracked block — to the second, not
-    the minute. The modal shows how much is still unassigned (or over) and has a
-    one-click button to hand the remainder to the last client; the split can't
-    be saved until it balances. Even splits divide the block to the exact second
-    and always add up. "Full duration to each client" is the deliberate
+  - HOW THE SPLIT IS DIVIDED — the modal leads with the two easy answers:
+    - **Evenly** — the same share of the block to every client.
+    - **By percentage** — type each client's share ("60% / 40%"). The boxes open
+      on an even percentage each, the modal shows what each percentage means in
+      TIME as you type ("60% — 36m"), and a running line says whether it adds up
+      ("Adds up to 95% — 5% left"). The split can't be saved until the
+      percentages total exactly 100. Nobody has to work out minutes by hand.
+    - **Exact minutes** — still available, in the compact row underneath. Type
+      the minutes for each client. Needed for seconds-precision corrections, and
+      it's what a saved split reopens on.
+    - **Full duration to each** — unchanged and deliberately different: every
+      client is billed the whole block (a meeting that serves several clients).
+  - Percentages are just a friendlier way to SAY a custom split: they are
+    converted to exact seconds and saved as a normal custom split, so nothing
+    downstream (approval, payroll, invoicing, reports) sees a new kind of entry.
+  - A CUSTOM / percentage split must add up EXACTLY to the tracked block — to the
+    second, not the minute. Percentages that total 100 always convert to seconds
+    that add up perfectly: the leftover seconds of an awkward block (33.33% of
+    45m 20s) are handed out one at a time, so nothing is lost or invented. In
+    exact-minutes mode the modal shows how much is still unassigned (or over) and
+    has a one-click button to hand the remainder to the last client; the split
+    can't be saved until it balances. Even splits divide the block to the exact
+    second and always add up. "Full duration to each client" is the deliberate
     exception: every client is billed the whole block.
 - Administrative work toggle: internal/company time with no client or task.
 - Log time manually: same fields plus date and duration, for after-the-fact

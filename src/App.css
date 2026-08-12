@@ -6378,6 +6378,92 @@ h2 {
   padding-top: 8px;
 }
 
+/* ---- Split method: Evenly / By percentage lead, the rest are compact ---- */
+.split-method-field {
+  gap: 8px;
+}
+
+.split-method-choices {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.split-method-choices--compact {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.split-method-chip {
+  align-items: center;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #d9e1e8);
+  border-radius: 10px;
+  cursor: pointer;
+  display: grid;
+  grid-template-areas: 'radio label' 'radio hint';
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  padding: 10px 12px;
+  transition: border-color 0.15s var(--ease, ease), background 0.15s var(--ease, ease);
+}
+
+.split-method-chip:hover {
+  border-color: var(--accent, #ff43a4);
+}
+
+.split-method-chip.is-selected {
+  background: rgba(255, 67, 164, 0.08);
+  border-color: var(--accent, #ff43a4);
+}
+
+.split-method-chip input {
+  grid-area: radio;
+  margin: 0;
+}
+
+.split-method-label {
+  font-weight: 600;
+  grid-area: label;
+}
+
+.split-method-hint {
+  color: var(--muted, #607080);
+  font-size: 0.78rem;
+  grid-area: hint;
+}
+
+/* The compact options carry no hint, so the label sits on one line. */
+.split-method-chip.is-compact {
+  font-size: 0.88rem;
+  grid-template-areas: 'radio label';
+  padding: 7px 10px;
+}
+
+/* One client's percentage box, its % sign, and what that means in time. */
+.group-allocation-percent {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.group-allocation-percent .group-allocation-input {
+  max-width: 84px;
+}
+
+.group-allocation-percent-sign {
+  color: var(--muted, #607080);
+}
+
+.group-allocation-percent .group-allocation-amount {
+  min-width: 62px;
+  text-align: right;
+}
+
+.group-allocation-percent-total {
+  font-weight: 600;
+  margin: 0;
+}
+
 /* "Group" tag shown on a recent time entry that was part of a group batch. */
 .entry-group-tag {
   background: rgba(255, 67, 164, 0.12);

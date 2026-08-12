@@ -39,6 +39,7 @@ import type {
   WorkSession,
 } from '../lib/types'
 import {
+  allocateByPercentages,
   allocateGroupMinutes,
   classifySplitTarget,
   clientName,
@@ -56,6 +57,8 @@ import {
   makeId,
   minutesAfterEntryEdit,
   minutesToSeconds,
+  percentagesFromMinutes,
+  percentagesTotalTo100,
   sessionMinutes,
   shiftWeek,
   splitClientOptions,
@@ -1677,7 +1680,38 @@ function ManualEntryModal({
  *     "will not let me adjust my time entry without losing the client split I
  *     chose".
  */
-function GroupSplitModal({
+/**
+ * How the owner EXPRESSES a split, which is not the same thing as how it is
+ * stored. `percent` is the friendly face of a custom split: the percentages are
+ * converted to exact seconds before saving and persisted as `custom`, so the
+ * stored vocabulary ('even' | 'custom' | 'full') and every rule built on it —
+ * the server's exact-sum check, payroll's treatment of 'full' — are untouched.
+ */
+type SplitMethod = 'even' | 'percent' | 'custom' | 'full'
+
+/**
+ * "Evenly" and "By percentage" lead, because manually typing a number of minutes
+ * per client is the thing the firm asked us to stop making them do. Exact
+ * minutes stays available as a compact third option: an adjustment reopens on
+ * exact amounts, and a seconds-precision correction can only be said in minutes.
+ */
+const SPLIT_METHOD_PRIMARY: Array<{ value: SplitMethod; label: string; hint: string }> = [
+  { value: 'even', label: 'Evenly', hint: 'The same share of the block to every client' },
+  { value: 'percent', label: 'By percentage', hint: "You set each client's share — 60% / 40%" },
+]
+
+const SPLIT_METHOD_SECONDARY: Array<{ value: SplitMethod; label: string; hint: string }> = [
+  { value: 'custom', label: 'Exact minutes', hint: 'Type the minutes for each client' },
+  { value: 'full', label: 'Full duration to each', hint: 'Every client is billed the whole block' },
+]
+
+/** "33.34", "50", "12.5" — 2dp, without trailing-zero noise. */
+function formatPercentValue(percent: number) {
+  if (!Number.isFinite(percent)) return '0'
+  return String(Math.round(percent * 100) / 100)
+}
+
+export function GroupSplitModal({
   entry,
   groupSlices = [],
   clients,
@@ -1729,14 +1763,23 @@ function GroupSplitModal({
   const [pickedIds, setPickedIds] = useState<string[]>(() =>
     isAdjust ? prefill.clientIds : entry.clientId ? [entry.clientId] : [],
   )
-  const [mode, setMode] = useState<GroupAllocationMode>(() =>
-    isAdjust ? prefill.mode : 'even',
-  )
+  // How the split is being SAID. A reopened split shows the method that produced
+  // it (a stored 'custom' reopens on exact minutes, which is what it really is).
+  const [method, setMethod] = useState<SplitMethod>(() => (isAdjust ? prefill.mode : 'even'))
+  // ...and how it will be STORED. Percentages are saved as an ordinary custom
+  // split — see `allocateByPercentages`.
+  const mode: GroupAllocationMode = method === 'percent' ? 'custom' : method
   // Prefilled with the split's exact per-client amounts, so reopening it shows
   // what is billed today — and switching to Custom never starts from blank.
   const [customMinutes, setCustomMinutes] = useState<Record<string, string>>(() =>
     isAdjust ? { ...prefill.customMinutes } : {},
   )
+  // Percentage mode's typed values — see `percentSeed` below for what they
+  // override, and why they are keyed by the client set they belong to.
+  const [percentEdits, setPercentEdits] = useState<{
+    key: string
+    values: Record<string, string>
+  }>({ key: '', values: {} })
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   // The clients this split is actually dividing across. Keeps the picker's
@@ -1762,13 +1805,71 @@ function GroupSplitModal({
     return out
   }, [targetIds, customMinutes])
 
+  /**
+   * What the percentage boxes START at, so they never open blank: reopening an
+   * existing split shows what is billed TODAY (36m and 24m of an hour read as
+   * 60% and 40%), anything else an even share each — which already adds up to
+   * exactly 100, so the split is submittable the moment the mode is picked.
+   */
+  const percentSeed = useMemo(() => {
+    if (targetIds.length === 0) return {}
+    const currentMinutes: Record<string, number> = {}
+    let currentTotal = 0
+    for (const id of targetIds) {
+      const minutes = Number(prefill.customMinutes[id])
+      if (!Number.isFinite(minutes) || minutes <= 0) {
+        currentTotal = 0
+        break
+      }
+      currentMinutes[id] = minutes
+      currentTotal += minutes
+    }
+    const seeded =
+      isAdjust && currentTotal > 0
+        ? percentagesFromMinutes(currentMinutes, currentTotal)
+        : percentagesFromMinutes(
+            Object.fromEntries(targetIds.map((id) => [id, 1])),
+            targetIds.length,
+          )
+    return Object.fromEntries(Object.entries(seeded).map(([id, value]) => [id, String(value)]))
+  }, [targetIds, isAdjust, prefill.customMinutes])
+
+  // Typed percentages sit ON TOP of that seed, tagged with the client set they
+  // were typed against: tick another client and the shares go back to an even
+  // split of the NEW set rather than leaving a stale 50/50 that no longer adds
+  // up. (Derived rather than synced in an effect — one source of truth.)
+  const percentSeedKey = targetIds.join('|')
+  const percentages = useMemo(
+    () =>
+      percentEdits.key === percentSeedKey ? { ...percentSeed, ...percentEdits.values } : percentSeed,
+    [percentSeed, percentSeedKey, percentEdits],
+  )
+  const setPercentage = (clientId: string, value: string) =>
+    setPercentEdits((prev) => ({
+      key: percentSeedKey,
+      values: prev.key === percentSeedKey ? { ...prev.values, [clientId]: value } : { [clientId]: value },
+    }))
+
+  const percentagesNumeric = useMemo(() => {
+    const out: Record<string, number> = {}
+    for (const id of targetIds) out[id] = Number(percentages[id])
+    return out
+  }, [targetIds, percentages])
+  const percentTotal = targetIds.reduce((sum, id) => {
+    const value = Number(percentages[id])
+    return sum + (Number.isFinite(value) ? value : 0)
+  }, 0)
+
   // The duration the even / full previews divide. Creating a split divides the
   // entry; adjusting one divides the block the split came from (reconstructed
   // from the slices — for a 'full' split that's one slice, otherwise the sum).
   const blockMinutes = isAdjust ? prefill.blockMinutes : entry.minutes
   const allocation = useMemo(
-    () => allocateGroupMinutes(blockMinutes, targetIds, mode, customMinutesNumeric),
-    [blockMinutes, targetIds, mode, customMinutesNumeric],
+    () =>
+      method === 'percent'
+        ? allocateByPercentages(blockMinutes, percentagesNumeric)
+        : allocateGroupMinutes(blockMinutes, targetIds, mode, customMinutesNumeric),
+    [method, blockMinutes, targetIds, mode, customMinutesNumeric, percentagesNumeric],
   )
   const totalBilled = Object.values(allocation).reduce((sum, minutes) => sum + (minutes || 0), 0)
 
@@ -1784,7 +1885,11 @@ function GroupSplitModal({
     0,
   )
   const remainderSeconds = blockSeconds - allocatedSeconds
-  const mustBalance = !isAdjust && mode === 'custom' && remainderSeconds !== 0
+  const mustBalance = !isAdjust && method === 'custom' && remainderSeconds !== 0
+  // Percentages must total exactly 100 in BOTH modes. An adjustment is allowed
+  // to change the total minutes, but "60% and 30%" still isn't a whole split —
+  // and once they do total 100 the seconds add up to the block by construction.
+  const percentUnbalanced = method === 'percent' && !percentagesTotalTo100(percentagesNumeric)
   // Auto-balance target: the last client in the group, so one click closes the
   // gap instead of making the owner do the arithmetic.
   const balanceTargetId = targetIds[targetIds.length - 1] ?? ''
@@ -1806,12 +1911,20 @@ function GroupSplitModal({
       setError("Pick at least two clients — to move this time to one other client, edit the entry's client instead.")
       return
     }
+    if (percentUnbalanced) {
+      setError(
+        `The percentages add up to ${formatPercentValue(percentTotal)}% — they have to add up to 100%.`,
+      )
+      return
+    }
     const hasAny = targetIds.some((id) => (allocation[id] ?? 0) > 0)
     if (!hasAny) {
       setError(
-        mode === 'custom'
-          ? 'Enter minutes greater than 0 for at least one client.'
-          : 'The tracked time is too short to split.',
+        method === 'percent'
+          ? 'Give at least one client more than 0%.'
+          : mode === 'custom'
+            ? 'Enter minutes greater than 0 for at least one client.'
+            : 'The tracked time is too short to split.',
       )
       return
     }
@@ -1837,7 +1950,15 @@ function GroupSplitModal({
             .filter((row) => minutesToSeconds(row.minutes) > 0),
         )
       } else {
-        await onSplit(entry, mode, customMinutesNumeric, targetIds)
+        // Percentage mode hands over the MINUTES it computed: the server runs the
+        // same shared allocator on a plain custom split and re-checks that they
+        // account for every second of the block.
+        await onSplit(
+          entry,
+          mode,
+          method === 'percent' ? allocation : customMinutesNumeric,
+          targetIds,
+        )
       }
       onClose()
     } catch (splitError) {
@@ -1924,25 +2045,64 @@ function GroupSplitModal({
                 </div>
               </div>
             ) : null}
-            <label className="field full-span">
+            <div
+              className="field full-span split-method-field"
+              role="radiogroup"
+              aria-label="How should the time be split?"
+            >
               <span>How should the time be split?</span>
-              <select
-                className="input"
-                value={mode}
-                onChange={(event) => setMode(event.target.value as GroupAllocationMode)}
-              >
-                <option value="even">Split evenly across clients</option>
-                <option value="full">Full duration to each client</option>
-                <option value="custom">Custom — set each client&apos;s time</option>
-              </select>
-            </label>
+              <div className="split-method-choices">
+                {SPLIT_METHOD_PRIMARY.map((choice) => (
+                  <label
+                    key={choice.value}
+                    className={`split-method-chip${method === choice.value ? ' is-selected' : ''}`}
+                  >
+                    <input
+                      type="radio"
+                      name="split-method"
+                      value={choice.value}
+                      checked={method === choice.value}
+                      onChange={() => setMethod(choice.value)}
+                    />
+                    <span className="split-method-label">{choice.label}</span>
+                    <span className="split-method-hint">{choice.hint}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="split-method-choices split-method-choices--compact">
+                {SPLIT_METHOD_SECONDARY.map((choice) => (
+                  <label
+                    key={choice.value}
+                    className={`split-method-chip is-compact${
+                      method === choice.value ? ' is-selected' : ''
+                    }`}
+                    title={choice.hint}
+                  >
+                    <input
+                      type="radio"
+                      name="split-method"
+                      value={choice.value}
+                      checked={method === choice.value}
+                      onChange={() => setMethod(choice.value)}
+                    />
+                    <span className="split-method-label">{choice.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
             <div className="field full-span group-allocation-preview">
-              <span>{mode === 'custom' ? 'Minutes per client' : 'Allocation'}</span>
+              <span>
+                {method === 'custom'
+                  ? 'Minutes per client'
+                  : method === 'percent'
+                    ? 'Percentage per client'
+                    : 'Allocation'}
+              </span>
               <ul className="group-allocation-list">
                 {targetIds.map((id) => (
                   <li key={id}>
                     <span className="group-allocation-name">{clientName(clients, id)}</span>
-                    {mode === 'custom' ? (
+                    {method === 'custom' ? (
                       <input
                         className="input group-allocation-input"
                         type="number"
@@ -1957,6 +2117,25 @@ function GroupSplitModal({
                         }
                         placeholder="min"
                       />
+                    ) : method === 'percent' ? (
+                      // The percentage AND what it means in time, side by side —
+                      // "40%" on its own doesn't tell her what she just billed.
+                      <span className="group-allocation-percent">
+                        <input
+                          className="input group-allocation-input"
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="any"
+                          value={percentages[id] ?? ''}
+                          onChange={(event) => setPercentage(id, event.target.value)}
+                          aria-label={`${clientName(clients, id)} percentage`}
+                        />
+                        <span className="group-allocation-percent-sign">%</span>
+                        <span className="group-allocation-amount">
+                          {formatHoursMinutes(allocation[id] ?? 0)}
+                        </span>
+                      </span>
                     ) : (
                       <span className="group-allocation-amount">
                         {formatHoursMinutes(allocation[id] ?? 0)}
@@ -1971,15 +2150,25 @@ function GroupSplitModal({
                 {mode === 'full' && targetIds.length > 1
                   ? ` — ${formatHoursMinutes(blockMinutes)} to each of ${targetIds.length} clients`
                   : ''}
-                {!isAdjust && mode === 'custom' && remainderSeconds !== 0
+                {!isAdjust && method === 'custom' && remainderSeconds !== 0
                   ? ` — ${formatHoursMinutes(Math.abs(remainderSeconds) / 60)} ${
                       remainderSeconds > 0 ? 'still unassigned' : 'over the block'
                     }`
                   : ''}
-                {!isAdjust && mode === 'custom' && remainderSeconds === 0
+                {!isAdjust && method === 'custom' && remainderSeconds === 0
                   ? ' — the block is fully assigned'
                   : ''}
               </p>
+              {method === 'percent' && targetIds.length > 0 ? (
+                <p className="group-allocation-percent-total">
+                  Adds up to {formatPercentValue(percentTotal)}%
+                  {percentUnbalanced
+                    ? percentTotal < 100
+                      ? ` — ${formatPercentValue(100 - percentTotal)}% left`
+                      : ` — ${formatPercentValue(percentTotal - 100)}% over`
+                    : ' — every minute of the block is assigned'}
+                </p>
+              ) : null}
               {mustBalance && balanceTargetId ? (
                 <button type="button" className="secondary-action" onClick={applyBalance}>
                   {remainderSeconds > 0 ? 'Assign the remaining ' : 'Take '}
@@ -1998,7 +2187,7 @@ function GroupSplitModal({
             <button
               type="button"
               className="primary-action"
-              disabled={pending || mustBalance}
+              disabled={pending || mustBalance || percentUnbalanced}
               onClick={() => void handleConfirm()}
             >
               <Clock3 size={16} />

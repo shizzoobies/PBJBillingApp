@@ -19,6 +19,25 @@ export declare function allocateGroupMinutes(
   custom?: Record<string, number>,
 ): Record<string, number>
 
+/** Do these percentages add up to 100 (allowing for ±0.0001 of float dust)? */
+export declare function percentagesTotalTo100(percents: Record<string, number>): boolean
+
+/**
+ * Percentages → minutes, in whole seconds, summing to EXACTLY the block when the
+ * percentages total 100. Persisted as a plain `custom` split — percentages are an
+ * input method, not a stored mode.
+ */
+export declare function allocateByPercentages(
+  totalMinutes: number,
+  percents: Record<string, number>,
+): Record<string, number>
+
+/** Minutes → percentages (2dp, adjusted to display summing to 100). */
+export declare function percentagesFromMinutes(
+  allocations: Record<string, number>,
+  totalMinutes: number,
+): Record<string, number>
+
 export type SplitTargetKind = 'holding' | 'regular' | 'administrative' | 'unsplittable'
 
 export declare function classifySplitTarget(entry: {

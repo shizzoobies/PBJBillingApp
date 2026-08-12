@@ -448,6 +448,11 @@ export function isGroupHoldingEntry(entry: {
 export type { GroupAllocationMode } from '../../lib/group-allocation.js'
 export {
   allocateGroupMinutes,
+  // Percentages are the friendly face of `custom`: the modal collects "60% / 40%",
+  // converts it to exact seconds here, and submits an ordinary custom split.
+  allocateByPercentages,
+  percentagesFromMinutes,
+  percentagesTotalTo100,
   // Which entries can be split, and the client checkbox list a regular-entry
   // split opens with — shared so the modal offers exactly what the server allows.
   classifySplitTarget,
