@@ -99,11 +99,21 @@ Clients page meanwhile. Owner-only.
   - A group block (one block spanning several clients) is covered by its member
     clients and needs no single task — its slices get tasks when it is split —
     but it does need a detail.
+  - **The client field starts on "Choose client"** — a placeholder, not a real
+    client. It used to open on whichever client sorted first, so time could be
+    logged against the wrong one by someone who never looked at the field. The
+    placeholder can't be re-selected once you've picked somebody, and the same
+    thing happens on both surfaces: the live timer and "Log time manually".
+    Because starting a timer needs to know who it's for, **Start timer stays
+    greyed out until a client is picked** (it says why on hover) — everything
+    else about starting is still instant, with no task and no detail. Not
+    applicable to administrative time or to "bill to multiple clients", neither
+    of which shows the single-client field at all.
   - **The form clears itself once the time is logged** — client, task, detail,
-    the administrative box and any group selection all go back to blank, so the
-    next entry starts from a clean slate and no description is ever logged
-    twice. A blocked or refused Stop & log clears nothing: everything typed
-    stays put until the time is actually saved.
+    the administrative box and any group selection all go back to blank (the
+    client back to "Choose client"), so the next entry starts from a clean slate
+    and no description is ever logged twice. A blocked or refused Stop & log
+    clears nothing: everything typed stays put until the time is actually saved.
   - Editing an entry can't blank a detail that was filled in. Older entries
     saved before this rule (blank description) still load and stay fully
     editable — their minutes, client and date can be fixed as before.
@@ -457,8 +467,14 @@ Clients page meanwhile. Owner-only.
      Delayed page, notifies whoever asked, and shows green with "done by <name>"
      and a date, tagged "awaiting your OK".
   3. **Confirmed** — whoever asked presses **Confirm**. The wait closes out and
-     leaves their Delayed page too, staying on the step in grey with a line
-     through it, still naming who did the check and who confirmed.
+     leaves their Delayed page too — and stays on the checklist step as a
+     **completed sub-item**: a ticked box with the label struck through, exactly
+     like a task you check off, with the full record underneath ("asked by
+     <name> <date> · done by <name> <date> · confirmed by <name> <date>"). It
+     stays there permanently — after the step is checked off, after the amber
+     waiting editor closes, and whether or not you can edit the task. The tick
+     belongs to the WAIT, not the step: confirming a wait never checks the step
+     itself off, and the box can't be un-ticked.
   You cannot confirm work nobody has reported finished (the app says so and
   points you at Cancel instead), and the person who did the work cannot confirm
   their own. Owners can do either step on anyone's behalf. **Cancel** is
@@ -629,6 +645,11 @@ Clients page meanwhile. Owner-only.
   takes it off your list and moves it onto the asker's to confirm; confirming
   takes it off theirs. This applies to owners too, so a firm-wide "everything
   that is stuck anywhere" view is no longer on this page.
+- **Leaving this page is not disappearing.** A confirmed wait is resolved, so it
+  correctly drops off everyone's Delayed list — and at the same time it stays on
+  its checklist step as a completed, struck-through sub-item naming who asked,
+  who did it and who confirmed it (see Checklists). The two are different places:
+  this page is what's still stuck; the step keeps the history.
 - An older free-text wait with nobody attached to it still shows to the step's
   assignee (or to everyone if the step has no assignee), so nothing that predates
   the two-step hand-off silently vanishes from the page.

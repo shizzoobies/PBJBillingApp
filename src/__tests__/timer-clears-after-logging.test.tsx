@@ -119,9 +119,11 @@ describe('The capture form after a log', () => {
     await screen.findByRole('button', { name: /start timer/i })
 
     // Blank slate: nothing from the entry that was just logged is left behind.
+    // The client goes back to the "Choose client" placeholder, not to the first
+    // client in the list — a slate that pre-picks somebody is not blank.
     expect(detailBox()).toHaveValue('')
     expect(taskBox()).toHaveValue('')
-    expect(clientSelect()).toHaveValue('client-1')
+    expect(clientSelect()).toHaveValue('')
     expect(employeeSelect()).toHaveValue(ME)
     expect(billToSelect()).toHaveValue('single')
     expect(adminCheckbox()).not.toBeChecked()
@@ -135,6 +137,10 @@ describe('The capture form after a log', () => {
     fireEvent.click(stopButton())
     await screen.findByRole('button', { name: /start timer/i })
 
+    // The client came back blank, so there is nothing to start against yet —
+    // the next run has to say who it is for, deliberately.
+    expect(startButton()).toBeDisabled()
+    fireEvent.change(clientSelect(), { target: { value: 'client-1' } })
     fireEvent.click(startButton())
 
     expect(starts).toHaveLength(2)
@@ -178,9 +184,10 @@ describe('The capture form after a log', () => {
 
     expect(billToSelect()).toHaveValue('single')
     expect(detailBox()).toHaveValue('')
-    // Back to the single-client form, with no client still ticked behind it.
+    // Back to the single-client form, with no client still ticked behind it —
+    // and the single picker sitting on its placeholder.
     expect(screen.queryByRole('checkbox', { name: 'Acme Dental' })).not.toBeInTheDocument()
-    expect(clientSelect()).toHaveValue('client-1')
+    expect(clientSelect()).toHaveValue('')
   })
 
   it('clears after a resumed session is appended', async () => {

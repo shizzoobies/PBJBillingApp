@@ -7179,6 +7179,56 @@ button.repeating-task-toggle-pill {
   color: #b3261e;
 }
 
+/* ---- Closed-out waits, kept on the step as completed sub-items ------- */
+/* "The waiting and information in it needs to stay as a sub task shown as
+   completed like other tasks are when you click the box." So these deliberately
+   borrow the sub-item row's geometry: ticked box on the left, struck label, and
+   the receipt (who asked, who did it, who confirmed it) underneath. */
+.waiting-record-list {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 0 0 26px;
+}
+
+.waiting-record-list-sub {
+  padding-left: 44px;
+}
+
+.waiting-record-row {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+}
+
+.waiting-record-row input[type='checkbox'] {
+  margin-top: 2px;
+}
+
+.waiting-record-body {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.waiting-record-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: line-through;
+}
+
+.waiting-record-note {
+  font-weight: 500;
+}
+
+/* The provenance is NOT struck through — it is the part you still need to read. */
+.waiting-record-trail {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 /* ---- Dashboard "Waiting on you" card -------------------------------- */
 .dashboard-waiting-on-you {
   display: grid;

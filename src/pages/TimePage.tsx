@@ -66,6 +66,17 @@ import {
   weekRangeOf,
 } from '../lib/utils'
 
+/**
+ * The client picker's opening state on every surface that LOGS time.
+ *
+ * It is `disabled`, so once you leave it you cannot come back to it — it is a
+ * prompt, not a choice. The owner's reason, verbatim: "have the client field
+ * default to choose client, so it is not accidentally left on the default 1st
+ * client option". A pre-picked client is time billed to whoever happens to sort
+ * first, by someone who never looked at the field.
+ */
+const CHOOSE_CLIENT_LABEL = 'Choose client'
+
 // ---- Exact start/stop capture: datetime-local <-> ISO helpers ------------
 function pad2(value: number) {
   return String(value).padStart(2, '0')
@@ -650,7 +661,10 @@ export function TimeCapture({
   previewMode: boolean
   currentPeriod: string
 }) {
-  const [clientId, setClientId] = useState(clients[0]?.id ?? '')
+  // Starts on the "Choose client" placeholder, NOT on the first client in the
+  // list. A real client pre-selected is a real client billed by accident —
+  // "so it is not accidentally left on the default 1st client option".
+  const [clientId, setClientId] = useState('')
   const [employeeId, setEmployeeId] = useState(activeEmployeeId)
   // Starts EMPTY. It used to be pre-filled with a standard sentence, which meant
   // every untouched entry logged a description nobody wrote; what's saved now is
@@ -677,9 +691,10 @@ export function TimeCapture({
       current.includes(id) ? current.filter((existing) => existing !== id) : [...current, id],
     )
   }
-  const effectiveClientId = clients.some((client) => client.id === clientId)
-    ? clientId
-    : clients[0]?.id ?? ''
+  // An unknown (or unpicked) client resolves to NOTHING, never to the first one
+  // in the list — the old `clients[0]` fallback would have quietly undone the
+  // placeholder the moment it rendered.
+  const effectiveClientId = clients.some((client) => client.id === clientId) ? clientId : ''
   // Owners pick the employee; fall back to themselves (activeEmployeeId) when
   // the selection is missing/invalid so time is never attributed to a stale id.
   const effectiveEmployeeId =
@@ -858,7 +873,9 @@ export function TimeCapture({
    * Called ONLY after a stop that actually saved — see {@link handleStopTimer}.
    */
   const resetCaptureFields = () => {
-    setClientId(clients[0]?.id ?? '')
+    // Back to "Choose client", not back to the first client — a blank slate that
+    // pre-picks somebody is not blank.
+    setClientId('')
     setEmployeeId(activeEmployeeId)
     setDescription('')
     setTaskId('')
@@ -1033,6 +1050,11 @@ export function TimeCapture({
                 value={shownClientId}
                 disabled={inputsDisabled}
               >
+                {/* See {@link CHOOSE_CLIENT_LABEL}. Disabled: it is where the
+                    field starts, never somewhere you can go back to. */}
+                <option value="" disabled>
+                  {CHOOSE_CLIENT_LABEL}
+                </option>
                 {clients.map((client) => (
                   <option key={client.id} value={client.id}>
                     {client.name}
@@ -1109,6 +1131,14 @@ export function TimeCapture({
                   ? groupClientIds.length === 0
                   : !isAdministrative && !effectiveClientId)
               }
+              // The client gate predates the placeholder, but the placeholder is
+              // what makes it reachable — so say why the button is greyed out
+              // instead of leaving it looking broken.
+              title={
+                !inputsDisabled && !groupMode && !isAdministrative && !effectiveClientId
+                  ? `Pick a client first — the field starts on "${CHOOSE_CLIENT_LABEL}".`
+                  : undefined
+              }
               onClick={handleStartTimer}
               type="button"
             >
@@ -1129,7 +1159,7 @@ export function TimeCapture({
  * On submit the entry is created (pending approval, like every entry) and a
  * short success confirmation is shown before the modal closes.
  */
-function ManualEntryModal({
+export function ManualEntryModal({
   activeEmployeeId,
   clients,
   checklists,
@@ -1171,7 +1201,8 @@ function ManualEntryModal({
   })
   const [stopLocal, setStopLocal] = useState(() => toLocalInput(new Date()))
   const [employeeId, setEmployeeId] = useState(activeEmployeeId)
-  const [clientId, setClientId] = useState(clients[0]?.id ?? '')
+  // Opens on "Choose client", same as the timer panel — see {@link CHOOSE_CLIENT_LABEL}.
+  const [clientId, setClientId] = useState('')
   const [description, setDescription] = useState('')
   const [billable, setBillable] = useState(true)
   const [taskId, setTaskId] = useState<string>('')
@@ -1191,9 +1222,9 @@ function ManualEntryModal({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const effectiveClientId = clients.some((client) => client.id === clientId)
-    ? clientId
-    : clients[0]?.id ?? ''
+  // Nothing picked resolves to nothing — never to `clients[0]`, which is the
+  // accident this whole change exists to stop.
+  const effectiveClientId = clients.some((client) => client.id === clientId) ? clientId : ''
   // Owners pick the employee; fall back to themselves (activeEmployeeId) when
   // the selection is missing/invalid so time is never attributed to a stale id.
   const effectiveEmployeeId =
@@ -1615,6 +1646,11 @@ function ManualEntryModal({
                         setTaskId('')
                       }}
                     >
+                      {/* Same opening state as the timer panel — see
+                          {@link CHOOSE_CLIENT_LABEL}. */}
+                      <option value="" disabled>
+                        {CHOOSE_CLIENT_LABEL}
+                      </option>
                       {clients.map((client) => (
                         <option key={client.id} value={client.id}>
                           {client.name}

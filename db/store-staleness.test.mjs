@@ -2825,3 +2825,144 @@ describe('spitball sessions (postgres branch)', () => {
     expect(fake.matching(/spitball_sessions/i)).toHaveLength(0)
   })
 })
+
+/**
+ * The two-party waiting-on hand-off, end to end on the file backend.
+ *
+ * Her report (featreq-b05a2f3a): "A received the notification and clicked
+ * Confirmed on the waiting task and it disappeared." These tests pin the half
+ * of that which lives in the store — CONFIRMING IS NOT A DELETE. The record has
+ * to survive `waiting → resolved → verified` with every name and date on it,
+ * because those five fields are the whole receipt for a hand-off between two
+ * people.
+ *
+ * Cancel is the deliberate exception and is pinned here too, so the difference
+ * between "this finished" and "this never needed to happen" can't blur.
+ */
+const WAITING_WORKSPACE = {
+  clients: [{ id: 'c1', name: 'Acme' }],
+  employees: [
+    { id: 'emp-brit', name: 'Brittany', role: 'owner' },
+    { id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' },
+  ],
+  checklists: [
+    {
+      id: 'cl-1',
+      title: 'August close',
+      clientId: 'c1',
+      items: [
+        { id: 'it-1', label: 'Reconcile the operating account', done: false },
+        {
+          id: 'it-2',
+          label: 'Payroll',
+          done: false,
+          subItems: [{ id: 'sub-1', title: 'Confirm the hours', done: false }],
+        },
+      ],
+    },
+  ],
+}
+
+/** The one entry on a node, straight off a fresh read. */
+async function readWaitingOns(store, { itemId, subItemId }) {
+  const data = await store.read()
+  const item = data.checklists.find((c) => c.id === 'cl-1').items.find((i) => i.id === itemId)
+  const node = subItemId ? item.subItems.find((s) => s.id === subItemId) : item
+  return node.waitingOns ?? []
+}
+
+describe('the waiting-on hand-off round-trips (file backend)', () => {
+  beforeEach(async () => {
+    await store.write(workspace(WAITING_WORKSPACE))
+  })
+
+  it('keeps the record through both stages, with every name and date', async () => {
+    const added = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'emp-lisa', requestedBy: 'emp-brit', note: 'the bank statements' },
+    )
+    expect(added.entry.id).toMatch(/^wo-/)
+
+    await store.markWaitingOnDone('cl-1', added.entry.id, { userId: 'emp-lisa' })
+    const afterDone = await readWaitingOns(store, { itemId: 'it-1' })
+    // Stage 1 already used to delete this. It must not.
+    expect(afterDone).toHaveLength(1)
+    expect(afterDone[0]).toMatchObject({ resolvedBy: 'emp-lisa', blockerId: 'emp-lisa' })
+    expect(afterDone[0].verifiedAt).toBeUndefined()
+
+    await store.markWaitingOnVerified('cl-1', added.entry.id, { userId: 'emp-brit' })
+    const afterVerify = await readWaitingOns(store, { itemId: 'it-1' })
+
+    // THE regression: confirming keeps the row. It is the record of who did the
+    // check, and it is what the step renders as a completed sub-item.
+    expect(afterVerify).toHaveLength(1)
+    expect(afterVerify[0]).toMatchObject({
+      id: added.entry.id,
+      blockerId: 'emp-lisa',
+      requestedBy: 'emp-brit',
+      note: 'the bank statements',
+      resolvedBy: 'emp-lisa',
+      verifiedBy: 'emp-brit',
+    })
+    expect(typeof afterVerify[0].createdAt).toBe('string')
+    expect(typeof afterVerify[0].resolvedAt).toBe('string')
+    expect(typeof afterVerify[0].verifiedAt).toBe('string')
+  })
+
+  it('never touches the step it was blocking — confirming is not completing', async () => {
+    const added = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'emp-lisa', requestedBy: 'emp-brit' },
+    )
+    await store.markWaitingOnDone('cl-1', added.entry.id, { userId: 'emp-lisa' })
+    await store.markWaitingOnVerified('cl-1', added.entry.id, { userId: 'emp-brit' })
+
+    const data = await store.read()
+    const item = data.checklists.find((c) => c.id === 'cl-1').items.find((i) => i.id === 'it-1')
+    expect(item.done).toBe(false)
+  })
+
+  it('round-trips on a SUB-item too (it rides the parent item, not its own column)', async () => {
+    const added = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-2', subItemId: 'sub-1' },
+      { blockerId: 'emp-lisa', requestedBy: 'emp-brit' },
+    )
+    await store.markWaitingOnDone('cl-1', added.entry.id, { userId: 'emp-lisa' })
+    await store.markWaitingOnVerified('cl-1', added.entry.id, { userId: 'emp-brit' })
+
+    const entries = await readWaitingOns(store, { itemId: 'it-2', subItemId: 'sub-1' })
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ resolvedBy: 'emp-lisa', verifiedBy: 'emp-brit' })
+  })
+
+  it('closes a CLIENT wait in one press, straight to verified', async () => {
+    const added = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'c1', requestedBy: 'emp-brit', blockerType: 'client' },
+    )
+    // No second party exists to hand back to, so Done carries `alsoVerify`.
+    await store.markWaitingOnDone('cl-1', added.entry.id, {
+      userId: 'emp-brit',
+      alsoVerify: true,
+    })
+
+    const entries = await readWaitingOns(store, { itemId: 'it-1' })
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ blockerType: 'client', verifiedBy: 'emp-brit' })
+  })
+
+  it('CANCEL is still the one path that deletes', async () => {
+    const added = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'emp-lisa', requestedBy: 'emp-brit' },
+    )
+    await store.resolveWaitingOn('cl-1', added.entry.id)
+
+    expect(await readWaitingOns(store, { itemId: 'it-1' })).toHaveLength(0)
+  })
+})

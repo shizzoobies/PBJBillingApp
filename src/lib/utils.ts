@@ -676,6 +676,70 @@ export const WAITING_DONE_PATCH: Readonly<{
 }> = { waiting: false, waitingForChecklistId: null }
 
 /**
+ * The waiting editor's "Clear" button — the opposite of Done. Done means "this
+ * finished, keep the receipt"; Clear means "this was never really a wait",
+ * so it ERASES the note rather than keeping it. Pinned here beside
+ * {@link WAITING_DONE_PATCH} so the difference between the two buttons is one
+ * diff apart and can't quietly converge.
+ */
+export const WAITING_CLEAR_PATCH: Readonly<{
+  waiting: boolean
+  waitingOn: null
+  waitingForChecklistId: null
+}> = { waiting: false, waitingOn: null, waitingForChecklistId: null }
+
+/**
+ * The waits on a step that are CLOSED OUT — confirmed by whoever asked, so they
+ * no longer block anything and no longer belong in the amber editor. They are
+ * not gone: they render on the step as completed sub-items, struck through, the
+ * way any ticked checklist item does.
+ *
+ * This is the other half of the fix for "[I] clicked Confirmed on the waiting
+ * task and it disappeared". The record already survived on the server; what it
+ * had nowhere to render was a home outside the editor, which unmounts the
+ * instant the last wait closes.
+ */
+export function completedWaits<T extends WaitingOnLike>(
+  waitingOns: readonly T[] | undefined,
+): T[] {
+  return (waitingOns ?? []).filter((entry) => !isWaitingOnOpen(entry))
+}
+
+/**
+ * The full provenance of a closed-out wait, as one readable line: who asked,
+ * who did it, who confirmed it, and when. This is the "information in it" that
+ * has to stay — three names and two dates are the entire audit trail of a
+ * two-party hand-off, and losing them is what made the feature untrustworthy.
+ *
+ * Names resolve through the same helpers the rest of the page uses, so an
+ * unknown id reads "Unassigned" rather than as a raw id. A client wait names
+ * the client (its `blockerId` points at the client record, not an employee).
+ */
+export function describeWaitProvenance(
+  entry: WaitingOnLike & { requestedBy?: string; createdAt?: string },
+  { employees, clientLabel }: { employees: Employee[]; clientLabel: string },
+): string {
+  const parts: string[] = []
+  const stamp = (iso?: string) => (iso ? ` ${shortDate.format(new Date(iso))}` : '')
+
+  const blocker = isClientWait(entry) ? clientLabel || 'the client' : employeeName(employees, entry.blockerId ?? '')
+  if (entry.requestedBy) {
+    parts.push(`asked by ${employeeName(employees, entry.requestedBy)}${stamp(entry.createdAt)}`)
+  }
+  if (entry.resolvedBy) {
+    parts.push(`done by ${employeeName(employees, entry.resolvedBy)}${stamp(entry.resolvedAt)}`)
+  } else if (entry.resolvedAt) {
+    parts.push(`done by ${blocker}${stamp(entry.resolvedAt)}`)
+  }
+  if (entry.verifiedBy) {
+    parts.push(
+      `confirmed by ${employeeName(employees, entry.verifiedBy)}${stamp(entry.verifiedAt)}`,
+    )
+  }
+  return parts.join(' · ')
+}
+
+/**
  * Which endpoint retires each structured person-blocker when "Done" is pressed.
  * If I'm the person being waited on it is genuinely "done" (notifies the
  * flagger and the assignee); otherwise I'm the blocked side saying the wait is

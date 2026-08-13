@@ -14,10 +14,12 @@ import {
   canMarkWaitingOnDone,
   canVerifyWaitingOn,
   isClientWait,
+  isWaitingOnOpen,
   waitingOnStage,
 } from '../../lib/waiting-on-state.js'
 import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
+import { CompletedWaits } from '../components/CompletedWaits'
 import { FilterBar } from '../components/FilterBar'
 import { ListSearch } from '../components/ListSearch'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
@@ -67,6 +69,7 @@ import {
   shortDate,
   stageNameFor,
   stepIsWaiting,
+  WAITING_CLEAR_PATCH,
   WAITING_DONE_PATCH,
 } from '../lib/utils'
 
@@ -2298,6 +2301,11 @@ function WaitingEditor({
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const { state, flash } = useSaveFlash()
+  // This editor is for waits that are still LIVE. A confirmed one has left the
+  // hand-off entirely and renders on the step itself as a completed sub-item
+  // (see {@link CompletedWaits}) — which is also what keeps it on screen after
+  // the last wait closes and this editor unmounts.
+  const openWaitingOns = waitingOns.filter(isWaitingOnOpen)
   // In-flight + last-failure state for the buttons in this editor. Every
   // waiting mutation is routed through `run` so a server refusal (the
   // waiting-on endpoints answer 403 when you're not allowed to retire a
@@ -2410,9 +2418,9 @@ function WaitingEditor({
           {error}
         </p>
       ) : null}
-      {waitingOns.length > 0 ? (
+      {openWaitingOns.length > 0 ? (
         <ul className="waiting-blocker-list">
-          {waitingOns.map((entry) => {
+          {openWaitingOns.map((entry) => {
             // A client wait names the client; blockerId points at the client
             // record, so looking it up among employees would print a stranger.
             const blockerName = isClientWait(entry)
@@ -2886,13 +2894,7 @@ function DraggableTaskList({
                 onSetWaitingFor={(next) =>
                   void onUpdateItem(item.id, { waitingForChecklistId: next })
                 }
-                onClear={() =>
-                  void onUpdateItem(item.id, {
-                    waiting: false,
-                    waitingOn: null,
-                    waitingForChecklistId: null,
-                  })
-                }
+                onClear={() => void onUpdateItem(item.id, WAITING_CLEAR_PATCH)}
                 onDone={async () => {
                   // Resolve the wait but KEEP the note — it renders as a
                   // "was waiting" record on this instance only (future
@@ -2920,6 +2922,15 @@ function DraggableTaskList({
                 }
               />
             ) : null}
+            {/* Outside the editor on purpose — the editor unmounts the moment
+                the last wait is confirmed, which is exactly when this has to
+                appear. Unconditional: a closed-out wait is part of the step's
+                history whether or not the step is done, waiting, or editable. */}
+            <CompletedWaits
+              waitingOns={item.waitingOns}
+              employees={employees}
+              clientLabel={clientName}
+            />
             {(hasSubItems || canEdit) ? (
               <div className="sub-item-list">
                 {subItems.map((sub) => {
@@ -3036,11 +3047,7 @@ function DraggableTaskList({
                             })
                           }
                           onClear={() =>
-                            void onUpdateSubItemWaiting(item.id, sub.id, {
-                              waiting: false,
-                              waitingOn: null,
-                              waitingForChecklistId: null,
-                            })
+                            void onUpdateSubItemWaiting(item.id, sub.id, WAITING_CLEAR_PATCH)
                           }
                           onDone={() => {
                             // Same retention semantics as the item-level Done
@@ -3071,6 +3078,13 @@ function DraggableTaskList({
                           }
                         />
                       ) : null}
+                      {/* Same reasoning as the item level — see above. */}
+                      <CompletedWaits
+                        className="waiting-record-list-sub"
+                        waitingOns={sub.waitingOns}
+                        employees={employees}
+                        clientLabel={clientName}
+                      />
                       {(hasSubSubItems || canEdit) ? (
                         <div className="sub-sub-item-list">
                           {subSubItems.map((subSub) => (
