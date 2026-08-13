@@ -24,7 +24,11 @@ import {
   isInBillingPeriod,
   isSafeHttpUrl,
   isSafeImageSrc,
+  recipientCountLabel,
+  resolveInvoiceRecipients,
+  type InvoiceRecipientDetail,
 } from '../lib/utils'
+import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
 import { generateInvoicesRequest, listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
 import { selectableClients } from '../lib/clientLifecycle'
 
@@ -418,6 +422,13 @@ export function InvoicesPage() {
     error?: string
   } | null>(null)
   const [monthRunRefresh, setMonthRunRefresh] = useState(0)
+  // The send waiting on her checkbox choices. Only ever set when the client has
+  // more than one address on file — a single one goes straight out.
+  const [pickingSend, setPickingSend] = useState<{
+    invoiceId: string
+    label: string
+    details: InvoiceRecipientDetail[]
+  } | null>(null)
   const shownSend = sendResult?.key === seedKey ? sendResult : null
 
   // Which half of the page is on screen. Deliberately NOT remembered across
@@ -574,24 +585,31 @@ export function InvoicesPage() {
         return
       }
 
-      const label = stored.number ? `invoice ${stored.number}` : 'this invoice'
-      const confirmed = window.confirm(
-        `Email ${label} for ${selectedClient.name} to the client's contacts on file?`,
-      )
-      if (!confirmed) return
-
-      const { invoice: updated } = await sendInvoiceRequest(stored.id)
-      const lastSent = [...(updated.emailLog ?? [])].reverse().find((entry) => entry.ok) ?? null
-      setSendResult({
-        key: seedKey,
-        note: lastSent
-          ? `Sent to ${lastSent.to.join(', ')} on ${formatSentOn(lastSent.at)}`
-          : 'Sent.',
+      // Who it would reach, worked out from the SAME resolver the endpoint
+      // uses. Nobody on file stops here with the reason, rather than making her
+      // sit through a confirm to be told no.
+      const recipients = resolveInvoiceRecipients({
+        client: selectedClient,
+        contacts: data.contacts,
       })
-      // Tell the month run to reload so it does not still read "Reviewed". It
-      // keeps its own month picker, so this only shows up there when it happens
-      // to be on the same month as this page.
-      setMonthRunRefresh((token) => token + 1)
+      if (recipients.to.length === 0) {
+        fail(recipients.reason ?? 'No email address on file for this client.')
+        return
+      }
+
+      const label = stored.number ? `Invoice ${stored.number}` : 'This invoice'
+      // One address goes straight out; two or more get the checkbox list, all
+      // ticked, so she can leave one off. Same rule as the month run.
+      if (recipients.to.length > 1) {
+        setPickingSend({
+          invoiceId: stored.id,
+          label: `${label} for ${selectedClient.name}`,
+          details: recipients.details,
+        })
+        return
+      }
+
+      await performSend(stored.id)
     } catch (err) {
       // The endpoint answers with sentences meant for a person — no recipients
       // on file, the provider refused — so show what it said.
@@ -601,8 +619,54 @@ export function InvoicesPage() {
     }
   }
 
+  /**
+   * The send itself, once the recipients are settled. Split out so the direct
+   * path and the picker's Send land on identical bookkeeping — the note she
+   * reads afterwards names the addresses that actually went out, read back off
+   * the server's email log rather than off what was asked for.
+   */
+  const performSend = async (invoiceId: string, to?: string[]) => {
+    setSendBusy(true)
+    try {
+      const { invoice: updated } = await sendInvoiceRequest(invoiceId, to)
+      setPickingSend(null)
+      const lastSent = [...(updated.emailLog ?? [])].reverse().find((entry) => entry.ok) ?? null
+      setSendResult({
+        key: seedKey,
+        note: lastSent
+          ? `Sent to ${recipientCountLabel(lastSent.to.length)} on ${formatSentOn(
+              lastSent.at,
+            )} — ${lastSent.to.join(', ')}`
+          : 'Sent.',
+      })
+      // Tell the month run to reload so it does not still read "Reviewed". It
+      // keeps its own month picker, so this only shows up there when it happens
+      // to be on the same month as this page.
+      setMonthRunRefresh((token) => token + 1)
+    } catch (err) {
+      setSendResult({
+        key: seedKey,
+        error: err instanceof Error ? err.message : 'Could not send the invoice.',
+      })
+    } finally {
+      setSendBusy(false)
+    }
+  }
+
   return (
     <>
+      {/* The checkbox list for a client with more than one address on file.
+          Rendered at the page root so it overlays whichever half is showing. */}
+      {pickingSend ? (
+        <InvoiceRecipientPicker
+          invoiceLabel={pickingSend.label}
+          details={pickingSend.details}
+          busy={sendBusy}
+          onSend={(to) => void performSend(pickingSend.invoiceId, to)}
+          onCancel={() => setPickingSend(null)}
+        />
+      ) : null}
+
       {/* One page owns everything invoice: this month, and every month.
           Deliberately NOT a second `.task-area-tabs` bar — the month run has
           one of those a few pixels below for its status groups, and two
@@ -643,6 +707,7 @@ export function InvoicesPage() {
             for its preview and print until they are pointed at stored data. */}
         <InvoiceMonthRun
           clients={data.clients}
+          contacts={data.contacts}
           refreshToken={monthRunRefresh}
           ref={monthRunRef}
           onPrint={printStored}

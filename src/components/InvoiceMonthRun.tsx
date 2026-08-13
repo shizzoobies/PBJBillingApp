@@ -26,12 +26,17 @@ import {
   sendInvoiceRequest,
   updateInvoiceRequest,
 } from '../lib/api'
-import type { Client, PersistedInvoice, PersistedInvoiceLine } from '../lib/types'
+import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
+import type { Client, Contact, PersistedInvoice, PersistedInvoiceLine } from '../lib/types'
 import {
   INVOICE_STATUS_LABELS,
   currency,
+  formatInvoiceRecipient,
   formatSentOn,
   getBillingPeriodLabel,
+  recipientCountLabel,
+  resolveInvoiceRecipients,
+  type ResolvedInvoiceRecipients,
 } from '../lib/utils'
 
 /**
@@ -121,11 +126,19 @@ function formatDue(due: string | null) {
 
 export function InvoiceMonthRun({
   clients,
+  contacts = [],
   onPrint,
   refreshToken = 0,
   ref,
 }: {
   clients: Client[]
+  /**
+   * The contact directory, so each row can work out WHO its invoice would be
+   * emailed to before anything is sent. Optional and defaulted: a caller that
+   * has not got them yet gets rows that simply say nobody is on file rather
+   * than a crash.
+   */
+  contacts?: Contact[]
   /** Hand a stored invoice up to the page, which owns the print document. */
   onPrint: (invoice: PersistedInvoice) => void
   /**
@@ -161,6 +174,21 @@ export function InvoiceMonthRun({
   const cardEnabled = useCallback(
     (clientId: string) => clients.find((c) => c.id === clientId)?.cardPaymentsEnabled ?? false,
     [clients],
+  )
+
+  /**
+   * Who this client's invoice would be emailed to, right now — the SERVER's
+   * resolver, so the row promises exactly what the send endpoint would do.
+   * A client that has gone missing resolves to nobody with the reason attached,
+   * which is the same shape a client with no addresses produces.
+   */
+  const recipientsFor = useCallback(
+    (clientId: string): ResolvedInvoiceRecipients =>
+      resolveInvoiceRecipients({
+        client: clients.find((c) => c.id === clientId) ?? null,
+        contacts,
+      }),
+    [clients, contacts],
   )
 
   /**
@@ -602,6 +630,7 @@ export function InvoiceMonthRun({
                     invoice={invoice}
                     clientName={clientName(invoice.clientId)}
                     cardEnabled={cardEnabled(invoice.clientId)}
+                    recipients={recipientsFor(invoice.clientId)}
                     open={openId === invoice.id}
                     busy={busy}
                     onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
@@ -624,6 +653,7 @@ function InvoiceRow({
   invoice,
   clientName,
   cardEnabled,
+  recipients,
   open,
   busy,
   onToggle,
@@ -636,6 +666,8 @@ function InvoiceRow({
   clientName: string
   /** This client is offered a card option, so its invoices go out with two ways to pay. */
   cardEnabled: boolean
+  /** Every address this invoice would be emailed to, resolved before any click. */
+  recipients: ResolvedInvoiceRecipients
   open: boolean
   busy: boolean
   onToggle: () => void
@@ -677,7 +709,23 @@ function InvoiceRow({
             {/* So she can tell at a glance which invoices went out with two ways
                 to pay, without opening each one. */}
             {cardEnabled && !isVoid ? ' · card enabled' : ''}
+            {/* How many people this would email, before she opens anything. A
+                client with two contact addresses and one with a single address
+                used to look identical from here. */}
+            {!isVoid && recipients.to.length > 0
+              ? ` · ${recipientCountLabel(recipients.to.length)}`
+              : ''}
           </span>
+          {/* Nobody on file is a flag in its own right — it used to surface as a
+              409 only after she pressed Send. */}
+          {!isVoid && recipients.to.length === 0 ? (
+            <span className="invoice-run-flags">
+              <span className="invoice-run-flag">
+                <AlertTriangle size={13} />
+                No email on file
+              </span>
+            </span>
+          ) : null}
           {flagged && !isVoid ? (
             <span className="invoice-run-flags">
               {invoice.scopeFlags.map((flag) => (
@@ -702,6 +750,8 @@ function InvoiceRow({
         <InvoiceEditor
           key={invoice.updatedAt ?? invoice.id}
           invoice={invoice}
+          clientName={clientName}
+          recipients={recipients}
           busy={busy}
           onPatch={onPatch}
           onPrint={onPrint}
@@ -720,6 +770,8 @@ function InvoiceRow({
  */
 function InvoiceEditor({
   invoice,
+  clientName,
+  recipients,
   busy,
   onPatch,
   onPrint,
@@ -727,6 +779,9 @@ function InvoiceEditor({
   onDirtyChange,
 }: {
   invoice: PersistedInvoice
+  clientName: string
+  /** Who this would go to, resolved by the same code the send endpoint uses. */
+  recipients: ResolvedInvoiceRecipients
   busy: boolean
   onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PersistedInvoice | null>
   onPrint: () => void
@@ -746,6 +801,8 @@ function InvoiceEditor({
   const [copied, setCopied] = useState(false)
   const [sendBusy, setSendBusy] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  // Open only when there is a choice to make — see `startSend`.
+  const [picking, setPicking] = useState(false)
 
   // The last send that actually landed. Read off the invoice rather than local
   // state on purpose: a send remounts this editor, so anything transient is gone
@@ -780,17 +837,34 @@ function InvoiceEditor({
    * the id — and on failure we keep the invoice we have, because pushing a new
    * one up would remount this editor and wipe the message before it was read.
    */
-  const sendInvoice = async () => {
+  const sendInvoice = async (to?: string[]) => {
     setSendBusy(true)
     setSendError(null)
     try {
-      const result = await sendInvoiceRequest(invoice.id)
+      const result = await sendInvoiceRequest(invoice.id, to)
+      setPicking(false)
       onInvoiceChanged(result.invoice)
     } catch (err) {
       setSendError(err instanceof Error ? err.message : 'Could not send the invoice.')
     } finally {
       setSendBusy(false)
     }
+  }
+
+  /**
+   * What the Send button does. One address on file goes straight out — a dialog
+   * asking a question with one possible answer is friction, not a safeguard.
+   * Two or more opens the picker with everyone ticked, so the default is still
+   * "send to all of them" and unticking is the deliberate act.
+   */
+  const startSend = () => {
+    if (recipients.to.length === 0) return
+    if (recipients.to.length === 1) {
+      void sendInvoice()
+      return
+    }
+    setSendError(null)
+    setPicking(true)
   }
 
   const dirty =
@@ -931,12 +1005,52 @@ function InvoiceEditor({
         </div>
       ) : null}
 
+      {/* Who this would go to, BEFORE anything is sent. Named, not counted:
+          "the contacts on file" was never something she could check. */}
+      <div className="invoice-run-recipients">
+        {recipients.to.length > 0 ? (
+          <>
+            <span className="invoice-run-recipients-label">
+              Goes to {recipientCountLabel(recipients.to.length)}
+            </span>
+            <ul>
+              {recipients.details.map((detail) => (
+                <li key={detail.email}>{formatInvoiceRecipient(detail)}</li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <p className="invoice-run-error" role="alert">
+            {recipients.reason}
+          </p>
+        )}
+      </div>
+
       {/* The durable receipt for a send — there is no toast, because the editor
-          remounts on the server's new invoice and a toast would not survive it. */}
+          remounts on the server's new invoice and a toast would not survive it.
+          Collapsed to the headline, because the addresses are the answer to a
+          question that only comes up when someone says it never arrived. */}
       {lastSent ? (
-        <p className="invoice-run-sent">
-          Sent to {lastSent.to.join(', ')} on {formatSentOn(lastSent.at)}
-        </p>
+        <details className="invoice-run-sent">
+          <summary>
+            Sent {formatSentOn(lastSent.at)} to {recipientCountLabel(lastSent.to.length)}
+          </summary>
+          <ul>
+            {lastSent.to.map((email) => (
+              <li key={email}>{email}</li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+
+      {picking ? (
+        <InvoiceRecipientPicker
+          invoiceLabel={`${invoice.number ? `Invoice ${invoice.number}` : 'This invoice'} for ${clientName}`}
+          details={recipients.details}
+          busy={sendBusy}
+          onSend={(to) => void sendInvoice(to)}
+          onCancel={() => setPicking(false)}
+        />
       ) : null}
 
       <div className="invoice-run-editor-footer">
@@ -1009,15 +1123,23 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy || sendBusy || dirty || invoice.status === 'draft'}
+              disabled={
+                busy ||
+                sendBusy ||
+                dirty ||
+                invoice.status === 'draft' ||
+                recipients.to.length === 0
+              }
               title={
                 dirty
                   ? 'Save your changes first'
                   : invoice.status === 'draft'
                     ? 'Mark this invoice reviewed first'
-                    : 'Email this invoice to the client'
+                    : // Say WHY rather than sit there dead: a 409 after the
+                      // click was the old answer to this.
+                      (recipients.reason ?? 'Email this invoice to the client')
               }
-              onClick={() => void sendInvoice()}
+              onClick={startSend}
             >
               <Mail size={15} />
               {sendBusy ? 'Sending…' : lastSent ? 'Send again' : 'Send'}

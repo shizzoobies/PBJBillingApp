@@ -1051,20 +1051,42 @@ Clients page meanwhile. Owner-only.
 > voided invoice or one with nothing owed.
 >
 > **Send (email the invoice).** In the month-run editor, next to Payment link,
-> there is a **Send** button. It emails the invoice to the client's linked
-> contacts (honoring a per-client email override on a shared contact), falling
-> back to the email on the client record; if nobody has an address on file, it
-> says exactly what is missing instead of failing quietly. The email carries the
+> there is a **Send** button. It emails the invoice to **every address attached
+> to that client**: each linked contact's general address AND any
+> client-specific addresses on that contact (a contact who appears on several
+> clients can hold a different address for each, and can hold more than one for
+> the same client — all of them are used), plus the address on the client
+> record. Archived contacts are skipped, and the same address is never sent two
+> copies. A personal address on a contact attached to the client counts too —
+> that is how some clients actually receive mail.
+>
+> **You can see who it goes to before you send.** Each row in the month run
+> shows its recipient count, and opening it lists them by name
+> ("Anthony Cooper <anthony@…>", "Client record <billing@…>"). A client with
+> **no address on file** is flagged as such on the row before the run starts,
+> and its Send button is disabled with the reason on it — it no longer fails
+> only after you press Send. The email carries the
 > full breakdown, total, due date and the note to the client, plus a big pink
 > **Pay $[amount]** button (bank transfer) when there is an amount owed — each send gets a fresh
 > payment link, and a re-send of a Paid or Processing invoice goes out as a
 > statement with NO pay button so nobody can pay twice. Sending marks the
 > invoice **Sent**; the first send's date is kept as THE sent date. The editor
-> shows the last send ("Sent to ann@acme.com on Aug 9") and the button becomes
+> shows the last send ("Sent Aug 9 to 2 recipients"), which opens to the actual
+> addresses so a past send can be audited, and the button becomes
 > **Send again**. A draft must be **marked reviewed** before it can be sent. A
 > failed send shows the email provider's actual error and never marks the
 > invoice sent — every attempt, including failures, is kept in a permanent
 > per-invoice email log along with the total that was billed at the time.
+>
+> **Choosing who gets it.** When a client has **more than one** address on file,
+> Send opens a short checkbox list — one line per address, showing whose it is —
+> with **everything ticked**, so sending to all of them is still one click.
+> Untick any you do not want and press Send; the invoice goes only to the
+> addresses you confirmed, and the email log records exactly those. With a
+> single address on file there is no dialog at all — it just sends. The same
+> list appears from the per-client **Email invoice** button. The server only
+> ever accepts a choice made from that client's own addresses; it cannot be
+> asked to email anyone else.
 >
 > **All three client emails are branded.** The invoice, the payment
 > acknowledgment and the receipt share one design: the PB&J logo at the top, a

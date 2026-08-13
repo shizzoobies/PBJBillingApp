@@ -45,6 +45,7 @@ import {
   resolveInvoiceRecipients,
   sendInvoicePaymentEmail,
 } from './lib/invoice-email.js'
+import { chooseInvoiceRecipients } from './lib/invoice-recipients.js'
 import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
 import { cardProcessingFeeLine } from './lib/invoice-lines.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
@@ -2624,6 +2625,16 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // Read before anything slow happens. The only field it may carry is
+      // `to` — the addresses the owner left ticked in the send dialog.
+      let sendPayload = null
+      try {
+        sendPayload = await readJsonBody(request)
+      } catch {
+        sendJson(response, 400, { error: 'Could not read the request body.' })
+        return
+      }
+
       const invoiceId = decodeURIComponent(invoiceSendMatch[1])
       const invoice = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
       if (!invoice) {
@@ -2652,6 +2663,22 @@ const server = createServer(async (request, response) => {
         sendJson(response, 409, { error: 'invoice_no_recipient', message: recipients.reason })
         return
       }
+
+      // A submitted `to` is a FILTER over the addresses this invoice's own
+      // client resolves to — never a list of addresses to email. Anything else
+      // is dropped by `chooseInvoiceRecipients`, so a forged body cannot turn
+      // an authenticated owner session into an open relay. Omitting the field
+      // means "everyone", which is what every caller predating the send dialog
+      // does, the webhook's payment emails included.
+      const chosen = chooseInvoiceRecipients(recipients.to, sendPayload?.to)
+      if (chosen.to.length === 0) {
+        sendJson(response, 400, {
+          error: 'invoice_no_chosen_recipient',
+          message: chosen.reason,
+        })
+        return
+      }
+      const sendTo = chosen.to
 
       // A fresh Checkout session on EVERY send — hosted Checkout URLs expire in
       // about a day, so reusing the one from an earlier send would email a dead
@@ -2782,7 +2809,7 @@ const server = createServer(async (request, response) => {
       }
 
       const sendResult = await sendInvoiceEmail({
-        to: recipients.to,
+        to: sendTo,
         subject: email.subject,
         html: email.html,
         text: email.text,
@@ -2794,7 +2821,7 @@ const server = createServer(async (request, response) => {
         // "she says she sent it, the client says it never arrived" — and
         // recordInvoiceSent refuses to mark a failed send as sent.
         await appDataStore.recordInvoiceSent(invoice.id, {
-          to: recipients.to,
+          to: sendTo,
           subject: email.subject,
           ok: false,
           error: sendResult.error,
@@ -2810,7 +2837,7 @@ const server = createServer(async (request, response) => {
       try {
         sentInvoice =
           (await appDataStore.recordInvoiceSent(invoice.id, {
-            to: recipients.to,
+            to: sendTo,
             subject: email.subject,
             ok: true,
             error: null,

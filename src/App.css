@@ -11424,6 +11424,54 @@ tr.is-inactive-client .client-name-link {
   margin: 10px 0 0;
 }
 
+/* The send receipt is a disclosure now: the headline answers "did it go out",
+   the addresses answer "to whom", and only one of those gets asked often. */
+details.invoice-run-sent > summary {
+  cursor: pointer;
+}
+
+details.invoice-run-sent ul,
+.invoice-run-recipients ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 0 0 14px;
+}
+
+/* Who this invoice would reach, shown before anything is sent. */
+.invoice-run-recipients {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 12px 0 0;
+}
+
+.invoice-run-recipients-label {
+  font-weight: 600;
+}
+
+/* The send dialog's checkbox list — one line per address, all ticked. */
+.invoice-recipient-picker {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.invoice-recipient-choice {
+  align-items: baseline;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.invoice-recipient-who {
+  font-weight: 600;
+}
+
+.invoice-recipient-email {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .invoice-status.is-sent {
   background: rgba(55, 138, 221, 0.14);
   color: #185fa5;

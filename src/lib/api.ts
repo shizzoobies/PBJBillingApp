@@ -2969,12 +2969,18 @@ export async function createInvoicePaymentLinkRequest(invoiceId: string) {
  * the recipients, mints a fresh pay link and writes the send log — so there is
  * nothing to pass but the id, and the returned invoice is the one to trust.
  */
-export async function sendInvoiceRequest(invoiceId: string) {
+/**
+ * Email an invoice. `to` is what the owner left ticked in the send dialog — a
+ * FILTER, not an address book: the server intersects it with the addresses the
+ * invoice's own client resolves to and drops anything else. Omit it to send to
+ * every address on file, which is what a single-recipient send does.
+ */
+export async function sendInvoiceRequest(invoiceId: string, to?: string[]) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/send`, {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify(to ? { to } : {}),
   })
   if (!response.ok) {
     const message = await safeErrorMessage(response)

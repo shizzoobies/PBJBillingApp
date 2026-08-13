@@ -258,6 +258,39 @@ export function formatSentOn(iso: string) {
 }
 
 /**
+ * Who an invoice email will go to — the SERVER's resolver, imported rather than
+ * re-implemented.
+ *
+ * The send endpoint addresses the email with exactly this function, so what the
+ * confirmation promises and what actually leaves cannot disagree. A second
+ * TypeScript copy of the rules is precisely how a client ends up on the
+ * confirmation and off the To: line.
+ */
+export {
+  resolveInvoiceRecipients,
+  NO_INVOICE_RECIPIENT_REASON,
+} from '../../lib/invoice-recipients.js'
+import type {
+  InvoiceRecipientDetail,
+  ResolvedInvoiceRecipients,
+} from '../../lib/invoice-recipients.js'
+export type { InvoiceRecipientDetail, ResolvedInvoiceRecipients }
+
+/** "Anthony Cooper <anthony@acme.com>" — one recipient, named. */
+export function formatInvoiceRecipient(detail: InvoiceRecipientDetail) {
+  return `${detail.source} <${detail.email}>`
+}
+
+/**
+ * "2 recipients" / "1 recipient" — the at-a-glance count, shared by the month
+ * run's rows, its send receipt and the per-client view so one send never counts
+ * itself two ways.
+ */
+export function recipientCountLabel(count: number) {
+  return `${count} recipient${count === 1 ? '' : 's'}`
+}
+
+/**
  * Client Recap period helpers (UI-side mirror of lib/periods.js). The server
  * validates and labels periods; these just drive the page's selector. A period
  * is "2026-08" (month) or "2026-Q3" (quarter).
