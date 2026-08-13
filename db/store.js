@@ -7237,6 +7237,17 @@ export class AppDataStore {
     const stringIds = (value) =>
       Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry) : []
 
+    // ONE assigned team. The Add-client form sends `assignedEmployeeIds`; the
+    // rest of the app writes `assignedBookkeeperIds`. Only the latter gates
+    // visibility, so a payload carrying just the former used to create a client
+    // its own team could not see. Accept either name, fold into one value.
+    const assignedTeam = [
+      ...new Set([
+        ...stringIds(client.assignedBookkeeperIds),
+        ...stringIds(client.assignedEmployeeIds),
+      ]),
+    ]
+
     // Normalize through the same profile mapper the reads use, so the record
     // handed back to the creating tab has the exact shape a reload produces.
     const record = normalizeClientProfile({
@@ -7248,11 +7259,10 @@ export class AppDataStore {
       hourlyRate: clampMoney(client.hourlyRate ?? 0),
       planIds: stringIds(client.planIds),
       contactIds: stringIds(client.contactIds),
-      // The team chosen on the Add-client form. `write()` rebuilds
-      // `client_assignments` from THIS field — reading `assignedBookkeeperIds`
-      // here instead dropped the entire team selection on every new client.
-      assignedEmployeeIds: stringIds(client.assignedEmployeeIds),
-      assignedBookkeeperIds: stringIds(client.assignedBookkeeperIds),
+      // One team, two names — `assignedEmployeeIds` is a derived alias kept
+      // for the UI until batch 2 removes it.
+      assignedEmployeeIds: assignedTeam,
+      assignedBookkeeperIds: assignedTeam,
       // Never let a bad value land in the stage column — absent/garbage is
       // 'active', matching write() and the read mappers.
       lifecycleStage: coerceLifecycleStage(client.lifecycleStage),

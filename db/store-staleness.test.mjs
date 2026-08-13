@@ -1349,10 +1349,13 @@ describe('createClient keeps every field the Add-client form sends (file backend
     expect(stored.cardPaymentsEnabled).toBe(true)
   })
 
-  it('keeps the team selection, which is what drives client visibility', async () => {
+  it('keeps the team selection in the field that drives client visibility', async () => {
     const created = await store.createClient(formValues)
     const data = await store.read()
     const stored = data.clients.find((c) => c.id === created.id)
+    // Both names, one value. `assignedBookkeeperIds` is what
+    // `visibleClientIdSet` reads; `assignedEmployeeIds` is its alias.
+    expect(stored.assignedBookkeeperIds).toEqual(['emp-1'])
     expect(stored.assignedEmployeeIds).toEqual(['emp-1'])
   })
 
@@ -1446,6 +1449,29 @@ describe('createClient writes every form field to Postgres', () => {
 
     const assignments = fake.matching(/^insert into client_assignments/i)
     expect(assignments.map((statement) => statement.params)).toEqual([[created.id, 'emp-1']])
+  })
+
+  it('puts the team the form picked where visibility actually reads it', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createClient(formValues)
+
+    // `assignedEmployeeIds` is what the Add-client form sends. It used to land
+    // ONLY in client_assignments while this column went in empty, so the team
+    // just picked could not see the client (2026-08-13).
+    const bound = boundColumns(fake.matching(/^insert into clients/i)[0])
+    expect(bound.assigned_bookkeeper_ids).toEqual(['emp-1'])
+  })
+
+  it('unions both inbound names without duplicating', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createClient({
+      ...formValues,
+      assignedEmployeeIds: ['emp-1', 'emp-2'],
+      assignedBookkeeperIds: ['emp-2', 'emp-3'],
+    })
+
+    const bound = boundColumns(fake.matching(/^insert into clients/i)[0])
+    expect([...bound.assigned_bookkeeper_ids].sort()).toEqual(['emp-1', 'emp-2', 'emp-3'])
   })
 
   it('leaves an unfilled optional column null rather than 0', async () => {
