@@ -1642,6 +1642,44 @@ describe('setChecklistTemplateActive (file backend)', () => {
   })
 })
 
+/**
+ * An owner can appear on a client's assigned team. It grants nothing — owners
+ * see every client regardless — but the Clients-page team column shows who
+ * works the account, and dropping owners from it silently misreported the team.
+ * Implicit grants (grantClientVisibility, the checklist backfill) still skip
+ * owners: being handed one task should not add you to a client's team list.
+ */
+describe('setClientAssignedTeam (file backend)', () => {
+  beforeEach(async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', assignedBookkeeperIds: [] }],
+        employees: [
+          { id: 'emp-1', name: 'Lisa', role: 'bookkeeper' },
+          { id: 'owner-1', name: 'Brittany', role: 'Owner' },
+        ],
+      }),
+    )
+  })
+
+  it('keeps an owner the user explicitly picked', async () => {
+    const updated = await store.setClientAssignedTeam('c1', ['emp-1', 'owner-1'])
+    expect(updated.assignedBookkeeperIds).toEqual(['emp-1', 'owner-1'])
+  })
+
+  it('still drops an id that is nobody', async () => {
+    const updated = await store.setClientAssignedTeam('c1', ['emp-1', 'ghost-9'])
+    expect(updated.assignedBookkeeperIds).toEqual(['emp-1'])
+  })
+
+  it('keeps the alias in step with what it stored', async () => {
+    await store.setClientAssignedTeam('c1', ['emp-1', 'owner-1'])
+    const data = await store.read()
+    const client = data.clients.find((c) => c.id === 'c1')
+    expect(client.assignedEmployeeIds).toEqual(client.assignedBookkeeperIds)
+  })
+})
+
 describe('setChecklistTemplateActive (postgres branch)', () => {
   it('updates the single row instead of rewriting the workspace', async () => {
     const fake = fakePostgres()

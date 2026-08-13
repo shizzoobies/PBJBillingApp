@@ -7032,7 +7032,8 @@ const server = createServer(async (request, response) => {
     }
 
     // PUT /api/clients/:id/assigned-team — owner-only. Replaces the per-client
-    // assigned-team list. Validates each id is a real non-owner employee.
+    // assigned-team list. Validates each id is a real employee; owners may be
+    // on the list (it grants them nothing — they see every client already).
     const clientAssignedTeamMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/assigned-team$/)
     if (clientAssignedTeamMatch) {
       const session = await requireSession(request, response)

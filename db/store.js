@@ -6596,14 +6596,16 @@ export class AppDataStore {
   }
 
   /**
-   * Owner-only: replace the assigned-team list for a client. Filters owners
-   * and unknown ids. Returns the updated client or null.
+   * Owner-only: replace the assigned-team list for a client. Filters unknown
+   * ids, but not owners — an owner on the list is a display fact, not a
+   * grant. Returns the updated client or null.
    */
   async setClientAssignedTeam(clientId, bookkeeperIds) {
     if (this.pool) {
-      const usersResult = await this.pool.query(
-        `select id from users where role <> 'owner'`,
-      )
+      // Every real user is pickable, owners included. An owner on the list is
+      // a display fact: they see every client either way, and hiding them made
+      // the Clients-page team column misreport who works the account.
+      const usersResult = await this.pool.query(`select id from users`)
       const valid = new Set(usersResult.rows.map((r) => r.id))
       const safe = [...new Set((bookkeeperIds ?? []).filter((id) => valid.has(id)))]
       const result = await this.pool.query(
@@ -6619,9 +6621,7 @@ export class AppDataStore {
 
     const data = await readJson(localDataPath)
     const employees = Array.isArray(data.employees) ? data.employees : []
-    const valid = new Set(
-      employees.filter((e) => e.role !== 'Owner').map((e) => e.id),
-    )
+    const valid = new Set(employees.map((e) => e.id))
     const safe = [...new Set((bookkeeperIds ?? []).filter((id) => valid.has(id)))]
     let updated = null
     data.clients = (data.clients ?? []).map((client) => {
