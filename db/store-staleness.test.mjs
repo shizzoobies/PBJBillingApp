@@ -1078,6 +1078,38 @@ describe('bulk save preserves invoices (postgres branch)', () => {
 })
 
 /**
+ * `client_assignments` was the second, non-authoritative copy of a client's
+ * assigned team. `write()` used to delete every row and rebuild it from
+ * `assignedEmployeeIds`, which no UI had updated since the Assigned-team
+ * control writes `assignedBookkeeperIds` — so each bulk save re-asserted a
+ * stale team. Nothing reads the table now; nothing may write it.
+ */
+describe('bulk save leaves client_assignments alone (postgres branch)', () => {
+  it('issues no client_assignments statement at all', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', assignedBookkeeperIds: ['emp-1'] }],
+      }),
+    )
+
+    expect(fake.matching(/client_assignments/i)).toEqual([])
+  })
+
+  it('still persists the assigned team to the clients row', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', assignedBookkeeperIds: ['emp-1'] }],
+      }),
+    )
+
+    const insert = fake.matching(/^insert into clients/i)[0]
+    expect(insert.params).toContainEqual(['emp-1'])
+  })
+})
+
+/**
  * `applyInvoicePayment` — the ONE path a webhook can take into an invoice.
  *
  * It was deliberately unable to touch money at all. The card fee forces one
@@ -1443,12 +1475,11 @@ describe('createClient writes every form field to Postgres', () => {
     })
   })
 
-  it('derives client_assignments from the team the form picked', async () => {
+  it('does not touch client_assignments — the team lives on the client row', async () => {
     const fake = fakePostgres()
-    const created = await postgresStore(fake).createClient(formValues)
+    await postgresStore(fake).createClient(formValues)
 
-    const assignments = fake.matching(/^insert into client_assignments/i)
-    expect(assignments.map((statement) => statement.params)).toEqual([[created.id, 'emp-1']])
+    expect(fake.matching(/client_assignments/i)).toEqual([])
   })
 
   it('puts the team the form picked where visibility actually reads it', async () => {

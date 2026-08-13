@@ -4287,10 +4287,10 @@ export class AppDataStore {
         (e) => ({ clientId: e?.clientId }),
       )
 
-      // No filtering on client.assignedEmployeeIds either — same reason
-      // (users table is preserved across saves, so user_id refs remain
-      // valid). If we ever see an FK error on client_assignments.user_id,
-      // it'll surface via the diagnostic in server.js.
+      // Nothing to filter on a client's assigned team: it lives in the
+      // `assigned_bookkeeper_ids` text[] column, which carries no FK. The
+      // `client_assignments` table this used to rebuild is inert (see
+      // docs/plans/client-assignment-single-source-2026-08.md).
       const safeClients = Array.isArray(data.clients) ? data.clients : []
 
       // Valid plan ids for this payload. Used to strip dangling plan
@@ -4368,7 +4368,6 @@ export class AppDataStore {
         await client.query('delete from weekly_submissions')
         await client.query('delete from reimbursements')
         await client.query('delete from recurring_reimbursements')
-        await client.query('delete from client_assignments')
         await client.query('delete from invoices')
         await client.query('delete from clients')
         await client.query('delete from subscription_plans')
@@ -4571,18 +4570,6 @@ export class AppDataStore {
               clientRecord.cardPaymentsEnabled ?? false,
             ],
           )
-
-          for (const employeeId of (clientRecord.assignedEmployeeIds ?? []).filter((id) =>
-            validUserIds.has(id),
-          )) {
-            await client.query(
-              `
-                insert into client_assignments (client_id, user_id)
-                values ($1, $2)
-              `,
-              [clientRecord.id, employeeId],
-            )
-          }
         }
 
         // Put back the invoices snapshotted before the wipe, now that their
@@ -6662,8 +6649,7 @@ export class AppDataStore {
    * see it. That is the "I added a client and it never appeared" report, and it
    * is exactly what cardinal rule 4 says to avoid.
    *
-   * Mirrors the shape `write()` uses for clients so the two agree, and rebuilds
-   * `client_assignments` the same way.
+   * Mirrors the shape `write()` uses for clients so the two agree.
    *
    * EVERY column the bulk save writes is written here too. The first version of
    * this endpoint persisted twelve of them, so a client created through the Add
@@ -7371,18 +7357,6 @@ export class AppDataStore {
             record.cardPaymentsEnabled ?? false,
           ],
         )
-        // Same derivation the bulk save uses, so visibility works immediately
-        // rather than only after the next full save. The `where exists` guard
-        // mirrors write()'s user-id filter: an id with no matching user would
-        // violate the FK and abort the whole create.
-        for (const userId of record.assignedEmployeeIds) {
-          await dbClient.query(
-            `insert into client_assignments (client_id, user_id)
-             select $1, $2 where exists (select 1 from users where id = $2)
-             on conflict do nothing`,
-            [record.id, userId],
-          )
-        }
         await dbClient.query('commit')
       } catch (error) {
         await dbClient.query('rollback')
