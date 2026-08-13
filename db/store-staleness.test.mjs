@@ -927,13 +927,17 @@ describe('edit a session-backed entry, then split it (file backend)', () => {
  * pre-check, the (optional) version fingerprint, and the invoice-drafts
  * snapshot â€” so returning an empty row set for everything else is faithful.
  */
-function fakePostgres({ invoices = [], groupSlices = [] } = {}) {
+function fakePostgres({ invoices = [], groupSlices = [], clientRows = [] } = {}) {
   const statements = []
   const record = (text, params) => {
     const trimmed = String(text).trim()
     statements.push({ text: trimmed, params })
     if (/^select\b[\s\S]*\bfrom invoices\b/i.test(trimmed)) {
       return { rows: invoices }
+    }
+    // The clients read inside read() — lets a test exercise the row mapper.
+    if (/^select\b[\s\S]*\bfrom clients\b[\s\S]*order by name asc/i.test(trimmed)) {
+      return { rows: clientRows }
     }
     // The `for update` read a split adjustment starts with.
     if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
@@ -966,6 +970,50 @@ function postgresStore(fake) {
   pgStore.mode = 'postgres'
   return pgStore
 }
+
+/**
+ * `assignedEmployeeIds` no longer has a table behind it — it is an alias of
+ * `assignedBookkeeperIds`, emitted identically by both backends so a UI reading
+ * either name gets the same answer. This is the Postgres half; the file half
+ * is in the invariant suite.
+ */
+describe('read() derives assignedEmployeeIds from the client row (postgres branch)', () => {
+  const clientRow = {
+    id: 'c1',
+    name: 'Acme',
+    contact: 'Pat',
+    billing_mode: 'hourly',
+    hourly_rate: 0,
+    plan_id: null,
+    plan_ids: [],
+    contact_ids: [],
+    assigned_bookkeeper_ids: ['emp-1', 'emp-2'],
+    lifecycle_stage: 'active',
+  }
+
+  it('emits both names with the same value', async () => {
+    const fake = fakePostgres({ clientRows: [clientRow] })
+    const data = await postgresStore(fake).read()
+
+    expect(data.clients[0].assignedBookkeeperIds).toEqual(['emp-1', 'emp-2'])
+    expect(data.clients[0].assignedEmployeeIds).toEqual(['emp-1', 'emp-2'])
+  })
+
+  it('no longer selects from client_assignments', async () => {
+    const fake = fakePostgres({ clientRows: [clientRow] })
+    await postgresStore(fake).read()
+
+    expect(fake.matching(/client_assignments/i)).toEqual([])
+  })
+
+  it('emits an empty team as an empty array on both names', async () => {
+    const fake = fakePostgres({ clientRows: [{ ...clientRow, assigned_bookkeeper_ids: null }] })
+    const data = await postgresStore(fake).read()
+
+    expect(data.clients[0].assignedBookkeeperIds).toEqual([])
+    expect(data.clients[0].assignedEmployeeIds).toEqual([])
+  })
+})
 
 const existingInvoice = {
   id: 'inv-1',

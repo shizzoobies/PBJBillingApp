@@ -435,6 +435,12 @@ export function normalizeClientProfile(client) {
       : typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
         ? client.customMonthlyFee
         : undefined
+  // One assigned team — see lib/data-scope.js. `assignedEmployeeIds` is an
+  // alias; whatever a caller passed under that name is discarded here so the
+  // old field cannot become a second source of truth again.
+  const assignedTeam = Array.isArray(client.assignedBookkeeperIds)
+    ? [...new Set(client.assignedBookkeeperIds.filter((id) => typeof id === 'string'))]
+    : []
   return {
     ...client,
     planIds,
@@ -446,9 +452,8 @@ export function normalizeClientProfile(client) {
       accountant: client.estimatedAccountantHours,
       cfo: client.estimatedCfoHours,
     }),
-    assignedBookkeeperIds: Array.isArray(client.assignedBookkeeperIds)
-      ? [...new Set(client.assignedBookkeeperIds.filter((id) => typeof id === 'string'))]
-      : [],
+    assignedBookkeeperIds: assignedTeam,
+    assignedEmployeeIds: assignedTeam,
     email: client.email ?? '',
     contactName: client.contactName ?? '',
     phone: client.phone ?? '',
@@ -3557,7 +3562,6 @@ export class AppDataStore {
         plansResult,
         contactsResult,
         clientsResult,
-        assignmentsResult,
         timeEntriesResult,
         checklistsResult,
         checklistItemsResult,
@@ -3607,11 +3611,6 @@ export class AppDataStore {
                    annual_rate, annual_billing_month, lifecycle_stage
             from clients
             order by name asc
-          `),
-          this.pool.query(`
-            select client_id, user_id
-            from client_assignments
-            order by client_id asc, user_id asc
           `),
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
@@ -3681,13 +3680,6 @@ export class AppDataStore {
             order by inactive_at desc, name asc
           `),
         ])
-
-      const assignmentsByClient = new Map()
-      for (const row of assignmentsResult.rows) {
-        const existing = assignmentsByClient.get(row.client_id) ?? []
-        existing.push(row.user_id)
-        assignmentsByClient.set(row.client_id, existing)
-      }
 
       const itemsByChecklist = new Map()
       for (const row of checklistItemsResult.rows) {
@@ -3867,6 +3859,13 @@ export class AppDataStore {
           const contactIds = Array.isArray(row.contact_ids)
             ? row.contact_ids.filter((id) => typeof id === 'string' && id)
             : []
+          // One assigned team, normalized once. `assignedEmployeeIds` below is
+          // an alias of this — it used to come from the `client_assignments`
+          // table, which could and did disagree with the column that actually
+          // gates visibility.
+          const assignedTeam = Array.isArray(row.assigned_bookkeeper_ids)
+            ? [...new Set(row.assigned_bookkeeper_ids.filter((id) => typeof id === 'string'))]
+            : []
           const monthlyRate =
             row.monthly_rate === null || row.monthly_rate === undefined
               ? row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
@@ -3903,10 +3902,8 @@ export class AppDataStore {
               row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
                 ? null
                 : Number(row.custom_monthly_fee),
-            assignedEmployeeIds: assignmentsByClient.get(row.id) ?? [],
-          assignedBookkeeperIds: Array.isArray(row.assigned_bookkeeper_ids)
-            ? [...new Set(row.assigned_bookkeeper_ids.filter((id) => typeof id === 'string'))]
-            : [],
+            assignedEmployeeIds: assignedTeam,
+            assignedBookkeeperIds: assignedTeam,
           email: row.email ?? '',
           contactName: row.contact_name ?? '',
           phone: row.phone ?? '',
