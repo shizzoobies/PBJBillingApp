@@ -99,6 +99,11 @@ Clients page meanwhile. Owner-only.
   - A group block (one block spanning several clients) is covered by its member
     clients and needs no single task — its slices get tasks when it is split —
     but it does need a detail.
+  - **The form clears itself once the time is logged** — client, task, detail,
+    the administrative box and any group selection all go back to blank, so the
+    next entry starts from a clean slate and no description is ever logged
+    twice. A blocked or refused Stop & log clears nothing: everything typed
+    stays put until the time is actually saved.
   - Editing an entry can't blank a detail that was filled in. Older entries
     saved before this rule (blank description) still load and stay fully
     editable — their minutes, client and date can be fixed as before.

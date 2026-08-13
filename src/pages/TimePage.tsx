@@ -848,6 +848,28 @@ export function TimeCapture({
       <span className="field-error">{TIME_ENTRY_FIELD_PROMPTS[field]}</span>
     ) : null
 
+  /**
+   * Back to a blank slate: every field the panel owns returns to the value it
+   * had on first render, so the NEXT capture starts from nothing. The panel's
+   * own state is what seeds the next Start (a running timer displays itself,
+   * but a stopped one leaves the compose-state showing), which is why a
+   * carried-over description used to ride along into the following entry.
+   *
+   * Called ONLY after a stop that actually saved — see {@link handleStopTimer}.
+   */
+  const resetCaptureFields = () => {
+    setClientId(clients[0]?.id ?? '')
+    setEmployeeId(activeEmployeeId)
+    setDescription('')
+    setTaskId('')
+    setTaskLabel('')
+    setIsAdministrative(false)
+    setBillTo('single')
+    setGroupClientIds([])
+    setStopAttempted(false)
+    setStopError('')
+  }
+
   const handleStopTimer = async () => {
     // Blocked stop: the elapsed time is NOT lost. Nothing is saved, nothing is
     // cleared — the timer keeps running with everything it has while the user
@@ -864,6 +886,10 @@ export function TimeCapture({
       // The live notes are kept on the running timer now, so stop with no
       // override and let it use the timer's own (persisted) description.
       await onStopTimer()
+      // The time is logged — and only now is it safe to wipe the form. A stop
+      // that was blocked or refused never reaches this line, so nothing a user
+      // typed is thrown away while it is still un-logged.
+      resetCaptureFields()
     } catch (error) {
       // Surface a server block (e.g. "submit last week first") instead of a
       // silent failure — the timer stays running so no time is lost.
