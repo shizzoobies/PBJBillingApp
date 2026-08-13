@@ -58,6 +58,7 @@ import {
   employeeName,
   ensureTemplateStages,
   formatHours,
+  getAssignedTeamIds,
   getChecklistFrequencyLabel,
   groupChecklist,
   itemDeletionKey,
@@ -1729,9 +1730,7 @@ export function ChecklistCard({
   // their clients (not just tasks they're the assignee/editor of).
   const checklistClient = clients.find((c) => c.id === checklist.clientId)
   const isAssignedToClient =
-    !!checklistClient &&
-    ((checklistClient.assignedEmployeeIds ?? []).includes(activeEmployeeId) ||
-      (checklistClient.assignedBookkeeperIds ?? []).includes(activeEmployeeId))
+    !!checklistClient && getAssignedTeamIds(checklistClient).includes(activeEmployeeId)
   // A non-owner who is neither assignee nor editor nor assigned to the client
   // sees the task read-only.
   const isViewerOnly = role !== 'owner' && !isAssignee && !isEditor && !isAssignedToClient

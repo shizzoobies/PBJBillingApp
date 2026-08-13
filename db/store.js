@@ -7734,8 +7734,7 @@ export class AppDataStore {
     )
     if (existing) return null
 
-    const assigneeId = (client.assignedBookkeeperIds ?? [])[0] ||
-      (client.assignedEmployeeIds ?? [])[0] || ''
+    const assigneeId = (client.assignedBookkeeperIds ?? [])[0] || ''
     const today = formatDateOnly(new Date())
     const makeStage = (name, items) => ({
       id: `stage-${randomUUID().slice(0, 8)}`,

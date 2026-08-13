@@ -22,6 +22,7 @@ import {
   fetchDismissedSetupIssues,
   restoreSetupIssueRequest,
 } from '../lib/api'
+import { getAssignedTeamIds } from '../lib/utils'
 
 const SEVERITY_LABEL: Record<SetupSeverity, string> = {
   high: 'Needs attention',
@@ -329,7 +330,7 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
     fix.kind === 'clientText' ? String(client?.[fix.field] ?? '') : '',
   )
   const [teamIds, setTeamIds] = useState<string[]>(() =>
-    fix.kind === 'clientTeam' ? client?.assignedEmployeeIds ?? [] : [],
+    fix.kind === 'clientTeam' ? getAssignedTeamIds(client) : [],
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -368,12 +369,9 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
           setBusy(false)
           return
         }
-        // Set the owner-managed assigned team AND the visibility list, so the
-        // issue clears and the assigned staff can actually see the client.
-        updateClient(fix.clientId, {
-          assignedEmployeeIds: teamIds,
-          assignedBookkeeperIds: teamIds,
-        })
+        // Set the owner-managed assigned team so the issue clears and the
+        // assigned staff can actually see the client.
+        updateClient(fix.clientId, { assignedBookkeeperIds: teamIds })
       } else if (fix.kind === 'planChecklists') {
         for (const templateId of fix.templateIds) {
           await applyTemplateToClient(templateId, { clientId: fix.clientId })

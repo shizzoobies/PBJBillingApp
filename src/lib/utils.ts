@@ -491,14 +491,18 @@ export {
   checklistMonthKey,
 }
 
+/**
+ * The assigned team for a client. Re-exported from `lib/data-scope.js` so the
+ * UI and the server's `visibleClientIdSet` share ONE definition — they used to
+ * read different fields and disagreed about who could see what.
+ */
+// @ts-expect-error - plain-JS module without type declarations
+export { assignedTeamIds as getAssignedTeamIds } from '../../lib/data-scope.js'
+
 /** Add the `(template, dueDate, stage 0)` key for a just-created instance. */
 function registerInstanceKey(keys: Set<string>, templateId: string, dueDate: string) {
   const key = checklistInstanceKey(templateId, dueDate, 0)
   if (key) keys.add(key)
-}
-
-export function getAssignedEmployeeIds(client: Client) {
-  return client.assignedEmployeeIds ?? []
 }
 
 export function makeId(prefix: string) {

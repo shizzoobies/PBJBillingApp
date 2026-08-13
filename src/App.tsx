@@ -130,7 +130,7 @@ import {
   currentBillingPeriod,
   ensureRecurringChecklists,
   formatTimeFromMs,
-  getAssignedEmployeeIds,
+  getAssignedTeamIds,
   type GroupAllocationMode,
   itemDeletionKey,
   legibleSidebarText,
@@ -1020,7 +1020,7 @@ function App() {
 
     return new Set([
       ...data.clients
-        .filter((client) => getAssignedEmployeeIds(client).includes(activeEmployeeId))
+        .filter((client) => getAssignedTeamIds(client).includes(activeEmployeeId))
         .map((client) => client.id),
       ...data.checklists
         .filter((checklist) => checklist.assigneeId === activeEmployeeId)
