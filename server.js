@@ -61,7 +61,11 @@ import {
   diagnoseTimeLogging,
   summarizeRecentChanges,
 } from './lib/diagnostics.js'
-import { isTemplateVisibleToScope, isTimeEntryVisibleToScope } from './lib/data-scope.js'
+import {
+  isClientVisibleToUser,
+  isTemplateVisibleToScope,
+  isTimeEntryVisibleToScope,
+} from './lib/data-scope.js'
 import { StaleWorkspaceError } from './lib/workspace-version.js'
 import {
   templateApplyRoleDenial,
@@ -536,8 +540,9 @@ function isCrossSiteOrigin(request) {
 
 /**
  * Compute the set of client ids visible to a session. Owners always see
- * everything. Non-owners see only clients where their user id appears in the
- * client's `assignedBookkeeperIds` array.
+ * everything. Non-owners see only clients whose assigned team includes their
+ * user id — `assignedTeamIds` in lib/data-scope.js is the one definition of
+ * that team, shared with the frontend so the two cannot drift.
  */
 // `weekStartOf` (the Sun–Sat week anchor) now lives in lib/time-entry.js beside
 // the weekly gate that consumes it — imported above.
@@ -548,12 +553,7 @@ function visibleClientIdSet(session, clients) {
   }
   const me = session.user.id
   return new Set(
-    clients
-      .filter((client) =>
-        Array.isArray(client.assignedBookkeeperIds) &&
-        client.assignedBookkeeperIds.includes(me),
-      )
-      .map((client) => client.id),
+    clients.filter((client) => isClientVisibleToUser(client, me)).map((client) => client.id),
   )
 }
 
