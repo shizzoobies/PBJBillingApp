@@ -3109,3 +3109,114 @@ describe('the waiting-on hand-off round-trips (file backend)', () => {
     expect(await readWaitingOns(store, { itemId: 'it-1' })).toHaveLength(0)
   })
 })
+
+/**
+ * THE invariant. Client assignment was stored twice — `assigned_bookkeeper_ids`
+ * and the `client_assignments` table — and only the first gated visibility, so
+ * the two could disagree without anything failing. They are one value now, and
+ * every mutation path has to keep them one value.
+ *
+ * If a future change reintroduces a second source, this is what catches it.
+ */
+const expectOneTeamSource = (client) => {
+  expect(client).toBeTruthy()
+  expect(client.assignedEmployeeIds).toEqual(client.assignedBookkeeperIds)
+}
+
+describe('one source of truth for a client team (file backend)', () => {
+  const teamWorkspace = () =>
+    workspace({
+      clients: [{ id: 'c1', name: 'Acme', assignedBookkeeperIds: ['emp-1'] }],
+      employees: [
+        { id: 'emp-1', name: 'Lisa', role: 'bookkeeper' },
+        { id: 'emp-2', name: 'Dana', role: 'bookkeeper' },
+      ],
+    })
+
+  const clientFromDisk = async (id = 'c1') => {
+    const data = await store.read()
+    return data.clients.find((c) => c.id === id)
+  }
+
+  beforeEach(async () => {
+    await store.write(teamWorkspace())
+  })
+
+  it('holds after a bulk-save round trip', async () => {
+    expectOneTeamSource(await clientFromDisk())
+    expect((await clientFromDisk()).assignedBookkeeperIds).toEqual(['emp-1'])
+  })
+
+  it('holds after createClient', async () => {
+    const created = await store.createClient({
+      name: 'Northwind',
+      contact: 'Dana',
+      assignedEmployeeIds: ['emp-2'],
+    })
+    expectOneTeamSource(await clientFromDisk(created.id))
+    expect((await clientFromDisk(created.id)).assignedBookkeeperIds).toEqual(['emp-2'])
+  })
+
+  it('holds after setClientAssignedTeam', async () => {
+    await store.setClientAssignedTeam('c1', ['emp-2'])
+    expectOneTeamSource(await clientFromDisk())
+  })
+
+  it('holds after grantClientVisibility', async () => {
+    await store.grantClientVisibility('c1', 'emp-2')
+    const client = await clientFromDisk()
+    expectOneTeamSource(client)
+    expect(client.assignedBookkeeperIds).toContain('emp-2')
+  })
+
+  it('holds after a bulk save carrying a STALE alias', async () => {
+    // The shape that used to cause the divergence: a payload whose alias
+    // disagrees with the canonical field. The canonical field must win.
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            assignedBookkeeperIds: ['emp-2'],
+            assignedEmployeeIds: ['emp-1'],
+          },
+        ],
+      }),
+    )
+    const client = await clientFromDisk()
+    expectOneTeamSource(client)
+    expect(client.assignedBookkeeperIds).toEqual(['emp-2'])
+  })
+
+  it('holds after deactivateUser removes someone from the team', async () => {
+    await store.setClientAssignedTeam('c1', ['emp-1', 'emp-2'])
+
+    // The plan docs refer to this cleanup informally as "deactivateUser"; the
+    // actual store method is `deleteTeamMember(userId, ownerId)` (db/store.js)
+    // — same behavior (soft-deactivates, strips the user from every client's
+    // assigned team), different name. It needs a real, ACTIVE user in the auth
+    // file to act on, and emp-2 is not one of the seeded auth users, so add it
+    // here. This suite's top-level beforeAll/afterAll already snapshot and
+    // restore tmp/auth-state.json around the whole file, so no extra cleanup
+    // is needed beyond what's already in place.
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    if (!authState.users.some((user) => user.id === 'emp-2')) {
+      authState.users.push({
+        id: 'emp-2',
+        name: 'Dana',
+        email: 'dana@pbj.local',
+        staffRole: 'Bookkeeper',
+        role: 'bookkeeper',
+      })
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+
+    const result = await store.deleteTeamMember('emp-2', 'owner-1')
+    expect(result).toEqual({ ok: true })
+
+    const client = await clientFromDisk()
+    expectOneTeamSource(client)
+    expect(client.assignedBookkeeperIds).not.toContain('emp-2')
+  })
+})
