@@ -96,7 +96,17 @@ out of any merge decision.
 
 `clients.assigned_bookkeeper_ids` (Postgres) / `client.assignedBookkeeperIds`
 (file JSON) is the only place assignment is stored. It may contain owners.
-`client_assignments` becomes **inert**: still present, never read, never written.
+`client_assignments` becomes **unread but not yet unwritten**: still present,
+never read by anything after this batch, but NOT the inert table batch 1 was
+originally scoped to produce. Two writes survive it: `write()`'s
+`delete from clients` (`db/store.js:4369`) still cascades into the table via
+`client_assignments.client_id references clients(id) on delete cascade`
+(`db/schema.sql:80`) — the explicit `delete from client_assignments` that used
+to run first, and the re-insert that repopulated it, are both gone, so every
+bulk save now empties the table via the cascade instead — and the orphan
+cleanup at `db/store.js:8430` still issues a direct
+`delete from client_assignments`. Neither is a read, so nothing regresses, but
+"inert" is a batch 2 fact, not a batch 1 one. See §4.
 
 ### 3.2 `assignedEmployeeIds` becomes derived, in both backends
 
@@ -169,8 +179,15 @@ A script under `scripts/` following the existing prod-diagnostic pattern.
 **`select` only — no writes, no transaction that could be mistaken for one.**
 Per client where the two disagree: client name, ids in the table but not in the
 array, ids in the array but not the table, each with the user's name and
-`inactive_at`. Output is the artifact Alex and Brittany decide from, and doubles
-as proof the fix worked.
+`inactive_at`. Output is the artifact Alex and Brittany decide from.
+
+**It must be run BEFORE deploy, not after.** Once this batch ships, the first
+bulk save cascades `client_assignments` empty (see §3.1), so a post-deploy run
+of this same report always shows zero divergence — whether or not anything
+worked. It cannot double as proof of anything once the table it reads is
+empty. Post-deploy verification is a separate, end-to-end check instead: create
+a client through the Add form as an owner and confirm the assigned staff
+member sees it.
 
 ### 3.8 Docs
 
@@ -185,15 +202,25 @@ as proof the fix worked.
 
 ## 4. Batch 2 — after the inert period
 
-Only once batch 1 has been live long enough to prove nothing reads the table:
+Only once batch 1 has been live long enough to prove nothing reads the table.
+
+**Batch 1 only stopped the reads.** The table still takes two writes — the
+`on delete cascade` from `write()`'s `delete from clients` (`db/store.js:4369`,
+`db/schema.sql:80`) and the orphan cleanup at `db/store.js:8430` — and batch 2
+must remove both, not just whatever remaining reads exist, or "inert" never
+actually becomes true:
 
 1. `create table client_assignments_archive as select * from client_assignments`
    — preserves `assigned_at`, which is the only history the table holds.
-2. Drop `client_assignments`; remove it from `db/schema.sql:79`.
+2. Drop `client_assignments`; remove it from `db/schema.sql:79`. This is what
+   retires the `on delete cascade` write — the constraint disappears with the
+   table.
 3. Remove it from `BULK_SAVE_TABLES` (`lib/workspace-version.js:62`). This
    changes the staleness fingerprint set and invalidates open tabs once —
    harmless, but worth doing outside Brittany's billing window.
-4. Remove the orphan-cleanup delete (`db/store.js:8449`).
+4. Remove the orphan-cleanup delete (`db/store.js:8430`) — the other write, and
+   the one that survives even after the table is dropped if left in place (it
+   would start erroring against a table that no longer exists).
 5. Remove the `assignedEmployeeIds` alias and its remaining type
    (`src/lib/types.ts:147`); rename the accessor's last callers.
 6. Resolve the `deleteTeamMember` asymmetry, which the drop makes moot.

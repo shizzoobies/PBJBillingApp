@@ -1160,15 +1160,23 @@ Run it against production read-only, paste the output, and stop. Any resulting w
 
 - [ ] **Step 1: Correct HANDOFF**
 
-Replace `docs/HANDOFF.md:133-134`:
+Replace `docs/HANDOFF.md:133-134`. `client_assignments` is not inert yet —
+`write()`'s `delete from clients` (`db/store.js:4369`) still cascades into it
+(`on delete cascade`, `db/schema.sql:80`), and the orphan cleanup at
+`db/store.js:8430` still writes it directly. Only the reads are gone:
 
 ```markdown
 - `clients` has only `assigned_bookkeeper_ids` — the ONE source of truth for a
   client's assigned team, and the only thing `visibleClientIdSet` reads.
-  `assignedEmployeeIds` is a derived alias of it with no DB column;
-  `client_assignments` is inert (nothing reads or writes it) and is dropped in
-  batch 2. See `docs/plans/client-assignment-single-source-2026-08.md`. Owners
-  may appear on an assigned team — it grants nothing, they see everything.
+  `assignedEmployeeIds` is a derived alias of it with no DB column.
+  `client_assignments` is nothing **read** — but not yet nothing written:
+  `write()`'s `delete from clients` (`db/store.js:4369`) still cascades into it
+  (`client_assignments.client_id references clients(id) on delete cascade`,
+  `db/schema.sql:80`), and the orphan cleanup at `db/store.js:8430` still
+  targets it directly. Both go away in batch 2, which is when the table
+  actually becomes inert. See
+  `docs/plans/client-assignment-single-source-2026-08.md`. Owners may appear on
+  an assigned team — it grants nothing, they see everything.
 ```
 
 - [ ] **Step 2: Update the capability manifest**
@@ -1203,9 +1211,20 @@ Poll Railway until the deploy SUCCEEDS **on the hash you pushed** (match it — 
 node scripts/provision-voice-agent.mjs
 ```
 
-- [ ] **Step 6: Verify against production, read-only**
+- [ ] **Step 6: Verify against production**
 
-Run the Task 8 report again post-deploy and confirm the count has not grown. Then create one throwaway client through the Add-client form as an owner, confirm the assigned staff member can see it, and delete it. If you would rather not create a client in production, prove the same thing with a `BEGIN … ROLLBACK` transaction issuing `createClient`'s exact statements (HANDOFF §4).
+Run the Task 8 report **before** deploying, and keep the output — once this
+ships, the first bulk save cascades `client_assignments` empty (its
+`client_id` FK is `on delete cascade` off `clients`, and `write()`'s
+`delete from clients` runs on every save), so a report run post-deploy would
+always show zero divergence regardless of whether anything worked. It cannot
+be re-run afterward as proof.
+
+Post-deploy, verify end-to-end instead: create one throwaway client through
+the Add-client form as an owner, confirm the assigned staff member can see it,
+and delete it. If you would rather not create a client in production, prove
+the same thing with a `BEGIN … ROLLBACK` transaction issuing `createClient`'s
+exact statements (HANDOFF §4).
 
 ---
 

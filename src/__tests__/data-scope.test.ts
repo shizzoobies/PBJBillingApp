@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest'
-// @ts-expect-error - plain-JS module without type declarations
 import { assignedTeamIds, isClientVisibleToUser, isTemplateVisibleToScope, isTimeEntryVisibleToScope } from '../../lib/data-scope.js'
 
 /**
@@ -102,12 +101,18 @@ describe('assignedTeamIds', () => {
 
   it('drops duplicates, non-strings and empty ids', () => {
     expect(
-      assignedTeamIds({ assignedBookkeeperIds: ['emp-1', 'emp-1', '', 7, null] }),
+      assignedTeamIds({
+        assignedBookkeeperIds: ['emp-1', 'emp-1', '', 7, null] as unknown as string[],
+      }),
     ).toEqual(['emp-1'])
   })
 
   it('ignores assignedEmployeeIds — it is a derived alias, never an input', () => {
-    expect(assignedTeamIds({ assignedEmployeeIds: ['emp-9'] })).toEqual([])
+    expect(
+      assignedTeamIds({ assignedEmployeeIds: ['emp-9'] } as unknown as {
+        assignedBookkeeperIds?: string[]
+      }),
+    ).toEqual([])
   })
 })
 

@@ -661,7 +661,10 @@ Clients page meanwhile. Owner-only.
 ## Clients (owner manages; staff see assigned)
 
 - Client list: contact, billing type (Hourly / Monthly subscription / Annual),
-  rate, assigned team, plans/services.
+  rate, assigned team, plans/services. The assigned team shown here now comes
+  from one stored field — for any client whose team had drifted between the two
+  old representations, this column changes the moment that ships, to match who
+  can actually see the client.
 - Add client: a "+" Add client button in the top-right of the page header
   (opposite the "Clients" title, above the search bar; owner only) opens an
   Add-client modal. Fields: name, primary contact,
@@ -1261,7 +1264,10 @@ Clients page meanwhile. Owner-only.
   rate — their invoice would be $0), **Plans**, **Team** (no bill rate),
   **Contacts** (unlinked). Tabs without automated checks (Time, Timesheet,
   Dashboard, reports) aren't listed, and the page says so — unlisted means
-  "not scanned", not "verified fine".
+  "not scanned", not "verified fine". A client whose team previously lived
+  only in the old `client_assignments` table (never the field that actually
+  gates visibility) now surfaces here as "missing a team member" — the
+  single-source-of-truth cleanup makes that gap visible instead of silent.
 - Top-of-page summary: one chip per tab that HAS problems, with its count;
   clicking a chip opens that tab's section and scrolls to it. Sections with
   issues are collapsed by default; green tabs are always visible.

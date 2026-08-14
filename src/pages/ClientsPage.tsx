@@ -1043,7 +1043,7 @@ function ClientTable({
                 <td>
                   <div className="client-chip-list compact">
                     {getAssignedTeamIds(client).length > 0 ? (
-                      getAssignedTeamIds(client).map((employeeId: string) => (
+                      getAssignedTeamIds(client).map((employeeId) => (
                         <span key={employeeId}>{employeeName(employees, employeeId)}</span>
                       ))
                     ) : (

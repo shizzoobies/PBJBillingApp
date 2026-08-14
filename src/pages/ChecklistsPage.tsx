@@ -1725,9 +1725,11 @@ export function ChecklistCard({
   const isAssignee = checklist.assigneeId === activeEmployeeId
   const isEditor = editorIds.includes(activeEmployeeId)
   // A non-owner can also edit any checklist whose client they're assigned to —
-  // resolve the checklist's client and check both assignment lists. This mirrors
-  // the server's visible-client allowance so staff can edit the shared board for
-  // their clients (not just tasks they're the assignee/editor of).
+  // resolve the checklist's client and check its assigned team via
+  // getAssignedTeamIds, the same one-field accessor the server's
+  // visible-client check reads. This mirrors that allowance so staff can edit
+  // the shared board for their clients (not just tasks they're the
+  // assignee/editor of).
   const checklistClient = clients.find((c) => c.id === checklist.clientId)
   const isAssignedToClient =
     !!checklistClient && getAssignedTeamIds(checklistClient).includes(activeEmployeeId)

@@ -927,7 +927,7 @@ describe('edit a session-backed entry, then split it (file backend)', () => {
  * pre-check, the (optional) version fingerprint, and the invoice-drafts
  * snapshot â€” so returning an empty row set for everything else is faithful.
  */
-function fakePostgres({ invoices = [], groupSlices = [], clientRows = [] } = {}) {
+function fakePostgres({ invoices = [], groupSlices = [], clientRows = [], userRows = [] } = {}) {
   const statements = []
   const record = (text, params) => {
     const trimmed = String(text).trim()
@@ -942,6 +942,13 @@ function fakePostgres({ invoices = [], groupSlices = [], clientRows = [] } = {})
     // The `for update` read a split adjustment starts with.
     if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
       return { rows: groupSlices, rowCount: groupSlices.length }
+    }
+    // The bare id-validation query `setClientAssignedTeam` issues. Anchored to
+    // the exact bare statement (no trailing `where`) so a reintroduced
+    // `where role <> 'owner'` filter falls through to the empty default below
+    // instead — the same empty-`valid` failure a live regression would cause.
+    if (/^select id from users\s*$/i.test(trimmed)) {
+      return { rows: userRows }
     }
     return { rows: [] }
   }
@@ -1677,6 +1684,40 @@ describe('setClientAssignedTeam (file backend)', () => {
     const data = await store.read()
     const client = data.clients.find((c) => c.id === 'c1')
     expect(client.assignedEmployeeIds).toEqual(client.assignedBookkeeperIds)
+  })
+})
+
+/**
+ * `setClientAssignedTeam` — the Postgres branch specifically. This is the one
+ * behavior change in the batch that lives ONLY in Postgres: the id-validation
+ * query used to be `select id from users where role <> 'owner'`; it is now the
+ * bare `select id from users`, so an explicitly picked owner survives.
+ *
+ * The file backend can't regress this — it validates against the local
+ * `employees` array, which was never role-filtered — so only a statement-level
+ * Postgres test catches a reintroduced filter. If it regressed, the id-validation
+ * query would come back empty, `safe` would become `[]`, and the update would
+ * wipe the client's team, silently revoking visibility for every assigned
+ * non-owner.
+ */
+describe('setClientAssignedTeam (postgres branch)', () => {
+  const userRows = [{ id: 'emp-1' }, { id: 'owner-1' }]
+
+  it('keeps an explicitly picked owner in the bound params', async () => {
+    const fake = fakePostgres({ userRows })
+    await postgresStore(fake).setClientAssignedTeam('c1', ['emp-1', 'owner-1'])
+
+    const updates = fake.matching(/^update clients set assigned_bookkeeper_ids/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].params).toEqual(['c1', ['emp-1', 'owner-1']])
+  })
+
+  it('still drops an id that belongs to nobody', async () => {
+    const fake = fakePostgres({ userRows })
+    await postgresStore(fake).setClientAssignedTeam('c1', ['emp-1', 'ghost-9'])
+
+    const updates = fake.matching(/^update clients set assigned_bookkeeper_ids/i)
+    expect(updates[0].params).toEqual(['c1', ['emp-1']])
   })
 })
 
@@ -3116,7 +3157,14 @@ describe('the waiting-on hand-off round-trips (file backend)', () => {
  * the two could disagree without anything failing. They are one value now, and
  * every mutation path has to keep them one value.
  *
- * If a future change reintroduces a second source, this is what catches it.
+ * On the file backend below, this alone does NOT catch a reintroduced second
+ * source: `read()` maps every client through `normalizeClientProfile`, which
+ * assigns one computed value to both `assignedBookkeeperIds` and
+ * `assignedEmployeeIds` unconditionally, so the two names are trivially equal
+ * here no matter what a regression wrote. The real regression power is each
+ * test's companion assertion on the actual value (e.g.
+ * `assignedBookkeeperIds` equals what was set) — never add a test that calls
+ * this helper without one.
  */
 const expectOneTeamSource = (client) => {
   expect(client).toBeTruthy()

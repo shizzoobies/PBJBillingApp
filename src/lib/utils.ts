@@ -496,7 +496,6 @@ export {
  * UI and the server's `visibleClientIdSet` share ONE definition — they used to
  * read different fields and disagreed about who could see what.
  */
-// @ts-expect-error - plain-JS module without type declarations
 export { assignedTeamIds as getAssignedTeamIds } from '../../lib/data-scope.js'
 
 /** Add the `(template, dueDate, stage 0)` key for a just-created instance. */
