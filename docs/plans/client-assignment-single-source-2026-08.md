@@ -1,6 +1,6 @@
 # One source of truth for "who is assigned to this client"
 
-**Date:** 2026-08-13 · **Status:** design approved, not yet implemented
+**Date:** 2026-08-13 · **Status:** batch 1 implemented on this branch, not yet deployed
 
 Client assignment is stored twice today, and the two copies disagree. This spec
 collapses them to one. Batch 1 (this spec) makes the second copy inert and adds
@@ -151,8 +151,7 @@ Statement-level, through `fakePostgres()`:
 - `write()` issues **no** `client_assignments` statement — neither delete nor insert.
 - `createClient({ assignedEmployeeIds: ['emp-1'] })` binds
   `assigned_bookkeeper_ids: ['emp-1']`. Direct regression test for 2026-08-13.
-- `visibleClientIdSet` sees a client built from the real Add-form payload.
-  **Fails today.**
+- `visibleClientIdSet` sees a client built from the real Add-form payload. This test passes.
 
 Invariant, both backends:
 
