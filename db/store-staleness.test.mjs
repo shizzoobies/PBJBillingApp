@@ -3160,6 +3160,7 @@ describe('one source of truth for a client team (file backend)', () => {
   it('holds after setClientAssignedTeam', async () => {
     await store.setClientAssignedTeam('c1', ['emp-2'])
     expectOneTeamSource(await clientFromDisk())
+    expect((await clientFromDisk()).assignedBookkeeperIds).toEqual(['emp-2'])
   })
 
   it('holds after grantClientVisibility', async () => {
