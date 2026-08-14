@@ -661,7 +661,10 @@ Clients page meanwhile. Owner-only.
 ## Clients (owner manages; staff see assigned)
 
 - Client list: contact, billing type (Hourly / Monthly subscription / Annual),
-  rate, assigned team, plans/services.
+  rate, assigned team, plans/services. The assigned team shown here now comes
+  from one stored field — for any client whose team had drifted between the two
+  old representations, this column changes the moment that ships, to match who
+  can actually see the client.
 - Add client: a "+" Add client button in the top-right of the page header
   (opposite the "Clients" title, above the search bar; owner only) opens an
   Add-client modal. Fields: name, primary contact,
@@ -669,7 +672,10 @@ Clients page meanwhile. Owner-only.
   monthly hours per role (informational only — never affects invoices), assigned
   bookkeeper(s), other contacts, plans/services. NOTE: there is no per-client hourly rate
   anymore — Hourly clients are billed off each team member's own bill rate (set
-  on the Team page). Right after saving, a prompt asks "Open their checklist
+  on the Team page). **The team picked on this form can see the new client
+  immediately** — assignment saved here is the same one visibility reads, so
+  there's no separate step of an owner re-picking the team on the client's own
+  page afterward. Right after saving, a prompt asks "Open their checklist
   now?" — choosing yes jumps straight into the new client's checklist + notes
   modal. (Contacts and Plans have the same "+" add-in-a-modal flow.) The header
   (title + "+" + search) stays pinned to the top as you scroll the list, so the
@@ -804,7 +810,10 @@ Clients page meanwhile. Owner-only.
     recurring checklist" buttons are hidden while they are inactive. Inactive
     clients are not counted as a To-100% setup problem — retiring a client is
     an intended state, not an unfinished step.
-- Assigned team controls which staff can see/log time for the client.
+- Assigned team controls which staff can see/log time for the client. An owner
+  can be listed on a client's assigned team too — it records who works the
+  account, but grants the owner nothing extra: owners already see and can act
+  on every client regardless of assignment.
 
 ## Client Recap (owner only)
 
@@ -1277,7 +1286,10 @@ Clients page meanwhile. Owner-only.
   rate — their invoice would be $0), **Plans**, **Team** (no bill rate),
   **Contacts** (unlinked). Tabs without automated checks (Time, Timesheet,
   Dashboard, reports) aren't listed, and the page says so — unlisted means
-  "not scanned", not "verified fine".
+  "not scanned", not "verified fine". A client whose team previously lived
+  only in the old `client_assignments` table (never the field that actually
+  gates visibility) now surfaces here as "missing a team member" — the
+  single-source-of-truth cleanup makes that gap visible instead of silent.
 - Top-of-page summary: one chip per tab that HAS problems, with its count;
   clicking a chip opens that tab's section and scrolls to it. Sections with
   issues are collapsed by default; green tabs are always visible.

@@ -41,7 +41,7 @@ import type {
 import {
   currency,
   employeeName,
-  getAssignedEmployeeIds,
+  getAssignedTeamIds,
   localDateOnly,
   MONTH_NAMES,
 } from '../lib/utils'
@@ -522,7 +522,7 @@ function ClientBuilder({
       // Only persist a non-default stage so most clients stay simply 'active'
       // (absent ⇒ active downstream).
       ...(initialStage !== 'active' ? { lifecycleStage: initialStage } : {}),
-      assignedEmployeeIds,
+      assignedBookkeeperIds: assignedEmployeeIds,
     })
     setName('')
     setPrimaryContactId('')
@@ -1042,8 +1042,8 @@ function ClientTable({
                 ) : null}
                 <td>
                   <div className="client-chip-list compact">
-                    {getAssignedEmployeeIds(client).length > 0 ? (
-                      getAssignedEmployeeIds(client).map((employeeId) => (
+                    {getAssignedTeamIds(client).length > 0 ? (
+                      getAssignedTeamIds(client).map((employeeId) => (
                         <span key={employeeId}>{employeeName(employees, employeeId)}</span>
                       ))
                     ) : (

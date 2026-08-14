@@ -19,7 +19,7 @@ import type {
   SubscriptionPlan,
 } from './types'
 import { evaluateRecurringTemplate } from '../../lib/recurring-gate.js'
-import { missingPlanTemplatesForClient, unlinkedContacts } from './utils'
+import { getAssignedTeamIds, missingPlanTemplatesForClient, unlinkedContacts } from './utils'
 
 /** The sidebar tab an issue belongs to — the page groups by these. */
 export type SetupCategory =
@@ -131,7 +131,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     }
 
     // No assigned team member.
-    if (!client.assignedEmployeeIds || client.assignedEmployeeIds.length === 0) {
+    if (getAssignedTeamIds(client).length === 0) {
       issues.push({
         id: `client:team:${client.id}`,
         category: 'Clients',

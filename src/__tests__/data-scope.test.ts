@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
-// @ts-expect-error - plain-JS module without type declarations
-import { isTemplateVisibleToScope, isTimeEntryVisibleToScope } from '../../lib/data-scope.js'
+import { assignedTeamIds, isClientVisibleToUser, isTemplateVisibleToScope, isTimeEntryVisibleToScope } from '../../lib/data-scope.js'
 
 /**
  * `isTemplateVisibleToScope` is the server's per-template visibility rule for a
@@ -84,5 +83,50 @@ describe('isTimeEntryVisibleToScope', () => {
     expect(isTimeEntryVisibleToScope({ employeeId: me, clientId: 'client-1' }, me, undefined)).toBe(
       false,
     )
+  })
+})
+
+describe('assignedTeamIds', () => {
+  it('reads the assigned team off assignedBookkeeperIds', () => {
+    expect(assignedTeamIds({ assignedBookkeeperIds: ['emp-1', 'emp-2'] })).toEqual([
+      'emp-1',
+      'emp-2',
+    ])
+  })
+
+  it('returns an empty array for a client with no team', () => {
+    expect(assignedTeamIds({})).toEqual([])
+    expect(assignedTeamIds(null)).toEqual([])
+  })
+
+  it('drops duplicates, non-strings and empty ids', () => {
+    expect(
+      assignedTeamIds({
+        assignedBookkeeperIds: ['emp-1', 'emp-1', '', 7, null] as unknown as string[],
+      }),
+    ).toEqual(['emp-1'])
+  })
+
+  it('ignores assignedEmployeeIds — it is a derived alias, never an input', () => {
+    expect(
+      assignedTeamIds({ assignedEmployeeIds: ['emp-9'] } as unknown as {
+        assignedBookkeeperIds?: string[]
+      }),
+    ).toEqual([])
+  })
+})
+
+describe('isClientVisibleToUser', () => {
+  it('is true when the user is on the assigned team', () => {
+    expect(isClientVisibleToUser({ assignedBookkeeperIds: ['emp-1'] }, 'emp-1')).toBe(true)
+  })
+
+  it('is false when they are not', () => {
+    expect(isClientVisibleToUser({ assignedBookkeeperIds: ['emp-2'] }, 'emp-1')).toBe(false)
+  })
+
+  it('is false for a missing client or missing user', () => {
+    expect(isClientVisibleToUser(null, 'emp-1')).toBe(false)
+    expect(isClientVisibleToUser({ assignedBookkeeperIds: ['emp-1'] }, '')).toBe(false)
   })
 })

@@ -130,8 +130,17 @@ snapshot first, single transaction, re-verify after.
 - No `employees` table — team members live in **`users`**.
 - Template stages/items are separate tables (`checklist_template_stages`,
   `checklist_template_items`), not a column on `checklist_templates`.
-- `clients` has only `assigned_bookkeeper_ids`. `assignedEmployeeIds` is a
-  frontend/legacy field with **no DB column** — visibility uses bookkeeper ids.
+- `clients` has only `assigned_bookkeeper_ids` — the ONE source of truth for a
+  client's assigned team, and the only thing `visibleClientIdSet` reads.
+  `assignedEmployeeIds` is a derived alias of it with no DB column.
+  `client_assignments` is nothing **read** — but not yet nothing written:
+  `write()`'s `delete from clients` (`db/store.js:4369`) still cascades into it
+  (`client_assignments.client_id references clients(id) on delete cascade`,
+  `db/schema.sql:80`), and the orphan cleanup at `db/store.js:8430` still
+  targets it directly. Both go away in batch 2, which is when the table
+  actually becomes inert. See
+  `docs/plans/client-assignment-single-source-2026-08.md`. Owners may appear on
+  an assigned team — it grants nothing, they see everything.
 
 ---
 

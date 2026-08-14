@@ -5,8 +5,9 @@ import { employeeName } from '../lib/utils'
 
 /**
  * Per-client assigned-team chip picker. Mirrors the SharingControl visual
- * language. The owner sees this on each client to manage which non-owner
- * bookkeepers can see the client. Non-owners never render this.
+ * language. The owner sees this on each client to manage which employees —
+ * owners included — show up as working the account. It grants nothing;
+ * visibility is separate. Non-owners never render this.
  */
 export function AssignedTeamControl({
   assignedIds,
@@ -19,7 +20,9 @@ export function AssignedTeamControl({
 }) {
   const [adderOpen, setAdderOpen] = useState(false)
 
-  const eligible = employees.filter((employee) => employee.role !== 'Owner')
+  // Owners are pickable: an owner sees every client anyway, so listing one here
+  // records who works the account rather than granting anything.
+  const eligible = employees
   const onList = new Set(assignedIds)
   const addable = eligible.filter((employee) => !onList.has(employee.id))
 
@@ -36,7 +39,8 @@ export function AssignedTeamControl({
   return (
     <div className="sharing-control">
       <p className="sharing-helper">
-        Only these team members can see this client. The owner always sees everything.
+        Only these team members can see this client — plus owners, who always see
+        everything.
       </p>
       <div className="sharing-chips">
         {assignedIds.length === 0 ? (

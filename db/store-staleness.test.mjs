@@ -927,7 +927,7 @@ describe('edit a session-backed entry, then split it (file backend)', () => {
  * pre-check, the (optional) version fingerprint, and the invoice-drafts
  * snapshot â€” so returning an empty row set for everything else is faithful.
  */
-function fakePostgres({ invoices = [], groupSlices = [] } = {}) {
+function fakePostgres({ invoices = [], groupSlices = [], clientRows = [], userRows = [] } = {}) {
   const statements = []
   const record = (text, params) => {
     const trimmed = String(text).trim()
@@ -935,9 +935,20 @@ function fakePostgres({ invoices = [], groupSlices = [] } = {}) {
     if (/^select\b[\s\S]*\bfrom invoices\b/i.test(trimmed)) {
       return { rows: invoices }
     }
+    // The clients read inside read() — lets a test exercise the row mapper.
+    if (/^select\b[\s\S]*\bfrom clients\b[\s\S]*order by name asc/i.test(trimmed)) {
+      return { rows: clientRows }
+    }
     // The `for update` read a split adjustment starts with.
     if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
       return { rows: groupSlices, rowCount: groupSlices.length }
+    }
+    // The bare id-validation query `setClientAssignedTeam` issues. Anchored to
+    // the exact bare statement (no trailing `where`) so a reintroduced
+    // `where role <> 'owner'` filter falls through to the empty default below
+    // instead — the same empty-`valid` failure a live regression would cause.
+    if (/^select id from users\s*$/i.test(trimmed)) {
+      return { rows: userRows }
     }
     return { rows: [] }
   }
@@ -966,6 +977,50 @@ function postgresStore(fake) {
   pgStore.mode = 'postgres'
   return pgStore
 }
+
+/**
+ * `assignedEmployeeIds` no longer has a table behind it — it is an alias of
+ * `assignedBookkeeperIds`, emitted identically by both backends so a UI reading
+ * either name gets the same answer. This is the Postgres half; the file half
+ * is in the invariant suite.
+ */
+describe('read() derives assignedEmployeeIds from the client row (postgres branch)', () => {
+  const clientRow = {
+    id: 'c1',
+    name: 'Acme',
+    contact: 'Pat',
+    billing_mode: 'hourly',
+    hourly_rate: 0,
+    plan_id: null,
+    plan_ids: [],
+    contact_ids: [],
+    assigned_bookkeeper_ids: ['emp-1', 'emp-2'],
+    lifecycle_stage: 'active',
+  }
+
+  it('emits both names with the same value', async () => {
+    const fake = fakePostgres({ clientRows: [clientRow] })
+    const data = await postgresStore(fake).read()
+
+    expect(data.clients[0].assignedBookkeeperIds).toEqual(['emp-1', 'emp-2'])
+    expect(data.clients[0].assignedEmployeeIds).toEqual(['emp-1', 'emp-2'])
+  })
+
+  it('no longer selects from client_assignments', async () => {
+    const fake = fakePostgres({ clientRows: [clientRow] })
+    await postgresStore(fake).read()
+
+    expect(fake.matching(/client_assignments/i)).toEqual([])
+  })
+
+  it('emits an empty team as an empty array on both names', async () => {
+    const fake = fakePostgres({ clientRows: [{ ...clientRow, assigned_bookkeeper_ids: null }] })
+    const data = await postgresStore(fake).read()
+
+    expect(data.clients[0].assignedBookkeeperIds).toEqual([])
+    expect(data.clients[0].assignedEmployeeIds).toEqual([])
+  })
+})
 
 const existingInvoice = {
   id: 'inv-1',
@@ -1074,6 +1129,38 @@ describe('bulk save preserves invoices (postgres branch)', () => {
     expect(restore.text).toMatch(/stripe_card_session_id/)
     expect(restore.params).toContain('cs_ach_1')
     expect(restore.params).toContain('cs_card_1')
+  })
+})
+
+/**
+ * `client_assignments` was the second, non-authoritative copy of a client's
+ * assigned team. `write()` used to delete every row and rebuild it from
+ * `assignedEmployeeIds`, which no UI had updated since the Assigned-team
+ * control writes `assignedBookkeeperIds` — so each bulk save re-asserted a
+ * stale team. Nothing reads the table now; nothing may write it.
+ */
+describe('bulk save leaves client_assignments alone (postgres branch)', () => {
+  it('issues no client_assignments statement at all', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', assignedBookkeeperIds: ['emp-1'] }],
+      }),
+    )
+
+    expect(fake.matching(/client_assignments/i)).toEqual([])
+  })
+
+  it('still persists the assigned team to the clients row', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', assignedBookkeeperIds: ['emp-1'] }],
+      }),
+    )
+
+    const insert = fake.matching(/^insert into clients/i)[0]
+    expect(insert.params).toContainEqual(['emp-1'])
   })
 })
 
@@ -1349,10 +1436,13 @@ describe('createClient keeps every field the Add-client form sends (file backend
     expect(stored.cardPaymentsEnabled).toBe(true)
   })
 
-  it('keeps the team selection, which is what drives client visibility', async () => {
+  it('keeps the team selection in the field that drives client visibility', async () => {
     const created = await store.createClient(formValues)
     const data = await store.read()
     const stored = data.clients.find((c) => c.id === created.id)
+    // Both names, one value. `assignedBookkeeperIds` is what
+    // `visibleClientIdSet` reads; `assignedEmployeeIds` is its alias.
+    expect(stored.assignedBookkeeperIds).toEqual(['emp-1'])
     expect(stored.assignedEmployeeIds).toEqual(['emp-1'])
   })
 
@@ -1440,12 +1530,34 @@ describe('createClient writes every form field to Postgres', () => {
     })
   })
 
-  it('derives client_assignments from the team the form picked', async () => {
+  it('does not touch client_assignments — the team lives on the client row', async () => {
     const fake = fakePostgres()
-    const created = await postgresStore(fake).createClient(formValues)
+    await postgresStore(fake).createClient(formValues)
 
-    const assignments = fake.matching(/^insert into client_assignments/i)
-    expect(assignments.map((statement) => statement.params)).toEqual([[created.id, 'emp-1']])
+    expect(fake.matching(/client_assignments/i)).toEqual([])
+  })
+
+  it('puts the team the form picked where visibility actually reads it', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createClient(formValues)
+
+    // `assignedEmployeeIds` is what the Add-client form sends. It used to land
+    // ONLY in client_assignments while this column went in empty, so the team
+    // just picked could not see the client (2026-08-13).
+    const bound = boundColumns(fake.matching(/^insert into clients/i)[0])
+    expect(bound.assigned_bookkeeper_ids).toEqual(['emp-1'])
+  })
+
+  it('unions both inbound names without duplicating', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createClient({
+      ...formValues,
+      assignedEmployeeIds: ['emp-1', 'emp-2'],
+      assignedBookkeeperIds: ['emp-2', 'emp-3'],
+    })
+
+    const bound = boundColumns(fake.matching(/^insert into clients/i)[0])
+    expect([...bound.assigned_bookkeeper_ids].sort()).toEqual(['emp-1', 'emp-2', 'emp-3'])
   })
 
   it('leaves an unfilled optional column null rather than 0', async () => {
@@ -1534,6 +1646,78 @@ describe('setChecklistTemplateActive (file backend)', () => {
     const before = await readFile(localDataPath, 'utf8')
     expect(await store.setChecklistTemplateActive('tmpl-nope', true)).toBeNull()
     expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+})
+
+/**
+ * An owner can appear on a client's assigned team. It grants nothing — owners
+ * see every client regardless — but the Clients-page team column shows who
+ * works the account, and dropping owners from it silently misreported the team.
+ * Implicit grants (grantClientVisibility, the checklist backfill) still skip
+ * owners: being handed one task should not add you to a client's team list.
+ */
+describe('setClientAssignedTeam (file backend)', () => {
+  beforeEach(async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', assignedBookkeeperIds: [] }],
+        employees: [
+          { id: 'emp-1', name: 'Lisa', role: 'bookkeeper' },
+          { id: 'owner-1', name: 'Brittany', role: 'Owner' },
+        ],
+      }),
+    )
+  })
+
+  it('keeps an owner the user explicitly picked', async () => {
+    const updated = await store.setClientAssignedTeam('c1', ['emp-1', 'owner-1'])
+    expect(updated.assignedBookkeeperIds).toEqual(['emp-1', 'owner-1'])
+  })
+
+  it('still drops an id that is nobody', async () => {
+    const updated = await store.setClientAssignedTeam('c1', ['emp-1', 'ghost-9'])
+    expect(updated.assignedBookkeeperIds).toEqual(['emp-1'])
+  })
+
+  it('keeps the alias in step with what it stored', async () => {
+    await store.setClientAssignedTeam('c1', ['emp-1', 'owner-1'])
+    const data = await store.read()
+    const client = data.clients.find((c) => c.id === 'c1')
+    expect(client.assignedEmployeeIds).toEqual(client.assignedBookkeeperIds)
+  })
+})
+
+/**
+ * `setClientAssignedTeam` — the Postgres branch specifically. This is the one
+ * behavior change in the batch that lives ONLY in Postgres: the id-validation
+ * query used to be `select id from users where role <> 'owner'`; it is now the
+ * bare `select id from users`, so an explicitly picked owner survives.
+ *
+ * The file backend can't regress this — it validates against the local
+ * `employees` array, which was never role-filtered — so only a statement-level
+ * Postgres test catches a reintroduced filter. If it regressed, the id-validation
+ * query would come back empty, `safe` would become `[]`, and the update would
+ * wipe the client's team, silently revoking visibility for every assigned
+ * non-owner.
+ */
+describe('setClientAssignedTeam (postgres branch)', () => {
+  const userRows = [{ id: 'emp-1' }, { id: 'owner-1' }]
+
+  it('keeps an explicitly picked owner in the bound params', async () => {
+    const fake = fakePostgres({ userRows })
+    await postgresStore(fake).setClientAssignedTeam('c1', ['emp-1', 'owner-1'])
+
+    const updates = fake.matching(/^update clients set assigned_bookkeeper_ids/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].params).toEqual(['c1', ['emp-1', 'owner-1']])
+  })
+
+  it('still drops an id that belongs to nobody', async () => {
+    const fake = fakePostgres({ userRows })
+    await postgresStore(fake).setClientAssignedTeam('c1', ['emp-1', 'ghost-9'])
+
+    const updates = fake.matching(/^update clients set assigned_bookkeeper_ids/i)
+    expect(updates[0].params).toEqual(['c1', ['emp-1']])
   })
 })
 
@@ -2964,5 +3148,124 @@ describe('the waiting-on hand-off round-trips (file backend)', () => {
     await store.resolveWaitingOn('cl-1', added.entry.id)
 
     expect(await readWaitingOns(store, { itemId: 'it-1' })).toHaveLength(0)
+  })
+})
+
+/**
+ * THE invariant. Client assignment was stored twice — `assigned_bookkeeper_ids`
+ * and the `client_assignments` table — and only the first gated visibility, so
+ * the two could disagree without anything failing. They are one value now, and
+ * every mutation path has to keep them one value.
+ *
+ * On the file backend below, this alone does NOT catch a reintroduced second
+ * source: `read()` maps every client through `normalizeClientProfile`, which
+ * assigns one computed value to both `assignedBookkeeperIds` and
+ * `assignedEmployeeIds` unconditionally, so the two names are trivially equal
+ * here no matter what a regression wrote. The real regression power is each
+ * test's companion assertion on the actual value (e.g.
+ * `assignedBookkeeperIds` equals what was set) — never add a test that calls
+ * this helper without one.
+ */
+const expectOneTeamSource = (client) => {
+  expect(client).toBeTruthy()
+  expect(client.assignedEmployeeIds).toEqual(client.assignedBookkeeperIds)
+}
+
+describe('one source of truth for a client team (file backend)', () => {
+  const teamWorkspace = () =>
+    workspace({
+      clients: [{ id: 'c1', name: 'Acme', assignedBookkeeperIds: ['emp-1'] }],
+      employees: [
+        { id: 'emp-1', name: 'Lisa', role: 'bookkeeper' },
+        { id: 'emp-2', name: 'Dana', role: 'bookkeeper' },
+      ],
+    })
+
+  const clientFromDisk = async (id = 'c1') => {
+    const data = await store.read()
+    return data.clients.find((c) => c.id === id)
+  }
+
+  beforeEach(async () => {
+    await store.write(teamWorkspace())
+  })
+
+  it('holds after a bulk-save round trip', async () => {
+    expectOneTeamSource(await clientFromDisk())
+    expect((await clientFromDisk()).assignedBookkeeperIds).toEqual(['emp-1'])
+  })
+
+  it('holds after createClient', async () => {
+    const created = await store.createClient({
+      name: 'Northwind',
+      contact: 'Dana',
+      assignedEmployeeIds: ['emp-2'],
+    })
+    expectOneTeamSource(await clientFromDisk(created.id))
+    expect((await clientFromDisk(created.id)).assignedBookkeeperIds).toEqual(['emp-2'])
+  })
+
+  it('holds after setClientAssignedTeam', async () => {
+    await store.setClientAssignedTeam('c1', ['emp-2'])
+    expectOneTeamSource(await clientFromDisk())
+    expect((await clientFromDisk()).assignedBookkeeperIds).toEqual(['emp-2'])
+  })
+
+  it('holds after grantClientVisibility', async () => {
+    await store.grantClientVisibility('c1', 'emp-2')
+    const client = await clientFromDisk()
+    expectOneTeamSource(client)
+    expect(client.assignedBookkeeperIds).toContain('emp-2')
+  })
+
+  it('holds after a bulk save carrying a STALE alias', async () => {
+    // The shape that used to cause the divergence: a payload whose alias
+    // disagrees with the canonical field. The canonical field must win.
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            assignedBookkeeperIds: ['emp-2'],
+            assignedEmployeeIds: ['emp-1'],
+          },
+        ],
+      }),
+    )
+    const client = await clientFromDisk()
+    expectOneTeamSource(client)
+    expect(client.assignedBookkeeperIds).toEqual(['emp-2'])
+  })
+
+  it('holds after deactivateUser removes someone from the team', async () => {
+    await store.setClientAssignedTeam('c1', ['emp-1', 'emp-2'])
+
+    // The plan docs refer to this cleanup informally as "deactivateUser"; the
+    // actual store method is `deleteTeamMember(userId, ownerId)` (db/store.js)
+    // — same behavior (soft-deactivates, strips the user from every client's
+    // assigned team), different name. It needs a real, ACTIVE user in the auth
+    // file to act on, and emp-2 is not one of the seeded auth users, so add it
+    // here. This suite's top-level beforeAll/afterAll already snapshot and
+    // restore tmp/auth-state.json around the whole file, so no extra cleanup
+    // is needed beyond what's already in place.
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    if (!authState.users.some((user) => user.id === 'emp-2')) {
+      authState.users.push({
+        id: 'emp-2',
+        name: 'Dana',
+        email: 'dana@pbj.local',
+        staffRole: 'Bookkeeper',
+        role: 'bookkeeper',
+      })
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+
+    const result = await store.deleteTeamMember('emp-2', 'owner-1')
+    expect(result).toEqual({ ok: true })
+
+    const client = await clientFromDisk()
+    expectOneTeamSource(client)
+    expect(client.assignedBookkeeperIds).not.toContain('emp-2')
   })
 })

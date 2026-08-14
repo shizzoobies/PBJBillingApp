@@ -435,6 +435,12 @@ export function normalizeClientProfile(client) {
       : typeof client.customMonthlyFee === 'number' && !Number.isNaN(client.customMonthlyFee)
         ? client.customMonthlyFee
         : undefined
+  // One assigned team — see lib/data-scope.js. `assignedEmployeeIds` is an
+  // alias; whatever a caller passed under that name is discarded here so the
+  // old field cannot become a second source of truth again.
+  const assignedTeam = Array.isArray(client.assignedBookkeeperIds)
+    ? [...new Set(client.assignedBookkeeperIds.filter((id) => typeof id === 'string'))]
+    : []
   return {
     ...client,
     planIds,
@@ -446,9 +452,8 @@ export function normalizeClientProfile(client) {
       accountant: client.estimatedAccountantHours,
       cfo: client.estimatedCfoHours,
     }),
-    assignedBookkeeperIds: Array.isArray(client.assignedBookkeeperIds)
-      ? [...new Set(client.assignedBookkeeperIds.filter((id) => typeof id === 'string'))]
-      : [],
+    assignedBookkeeperIds: assignedTeam,
+    assignedEmployeeIds: assignedTeam,
     email: client.email ?? '',
     contactName: client.contactName ?? '',
     phone: client.phone ?? '',
@@ -3557,7 +3562,6 @@ export class AppDataStore {
         plansResult,
         contactsResult,
         clientsResult,
-        assignmentsResult,
         timeEntriesResult,
         checklistsResult,
         checklistItemsResult,
@@ -3607,11 +3611,6 @@ export class AppDataStore {
                    annual_rate, annual_billing_month, lifecycle_stage
             from clients
             order by name asc
-          `),
-          this.pool.query(`
-            select client_id, user_id
-            from client_assignments
-            order by client_id asc, user_id asc
           `),
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
@@ -3681,13 +3680,6 @@ export class AppDataStore {
             order by inactive_at desc, name asc
           `),
         ])
-
-      const assignmentsByClient = new Map()
-      for (const row of assignmentsResult.rows) {
-        const existing = assignmentsByClient.get(row.client_id) ?? []
-        existing.push(row.user_id)
-        assignmentsByClient.set(row.client_id, existing)
-      }
 
       const itemsByChecklist = new Map()
       for (const row of checklistItemsResult.rows) {
@@ -3867,6 +3859,13 @@ export class AppDataStore {
           const contactIds = Array.isArray(row.contact_ids)
             ? row.contact_ids.filter((id) => typeof id === 'string' && id)
             : []
+          // One assigned team, normalized once. `assignedEmployeeIds` below is
+          // an alias of this — it used to come from the `client_assignments`
+          // table, which could and did disagree with the column that actually
+          // gates visibility.
+          const assignedTeam = Array.isArray(row.assigned_bookkeeper_ids)
+            ? [...new Set(row.assigned_bookkeeper_ids.filter((id) => typeof id === 'string'))]
+            : []
           const monthlyRate =
             row.monthly_rate === null || row.monthly_rate === undefined
               ? row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
@@ -3903,10 +3902,8 @@ export class AppDataStore {
               row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
                 ? null
                 : Number(row.custom_monthly_fee),
-            assignedEmployeeIds: assignmentsByClient.get(row.id) ?? [],
-          assignedBookkeeperIds: Array.isArray(row.assigned_bookkeeper_ids)
-            ? [...new Set(row.assigned_bookkeeper_ids.filter((id) => typeof id === 'string'))]
-            : [],
+            assignedEmployeeIds: assignedTeam,
+            assignedBookkeeperIds: assignedTeam,
           email: row.email ?? '',
           contactName: row.contact_name ?? '',
           phone: row.phone ?? '',
@@ -4287,10 +4284,10 @@ export class AppDataStore {
         (e) => ({ clientId: e?.clientId }),
       )
 
-      // No filtering on client.assignedEmployeeIds either — same reason
-      // (users table is preserved across saves, so user_id refs remain
-      // valid). If we ever see an FK error on client_assignments.user_id,
-      // it'll surface via the diagnostic in server.js.
+      // Nothing to filter on a client's assigned team: it lives in the
+      // `assigned_bookkeeper_ids` text[] column, which carries no FK. The
+      // `client_assignments` table this used to rebuild is inert (see
+      // docs/plans/client-assignment-single-source-2026-08.md).
       const safeClients = Array.isArray(data.clients) ? data.clients : []
 
       // Valid plan ids for this payload. Used to strip dangling plan
@@ -4368,7 +4365,6 @@ export class AppDataStore {
         await client.query('delete from weekly_submissions')
         await client.query('delete from reimbursements')
         await client.query('delete from recurring_reimbursements')
-        await client.query('delete from client_assignments')
         await client.query('delete from invoices')
         await client.query('delete from clients')
         await client.query('delete from subscription_plans')
@@ -4571,18 +4567,6 @@ export class AppDataStore {
               clientRecord.cardPaymentsEnabled ?? false,
             ],
           )
-
-          for (const employeeId of (clientRecord.assignedEmployeeIds ?? []).filter((id) =>
-            validUserIds.has(id),
-          )) {
-            await client.query(
-              `
-                insert into client_assignments (client_id, user_id)
-                values ($1, $2)
-              `,
-              [clientRecord.id, employeeId],
-            )
-          }
         }
 
         // Put back the invoices snapshotted before the wipe, now that their
@@ -6612,14 +6596,16 @@ export class AppDataStore {
   }
 
   /**
-   * Owner-only: replace the assigned-team list for a client. Filters owners
-   * and unknown ids. Returns the updated client or null.
+   * Owner-only: replace the assigned-team list for a client. Filters unknown
+   * ids, but not owners — an owner on the list is a display fact, not a
+   * grant. Returns the updated client or null.
    */
   async setClientAssignedTeam(clientId, bookkeeperIds) {
     if (this.pool) {
-      const usersResult = await this.pool.query(
-        `select id from users where role <> 'owner'`,
-      )
+      // Every real user is pickable, owners included. An owner on the list is
+      // a display fact: they see every client either way, and hiding them made
+      // the Clients-page team column misreport who works the account.
+      const usersResult = await this.pool.query(`select id from users`)
       const valid = new Set(usersResult.rows.map((r) => r.id))
       const safe = [...new Set((bookkeeperIds ?? []).filter((id) => valid.has(id)))]
       const result = await this.pool.query(
@@ -6635,9 +6621,7 @@ export class AppDataStore {
 
     const data = await readJson(localDataPath)
     const employees = Array.isArray(data.employees) ? data.employees : []
-    const valid = new Set(
-      employees.filter((e) => e.role !== 'Owner').map((e) => e.id),
-    )
+    const valid = new Set(employees.map((e) => e.id))
     const safe = [...new Set((bookkeeperIds ?? []).filter((id) => valid.has(id)))]
     let updated = null
     data.clients = (data.clients ?? []).map((client) => {
@@ -6662,8 +6646,7 @@ export class AppDataStore {
    * see it. That is the "I added a client and it never appeared" report, and it
    * is exactly what cardinal rule 4 says to avoid.
    *
-   * Mirrors the shape `write()` uses for clients so the two agree, and rebuilds
-   * `client_assignments` the same way.
+   * Mirrors the shape `write()` uses for clients so the two agree.
    *
    * EVERY column the bulk save writes is written here too. The first version of
    * this endpoint persisted twelve of them, so a client created through the Add
@@ -7237,6 +7220,17 @@ export class AppDataStore {
     const stringIds = (value) =>
       Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry) : []
 
+    // ONE assigned team. The Add-client form sends `assignedEmployeeIds`; the
+    // rest of the app writes `assignedBookkeeperIds`. Only the latter gates
+    // visibility, so a payload carrying just the former used to create a client
+    // its own team could not see. Accept either name, fold into one value.
+    const assignedTeam = [
+      ...new Set([
+        ...stringIds(client.assignedBookkeeperIds),
+        ...stringIds(client.assignedEmployeeIds),
+      ]),
+    ]
+
     // Normalize through the same profile mapper the reads use, so the record
     // handed back to the creating tab has the exact shape a reload produces.
     const record = normalizeClientProfile({
@@ -7248,11 +7242,10 @@ export class AppDataStore {
       hourlyRate: clampMoney(client.hourlyRate ?? 0),
       planIds: stringIds(client.planIds),
       contactIds: stringIds(client.contactIds),
-      // The team chosen on the Add-client form. `write()` rebuilds
-      // `client_assignments` from THIS field — reading `assignedBookkeeperIds`
-      // here instead dropped the entire team selection on every new client.
-      assignedEmployeeIds: stringIds(client.assignedEmployeeIds),
-      assignedBookkeeperIds: stringIds(client.assignedBookkeeperIds),
+      // One team, two names — `assignedEmployeeIds` is a derived alias kept
+      // for the UI until batch 2 removes it.
+      assignedEmployeeIds: assignedTeam,
+      assignedBookkeeperIds: assignedTeam,
       // Never let a bad value land in the stage column — absent/garbage is
       // 'active', matching write() and the read mappers.
       lifecycleStage: coerceLifecycleStage(client.lifecycleStage),
@@ -7361,18 +7354,6 @@ export class AppDataStore {
             record.cardPaymentsEnabled ?? false,
           ],
         )
-        // Same derivation the bulk save uses, so visibility works immediately
-        // rather than only after the next full save. The `where exists` guard
-        // mirrors write()'s user-id filter: an id with no matching user would
-        // violate the FK and abort the whole create.
-        for (const userId of record.assignedEmployeeIds) {
-          await dbClient.query(
-            `insert into client_assignments (client_id, user_id)
-             select $1, $2 where exists (select 1 from users where id = $2)
-             on conflict do nothing`,
-            [record.id, userId],
-          )
-        }
         await dbClient.query('commit')
       } catch (error) {
         await dbClient.query('rollback')
@@ -7753,8 +7734,7 @@ export class AppDataStore {
     )
     if (existing) return null
 
-    const assigneeId = (client.assignedBookkeeperIds ?? [])[0] ||
-      (client.assignedEmployeeIds ?? [])[0] || ''
+    const assigneeId = (client.assignedBookkeeperIds ?? [])[0] || ''
     const today = formatDateOnly(new Date())
     const makeStage = (name, items) => ({
       id: `stage-${randomUUID().slice(0, 8)}`,

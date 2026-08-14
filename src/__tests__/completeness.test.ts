@@ -23,7 +23,7 @@ const makeClient = (overrides: Partial<Client>): Client => ({
   contactIds: ['contact-1'],
   monthlyRate: 1000,
   email: 'pay@acme.test',
-  assignedEmployeeIds: ['emp-1'],
+  assignedBookkeeperIds: ['emp-1'],
   ...overrides,
 })
 
@@ -60,7 +60,7 @@ describe('computeSetupIssues', () => {
   it('attaches quick-fix descriptors to the field-based issues', () => {
     const input: CompletenessInput = {
       ...emptyInput,
-      clients: [makeClient({ monthlyRate: 0, email: '', assignedEmployeeIds: [] })],
+      clients: [makeClient({ monthlyRate: 0, email: '', assignedBookkeeperIds: [] })],
     }
     const byId = new Map(computeSetupIssues(input).map((i) => [i.id, i]))
     expect(byId.get('billing:monthly:client-1')?.fix).toEqual({
@@ -100,7 +100,7 @@ describe('computeSetupIssues', () => {
   it('flags missing email, team, and contacts on a client', () => {
     const input: CompletenessInput = {
       ...emptyInput,
-      clients: [makeClient({ email: '', assignedEmployeeIds: [], contactIds: [] })],
+      clients: [makeClient({ email: '', assignedBookkeeperIds: [], contactIds: [] })],
     }
     const ids = computeSetupIssues(input).map((i) => i.id)
     expect(ids).toContain('client:email:client-1')
