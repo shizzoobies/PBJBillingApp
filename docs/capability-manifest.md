@@ -669,7 +669,10 @@ Clients page meanwhile. Owner-only.
   monthly hours per role (informational only — never affects invoices), assigned
   bookkeeper(s), other contacts, plans/services. NOTE: there is no per-client hourly rate
   anymore — Hourly clients are billed off each team member's own bill rate (set
-  on the Team page). Right after saving, a prompt asks "Open their checklist
+  on the Team page). **The team picked on this form can see the new client
+  immediately** — assignment saved here is the same one visibility reads, so
+  there's no separate step of an owner re-picking the team on the client's own
+  page afterward. Right after saving, a prompt asks "Open their checklist
   now?" — choosing yes jumps straight into the new client's checklist + notes
   modal. (Contacts and Plans have the same "+" add-in-a-modal flow.) The header
   (title + "+" + search) stays pinned to the top as you scroll the list, so the
@@ -804,7 +807,10 @@ Clients page meanwhile. Owner-only.
     recurring checklist" buttons are hidden while they are inactive. Inactive
     clients are not counted as a To-100% setup problem — retiring a client is
     an intended state, not an unfinished step.
-- Assigned team controls which staff can see/log time for the client.
+- Assigned team controls which staff can see/log time for the client. An owner
+  can be listed on a client's assigned team too — it records who works the
+  account, but grants the owner nothing extra: owners already see and can act
+  on every client regardless of assignment.
 
 ## Client Recap (owner only)
 

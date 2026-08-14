@@ -130,8 +130,12 @@ snapshot first, single transaction, re-verify after.
 - No `employees` table — team members live in **`users`**.
 - Template stages/items are separate tables (`checklist_template_stages`,
   `checklist_template_items`), not a column on `checklist_templates`.
-- `clients` has only `assigned_bookkeeper_ids`. `assignedEmployeeIds` is a
-  frontend/legacy field with **no DB column** — visibility uses bookkeeper ids.
+- `clients` has only `assigned_bookkeeper_ids` — the ONE source of truth for a
+  client's assigned team, and the only thing `visibleClientIdSet` reads.
+  `assignedEmployeeIds` is a derived alias of it with no DB column;
+  `client_assignments` is inert (nothing reads or writes it) and is dropped in
+  batch 2. See `docs/plans/client-assignment-single-source-2026-08.md`. Owners
+  may appear on an assigned team — it grants nothing, they see everything.
 
 ---
 

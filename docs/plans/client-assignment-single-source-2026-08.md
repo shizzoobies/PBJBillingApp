@@ -62,7 +62,7 @@ existing `fakePostgres()` harness in `db/store-staleness.test.mjs`.
 
 ### Secondary asymmetry (flagged, not fixed here)
 
-`deactivateUser` on Postgres strips the user from `assigned_bookkeeper_ids`
+`deleteTeamMember` on Postgres strips the user from `assigned_bookkeeper_ids`
 (`db/store.js:9802`) but never from `client_assignments`; the file backend strips
 both (`db/store.js:9893`). So the table currently holds deactivated users. It
 stops mattering once the table is inert, and it is a reason to keep those rows
@@ -159,7 +159,7 @@ Invariant, both backends:
 - A shared `expectOneTeamSource(client)` asserting `assignedEmployeeIds`
   deep-equals `assignedBookkeeperIds`, applied after every mutation path:
   `createClient`, `setClientAssignedTeam`, `grantClientVisibility`, a bulk-save
-  round-trip, and `deactivateUser`.
+  round-trip, and `deleteTeamMember`.
 
 Rewrites (not deletions) of the two tests encoding the wrong belief:
 `db/store-staleness.test.mjs:1352` and `:1443`.
@@ -197,7 +197,7 @@ Only once batch 1 has been live long enough to prove nothing reads the table:
 4. Remove the orphan-cleanup delete (`db/store.js:8449`).
 5. Remove the `assignedEmployeeIds` alias and its remaining type
    (`src/lib/types.ts:147`); rename the accessor's last callers.
-6. Resolve the `deactivateUser` asymmetry, which the drop makes moot.
+6. Resolve the `deleteTeamMember` asymmetry, which the drop makes moot.
 
 ---
 

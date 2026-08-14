@@ -747,7 +747,7 @@ Expected: PASS, and `tsc -b && vite build` clean.
 - [ ] **Step 8: Confirm no reader is left behind**
 
 Run: `git grep -n "assignedEmployeeIds" -- src/ db/ lib/ server.js`
-Expected: hits ONLY in `src/lib/types.ts:147` (the type, removed in batch 2), `db/store.js` where the alias is *produced* (`normalizeClientProfile`, the row mapper, the `createClient` fold), `db/store.js:9896` (`deactivateUser`'s file branch), and tests. No UI file reads it.
+Expected: hits ONLY in `src/lib/types.ts:147` (the type, removed in batch 2), `db/store.js` where the alias is *produced* (`normalizeClientProfile`, the row mapper, the `createClient` fold), `db/store.js:9896` (`deleteTeamMember`'s file branch), and tests. No UI file reads it.
 
 - [ ] **Step 9: Commit**
 
@@ -1003,19 +1003,19 @@ describe('one source of truth for a client team (file backend)', () => {
 Run: `npx vitest run db/store-staleness.test.mjs -t "one source of truth"`
 Expected: PASS. If the stale-alias case fails, `normalizeClientProfile` is not being applied on the bulk-save path — fix that rather than weakening the test, since that payload shape is exactly the production failure.
 
-- [ ] **Step 3: Add the deactivateUser case**
+- [ ] **Step 3: Add the deleteTeamMember case**
 
 ```js
-  it('holds after deactivateUser removes someone from the team', async () => {
+  it('holds after deleteTeamMember removes someone from the team', async () => {
     await store.setClientAssignedTeam('c1', ['emp-1', 'emp-2'])
-    await store.deactivateUser('emp-2')
+    await store.deleteTeamMember('emp-2')
     const client = await clientFromDisk()
     expectOneTeamSource(client)
     expect(client.assignedBookkeeperIds).not.toContain('emp-2')
   })
 ```
 
-`deactivateUser` needs a real auth-file user to act on; follow the setup the existing `deactivateUser` tests in this file use (they already handle `tmp/auth.json`). If no such suite exists, seed the auth file the way `beforeAll` does and note it in the commit body.
+`deleteTeamMember` needs a real auth-file user to act on; follow the setup the existing `deleteTeamMember` tests in this file use (they already handle `tmp/auth.json`). If no such suite exists, seed the auth file the way `beforeAll` does and note it in the commit body.
 
 - [ ] **Step 4: Run and commit**
 
