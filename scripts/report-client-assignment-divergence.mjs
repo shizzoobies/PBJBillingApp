@@ -81,6 +81,10 @@ main()
     console.error(`Report failed: ${error.message}`)
     process.exitCode = 1
   })
-  .finally(() => {
-    pool.end()
+  .finally(async () => {
+    try {
+      await pool.end()
+    } catch (error) {
+      console.error(`Failed to close database connection: ${error.message}`)
+    }
   })
