@@ -4,7 +4,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { AppDataStore, INVOICE_SELECT_COLUMNS, mapInvoiceRow } from './store.js'
+import {
+  AppDataStore,
+  CHECKLIST_ITEM_SELECT_COLUMNS,
+  CREATED_AT_PRESERVED_TABLES,
+  INVOICE_SELECT_COLUMNS,
+  mapChecklistItemRow,
+  mapInvoiceRow,
+} from './store.js'
 import {
   BULK_SAVE_TABLES,
   StaleWorkspaceError,
@@ -927,13 +934,30 @@ describe('edit a session-backed entry, then split it (file backend)', () => {
  * pre-check, the (optional) version fingerprint, and the invoice-drafts
  * snapshot â€” so returning an empty row set for everything else is faithful.
  */
-function fakePostgres({ invoices = [], groupSlices = [], clientRows = [], userRows = [] } = {}) {
+function fakePostgres({
+  invoices = [],
+  groupSlices = [],
+  clientRows = [],
+  userRows = [],
+  createdAtRows = {},
+  priorItemRows = [],
+} = {}) {
   const statements = []
   const record = (text, params) => {
     const trimmed = String(text).trim()
     statements.push({ text: trimmed, params })
     if (/^select\b[\s\S]*\bfrom invoices\b/i.test(trimmed)) {
       return { rows: invoices }
+    }
+    // The bulk save's created_at snapshots — one bare select per table in
+    // CREATED_AT_PRESERVED_TABLES, taken before the wipe.
+    const createdAtSnapshot = /^select id, created_at from (\w+)$/i.exec(trimmed)
+    if (createdAtSnapshot) {
+      return { rows: createdAtRows[createdAtSnapshot[1]] ?? [] }
+    }
+    // The sibling snapshot of what was already complete.
+    if (/^select id, done, completed_at from checklist_items$/i.test(trimmed)) {
+      return { rows: priorItemRows }
     }
     // The clients read inside read() — lets a test exercise the row mapper.
     if (/^select\b[\s\S]*\bfrom clients\b[\s\S]*order by name asc/i.test(trimmed)) {
@@ -3518,5 +3542,493 @@ describe('markWaitingOnSentBack statement shape (postgres branch)', () => {
     const subItems = JSON.parse(updates[0].params[2])
     expect(subItems[0].waitingOns[0].sendBacks).toHaveLength(1)
     expect(subItems[0].waitingOns[0].resolvedAt).toBeUndefined()
+  })
+})
+
+/**
+ * `created_at` through the bulk save.
+ *
+ * Every re-insert in the Postgres branch used to OMIT `created_at`, so the
+ * column's `default now()` fired again on each wipe-and-rewrite. In production
+ * that meant all 753 checklists claimed to have been created on the day of the
+ * most recent owner autosave — the creation dates were being destroyed on a
+ * schedule, silently, and the historical ones are gone for good.
+ *
+ * The fix is the technique the invoice restore already used: snapshot inside the
+ * transaction BEFORE the deletes, then supply the value. Deliberately NOT taken
+ * from the payload — `read()` does not even send most of these, and a stale tab
+ * that did carry one could rewrite history.
+ *
+ * These are STATEMENT-SHAPE tests. The file backend cannot see this bug at all
+ * (it re-writes whole records and has no column defaults), so a shape assertion
+ * on what the transaction issues is the only guard CI can offer.
+ */
+describe('bulk save preserves created_at (postgres branch)', () => {
+  const ORIGINAL = new Date('2026-01-15T10:00:00.000Z')
+
+  /** One row per created_at-carrying table, all claiming the same old date. */
+  const snapshotRows = {
+    subscription_plans: [{ id: 'plan-1', created_at: ORIGINAL }],
+    contacts: [{ id: 'contact-1', created_at: ORIGINAL }],
+    clients: [{ id: 'c1', created_at: ORIGINAL }],
+    reimbursements: [{ id: 'reim-1', created_at: ORIGINAL }],
+    recurring_reimbursements: [{ id: 'rec-1', created_at: ORIGINAL }],
+    checklist_templates: [{ id: 'tpl-1', created_at: ORIGINAL }],
+    checklist_template_items: [{ id: 'tpl-item-1', created_at: ORIGINAL }],
+    checklists: [{ id: 'cl-1', created_at: ORIGINAL }],
+    checklist_items: [{ id: 'item-1', created_at: ORIGINAL }],
+  }
+
+  /** A payload carrying exactly one row for each of those tables. */
+  const historyWorkspace = () =>
+    workspace({
+      clients: [{ id: 'c1', name: 'Acme' }],
+      plans: [{ id: 'plan-1', name: 'Basic', templateIds: [] }],
+      contacts: [{ id: 'contact-1', name: 'Pat' }],
+      reimbursements: [
+        { id: 'reim-1', clientId: 'c1', date: '2026-02-01', description: 'Stamps', amount: 10 },
+      ],
+      recurringReimbursements: [
+        {
+          id: 'rec-1',
+          clientId: 'c1',
+          description: 'Software',
+          amount: 20,
+          frequency: 'monthly',
+          startDate: '2026-01-01',
+        },
+      ],
+      checklistTemplates: [
+        {
+          id: 'tpl-1',
+          title: 'Monthly close',
+          clientId: 'c1',
+          assigneeId: 'emp-1',
+          frequency: 'monthly',
+          nextDueDate: '2026-02-28',
+          active: true,
+          stages: [
+            {
+              id: 'stage-1',
+              name: 'Stage 1',
+              assigneeId: 'emp-1',
+              offsetDays: 0,
+              items: [{ id: 'tpl-item-1', label: 'Reconcile' }],
+            },
+          ],
+        },
+      ],
+      checklists: [
+        {
+          id: 'cl-1',
+          title: 'January close',
+          clientId: 'c1',
+          assigneeId: 'emp-1',
+          dueDate: '2026-01-31',
+          items: [{ id: 'item-1', label: 'Reconcile', done: false }],
+        },
+      ],
+    })
+
+  it('snapshots every affected table BEFORE the first delete', async () => {
+    const fake = fakePostgres({ createdAtRows: snapshotRows })
+    await postgresStore(fake).write(historyWorkspace())
+
+    const firstDeleteAt = fake.indexOf(/^delete from /i)
+    expect(firstDeleteAt).toBeGreaterThan(-1)
+    for (const table of CREATED_AT_PRESERVED_TABLES) {
+      const at = fake.indexOf(new RegExp(`^select id, created_at from ${table}$`, 'i'))
+      expect(at, `${table} is never snapshotted`).toBeGreaterThan(-1)
+      expect(at, `${table} is snapshotted after the wipe`).toBeLessThan(firstDeleteAt)
+    }
+  })
+
+  it('names created_at on the re-insert for every one of them', async () => {
+    const fake = fakePostgres({ createdAtRows: snapshotRows })
+    await postgresStore(fake).write(historyWorkspace())
+
+    for (const table of CREATED_AT_PRESERVED_TABLES) {
+      const inserts = fake.matching(new RegExp(`^insert into ${table}\\b`, 'i'))
+      expect(inserts.length, `${table} never re-inserted by this payload`).toBeGreaterThan(0)
+      // The column has to be NAMED — omitting it is exactly the bug, and the
+      // `default now()` behind it makes the omission invisible at runtime.
+      expect(inserts[0].text, `${table} insert omits created_at`).toMatch(/\bcreated_at\b/)
+    }
+  })
+
+  it('supplies the ORIGINAL timestamp, not the default', async () => {
+    const fake = fakePostgres({ createdAtRows: snapshotRows })
+    await postgresStore(fake).write(historyWorkspace())
+
+    for (const table of CREATED_AT_PRESERVED_TABLES) {
+      const insert = fake.matching(new RegExp(`^insert into ${table}\\b`, 'i'))[0]
+      expect(insert.params, `${table} lost its original created_at`).toContain(ORIGINAL)
+    }
+  })
+
+  it('falls back to a fresh timestamp for a genuinely new row', async () => {
+    // No snapshot at all: every row in this payload is new.
+    const fake = fakePostgres()
+    const before = Date.now()
+    await postgresStore(fake).write(historyWorkspace())
+
+    const insert = fake.matching(/^insert into checklists\b/i)[0]
+    const supplied = insert.params.find((param) => param instanceof Date)
+    expect(supplied).toBeInstanceOf(Date)
+    expect(supplied.getTime()).toBeGreaterThanOrEqual(before)
+  })
+
+  it('ignores a createdAt the payload carries — a stale tab cannot rewrite history', async () => {
+    const fake = fakePostgres({ createdAtRows: snapshotRows })
+    const payload = historyWorkspace()
+    payload.checklists[0].createdAt = '2019-01-01T00:00:00.000Z'
+    await postgresStore(fake).write(payload)
+
+    const insert = fake.matching(/^insert into checklists\b/i)[0]
+    expect(insert.params).toContain(ORIGINAL)
+    expect(insert.params).not.toContain('2019-01-01T00:00:00.000Z')
+  })
+})
+
+/**
+ * `checklist_items.completed_at` — the record of WHEN a step was finished.
+ *
+ * `done` is a bare boolean and always was, so nothing in the product recorded
+ * the moment anything was completed. The Completed tasks tab is an audit
+ * surface, so the rule has to hold in both directions: a completion is stamped,
+ * an un-tick clears the stamp, and no unrelated write may invent or erase one.
+ */
+describe('completed_at on checklist items (postgres branch)', () => {
+  const itemRow = (over = {}) => ({
+    id: 'item-1',
+    checklist_id: 'cl-1',
+    label: 'Reconcile',
+    done: false,
+    sub_items: [],
+    ...over,
+  })
+
+  /**
+   * A Postgres store whose per-item read returns `row`, so the read-modify-write
+   * toggle path has something to toggle. Everything else falls through to the
+   * recording fake.
+   */
+  function pgStoreWithItem(row) {
+    const fake = fakePostgres()
+    const store = postgresStore(fake)
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      if (/^select (id, done|done|sub_items).*from checklist_items/is.test(String(text).trim())) {
+        return { rows: [row], rowCount: 1 }
+      }
+      return result
+    }
+    return { fake, store }
+  }
+
+  it('stamps the completion in the same UPDATE that sets done', async () => {
+    const { fake, store } = pgStoreWithItem(itemRow())
+    await store.toggleChecklistItem('cl-1', 'item-1')
+
+    const update = fake.matching(/^update checklist_items\s+set done = \$3/i)[0]
+    expect(update).toBeDefined()
+    expect(update.text).toMatch(
+      /completed_at = case when \$3 then coalesce\(completed_at, now\(\)\)/,
+    )
+    expect(update.text).toMatch(/else null end/)
+    // $3 is the new `done` — the one expression covers both directions.
+    expect(update.params[2]).toBe(true)
+  })
+
+  it('clears it when the step is un-ticked', async () => {
+    const { fake, store } = pgStoreWithItem(itemRow({ done: true }))
+    await store.toggleChecklistItem('cl-1', 'item-1')
+
+    const update = fake.matching(/^update checklist_items\s+set done = \$3/i)[0]
+    expect(update.params[2]).toBe(false)
+    expect(update.text).toMatch(/else null end/)
+  })
+
+  it('follows the roll-up when a sub-item is added', async () => {
+    // Every sub-item write recomputes the parent `done`; the stamp has to move
+    // with it or a task can be "complete" with no completion date.
+    const { fake, store } = pgStoreWithItem(itemRow({ done: true }))
+    await store.addChecklistSubItem('cl-1', 'item-1', 'Pull statements')
+
+    const update = fake.matching(
+      /^update checklist_items\s+set sub_items = \$3::jsonb, done = \$4/i,
+    )[0]
+    expect(update).toBeDefined()
+    expect(update.text).toMatch(/completed_at = case when \$4 then/)
+  })
+
+  it('bulk save keeps the stored stamp and ignores the payload', async () => {
+    const stamped = new Date('2026-03-02T15:30:00.000Z')
+    const fake = fakePostgres({
+      priorItemRows: [{ id: 'item-1', done: true, completed_at: stamped }],
+    })
+    await postgresStore(fake).write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'January close',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            dueDate: '2026-01-31',
+            items: [
+              {
+                id: 'item-1',
+                label: 'Reconcile',
+                done: true,
+                // A stale tab's idea of when this finished. Must not win.
+                completedAt: '2019-01-01T00:00:00.000Z',
+              },
+            ],
+          },
+        ],
+      }),
+    )
+
+    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
+    expect(insert.text).toMatch(/\bcompleted_at\b/)
+    expect(insert.params).toContain(stamped)
+    expect(insert.params).not.toContain('2019-01-01T00:00:00.000Z')
+  })
+
+  it('bulk save writes null for a step that is not done', async () => {
+    const fake = fakePostgres({
+      priorItemRows: [
+        { id: 'item-1', done: true, completed_at: new Date('2026-03-02T15:30:00.000Z') },
+      ],
+    })
+    await postgresStore(fake).write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'January close',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            dueDate: '2026-01-31',
+            items: [{ id: 'item-1', label: 'Reconcile', done: false }],
+          },
+        ],
+      }),
+    )
+
+    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
+    expect(insert.params[14]).toBeNull()
+  })
+
+  it('leaves a legacy complete-but-unstamped row unstamped rather than backdating it', async () => {
+    // The row was already done before the column existed. Stamping it now would
+    // put today's date on work finished months ago, on an AUDIT screen.
+    const fake = fakePostgres({
+      priorItemRows: [{ id: 'item-1', done: true, completed_at: null }],
+    })
+    await postgresStore(fake).write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'January close',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            dueDate: '2026-01-31',
+            items: [{ id: 'item-1', label: 'Reconcile', done: true }],
+          },
+        ],
+      }),
+    )
+
+    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
+    expect(insert.params[14]).toBeNull()
+  })
+})
+
+/**
+ * Column parity between the checklist-item SELECT and its row mapper — the same
+ * guard, and for the same reason, as the invoice one above. `completed_at` is
+ * the newest column on `checklist_items`; left out of the select it would read
+ * as `undefined` on Postgres and correctly on the file backend, so every test
+ * here would pass while production showed no completion dates at all.
+ */
+describe('read() selects every column mapChecklistItemRow reads', () => {
+  it('has no column the mapper reads but the select omits', () => {
+    const readColumns = new Set()
+    mapChecklistItemRow(
+      new Proxy(
+        {},
+        {
+          get(_target, key) {
+            if (typeof key === 'string') readColumns.add(key)
+            return undefined
+          },
+        },
+      ),
+    )
+
+    const selected = new Set(
+      CHECKLIST_ITEM_SELECT_COLUMNS.split(',')
+        .map((column) => column.trim())
+        .filter(Boolean),
+    )
+
+    expect(readColumns.size).toBeGreaterThan(8)
+    expect([...readColumns].filter((column) => !selected.has(column))).toEqual([])
+    expect(selected.has('completed_at')).toBe(true)
+  })
+
+  it('emits completedAt only when the row carries one', () => {
+    const stamped = mapChecklistItemRow({
+      id: 'item-1',
+      label: 'Reconcile',
+      done: true,
+      completed_at: new Date('2026-03-02T15:30:00.000Z'),
+    })
+    expect(stamped.completedAt).toBe('2026-03-02T15:30:00.000Z')
+
+    const legacy = mapChecklistItemRow({
+      id: 'item-2',
+      label: 'Reconcile',
+      done: true,
+      completed_at: null,
+    })
+    expect(legacy).not.toHaveProperty('completedAt')
+  })
+})
+
+/**
+ * The FILE backend's half of the same two contracts (cardinal rule 1).
+ *
+ * This backend re-writes each record WHOLE, which is often assumed to be
+ * protection in itself. It is not: whatever the payload omits is gone, and
+ * whatever it carries is believed. So the same rule is enforced here — the
+ * persisted value wins over the payload's, and only a step this save actually
+ * completes gets a fresh stamp.
+ */
+describe('bulk save preserves checklist history (file backend)', () => {
+  const checklistWith = (items, over = {}) => ({
+    id: 'cl-1',
+    title: 'January close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    dueDate: '2026-01-31',
+    items,
+    ...over,
+  })
+
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  it('keeps a checklist createdAt the payload dropped', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          checklistWith([{ id: 'item-1', label: 'Reconcile', done: false }], {
+            createdAt: '2026-01-02T09:00:00.000Z',
+          }),
+        ],
+      }),
+    )
+
+    // The next save has no createdAt at all — the shape `read()` actually sends.
+    await store.write(
+      workspace({
+        checklists: [checklistWith([{ id: 'item-1', label: 'Reconcile', done: false }])],
+      }),
+    )
+
+    expect((await persisted()).checklists[0].createdAt).toBe('2026-01-02T09:00:00.000Z')
+  })
+
+  it('stamps a completion, and keeps it across the next bulk save', async () => {
+    await store.write(
+      workspace({
+        checklists: [checklistWith([{ id: 'item-1', label: 'Reconcile', done: false }])],
+      }),
+    )
+    await store.toggleChecklistItem('cl-1', 'item-1')
+
+    const stamped = (await persisted()).checklists[0].items[0].completedAt
+    expect(stamped).toBeTruthy()
+
+    // A save whose payload carries a DIFFERENT stamp must not rewrite it.
+    await store.write(
+      workspace({
+        checklists: [
+          checklistWith([
+            {
+              id: 'item-1',
+              label: 'Reconcile',
+              done: true,
+              completedAt: '2019-01-01T00:00:00.000Z',
+            },
+          ]),
+        ],
+      }),
+    )
+
+    expect((await persisted()).checklists[0].items[0].completedAt).toBe(stamped)
+  })
+
+  it('clears the stamp when the step is un-ticked', async () => {
+    await store.write(
+      workspace({
+        checklists: [checklistWith([{ id: 'item-1', label: 'Reconcile', done: false }])],
+      }),
+    )
+    await store.toggleChecklistItem('cl-1', 'item-1')
+    expect((await persisted()).checklists[0].items[0].completedAt).toBeTruthy()
+
+    await store.toggleChecklistItem('cl-1', 'item-1')
+    const item = (await persisted()).checklists[0].items[0]
+    expect(item.done).toBe(false)
+    expect(item).not.toHaveProperty('completedAt')
+  })
+
+  it('does not backdate a step that was already done before stamps existed', async () => {
+    // The legacy state, written straight to the file: complete, never stamped.
+    // (It cannot be produced through `write()` — that path stamps a new item
+    // arriving complete, which is the right answer for a NEW item.)
+    await writeFile(
+      localDataPath,
+      JSON.stringify(
+        workspace({
+          checklists: [checklistWith([{ id: 'item-1', label: 'Reconcile', done: true }])],
+        }),
+        null,
+        2,
+      ),
+    )
+
+    // Still done, still unstamped — a bulk save is not a completion event, and
+    // today's date on work finished months ago would be a lie on an audit view.
+    await store.write(
+      workspace({
+        checklists: [checklistWith([{ id: 'item-1', label: 'Reconcile', done: true }])],
+      }),
+    )
+
+    expect((await persisted()).checklists[0].items[0]).not.toHaveProperty('completedAt')
+  })
+
+  it('stamps a step the bulk save itself completes', async () => {
+    await store.write(
+      workspace({
+        checklists: [checklistWith([{ id: 'item-1', label: 'Reconcile', done: false }])],
+      }),
+    )
+    await store.write(
+      workspace({
+        checklists: [checklistWith([{ id: 'item-1', label: 'Reconcile', done: true }])],
+      }),
+    )
+
+    expect((await persisted()).checklists[0].items[0].completedAt).toBeTruthy()
   })
 })

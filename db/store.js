@@ -973,6 +973,156 @@ function rollUpItemDone(item) {
 }
 
 /**
+ * Columns `mapChecklistItemRow` reads. Same contract as
+ * `INVOICE_SELECT_COLUMNS`: a column added to the mapper but not to this list
+ * reads as `undefined` on Postgres and as the real value on the file backend,
+ * so the bug is invisible to every test in this repo and visible only in
+ * production. `checklist_id` is here for the caller's grouping, not the mapper.
+ *
+ * A unit test pins the parity (see db/store-staleness.test.mjs).
+ */
+export const CHECKLIST_ITEM_SELECT_COLUMNS = `id, checklist_id, label, done, sort_order, due_date,
+          due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id,
+          waiting_ons, sub_items, completed_at`
+
+/**
+ * One `checklist_items` row -> the shape the app speaks. Optional fields are
+ * omitted rather than set to null so a flat item stays flat (the file backend
+ * stores exactly what the UI sends, and the two shapes have to match).
+ *
+ * Exported so the column-parity test can watch which columns it reads.
+ */
+export function mapChecklistItemRow(row) {
+  const subItems = normalizeSubItems(row.sub_items, { withDone: true })
+  const item = {
+    id: row.id,
+    label: row.label,
+    done: row.done,
+  }
+  if (row.due_date) {
+    item.dueDate = row.due_date.toISOString().slice(0, 10)
+  }
+  if (typeof row.due_day_of_month === 'number') {
+    item.dueDayOfMonth = row.due_day_of_month
+  }
+  if (row.assignee_id) {
+    item.assigneeId = row.assignee_id
+  }
+  if (row.waiting_on) {
+    item.waitingOn = row.waiting_on
+  }
+  // An item flagged waiting OR carrying a legacy "waiting on" note (from
+  // before the toggle existed) is treated as waiting.
+  if (row.waiting || row.waiting_on) {
+    item.waiting = true
+  }
+  if (row.waiting_for_checklist_id) {
+    item.waitingForChecklistId = row.waiting_for_checklist_id
+  }
+  const itemWaitingOns = normalizeWaitingOns(row.waiting_ons)
+  if (itemWaitingOns.length > 0) {
+    item.waitingOns = itemWaitingOns
+  }
+  if (subItems.length > 0) {
+    item.subItems = subItems
+    // `done` is derived for items with sub-items (which may themselves be
+    // derived from sub-sub-items) — keep it in sync on read so a hand-edited
+    // DB row can't desync the roll-up.
+    item.done = rollUpItemDone(item)
+  }
+  // Only emitted when there is one. An item completed before the column
+  // existed has no timestamp and must not be given a fabricated one.
+  if (row.completed_at) {
+    item.completedAt = new Date(row.completed_at).toISOString()
+  }
+  return item
+}
+
+/**
+ * SQL fragment that keeps `completed_at` truthful whenever `done` is written.
+ *
+ * `$${n}` is the parameter carrying the NEW `done` value:
+ *   - completing -> stamp now(), unless the row already carries a stamp
+ *     (re-asserting `done` on an already-complete step is not a re-completion)
+ *   - un-completing -> clear it; a reopened step has no completion date
+ *
+ * Written as one expression inside the same UPDATE as `done` so the two can
+ * never drift, and so no code path can set `done` without deciding this.
+ */
+function completedAtClause(doneParamIndex) {
+  return `completed_at = case when $${doneParamIndex} then coalesce(completed_at, now()) else null end`
+}
+
+/**
+ * Every table the bulk save wipes that HAS a `created_at` column and is
+ * re-inserted from the payload — i.e. every table whose creation dates the wipe
+ * would otherwise reset to `now()`.
+ *
+ * The full list of tables `write()` deletes is fourteen. The four missing here:
+ *   - `invoices`            — already snapshotted and restored verbatim.
+ *   - `time_entries`        — already supplies `created_at` on its insert.
+ *   - `timesheet_locks`     — no `created_at`; `locked_at` is supplied.
+ *   - `weekly_submissions`  — no `created_at`; `submitted_at` is supplied.
+ * `checklist_template_stages` has no `created_at` column at all, so it has
+ * nothing to lose. `users` is upserted, never deleted, and its ON CONFLICT
+ * touches name + updated_at only.
+ *
+ * Exported so a test can assert the insert for each one names the column.
+ */
+export const CREATED_AT_PRESERVED_TABLES = [
+  'subscription_plans',
+  'contacts',
+  'clients',
+  'reimbursements',
+  'recurring_reimbursements',
+  'checklist_templates',
+  'checklist_template_items',
+  'checklists',
+  'checklist_items',
+]
+
+/**
+ * The completion stamp a BULK SAVE should persist for a checklist item.
+ *
+ * The payload's own `completedAt` is deliberately ignored. The bulk save
+ * re-inserts every row from whatever snapshot the calling tab holds, so trusting
+ * it would let a stale tab rewrite completion history — the same class of bug as
+ * the `created_at` reset this function's callers exist to fix.
+ *
+ * @param {boolean} done the roll-up `done` being persisted now
+ * @param {{ done?: boolean, completedAt?: Date|string|null }} [previous] the row
+ *   as it stood BEFORE the wipe, or undefined for a genuinely new item
+ * @returns {Date|string|null} what to write to `completed_at`
+ */
+export function preservedItemCompletion(done, previous) {
+  if (!done) return null
+  // Already carried a stamp — keep the real one.
+  if (previous?.completedAt) return previous.completedAt
+  // Already complete but never stamped: a row from before the column existed.
+  // Leave it null rather than backdating it to this save.
+  if (previous?.done) return null
+  // This save is what completed it (or the item is new and arrives complete).
+  return new Date()
+}
+
+/**
+ * File-backend mirror of `completedAtClause`: return `item` with its new `done`
+ * and a `completedAt` that follows the same rule. The prior item IS the "before"
+ * state here, so an already-stamped completion is kept and a reopened step loses
+ * its date.
+ */
+function withCompletionStamp(item, done) {
+  const next = { ...item, done }
+  const completedAt = preservedItemCompletion(done, item)
+  if (completedAt) {
+    next.completedAt = completedAt instanceof Date ? completedAt.toISOString() : completedAt
+  } else {
+    delete next.completedAt
+  }
+  return next
+}
+
+/**
  * Set every sub-sub-item under a sub-item to `value`. Returns a new sub-item.
  */
 function cascadeSubItem(sub, value) {
@@ -2901,6 +3051,17 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_items add column if not exists sub_items jsonb not null default '[]'::jsonb`,
       )
+      // WHEN a step was completed. `done` is a bare boolean and always was, so
+      // until this column existed nothing in the product recorded the moment
+      // anything finished — the "audit trail" the Completed tasks tab shows is
+      // built from this. Nullable on purpose and NOT backfilled: every row that
+      // predates it was completed at an unknown time, and inventing one (the
+      // migration's own clock, `updated_at`, the due date) would put a wrong
+      // date in front of someone auditing the work. Those rows render an
+      // explicit placeholder instead. See `preservedItemCompletion`.
+      await this.pool.query(
+        `alter table checklist_items add column if not exists completed_at timestamptz`,
+      )
 
       await this.pool.query(`
         create table if not exists checklist_templates (
@@ -3657,7 +3818,7 @@ export class AppDataStore {
             order by due_date asc, id asc
           `),
           this.pool.query(`
-            select id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, waiting_ons, sub_items
+            select ${CHECKLIST_ITEM_SELECT_COLUMNS}
             from checklist_items
             order by checklist_id asc, sort_order asc, id asc
           `),
@@ -3713,44 +3874,7 @@ export class AppDataStore {
       const itemsByChecklist = new Map()
       for (const row of checklistItemsResult.rows) {
         const existing = itemsByChecklist.get(row.checklist_id) ?? []
-        const subItems = normalizeSubItems(row.sub_items, { withDone: true })
-        const item = {
-          id: row.id,
-          label: row.label,
-          done: row.done,
-        }
-        if (row.due_date) {
-          item.dueDate = row.due_date.toISOString().slice(0, 10)
-        }
-        if (typeof row.due_day_of_month === 'number') {
-          item.dueDayOfMonth = row.due_day_of_month
-        }
-        if (row.assignee_id) {
-          item.assigneeId = row.assignee_id
-        }
-        if (row.waiting_on) {
-          item.waitingOn = row.waiting_on
-        }
-        // An item flagged waiting OR carrying a legacy "waiting on" note (from
-        // before the toggle existed) is treated as waiting.
-        if (row.waiting || row.waiting_on) {
-          item.waiting = true
-        }
-        if (row.waiting_for_checklist_id) {
-          item.waitingForChecklistId = row.waiting_for_checklist_id
-        }
-        const itemWaitingOns = normalizeWaitingOns(row.waiting_ons)
-        if (itemWaitingOns.length > 0) {
-          item.waitingOns = itemWaitingOns
-        }
-        if (subItems.length > 0) {
-          item.subItems = subItems
-          // `done` is derived for items with sub-items (which may themselves be
-          // derived from sub-sub-items) — keep it in sync on read so a
-          // hand-edited DB row can't desync the roll-up.
-          item.done = rollUpItemDone(item)
-        }
-        existing.push(item)
+        existing.push(mapChecklistItemRow(row))
         itemsByChecklist.set(row.checklist_id, existing)
       }
 
@@ -4384,6 +4508,35 @@ export class AppDataStore {
           )
         ).rows
 
+        // Creation dates are DATA, not bookkeeping — and this transaction was
+        // erasing them. Every insert below omitted `created_at`, so each wipe
+        // and re-insert let the column's `default now()` fire again: in
+        // production all 753 checklists claimed to have been created on the day
+        // of the most recent autosave. (Those original dates are gone and are
+        // not recoverable; this stops the loss from here on.)
+        //
+        // Same technique as the invoice restore above — snapshot INSIDE the
+        // transaction, before the deletes, and supply the value on re-insert.
+        // Deliberately NOT taken from the payload: `read()` doesn't even send
+        // most of these, and a stale tab that did carry one could rewrite
+        // history. A row with no snapshot entry is genuinely new and falls back
+        // to now().
+        const preservedCreatedAt = new Map()
+        for (const table of CREATED_AT_PRESERVED_TABLES) {
+          const snapshot = await client.query(`select id, created_at from ${table}`)
+          preservedCreatedAt.set(table, new Map(snapshot.rows.map((row) => [row.id, row.created_at])))
+        }
+        const createdAtFor = (table, id) => preservedCreatedAt.get(table)?.get(id) ?? new Date()
+
+        // Completion stamps, for the same reason and with the same rule (see
+        // `preservedItemCompletion`): the payload's copy is ignored, the stored
+        // one wins, and only a step this save actually completes gets now().
+        const priorItemCompletion = new Map(
+          (
+            await client.query(`select id, done, completed_at from checklist_items`)
+          ).rows.map((row) => [row.id, { done: row.done, completedAt: row.completed_at }]),
+        )
+
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
         await client.query('delete from checklist_template_items')
@@ -4460,10 +4613,16 @@ export class AppDataStore {
             : []
           await client.query(
             `
-              insert into subscription_plans (id, name, notes, template_ids, updated_at)
-              values ($1, $2, $3, $4::text[], now())
+              insert into subscription_plans (id, name, notes, template_ids, created_at, updated_at)
+              values ($1, $2, $3, $4::text[], $5, now())
             `,
-            [plan.id, plan.name, plan.notes ?? '', planTemplateIds],
+            [
+              plan.id,
+              plan.name,
+              plan.notes ?? '',
+              planTemplateIds,
+              createdAtFor('subscription_plans', plan.id),
+            ],
           )
         }
 
@@ -4484,9 +4643,10 @@ export class AppDataStore {
             `
               insert into contacts (
                 id, name, email, phone, title, notes, locked,
-                company_emails, linked_contact_ids, archived_at, group_name, updated_at
+                company_emails, linked_contact_ids, archived_at, group_name,
+                created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::text[], $10, $11, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::text[], $10, $11, $12, now())
             `,
             [
               contact.id,
@@ -4500,6 +4660,7 @@ export class AppDataStore {
               linkedContactIds,
               archivedAt,
               groupName,
+              createdAtFor('contacts', contact.id),
             ],
           )
         }
@@ -4522,9 +4683,9 @@ export class AppDataStore {
                 estimated_bookkeeper_hours, estimated_accountant_hours,
                 estimated_cfo_hours, monthly_service_tier,
                 annual_rate, annual_billing_month, lifecycle_stage,
-                card_payments_enabled, updated_at
+                card_payments_enabled, created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, now())
             `,
             [
               clientRecord.id,
@@ -4594,6 +4755,7 @@ export class AppDataStore {
                 : Number(clientRecord.annualBillingMonth),
               coerceLifecycleStage(clientRecord.lifecycleStage),
               clientRecord.cardPaymentsEnabled ?? false,
+              createdAtFor('clients', clientRecord.id),
             ],
           )
         }
@@ -4722,8 +4884,8 @@ export class AppDataStore {
         for (const reimbursement of safeReimbursements) {
           await client.query(
             `
-              insert into reimbursements (id, client_id, date, description, amount, updated_at)
-              values ($1, $2, $3, $4, $5, now())
+              insert into reimbursements (id, client_id, date, description, amount, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, now())
             `,
             [
               reimbursement.id,
@@ -4731,6 +4893,7 @@ export class AppDataStore {
               reimbursement.date,
               reimbursement.description,
               reimbursement.amount,
+              createdAtFor('reimbursements', reimbursement.id),
             ],
           )
         }
@@ -4739,8 +4902,8 @@ export class AppDataStore {
           await client.query(
             `
               insert into recurring_reimbursements
-                (id, client_id, description, amount, frequency, start_date, updated_at)
-              values ($1, $2, $3, $4, $5, $6, now())
+                (id, client_id, description, amount, frequency, start_date, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, now())
             `,
             [
               recurring.id,
@@ -4749,6 +4912,7 @@ export class AppDataStore {
               recurring.amount,
               recurring.frequency,
               recurring.startDate,
+              createdAtFor('recurring_reimbursements', recurring.id),
             ],
           )
         }
@@ -4756,8 +4920,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, now())
             `,
             [
               template.id,
@@ -4792,6 +4956,7 @@ export class AppDataStore {
               typeof template.onboardingForClientId === 'string' && template.onboardingForClientId
                 ? template.onboardingForClientId
                 : null,
+              createdAtFor('checklist_templates', template.id),
             ],
           )
 
@@ -4824,8 +4989,8 @@ export class AppDataStore {
             for (const [index, item] of (stage.items ?? []).entries()) {
               await client.query(
                 `
-                  insert into checklist_template_items (id, template_id, label, sort_order, due_date, due_day_of_month, assignee_id, stage_id, sub_items, updated_at)
-                  values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now())
+                  insert into checklist_template_items (id, template_id, label, sort_order, due_date, due_day_of_month, assignee_id, stage_id, sub_items, created_at, updated_at)
+                  values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, now())
                 `,
                 [
                   item.id,
@@ -4839,6 +5004,7 @@ export class AppDataStore {
                   item.assigneeId ?? null,
                   stage.id,
                   JSON.stringify(normalizeSubItems(item.subItems, { withDone: false })),
+                  createdAtFor('checklist_template_items', item.id),
                 ],
               )
             }
@@ -4864,8 +5030,8 @@ export class AppDataStore {
           // we already have.
           const insertResult = await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, now())
               on conflict do nothing
             `,
             [
@@ -4888,6 +5054,7 @@ export class AppDataStore {
               checklist.deletionRequestedAt ?? null,
               checklist.onboardingForClientId ?? null,
               checklist.createdBy ?? null,
+              createdAtFor('checklists', checklist.id),
             ],
           )
 
@@ -4912,8 +5079,8 @@ export class AppDataStore {
               subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
             await client.query(
               `
-                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, waiting_ons, sub_items, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, now())
+                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, waiting_ons, sub_items, created_at, completed_at, updated_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, now())
               `,
               [
                 item.id,
@@ -4931,6 +5098,10 @@ export class AppDataStore {
                 item.waitingForChecklistId ? String(item.waitingForChecklistId) : null,
                 JSON.stringify(normalizeWaitingOns(item.waitingOns)),
                 JSON.stringify(subItems),
+                createdAtFor('checklist_items', item.id),
+                // The stored stamp wins over anything the payload carries, so a
+                // bulk save can neither erase a completion date nor invent one.
+                preservedItemCompletion(itemDone, priorItemCompletion.get(item.id)),
               ],
             )
           }
@@ -4985,6 +5156,55 @@ export class AppDataStore {
               ? { ...employee, role: priorRoleById.get(employee.id) }
               : employee,
           )
+        }
+
+        // Cardinal rule 1 mirror of the created_at / completed_at preservation
+        // in the Postgres branch. This backend re-writes each record WHOLE, so
+        // a payload that dropped `createdAt`, or that carries a stale tab's
+        // `completedAt`, rewrites history exactly the way the Postgres wipe did
+        // — "it spreads the record" is not by itself protection. Same rule as
+        // there: what is already persisted wins; only a step this save actually
+        // completes gets a fresh stamp.
+        const priorChecklistById = new Map(
+          [
+            ...(Array.isArray(previous.checklists) ? previous.checklists : []),
+            ...(Array.isArray(previous.recycledChecklists) ? previous.recycledChecklists : []),
+          ]
+            .filter((checklist) => checklist && typeof checklist.id === 'string')
+            .map((checklist) => [checklist.id, checklist]),
+        )
+        const withPreservedHistory = (checklist) => {
+          if (!checklist || typeof checklist.id !== 'string') return checklist
+          const prior = priorChecklistById.get(checklist.id)
+          const priorItemById = new Map(
+            (Array.isArray(prior?.items) ? prior.items : [])
+              .filter((item) => item && typeof item.id === 'string')
+              .map((item) => [item.id, item]),
+          )
+          const next = { ...checklist }
+          if (prior?.createdAt) next.createdAt = prior.createdAt
+          if (Array.isArray(checklist.items)) {
+            next.items = checklist.items.map((item) => {
+              if (!item || typeof item.id !== 'string') return item
+              const done = rollUpItemDone(item)
+              const completedAt = preservedItemCompletion(done, priorItemById.get(item.id))
+              const merged = { ...item }
+              if (completedAt) {
+                merged.completedAt =
+                  completedAt instanceof Date ? completedAt.toISOString() : completedAt
+              } else {
+                delete merged.completedAt
+              }
+              return merged
+            })
+          }
+          return next
+        }
+        if (Array.isArray(data.checklists)) {
+          data.checklists = data.checklists.map(withPreservedHistory)
+        }
+        if (Array.isArray(data.recycledChecklists)) {
+          data.recycledChecklists = data.recycledChecklists.map(withPreservedHistory)
         }
       }
     } catch {
@@ -7484,8 +7704,8 @@ export class AppDataStore {
         for (const item of nextChecklist.items) {
           await client.query(
             `
-              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, waiting_ons, sub_items, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, now())
+              insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, waiting_ons, sub_items, completed_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, now())
             `,
             [
               item.id,
@@ -7503,6 +7723,10 @@ export class AppDataStore {
               item.waitingForChecklistId ? String(item.waitingForChecklistId) : null,
               JSON.stringify(normalizeWaitingOns(item.waitingOns)),
               JSON.stringify(Array.isArray(item.subItems) ? item.subItems : []),
+              // Brand-new rows: a step that arrives already ticked was completed
+              // now. Materialized template steps always arrive open, so this is
+              // null on every ordinary create.
+              preservedItemCompletion(item.done, undefined),
             ],
           )
         }
@@ -7565,7 +7789,7 @@ export class AppDataStore {
 
       await this.pool.query(
         `update checklist_items
-         set done = $3, sub_items = $4::jsonb, updated_at = now()
+         set done = $3, sub_items = $4::jsonb, ${completedAtClause(3)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
         [checklistId, itemId, toggled.done, JSON.stringify(toggled.subItems)],
       )
@@ -7602,8 +7826,8 @@ export class AppDataStore {
         itemUpdated = true
         // Keep flat items flat: only attach `subItems` when there are some.
         return toggled.subItems.length > 0
-          ? { ...item, subItems: toggled.subItems, done: toggled.done }
-          : { ...item, done: toggled.done }
+          ? withCompletionStamp({ ...item, subItems: toggled.subItems }, toggled.done)
+          : withCompletionStamp(item, toggled.done)
       })
 
       if (!itemUpdated) {
@@ -8537,7 +8761,7 @@ export class AppDataStore {
       ]
       await this.pool.query(
         `update checklist_items
-         set sub_items = $3::jsonb, done = $4, updated_at = now()
+         set sub_items = $3::jsonb, done = $4, ${completedAtClause(4)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
         [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
       )
@@ -8558,7 +8782,10 @@ export class AppDataStore {
           ...subItems,
           { id: `subitem-${randomUUID().slice(0, 8)}`, title: trimmed, done: false },
         ]
-        return { ...item, subItems: nextSubItems, done: nextSubItems.every((sub) => sub.done) }
+        return withCompletionStamp(
+          { ...item, subItems: nextSubItems },
+          nextSubItems.every((sub) => sub.done),
+        )
       })
       updatedChecklist = { ...checklist, items }
       return updatedChecklist
@@ -8592,7 +8819,7 @@ export class AppDataStore {
           : Boolean(itemResult.rows[0].done)
       await this.pool.query(
         `update checklist_items
-         set sub_items = $3::jsonb, done = $4, updated_at = now()
+         set sub_items = $3::jsonb, done = $4, ${completedAtClause(4)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
         [checklistId, itemId, JSON.stringify(nextSubItems), nextDone],
       )
@@ -8615,7 +8842,7 @@ export class AppDataStore {
           nextSubItems.length > 0
             ? nextSubItems.every((sub) => sub.done)
             : Boolean(item.done)
-        return { ...item, subItems: nextSubItems, done: nextDone }
+        return withCompletionStamp({ ...item, subItems: nextSubItems }, nextDone)
       })
       updatedChecklist = { ...checklist, items }
       return updatedChecklist
@@ -8728,7 +8955,7 @@ export class AppDataStore {
       })
       await this.pool.query(
         `update checklist_items
-         set sub_items = $3::jsonb, done = $4, updated_at = now()
+         set sub_items = $3::jsonb, done = $4, ${completedAtClause(4)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
         [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
       )
@@ -8759,7 +8986,10 @@ export class AppDataStore {
             done: nextSubSubItems.every((subSub) => subSub.done),
           }
         })
-        return { ...item, subItems: nextSubItems, done: nextSubItems.every((sub) => sub.done) }
+        return withCompletionStamp(
+          { ...item, subItems: nextSubItems },
+          nextSubItems.every((sub) => sub.done),
+        )
       })
       updatedChecklist = { ...checklist, items }
       return updatedChecklist
@@ -8807,7 +9037,7 @@ export class AppDataStore {
       })
       await this.pool.query(
         `update checklist_items
-         set sub_items = $3::jsonb, done = $4, updated_at = now()
+         set sub_items = $3::jsonb, done = $4, ${completedAtClause(4)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
         [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
       )
@@ -8843,7 +9073,10 @@ export class AppDataStore {
           }
           return nextSub
         })
-        return { ...item, subItems: nextSubItems, done: nextSubItems.every((sub) => sub.done) }
+        return withCompletionStamp(
+          { ...item, subItems: nextSubItems },
+          nextSubItems.every((sub) => sub.done),
+        )
       })
       updatedChecklist = { ...checklist, items }
       return updatedChecklist

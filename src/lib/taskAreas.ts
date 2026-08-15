@@ -1,5 +1,6 @@
 /**
- * The three areas of the Checklists page: In progress / Repeating / Standard.
+ * The areas of the Checklists page: In progress / Repeating / Standard /
+ * Completed.
  *
  * They used to be stacked vertically, so reaching a repeating task meant
  * scrolling past the entire in-progress list — 554 checklists in production.
@@ -13,9 +14,9 @@
  * the area didn't follow the link, the click would simply appear to do nothing.
  */
 
-export type TaskArea = 'progress' | 'repeating' | 'standard'
+export type TaskArea = 'progress' | 'repeating' | 'standard' | 'completed'
 
-export const TASK_AREA_KEYS: TaskArea[] = ['progress', 'repeating', 'standard']
+export const TASK_AREA_KEYS: TaskArea[] = ['progress', 'repeating', 'standard', 'completed']
 
 /**
  * Which area to open, in priority order:
@@ -37,7 +38,11 @@ export function resolveTaskArea(params: {
 }): TaskArea {
   if (params.focusTemplate) return 'repeating'
   if (params.focusChecklist) return 'progress'
-  if (params.areaParam === 'repeating' || params.areaParam === 'standard') {
+  if (
+    params.areaParam === 'repeating' ||
+    params.areaParam === 'standard' ||
+    params.areaParam === 'completed'
+  ) {
     return params.areaParam
   }
   return 'progress'

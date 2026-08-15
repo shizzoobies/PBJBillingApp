@@ -625,6 +625,15 @@ export type ChecklistItem = {
   waitingOns?: WaitingOn[]
   /** One level of nested sub-items. Empty/undefined when the item is flat. */
   subItems?: SubChecklistItem[]
+  /**
+   * When this step was completed (ISO). Set when `done` goes false → true,
+   * cleared when it is unticked, and preserved across bulk saves.
+   *
+   * ABSENT is meaningful and common: nothing recorded completion times before
+   * this field existed, and those rows were deliberately not backfilled. The
+   * Completed tasks tab renders them with a placeholder rather than a guess.
+   */
+  completedAt?: string
 }
 
 export type ChecklistTemplateItem = {

@@ -418,22 +418,24 @@ Clients page meanwhile. Owner-only.
 
 ## Checklists (tasks)
 
-- **The page is split into three TABS: "In progress", "Repeating" and
-  "Standard"**, each showing a count. They used to sit stacked on top of each
-  other, so getting to a repeating task meant scrolling past every in-progress
-  checklist (hundreds of them). Now each is one click away.
+- **The page is split into four TABS: "In progress", "Repeating", "Standard"
+  and "Completed"**, each showing a count. They used to sit stacked on top of
+  each other, so getting to a repeating task meant scrolling past every
+  in-progress checklist (hundreds of them). Now each is one click away.
   - **In progress** — the live checklists, exactly as before: the
     "Group by: Due date / Client" choice and its collapsible Overdue / Due this
     week / Due this month / Later / Completed sections are unchanged.
   - **Repeating** — the recurring task setups (owner edits them here; staff see
     the recurring checklists for their assigned clients).
   - **Standard** — the firm's reusable blueprint templates.
+  - **Completed** — the history of finished tasks (see below).
   - On "Repeating", tasks are grouped under their business, listed
     alphabetically, and **each business starts COLLAPSED** — you see a scannable
     list of business names with a count each, and click one to open its tasks.
     (Searching opens matching businesses automatically, and a link that jumps to
     a specific repeating task opens its business too.)
-  - **Every tab has a search box.** On "Repeating" it matches the BUSINESS name
+  - **In progress / Repeating / Standard each have a search box** (Completed has
+    filters instead — see below). On "Repeating" it matches the BUSINESS name
     or the task name, so you can jump straight to a client's repeating setup
     instead of scrolling the whole list; "Standard" searches template names, and
     "In progress" searches business or task name as before. Each shows "N of M"
@@ -442,10 +444,38 @@ Clients page meanwhile. Owner-only.
     count applies the current report period and the assignee/client/status
     filters. If that count looks low, the report period is usually the reason
     (a narrow custom range hides everything outside it).
-  - The "+ New" button stays available from all three tabs.
+  - The "+ New" button stays available from all four tabs.
   - Links that jump to a specific task or a specific repeating setup switch to
     the right tab automatically, so a link never lands on a hidden area.
   - The recycle bin sits below the tabs and is always available (owner only).
+- **Completed tasks tab — the record of finished work.** A finished task never
+  moved anywhere: it stays where it always was and is simply filtered out of the
+  active lists. This tab is the view of them, newest first, showing WHAT was
+  completed, for WHICH client, by WHOM, and WHEN.
+  - **Read-only.** There is nothing to press: no checkboxes, no editing, and no
+    way to re-open a task from here. Re-opening is done on the In progress tab,
+    where the usual permission rules apply.
+  - **Who sees what:** an employee sees their own completed tasks; an
+    **Accountant** also sees the completed tasks of the people staffed on the
+    clients they're assigned to; the owner sees everything. (This is the same
+    rule the open-tasks count uses. There is no supervisor field in the data, so
+    "their bookkeepers" means "the people on the same clients".)
+  - **Filters:** client, person, and a completed-from / completed-to date range.
+  - **"Completed by" is the person responsible for the task.** Completing a step
+    requires being its responsible person, so that's who finished it — the app
+    does not separately record which account clicked the checkbox.
+  - **Dates before this feature show "—", not a guess.** The app did not record
+    completion times until this tab was built (a step was just ticked or not),
+    and those old moments cannot be recovered. Rather than print a made-up date
+    on an audit screen, older rows show a dash, with a note under the table
+    saying why. Everything completed from now on carries a real timestamp.
+    Setting a date range hides the dashed rows, since an unknown date can't be
+    said to fall inside a window; the tab says so when a range is set.
+- **When a step is completed is now recorded.** Ticking a step stamps the
+  completion time; un-ticking it clears the stamp (a re-opened step has no
+  completion date). Adding a sub-step to a finished item re-opens it and clears
+  the date the same way. The stamp survives ordinary saves — a background
+  workspace save can neither erase a completion date nor invent one.
 - A checklist = a task for a client: title, client, assignee, due date,
   frequency (one-off, weekly, monthly, quarterly, annual), steps.
 - Steps support sub-steps and sub-sub-steps, drag-to-reorder, per-step due

@@ -19,6 +19,7 @@ import {
 } from '../../lib/waiting-on-state.js'
 import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
+import { CompletedTasksSection } from '../components/CompletedTasksSection'
 import { CompletedWaits } from '../components/CompletedWaits'
 import { WaitApprovalActions } from '../components/WaitApprovalActions'
 import { FilterBar } from '../components/FilterBar'
@@ -46,6 +47,7 @@ import type {
 } from '../lib/types'
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
+import { completedTaskRows } from '../lib/completedTasks'
 import { filterInProgressChecklists } from '../lib/inProgressFilter'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { selectableClients } from '../lib/clientLifecycle'
@@ -81,6 +83,7 @@ const TASK_AREAS: Array<{ key: TaskArea; label: string }> = [
   { key: 'progress', label: 'In progress' },
   { key: 'repeating', label: 'Repeating' },
   { key: 'standard', label: 'Standard' },
+  { key: 'completed', label: 'Completed' },
 ]
 type CreateMode = 'one-time' | 'repeating' | null
 
@@ -280,10 +283,28 @@ export function ChecklistsPage() {
       }).length,
     [visibleChecklists, reportPeriod, areaAssignee, areaClient, areaStatus],
   )
+  // Completed history. Built from `data.checklists` (the server's client-scoped
+  // feed), NOT `visibleChecklists` — that one is already narrowed to "mine",
+  // which would hide from an accountant exactly the colleagues' work this tab is
+  // supposed to show them. The people-level narrowing is `completedTaskRows`'s
+  // job, and it is the same rule the open-tasks badge uses.
+  const completedRows = useMemo(
+    () =>
+      completedTaskRows({
+        checklists: data.checklists,
+        viewerId: activeEmployeeId,
+        isOwner: ownerMode,
+        staffRole: effectiveUser?.staffRole,
+        clients: visibleClients,
+      }),
+    [data.checklists, activeEmployeeId, ownerMode, effectiveUser?.staffRole, visibleClients],
+  )
+
   const areaCounts: Record<TaskArea, number> = {
     progress: inProgressCount,
     repeating: data.checklistTemplates.filter((t) => !t.isStandard).length,
     standard: data.checklistTemplates.filter((t) => t.isStandard).length,
+    completed: completedRows.length,
   }
 
   // The unified "+ New" dropdown. Mode controls whether the create form is in
@@ -513,6 +534,16 @@ export function ChecklistsPage() {
         />
         )}
       </section>
+
+      {/* Outside the Tasks panel, like the other area managers — the tabs live
+          in that panel's header but each area renders its own panel below. */}
+      {activeArea === 'completed' ? (
+        <CompletedTasksSection
+          rows={completedRows}
+          clients={data.clients}
+          employees={data.employees}
+        />
+      ) : null}
 
       {ownerMode && activeArea === 'repeating' ? (
         <RepeatingTasksManager
