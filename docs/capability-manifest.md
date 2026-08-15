@@ -984,8 +984,18 @@ Clients page meanwhile. Owner-only.
   breakdown for the period: Time & hours (total / billable / administrative, by
   staff, vs. the prior period); Tasks & workflow (due / completed / overdue this
   period); Billing (revenue for the period, rate/plan, reimbursements); and
-  Profitability (realized rate = fee ÷ hours, and margin when team cost rates are
-  set).
+  Profitability (realized rate = fee ÷ hours, and margin).
+- **Labor cost counts team members who have a pay rate on file; owner time
+  carries no hourly cost.** The recap used to withhold margin entirely — showing
+  "—" — whenever anyone who logged time had no cost rate. Because the owner
+  correctly has no cost rate (she draws no hourly wage) and works on most
+  clients, that blanked margin nearly everywhere: on August 2026 data she had
+  logged time on 31 of the 34 clients with any. Someone with no rate now simply
+  adds nothing to labor cost, which is exactly how the payroll report and every
+  cost figure elsewhere have always treated them — the recap was the odd one
+  out. **Margin is now always a figure**, and a client the owner works alone
+  shows its full fee as profit. The reason is printed on screen under every
+  cost and profit figure so the number is never a puzzle.
 - **Every hours figure on the recap reads as x.xx** — the totals and each
   person's row.
 - **The by-staff list is in a FIXED order that does not move month to month:**
@@ -1007,6 +1017,46 @@ Clients page meanwhile. Owner-only.
   hourly clients have shifted, some up and some down** — the new numbers are the
   correct ones. Monthly and annual clients are unaffected. A quarter is summed
   month by month rather than estimated as a rate times three.
+- **Estimated vs. actual** (owner only) — the panel that catches an overrun
+  while it is still happening:
+  - **Hours per role.** Estimated hours (the client's Estimated monthly hours
+    fields) against hours actually worked, per tier, with the difference and
+    whether it ran **over** or **under** — e.g. a Bookkeeper estimated at 10
+    hours who worked 12 reads "+2.00h over". A quarterly recap multiplies the
+    monthly estimate by the three months it covers.
+  - **Profit.** Estimated profit = expected revenue − estimated cost, where
+    estimated cost is each role's estimated hours × that role's cost rate, and
+    expected revenue is the client's monthly rate (monthly clients), a twelfth
+    of the annual fee (annual clients), or the estimated hours at each role's
+    bill rate (hourly clients). Actual profit = the invoiced service revenue
+    minus actual labor cost — the same two figures the Billing and
+    Profitability panels show, from the same calculators. Reimbursements are
+    excluded from both sides. All of this is stated on screen under the figures.
+  - **A role's cost/bill rate** is taken from the people ASSIGNED to the client
+    in that role; failing that, from whoever actually logged time in it. If
+    several people are involved at different rates, the rate is their average
+    and the panel says so. A role whose people have no pay rate (the CFO role,
+    which is the owner's) costs nothing on BOTH sides of the comparison — it
+    never makes the comparison unavailable.
+  - **"No estimate set" is a normal, honest state** — most clients have no
+    estimate on file. Those clients show the actual side only and **no
+    variance at all**; nothing is ever compared against a zero nobody entered.
+    The panel points at where to set them (client page → Estimated monthly
+    hours).
+- **Projected end-of-month invoice** (owner only, monthly view only) — always
+  labelled an Estimate, always with its basis printed underneath:
+  - A monthly/annual (plan) client: the known, fixed plan amount plus the
+    reimbursements recorded so far.
+  - An hourly client: the billable work booked so far scaled by the business
+    days elapsed — "projected from 12.00 billable hours over 10 of 21 business
+    days" — plus reimbursements as recorded. Reimbursements are never
+    extrapolated.
+  - A month that has already ended shows the **actual** invoice, described as
+    such, not a projection.
+  - Quarterly view shows no projection: it is a month-shaped question.
+- The whole estimated-vs-actual and projection area, like the rest of the
+  recap's money, is **owner-only** — the figures are absent from a staff
+  member's data entirely, not merely hidden on their screen.
 
 ## Contacts
 

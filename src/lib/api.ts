@@ -2472,12 +2472,98 @@ export type ClientRecap = {
     reimbursements: Array<{ date: string; description: string; amount: number }>
     reimbursementTotal: number
   } | null
+  /**
+   * `laborCost` counts only team members who have a cost rate on file — someone
+   * without one (the owner, who draws no hourly wage) contributes zero rather
+   * than making cost unknowable. Show LABOR_COST_BASIS_NOTE wherever these
+   * appear.
+   */
   profitability: {
     realizedRate: number | null
-    marginAvailable: boolean
-    laborCost: number | null
-    margin: number | null
+    laborCost: number
+    margin: number
   } | null
+  /**
+   * Estimated vs. actual, owner-only (null for staff, and absent from their
+   * payload entirely). `estimatedHours === null` on a tier means NO estimate is
+   * set — render "No estimate set", never a variance against zero.
+   */
+  estimates: ClientRecapEstimates | null
+  /**
+   * Projected end-of-month invoice, owner-only. `null` for a quarterly recap —
+   * the projection is a month-shaped question. Always render `method` beside
+   * the figure; `isEstimate` false means the month is closed and the number is
+   * the real one.
+   */
+  projection: ClientRecapProjection | null
+}
+
+/** How a tier's rate was resolved: its assigned team, or whoever logged time. */
+export type ClientRecapRateBasis = 'assigned' | 'logged' | null
+/** `null` when there is nothing to compare against — never a default 'over'. */
+export type ClientRecapDirection = 'over' | 'under' | 'on' | null
+
+export type ClientRecapEstimateTier = {
+  tier: string
+  /** Null = no estimate set for this tier. Already scaled by monthsInPeriod. */
+  estimatedHours: number | null
+  actualHours: number
+  deltaHours: number | null
+  direction: ClientRecapDirection
+  /** Null = nobody in this role has a cost rate, so the role costs nothing. */
+  costRate: number | null
+  costRateBasis: ClientRecapRateBasis
+  costRatePeopleCount: number
+  /** Null = no estimate, or no cost rate for the role — either way, zero cost. */
+  estimatedCost: number | null
+  actualCost: number
+}
+
+export type ClientRecapEstimates = {
+  hasEstimate: boolean
+  monthsInPeriod: number
+  whereToSet: string
+  byTier: ClientRecapEstimateTier[]
+  hours: {
+    estimated: number | null
+    actual: number
+    delta: number | null
+    direction: ClientRecapDirection
+  }
+  /**
+   * The only reason an estimated figure here is null is that no estimate is
+   * set. A role with no cost rate contributes zero cost, it does not make the
+   * comparison unavailable.
+   */
+  profit: {
+    estimatedRevenue: number | null
+    estimatedCost: number | null
+    estimatedProfit: number | null
+    actualRevenue: number
+    actualCost: number
+    actualProfit: number
+    delta: number | null
+    direction: ClientRecapDirection
+  }
+}
+
+export type ClientRecapProjection = {
+  /**
+   * 'actual' — the month is closed, this is the invoice, not a projection.
+   * 'plan' — fixed plan fee + reimbursements recorded so far.
+   * 'hourly' — extrapolated from hours logged across the business days elapsed.
+   * 'too_early' — an in-progress month with no elapsed business days to scale.
+   */
+  basis: 'actual' | 'plan' | 'hourly' | 'too_early'
+  isEstimate: boolean
+  amount: number | null
+  serviceAmount: number | null
+  reimbursementsToDate: number
+  hoursToDate: number
+  businessDaysElapsed: number
+  businessDaysInMonth: number
+  /** The one-line basis caption. Always shown next to the figure. */
+  method: string
 }
 
 export async function fetchClientRecap(

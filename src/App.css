@@ -8539,6 +8539,40 @@ button.repeating-task-toggle-pill {
   color: #c0392b;
 }
 
+/* The "Estimate" badge sits inline with the projection heading, so the figure
+   below it is never read as a settled number. */
+.recap-card h3 .recap-badge {
+  font-weight: 500;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+/* Estimated vs. actual: the variance is the only colored thing on the panel,
+   and the color follows what the row MEANS, not the sign — hours over plan is
+   bad news, profit over plan is good news, and both carry a '+'. */
+.recap-variance-good {
+  color: #1f7d4d;
+  font-weight: 700;
+}
+
+.recap-variance-bad {
+  color: #c0392b;
+  font-weight: 700;
+}
+
+.recap-variance-none {
+  color: var(--muted);
+}
+
+/* The basis/definition line under an estimated figure. Quiet, but never
+   optional: a projection without its method printed beside it is a claim. */
+.recap-estimate-caption {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 10px 0 0;
+}
+
 .recap-tax-status {
   align-items: center;
   display: flex;

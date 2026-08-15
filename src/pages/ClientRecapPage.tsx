@@ -4,7 +4,10 @@ import { useAppContext } from '../AppContext'
 import {
   fetchClientRecap,
   type ClientRecap,
+  type ClientRecapDirection,
+  type ClientRecapEstimates,
   type ClientRecapPeriodType,
+  type ClientRecapProjection,
 } from '../lib/api'
 import { currentReviewPeriod, formatDecimalHours, shiftReviewPeriod } from '../lib/utils'
 
@@ -16,6 +19,30 @@ const money = (n: number | null | undefined) =>
  * two-decimal rule here that could drift from it.
  */
 const hrs = (n: number) => formatDecimalHours(n * 60)
+const signed = (n: number, format: (value: number) => string) =>
+  `${n > 0 ? '+' : ''}${format(n)}`
+
+/**
+ * Green/red is chosen by what the row MEANS, never by the sign: hours over plan
+ * is bad news, profit over plan is good news, and the same '+' leads both.
+ * `goodDirection` says which way is the good way for this row.
+ */
+/**
+ * Printed once on every panel that shows a cost or a profit.
+ *
+ * Labor cost counts whoever has a pay rate on file and nobody else — the owner
+ * draws no hourly wage, so her time adds no cost, and a client she works alone
+ * shows its full fee as profit. That is the intended reading, but it is not a
+ * guessable one, so it is stated rather than left to be discovered. Kept beside
+ * the other captions so the wording stays in one revisable place.
+ */
+const LABOR_COST_BASIS_NOTE =
+  'Labor cost counts team members who have a pay rate on file; owner time carries no hourly cost.'
+
+const varianceClass = (direction: ClientRecapDirection, goodDirection: 'over' | 'under') => {
+  if (direction == null || direction === 'on') return 'recap-variance-none'
+  return direction === goodDirection ? 'recap-variance-good' : 'recap-variance-bad'
+}
 
 export function ClientRecapPage() {
   const { visibleClients } = useAppContext()
@@ -271,30 +298,203 @@ export function ClientRecapPage() {
           ) : null}
 
           {/* Profitability (owner only) */}
-          {recap.profitability ? (
-            <section className="panel recap-card">
-              <h3>Profitability</h3>
-              <div className="recap-stats">
-                <div className="recap-stat">
-                  <span className="recap-stat-value">{money(recap.profitability.realizedRate)}</span>
-                  <span className="recap-stat-label">Realized rate (fee ÷ hours)</span>
-                </div>
-                <div className="recap-stat">
-                  <span className="recap-stat-value">
-                    {recap.profitability.marginAvailable ? money(recap.profitability.margin) : '—'}
-                  </span>
-                  <span className="recap-stat-label">Margin</span>
-                </div>
-              </div>
-              {!recap.profitability.marginAvailable ? (
-                <p className="muted-text">
-                  Set cost rates for the team members on this client (Team page) to see margin.
-                </p>
-              ) : null}
-            </section>
+          {recap.profitability ? <ProfitabilityCard profitability={recap.profitability} /> : null}
+
+          {/* Estimated vs. actual (owner only) */}
+          {recap.estimates ? (
+            <EstimateVsActualCard estimates={recap.estimates} periodType={recap.periodType} />
           ) : null}
+
+          {/* Projected invoice (owner only, monthly only) */}
+          {recap.projection ? <ProjectionCard projection={recap.projection} /> : null}
         </>
       ) : null}
+    </section>
+  )
+}
+
+/**
+ * Realized rate and margin. Margin is always a figure now — a team member with
+ * no pay rate contributes no cost rather than blanking the panel — so the note
+ * explaining what labor cost counts is not optional decoration here.
+ */
+export function ProfitabilityCard({
+  profitability,
+}: {
+  profitability: NonNullable<ClientRecap['profitability']>
+}) {
+  return (
+    <section className="panel recap-card">
+      <h3>Profitability</h3>
+      <div className="recap-stats">
+        <div className="recap-stat">
+          <span className="recap-stat-value">{money(profitability.realizedRate)}</span>
+          <span className="recap-stat-label">Realized rate (fee ÷ hours)</span>
+        </div>
+        <div className="recap-stat">
+          <span className="recap-stat-value">{money(profitability.margin)}</span>
+          <span className="recap-stat-label">Margin</span>
+        </div>
+      </div>
+      <p className="recap-estimate-caption">{LABOR_COST_BASIS_NOTE}</p>
+    </section>
+  )
+}
+
+/**
+ * Plan against reality, for hours and for profit.
+ *
+ * The honest-empty case is the COMMON one — most clients have no estimate on
+ * file — so "No estimate set" is a first-class state here, not an error state:
+ * the actual column still reports everything it knows, and nothing is ever
+ * compared against a zero nobody entered.
+ */
+export function EstimateVsActualCard({
+  estimates,
+  periodType,
+}: {
+  estimates: ClientRecapEstimates
+  periodType: ClientRecapPeriodType
+}) {
+  const { profit } = estimates
+  const perPeriod =
+    periodType === 'quarter' && estimates.monthsInPeriod > 1
+      ? ` (monthly estimates × ${estimates.monthsInPeriod} months)`
+      : ''
+
+  return (
+    <section className="panel recap-card">
+      <h3>Estimated vs. actual</h3>
+      {!estimates.hasEstimate ? (
+        <p className="muted-text">
+          No estimate set for this client — the actual hours below are reported on their own. Set
+          them on the {estimates.whereToSet} to compare plan against reality here.
+        </p>
+      ) : null}
+
+      <table className="report-table">
+        <thead>
+          <tr>
+            <th>Role</th>
+            <th>Estimated hours{perPeriod}</th>
+            <th>Actual hours</th>
+            <th>Difference</th>
+          </tr>
+        </thead>
+        <tbody>
+          {estimates.byTier.map((row) => (
+            <tr key={row.tier}>
+              <td>{row.tier}</td>
+              <td>
+                {row.estimatedHours == null ? (
+                  <span className="muted-text">No estimate set</span>
+                ) : (
+                  hrs(row.estimatedHours)
+                )}
+              </td>
+              <td>{hrs(row.actualHours)}</td>
+              <td className={varianceClass(row.direction, 'under')}>
+                {row.deltaHours == null
+                  ? '—'
+                  : row.direction === 'on'
+                    ? 'On estimate'
+                    : `${signed(row.deltaHours, hrs)} ${row.direction}`}
+              </td>
+            </tr>
+          ))}
+          {estimates.byTier.length > 0 ? (
+            <tr>
+              <td>
+                <strong>Total</strong>
+              </td>
+              <td>
+                {estimates.hours.estimated == null ? (
+                  <span className="muted-text">No estimate set</span>
+                ) : (
+                  <strong>{hrs(estimates.hours.estimated)}</strong>
+                )}
+              </td>
+              <td>
+                <strong>{hrs(estimates.hours.actual)}</strong>
+              </td>
+              <td className={varianceClass(estimates.hours.direction, 'under')}>
+                {estimates.hours.delta == null
+                  ? '—'
+                  : estimates.hours.direction === 'on'
+                    ? 'On estimate'
+                    : `${signed(estimates.hours.delta, hrs)} ${estimates.hours.direction}`}
+              </td>
+            </tr>
+          ) : null}
+        </tbody>
+      </table>
+
+      <div className="recap-stats" style={{ marginTop: 14 }}>
+        <div className="recap-stat">
+          <span className="recap-stat-value">
+            {profit.estimatedProfit == null ? '—' : money(profit.estimatedProfit)}
+          </span>
+          <span className="recap-stat-label">
+            {profit.estimatedProfit == null ? 'Estimated profit — no estimate set' : 'Estimated profit'}
+          </span>
+        </div>
+        <div className="recap-stat">
+          <span className="recap-stat-value">{money(profit.actualProfit)}</span>
+          <span className="recap-stat-label">Actual profit</span>
+        </div>
+        <div className="recap-stat">
+          <span className={`recap-stat-value ${varianceClass(profit.direction, 'over')}`}>
+            {profit.delta == null ? '—' : signed(profit.delta, (n) => money(n))}
+          </span>
+          <span className="recap-stat-label">Difference</span>
+        </div>
+      </div>
+
+      {/* The definitions, on screen, because a profit figure nobody can restate
+          is a figure nobody trusts. */}
+      <p className="recap-estimate-caption">
+        Estimated profit = expected revenue{' '}
+        {profit.estimatedRevenue == null ? '' : `(${money(profit.estimatedRevenue)}) `}− estimated
+        cost{' '}
+        {profit.estimatedCost == null ? '' : `(${money(profit.estimatedCost)}) `}, where estimated
+        cost is each role's estimated hours × that role's cost rate. Actual profit = invoiced
+        service revenue ({money(profit.actualRevenue)}) − actual labor cost (
+        {money(profit.actualCost)}), the same figures the Billing and Profitability panels show.
+        Reimbursements are excluded from both sides. {LABOR_COST_BASIS_NOTE}
+      </p>
+    </section>
+  )
+}
+
+/**
+ * The projected invoice. Its whole job is to be believable, so the basis line is
+ * not optional decoration — it renders under the figure every time, and a
+ * closed month says plainly that it is no longer a projection at all.
+ */
+export function ProjectionCard({ projection }: { projection: ClientRecapProjection }) {
+  return (
+    <section className="panel recap-card">
+      <h3>
+        {projection.isEstimate ? 'Projected end-of-month invoice' : 'End-of-month invoice'}
+        {projection.isEstimate ? <span className="recap-badge">Estimate</span> : null}
+      </h3>
+      <div className="recap-stats">
+        <div className="recap-stat">
+          <span className="recap-stat-value">{money(projection.amount)}</span>
+          <span className="recap-stat-label">
+            {projection.isEstimate ? 'Projected total' : 'Invoice total'}
+          </span>
+        </div>
+        <div className="recap-stat">
+          <span className="recap-stat-value">{money(projection.serviceAmount)}</span>
+          <span className="recap-stat-label">Service</span>
+        </div>
+        <div className="recap-stat">
+          <span className="recap-stat-value">{money(projection.reimbursementsToDate)}</span>
+          <span className="recap-stat-label">Reimbursements recorded</span>
+        </div>
+      </div>
+      <p className="recap-estimate-caption">{projection.method}</p>
     </section>
   )
 }
