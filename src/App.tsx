@@ -55,6 +55,7 @@ import {
   addWaitingOnRequest,
   waitingOnDoneRequest,
   waitingOnVerifyRequest,
+  waitingOnSendBackRequest,
   waitingOnCancelRequest,
   fetchWaitingOnMe,
   updateChecklistMetaRequest,
@@ -1141,6 +1142,18 @@ function App() {
       if (previewActiveRef.current) return
       const updated = await waitingOnVerifyRequest(checklistId, waitingOnId)
       mergeChecklist(updated)
+      await refreshWaitingOnMe()
+    },
+    [mergeChecklist, refreshWaitingOnMe],
+  )
+
+  const waitingOnSendBack = useCallback(
+    async (checklistId: string, waitingOnId: string, note: string) => {
+      if (previewActiveRef.current) return
+      const updated = await waitingOnSendBackRequest(checklistId, waitingOnId, note)
+      mergeChecklist(updated)
+      // It is the blocker's move again, so it reappears in THEIR queue —
+      // refreshing here is what makes that show up without a reload.
       await refreshWaitingOnMe()
     },
     [mergeChecklist, refreshWaitingOnMe],
@@ -3772,6 +3785,7 @@ function App() {
     addWaitingOn,
     waitingOnDone,
     waitingOnVerify,
+    waitingOnSendBack,
     waitingOnCancel,
     restoreChecklist,
     emptyChecklistRecycleBin,

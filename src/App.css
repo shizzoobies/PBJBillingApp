@@ -7583,6 +7583,100 @@ button.repeating-task-toggle-pill {
   background: rgba(34, 139, 88, 0.16);
 }
 
+.delayed-row-done:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* One line per structured wait inside a Delayed row. The buttons live here
+   rather than on the row because a step can hold several waits at once, and on
+   the "Waiting on me" tab each one is separately yours to finish. */
+.delayed-wait-list {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+}
+
+.delayed-wait {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Why it came back. Not a warning colour — a rejection here is ordinary. */
+.delayed-wait-sendback {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+/* ---- Send back: "not approved, do it again" -------------------------- */
+/* Outlined and quiet next to Approve: rejecting is the less common answer,
+   and it should not look like the primary one. */
+.waiting-blocker-sendback {
+  background: #fff;
+  border: 1px solid rgba(179, 38, 30, 0.5);
+  border-radius: 999px;
+  color: #b3261e;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+
+.waiting-blocker-sendback:hover:not(:disabled) {
+  background: #b3261e;
+  color: #fff;
+}
+
+.waiting-blocker-sendback:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.wait-sendback-composer {
+  display: grid;
+  gap: 6px;
+  min-width: 220px;
+}
+
+.wait-sendback-note {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  resize: vertical;
+  width: 100%;
+}
+
+.wait-sendback-composer-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.waiting-blocker-cancel-sendback {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waiting-blocker-sendback {
+    transition: none;
+  }
+}
+
 /* Repeating tasks grouped by client */
 .repeating-client-group {
   display: grid;

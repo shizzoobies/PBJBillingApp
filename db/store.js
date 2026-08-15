@@ -699,6 +699,35 @@ export function normalizeWaitingOns(raw) {
           base[field] = entry[field]
         }
       }
+      // Send-back history, in order. This list is the reason a rejected wait
+      // loses nothing: the resolution it cleared is stashed here alongside the
+      // requester's new note, so "who did it and when" survives every lap and
+      // the ORIGINAL note above is never overwritten. Every read re-normalizes,
+      // so dropping this here would silently erase the history on the next load.
+      if (Array.isArray(entry.sendBacks)) {
+        const events = entry.sendBacks
+          .filter(
+            (event) =>
+              event &&
+              typeof event.at === 'string' &&
+              event.at &&
+              typeof event.by === 'string' &&
+              event.by,
+          )
+          .map((event) => {
+            const stamped = { at: event.at, by: event.by }
+            if (typeof event.note === 'string' && event.note.trim()) {
+              stamped.note = event.note.trim()
+            }
+            for (const field of ['resolvedAt', 'resolvedBy']) {
+              if (typeof event[field] === 'string' && event[field]) {
+                stamped[field] = event[field]
+              }
+            }
+            return stamped
+          })
+        if (events.length > 0) base.sendBacks = events
+      }
       return base
     })
 }
@@ -9068,6 +9097,35 @@ export class AppDataStore {
       verifiedAt: nowIso(),
       verifiedBy: String(userId),
     }))
+  }
+
+  /**
+   * SEND BACK — the requester rejects the reported work and hands it straight
+   * back to the blocker. "a button to not approve and send back with another
+   * note" (featreq-b05a2f3a, her fourth round).
+   *
+   * The resolution has to be cleared or the wait would still read as `resolved`
+   * and stay out of the blocker's queue — so it is MOVED onto `sendBacks[]`
+   * rather than dropped. Nothing about the original is touched: the first note,
+   * `requestedBy` and `createdAt` all stay exactly where they were, and each
+   * lap appends one more event. That is the whole audit trail of a hand-off
+   * that went round twice.
+   *
+   * No new SQL: both backends persist through `_mutateWaitingOn`, which writes
+   * the node's whole `waitingOns` array back (Postgres: the existing
+   * `checklist_items.waiting_ons` / `sub_items` JSONB update). What IS new is a
+   * key inside that JSONB — see `normalizeWaitingOns`.
+   */
+  async markWaitingOnSentBack(checklistId, waitingOnId, { userId, note }) {
+    const at = nowIso()
+    return this._mutateWaitingOn(checklistId, waitingOnId, (entry) => {
+      const { resolvedAt, resolvedBy, ...rest } = entry
+      const event = { at, by: String(userId) }
+      if (typeof note === 'string' && note.trim()) event.note = note.trim()
+      if (resolvedAt) event.resolvedAt = resolvedAt
+      if (resolvedBy) event.resolvedBy = resolvedBy
+      return { ...rest, sendBacks: [...(entry.sendBacks ?? []), event] }
+    })
   }
 
   /**

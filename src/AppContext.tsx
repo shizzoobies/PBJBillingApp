@@ -481,6 +481,16 @@ export type AppContextValue = {
   waitingOnDone: (checklistId: string, waitingOnId: string) => Promise<void>
   /** Stage 2 — the requester confirms and closes it out, keeping it as the record. */
   waitingOnVerify: (checklistId: string, waitingOnId: string) => Promise<void>
+  /**
+   * Stage 2, the other door — the requester does NOT approve. The wait returns
+   * to the blocker with `note`, and the rejected resolution is kept on
+   * `sendBacks[]`. The note is required by the server.
+   */
+  waitingOnSendBack: (
+    checklistId: string,
+    waitingOnId: string,
+    note: string,
+  ) => Promise<void>
   /** Cancel a waiting-on blocker (notifies the blocker it's no longer needed). */
   waitingOnCancel: (checklistId: string, waitingOnId: string) => Promise<void>
   /** Owner-only: restore a recycled checklist back to the active list. */

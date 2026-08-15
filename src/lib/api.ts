@@ -1357,6 +1357,35 @@ export async function waitingOnDoneRequest(checklistId: string, waitingOnId: str
   return ((await response.json()) as { checklist: Checklist }).checklist
 }
 
+/**
+ * Send back — the requester does NOT approve the reported work, so the wait
+ * returns to the blocker carrying `note`. Refused with 400 when the note is
+ * empty (a bare rejection tells the blocker nothing) and with 409 until the
+ * blocker has marked it done.
+ */
+export async function waitingOnSendBackRequest(
+  checklistId: string,
+  waitingOnId: string,
+  note: string,
+) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/waiting-ons/${encodeURIComponent(
+      waitingOnId,
+    )}/send-back`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to send back (${response.status})`)
+  }
+  return ((await response.json()) as { checklist: Checklist }).checklist
+}
+
 /** Cancel a waiting-on blocker (the flagger, the step assignee, or an owner). */
 export async function waitingOnCancelRequest(checklistId: string, waitingOnId: string) {
   const response = await apiFetch(

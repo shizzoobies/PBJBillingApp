@@ -506,6 +506,25 @@ export type WaitingOn = {
   /** The requester confirmed and retired the wait. Kept, shown struck through. */
   verifiedAt?: string
   verifiedBy?: string
+  /**
+   * Every time the requester did NOT approve and sent it back, oldest first.
+   * Send-back clears `resolvedAt/By` so the wait is the blocker's move again —
+   * the cleared resolution is stashed on the event rather than lost, and the
+   * requester's new note is appended here rather than overwriting `note`.
+   */
+  sendBacks?: WaitingSendBack[]
+}
+
+/** One "not approved — do it again" lap on a {@link WaitingOn}. */
+export type WaitingSendBack = {
+  /** When it was sent back, and by whom (the requester). */
+  at: string
+  by: string
+  /** What still needs doing. Required by the endpoint — a bare rejection helps nobody. */
+  note?: string
+  /** The resolution this send-back cleared, kept so "who did it, when" survives. */
+  resolvedAt?: string
+  resolvedBy?: string
 }
 
 export type SubSubChecklistItem = {

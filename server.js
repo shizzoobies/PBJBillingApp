@@ -86,6 +86,7 @@ import {
 } from './lib/stripe-rail.js'
 import {
   canMarkWaitingOnDone,
+  canSendBackWaitingOn,
   canVerifyWaitingOn,
   isClientWait,
   waitingOnStage,
@@ -6430,16 +6431,19 @@ const server = createServer(async (request, response) => {
     // These routes MUST be matched BEFORE the generic
     // `/api/checklists/:id/items/...` matchers below so they aren't shadowed.
 
-    // POST /api/checklists/:id/waiting-ons/:waitingOnId/(done|cancel|verify)
+    // POST /api/checklists/:id/waiting-ons/:waitingOnId/(done|cancel|verify|send-back)
     //
-    // The two-stage hand-off (see lib/waiting-on-state.js):
-    //   done   — the blocker reports their part finished. Marks the record
-    //            resolved; does NOT delete it, because the record is what keeps
-    //            the name of whoever did the check.
-    //   verify — the requester confirms and retires the wait. Also keeps it.
-    //   cancel — unchanged: removes the row outright.
+    // The hand-off (see lib/waiting-on-state.js):
+    //   done      — the blocker reports their part finished. Marks the record
+    //               resolved; does NOT delete it, because the record is what
+    //               keeps the name of whoever did the check.
+    //   verify    — the requester approves and retires the wait. Also keeps it.
+    //   send-back — the requester does NOT approve: the wait returns to the
+    //               blocker carrying a new note, and the rejected resolution is
+    //               kept on `sendBacks[]`. Body: { note }.
+    //   cancel    — unchanged: removes the row outright.
     const waitingOnActionMatch = normalizedPath.match(
-      /^\/api\/checklists\/([^/]+)\/waiting-ons\/([^/]+)\/(done|cancel|verify)$/,
+      /^\/api\/checklists\/([^/]+)\/waiting-ons\/([^/]+)\/(done|cancel|verify|send-back)$/,
     )
     if (waitingOnActionMatch) {
       const session = await requireSession(request, response)
@@ -6479,6 +6483,8 @@ const server = createServer(async (request, response) => {
       // A client wait has no second party to hand back to, so its Done goes
       // straight through both stages in one click.
       const clientWait = isClientWait(entry)
+      /** Set by the send-back branch below; the note that rides back to the blocker. */
+      let sendBackNote = ''
 
       if (action === 'done') {
         if (!canMarkWaitingOnDone(permissionArgs)) {
@@ -6506,6 +6512,29 @@ const server = createServer(async (request, response) => {
           })
           return
         }
+      } else if (action === 'send-back') {
+        // Same people, same stage as verify — approving and rejecting are the
+        // two doors out of one room.
+        if (!canSendBackWaitingOn(permissionArgs)) {
+          sendJson(response, waitingOnStage(entry) === 'resolved' ? 403 : 409, {
+            error: clientWait
+              ? // Nobody to send it back TO.
+                'A client wait cannot be sent back'
+              : waitingOnStage(entry) === 'waiting'
+                ? 'Nobody has marked this done yet — there is nothing to send back'
+                : waitingOnStage(entry) === 'verified'
+                  ? 'This wait is already closed out'
+                  : 'You cannot send this waiting-on request back',
+          })
+          return
+        }
+        // Her words: "send back with another note". A bare rejection tells the
+        // blocker nothing, so the note is the payload, not a decoration.
+        sendBackNote = String((await readJsonBody(request))?.note ?? '').trim()
+        if (!sendBackNote) {
+          sendJson(response, 400, { error: 'Say what still needs doing before sending it back' })
+          return
+        }
       } else {
         // Cancel: the flagger, the step assignee, or an owner.
         const isAssignee = existing.assigneeId && existing.assigneeId === session.user.id
@@ -6525,7 +6554,12 @@ const server = createServer(async (request, response) => {
             ? await appDataStore.markWaitingOnVerified(checklistId, waitingOnId, {
                 userId: session.user.id,
               })
-            : await appDataStore.resolveWaitingOn(checklistId, waitingOnId)
+            : action === 'send-back'
+              ? await appDataStore.markWaitingOnSentBack(checklistId, waitingOnId, {
+                  userId: session.user.id,
+                  note: sendBackNote,
+                })
+              : await appDataStore.resolveWaitingOn(checklistId, waitingOnId)
       if (!resolved) {
         sendJson(response, 404, { error: 'Waiting-on request not found' })
         return
@@ -6573,6 +6607,23 @@ const server = createServer(async (request, response) => {
           await appDataStore.recordActivity(
             session.user.id,
             'waiting_on_verified',
+            `${checklistTitle}: ${resolved.label}`,
+          )
+        } else if (action === 'send-back') {
+          // It is the blocker's move again, so this is the same fact the wait
+          // announced when it was first created — reusing that event keeps it
+          // inside the "Waiting-on updates" notification preference rather than
+          // inventing a channel nobody has opted into.
+          const senderName = nameOf(session.user.id)
+          await notify(appDataStore, resolved.entry.blockerId, 'waiting_on_requested', {
+            checklistId,
+            message: `${senderName} sent "${resolved.label}" in "${checklistTitle}" back to you — ${sendBackNote}`,
+            link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+          await appDataStore.recordActivity(
+            session.user.id,
+            'waiting_on_sent_back',
             `${checklistTitle}: ${resolved.label}`,
           )
         } else {

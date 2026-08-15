@@ -3269,3 +3269,254 @@ describe('one source of truth for a client team (file backend)', () => {
     expect(client.assignedBookkeeperIds).not.toContain('emp-2')
   })
 })
+
+/**
+ * SEND BACK — "a button to not approve and send back with another note"
+ * (featreq-b05a2f3a, the firm owner's fourth round on the waiting-on flow).
+ *
+ * The transition that makes the hand-off a loop rather than a line:
+ *
+ *   waiting --B's Done--> resolved --A's Send back--> waiting --B's Done--> ...
+ *
+ * What makes it safe is that it MOVES rather than deletes. `resolvedAt` /
+ * `resolvedBy` have to be cleared or the wait would still read as `resolved`
+ * and never return to B's queue — so they are stashed on the `sendBacks[]`
+ * event that cleared them, alongside A's new note. The ORIGINAL note, the
+ * requester and the creation date are never touched.
+ *
+ * File backend here; the Postgres statement shape is pinned separately below.
+ */
+describe('markWaitingOnSentBack (file backend)', () => {
+  const ASKED = 'emp-brit' // A, who asked
+  const BLOCKER = 'emp-lisa' // B, who was waited on
+
+  const seedWait = async (overrides = {}) => {
+    await store.write(
+      workspace({
+        employees: [
+          { id: ASKED, name: 'Brittany', role: 'owner' },
+          { id: BLOCKER, name: 'Lisa', role: 'bookkeeper' },
+        ],
+        checklists: [
+          {
+            id: 'cl-1',
+            clientId: 'c1',
+            title: 'August close',
+            items: [
+              {
+                id: 'it-1',
+                label: 'Bank rec',
+                done: false,
+                assigneeId: ASKED,
+                waitingOns: [
+                  {
+                    id: 'wo-1',
+                    blockerId: BLOCKER,
+                    requestedBy: ASKED,
+                    note: 'the bank statements',
+                    createdAt: '2026-08-05T15:00:00.000Z',
+                    ...overrides,
+                  },
+                ],
+                subItems: [],
+              },
+            ],
+          },
+        ],
+      }),
+    )
+  }
+
+  const RESOLVED = { resolvedAt: '2026-08-07T15:00:00.000Z', resolvedBy: BLOCKER }
+
+  const entryFromDisk = async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.checklists[0].items[0].waitingOns[0]
+  }
+
+  it('returns a resolved wait to the blocker and keeps BOTH notes', async () => {
+    await seedWait(RESOLVED)
+
+    const result = await store.markWaitingOnSentBack('cl-1', 'wo-1', {
+      userId: ASKED,
+      note: 'the March page is missing',
+    })
+    expect(result).not.toBeNull()
+
+    const entry = await entryFromDisk()
+    // Back to B's move.
+    expect(entry.resolvedAt).toBeUndefined()
+    expect(entry.resolvedBy).toBeUndefined()
+    expect(entry.verifiedAt).toBeUndefined()
+    // The original note is NOT overwritten — that was the whole instruction.
+    expect(entry.note).toBe('the bank statements')
+    expect(entry.requestedBy).toBe(ASKED)
+    expect(entry.createdAt).toBe('2026-08-05T15:00:00.000Z')
+    // ...and the rejected resolution survives on the event that cleared it.
+    expect(entry.sendBacks).toHaveLength(1)
+    expect(entry.sendBacks[0]).toMatchObject({
+      by: ASKED,
+      note: 'the March page is missing',
+      resolvedAt: RESOLVED.resolvedAt,
+      resolvedBy: BLOCKER,
+    })
+    expect(typeof entry.sendBacks[0].at).toBe('string')
+  })
+
+  it('appends on every lap, oldest first', async () => {
+    await seedWait(RESOLVED)
+    await store.markWaitingOnSentBack('cl-1', 'wo-1', { userId: ASKED, note: 'first pass' })
+    await store.markWaitingOnDone('cl-1', 'wo-1', { userId: BLOCKER })
+    await store.markWaitingOnSentBack('cl-1', 'wo-1', { userId: ASKED, note: 'second pass' })
+
+    const entry = await entryFromDisk()
+    expect(entry.sendBacks.map((event) => event.note)).toEqual(['first pass', 'second pass'])
+    expect(entry.note).toBe('the bank statements')
+  })
+
+  it('survives the read() round-trip — normalizeWaitingOns must not eat it', async () => {
+    await seedWait(RESOLVED)
+    await store.markWaitingOnSentBack('cl-1', 'wo-1', { userId: ASKED, note: 'not yet' })
+
+    // read() re-normalizes every node and writes its materialized output back;
+    // a field the normalizer drops is erased on the next page load.
+    const data = await store.read()
+    const entry = data.checklists[0].items[0].waitingOns[0]
+    expect(entry.sendBacks).toEqual([
+      expect.objectContaining({ by: ASKED, note: 'not yet', resolvedBy: BLOCKER }),
+    ])
+    expect(entry.resolvedAt).toBeUndefined()
+  })
+
+  it('closes out normally after the lap, keeping the whole history', async () => {
+    await seedWait(RESOLVED)
+    await store.markWaitingOnSentBack('cl-1', 'wo-1', { userId: ASKED, note: 'redo it' })
+    await store.markWaitingOnDone('cl-1', 'wo-1', { userId: BLOCKER })
+    await store.markWaitingOnVerified('cl-1', 'wo-1', { userId: ASKED })
+
+    const entry = await entryFromDisk()
+    expect(entry.verifiedBy).toBe(ASKED)
+    expect(entry.resolvedBy).toBe(BLOCKER)
+    expect(entry.note).toBe('the bank statements')
+    expect(entry.sendBacks).toHaveLength(1)
+  })
+
+  it('never touches the step own done flag', async () => {
+    await seedWait(RESOLVED)
+    await store.markWaitingOnSentBack('cl-1', 'wo-1', { userId: ASKED, note: 'again please' })
+
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.checklists[0].items[0].done).toBe(false)
+  })
+
+  it('returns null for a wait that is not there', async () => {
+    await seedWait()
+    expect(
+      await store.markWaitingOnSentBack('cl-1', 'wo-nope', { userId: ASKED, note: 'x' }),
+    ).toBeNull()
+  })
+})
+
+/**
+ * The same transition's POSTGRES shape — the branch production runs.
+ *
+ * NO new statement is introduced: send-back rides the existing
+ * `_persistItemWaitingOns` update, the same one Done and Approve use. What IS
+ * new is a key inside that JSONB payload (`sendBacks[]`), and a JSONB field the
+ * normalizer doesn't carry is erased on the next read — which is why this
+ * asserts on the parameter, not just the SQL text.
+ */
+describe('markWaitingOnSentBack statement shape (postgres branch)', () => {
+  const ASKED = 'emp-brit'
+  const BLOCKER = 'emp-lisa'
+
+  const resolvedEntry = () => ({
+    id: 'wo-1',
+    blockerId: BLOCKER,
+    requestedBy: ASKED,
+    note: 'the bank statements',
+    createdAt: '2026-08-05T15:00:00.000Z',
+    resolvedAt: '2026-08-07T15:00:00.000Z',
+    resolvedBy: BLOCKER,
+  })
+
+  /** `_mutateWaitingOn` reads through `read()`; stub it to the row under test. */
+  function pgStoreFor(items) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({
+      checklists: [{ id: 'cl-1', clientId: 'c1', title: 'August close', items }],
+    })
+    return { fake, pgStore }
+  }
+
+  const itemLevel = () => [
+    {
+      id: 'it-1',
+      label: 'Bank rec',
+      done: false,
+      assigneeId: ASKED,
+      waitingOns: [resolvedEntry()],
+      subItems: [],
+    },
+  ]
+
+  it('writes through the existing waiting_ons update — no new statement', async () => {
+    const { fake, pgStore } = pgStoreFor(itemLevel())
+    await pgStore.markWaitingOnSentBack('cl-1', 'wo-1', { userId: ASKED, note: 'the March page' })
+
+    const updates = fake.matching(/^update checklist_items set waiting_ons = \$3::jsonb/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].params.slice(0, 2)).toEqual(['cl-1', 'it-1'])
+    // Nothing else in the schema is touched by a send-back.
+    expect(fake.matching(/^update checklist_items set sub_items/i)).toHaveLength(0)
+  })
+
+  it('carries sendBacks[] into the JSONB, with the resolution it cleared', async () => {
+    const { fake, pgStore } = pgStoreFor(itemLevel())
+    await pgStore.markWaitingOnSentBack('cl-1', 'wo-1', { userId: ASKED, note: 'the March page' })
+
+    const written = JSON.parse(
+      fake.matching(/^update checklist_items set waiting_ons/i)[0].params[2],
+    )
+    expect(written).toHaveLength(1)
+    expect(written[0].note).toBe('the bank statements')
+    expect(written[0].resolvedAt).toBeUndefined()
+    expect(written[0].resolvedBy).toBeUndefined()
+    expect(written[0].sendBacks).toEqual([
+      expect.objectContaining({
+        by: ASKED,
+        note: 'the March page',
+        resolvedAt: '2026-08-07T15:00:00.000Z',
+        resolvedBy: BLOCKER,
+      }),
+    ])
+  })
+
+  it('rewrites the sub_items JSONB instead when the wait is on a sub-item', async () => {
+    const { fake, pgStore } = pgStoreFor([
+      {
+        id: 'it-1',
+        label: 'Bank rec',
+        done: false,
+        assigneeId: ASKED,
+        waitingOns: [],
+        subItems: [
+          {
+            id: 'sub-1',
+            title: 'Pull statements',
+            done: false,
+            waitingOns: [resolvedEntry()],
+          },
+        ],
+      },
+    ])
+    await pgStore.markWaitingOnSentBack('cl-1', 'wo-1', { userId: ASKED, note: 'the March page' })
+
+    const updates = fake.matching(/^update checklist_items set sub_items = \$3::jsonb/i)
+    expect(updates).toHaveLength(1)
+    const subItems = JSON.parse(updates[0].params[2])
+    expect(subItems[0].waitingOns[0].sendBacks).toHaveLength(1)
+    expect(subItems[0].waitingOns[0].resolvedAt).toBeUndefined()
+  })
+})

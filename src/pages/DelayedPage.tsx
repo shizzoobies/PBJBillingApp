@@ -1,14 +1,20 @@
 import { AlarmClock, Check, ChevronDown, ChevronRight } from 'lucide-react'
 import { useCallback, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
+import { WaitApprovalActions } from '../components/WaitApprovalActions'
 import type { WaitingOn } from '../lib/types'
 import {
+  canMarkWaitingOnDone,
+  canVerifyWaitingOn,
   isClientWait,
-  isWaitingOnOpen,
-  waitingStepConcernsUser,
+  legacyWaitBelongsOnTab,
+  waitingOnStage,
+  waitingsOnDelayedTab,
+  type DelayedTab,
 } from '../../lib/waiting-on-state.js'
+import { DELAYED_TAB_KEYS, DELAYED_TAB_LABELS, resolveDelayedTab } from '../lib/delayedTabs'
 import {
   clientName,
   employeeName,
@@ -19,28 +25,45 @@ import {
 } from '../lib/utils'
 
 /**
- * The "Delayed" page — every checklist step flagged as waiting, grouped by
- * client so you can see which clients are stuck and why.
+ * The "Delayed" page — every checklist step flagged as waiting, split by which
+ * SIDE of the hand-off the viewer is on, then grouped by client.
  *
- * Rows are filtered to the VIEWER. Brittany's hand-off flow asks that finishing
- * your part removes the item "from Person B's delayed area" and that confirming
- * removes it "from Person A's" — which only means anything if the two people
- * are looking at different lists. So:
+ * Her fourth round, verbatim (featreq-b05a2f3a):
  *
- *   still waiting  → the person being waited on, plus whoever asked and the
- *                    step's assignee (they are the ones actually held up)
- *   marked done    → drops off the blocker's list, stays with the requester
- *                    and assignee until they confirm
- *   confirmed      → gone from everyone's
+ *   "On the Delayed tab when person A sends it to Person B - Person B should be
+ *    able to click done on their delayed tab and it goes away. On Person A's
+ *    delayed tab it should show as delayed but no button to push done just so
+ *    they can see and remember it (maybe a waiting on me and a I am waiting on
+ *    others tabs within delayed to keep it organized). Then when person B
+ *    pushes done it should show in Person A's delayed where they can push
+ *    complete."
  *
- * Owners are filtered the same way rather than seeing everything (Alex's call).
+ * So the page is two lists of the same waits seen from opposite ends:
+ *
+ *   Waiting on me         — you are the blocker. One plain Done per wait;
+ *                           pressing it resolves the WAIT and the row leaves
+ *                           this list. It does NOT tick the step off — that has
+ *                           been the checkboxes' job since her first round.
+ *   I'm waiting on others — you are the requester. Read-only while it is open
+ *                           ("no button to push done just so they can see and
+ *                           remember it"); Approve / Send back once the blocker
+ *                           reports done.
+ *
+ * The one behavior that CHANGED here: this page's Done used to call the step's
+ * own done-toggle, i.e. completing the checklist step from the Delayed list.
+ * That is now the wait's Done. The step-toggle survives only for OLD free-text
+ * waits, which have no wait record to resolve — see `row.legacy` below.
+ *
+ * Owners are filtered like everyone else rather than seeing the whole firm
+ * (Alex's call), which is why the routing helpers are asked without the owner
+ * override.
  */
 
 type WaitingRow = {
   key: string
   checklistId: string
   checklistTitle: string
-  /** The parent item's id (target of the Done toggle for an item row). */
+  /** The parent item's id. */
   itemId: string
   /** The parent item label. */
   itemLabel: string
@@ -48,9 +71,17 @@ type WaitingRow = {
   subItemId?: string
   /** Present when the waiting flag is on a sub-item rather than the item. */
   subLabel?: string
+  /** The step's own free-text waiting note (the legacy field, not a wait's note). */
   note?: string
-  /** Names of the internal people this step is structurally waiting on. */
-  blockerNames?: string[]
+  /** The structured waits on this step that belong on the ACTIVE tab, for this viewer. */
+  waits: WaitingOn[]
+  /**
+   * True for the old free-text flag (`waiting: true` with nobody attached).
+   * These have no wait record, so the only thing that can retire them is the
+   * step's own done-toggle — which is why they keep it and structured rows
+   * don't.
+   */
+  legacy: boolean
   assigneeId?: string
   dueDate?: string
 }
@@ -69,14 +100,21 @@ type ClientGroup = {
 }
 
 export function DelayedPage() {
-  const { data, toggleChecklistItem, toggleSubItem, activeEmployeeId: meId } = useAppContext()
+  const {
+    data,
+    toggleChecklistItem,
+    toggleSubItem,
+    waitingOnDone,
+    waitingOnVerify,
+    waitingOnSendBack,
+    activeEmployeeId: meId,
+  } = useAppContext()
   const { clients, employees, checklists } = data
   const today = localDateOnly()
 
   // A client wait names the CLIENT — its blockerId points at the client record,
   // so resolving it against employees would print "Unknown" for the one thing
-  // the row is about. Memoized alongside the rows it feeds so the grouping
-  // below doesn't rebuild on every render.
+  // the row is about.
   const blockerLabel = useCallback(
     (entry: WaitingOn, ownerClientId: string) =>
       isClientWait(entry)
@@ -85,51 +123,60 @@ export function DelayedPage() {
     [clients, employees],
   )
 
-  // Mark a delayed step done from here — the SAME toggle used on the dashboard /
-  // Checklists page. Once done it no longer counts as an open waiting step, so
-  // it drops off this list on the next render.
-  const markDone = (row: WaitingRow) => {
-    if (row.subItemId) {
-      void toggleSubItem(row.checklistId, row.itemId, row.subItemId)
-    } else {
-      void toggleChecklistItem(row.checklistId, row.itemId)
+  // Every waiting mutation goes through here so a server refusal surfaces on
+  // the page instead of dying as an unhandled rejection — a swallowed rejection
+  // is exactly what "the button does nothing" looks like from the outside.
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const run = async (work: () => Promise<void> | void) => {
+    setError(null)
+    setBusy(true)
+    try {
+      await work()
+    } catch (err) {
+      setError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Couldn't update this wait — please try again.",
+      )
+    } finally {
+      setBusy(false)
     }
   }
 
-  const groups = useMemo<ClientGroup[]>(() => {
-    const byClient = new Map<string, Map<string, ChecklistGroup>>()
+  const buildGroups = useCallback(
+    (tab: DelayedTab): ClientGroup[] => {
+      const byClient = new Map<string, Map<string, ChecklistGroup>>()
 
-    for (const checklist of checklists) {
-      if (checklist.deletedAt) continue
-      const rows: WaitingRow[] = []
-      for (const item of checklist.items) {
-        // A completed step isn't "delayed" any more — hide it so marking a step
-        // done here makes it drop off the list.
-        if (
-          stepIsWaiting(item) &&
-          !isChecklistItemDone(item) &&
-          waitingStepConcernsUser(item, { userId: meId, assigneeId: item.assigneeId ?? null })
-        ) {
-          rows.push({
-            key: `${checklist.id}:${item.id}`,
-            checklistId: checklist.id,
-            checklistTitle: checklist.title,
-            itemId: item.id,
-            itemLabel: item.label,
-            note: item.waitingOn,
-            blockerNames: (item.waitingOns ?? [])
-              .filter(isWaitingOnOpen)
-              .map((w) => blockerLabel(w, checklist.clientId)),
-            assigneeId: item.assigneeId,
-            dueDate: item.dueDate,
-          })
-        }
-        for (const sub of item.subItems ?? []) {
-          if (
-            stepIsWaiting(sub) &&
-            !sub.done &&
-            waitingStepConcernsUser(sub, { userId: meId, assigneeId: item.assigneeId ?? null })
-          ) {
+      for (const checklist of checklists) {
+        if (checklist.deletedAt) continue
+        const rows: WaitingRow[] = []
+        for (const item of checklist.items) {
+          const assigneeId = item.assigneeId ?? null
+          // A completed step isn't "delayed" any more.
+          if (stepIsWaiting(item) && !isChecklistItemDone(item)) {
+            const waits = waitingsOnDelayedTab(item, { userId: meId, assigneeId, tab })
+            const legacy = legacyWaitBelongsOnTab(item, { userId: meId, assigneeId, tab })
+            if (waits.length > 0 || legacy) {
+              rows.push({
+                key: `${checklist.id}:${item.id}`,
+                checklistId: checklist.id,
+                checklistTitle: checklist.title,
+                itemId: item.id,
+                itemLabel: item.label,
+                note: item.waitingOn,
+                waits,
+                legacy,
+                assigneeId: item.assigneeId,
+                dueDate: item.dueDate,
+              })
+            }
+          }
+          for (const sub of item.subItems ?? []) {
+            if (!stepIsWaiting(sub) || sub.done) continue
+            const waits = waitingsOnDelayedTab(sub, { userId: meId, assigneeId, tab })
+            const legacy = legacyWaitBelongsOnTab(sub, { userId: meId, assigneeId, tab })
+            if (waits.length === 0 && !legacy) continue
             rows.push({
               key: `${checklist.id}:${item.id}:${sub.id}`,
               checklistId: checklist.id,
@@ -139,42 +186,76 @@ export function DelayedPage() {
               subItemId: sub.id,
               subLabel: sub.title,
               note: sub.waitingOn,
-              blockerNames: (sub.waitingOns ?? [])
-                .filter(isWaitingOnOpen)
-                .map((w) => blockerLabel(w, checklist.clientId)),
+              waits,
+              legacy,
               assigneeId: item.assigneeId,
               dueDate: sub.dueDate ?? item.dueDate,
             })
           }
         }
+        if (rows.length === 0) continue
+
+        const clientId = checklist.clientId
+        const checklistMap = byClient.get(clientId) ?? new Map<string, ChecklistGroup>()
+        checklistMap.set(checklist.id, {
+          checklistId: checklist.id,
+          title: checklist.title,
+          rows,
+        })
+        byClient.set(clientId, checklistMap)
       }
-      if (rows.length === 0) continue
 
-      const clientId = checklist.clientId
-      const checklistMap = byClient.get(clientId) ?? new Map<string, ChecklistGroup>()
-      checklistMap.set(checklist.id, {
-        checklistId: checklist.id,
-        title: checklist.title,
-        rows,
-      })
-      byClient.set(clientId, checklistMap)
-    }
+      return [...byClient.entries()]
+        .map(([clientId, checklistMap]) => {
+          const checklistGroups = [...checklistMap.values()].sort((a, b) =>
+            a.title.localeCompare(b.title),
+          )
+          const count = checklistGroups.reduce((total, group) => total + group.rows.length, 0)
+          return {
+            clientId,
+            name: clientName(clients, clientId),
+            count,
+            checklists: checklistGroups,
+          }
+        })
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    },
+    [checklists, clients, meId],
+  )
 
-    return [...byClient.entries()]
-      .map(([clientId, checklistMap]) => {
-        const checklistGroups = [...checklistMap.values()].sort((a, b) =>
-          a.title.localeCompare(b.title),
-        )
-        const count = checklistGroups.reduce((total, group) => total + group.rows.length, 0)
-        return {
-          clientId,
-          name: clientName(clients, clientId),
-          count,
-          checklists: checklistGroups,
-        }
-      })
-      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
-  }, [blockerLabel, checklists, clients, meId])
+  // Both tabs are built every render: the counts live in the tab labels, so the
+  // quiet one has to be measured even while the busy one is showing.
+  const groupsByTab = useMemo(
+    () => ({
+      blocking: buildGroups('blocking'),
+      requesting: buildGroups('requesting'),
+    }),
+    [buildGroups],
+  )
+
+  const tabCounts = useMemo(
+    () =>
+      ({
+        blocking: groupsByTab.blocking.reduce((total, group) => total + group.count, 0),
+        requesting: groupsByTab.requesting.reduce((total, group) => total + group.count, 0),
+      }) as Record<DelayedTab, number>,
+    [groupsByTab],
+  )
+
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeTab = resolveDelayedTab({
+    tabParam: searchParams.get('tab'),
+    counts: tabCounts,
+  })
+  const showTab = (tab: DelayedTab) => {
+    // Written even for the tab that would have been the default — otherwise
+    // clicking a quiet tab bounces straight back to the busy one.
+    const next = new URLSearchParams(searchParams)
+    next.set('tab', tab)
+    setSearchParams(next, { replace: true })
+  }
+
+  const groups = groupsByTab[activeTab]
 
   const [query, setQuery] = useState('')
 
@@ -187,12 +268,16 @@ export function DelayedPage() {
         const filteredChecklists = group.checklists
           .map((checklist) => {
             const titleMatch = checklist.title.toLowerCase().includes(q)
-            const filteredRows = clientMatch || titleMatch
-              ? checklist.rows
-              : checklist.rows.filter((row) => {
-                  const noteMatch = (row.note ?? '').toLowerCase().includes(q)
-                  return noteMatch
-                })
+            const filteredRows =
+              clientMatch || titleMatch
+                ? checklist.rows
+                : checklist.rows.filter((row) => {
+                    const noteMatch = (row.note ?? '').toLowerCase().includes(q)
+                    const waitNoteMatch = row.waits.some((entry) =>
+                      (entry.note ?? '').toLowerCase().includes(q),
+                    )
+                    return noteMatch || waitNoteMatch
+                  })
             return { ...checklist, rows: filteredRows }
           })
           .filter((checklist) => checklist.rows.length > 0)
@@ -205,7 +290,8 @@ export function DelayedPage() {
       .filter((group) => group.checklists.length > 0)
   }, [groups, query])
 
-  const totalDelayed = groups.reduce((total, group) => total + group.count, 0)
+  const totalDelayed = tabCounts.blocking + tabCounts.requesting
+  const tabTotal = tabCounts[activeTab]
   const visibleTotal = visibleGroups.reduce((total, group) => total + group.count, 0)
 
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
@@ -216,6 +302,17 @@ export function DelayedPage() {
       else next.add(clientId)
       return next
     })
+  }
+
+  // The ONLY remaining step-completing action on this page, and only for a
+  // free-text wait with no record behind it. A structured wait is retired by
+  // its own Done — the step stays for its owner to tick off.
+  const markLegacyDone = (row: WaitingRow) => {
+    if (row.subItemId) {
+      void toggleSubItem(row.checklistId, row.itemId, row.subItemId)
+    } else {
+      void toggleChecklistItem(row.checklistId, row.itemId)
+    }
   }
 
   return (
@@ -235,22 +332,54 @@ export function DelayedPage() {
             onChange={setQuery}
             placeholder="Search delayed…"
             resultCount={visibleTotal}
-            total={totalDelayed}
+            total={tabTotal}
           />
         </div>
       </header>
 
+      {/* The shared underline bar — the same one the approvals page and the
+          month run use. Deliberately not a fourth copy of the styling. */}
+      <div className="task-area-tabs" role="tablist" aria-label="Delayed sections">
+        {DELAYED_TAB_KEYS.map((tab) => {
+          const isActive = tab === activeTab
+          const count = tabCounts[tab]
+          const classes = ['task-area-tab', isActive ? 'is-active' : '', count === 0 ? 'is-empty' : '']
+            .filter(Boolean)
+            .join(' ')
+          return (
+            <button
+              key={tab}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              className={classes}
+              onClick={() => showTab(tab)}
+            >
+              {DELAYED_TAB_LABELS[tab]}
+              <span className="task-area-tab-count">{count}</span>
+            </button>
+          )
+        })}
+      </div>
+
       <p className="panel-intro">
-        Every checklist step flagged <strong>“waiting on”</strong> — grouped by client — so you can
-        see what’s blocked and why. Clear a flag on the Checklists tab (or under the client) once
-        it’s unblocked.
+        {activeTab === 'blocking'
+          ? 'Steps a colleague is waiting on YOU for. Press Done when your part is finished — it leaves this list and goes back to whoever asked, who has the final say.'
+          : "Steps YOU are waiting on. Nothing to press until they mark their part done — then you can approve it or send it back with a note."}
       </p>
+
+      {error ? (
+        <p className="waiting-editor-error" role="alert">
+          {error}
+        </p>
+      ) : null}
 
       {groups.length === 0 ? (
         <div className="panel">
           <p className="empty-state">
-            Nothing is flagged as waiting right now. Toggle the ⏳ on a checklist item or sub-item
-            to flag it as delayed.
+            {activeTab === 'blocking'
+              ? 'Nobody is waiting on you right now.'
+              : 'You are not waiting on anybody right now. Flag a step with the ⏳ on a checklist item or sub-item to add one.'}
           </p>
         </div>
       ) : visibleGroups.length === 0 ? (
@@ -297,15 +426,43 @@ export function DelayedPage() {
                                       <span className="delayed-row-sub"> › {row.subLabel}</span>
                                     ) : null}
                                   </span>
-                                  <span className="delayed-row-note">
-                                    {row.blockerNames && row.blockerNames.length > 0
-                                      ? `Waiting on ${row.blockerNames.join(', ')}${
-                                          row.note ? ` — ${row.note}` : ''
-                                        }`
-                                      : row.note
-                                        ? row.note
-                                        : 'Waiting (no note yet)'}
-                                  </span>
+                                  {row.legacy ? (
+                                    <span className="delayed-row-note">
+                                      {row.note ? row.note : 'Waiting (no note yet)'}
+                                    </span>
+                                  ) : null}
+                                  {row.waits.length > 0 ? (
+                                    <ul className="delayed-wait-list">
+                                      {row.waits.map((entry) => (
+                                        <DelayedWaitRow
+                                          key={entry.id}
+                                          entry={entry}
+                                          tab={activeTab}
+                                          busy={busy}
+                                          blockerName={blockerLabel(entry, group.clientId)}
+                                          assigneeId={row.assigneeId ?? null}
+                                          meId={meId}
+                                          employees={employees.map((e) => ({
+                                            id: e.id,
+                                            name: e.name,
+                                          }))}
+                                          onDone={() =>
+                                            void run(() => waitingOnDone(row.checklistId, entry.id))
+                                          }
+                                          onApprove={() =>
+                                            void run(() =>
+                                              waitingOnVerify(row.checklistId, entry.id),
+                                            )
+                                          }
+                                          onSendBack={(note) =>
+                                            void run(() =>
+                                              waitingOnSendBack(row.checklistId, entry.id, note),
+                                            )
+                                          }
+                                        />
+                                      ))}
+                                    </ul>
+                                  ) : null}
                                 </div>
                                 <div className="delayed-row-meta">
                                   {row.assigneeId ? (
@@ -318,14 +475,16 @@ export function DelayedPage() {
                                       Due {shortDate.format(new Date(`${row.dueDate}T12:00:00`))}
                                     </span>
                                   ) : null}
-                                  <button
-                                    type="button"
-                                    className="delayed-row-done"
-                                    onClick={() => markDone(row)}
-                                    title="Mark this step done (same as checking it off on the Checklists page)"
-                                  >
-                                    <Check size={14} /> Done
-                                  </button>
+                                  {row.legacy && row.waits.length === 0 ? (
+                                    <button
+                                      type="button"
+                                      className="delayed-row-done"
+                                      onClick={() => markLegacyDone(row)}
+                                      title="Mark this step done (same as checking it off on the Checklists page)"
+                                    >
+                                      <Check size={14} /> Done
+                                    </button>
+                                  ) : null}
                                 </div>
                               </li>
                             )
@@ -341,5 +500,100 @@ export function DelayedPage() {
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * One structured wait inside a Delayed row, with whatever the viewer is allowed
+ * to press on this tab — which is the whole point of the split:
+ *
+ *   blocking / waiting    → Done (yours to finish)
+ *   requesting / waiting  → nothing. "no button to push done just so they can
+ *                           see and remember it". The one exception is a CLIENT
+ *                           wait, which has no second party: whoever chased the
+ *                           client closes it themselves, as it has since round 1.
+ *   requesting / resolved → Approve or Send back, and nothing else.
+ */
+function DelayedWaitRow({
+  entry,
+  tab,
+  busy,
+  blockerName,
+  assigneeId,
+  meId,
+  employees,
+  onDone,
+  onApprove,
+  onSendBack,
+}: {
+  entry: WaitingOn
+  tab: DelayedTab
+  busy: boolean
+  blockerName: string
+  assigneeId: string | null
+  meId: string
+  employees: Array<{ id: string; name: string }>
+  onDone: () => void
+  onApprove: () => void
+  onSendBack: (note: string) => void
+}) {
+  const stage = waitingOnStage(entry)
+  // The owner override is deliberately off: this page shows everyone their own
+  // part in the hand-off, owners included.
+  const permission = { entry, userId: meId, isOwner: false, assigneeId }
+  const lastSendBack = entry.sendBacks?.[entry.sendBacks.length - 1]
+  const nameOf = (id: string) => employees.find((e) => e.id === id)?.name ?? 'A team member'
+
+  return (
+    <li className={`delayed-wait is-${stage}`}>
+      <span className="delayed-row-note">
+        {`Waiting on ${blockerName}`}
+        {entry.note ? ` — ${entry.note}` : ''}
+      </span>
+      {/* Why it came back. Shown on both tabs: B needs to know what to redo, and
+          A needs to remember what they asked for. */}
+      {lastSendBack ? (
+        <span className="delayed-wait-sendback">
+          {`Sent back by ${nameOf(lastSendBack.by)}${
+            lastSendBack.note ? ` — ${lastSendBack.note}` : ''
+          }`}
+        </span>
+      ) : null}
+      {stage === 'resolved' ? (
+        <span className="waiting-blocker-pending">
+          {entry.resolvedBy ? `${nameOf(entry.resolvedBy)} says done` : 'reported done'}
+        </span>
+      ) : null}
+      {tab === 'blocking' && canMarkWaitingOnDone(permission) ? (
+        <button
+          type="button"
+          className="delayed-row-done"
+          disabled={busy}
+          title="My part is finished — hands it back to whoever asked, and it leaves this list. It does not tick the step off."
+          onClick={onDone}
+        >
+          <Check size={14} /> Done
+        </button>
+      ) : null}
+      {tab === 'requesting' && stage === 'resolved' && canVerifyWaitingOn(permission) ? (
+        <WaitApprovalActions
+          busy={busy}
+          blockerName={blockerName}
+          onApprove={onApprove}
+          onSendBack={onSendBack}
+        />
+      ) : null}
+      {tab === 'requesting' && stage === 'waiting' && canMarkWaitingOnDone(permission) ? (
+        <button
+          type="button"
+          className="delayed-row-done"
+          disabled={busy}
+          title="The client came back — close this out. Clients have no login, so there is nobody to hand it back to."
+          onClick={onDone}
+        >
+          <Check size={14} /> Heard back
+        </button>
+      ) : null}
+    </li>
   )
 }

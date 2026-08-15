@@ -494,7 +494,7 @@ Clients page meanwhile. Owner-only.
   2. **Done** — the person being waited on presses **Mark done**. It leaves THEIR
      Delayed page, notifies whoever asked, and shows green with "done by <name>"
      and a date, tagged "awaiting your OK".
-  3. **Confirmed** — whoever asked presses **Confirm**. The wait closes out and
+  3. **Approved** — whoever asked presses **Approve**. The wait closes out and
      leaves their Delayed page too — and stays on the checklist step as a
      **completed sub-item**: a ticked box with the label struck through, exactly
      like a task you check off, with the full record underneath ("asked by
@@ -503,11 +503,27 @@ Clients page meanwhile. Owner-only.
      waiting editor closes, and whether or not you can edit the task. The tick
      belongs to the WAIT, not the step: confirming a wait never checks the step
      itself off, and the box can't be un-ticked.
-  You cannot confirm work nobody has reported finished (the app says so and
-  points you at Cancel instead), and the person who did the work cannot confirm
-  their own. Owners can do either step on anyone's behalf. **Cancel** is
+  You cannot approve work nobody has reported finished (the app says so and
+  points you at Cancel instead), and the person who did the work cannot approve
+  their own. Owners can do either step on anyone's behalf. **Cancel** (the ×) is
   unchanged and still erases the wait outright — that means "this never needed to
-  happen", so no record is kept.
+  happen", so no record is kept — but it is only offered while the wait is still
+  amber. Once someone has reported it done, the only two answers are Approve and
+  Send back.
+- **Send back — "not approved, do it again."** At step 2 the person who asked
+  gets a **Send back** button beside Approve. It asks for a note (required) and
+  hands the wait straight back: it turns amber again, reappears in the other
+  person's "Waiting on me" list with a Done, and notifies them exactly like the
+  original request did. Nothing is overwritten — the original note stays put, and
+  every send-back note is kept in order alongside who had reported it done and
+  when, so a wait that went round three times reads back in full. The step itself
+  is never ticked off by any of this.
+- **Creating a wait is Save, and it is final.** Picking a name no longer creates
+  the wait on the spot: you pick the person (or the client), type the note that
+  goes WITH the wait, then press **Save**. **Clear** discards it if you opened
+  the picker by accident — nothing is created and nothing is notified. Once
+  saved, the person and the note cannot be edited; the only things left are the
+  buttons above (Mark done / Approve / Send back / Cancel).
 - **Waiting on the CLIENT.** The same picker offers the task's own client
   alongside the team. You never choose which client — the task already belongs to
   one. Because a client has no login, there is nobody to hand back to and nobody
@@ -703,10 +719,29 @@ Clients page meanwhile. Owner-only.
 - An older free-text wait with nobody attached to it still shows to the step's
   assignee (or to everyone if the step has no assignee), so nothing that predates
   the two-step hand-off silently vanishes from the page.
-- Each row has a "Done" button that checks the step off right here — the same
-  toggle used on the Checklists page / dashboard — so whoever was tagged (e.g. a
-  bookkeeper waiting-on'd for a step) can complete it without leaving this page.
-  A completed step drops off the list (done steps aren't shown).
+- **Two tabs: "Waiting on me" and "I'm waiting on others."** Same underline tab
+  bar as Time Approvals, with a live count in each label; the page opens on
+  whichever has work (clicking the quiet one sticks — it won't bounce back).
+  - **Waiting on me** — someone is blocked on you. Each wait has a plain **Done**
+    button. Pressing it says "my part is finished": the wait leaves this list and
+    goes back to whoever asked, who has the final say. It does NOT tick the
+    checklist step off.
+  - **I'm waiting on others** — waits you asked for (and waits on a client). While
+    the other person hasn't finished, the row is a **read-only reminder**: no
+    Done, no buttons, just what you're waiting on and why. Once they mark it done
+    the row gains exactly two buttons, **Approve** and **Send back**.
+  - One step can appear on both tabs at once with different waits on each — being
+    owed something and owing something on the same step is normal.
+- **Send back ("not approved").** Instead of approving, you can send a wait
+  straight back with a note saying what still needs doing. The note is required.
+  It returns to the other person's "Waiting on me" tab with a Done again, and
+  they're notified the same way as the original request. Nothing is overwritten:
+  the original note stays, and every send-back note is kept in order alongside
+  who had reported it done and when. You lose the two buttons again until they
+  re-report it finished.
+- The step's own "Done" toggle survives on this page only for an OLD free-text
+  wait, which has no wait record to resolve. A completed step drops off the list
+  (done steps aren't shown).
 
 ## Clients (owner manages; staff see assigned)
 

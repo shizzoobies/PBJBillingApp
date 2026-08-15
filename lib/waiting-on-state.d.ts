@@ -6,6 +6,23 @@
 
 export type WaitingOnStage = 'waiting' | 'resolved' | 'verified'
 
+/** The two halves of the Delayed page. */
+export type DelayedTab = 'blocking' | 'requesting'
+
+/**
+ * One "not approved, do it again" lap. Written by the requester's Send back,
+ * which clears the resolution it is rejecting — so the resolution is stashed
+ * here rather than lost, alongside the requester's new note.
+ */
+export type WaitingSendBack = {
+  at: string
+  by: string
+  note?: string
+  /** The resolution this send-back cleared. */
+  resolvedAt?: string
+  resolvedBy?: string
+}
+
 /** The shape the predicates actually read. Deliberately structural. */
 export type WaitingOnLike = {
   id?: string
@@ -16,6 +33,7 @@ export type WaitingOnLike = {
   resolvedBy?: string
   verifiedAt?: string
   verifiedBy?: string
+  sendBacks?: WaitingSendBack[]
 }
 
 export type WaitingStepLike = {
@@ -31,18 +49,33 @@ export type WaitingOnPermissionArgs = {
 }
 
 export const WAITING_STAGES: readonly WaitingOnStage[]
+export const DELAYED_TABS: readonly DelayedTab[]
 
 export function waitingOnStage(entry: WaitingOnLike | undefined): WaitingOnStage
 export function isClientWait(entry: WaitingOnLike | undefined): boolean
 export function isWaitingOnOpen(entry: WaitingOnLike | undefined): boolean
 export function canMarkWaitingOnDone(args: WaitingOnPermissionArgs): boolean
 export function canVerifyWaitingOn(args: WaitingOnPermissionArgs): boolean
+export function canSendBackWaitingOn(args: WaitingOnPermissionArgs): boolean
 export function waitingOnConcernsUser(args: {
   entry: WaitingOnLike
   userId: string
   assigneeId?: string | null
 }): boolean
+export function waitingOnDelayedTab(args: {
+  entry: WaitingOnLike
+  userId: string
+  assigneeId?: string | null
+}): DelayedTab | null
 export function waitingStepConcernsUser(
   node: WaitingStepLike | undefined,
   args: { userId: string; assigneeId?: string | null },
+): boolean
+export function waitingsOnDelayedTab<T extends WaitingOnLike>(
+  node: { waitingOns?: T[] } | undefined,
+  args: { userId: string; assigneeId?: string | null; tab: DelayedTab },
+): T[]
+export function legacyWaitBelongsOnTab(
+  node: WaitingStepLike | undefined,
+  args: { userId: string; assigneeId?: string | null; tab: DelayedTab },
 ): boolean
