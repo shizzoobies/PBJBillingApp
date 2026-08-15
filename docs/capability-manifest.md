@@ -312,6 +312,15 @@ Clients page meanwhile. Owner-only.
   the week being viewed.
 - Multi-week range: the day list + total are read-only (no Submit/lock); pick a
   single week to submit or lock — the weekly submission model is unchanged.
+- **Every duration on the page is BILLED time, not clock time** (Aug 2026, client
+  request). Each row still shows the clock-in → clock-out it came from, but the
+  minutes beside it are that entry's own billed minutes. This matters for a SPLIT
+  block: each slice keeps the whole original block's clock-in/out as its audit
+  trail, so a 25-minute block split across 20 clients shows ~1m 15s per client
+  and a 25-minute day — not 25 minutes twenty times. It also matters for an entry
+  whose duration was hand-corrected: the page reports the corrected duration, and
+  the untouched clock times stay visible beside it. Day totals, the range total
+  and the week total are sums of those billed minutes.
 
 ## Time Approvals (owner only)
 

@@ -9,6 +9,9 @@ import {
   presetRange,
   type ReportPeriod,
 } from '../lib/reportPeriod'
+// A timesheet row's duration is BILLED time (`entry.minutes`), never the length
+// of its clock span — see `src/lib/timesheetDays.ts` for why those differ.
+import { timesheetDays } from '../lib/timesheetDays'
 import type { TimeEntry, WeeklySubmission } from '../lib/types'
 import {
   clientName,
@@ -17,31 +20,9 @@ import {
   formatHoursMinutes,
   getWeekLabel,
   localDateOnly,
-  sessionMinutes,
   shiftWeek,
   weekRangeOf,
 } from '../lib/utils'
-
-// One row in the timesheet: a single work session, or the whole entry when it
-// has no session breakdown (legacy/manual entries).
-type Segment = {
-  entry: TimeEntry
-  startAt?: string
-  endAt?: string
-  minutes: number
-}
-
-function entrySegments(entry: TimeEntry): Segment[] {
-  if (entry.sessions && entry.sessions.length > 0) {
-    return entry.sessions.map((session) => ({
-      entry,
-      startAt: session.startAt,
-      endAt: session.endAt,
-      minutes: sessionMinutes(session),
-    }))
-  }
-  return [{ entry, startAt: entry.startAt, endAt: entry.endAt, minutes: entry.minutes }]
-}
 
 const TIME_FMT = new Intl.DateTimeFormat('en-US', {
   hour: 'numeric',
@@ -86,28 +67,16 @@ export function TimesheetPage() {
   // The Sun–Sat week the weekly workflow operates on (derived from the range).
   const weekStart = reportPeriod.from
 
-  const days = useMemo(() => {
-    const inRange = visibleEntries.filter(
-      (entry) =>
-        entry.employeeId === viewedEmployeeId && isInReportPeriod(entry.date, reportPeriod),
-    )
-    const byDate = new Map<string, Segment[]>()
-    for (const entry of inRange) {
-      const list = byDate.get(entry.date) ?? []
-      list.push(...entrySegments(entry))
-      byDate.set(entry.date, list)
-    }
-    return [...byDate.entries()]
-      // Most-recent day first, like the rest of the time views.
-      .sort((a, b) => b[0].localeCompare(a[0]))
-      .map(([date, segments]) => ({
-        date,
-        segments: segments
-          .slice()
-          .sort((x, y) => (x.startAt ?? '').localeCompare(y.startAt ?? '')),
-        total: segments.reduce((sum, seg) => sum + seg.minutes, 0),
-      }))
-  }, [visibleEntries, viewedEmployeeId, reportPeriod])
+  const days = useMemo(
+    () =>
+      timesheetDays(
+        visibleEntries.filter(
+          (entry) =>
+            entry.employeeId === viewedEmployeeId && isInReportPeriod(entry.date, reportPeriod),
+        ),
+      ),
+    [visibleEntries, viewedEmployeeId, reportPeriod],
+  )
 
   const rangeTotal = days.reduce((sum, day) => sum + day.total, 0)
 
