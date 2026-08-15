@@ -2625,6 +2625,12 @@ td strong {
 .payroll-job-cell {
   padding-left: 22px;
 }
+/* Exact minutes — the reconciliation column. Lining figures so the decimal
+   points stack and the column can be checked against a calculator. */
+.payroll-exact-minutes {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 
 .report-metric-grid {
   display: grid;
@@ -8380,6 +8386,15 @@ button.repeating-task-toggle-pill {
   gap: 12px;
   justify-content: space-between;
   padding: 6px 0;
+}
+
+/* The fixed role tier beside a name — CFO / Accountant / Bookkeeper. Quiet on
+   purpose: it explains the order rather than competing with the name. */
+.recap-staff-tier {
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .recap-badge {

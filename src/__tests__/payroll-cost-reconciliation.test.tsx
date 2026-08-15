@@ -119,13 +119,21 @@ function summaryTable(container: HTMLElement) {
 
 const dollars = (text: string) => Number(text.replace(/[$,]/g, ''))
 
+/**
+ * Summary column positions. Named rather than inlined because the Minutes
+ * column was inserted between Hours and Billable, and a bare `row[4]` gave no
+ * hint that it had moved.
+ */
+const HOURS = 1
+const MINUTES = 2
+const COST = 5
+
 describe('payroll Cost column reconciles by hand', () => {
   it('sums the visible Cost cells to exactly the shown total', async () => {
     const { container } = await renderReport()
     const { body, footer } = summaryTable(container)
 
-    // Cost is the 5th column: Team member, Hours, Billable, Billable $, Cost.
-    const costCells = body.map((row) => row[4])
+    const costCells = body.map((row) => row[COST])
     expect(costCells).toContain('$6.17')
     // The owner has no cost rate: "—", never "$0.00".
     expect(costCells).toContain('—')
@@ -133,7 +141,7 @@ describe('payroll Cost column reconciles by hand', () => {
     const byHand = costCells
       .filter((cell) => cell !== '—')
       .reduce((sum, cell) => sum + dollars(cell), 0)
-    expect(footer[4]).toBe('$12.34')
+    expect(footer[COST]).toBe('$12.34')
     expect(byHand.toFixed(2)).toBe('12.34')
   })
 
@@ -141,16 +149,76 @@ describe('payroll Cost column reconciles by hand', () => {
     const { container } = await renderReport()
     // Summing the unrounded floats and rounding once at display showed $12.33 —
     // a figure the owner could never reproduce from the cells above it.
-    expect(summaryTable(container).footer[4]).not.toBe('$12.33')
+    expect(summaryTable(container).footer[COST]).not.toBe('$12.33')
   })
 
   it('states the cost basis on the page, next to the totals', async () => {
     await renderReport()
-    expect(
-      screen.getByText('Cost is calculated per person from exact clock time.'),
-    ).toBeInTheDocument()
+    expect(screen.getByText(/Cost comes from the exact Minutes column/i)).toBeInTheDocument()
+  })
+})
+
+/**
+ * ITEM 2 — the send-back. Two-decimal hours alone do NOT make cost checkable:
+ * 20.22h × $16 = $323.52 where the real figure is $323.54. So the exact minutes
+ * are on the screen, not only in the CSV, and `minutes ÷ 60 × rate` has to land
+ * on the Cost cell for every row.
+ */
+describe('payroll summary shows exact minutes beside the hours', () => {
+  it('prints a Minutes column between Hours and Billable', async () => {
+    const { container } = await renderReport()
+    const headers = [
+      ...(container.querySelector('#payroll-hours table thead tr') as Element).querySelectorAll(
+        'th',
+      ),
+    ].map((th) => th.textContent ?? '')
+    expect(headers[HOURS]).toBe('Hours')
+    expect(headers[MINUTES]).toBe('Minutes')
+    expect(headers[3]).toBe('Billable')
   })
 
+  it('reproduces every Cost cell from minutes ÷ 60 × rate', async () => {
+    const { container } = await renderReport()
+    const { body, footer } = summaryTable(container)
+
+    for (const row of body) {
+      const minutes = Number(row[MINUTES])
+      expect(Number.isFinite(minutes)).toBe(true)
+      // The owner has no pay rate, so there is no cost to reproduce.
+      if (row[COST] === '—') continue
+      const byHand = ((minutes / 60) * COST_RATE).toFixed(2)
+      expect(dollars(row[COST]).toFixed(2)).toBe(byHand)
+    }
+
+    // Exact, not rounded: 10 + 10 + 45.
+    expect(footer[MINUTES]).toBe('65')
+  })
+
+  it('would NOT reconcile from the 2-decimal hours alone — which is why it is there', async () => {
+    const { container } = await renderReport()
+    const row = summaryTable(container).body.find((cells) => cells[COST] === '$6.17') as string[]
+    // "0.17h" × $37 = $6.29, nowhere near the $6.17 the report shows. The hours
+    // column is for reading; the minutes column is for checking.
+    expect(row[HOURS]).toBe('0.17h')
+    expect((Number(row[HOURS].replace('h', '')) * COST_RATE).toFixed(2)).not.toBe('6.17')
+  })
+})
+
+describe('payroll hours read as x.xx', () => {
+  it('renders two decimals everywhere in the summary, never one', async () => {
+    const { container } = await renderReport()
+    const { body, footer } = summaryTable(container)
+    for (const row of [...body, footer]) {
+      for (const cell of [row[HOURS], row[3]]) {
+        if (cell) expect(cell).toMatch(/^\d+\.\d{2}h$/)
+      }
+    }
+    // 65 minutes tracked in total → 1.0833h → "1.08h", not "1.1h".
+    expect(footer[HOURS]).toBe('1.08h')
+  })
+})
+
+describe('payroll detail table keeps the per-person cost rule', () => {
   it('explains the penny gap between per-row cents and the detail total', async () => {
     await renderReport()
     expect(screen.getByText(/row cents may differ by a penny or two/i)).toBeInTheDocument()

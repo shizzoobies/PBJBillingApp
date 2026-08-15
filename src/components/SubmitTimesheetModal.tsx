@@ -5,7 +5,7 @@ import {
   type SubmitTarget,
 } from '../lib/timesheetSubmitPlan'
 import type { TimeEntry, TimesheetLock, WeeklySubmission } from '../lib/types'
-import { formatHours } from '../lib/utils'
+import { formatHoursMinutes } from '../lib/utils'
 
 /**
  * The guided "Submit timesheet" flow.
@@ -112,7 +112,7 @@ export function SubmitTimesheetModal({
             <>
               <p className="modal-intro">
                 Submitting week of <strong>{weekDayRangeLabel(target.weekStart)}</strong> —{' '}
-                {formatHours(target.minutes)} logged.
+                {formatHoursMinutes(target.minutes)} logged.
               </p>
               {target.reason === 'rejected' ? (
                 <p className="submit-flow-note">

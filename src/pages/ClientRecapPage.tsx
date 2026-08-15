@@ -6,11 +6,16 @@ import {
   type ClientRecap,
   type ClientRecapPeriodType,
 } from '../lib/api'
-import { currentReviewPeriod, shiftReviewPeriod } from '../lib/utils'
+import { currentReviewPeriod, formatDecimalHours, shiftReviewPeriod } from '../lib/utils'
 
 const money = (n: number | null | undefined) =>
   n == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
-const hrs = (n: number) => `${n}h`
+/**
+ * Always x.xx. The recap reports HOURS (the payroll report reports minutes), so
+ * convert back to minutes for the shared formatter rather than keeping a second
+ * two-decimal rule here that could drift from it.
+ */
+const hrs = (n: number) => formatDecimalHours(n * 60)
 
 export function ClientRecapPage() {
   const { visibleClients } = useAppContext()
@@ -158,10 +163,16 @@ export function ClientRecapPage() {
               </div>
             </div>
             {recap.time.byStaff.length > 0 ? (
+              /* Server order is the display order: CFO tier, then Accountant,
+                 then Bookkeeper, by name inside a tier — the same sequence every
+                 month. Do NOT sort here. A tier nobody logged time in simply
+                 does not appear. */
               <ul className="recap-list">
                 {recap.time.byStaff.map((row) => (
                   <li key={row.name}>
-                    <span>{row.name}</span>
+                    <span>
+                      {row.name} <span className="recap-staff-tier">{row.tier}</span>
+                    </span>
                     <span>
                       {hrs(row.hours)} ({hrs(row.billableHours)} billable)
                     </span>

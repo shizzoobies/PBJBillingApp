@@ -1262,15 +1262,52 @@ export function ensureRecurringChecklists(data: AppData) {
   }
 }
 
-export function formatHours(minutes: number) {
+/**
+ * Hours at TWO decimals, always — e.g. 1213.2833 -> "20.22h", 60 -> "1.00h",
+ * 0 -> "0.00h", 30 -> "0.50h". The single formatter for every REPORTING
+ * surface (client recap, payroll hours, dashboards, productivity, invoices):
+ * a duration presented as a number to read, compare or add up.
+ *
+ * Always two decimals, never one and never a bare integer — a column of
+ * "20.22h / 1.00h / 0.50h" adds up by eye; "20.2h / 1h / .5h" does not. This
+ * is the format the firm owner asked for.
+ *
+ * NOT a costing input. Cost is computed from exact minutes, so re-deriving a
+ * dollar figure from these two decimals will be off by cents (20.22h × $16 =
+ * $323.52 where the exact 1213.2833 min is $323.54). The payroll summary
+ * prints an exact Minutes column beside the hours for that reason.
+ *
+ * Live time-ENTRY surfaces (Time page rows, the running timer, approval
+ * queues) deliberately keep `formatHoursMinutes` instead — "23m" reads better
+ * than "0.38h" when you are logging or approving one piece of work.
+ */
+export function formatDecimalHours(minutes: number) {
+  return `${decimalHours(minutes)}h`
+}
+
+/**
+ * The same two-decimal hours WITHOUT the trailing "h" — for the handful of
+ * reporting spots that supply their own unit ("12.30 hours" in a tooltip, a
+ * "b / i" pill). Same rounding as formatDecimalHours by construction, so the
+ * two can never drift apart.
+ */
+export function decimalHours(minutes: number) {
   const hours = minutes / 60
-  return `${Number.isInteger(hours) ? hours.toFixed(0) : hours.toFixed(1)}h`
+  // Round the hundredths the same way `roundToCent` rounds cents: a value like
+  // 0.995 (59.7 minutes) is stored a hair BELOW its decimal form, so a bare
+  // `toFixed(2)` reports "0.99" and an accountant checking the arithmetic finds
+  // a discrepancy that isn't there. Normalizing through a fixed-precision
+  // string first makes a half-hundredth round up, as written arithmetic does.
+  const hundredths = Math.round(Number((hours * 100).toFixed(6)))
+  // -0 would render as "-0.00". Normalize it to zero.
+  return (hundredths === 0 ? 0 : hundredths / 100).toFixed(2)
 }
 
 /**
  * Exact hours + minutes, e.g. 80 -> "1h 20m", 45 -> "45m", 120 -> "2h".
- * Unlike formatHours (which rounds to one decimal), this shows the precise
- * time the user logged.
+ * Unlike formatDecimalHours (which reports a decimal number of hours), this
+ * shows the precise time the user logged, the way they logged it. Reserved for
+ * time-ENTRY and approval surfaces — see formatDecimalHours.
  */
 export function formatHoursMinutes(minutes: number) {
   // Work in whole seconds so sub-minute durations (exact-seconds timer stops)

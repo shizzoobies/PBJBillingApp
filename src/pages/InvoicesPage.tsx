@@ -17,7 +17,7 @@ import type {
 } from '../lib/types'
 import {
   currency,
-  formatHours,
+  formatDecimalHours,
   formatSentOn,
   getBillingPeriodLabel,
   getInvoice,
@@ -212,7 +212,7 @@ function buildDisplayInvoice(
       lines: [
         {
           label: `Bookkeeping services - ${invoice.periodLabel}`,
-          detail: `${formatHours(invoice.billableMinutes)} this period`,
+          detail: `${formatDecimalHours(invoice.billableMinutes)} this period`,
           amount: invoice.total,
         },
       ],
@@ -243,8 +243,8 @@ function buildDisplayInvoice(
     .map((entry) => {
       const amount = entry.billable ? (entry.minutes / 60) * client.hourlyRate : 0
       const detail = entry.billable
-        ? `${formatHours(entry.minutes)} at ${currency.format(client.hourlyRate)}/hr · ${formatEntryDate(entry.date)}`
-        : `${formatHours(entry.minutes)} · ${formatEntryDate(entry.date)} · internal`
+        ? `${formatDecimalHours(entry.minutes)} at ${currency.format(client.hourlyRate)}/hr · ${formatEntryDate(entry.date)}`
+        : `${formatDecimalHours(entry.minutes)} · ${formatEntryDate(entry.date)} · internal`
       return {
         label: entryCategory(entry),
         detail: entry.description ? `${detail} · ${entry.description}` : detail,
@@ -785,7 +785,7 @@ export function InvoicesPage() {
             <div className="invoice-context">
               <span>{billingPeriodLabel}</span>
               <span>{baseInvoice.entryCount} billable entries</span>
-              <span>{formatHours(baseInvoice.billableMinutes)} tracked</span>
+              <span>{formatDecimalHours(baseInvoice.billableMinutes)} tracked</span>
               {/* Only for the clients who have it — the absence of this says
                   "bank transfer only", which is everyone else. */}
               {selectedClient.cardPaymentsEnabled ? <span>Card enabled</span> : null}
@@ -1150,7 +1150,7 @@ function BillingQueue({
                     : client.billingMode === 'annual'
                       ? 'Annual plan'
                       : 'Billable hours'}{' '}
-                  · {formatHours(invoice.billableMinutes)}
+                  · {formatDecimalHours(invoice.billableMinutes)}
                 </span>
               </div>
               <strong>{currency.format(invoice.total)}</strong>

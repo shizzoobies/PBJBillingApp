@@ -11,7 +11,7 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import {
-  formatHours,
+  formatDecimalHours,
   getBillingPeriodLabel,
   isInBillingPeriod,
   isSafeImageSrc,
@@ -251,7 +251,7 @@ export function AppLayout() {
             <SummaryItem
               icon={Clock3}
               label="My billable time"
-              value={formatHours(billableMinutes)}
+              value={formatDecimalHours(billableMinutes)}
               detail={`${periodVisibleEntries.length} in ${billingPeriodLabel}`}
             />
             <SummaryItem

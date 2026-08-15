@@ -60,7 +60,7 @@ export const PER_EMPLOYEE_BILLING_START: string
 export const MONTH_NAMES: string[]
 export const currency: Intl.NumberFormat
 
-export function formatHours(minutes: number): string
+export function formatDecimalHours(minutes: number): string
 export function normalizeBillingMonth(value: unknown): number
 export function getBillingPeriodLabel(period: string): string
 export function isInBillingPeriod(entry: { date?: string }, period: string): boolean

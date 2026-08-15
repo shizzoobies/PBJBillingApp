@@ -6,7 +6,7 @@ import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
 import type { ActivityEntry, Employee, TeamMember } from '../lib/types'
-import { formatHours, localDateOnly, relativeTime } from '../lib/utils'
+import { decimalHours, formatDecimalHours, localDateOnly, relativeTime } from '../lib/utils'
 import {
   bucketByPeriod,
   businessDaysIn,
@@ -518,11 +518,11 @@ function TeamComparison({
                     <strong>{row.name}</strong>
                     <div className="productivity-row-sub">{row.role}</div>
                   </td>
-                  <td>{formatHours(row.minutes)}</td>
+                  <td>{formatDecimalHours(row.minutes)}</td>
                   <td>
                     <span className="productivity-pill">
-                      {(row.billableMinutes / 60).toFixed(1)} b /{' '}
-                      {(row.internalMinutes / 60).toFixed(1)} i
+                      {decimalHours(row.billableMinutes)} b /{' '}
+                      {decimalHours(row.internalMinutes)} i
                     </span>
                   </td>
                   <td>{row.tasksCompleted}</td>
@@ -650,7 +650,7 @@ function PerPersonDetail({
 
       {stats ? (
         <div className="report-metric-grid">
-          <MetricCard label="Hours tracked" value={formatHours(stats.minutes)} detail={`${formatHours(stats.billableMinutes)} billable`} />
+          <MetricCard label="Hours tracked" value={formatDecimalHours(stats.minutes)} detail={`${formatDecimalHours(stats.billableMinutes)} billable`} />
           <MetricCard label="Tasks completed" value={String(stats.tasksCompleted)} detail={`${stats.avgPerDay.toFixed(1)} / business day`} />
           <MetricCard label="Cases handed off" value={String(stats.casesAdvanced)} detail="advanced to next stage" />
           <MetricCard label="Cases finished" value={String(stats.casesCompleted)} detail="fully closed" />
@@ -676,7 +676,7 @@ function PerPersonDetail({
                     <div
                       className="productivity-chart-bar productivity-chart-bar-hours"
                       style={{ height: `${Math.max(2, hoursPct)}%` }}
-                      title={`${(row.minutes / 60).toFixed(1)} hours`}
+                      title={`${decimalHours(row.minutes)} hours`}
                     />
                     <div
                       className="productivity-chart-bar productivity-chart-bar-items"
@@ -742,8 +742,8 @@ function PerPersonDetail({
                 <td>
                   <strong>{formatPeriodLabel(row.period, granularity)}</strong>
                 </td>
-                <td>{formatHours(row.minutes)}</td>
-                <td>{formatHours(row.billable)}</td>
+                <td>{formatDecimalHours(row.minutes)}</td>
+                <td>{formatDecimalHours(row.billable)}</td>
                 <td>{row.items}</td>
                 <td>{row.cases}</td>
               </tr>

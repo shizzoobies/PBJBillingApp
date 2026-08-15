@@ -8,6 +8,25 @@ file in the same commit.
 Audience note: the assistant talks to the firm OWNER. Staff (bookkeepers)
 see a reduced version of the app — owner-only abilities are marked.
 
+## How durations are displayed (site-wide rule)
+
+Two formats, chosen by what the screen is for:
+
+- **REPORTING surfaces show two-decimal hours — always x.xx.** Client Recap,
+  the payroll Hours report (summary and detail), the Dashboard and Reports
+  summary cards, Productivity, client month totals, the workspace summary strip
+  and invoice line detail. "20.22h", "1.00h", "0.50h" — never one decimal and
+  never a bare integer, so a column adds up by eye.
+- **Live time-ENTRY and APPROVAL surfaces keep hours-and-minutes** ("1h 20m",
+  "23m", "45s"): the Time page entry rows and split allocations, the running
+  timer, the Timesheet week/day rows, Time Approvals, the submit-timesheet
+  prompt, the log-time modal, per-entry and per-session rows on a client, and
+  the "time logged" line on a task or case. When someone is logging or approving
+  ONE piece of work, "23m" is the honest reading and "0.38h" is not.
+
+Cost figures are never derived from the displayed hours — see the payroll Hours
+report below.
+
 ## Navigation map
 
 Sidebar pages: Dashboard, Engagements, Time, Timesheet, Time Approvals,
@@ -833,6 +852,17 @@ Clients page meanwhile. Owner-only.
   period); Billing (revenue for the period, rate/plan, reimbursements); and
   Profitability (realized rate = fee ÷ hours, and margin when team cost rates are
   set).
+- **Every hours figure on the recap reads as x.xx** — the totals and each
+  person's row.
+- **The by-staff list is in a FIXED order that does not move month to month:**
+  CFO tier first, then Accountant, then Bookkeeper, then anyone whose role isn't
+  set — and alphabetically by name inside a tier. It used to sort by hours, so
+  the list reshuffled every month as workload moved. The tier comes from the
+  team member's staff role: **Owner → CFO, Accountant → Accountant, Bookkeeper →
+  Bookkeeper** (the app has no separate "CFO" staff role; CFO is the name used
+  for the owner's own tier, matching the client's estimated CFO hours field).
+  A tier nobody logged time in simply doesn't appear — no zero row is invented —
+  and the tiers that are present keep their order regardless.
 - **Revenue here is now the same number the invoice bills.** It used to value an
   hourly client's time at that client's single hourly rate, but invoices have
   charged each team member's own bill rate since June 2026. On July 2026 data
@@ -876,11 +906,16 @@ Clients page meanwhile. Owner-only.
   start to a day in the pay period's first week — the cadence is then preserved.
   Table of each member's hours (billable/internal split + entry count) with a
   grand total.
-- **Time is shown EXACTLY, e.g. "2m" or "1h 20m", not rounded to a decimal.**
-  This matters for split time: a block divided across several clients leaves
-  each client a few minutes, and the old one-decimal rounding printed those as
-  "0.0h" — the hours appeared to vanish, and the rows didn't add up to the
-  total. They do now.
+- **Hours read as x.xx — two decimals, always** ("20.22h", "1.00h", "0.50h"), on
+  the summary and the day-and-job detail alike. Two decimals, never one: the old
+  one-decimal rounding printed a few-minute split allocation as "0.0h", so the
+  hours appeared to vanish and the rows didn't add up to the total.
+- **An exact "Minutes" column sits beside Hours in the summary table**, carrying
+  the minutes as stored (seconds included) — the same value the Summary CSV
+  exports. It is there so cost can be checked ON SCREEN: **minutes ÷ 60 × the
+  pay rate reproduces the Cost cell to the penny**, which the 2-decimal Hours
+  column cannot (20.22h × $16 = $323.52 where the real figure is $323.54). The
+  note under the totals says exactly that.
 - **Billable time, Billable $ and Cost appear on the PRINTED report**, not just
   on screen — on both the per-member summary and the day-and-job detail, with
   totals.
@@ -904,12 +939,15 @@ Clients page meanwhile. Owner-only.
   cost rate, and round to the cent ONCE. A total is then the sum of those
   cent-rounded per-person amounts. The consequence that matters: **adding up the
   visible Cost column with a calculator always lands exactly on the total
-  printed underneath it.** A line saying "Cost is calculated per person from
-  exact clock time." sits under the summary totals.
+  printed underneath it.** A line under the summary totals says so: "Cost comes
+  from the exact Minutes column, not the rounded Hours next to it — divide the
+  minutes by 60 and multiply by the pay rate and you get the Cost shown, to the
+  penny."
   - Recomputing cost from a report's 2-decimal Hours column will NOT match, and
     that is expected, not a bug: two decimals of an hour is 36 seconds of slack,
     so the hand figure can land a dime or two off over a pay period. Use the
-    exact minutes in the exports (below) to re-derive a cost figure.
+    **Minutes column on the report itself** (or the exact minutes in the exports
+    below) to re-derive a cost figure.
   - Per-ENTRY Cost cells in the day-and-job detail table and the "Raw hours"
     export are each rounded to the cent on their own, so each row is readable
     by itself. The detail table's Cost TOTAL is still the per-person figure, so

@@ -68,6 +68,7 @@ import {
   ensureTemplateStages,
   employeeName,
   formatAuditStamp,
+  formatDecimalHours,
   formatHoursMinutes,
   getChecklistFrequencyLabel,
   isDueThisMonth,
@@ -509,11 +510,14 @@ function ClientTimeBody({
     <div>
       <div className="client-time-summary">
         <div className="client-time-summary-item">
-          <strong>{formatHoursMinutes(month.trackedMinutes)}</strong>
+          {/* Summary totals for reading/analysis — two decimals. The per-entry
+              and per-session rows below stay in h/m: they are individual pieces
+              of work, where "23m" reads better than "0.38h". */}
+          <strong>{formatDecimalHours(month.trackedMinutes)}</strong>
           <span>Tracked this month</span>
         </div>
         <div className="client-time-summary-item">
-          <strong>{formatHoursMinutes(month.billableMinutes)}</strong>
+          <strong>{formatDecimalHours(month.billableMinutes)}</strong>
           <span>Billable this month</span>
         </div>
         <div className="client-time-summary-item">

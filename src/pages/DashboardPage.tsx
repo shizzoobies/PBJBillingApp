@@ -25,7 +25,7 @@ import {
   describeActivityAction,
   employeeName,
   formatActivityTimestamp,
-  formatHours,
+  formatDecimalHours,
   isInBillingPeriod,
   localDateOnly,
   normalizeBillingMonth,
@@ -343,7 +343,7 @@ function OwnerDashboardView() {
           title="Approximation: total billable hours this month (no invoice-sent state yet)"
         >
           <CircleDollarSign size={20} />
-          <strong>{formatHours(unbilledMinutes)}</strong>
+          <strong>{formatDecimalHours(unbilledMinutes)}</strong>
           <span>Unbilled hours</span>
           <small>hours</small>
         </button>
@@ -515,7 +515,7 @@ function OwnerDashboardView() {
         <div className="dashboard-kpi-row">
           <div className="kpi-stat">
             <Clock3 size={16} />
-            <strong>{formatHours(hoursMinutes)}</strong>
+            <strong>{formatDecimalHours(hoursMinutes)}</strong>
             <span>Hours tracked</span>
           </div>
           <div className="kpi-stat">
@@ -972,7 +972,7 @@ function EmployeeDashboardView() {
         <div className="dashboard-kpi-row">
           <div className="kpi-stat">
             <Clock3 size={16} />
-            <strong>{formatHours(hoursMinutes)}</strong>
+            <strong>{formatDecimalHours(hoursMinutes)}</strong>
             <span>Hours tracked</span>
           </div>
           <div className="kpi-stat">
@@ -982,7 +982,7 @@ function EmployeeDashboardView() {
           </div>
           <div className="kpi-stat">
             <Clock3 size={16} />
-            <strong>{formatHours(billableMonthMinutes)}</strong>
+            <strong>{formatDecimalHours(billableMonthMinutes)}</strong>
             <span>Billable hours</span>
           </div>
           <div className="kpi-stat">

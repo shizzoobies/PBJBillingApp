@@ -8,7 +8,7 @@ import {
   describeActivityAction,
   employeeName,
   formatActivityTimestamp,
-  formatHours,
+  formatHoursMinutes,
   shortDate,
 } from '../lib/utils'
 
@@ -108,7 +108,7 @@ export function CaseDetailPage() {
                   </div>
                   {loggedMinutes > 0 ? (
                     <div className="case-timeline-meta">
-                      Time logged: {formatHours(loggedMinutes)}
+                      Time logged: {formatHoursMinutes(loggedMinutes)}
                     </div>
                   ) : null}
                   {checklist ? (

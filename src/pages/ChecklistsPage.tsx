@@ -57,7 +57,7 @@ import {
   effectiveChecklistDue,
   employeeName,
   ensureTemplateStages,
-  formatHours,
+  formatHoursMinutes,
   getAssignedTeamIds,
   getChecklistFrequencyLabel,
   groupChecklist,
@@ -1954,7 +1954,7 @@ export function ChecklistCard({
               .filter((entry) => entry.taskId === checklist.id)
               .reduce((sum, entry) => sum + entry.minutes, 0)
             return totalMinutes > 0 ? (
-              <span className="checklist-meta-line">Time logged: {formatHours(totalMinutes)}</span>
+              <span className="checklist-meta-line">Time logged: {formatHoursMinutes(totalMinutes)}</span>
             ) : null
           })()}
           {metaPendingNote ? (

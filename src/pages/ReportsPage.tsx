@@ -31,8 +31,7 @@ import {
   formatAuditStamp,
   currency,
   employeeName,
-  formatHours,
-  formatHoursMinutes,
+  formatDecimalHours,
   getBillingPeriodLabel,
   getInvoice,
   isInBillingPeriod,
@@ -47,7 +46,9 @@ import {
  * 2-decimal Hours column, getting a different answer by a dime, and reporting a
  * bug — which is exactly what happened.
  */
-const COST_BASIS_NOTE = 'Cost is calculated per person from exact clock time.'
+const COST_BASIS_NOTE =
+  'Cost comes from the exact Minutes column, not the rounded Hours next to it — ' +
+  'divide the minutes by 60 and multiply by the pay rate and you get the Cost shown, to the penny.'
 
 /**
  * The honest footnote for the per-entry Cost column: row cents are each rounded
@@ -771,6 +772,13 @@ function PayrollHoursReport({
             <tr>
               <th>Team member</th>
               <th>Hours</th>
+              {/* The exact minutes as stored — the SAME value the Summary CSV
+                  carries. Cost is built from these, so `Minutes ÷ 60 × rate`
+                  reproduces the Cost cell by hand; the 2-decimal Hours beside
+                  it will not (20.22h × $16 = $323.52, the real figure $323.54).
+                  That gap is why this column is on screen and not only in the
+                  export. */}
+              <th>Minutes</th>
               <th>Billable</th>
               <th>Billable $</th>
               <th>Cost</th>
@@ -781,7 +789,7 @@ function PayrollHoursReport({
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="muted-text">
+                <td colSpan={8} className="muted-text">
                   No team members to report.
                 </td>
               </tr>
@@ -791,13 +799,14 @@ function PayrollHoursReport({
                   <td>
                     <strong>{row.name}</strong>
                   </td>
-                  <td>{formatHoursMinutes(row.minutes)}</td>
-                  <td>{formatHoursMinutes(row.billable)}</td>
+                  <td>{formatDecimalHours(row.minutes)}</td>
+                  <td className="payroll-exact-minutes">{exactMinutesCell(row.minutes)}</td>
+                  <td>{formatDecimalHours(row.billable)}</td>
                   <td>{money(row.amount)}</td>
                   {/* Cost is on HOURS WORKED, not billable hours — the firm
                       pays for internal time too. "—" for the owner. */}
                   <td>{money(costFor(row.id, row.minutes))}</td>
-                  <td className="no-print">{formatHoursMinutes(row.internal)}</td>
+                  <td className="no-print">{formatDecimalHours(row.internal)}</td>
                   <td className="no-print">{row.count}</td>
                 </tr>
               ))
@@ -809,10 +818,13 @@ function PayrollHoursReport({
                 <strong>Total</strong>
               </td>
               <td>
-                <strong>{formatHoursMinutes(totalMinutes)}</strong>
+                <strong>{formatDecimalHours(totalMinutes)}</strong>
+              </td>
+              <td className="payroll-exact-minutes">
+                <strong>{exactMinutesCell(totalMinutes)}</strong>
               </td>
               <td>
-                <strong>{formatHoursMinutes(totalBillableMinutes)}</strong>
+                <strong>{formatDecimalHours(totalBillableMinutes)}</strong>
               </td>
               <td>
                 <strong>{currency.format(totalAmount)}</strong>
@@ -884,7 +896,7 @@ function PayrollHoursReport({
                       <strong>{fmtDay(group.date)}</strong>
                     </td>
                     <td>
-                      <strong>{formatHoursMinutes(group.minutes)}</strong>
+                      <strong>{formatDecimalHours(group.minutes)}</strong>
                     </td>
                     <td />
                     <td />
@@ -900,12 +912,12 @@ function PayrollHoursReport({
                       <td>{row.clockIn || '—'}</td>
                       <td>{row.clockOut || '—'}</td>
                       <td>{row.sessionCount || '—'}</td>
-                      {/* EXACT, not formatHours. Split allocations are small by
+                      {/* Two decimals, never one. Split allocations are small by
                           construction — 33 of the 138 in production render as
                           "0.0h" under one-decimal rounding, and the rounded rows
                           add up to 2.9h more than was actually entered. */}
                       <td>
-                        {formatHoursMinutes(row.minutes)}
+                        {formatDecimalHours(row.minutes)}
                         {row.countedElsewhere ? (
                           <div
                             className="muted-text"
@@ -915,7 +927,7 @@ function PayrollHoursReport({
                           </div>
                         ) : null}
                       </td>
-                      <td>{formatHoursMinutes(row.billableMinutes)}</td>
+                      <td>{formatDecimalHours(row.billableMinutes)}</td>
                       <td>{money(amountFor(row.employeeId, row.billableMinutes))}</td>
                       {/* Deduped rows show no cost: the firm pays for the block
                           once, and the first row of the group carries it. */}
@@ -934,10 +946,10 @@ function PayrollHoursReport({
                 <strong>Total</strong>
               </td>
               <td>
-                <strong>{formatHoursMinutes(detailMinutes)}</strong>
+                <strong>{formatDecimalHours(detailMinutes)}</strong>
               </td>
               <td>
-                <strong>{formatHoursMinutes(detailBillableMinutes)}</strong>
+                <strong>{formatDecimalHours(detailBillableMinutes)}</strong>
               </td>
               <td>
                 <strong>{currency.format(detailAmount)}</strong>
@@ -1137,12 +1149,12 @@ function ReportsOverview({
         <div className="report-metric-grid">
           <ReportMetricCard
             label="Tracked hours"
-            value={formatHours(ownerTrackedMinutes)}
-            detail={`${formatHours(ownerBillableMinutes)} billable`}
+            value={formatDecimalHours(ownerTrackedMinutes)}
+            detail={`${formatDecimalHours(ownerBillableMinutes)} billable`}
           />
           <ReportMetricCard
             label="Internal hours"
-            value={formatHours(ownerInternalMinutes)}
+            value={formatDecimalHours(ownerInternalMinutes)}
             detail={`${billableRate}% billable mix`}
           />
           <ReportMetricCard
@@ -1188,12 +1200,12 @@ function ReportsOverview({
             const cost = overviewCostFor(row.employeeId, row.minutes)
             return [
               employeeName(employees, row.employeeId),
-              formatHours(row.minutes),
-              formatHours(row.billableMinutes),
+              formatDecimalHours(row.minutes),
+              formatDecimalHours(row.billableMinutes),
               currency.format(row.billableAmount),
               // "—" (never $0.00) when there's no cost rate — see overviewCostFor.
               cost === null ? '—' : currency.format(cost),
-              formatHours(row.internalMinutes),
+              formatDecimalHours(row.internalMinutes),
               row.entryCount.toString(),
               row.clientCount.toString(),
             ]
@@ -1216,9 +1228,9 @@ function ReportsOverview({
           columns={['Client', 'Tracked', 'Billable', 'Internal', 'Staff', 'Projected billing']}
           rows={clientRows.map((row) => [
             clientName(clients, row.clientId),
-            formatHours(row.minutes),
-            formatHours(row.billableMinutes),
-            formatHours(row.internalMinutes),
+            formatDecimalHours(row.minutes),
+            formatDecimalHours(row.billableMinutes),
+            formatDecimalHours(row.internalMinutes),
             row.employeeCount.toString(),
             currency.format(row.invoiceTotal),
           ])}
@@ -1263,7 +1275,7 @@ function ReportsOverview({
                   <div className="category-row-header">
                     <strong>{row.taskTitle}</strong>
                     <span>
-                      {formatHours(row.minutes)} · {row.entryCount} entries
+                      {formatDecimalHours(row.minutes)} · {row.entryCount} entries
                     </span>
                   </div>
                   <div className="category-bar">

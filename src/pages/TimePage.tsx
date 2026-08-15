@@ -49,7 +49,6 @@ import {
   eligibleChecklistsFor,
   employeeName,
   formatAuditStamp,
-  formatHours,
   formatHoursMinutes,
   getWeekLabel,
   isGroupHoldingEntry,
@@ -547,7 +546,7 @@ function WeeklySubmissionWidget({
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span className="status-pill">{formatHours(weekTotal)} logged</span>
+          <span className="status-pill">{formatHoursMinutes(weekTotal)} logged</span>
           {submission?.status === 'pending' ? (
             <span className="status-pill">Pending review</span>
           ) : null}

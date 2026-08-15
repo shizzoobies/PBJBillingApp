@@ -2322,7 +2322,18 @@ export async function resolvePendingFeatureRequest(id: string) {
 // ---- Client Recap (per-client monthly/quarterly review) ----
 
 export type ClientRecapPeriodType = 'month' | 'quarter'
-export type ClientRecapStaffRow = { name: string; hours: number; billableHours: number }
+/**
+ * `tier` is the fixed display grouping — 'CFO' | 'Accountant' | 'Bookkeeper' |
+ * 'Other' — assigned server-side by `recapStaffTier` in lib/client-recap.js,
+ * which is the single place the staff role -> tier mapping lives. Rows arrive
+ * already sorted by tier then name; the page must not re-sort them.
+ */
+export type ClientRecapStaffRow = {
+  name: string
+  tier: string
+  hours: number
+  billableHours: number
+}
 export type ClientRecapTask = {
   title: string
   dueDate: string

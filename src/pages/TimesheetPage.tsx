@@ -16,7 +16,6 @@ import type { TimeEntry, WeeklySubmission } from '../lib/types'
 import {
   clientName,
   employeeName,
-  formatHours,
   formatHoursMinutes,
   getWeekLabel,
   localDateOnly,
@@ -275,7 +274,7 @@ function WeeklyTimesheetControls({
   return (
     <div className="timesheet-week-controls">
       <div className="timesheet-week-status">
-        <span className="status-pill">{formatHours(weekMinutes)} logged</span>
+        <span className="status-pill">{formatHoursMinutes(weekMinutes)} logged</span>
         {submission?.status === 'pending' ? (
           <span className="status-pill">Pending review</span>
         ) : null}

@@ -5,7 +5,7 @@ import { useAppContext } from '../AppContext'
 import { AddModal } from './AddModal'
 import type { Client } from '../lib/types'
 import { buildTimeTaskOptions, resolveTimeTaskChoice } from '../lib/timeTaskOptions'
-import { eligibleChecklistsFor, formatHours } from '../lib/utils'
+import { eligibleChecklistsFor, formatHoursMinutes } from '../lib/utils'
 
 /** Shared id for the task suggestions <datalist>, same idiom as Contacts' Group input. */
 const TASK_DATALIST_ID = 'client-time-task-options'
@@ -80,7 +80,7 @@ export function ClientTimeModal({ client, onClose }: { client: Client; onClose: 
         <>
           <p className="muted-text" style={{ marginTop: 0 }}>
             {loggedMinutes > 0
-              ? `${formatHours(loggedMinutes)} logged for this client this month.`
+              ? `${formatHoursMinutes(loggedMinutes)} logged for this client this month.`
               : 'No time logged for this client yet this month.'}
           </p>
           <label className="field">

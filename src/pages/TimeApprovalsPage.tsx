@@ -19,7 +19,6 @@ import {
   employeeName,
   effectiveSessions,
   formatAuditStamp,
-  formatHours,
   formatHoursMinutes,
   getBillingPeriodLabel,
   getWeekLabel,
@@ -411,7 +410,7 @@ function WeeklyReviewSection({
                     <strong>{employeeName(employees, submission.userId)}</strong>
                     <span className="checklist-meta-line">
                       {getWeekLabel(submission.weekStart)} ·{' '}
-                      {formatHours(totalMinutes)} logged · submitted{' '}
+                      {formatHoursMinutes(totalMinutes)} logged · submitted{' '}
                       {new Date(submission.submittedAt).toLocaleString()}
                     </span>
                   </div>
@@ -1110,7 +1109,7 @@ function ApprovalRow({
           <strong>{clientLabel}</strong>
           <span>{entry.description}</span>
           <small>
-            {entry.date} · {taskLabel} · {formatHours(entry.minutes)} ·{' '}
+            {entry.date} · {taskLabel} · {formatHoursMinutes(entry.minutes)} ·{' '}
             {entry.billable ? 'Billable' : 'Internal'}
           </small>
           {(() => {
@@ -1389,7 +1388,7 @@ function MonthEndRow({
       <td>
         <strong>{employeeName}</strong>
       </td>
-      <td>{formatHours(minutes)}</td>
+      <td>{formatHoursMinutes(minutes)}</td>
       <td>{pendingCount}</td>
       <td>
         {lock ? (

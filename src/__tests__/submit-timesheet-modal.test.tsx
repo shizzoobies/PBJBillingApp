@@ -204,4 +204,15 @@ describe('SubmitTimesheetModal', () => {
     expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /submit this week/i })).not.toBeInTheDocument()
   })
+
+  /**
+   * Reporting surfaces moved to two-decimal hours ("20.22h"). This is NOT one:
+   * someone about to submit their own week reads "1h 20m", not "1.33h". The
+   * split is deliberate, so it gets a test rather than a comment.
+   */
+  it('states the week total in hours and minutes, not decimal hours', () => {
+    renderModal({ entries: [entry('2026-08-04', 80)] })
+    expect(screen.getByText(/1h 20m logged\./)).toBeInTheDocument()
+    expect(screen.queryByText(/1\.33h/)).not.toBeInTheDocument()
+  })
 })
