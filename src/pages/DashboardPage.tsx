@@ -16,6 +16,11 @@ import {
   UserPlus,
   Users,
 } from 'lucide-react'
+import {
+  isChecklistSkipped,
+  pendingSkipReviews,
+  skipReasonLabel,
+} from '../../lib/checklist-skip.js'
 import { useAppContext } from '../AppContext'
 import { fetchGlobalActivity, fetchTeam, fetchTeamActivity } from '../lib/api'
 import type { ActivityEntry, Checklist, TeamMember } from '../lib/types'
@@ -56,6 +61,68 @@ export function DashboardPage() {
   const showEmployeeView = previewMode || role !== 'owner'
 
   return showEmployeeView ? <EmployeeDashboardView /> : <OwnerDashboardView />
+}
+
+/**
+ * Owner-only: this year's skipped recurring tasks awaiting her review.
+ *
+ * Renders NOTHING for anyone else — `checklistSkips` is empty for staff (the
+ * endpoint 403s), and the role check here makes that explicit rather than
+ * relying on an empty array. It also renders nothing when there is nothing to
+ * review, so a clean dashboard stays clean.
+ *
+ * "Reviewed" clears the row from this list and keeps the record forever — the
+ * same audit-trail decision as the completed-tasks history.
+ */
+function SkippedTasksReviewSection() {
+  const { checklistSkips, reviewChecklistSkip, data, role, previewMode } = useAppContext()
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const rows = useMemo(
+    () => pendingSkipReviews(checklistSkips, new Date().getFullYear()),
+    [checklistSkips],
+  )
+
+  if (role !== 'owner' || previewMode) return null
+  if (rows.length === 0) return null
+
+  return (
+    <section className="dashboard-section" aria-label="Skipped tasks">
+      <h2>Skipped tasks to review ({rows.length})</h2>
+      <ul className="dashboard-cases">
+        {rows.map((skip) => (
+          <li key={skip.id} className="dashboard-case-row">
+            <div className="dashboard-case-main">
+              <strong>{skip.title}</strong>
+              <span className="dashboard-case-client">
+                {skip.clientId ? clientName(data.clients, skip.clientId) : 'No client'}
+              </span>
+              <span className="dashboard-case-client">
+                {skip.reasonNote}
+              </span>
+            </div>
+            <div className="dashboard-case-stage">{skipReasonLabel(skip.reasonCategory)}</div>
+            <div className="dashboard-case-holder">
+              {skip.skippedByName ?? employeeName(data.employees, skip.skippedBy ?? '')}
+              {skip.skippedAt ? ` · ${formatActivityTimestamp(skip.skippedAt)}` : ''}
+            </div>
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busyId === skip.id}
+              onClick={() => {
+                setBusyId(skip.id)
+                void reviewChecklistSkip(skip.id).finally(() => setBusyId(null))
+              }}
+              title="Clear this off your dashboard — the record is kept."
+            >
+              {busyId === skip.id ? 'Saving…' : 'Reviewed'}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
 }
 
 function OwnerDashboardView() {
@@ -118,11 +185,19 @@ function OwnerDashboardView() {
   const sevenDaysAgo = addDays(todayIso, -7)
   const firstName = sessionUser.name.split(' ')[0]
 
+  // The overdue RULE is untouched — a skipped occurrence simply never reaches
+  // it, exactly as on the Checklists page. A task deliberately moved to its next
+  // occurrence is not late.
   const overdueChecklists = data.checklists.filter(
-    (c) => c.dueDate && c.dueDate < todayIso && !isComplete(c),
+    (c) => !isChecklistSkipped(c) && c.dueDate && c.dueDate < todayIso && !isComplete(c),
   )
   const dueThisWeekChecklists = data.checklists.filter(
-    (c) => c.dueDate && c.dueDate >= todayIso && c.dueDate <= weekEndIso && !isComplete(c),
+    (c) =>
+      !isChecklistSkipped(c) &&
+      c.dueDate &&
+      c.dueDate >= todayIso &&
+      c.dueDate <= weekEndIso &&
+      !isComplete(c),
   )
 
   const stuckCaseIds = useMemo(() => {
@@ -484,6 +559,8 @@ function OwnerDashboardView() {
         ) : null}
       </section>
 
+      <SkippedTasksReviewSection />
+
       <section className="dashboard-section" aria-label="Recent activity">
         <h2>Recent activity</h2>
         {activity.length === 0 ? (
@@ -650,11 +727,19 @@ function EmployeeDashboardView() {
   const weekEndIso = addDays(todayIso, 7)
   const threeDaysAgo = addDays(todayIso, -3)
 
+  // Same as the owner view: the overdue rule is unchanged, a skipped occurrence
+  // just isn't in the list it reads.
   const overdueChecklists = data.checklists.filter(
-    (c) => c.assigneeId === userId && c.dueDate && c.dueDate < todayIso && !isComplete(c),
+    (c) =>
+      !isChecklistSkipped(c) &&
+      c.assigneeId === userId &&
+      c.dueDate &&
+      c.dueDate < todayIso &&
+      !isComplete(c),
   )
   const dueThisWeekChecklists = data.checklists.filter(
     (c) =>
+      !isChecklistSkipped(c) &&
       c.assigneeId === userId &&
       c.dueDate &&
       c.dueDate >= todayIso &&

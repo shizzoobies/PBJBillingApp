@@ -60,6 +60,9 @@ import {
   fetchWaitingOnMe,
   updateChecklistMetaRequest,
   listPendingTaskEdits,
+  listChecklistSkips,
+  reviewChecklistSkip as reviewChecklistSkipRequest,
+  skipChecklistOccurrence as skipChecklistOccurrenceRequest,
   approvePendingTaskEdit as approvePendingTaskEditRequest,
   rejectPendingTaskEdit as rejectPendingTaskEditRequest,
   isTaskEditPending,
@@ -117,6 +120,7 @@ import {
   type FeatureRequest,
   type FeatureRequestType,
   type FirmSettings,
+  type ChecklistSkip,
   type ItemDeletionRequest,
   type PendingTaskEdit,
   type PublicFirmSettings,
@@ -141,6 +145,8 @@ import {
 } from './lib/utils'
 import { selectableClients } from './lib/clientLifecycle'
 import { checklistsVisibleTo } from './lib/checklistVisibility'
+import { isChecklistSkipped } from '../lib/checklist-skip.js'
+import type { SkipReasonCategory } from '../lib/checklist-skip.js'
 import {
   defaultReportPeriod,
   normalizeReportPeriod,
@@ -300,6 +306,9 @@ function App() {
   // managed like itemDeletionRequests: loaded on sign-in and refreshed after any
   // waiting-on action so the Dashboard card + step chips stay accurate.
   const [waitingOnMe, setWaitingOnMe] = useState<WaitingOnMeItem[]>([])
+  // Quiet-skip audit records. Owner-only (the endpoint 403s otherwise), so this
+  // stays empty for staff and their dashboard shows no review section.
+  const [checklistSkips, setChecklistSkips] = useState<ChecklistSkip[]>([])
   const [activeEmployeeId, setActiveEmployeeId] = useState('emp-avery')
   const [previewUserId, setPreviewUserId] = useState<string | null>(null)
   const [selectedClientId, setSelectedClientId] = useState('client-northstar')
@@ -591,6 +600,35 @@ function App() {
       /* non-fatal — the queue/badges just won't update until the next refresh */
     }
   }, [])
+
+  // Skip records: owner-only. The endpoint 403s for everyone else, and this
+  // early return keeps a bookkeeper from even asking — so their list stays the
+  // empty array it started as and the review section never renders for them.
+  const refreshChecklistSkips = useCallback(async () => {
+    if (role !== 'owner') return
+    try {
+      setChecklistSkips(await listChecklistSkips())
+    } catch {
+      /* non-fatal — the review section just won't update until the next refresh */
+    }
+  }, [role])
+
+  useEffect(() => {
+    if (!sessionUser) return
+    let cancelled = false
+    void (async () => {
+      if (role !== 'owner') return
+      try {
+        const skips = await listChecklistSkips()
+        if (!cancelled) setChecklistSkips(skips)
+      } catch {
+        /* non-fatal */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [sessionUser, role])
 
   // "Waiting on you" blockers: same endpoint-managed pattern.
   const refreshWaitingOnMe = useCallback(async () => {
@@ -1001,13 +1039,28 @@ function App() {
     writeStoredTimer(timer)
   }, [timer])
 
+  // Quietly-skipped occurrences are dropped HERE and nowhere else.
+  //
+  // This is the one narrowing every "my work" surface reads (Checklists tab,
+  // Board, client panels, the sidebar badge), so filtering here is what makes a
+  // skipped task leave the active view for the cycle — and, because the overdue
+  // bucket is computed downstream of this list, what stops a skip ever reading
+  // as overdue. The OVERDUE VIEW ITSELF IS UNTOUCHED: its rules are exactly what
+  // they were, it simply never sees the row.
+  //
+  // Crucially the row is NOT removed from `data.checklists`: that list is what
+  // the owner's bulk save writes back, and dropping it there would un-skip the
+  // task (or delete it) on the next autosave.
   const visibleChecklists = useMemo(
     () =>
       sortChecklists(
-        checklistsVisibleTo(data.checklists, {
-          viewerId: activeEmployeeId,
-          isOwner: role === 'owner',
-        }),
+        checklistsVisibleTo(
+          data.checklists.filter((checklist) => !isChecklistSkipped(checklist)),
+          {
+            viewerId: activeEmployeeId,
+            isOwner: role === 'owner',
+          },
+        ),
       ),
     [activeEmployeeId, data.checklists, role],
   )
@@ -1193,6 +1246,37 @@ function App() {
       await refreshPendingTaskEdits()
     },
     [refreshPendingTaskEdits],
+  )
+
+  /**
+   * Quiet skip. The server returns the stamped checklist; merging it is what
+   * makes the task drop out of `visibleChecklists` for this cycle. Nothing else
+   * happens on screen — "quiet" means no interruption beyond the dialog.
+   * The skip list is refreshed too so the owner's dashboard count is live.
+   */
+  const skipChecklistOccurrence = useCallback(
+    async (checklistId: string, input: { category: SkipReasonCategory; explanation: string }) => {
+      if (previewActiveRef.current) return
+      const { checklist } = await skipChecklistOccurrenceRequest(checklistId, input)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((entry) =>
+          entry.id === checklist.id ? checklist : entry,
+        ),
+      }))
+      await refreshChecklistSkips()
+    },
+    [refreshChecklistSkips],
+  )
+
+  /** Owner: "Reviewed" — clears the skip off the dashboard, keeps the record. */
+  const reviewChecklistSkip = useCallback(
+    async (skipId: string) => {
+      if (previewActiveRef.current) return
+      await reviewChecklistSkipRequest(skipId)
+      await refreshChecklistSkips()
+    },
+    [refreshChecklistSkips],
   )
 
   const logTime = async (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => {
@@ -3781,6 +3865,9 @@ function App() {
     pendingTaskEditChecklistIds,
     approvePendingTaskEdit,
     rejectPendingTaskEdit,
+    checklistSkips,
+    skipChecklistOccurrence,
+    reviewChecklistSkip,
     waitingOnMe,
     addWaitingOn,
     waitingOnDone,

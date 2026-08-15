@@ -4032,3 +4032,301 @@ describe('bulk save preserves checklist history (file backend)', () => {
     expect((await persisted()).checklists[0].items[0].completedAt).toBeTruthy()
   })
 })
+
+/**
+ * Quiet skip — the FILE backend, end to end.
+ *
+ * Cardinal rule 1: `db/store.js` has two backends and any persisted change must
+ * touch both. This half proves the shape both branches implement (the marker on
+ * the checklist row, the record in its own store, and the review stamp). The
+ * Postgres half is the statement-shape suite below, plus the rolled-back
+ * production validation that runs before shipping (HANDOFF §4).
+ */
+describe('quiet skip (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const authPersisted = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+
+  const skippableTemplate = {
+    id: 'tmpl-skip',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2026-08-31',
+    active: true,
+    skipAllowed: true,
+    viewerIds: [],
+    editorIds: [],
+    stages: [],
+  }
+
+  const instance = (over = {}) => ({
+    id: 'cl-1',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    templateId: 'tmpl-skip',
+    dueDate: '2026-08-31',
+    viewerIds: [],
+    editorIds: [],
+    items: [{ id: 'item-1', label: 'Reconcile', done: false }],
+    ...over,
+  })
+
+  beforeEach(async () => {
+    await store.write(
+      workspace({ checklists: [instance()], checklistTemplates: [skippableTemplate] }),
+    )
+  })
+
+  it('round-trips skipAllowed on the template', async () => {
+    expect((await persisted()).checklistTemplates[0].skipAllowed).toBe(true)
+  })
+
+  it('stamps the instance without soft-deleting it', async () => {
+    const updated = await store.skipChecklistInstance('cl-1', 'emp-1')
+    expect(updated.skippedAt).toBeTruthy()
+    expect(updated.skippedBy).toBe('emp-1')
+
+    const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-1')
+    expect(row.skippedAt).toBeTruthy()
+    // NOT a soft delete: the row must stay in the active list so the
+    // materializer's identity tuple still sees it and does not respawn the
+    // cycle that was deliberately stepped past.
+    expect(row.deletedAt ?? null).toBeNull()
+  })
+
+  it('refuses to skip the same occurrence twice', async () => {
+    expect(await store.skipChecklistInstance('cl-1', 'emp-1')).not.toBeNull()
+    expect(await store.skipChecklistInstance('cl-1', 'emp-1')).toBeNull()
+  })
+
+  it('survives a bulk save — an autosave must not un-skip a task', async () => {
+    await store.skipChecklistInstance('cl-1', 'emp-1')
+    const stamped = (await persisted()).checklists[0].skippedAt
+
+    // The owner's tab round-trips the workspace it was served.
+    await store.write(
+      workspace({
+        checklists: [instance({ skippedAt: stamped, skippedBy: 'emp-1' })],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+
+    expect((await persisted()).checklists[0].skippedAt).toBe(stamped)
+  })
+
+  it.each(['me', 'colleague', 'client'])(
+    'persists the %s category with its note',
+    async (category) => {
+      const record = await store.createChecklistSkip({
+        checklistId: 'cl-1',
+        templateId: 'tmpl-skip',
+        clientId: 'c1',
+        title: 'Monthly close',
+        skippedBy: 'emp-1',
+        skippedByName: 'Lisa Chen',
+        reasonCategory: category,
+        reasonNote: 'Bank feed was down.',
+      })
+
+      const stored = (await authPersisted()).checklistSkips.find((entry) => entry.id === record.id)
+      expect(stored.reasonCategory).toBe(category)
+      expect(stored.reasonNote).toBe('Bank feed was down.')
+      expect(stored.reviewedAt).toBeNull()
+    },
+  )
+
+  it('lists skips newest first', async () => {
+    const older = await store.createChecklistSkip({
+      checklistId: 'cl-1',
+      title: 'Older',
+      reasonCategory: 'me',
+      reasonNote: 'a',
+    })
+    // The file backend stamps from the clock, so force a distinguishable order.
+    const authState = await authPersisted()
+    const olderRecord = authState.checklistSkips.find((entry) => entry.id === older.id)
+    olderRecord.skippedAt = '2026-01-01T00:00:00.000Z'
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    const newer = await store.createChecklistSkip({
+      checklistId: 'cl-1',
+      title: 'Newer',
+      reasonCategory: 'client',
+      reasonNote: 'b',
+    })
+
+    // Filtered to this test's two records: the auth-state file accumulates the
+    // records earlier tests in this suite filed, and their order is not what
+    // this test is about.
+    const list = (await store.listChecklistSkips()).filter((entry) =>
+      [older.id, newer.id].includes(entry.id),
+    )
+    expect(list.map((entry) => entry.id)).toEqual([newer.id, older.id])
+  })
+
+  it('reviewing stamps the record and keeps it forever', async () => {
+    const record = await store.createChecklistSkip({
+      checklistId: 'cl-1',
+      title: 'Monthly close',
+      reasonCategory: 'client',
+      reasonNote: 'No statements.',
+    })
+
+    const reviewed = await store.reviewChecklistSkip(record.id, 'emp-owner')
+    expect(reviewed.reviewedBy).toBe('emp-owner')
+    expect(reviewed.reviewedAt).toBeTruthy()
+
+    // Still there. Reviewing clears it from the DASHBOARD, never from the trail.
+    const list = await store.listChecklistSkips()
+    expect(list.find((entry) => entry.id === record.id)).toBeTruthy()
+  })
+
+  it('refuses to re-review a decision that was already made', async () => {
+    const record = await store.createChecklistSkip({
+      checklistId: 'cl-1',
+      title: 'Monthly close',
+      reasonCategory: 'me',
+      reasonNote: 'Ran out of week.',
+    })
+    await store.reviewChecklistSkip(record.id, 'emp-owner')
+    expect(await store.reviewChecklistSkip(record.id, 'emp-other')).toBeNull()
+  })
+})
+
+/**
+ * Quiet skip — the POSTGRES branch, at statement level.
+ *
+ * NEW SQL SHAPES, flagged for the rolled-back production validation:
+ *   - alter table checklist_templates add column if not exists skip_allowed
+ *       boolean not null default false
+ *   - alter table checklists add column if not exists skipped_at timestamptz
+ *   - alter table checklists add column if not exists skipped_by text
+ *   - create table if not exists checklist_skips (...) + checklist_skips_skipped_at_idx
+ *
+ * The file backend cannot regress the two things pinned here — it has no
+ * columns and no WHERE clause — so only a statement-level test catches them:
+ * the skip UPDATE must be guarded on `skipped_at is null` (or a double-submit
+ * files two records for one cycle), and the review UPDATE must be guarded on
+ * `reviewed_at is null` (or a second owner overwrites the first one's decision).
+ */
+describe('quiet skip (postgres branch)', () => {
+  it('guards the skip UPDATE so one cycle can only be skipped once', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).skipChecklistInstance('cl-1', 'emp-1')
+
+    const [statement] = fake.matching(/^update checklists set skipped_at/i)
+    expect(statement).toBeTruthy()
+    expect(statement.text).toMatch(/skipped_at is null/i)
+    // And never touches a row already in the recycle bin.
+    expect(statement.text).toMatch(/deleted_at is null/i)
+    expect(statement.params).toEqual(['cl-1', 'emp-1'])
+  })
+
+  it('inserts the audit record into checklist_skips with its category and note', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createChecklistSkip({
+      checklistId: 'cl-1',
+      templateId: 'tmpl-skip',
+      clientId: 'c1',
+      title: 'Monthly close',
+      skippedBy: 'emp-1',
+      skippedByName: 'Lisa Chen',
+      reasonCategory: 'client',
+      reasonNote: 'No statements.',
+    })
+
+    const [statement] = fake.matching(/insert into checklist_skips/i)
+    expect(statement).toBeTruthy()
+    expect(statement.params).toContain('client')
+    expect(statement.params).toContain('No statements.')
+    expect(statement.params).toContain('Monthly close')
+  })
+
+  it('guards the review UPDATE so a decision cannot be overwritten', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).reviewChecklistSkip('skip-1', 'emp-owner')
+
+    const [statement] = fake.matching(/^update checklist_skips set reviewed_by/i)
+    expect(statement).toBeTruthy()
+    expect(statement.text).toMatch(/reviewed_at is null/i)
+    expect(statement.params).toEqual(['skip-1', 'emp-owner'])
+  })
+
+  it('never issues a DELETE against checklist_skips — the trail is permanent', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    await pgStore.createChecklistSkip({
+      checklistId: 'cl-1',
+      title: 'Monthly close',
+      reasonCategory: 'me',
+      reasonNote: 'Ran out of week.',
+    })
+    await pgStore.reviewChecklistSkip('skip-1', 'emp-owner')
+
+    expect(fake.matching(/delete from checklist_skips/i)).toHaveLength(0)
+  })
+
+  it('carries skipped_at / skipped_by through the bulk save', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'Monthly close',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            dueDate: '2026-08-31',
+            items: [],
+            skippedAt: '2026-08-14T10:00:00.000Z',
+            skippedBy: 'emp-1',
+          },
+        ],
+      }),
+    )
+
+    const [statement] = fake.matching(/insert into checklists \(/i)
+    expect(statement.text).toMatch(/skipped_at, skipped_by/i)
+    expect(statement.params).toContain('2026-08-14T10:00:00.000Z')
+  })
+
+  it('carries skip_allowed through the bulk save, defaulting to false', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        checklistTemplates: [
+          {
+            id: 'tmpl-a',
+            title: 'On',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            frequency: 'monthly',
+            nextDueDate: '2026-08-31',
+            active: true,
+            skipAllowed: true,
+            stages: [],
+          },
+          {
+            id: 'tmpl-b',
+            title: 'Unset',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            frequency: 'monthly',
+            nextDueDate: '2026-08-31',
+            active: true,
+            stages: [],
+          },
+        ],
+      }),
+    )
+
+    const inserts = fake.matching(/insert into checklist_templates/i)
+    expect(inserts).toHaveLength(2)
+    expect(inserts[0].text).toMatch(/skip_allowed/i)
+    // Anything other than an explicit true is off — skipping is opt-in.
+    expect(inserts[0].params.at(-2)).toBe(true)
+    expect(inserts[1].params.at(-2)).toBe(false)
+  })
+})

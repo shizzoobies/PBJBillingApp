@@ -17,6 +17,11 @@ import {
   isWaitingOnOpen,
   waitingOnStage,
 } from '../../lib/waiting-on-state.js'
+import {
+  SKIP_REASON_CATEGORIES,
+  canOfferSkip,
+  type SkipReasonCategory,
+} from '../../lib/checklist-skip.js'
 import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { CompletedTasksSection } from '../components/CompletedTasksSection'
@@ -1657,6 +1662,91 @@ function ChecklistGroup({
   )
 }
 
+/**
+ * The skip dialog — the ONLY interruption a quiet skip produces.
+ *
+ * A required category from a three-option dropdown and a required written
+ * explanation. Both are re-checked server-side; the disabled Confirm button here
+ * is a courtesy so nobody submits an empty form, not the boundary. Whatever the
+ * server refuses is shown verbatim, because its wording is the friendly one.
+ */
+function SkipTaskDialog({
+  title,
+  onCancel,
+  onConfirm,
+}: {
+  title: string
+  onCancel: () => void
+  onConfirm: (input: { category: SkipReasonCategory; explanation: string }) => Promise<void>
+}) {
+  const [category, setCategory] = useState<SkipReasonCategory | ''>('')
+  const [explanation, setExplanation] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const ready = category !== '' && explanation.trim().length > 0
+
+  const submit = async () => {
+    if (!ready || saving) return
+    setSaving(true)
+    setError('')
+    try {
+      await onConfirm({ category: category as SkipReasonCategory, explanation: explanation.trim() })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not skip this task.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="skip-task-dialog" role="group" aria-label={`Skip ${title} this cycle`}>
+      <p className="skip-task-dialog-lead">
+        Skipping “{title}” for this cycle. It leaves your list now and the next occurrence still
+        generates as normal.
+      </p>
+      <label className="field">
+        <span>Who could not complete it?</span>
+        <select
+          className="input"
+          value={category}
+          onChange={(event) => setCategory(event.target.value as SkipReasonCategory | '')}
+        >
+          <option value="">Choose one…</option>
+          {SKIP_REASON_CATEGORIES.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>What happened?</span>
+        <textarea
+          className="input"
+          rows={3}
+          placeholder="A sentence is plenty — this is what the owner reads when she reviews it."
+          value={explanation}
+          onChange={(event) => setExplanation(event.target.value)}
+        />
+      </label>
+      {error ? <p className="form-error">{error}</p> : null}
+      <div className="series-scope-actions">
+        <button
+          type="button"
+          className="primary-action"
+          disabled={!ready || saving}
+          onClick={() => void submit()}
+        >
+          {saving ? 'Skipping…' : 'Skip this cycle'}
+        </button>
+        <button type="button" className="link-button" onClick={onCancel} disabled={saving}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function ChecklistCard({
   activeEmployeeId,
   checklist,
@@ -1781,8 +1871,22 @@ export function ChecklistCard({
     pendingTaskEditChecklistIds,
     serviceCategories,
     addSeriesChecklistItem,
+    data: contextData,
+    skipChecklistOccurrence,
   } = useAppContext()
   const [editingMeta, setEditingMeta] = useState(false)
+  // Quiet skip. The affordance renders ONLY when the task's recurring template
+  // has skipping turned on — a task with it off shows nothing at all, because
+  // "they don't necessarily know skipping is an option unless enabled". A
+  // projected ghost isn't a real instance, so it is never skippable.
+  const [skipOpen, setSkipOpen] = useState(false)
+  const canSkip =
+    !checklist.projected &&
+    canOfferSkip({
+      checklist,
+      templates: contextData.checklistTemplates,
+      canWrite: canEditStructure,
+    })
   // When the owner adds a task to a live RECURRING instance, ask whether it's
   // for this checklist only or the whole series. Holds the pending label(s)
   // until they pick; null = no prompt open.
@@ -2024,6 +2128,16 @@ export function ChecklistCard({
               </button>
             </>
           ) : null}
+          {canSkip ? (
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => setSkipOpen(true)}
+              title="Not doing this one this cycle? Skip it — the next occurrence still generates."
+            >
+              Skip this cycle
+            </button>
+          ) : null}
           {/* The actions menu is available to anyone who can edit the task's
               structure (owner, assignee, or editor). For an owner "Delete"
               soft-deletes immediately; for staff it sends a deletion REQUEST
@@ -2059,6 +2173,16 @@ export function ChecklistCard({
           ) : null}
         </div>
       </header>
+      {skipOpen ? (
+        <SkipTaskDialog
+          title={checklist.title}
+          onCancel={() => setSkipOpen(false)}
+          onConfirm={async (input) => {
+            await skipChecklistOccurrence(checklist.id, input)
+            setSkipOpen(false)
+          }}
+        />
+      ) : null}
       <div className="progress-track">
         <span
           style={{
@@ -3658,6 +3782,9 @@ export function NewTaskForm({
   // created immediately on save so the user can start right away, independent
   // of the recurrence schedule.
   const [startFirstNow, setStartFirstNow] = useState(true)
+  // Quiet skip: OFF by default, deliberately. Skipping is an exception the owner
+  // grants per recipe, not a capability every recurring task carries.
+  const [skipAllowed, setSkipAllowed] = useState(false)
 
   // Hand-off (multi-stage) toggle. Only available in repeating mode.
   // When enabled, we render an editor for additional stages.
@@ -3772,6 +3899,7 @@ export function NewTaskForm({
         viewerIds: [],
         editorIds: [],
         categoryId: categoryId || null,
+        skipAllowed,
         stages: [firstStage, ...extraStages],
         ...(isSpecificMonths
           ? {
@@ -4005,6 +4133,22 @@ export function NewTaskForm({
             onChange={(event) => setStartFirstNow(event.target.checked)}
           />
           <span>Create the first checklist now so you can start right away.</span>
+        </label>
+      ) : null}
+
+      {/* Quiet skip is decided when the recipe is created, and defaults to off:
+          if it isn't turned on here, nobody working the task will ever see a
+          skip control. */}
+      {mode === 'repeating' ? (
+        <label className="start-first-now-row">
+          <input
+            type="checkbox"
+            checked={skipAllowed}
+            onChange={(event) => setSkipAllowed(event.target.checked)}
+          />
+          <span>
+            Allow skipping an occurrence (with a reason) when it will be caught next cycle.
+          </span>
         </label>
       ) : null}
 
@@ -4678,6 +4822,23 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
             />
           </label>
         )}
+        {/* Quiet skip. Whether skipping is offered at all is set here, on the
+            recipe — never per instance. Off unless the owner turns it on, and
+            with it off the staff card shows no skip control at all. */}
+        <label className="repeating-task-on-off-row">
+          <input
+            checked={template.skipAllowed === true}
+            onChange={(event) =>
+              props.onUpdateTemplate(template.id, (current) => ({
+                ...current,
+                skipAllowed: event.target.checked,
+              }))
+            }
+            type="checkbox"
+            title="Let whoever is on this task skip one occurrence (with a reason) when they'll catch it next cycle."
+          />
+          <span>Skipping allowed</span>
+        </label>
         <label className="repeating-task-on-off-row">
           <input
             checked={template.active}

@@ -3704,6 +3704,32 @@ td strong {
   gap: 8px;
 }
 
+/* --- Quiet skip dialog ------------------------------------------------ */
+
+/* Deliberately an inline panel on the card rather than a modal: a skip is a
+   small, quiet decision and a full-screen overlay would make it feel like one
+   of the approval flows, which it is not. */
+.skip-task-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2, #f7f4fb);
+}
+.skip-task-dialog-lead {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--muted, #6c6577);
+}
+.skip-task-dialog .form-error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--danger, #b3261e);
+}
+
 /* --- Quick template form --------------------------------------------- */
 
 .quick-template-form {

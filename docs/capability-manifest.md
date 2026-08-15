@@ -92,6 +92,14 @@ Clients page meanwhile. Owner-only.
   link to view their tasks.
 - Cases in flight: multi-step cases with current step, who holds it, and a
   Stuck badge when blocked. Click to open the case.
+- **"Skipped tasks to review (N)" (owner only)** — this year's quietly-skipped
+  recurring tasks, newest first, each showing the task, the client, who skipped
+  it, when, which of the three reasons they picked, and their written
+  explanation. One button per row, "Reviewed", clears it off the dashboard. The
+  section is hidden entirely when there is nothing to review, and it never
+  appears for a bookkeeper or an accountant. **Reviewing keeps the record** — it
+  is an audit trail, so the row is stamped with who reviewed it and when, never
+  deleted. See "Skipping a recurring task" under Checklists.
 - Recent activity feed (owner).
 - Quick actions: New task, Invite bookkeeper, Add client, Notifications.
 - "Viewing as" (owner): preview the app exactly as a specific bookkeeper sees
@@ -471,6 +479,45 @@ Clients page meanwhile. Owner-only.
     saying why. Everything completed from now on carries a real timestamp.
     Setting a date range hides the dashed rows, since an unknown date can't be
     said to fall inside a window; the tab says so when a range is set.
+- **Skipping a recurring task (a "quiet skip").** When someone won't complete a
+  recurring task this cycle but will catch it on the next occurrence, they can
+  step past this one instead of letting it sit there flagged as overdue.
+  - **Skipping is OFF unless it was turned on for that repeating task.** It is a
+    setting on the repeating setup itself ("Allow skipping an occurrence…"),
+    chosen when the task is created and changeable afterwards on the Repeating
+    tab. Repeating setups are owner-managed, so the owner is the one who decides.
+    **With it off there is no skip button at all** — not a greyed-out one — so
+    nobody is invited to ask for something that was never on offer.
+  - **One-off tasks are never skippable**, because there is no next occurrence to
+    catch them on. Skipping only exists for repeating work.
+  - **What the person doing it sees:** a "Skip this cycle" button on the task
+    card, and one small form — a required dropdown for **who couldn't complete
+    it (me / a colleague / the client)** and a required written explanation.
+    Nothing else happens: no approval to wait for, no block. The task leaves
+    their active list for this cycle and that's the end of it for them.
+  - **The next occurrence still generates exactly as normal**, on its own due
+    date, open and unskipped. Skipping one cycle changes nothing about the
+    schedule.
+  - **A skipped task does not read as overdue anywhere.** The overdue rules are
+    unchanged — a skipped occurrence simply isn't in the lists they read, because
+    it was deliberately moved on rather than missed.
+  - **Who gets told:** the owner every time, and an **Accountant** when a
+    **Bookkeeper** skips a task on a client that accountant is assigned to. (Same
+    substitution as everywhere else in the app: there is no supervisor field in
+    the data, so "their bookkeepers" means "the people on the same clients".)
+    Both are ordinary in-app notifications plus the usual email, and both can be
+    turned off per person under Settings → Notifications ("Skipped recurring
+    tasks").
+  - **The owner reviews them on her Dashboard** — see "Skipped tasks to review"
+    there. Marking one reviewed clears it off the dashboard and keeps the record
+    permanently.
+  - **A skip is not a deletion and not a completion.** The task is still there,
+    still attached to its time entries and its history; it is simply out of the
+    way for this cycle.
+- **When a team member creates a task, the owner is notified.** The notice names
+  the task and the person, so she can decide whether skipping should be allowed
+  on that kind of work. (Repeating setups — where the skip setting actually
+  lives — are owner-managed, so this is what tells her there is a call to make.)
 - **When a step is completed is now recorded.** Ticking a step stamps the
   completion time; un-ticking it clears the stamp (a re-opened step has no
   completion date). Adding a sub-step to a finished item re-opens it and clears
@@ -1510,9 +1557,15 @@ Clients page meanwhile. Owner-only.
   section. Owners also see the same section on the Settings page. Toggle types: task assigned to you,
   workflow progress (someone advances/completes a workflow you opened),
   waiting-on updates, time entries needing approval, your time entry was
-  sent back, deletion requests, edit requests/decisions, and Updates tracker
-  activity. Turning a type off stops the EMAIL only — in-app bell notifications
-  always arrive. All types default to on.
+  sent back, deletion requests, edit requests/decisions, skipped recurring
+  tasks, and Updates tracker activity. Turning a type off stops the EMAIL only —
+  in-app bell notifications always arrive. All types default to on.
+- **Skipped recurring tasks** (the "skippedTasks" toggle): covers both halves of
+  the quiet-skip flow — a recurring task being skipped for a cycle (the owner
+  always; an accountant when a bookkeeper skips on a client that accountant is
+  on), and a team member creating a task, so the owner can decide whether
+  skipping should be allowed on it. See "Skipping a recurring task" under
+  Checklists.
 - **Updates tracker activity** (the "updatesTracker" toggle): the OTHER owner is
   notified when a new update is logged, and whenever an update CHANGES STATUS —
   shipped, sent back to Planned, picked up as In progress, moved to Britt's

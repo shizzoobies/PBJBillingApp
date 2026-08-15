@@ -1679,6 +1679,10 @@ export function describeActivityAction(action: string): string {
       return 'unchecked'
     case 'checklist_created':
       return 'created checklist'
+    case 'checklist_skipped':
+      return 'skipped this cycle of'
+    case 'checklist_skip_reviewed':
+      return 'reviewed the skip of'
     case 'template_viewers_updated':
       return 'updated template viewers'
     case 'team_invited':

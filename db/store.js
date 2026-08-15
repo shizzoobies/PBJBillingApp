@@ -1974,6 +1974,46 @@ function buildSpawnedNextStageChecklist({ template, justCompletedChecklist }) {
   })
 }
 
+/**
+ * One shape for a skip record whichever backend produced it. Timestamps are ISO
+ * strings on both sides (pg hands back Date objects, the file backend already
+ * stores strings), and `reviewedAt` being null is the whole dashboard filter.
+ */
+function mapChecklistSkipRow(row) {
+  return {
+    id: row.id,
+    checklistId: row.checklist_id,
+    templateId: row.template_id ?? null,
+    clientId: row.client_id ?? null,
+    title: row.title ?? '',
+    skippedBy: row.skipped_by ?? null,
+    skippedByName: row.skipped_by_name ?? null,
+    skippedAt: row.skipped_at ? new Date(row.skipped_at).toISOString() : null,
+    reasonCategory: row.reason_category,
+    reasonNote: row.reason_note ?? '',
+    reviewedBy: row.reviewed_by ?? null,
+    reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+  }
+}
+
+/** The file backend's stored object, filled out to the same shape. */
+function normalizeChecklistSkip(record) {
+  return {
+    id: record.id,
+    checklistId: record.checklistId,
+    templateId: record.templateId ?? null,
+    clientId: record.clientId ?? null,
+    title: record.title ?? '',
+    skippedBy: record.skippedBy ?? null,
+    skippedByName: record.skippedByName ?? null,
+    skippedAt: record.skippedAt ?? null,
+    reasonCategory: record.reasonCategory,
+    reasonNote: record.reasonNote ?? '',
+    reviewedBy: record.reviewedBy ?? null,
+    reviewedAt: record.reviewedAt ?? null,
+  }
+}
+
 export class AppDataStore {
   constructor() {
     this.pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null
@@ -2821,6 +2861,51 @@ export class AppDataStore {
       `)
       await this.pool.query(
         `create index if not exists pending_task_edits_approver_idx on pending_task_edits (approver_id)`,
+      )
+
+      // ---- Quiet skip for recurring checklist tasks (lib/checklist-skip.js) ----
+      //
+      // Whether skipping is offered AT ALL is a property of the recurring
+      // TEMPLATE, set when it is created, defaulting OFF. It lives only here and
+      // never on the instance: copying it down would make a later change of mind
+      // apply to some materialized rows and not others.
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists skip_allowed boolean not null default false`,
+      )
+
+      // The instance's own skip marker. Deliberately NOT a soft-delete: the row
+      // must stay out of the recycle bin and stay visible to the materializer's
+      // identity tuple (template_id, due_date, stage_index), because that is what
+      // stops this period respawning while the NEXT period's different due date
+      // generates exactly as before. Views drop skipped rows from the active
+      // lists, so a skipped task can never reach an overdue bucket either.
+      await this.pool.query(`alter table checklists add column if not exists skipped_at timestamptz`)
+      await this.pool.query(`alter table checklists add column if not exists skipped_by text`)
+
+      // The audit trail itself. Endpoint-managed (NOT part of the bulk
+      // /api/app-data write) — exactly like pending_task_edits — so staff can
+      // file a skip without the owner-only bulk save, and so a stale tab's
+      // autosave can never clobber one. Plain text ids (no FK) and a `title`
+      // snapshot so the record survives the task being renamed or deleted: it is
+      // kept FOREVER, reviewing only stamps it.
+      await this.pool.query(`
+        create table if not exists checklist_skips (
+          id text primary key,
+          checklist_id text not null,
+          template_id text,
+          client_id text,
+          title text not null,
+          skipped_by text,
+          skipped_by_name text,
+          skipped_at timestamptz not null default now(),
+          reason_category text not null,
+          reason_note text not null,
+          reviewed_by text,
+          reviewed_at timestamptz
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists checklist_skips_skipped_at_idx on checklist_skips (skipped_at desc)`,
       )
 
       // Time approval workflow. Detect whether the column already exists BEFORE
@@ -3813,7 +3898,8 @@ export class AppDataStore {
           this.pool.query(`
             select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
                    case_id, stage_id, stage_index, stage_count, category_id, deleted_at,
-                   deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by
+                   deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by,
+                   skipped_at, skipped_by
             from checklists
             order by due_date asc, id asc
           `),
@@ -3825,7 +3911,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
                    scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id,
-                   onboarding_for_client_id
+                   onboarding_for_client_id, skip_allowed
             from checklist_templates
             order by title asc
           `),
@@ -3958,6 +4044,11 @@ export class AppDataStore {
           ? row.deletion_requested_at.toISOString()
           : null,
         createdBy: row.created_by ?? null,
+        // Quiet skip: a stamped instance stays in the ACTIVE list (it is not a
+        // soft-delete) so the materializer's identity tuple still sees it; the
+        // view layer is what drops it from the active surfaces.
+        skippedAt: row.skipped_at ? row.skipped_at.toISOString() : null,
+        skippedBy: row.skipped_by ?? null,
       }))
 
       const data = {
@@ -4118,6 +4209,9 @@ export class AppDataStore {
           active: row.active,
           isStandard: Boolean(row.is_standard),
           categoryId: row.category_id ?? null,
+          // Off unless an owner turned it on — a task whose template has this
+          // false must not even show the skip affordance.
+          skipAllowed: Boolean(row.skip_allowed),
           ...(row.onboarding_for_client_id
             ? { onboardingForClientId: row.onboarding_for_client_id }
             : {}),
@@ -4920,8 +5014,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, skip_allowed, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, now())
             `,
             [
               template.id,
@@ -4956,6 +5050,8 @@ export class AppDataStore {
               typeof template.onboardingForClientId === 'string' && template.onboardingForClientId
                 ? template.onboardingForClientId
                 : null,
+              // Skipping is opt-in: anything other than an explicit true is off.
+              template.skipAllowed === true,
               createdAtFor('checklist_templates', template.id),
             ],
           )
@@ -5030,8 +5126,8 @@ export class AppDataStore {
           // we already have.
           const insertResult = await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, skipped_at, skipped_by, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, now())
               on conflict do nothing
             `,
             [
@@ -5054,6 +5150,12 @@ export class AppDataStore {
               checklist.deletionRequestedAt ?? null,
               checklist.onboardingForClientId ?? null,
               checklist.createdBy ?? null,
+              // A skip must survive the owner's next bulk save. The tab round-
+              // trips these two fields untouched (nothing in the UI edits them —
+              // POST /api/checklists/:id/skip is the only writer), so persisting
+              // them here is what stops an autosave silently un-skipping a task.
+              checklist.skippedAt ?? null,
+              checklist.skippedBy ?? null,
               createdAtFor('checklists', checklist.id),
             ],
           )
@@ -11958,6 +12060,147 @@ export class AppDataStore {
     const removed = authState.pendingTaskEdits.length < before
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return removed
+  }
+
+  // ---- Quiet skip: the instance marker + the audit trail ----
+  //
+  // Two stores, on purpose. The MARKER (`checklists.skipped_at/skipped_by`)
+  // rides with the checklist row because it is a property of that instance and
+  // has to survive the owner's bulk save. The RECORD (`checklist_skips` on pg,
+  // `authState.checklistSkips` on the file backend) is endpoint-managed like
+  // pending_task_edits, so staff can file one without the owner-only bulk save
+  // and a stale tab can never clobber the history. The record is kept forever;
+  // reviewing stamps it rather than deleting it.
+
+  /**
+   * Stamp an instance as skipped for this cycle. Refuses a task that is already
+   * skipped or already in the recycle bin, so a double-submit cannot produce two
+   * skip records for one cycle. Returns the updated checklist, or null.
+   */
+  async skipChecklistInstance(checklistId, userId) {
+    if (!checklistId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update checklists set skipped_at = now(), skipped_by = $2
+         where id = $1 and deleted_at is null and skipped_at is null
+         returning id`,
+        [checklistId, userId ?? null],
+      )
+      if ((result.rowCount ?? 0) === 0) return null
+      const data = await this.read()
+      return (data.checklists ?? []).find((checklist) => checklist.id === checklistId) ?? null
+    }
+    const data = await readJson(localDataPath)
+    const target = (data.checklists ?? []).find((checklist) => checklist.id === checklistId)
+    if (!target || target.deletedAt || target.skippedAt) return null
+    target.skippedAt = nowIso()
+    target.skippedBy = userId ?? null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return target
+  }
+
+  /**
+   * Every skip record, newest first. Not scoped: the only caller is the
+   * owner-only dashboard endpoint, which does its own role check — a scoped
+   * variant with no scoped caller would be a second rule to keep honest.
+   */
+  async listChecklistSkips() {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
+                skipped_at, reason_category, reason_note, reviewed_by, reviewed_at
+           from checklist_skips order by skipped_at desc`,
+      )
+      return result.rows.map(mapChecklistSkipRow)
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.checklistSkips) ? authState.checklistSkips : []
+    return [...list]
+      .map(normalizeChecklistSkip)
+      .sort((a, b) => String(b.skippedAt).localeCompare(String(a.skippedAt)))
+  }
+
+  /** File a skip record. Returns the created record. */
+  async createChecklistSkip({
+    checklistId,
+    templateId,
+    clientId,
+    title,
+    skippedBy,
+    skippedByName,
+    reasonCategory,
+    reasonNote,
+  } = {}) {
+    if (!checklistId || !reasonCategory || !reasonNote) return null
+    const record = {
+      id: `skip-${randomUUID().slice(0, 8)}`,
+      checklistId,
+      templateId: templateId ?? null,
+      clientId: clientId ?? null,
+      // Snapshot the title: the record outlives renames and deletions.
+      title: String(title ?? '').slice(0, 300),
+      skippedBy: skippedBy ?? null,
+      skippedByName: skippedByName ?? null,
+      skippedAt: nowIso(),
+      reasonCategory,
+      reasonNote: String(reasonNote),
+      reviewedBy: null,
+      reviewedAt: null,
+    }
+    if (this.pool) {
+      await this.pool.query(
+        `insert into checklist_skips
+           (id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
+            skipped_at, reason_category, reason_note)
+         values ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9)`,
+        [
+          record.id,
+          record.checklistId,
+          record.templateId,
+          record.clientId,
+          record.title,
+          record.skippedBy,
+          record.skippedByName,
+          record.reasonCategory,
+          record.reasonNote,
+        ],
+      )
+      return record
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.checklistSkips)) authState.checklistSkips = []
+    authState.checklistSkips.push(record)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return record
+  }
+
+  /**
+   * Mark a skip reviewed — the owner has either decided it was legitimate or
+   * had the conversation. Clears it off her dashboard and NOTHING else: the row
+   * stays forever. Idempotent: re-reviewing an already-reviewed skip returns
+   * null rather than re-stamping someone else's decision.
+   */
+  async reviewChecklistSkip(skipId, reviewerId) {
+    if (!skipId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update checklist_skips set reviewed_by = $2, reviewed_at = now()
+         where id = $1 and reviewed_at is null
+         returning id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
+                   skipped_at, reason_category, reason_note, reviewed_by, reviewed_at`,
+        [skipId, reviewerId ?? null],
+      )
+      const row = result.rows[0]
+      return row ? mapChecklistSkipRow(row) : null
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.checklistSkips)) authState.checklistSkips = []
+    const record = authState.checklistSkips.find((entry) => entry?.id === skipId)
+    if (!record || record.reviewedAt) return null
+    record.reviewedBy = reviewerId ?? null
+    record.reviewedAt = nowIso()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return normalizeChecklistSkip(record)
   }
 
   // ---- Active Checklists board: service categories (the columns) ----

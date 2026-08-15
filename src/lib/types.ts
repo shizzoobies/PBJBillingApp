@@ -760,6 +760,17 @@ export type ChecklistTemplate = {
    * ordinary (recurring/standard) template — the sync is a no-op without it.
    */
   onboardingForClientId?: string
+  /**
+   * Quiet skip: may a person step past ONE occurrence of this recurring task
+   * when they won't finish it this cycle but will catch it next time?
+   *
+   * Set when the template is created and editable afterwards, OFF by default,
+   * and owner-only in practice — templates are written through the owner-only
+   * bulk `/api/app-data` save. It lives here and NOT on the materialized
+   * instance on purpose: copying it down would make a later change of mind apply
+   * to some rows and not others. See lib/checklist-skip.js.
+   */
+  skipAllowed?: boolean
 }
 
 export type Checklist = {
@@ -832,6 +843,51 @@ export type Checklist = {
    * no-op without it, so normal cases are unaffected.
    */
   onboardingForClientId?: string
+  /**
+   * Quiet skip: when this occurrence was stepped past, and by whom.
+   *
+   * Deliberately NOT a soft-delete. The row stays in the ACTIVE `checklists`
+   * list so the materializer's identity tuple (templateId, dueDate, stageIndex)
+   * still sees it — that is what stops this period respawning while the NEXT
+   * period's different due date generates exactly as before. The view layer
+   * (`App.tsx`'s `visibleChecklists`) drops it from the active surfaces, so it
+   * can never reach an overdue bucket either. Only
+   * `POST /api/checklists/:id/skip` writes these; the bulk save round-trips
+   * them untouched. Unset on every task that has not been skipped.
+   */
+  skippedAt?: string | null
+  /** User id of whoever skipped this occurrence. */
+  skippedBy?: string | null
+}
+
+/**
+ * One skip of one recurring occurrence — the audit trail behind the owner's
+ * dashboard review section.
+ *
+ * Kept FOREVER, exactly like the completed-tasks history: reviewing stamps
+ * `reviewedBy`/`reviewedAt` (which clears it off the dashboard) and deletes
+ * nothing. `title` is a snapshot taken at skip time so the record survives the
+ * task being renamed or deleted. Endpoint-managed (NOT part of the bulk
+ * app-data write), stored in `checklist_skips` on pg / under auth-state on the
+ * file backend.
+ */
+export type ChecklistSkip = {
+  id: string
+  checklistId: string
+  templateId: string | null
+  clientId: string | null
+  /** The task's title at the moment it was skipped. */
+  title: string
+  skippedBy: string | null
+  skippedByName: string | null
+  /** ISO timestamp the skip was filed. */
+  skippedAt: string | null
+  /** One of the three categories — see `SkipReasonCategory`. */
+  reasonCategory: string
+  /** The required written explanation. */
+  reasonNote: string
+  reviewedBy: string | null
+  reviewedAt: string | null
 }
 
 /**

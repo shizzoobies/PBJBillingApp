@@ -5,6 +5,7 @@ import type {
   AppData,
   BillingMode,
   Checklist,
+  ChecklistSkip,
   ChecklistTemplate,
   ChecklistTemplateItem,
   Client,
@@ -24,6 +25,7 @@ import type {
   TimerState,
   WaitingOnMeItem,
 } from './lib/types'
+import type { SkipReasonCategory } from '../lib/checklist-skip.js'
 
 export type AppContextValue = {
   data: AppData
@@ -454,6 +456,24 @@ export type AppContextValue = {
   approvePendingTaskEdit: (editId: string) => Promise<void>
   /** Reject a pending task edit (discards it). Allowed for the approver or owner. */
   rejectPendingTaskEdit: (editId: string) => Promise<void>
+  /**
+   * Quiet-skip audit records — every skip ever filed, newest first, reviewed
+   * ones included. OWNER-ONLY: the endpoint 403s for anyone else, so this stays
+   * an empty array for staff and the dashboard review section never renders for
+   * them. The records are an audit trail and are never deleted.
+   */
+  checklistSkips: ChecklistSkip[]
+  /**
+   * Skip this occurrence of a recurring task. Only offered when the task's
+   * template has `skipAllowed` — the server refuses it otherwise. Both fields
+   * are required; an empty explanation is refused server-side.
+   */
+  skipChecklistOccurrence: (
+    checklistId: string,
+    input: { category: SkipReasonCategory; explanation: string },
+  ) => Promise<void>
+  /** Owner-only: mark a skip reviewed — clears it off the dashboard, keeps the record. */
+  reviewChecklistSkip: (skipId: string) => Promise<void>
   /**
    * Structured "waiting on you" blockers targeting the signed-in user (from
    * GET /api/waiting-on-me). Drives the Dashboard "Waiting on you" card + the

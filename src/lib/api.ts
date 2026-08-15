@@ -3,6 +3,7 @@
   type ActivityEntry,
   type AppData,
   type Checklist,
+  type ChecklistSkip,
   type ChecklistTemplate,
   type ChecklistTemplateItem,
   type Client,
@@ -31,6 +32,7 @@
   type WeeklySubmission,
 } from './types'
 import type { GroupAllocationMode } from '../../lib/group-allocation.js'
+import type { SkipReasonCategory } from '../../lib/checklist-skip.js'
 
 /**
  * Module-level preview state. `AppContext` calls `setPreviewModeActive`
@@ -1499,6 +1501,61 @@ export async function rejectPendingTaskEdit(editId: string) {
     throw new ApiError(response.status, body?.error ?? `Failed to reject edit (${response.status})`)
   }
   return (await response.json()) as { ok: true; removed: string }
+}
+
+// ---- Quiet skip for recurring checklist tasks ----
+
+/**
+ * Skip this occurrence of a recurring task. Both fields are required and the
+ * SERVER enforces that — the dialog's own validation is a courtesy, not the
+ * boundary. Returns the stamped checklist and the audit record.
+ */
+export async function skipChecklistOccurrence(
+  checklistId: string,
+  input: { category: SkipReasonCategory; explanation: string },
+) {
+  const response = await apiFetch(`/api/checklists/${encodeURIComponent(checklistId)}/skip`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to skip task (${response.status})`)
+  }
+  return (await response.json()) as { checklist: Checklist; skip: ChecklistSkip }
+}
+
+/** Owner-only: every skip record ever filed, newest first (reviewed included). */
+export async function listChecklistSkips() {
+  const response = await apiFetch('/api/checklists/skips', { credentials: 'same-origin' })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to load skips (${response.status})`)
+  }
+  return ((await response.json()) as { skips: ChecklistSkip[] }).skips
+}
+
+/**
+ * Owner-only: mark a skip reviewed. This clears it off the dashboard and
+ * deletes nothing — the record is the audit trail.
+ */
+export async function reviewChecklistSkip(skipId: string) {
+  const response = await apiFetch(
+    `/api/checklists/skips/${encodeURIComponent(skipId)}/review`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to review skip (${response.status})`)
+  }
+  return ((await response.json()) as { skip: ChecklistSkip }).skip
 }
 
 /**

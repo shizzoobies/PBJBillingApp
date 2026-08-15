@@ -73,6 +73,15 @@ import {
   templateApplyScopeDenial,
 } from './lib/template-apply-permission.js'
 import { checklistWriteDenial } from './lib/checklist-write-permission.js'
+import {
+  SKIP_ALREADY_SKIPPED_MESSAGE,
+  SKIP_NOT_ENABLED_MESSAGE,
+  isSkipAllowedForChecklist,
+  isChecklistSkipped,
+  skipNotificationRecipients,
+  skipReasonLabel,
+  validateSkipRequest,
+} from './lib/checklist-skip.js'
 import { buildQboCsv } from './lib/qbo-export.js'
 import {
   createInvoiceCardCheckoutSession,
@@ -5377,6 +5386,35 @@ const server = createServer(async (request, response) => {
           })
         }
 
+        // Quiet skip, part 1: "If another employee creates a task, I get
+        // notified so I can add whether skipping is acceptable." This is the
+        // only task-creation path a non-owner has — recurring TEMPLATES (where
+        // `skipAllowed` actually lives) are written through the owner-only bulk
+        // /api/app-data save, so the owner is already the only person who can
+        // set the flag. This notice is what tells her there is a new task to
+        // make that call on. Best-effort: a notification failure must never
+        // fail the creation the user just watched succeed.
+        if (session.user.role !== 'owner') {
+          try {
+            const creatorName =
+              (data.employees ?? []).find((employee) => employee.id === session.user.id)?.name ??
+              session.user.name ??
+              'A team member'
+            const members = await appDataStore.getTeamMembers()
+            for (const owner of members.filter((member) => member.role === 'owner')) {
+              await notify(appDataStore, owner.id, 'task_created_by_staff', {
+                checklistId: checklist.id,
+                clientId: checklist.clientId,
+                message: `${creatorName} created "${checklist.title}" — decide whether skipping it should be allowed.`,
+                link: `/checklists?focus=${checklist.id}`,
+                appPublicUrl: getPublicAppUrl(request),
+              })
+            }
+          } catch (err) {
+            console.error('[notify] task_created_by_staff dispatch failed:', err?.message || err)
+          }
+        }
+
         sendJson(response, 201, checklist)
         return
       }
@@ -5751,6 +5789,181 @@ const server = createServer(async (request, response) => {
         console.error('[notify] task_edit_approved dispatch failed:', err?.message || err)
       }
       sendJson(response, 200, updated)
+      return
+    }
+
+    // ---- Quiet skip for recurring checklist tasks ----
+    //
+    // Three endpoints, all checked BEFORE the generic `:id` matchers below so
+    // "skips" is never read as a checklist id. Endpoint-managed (NOT the
+    // owner-only bulk /api/app-data write) so staff can actually file a skip.
+
+    // GET /api/checklists/skips — the owner's review queue. Owner-only: this is
+    // firm-wide oversight, and a bookkeeper has no business reading every other
+    // bookkeeper's skips. Returns EVERY record (reviewed included) with its
+    // review state; the dashboard shows this year's unreviewed ones. The record
+    // is an audit trail and is never deleted.
+    if (normalizedPath === '/api/checklists/skips' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can review skipped tasks' })
+        return
+      }
+      const skips = await appDataStore.listChecklistSkips()
+      sendJson(response, 200, { skips })
+      return
+    }
+
+    // POST /api/checklists/skips/:id/review — owner-only "Reviewed". Stamps the
+    // record so it clears off the dashboard; nothing is deleted.
+    const skipReviewMatch = normalizedPath.match(/^\/api\/checklists\/skips\/([^/]+)\/review$/)
+    if (skipReviewMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can review skipped tasks' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const skipId = decodeURIComponent(skipReviewMatch[1])
+      const reviewed = await appDataStore.reviewChecklistSkip(skipId, session.user.id)
+      if (!reviewed) {
+        sendJson(response, 404, { error: 'That skip was not found, or it was already reviewed.' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'checklist_skip_reviewed', reviewed.title)
+      sendJson(response, 200, { skip: reviewed })
+      return
+    }
+
+    // POST /api/checklists/:id/skip — the skip action itself. Body:
+    // { category, explanation }. Both required; an empty explanation is refused
+    // here (not only in the dialog) with the same friendly wording.
+    const checklistSkipMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/skip$/)
+    if (checklistSkipMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      const checklistId = decodeURIComponent(checklistSkipMatch[1])
+      const data = await appDataStore.read()
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
+      if (!checklist || checklist.deletedAt) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      // Same write boundary as every other structural change to a task: the
+      // owner, the assignee, or a named editor.
+      const denial = checklistWriteDenial({
+        user: session.user,
+        checklist,
+        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        error: 'This task belongs to someone else — only its assignee or an editor can skip it.',
+      })
+      if (denial) {
+        sendJson(response, denial.status, { error: denial.error })
+        return
+      }
+
+      // Skippability is a property set when the recurring template was created.
+      // A task whose template has it off is refused here as well as hidden in
+      // the UI — "they don't necessarily know skipping is an option unless
+      // enabled" only holds if the endpoint agrees.
+      if (!isSkipAllowedForChecklist(checklist, data.checklistTemplates ?? [])) {
+        sendJson(response, 403, { error: SKIP_NOT_ENABLED_MESSAGE })
+        return
+      }
+      if (isChecklistSkipped(checklist)) {
+        sendJson(response, 409, { error: SKIP_ALREADY_SKIPPED_MESSAGE })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const validated = validateSkipRequest({
+        category: payload?.category,
+        explanation: payload?.explanation,
+      })
+      if (!validated.ok) {
+        sendJson(response, 400, { error: validated.error })
+        return
+      }
+
+      const skipperName =
+        (data.employees ?? []).find((employee) => employee.id === session.user.id)?.name ??
+        session.user.name ??
+        'A team member'
+
+      const skipped = await appDataStore.skipChecklistInstance(checklistId, session.user.id)
+      if (!skipped) {
+        sendJson(response, 409, { error: SKIP_ALREADY_SKIPPED_MESSAGE })
+        return
+      }
+      const record = await appDataStore.createChecklistSkip({
+        checklistId,
+        templateId: checklist.templateId ?? null,
+        clientId: checklist.clientId ?? null,
+        title: checklist.title,
+        skippedBy: session.user.id,
+        skippedByName: skipperName,
+        reasonCategory: validated.category,
+        reasonNote: validated.explanation,
+      })
+
+      await appDataStore.recordActivity(session.user.id, 'checklist_skipped', checklist.title)
+
+      // Quiet for the person skipping; loud for the people who need to know.
+      // Recipients come from the shared-client substitution in
+      // lib/checklist-skip.js (owner always; an Accountant only for a
+      // Bookkeeper's skip on a client that Accountant is assigned to).
+      try {
+        const client = (data.clients ?? []).find((entry) => entry.id === checklist.clientId) ?? null
+        const recipients = skipNotificationRecipients({
+          client,
+          employees: data.employees ?? [],
+          skipperId: session.user.id,
+        })
+        for (const userId of recipients) {
+          await notify(appDataStore, userId, 'checklist_skipped', {
+            checklistId,
+            clientId: checklist.clientId,
+            message:
+              `${skipperName} skipped "${checklist.title}" this cycle ` +
+              `(${skipReasonLabel(validated.category)}): ${validated.explanation}`,
+            link: '/',
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
+      } catch (err) {
+        console.error('[notify] checklist_skipped dispatch failed:', err?.message || err)
+      }
+
+      sendJson(response, 200, { checklist: skipped, skip: record })
       return
     }
 
