@@ -26,6 +26,7 @@ import {
   selectableClients,
 } from '../lib/clientLifecycle'
 import { buildClientTaskCounts, type ClientTaskCounts } from '../lib/clientTaskCounts'
+import { openTaskAssigneeScope, scopeChecklistsToOpenTaskOwners } from '../lib/openTaskScope'
 import { ListSearch } from '../components/ListSearch'
 import type {
   BillingMode,
@@ -142,8 +143,17 @@ function matchesClientQuery(client: Client, query: string): boolean {
 }
 
 export function ClientsPage() {
-  const { ownerMode, visibleClients, data, updateClientPlan, updateClient, addClient, startOnboarding } =
-    useAppContext()
+  const {
+    ownerMode,
+    visibleClients,
+    data,
+    activeEmployeeId,
+    effectiveUser,
+    updateClientPlan,
+    updateClient,
+    addClient,
+    startOnboarding,
+  } = useAppContext()
   const [query, setQuery] = useState('')
   // Owner-only stage segment. Default to 'active' so the normal list isn't
   // cluttered with prospects/onboarding.
@@ -193,10 +203,28 @@ export function ClientsPage() {
   // when the tint and the number are computed separately they eventually
   // disagree, and a row saying "0 active" next to a lit-up button is worse than
   // either on its own.
+  //
+  // Scoped to whose tasks this viewer is entitled to count: their own, plus —
+  // for an accountant — the people staffed alongside them on their clients.
+  // See `openTaskAssigneeScope` for why that stands in for a hierarchy.
   const todayDateOnly = localDateOnly()
+  const openTaskScope = useMemo(
+    () =>
+      openTaskAssigneeScope({
+        viewerId: activeEmployeeId,
+        isOwner: ownerMode,
+        staffRole: effectiveUser?.staffRole,
+        clients: data.clients ?? [],
+      }),
+    [activeEmployeeId, ownerMode, effectiveUser?.staffRole, data.clients],
+  )
   const taskCounts = useMemo(
-    () => buildClientTaskCounts(data.checklists ?? [], todayDateOnly),
-    [data.checklists, todayDateOnly],
+    () =>
+      buildClientTaskCounts(
+        scopeChecklistsToOpenTaskOwners(data.checklists ?? [], openTaskScope),
+        todayDateOnly,
+      ),
+    [data.checklists, openTaskScope, todayDateOnly],
   )
 
   if (!ownerMode) {

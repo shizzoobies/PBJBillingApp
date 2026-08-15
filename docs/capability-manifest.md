@@ -551,18 +551,40 @@ Clients page meanwhile. Owner-only.
   rejected from the existing queue; no new ones are created.)
 - CHECKING A STEP OFF IS PERSONAL: only the person a step is assigned to can tick
   it — its own assignee when set, otherwise the checklist's assignee — plus the
-  owner as an override. Being assigned to the client lets you SEE and EDIT the
-  checklist (add steps, rename, due dates) but never complete someone else's
-  work; sub-steps follow their parent step's responsible person. Boxes you can't
+  owner as an override. Being assigned to the client lets you SEE the checklist,
+  not edit it (see the sharing rules below), and never lets you complete someone
+  else's work; sub-steps follow their parent step's responsible person. Boxes you can't
   tick render disabled with a "assigned to someone else" tooltip, and the server
   enforces the same rule.
 - Sharing/visibility: a team member assigned to a client sees ALL of that
-  client's tasks (the whole shared board), not just tasks assigned to them
-  personally. They can log time against any of those tasks AND add/edit items on
-  any checklist for a client they're assigned to (completing steps is limited to
-  the assigned person, per above; deletions still need owner approval). Staff can also CREATE a one-time task for any client
-  they're assigned to (the "New task" button on the Checklists page). Owners can
+  client's tasks on the shared board and can LOG TIME against any of them. But
+  SEEING is not EDITING. **Only the task's assignee, a named editor, or an owner
+  can change a checklist** — rename it, change its due date or assignee, add,
+  edit, reorder or delete steps, or flag a step as waiting. A colleague staffed
+  on the same client gets a read-only card; the server refuses the write with a
+  403 either way. (Before, sharing a client was enough to edit a co-worker's
+  live checklist.) A step handed to one person specifically can be edited by
+  that person. Staff can still CREATE a one-time task for any client they're
+  assigned to (the "New task" button on the Checklists page). Owners can
   create/edit everything.
+- WHOSE TASKS EACH VIEW SHOWS (owners always see everyone):
+  - **Clients tab → Checklist button** — YOUR OWN active checklist for that
+    client, the same view as the Checklists tab's In-progress list. If you have
+    none it says "No active task at this time" rather than showing a
+    colleague's.
+  - **Checklists → In progress** — your own active checklists (plus any the
+    owner explicitly named you a viewer on).
+  - **Checklists → Repeating** — everyone assigned to the client can SEE the
+    recurring recipes; only the owner changes them.
+  - **Checklists → Standard** — blueprints are owner-edited. An accountant can
+    view one and copy it to a client (the usual "Copy to client" picker); a
+    bookkeeper views only.
+  - **Gantt** — your own lane and your own tasks only.
+  - **Open/late task counts on the Clients list** — your own open tasks. An
+    ACCOUNTANT also sees those of the people staffed alongside them on their
+    clients. (There is no supervisor field in the data — "the bookkeepers you
+    oversee" is read as shared client assignment.)
+  - The **Board** tab is unchanged: it stays the whole shared board.
 - Recurring checklists (the repeating "recipes") — team members can VIEW the
   recurring checklists for the clients they're assigned to in TWO places:
   (1) the main Checklists page has a read-only "Recurring checklists" section

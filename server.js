@@ -72,6 +72,7 @@ import {
   templateApplyRoleDenial,
   templateApplyScopeDenial,
 } from './lib/template-apply-permission.js'
+import { checklistWriteDenial } from './lib/checklist-write-permission.js'
 import { buildQboCsv } from './lib/qbo-export.js'
 import {
   createInvoiceCardCheckoutSession,
@@ -5779,19 +5780,16 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      // Authorization mirrors the item endpoints: owner / assignee / editor /
-      // any non-owner whose client is in their visible (assigned) set.
-      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
-      const clientVisible =
-        session.user.role === 'owner' ||
-        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
-      const canEdit =
-        session.user.role === 'owner' ||
-        checklist.assigneeId === session.user.id ||
-        editorIds.includes(session.user.id) ||
-        clientVisible
-      if (!canEdit) {
-        sendJson(response, 403, { error: 'You do not have permission to edit this task' })
+      // Authorization mirrors the item endpoints: owner / assignee / editor.
+      // Sharing the client is READ scope only — see checklist-write-permission.
+      const metaDenial = checklistWriteDenial({
+        user: session.user,
+        checklist,
+        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        error: 'You do not have permission to edit this task',
+      })
+      if (metaDenial) {
+        sendJson(response, metaDenial.status, { error: metaDenial.error })
         return
       }
 
@@ -6204,24 +6202,17 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
-      // A non-owner can edit any item on a checklist whose client is in their
-      // visible (assigned) set — plus the legacy assignee/editor paths.
-      const clientVisible =
-        session.user.role === 'owner' ||
-        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
-      const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
-      const canEdit = itemAssigneeId
-        ? session.user.role === 'owner' ||
-          itemAssigneeId === session.user.id ||
-          editorIds.includes(session.user.id) ||
-          clientVisible
-        : session.user.role === 'owner' ||
-          checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id) ||
-          clientVisible
-      if (!canEdit) {
-        sendJson(response, 403, { error: 'You can only update your assigned checklists' })
+      // Owner / the task's assignee / an editor / the step's own assignee.
+      // Sharing the client is NOT enough — that's read scope.
+      const nestedDenial = checklistWriteDenial({
+        user: session.user,
+        checklist,
+        item: targetItem,
+        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        error: 'You can only update your assigned checklists',
+      })
+      if (nestedDenial) {
+        sendJson(response, nestedDenial.status, { error: nestedDenial.error })
         return
       }
 
@@ -6325,24 +6316,17 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
-      // A non-owner can edit any item on a checklist whose client is in their
-      // visible (assigned) set — plus the legacy assignee/editor paths.
-      const clientVisible =
-        session.user.role === 'owner' ||
-        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
-      const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
-      const canEdit = itemAssigneeId
-        ? session.user.role === 'owner' ||
-          itemAssigneeId === session.user.id ||
-          editorIds.includes(session.user.id) ||
-          clientVisible
-        : session.user.role === 'owner' ||
-          checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id) ||
-          clientVisible
-      if (!canEdit) {
-        sendJson(response, 403, { error: 'You can only update your assigned checklists' })
+      // Owner / the task's assignee / an editor / the step's own assignee.
+      // Sharing the client is NOT enough — that's read scope.
+      const nestedDenial = checklistWriteDenial({
+        user: session.user,
+        checklist,
+        item: targetItem,
+        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        error: 'You can only update your assigned checklists',
+      })
+      if (nestedDenial) {
+        sendJson(response, nestedDenial.status, { error: nestedDenial.error })
         return
       }
 
@@ -6642,15 +6626,15 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      // Auth mirrors the item PATCH: owner / assignee / editor / client-visible.
-      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
-      const canEdit =
-        session.user.role === 'owner' ||
-        checklist.assigneeId === session.user.id ||
-        editorIds.includes(session.user.id) ||
-        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
-      if (!canEdit) {
-        sendJson(response, 403, { error: 'You do not have permission to flag this step' })
+      // Auth mirrors the item PATCH: owner / assignee / editor.
+      const waitDenial = checklistWriteDenial({
+        user: session.user,
+        checklist,
+        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        error: 'You do not have permission to flag this step',
+      })
+      if (waitDenial) {
+        sendJson(response, waitDenial.status, { error: waitDenial.error })
         return
       }
 
@@ -6744,14 +6728,14 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
-      const canEdit =
-        session.user.role === 'owner' ||
-        checklist.assigneeId === session.user.id ||
-        editorIds.includes(session.user.id) ||
-        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
-      if (!canEdit) {
-        sendJson(response, 403, { error: 'You do not have permission to reorder items' })
+      const reorderDenial = checklistWriteDenial({
+        user: session.user,
+        checklist,
+        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        error: 'You do not have permission to reorder items',
+      })
+      if (reorderDenial) {
+        sendJson(response, reorderDenial.status, { error: reorderDenial.error })
         return
       }
 
@@ -6789,22 +6773,20 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const editorIds = Array.isArray(checklist.editorIds) ? checklist.editorIds : []
-      // A non-owner can edit any item on a checklist whose client is in their
-      // visible (assigned) set — plus the legacy assignee/editor paths.
-      const clientVisible =
-        session.user.role === 'owner' ||
-        visibleClientIdSet(session, data.clients ?? []).has(checklist.clientId)
+      // Owner / the task's assignee / an editor. Sharing the client is read
+      // scope, not write access — see lib/checklist-write-permission.js.
+      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
 
       // --- POST /api/checklists/:id/items (bulk append) ---
       if (!itemId && request.method === 'POST') {
-        const canEdit =
-          session.user.role === 'owner' ||
-          checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id) ||
-          clientVisible
-        if (!canEdit) {
-          sendJson(response, 403, { error: 'You do not have permission to add items' })
+        const appendDenial = checklistWriteDenial({
+          user: session.user,
+          checklist,
+          visibleClientIds,
+          error: 'You do not have permission to add items',
+        })
+        if (appendDenial) {
+          sendJson(response, appendDenial.status, { error: appendDenial.error })
           return
         }
 
@@ -6844,20 +6826,16 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        // Per-item assignee also gets edit access; so does any non-owner whose
-        // client is in their visible (assigned) set.
-        const itemAssigneeId = typeof targetItem.assigneeId === 'string' ? targetItem.assigneeId : ''
-        const canEdit = itemAssigneeId
-          ? session.user.role === 'owner' ||
-            itemAssigneeId === session.user.id ||
-            editorIds.includes(session.user.id) ||
-            clientVisible
-          : session.user.role === 'owner' ||
-            checklist.assigneeId === session.user.id ||
-            editorIds.includes(session.user.id) ||
-            clientVisible
-        if (!canEdit) {
-          sendJson(response, 403, { error: 'You do not have permission to edit this item' })
+        // The step's own assignee also gets edit access on that step.
+        const itemDenial = checklistWriteDenial({
+          user: session.user,
+          checklist,
+          item: targetItem,
+          visibleClientIds,
+          error: 'You do not have permission to edit this item',
+        })
+        if (itemDenial) {
+          sendJson(response, itemDenial.status, { error: itemDenial.error })
           return
         }
 
@@ -6941,13 +6919,15 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        const canEdit =
-          session.user.role === 'owner' ||
-          checklist.assigneeId === session.user.id ||
-          editorIds.includes(session.user.id) ||
-          clientVisible
-        if (!canEdit) {
-          sendJson(response, 403, { error: 'You do not have permission to delete this item' })
+        const deleteDenial = checklistWriteDenial({
+          user: session.user,
+          checklist,
+          item: targetItem,
+          visibleClientIds,
+          error: 'You do not have permission to delete this item',
+        })
+        if (deleteDenial) {
+          sendJson(response, deleteDenial.status, { error: deleteDenial.error })
           return
         }
 

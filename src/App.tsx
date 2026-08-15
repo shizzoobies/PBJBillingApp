@@ -139,6 +139,7 @@ import {
   sortChecklists,
 } from './lib/utils'
 import { selectableClients } from './lib/clientLifecycle'
+import { checklistsVisibleTo } from './lib/checklistVisibility'
 import {
   defaultReportPeriod,
   normalizeReportPeriod,
@@ -999,19 +1000,16 @@ function App() {
     writeStoredTimer(timer)
   }, [timer])
 
-  const visibleChecklists = useMemo(() => {
-    if (role === 'owner') {
-      return sortChecklists(data.checklists)
-    }
-
-    return sortChecklists(
-      data.checklists.filter(
-        (checklist) =>
-          checklist.assigneeId === activeEmployeeId ||
-          (checklist.viewerIds ?? []).includes(activeEmployeeId),
+  const visibleChecklists = useMemo(
+    () =>
+      sortChecklists(
+        checklistsVisibleTo(data.checklists, {
+          viewerId: activeEmployeeId,
+          isOwner: role === 'owner',
+        }),
       ),
-    )
-  }, [activeEmployeeId, data.checklists, role])
+    [activeEmployeeId, data.checklists, role],
+  )
 
   const visibleClientIds = useMemo(() => {
     if (role === 'owner') {

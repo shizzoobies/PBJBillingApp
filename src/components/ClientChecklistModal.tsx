@@ -8,9 +8,13 @@ import { ClientNotesPanel } from './ClientNotesPanel'
 /**
  * Quick "Checklist + Notes" modal launched from the client LIST. Renders the
  * SAME editable active-checklists UI used on the client detail page, plus the
- * shared notes panel. Works for owners and staff alike (each sees only their
- * scoped data; the checklist + notes endpoints already authorize assignees /
- * editors).
+ * shared notes panel.
+ *
+ * For staff it shows only THEIR OWN active checklists for this client, not
+ * every checklist on it. This button was the exact route Brittany used to open
+ * and edit a colleague's active checklist on a shared client. The scoping now
+ * lives in `ActiveChecklistsBody` (it reads `visibleChecklists`), and the
+ * server refuses the writes independently — see lib/checklist-write-permission.
  */
 export function ClientChecklistModal({
   client,

@@ -1261,6 +1261,7 @@ export function ActiveChecklistsBody({ client, data }: { client: Client; data: A
     activeEmployeeId,
     role,
     ownerMode,
+    visibleChecklists,
     addSubItem,
     addSubSubItem,
     bulkAddChecklistItems,
@@ -1282,7 +1283,16 @@ export function ActiveChecklistsBody({ client, data }: { client: Client; data: A
   // every item is done (status 'Done') is finished, not in flight, so it's
   // excluded here. Overdue / In progress / Not started all remain. Shared with
   // the Checklists tab's count so the two can't disagree.
-  const checklists = sortChecklists(activeChecklistsForClient(data.checklists, client.id, today))
+  //
+  // Sourced from `visibleChecklists`, NOT `data.checklists`: on a client two
+  // people share, `data.checklists` carries both of their tasks (that read
+  // scope is deliberate), so this panel used to hand a bookkeeper a fully
+  // editable card for a colleague's active checklist. `visibleChecklists` is
+  // the same "mine" set the Checklists tab's In-progress list uses — owners
+  // still get everything.
+  const checklists = sortChecklists(
+    activeChecklistsForClient(visibleChecklists, client.id, today),
+  )
 
   // "Due this month": a checklist's effective due = its dueDate (same field the
   // page already shows). Count is computed regardless so the label is accurate.
@@ -1294,7 +1304,13 @@ export function ActiveChecklistsBody({ client, data }: { client: Client; data: A
     : checklists
 
   if (checklists.length === 0) {
-    return <p className="muted-text">No active checklists for this client.</p>
+    // For staff this is now a statement about THEM, not the client — a
+    // colleague may well have live work here that is none of their business.
+    return (
+      <p className="muted-text">
+        {ownerMode ? 'No active checklists for this client.' : 'No active task at this time'}
+      </p>
+    )
   }
 
   // Full editable checklist cards — the same editor as the Checklists tab, so

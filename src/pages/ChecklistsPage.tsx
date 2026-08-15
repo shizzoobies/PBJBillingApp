@@ -58,7 +58,6 @@ import {
   employeeName,
   ensureTemplateStages,
   formatHoursMinutes,
-  getAssignedTeamIds,
   getChecklistFrequencyLabel,
   groupChecklist,
   itemDeletionKey,
@@ -1724,20 +1723,16 @@ export function ChecklistCard({
   const editorIds = checklist.editorIds ?? []
   const isAssignee = checklist.assigneeId === activeEmployeeId
   const isEditor = editorIds.includes(activeEmployeeId)
-  // A non-owner can also edit any checklist whose client they're assigned to —
-  // resolve the checklist's client and check its assigned team via
-  // getAssignedTeamIds, the same one-field accessor the server's
-  // visible-client check reads. This mirrors that allowance so staff can edit
-  // the shared board for their clients (not just tasks they're the
-  // assignee/editor of).
-  const checklistClient = clients.find((c) => c.id === checklist.clientId)
-  const isAssignedToClient =
-    !!checklistClient && getAssignedTeamIds(checklistClient).includes(activeEmployeeId)
-  // A non-owner who is neither assignee nor editor nor assigned to the client
-  // sees the task read-only.
-  const isViewerOnly = role !== 'owner' && !isAssignee && !isEditor && !isAssignedToClient
+  // Being assigned to the CLIENT used to be enough to edit any task on it. It
+  // is not: on a client two bookkeepers share, that handed each of them a live
+  // editor for the other's work (featreq-9b47ab5b). Client assignment governs
+  // what you can SEE; the assignee and named editors govern what you can
+  // change. The server refuses the writes either way — see
+  // lib/checklist-write-permission.js — so these two flags exist to keep the
+  // controls honest, not to be the boundary.
+  const isViewerOnly = role !== 'owner' && !isAssignee && !isEditor
   // Whether the current viewer can edit checklist structure (reorder, bulk add)
-  const canEditStructure = role === 'owner' || isAssignee || isEditor || isAssignedToClient
+  const canEditStructure = role === 'owner' || isAssignee || isEditor
   // A staff member has asked an owner to delete this task; surfaces a badge and
   // (for owners) Approve / Reject actions, and disables re-requesting.
   const pendingDeletion = checklistHasPendingDeletionRequest(checklist)

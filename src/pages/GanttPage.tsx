@@ -19,15 +19,28 @@ function checklistStatus(checklist: Checklist, todayDateOnly: string): StatusFil
 }
 
 export function GanttPage() {
-  const { data } = useAppContext()
+  const { data, ownerMode, activeEmployeeId } = useAppContext()
+
+  // Staff see their own lane only. The Gantt is a planning board, and until now
+  // a bookkeeper opening it got a swimlane per person staffed on any of their
+  // clients — other people's workloads, laid out by name. Owners still see
+  // everyone; `null` means "no restriction".
+  const viewerId = ownerMode ? null : activeEmployeeId
 
   return (
     <section className="content-grid" id="gantt">
       <GanttView
-        checklists={data.checklists}
+        checklists={
+          viewerId
+            ? data.checklists.filter((checklist) => checklist.assigneeId === viewerId)
+            : data.checklists
+        }
         clients={data.clients}
-        employees={data.employees}
+        employees={
+          viewerId ? data.employees.filter((employee) => employee.id === viewerId) : data.employees
+        }
         data={data}
+        viewerId={viewerId}
       />
     </section>
   )
@@ -38,11 +51,14 @@ function GanttView({
   clients,
   employees,
   data,
+  viewerId,
 }: {
   checklists: Checklist[]
   clients: Client[]
   employees: Employee[]
   data: AppData
+  /** Non-null = show only this person's tasks (staff). Null = everyone (owner). */
+  viewerId: string | null
 }) {
   const navigate = useNavigate()
   const { assignee, client, status } = useFilters()
@@ -91,6 +107,9 @@ function GanttView({
 
   const q = query.trim().toLowerCase()
   const filtered = [...checklists, ...projectedGhosts].filter((checklist) => {
+    // Applied before the user-chosen filters (and to the projected ghosts too)
+    // so no combination of URL params can widen it.
+    if (viewerId && checklist.assigneeId !== viewerId) return false
     if (assignee && checklist.assigneeId !== assignee) return false
     if (client && checklist.clientId !== client) return false
     if (status && status !== 'all') {
@@ -185,7 +204,7 @@ function GanttView({
     <section className="panel gantt-panel">
       <div className="section-heading">
         <div>
-          <p className="section-kicker">Owner planning</p>
+          <p className="section-kicker">{viewerId ? 'Your schedule' : 'Owner planning'}</p>
           <h2>Checklist Gantt</h2>
         </div>
       </div>
