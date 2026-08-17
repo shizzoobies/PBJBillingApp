@@ -76,7 +76,8 @@ export async function updateFirmSettingsRequest(patch: Partial<FirmSettings>) {
     body: JSON.stringify(patch),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to save firm settings (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to save firm settings (${response.status})`)
   }
   return (await response.json()) as FirmSettings
 }
@@ -162,8 +163,16 @@ export async function saveAppData(data: AppData) {
             'This tab is out of date — please reload.',
         )
       }
+      // The OTHER 409 (the empty-payload guard) already consumed the body
+      // above, so safeErrorMessage below would read nothing — use `body`.
+      const parsed = body as { message?: string; error?: string } | null
+      throw new ApiError(
+        response.status,
+        parsed?.message || parsed?.error || `Failed to save app data (${response.status})`,
+      )
     }
-    throw new ApiError(response.status, `Failed to save app data (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to save app data (${response.status})`)
   }
   // The write moved the fingerprint; adopt the new one or this tab's very next
   // save would be refused as stale against its own change.
@@ -199,7 +208,8 @@ export async function requestSignInLink(email: string) {
   })
 
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to request sign-in link (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to request sign-in link (${response.status})`)
   }
 
   return (await response.json()) as { ok: boolean; message: string }
@@ -269,7 +279,8 @@ export async function logoutSession() {
   })
 
   if (!response.ok && response.status !== 204) {
-    throw new ApiError(response.status, `Failed to log out (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to log out (${response.status})`)
   }
 }
 
@@ -767,7 +778,8 @@ export async function toggleChecklistItemRequest(
   })
 
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to update checklist item (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to update checklist item (${response.status})`)
   }
 
   return (await response.json()) as Checklist
@@ -919,7 +931,8 @@ export async function setChecklistViewersRequest(
   })
 
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to update checklist viewers (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to update checklist viewers (${response.status})`)
   }
 
   return (await response.json()) as Checklist
@@ -1034,7 +1047,8 @@ export async function revokeTeamSession(userId: string, sessionId: string) {
     { credentials: 'same-origin', method: 'POST' },
   )
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to revoke session (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to revoke session (${response.status})`)
   }
   return (await response.json()) as { ok: boolean }
 }
@@ -1046,7 +1060,8 @@ export async function revokeAllTeamSessions(userId: string) {
     { credentials: 'same-origin', method: 'POST' },
   )
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to revoke sessions (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to revoke sessions (${response.status})`)
   }
   return (await response.json()) as { revoked: number }
 }
@@ -1124,7 +1139,8 @@ export async function reorderChecklistItemsRequest(checklistId: string, itemIds:
     body: JSON.stringify({ itemIds }),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to reorder checklist items (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to reorder checklist items (${response.status})`)
   }
   return (await response.json()) as Checklist
 }
@@ -1184,7 +1200,8 @@ export async function appendChecklistItemsRequest(
     body: JSON.stringify({ titles }),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to add checklist items (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to add checklist items (${response.status})`)
   }
   return (await response.json()) as TaskEditResult<Checklist>
 }
@@ -1208,7 +1225,8 @@ export async function updateChecklistItemRequest(
     body: JSON.stringify(patch),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to update checklist item (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to update checklist item (${response.status})`)
   }
   return (await response.json()) as TaskEditResult<Checklist>
 }
@@ -1219,7 +1237,8 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
     method: 'DELETE',
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to delete checklist item (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to delete checklist item (${response.status})`)
   }
   return (await response.json()) as ItemDeleteResult
 }
@@ -1576,7 +1595,8 @@ export async function deleteChecklistRequest(checklistId: string) {
     method: 'DELETE',
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to delete checklist (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to delete checklist (${response.status})`)
   }
   return (await response.json()) as { ok: true; removed: string } | Checklist
 }
@@ -1594,7 +1614,8 @@ export async function approveChecklistDeletionRequest(checklistId: string) {
     },
   )
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to approve deletion (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to approve deletion (${response.status})`)
   }
   return (await response.json()) as { ok: true; removed: string }
 }
@@ -1612,7 +1633,8 @@ export async function rejectChecklistDeletionRequest(checklistId: string) {
     },
   )
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to reject deletion (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to reject deletion (${response.status})`)
   }
   return (await response.json()) as Checklist
 }
@@ -1631,7 +1653,8 @@ export async function restoreChecklistRequest(checklistId: string) {
     },
   )
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to restore checklist (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to restore checklist (${response.status})`)
   }
   return (await response.json()) as Checklist
 }
@@ -1646,7 +1669,8 @@ export async function emptyChecklistRecycleBinRequest() {
     method: 'DELETE',
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to empty recycle bin (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to empty recycle bin (${response.status})`)
   }
   return (await response.json()) as { ok: true; removed: number }
 }
@@ -1677,7 +1701,8 @@ export async function recordClientProfileActivity(clientId: string) {
     method: 'POST',
   })
   if (!response.ok && response.status !== 204) {
-    throw new ApiError(response.status, `Failed to record client activity (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to record client activity (${response.status})`)
   }
 }
 
@@ -1739,7 +1764,8 @@ export async function addTemplateStageRequest(
     body: JSON.stringify(payload),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to add stage (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to add stage (${response.status})`)
   }
   return (await response.json()) as ChecklistTemplate
 }
@@ -1765,7 +1791,8 @@ export async function patchTemplateStageRequest(
     },
   )
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to update stage (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to update stage (${response.status})`)
   }
   return (await response.json()) as ChecklistTemplate
 }
@@ -1790,7 +1817,8 @@ export async function appendTemplateStageItemsRequest(
     },
   )
   if (!response.ok) {
-    throw new ApiError(response.status, await safeErrorMessage(response))
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to add steps (${response.status})`)
   }
   return (await response.json()) as { items: { id: string; label: string }[] }
 }
@@ -1804,7 +1832,8 @@ export async function deleteTemplateStageRequest(templateId: string, stageId: st
     },
   )
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to remove stage (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to remove stage (${response.status})`)
   }
   return (await response.json()) as ChecklistTemplate
 }
@@ -1817,7 +1846,8 @@ export async function reorderTemplateStagesRequest(templateId: string, stageIds:
     body: JSON.stringify({ stageIds }),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to reorder stages (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to reorder stages (${response.status})`)
   }
   return (await response.json()) as ChecklistTemplate
 }
@@ -1835,7 +1865,8 @@ export async function setTemplateViewersRequest(
   })
 
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to update template viewers (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to update template viewers (${response.status})`)
   }
 
   return (await response.json()) as ChecklistTemplate
@@ -2013,7 +2044,8 @@ export async function markNotificationReadRequest(notificationId: string) {
     { credentials: 'same-origin', method: 'POST' },
   )
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to mark notification read (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to mark notification read (${response.status})`)
   }
   return (await response.json()) as NotificationEntry
 }
@@ -2048,7 +2080,8 @@ export async function updateNotificationPrefsRequest(prefs: EmailNotificationPre
     body: JSON.stringify({ prefs }),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to save notification preferences (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to save notification preferences (${response.status})`)
   }
   return (await response.json()) as { prefs: EmailNotificationPrefs }
 }
@@ -2059,7 +2092,8 @@ export async function markAllNotificationsReadRequest() {
     method: 'POST',
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to mark all read (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to mark all read (${response.status})`)
   }
   return (await response.json()) as { updated: number }
 }
@@ -2315,7 +2349,8 @@ export async function assistantClearHistory() {
     credentials: 'same-origin',
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to clear conversation (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to clear conversation (${response.status})`)
   }
   return (await response.json()) as { ok: boolean }
 }
@@ -2355,7 +2390,8 @@ export async function resolvePendingVoiceAction(id: string) {
     body: JSON.stringify({ id }),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to resolve pending action (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to resolve pending action (${response.status})`)
   }
   return (await response.json()) as { ok: boolean; removed: boolean }
 }
@@ -2378,7 +2414,8 @@ export async function resolvePendingReport(id: string) {
     body: JSON.stringify({ id }),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to resolve pending report (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to resolve pending report (${response.status})`)
   }
   return (await response.json()) as { ok: boolean; removed: boolean }
 }
@@ -2405,7 +2442,8 @@ export async function resolvePendingFeatureRequest(id: string) {
     body: JSON.stringify({ id }),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to resolve pending request (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to resolve pending request (${response.status})`)
   }
   return (await response.json()) as { ok: boolean; removed: boolean }
 }
@@ -3027,7 +3065,8 @@ export async function assistantDismissSuggestion(key: string) {
     body: JSON.stringify({ key }),
   })
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to dismiss suggestion (${response.status})`)
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to dismiss suggestion (${response.status})`)
   }
   return (await response.json()) as { ok: boolean }
 }
