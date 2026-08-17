@@ -1,264 +1,264 @@
 # Building an in-app feedback loop for the DevOps app
 
 Written 2026-08-15 for the agent orchestrating that build. Self-contained — you
-don't need the other project to follow it.
+don't need any other project to follow it.
 
 This describes a working in-app feedback loop that has run for months between a
-developer and an end client on another app Alex maintains, and adapts it for
-**your** situation: an internal DevOps tool where a **team of admins** both files
-and monitors the work, rather than a single external owner.
+developer and an end client on another app Alex maintains, adapted for **your**
+situation: an internal DevOps tool where **many admins file and watch the work,
+and exactly one person — Alex — ships it.**
 
 The mechanics are one table and a handful of statuses. **The value is in the
-conventions and the ownership rules** — those are what this document is really
-for. Read §2 and §5 even if you skim the rest, because that's where a
-single-owner design quietly breaks when you point it at a team.
+authority model (§2) and the conventions (§8–§10).** Read those even if you skim
+the rest.
 
 ---
 
 ## 1. The loop
 
-One page inside the app carries the entire conversation about the product, so
+One page inside the app carries the whole conversation about the product, so
 nothing lives in Slack threads or anyone's inbox:
 
 ```
-An admin files a request
+Any admin files a request
         ↓
-It gets an OWNER and a refined spec              (new → planned)
+ALEX triages it: priority + a buildable spec        (new → triaged)
         ↓
-Someone builds it                                (planned → in_progress)
+ALEX builds it                                      (→ in_progress)
         ↓
-It ships, verified live                          (→ shipped)
+ALEX ships it, verified live                        (→ shipped)
         ↓
-THE FILER verifies it against what they meant
+THE ADMIN WHO FILED IT verifies it in the app
         ├── right   → done
-        └── wrong   → back to planned, with their words attached
+        └── wrong   → back to triaged, in their own words
 ```
 
-Two side channels:
+Plus a **clarification lane**: when Alex can't proceed without a decision, the
+item goes to `needs_input` with one written question; the filer answers in the
+app and the answer stays attached forever.
 
-- **A clarification lane** — when the builder can't proceed without a decision,
-  the item goes to `needs_input` with one written question. The answer stays
-  attached to the item forever.
-- **Optional: a brainstorm chat** — a low-stakes AI conversation for half-formed
-  ideas that files a draft when it's cooked. Valuable for a non-technical owner;
-  **less valuable for admins who can already write a clear ticket.** Don't build
-  it first, and possibly don't build it at all. Ask them.
+An optional **brainstorm chat** (a low-stakes AI conversation that files a draft
+when an idea is cooked) is valuable for non-technical owners. Your admins can
+already write a clear ticket. **Don't build it first, and probably don't build
+it at all** unless they ask.
 
 ---
 
-## 2. What changes when the audience is a team
+## 2. The authority model — build this in from the start
 
-The original design assumes one person on each side. Every one of these
-assumptions breaks with a team of admins. This section is the reason this
-document exists.
+**Everyone can ask. One person can ship.** That is the rule, and it is not a UI
+preference — enforce it server-side. Hiding a button is not a permission model;
+a fix on the reference project found 8 of 11 endpoints accepting writes they
+should have refused, because the guarding lived only in the interface.
 
-**1. An item with no owner is nobody's job.** With one client, "who's handling
-this" never came up. With five admins it's the failure mode: items get read by
-everyone and picked up by no one, or two people build the same thing. Add
-`assigned_to` and make it visible in every list. An item in `planned` with no
-assignee is a queue smell — surface it (§6).
+| Action | Who |
+|---|---|
+| File a request | any admin |
+| Edit the report they filed | its filer, until it's triaged |
+| Triage: set priority, write the spec, accept into the queue | **Alex only** |
+| Move to `in_progress` / `shipped` / `wont_do` | **Alex only** |
+| Ask a clarification question | **Alex only** |
+| Answer a clarification question | the filer (or Alex on their behalf, recorded) |
+| Accept a shipped item → `done` | **the filer** |
+| Send a shipped item back | **the filer** |
+| Comment / add context | any admin |
+| Change someone else's priority or spec | nobody but Alex |
 
-**2. "The owner accepted it" becomes ambiguous.** Decide explicitly and enforce
-it: **the person who filed it is the person who verifies it.** They're the only
-one who knows what they meant. If the filer is unavailable, an admin lead can
-accept, but record *who* accepted — `approved_by` isn't decoration on a team.
+Three consequences worth designing for rather than discovering:
 
-**3. Duplicate filings are guaranteed.** Three admins will file the same broken
-thing during the same incident. Provide search-before-file (even a naive title
-match on the create form) and a way to merge or link an item to a primary. If
-you skip this, the board fills with near-duplicates within a month and people
-stop trusting it as a picture of reality.
+**Alex is the bottleneck, deliberately.** That's a legitimate choice for a tool
+that touches production — but it must be *visible*, not silent. An admin whose
+request sits untouched for three weeks with no signal concludes the system is
+theatre and goes back to Slack. §6 exists mostly for this.
 
-**4. Notification fan-out gets loud fast.** One client's tracker generated a
-handful of notices a week. A team's will generate that per day. Build per-user
-preferences from the start (§7) — retrofitting them after everyone has muted
-the channel is too late.
+**"Waiting on Alex" is a real state, and should look like one.** Don't leave a
+filed item sitting in `new` looking identical to something nobody has read. A
+plain "received, not yet triaged" is honest and buys enormous patience. If he's
+away, say so on the page.
 
-**5. Your filers are engineers, which is a mixed blessing.** They write precise
-reproduction steps — and they file **solutions instead of problems**. "Add a
-retry to the deploy webhook" hides the actual report, which might be "deploys
-silently fail about once a week." Capture both, separately (§4). The proposed
-fix is useful signal; it is not the requirement.
-
-**6. This is not an incident tool.** A DevOps app already has alerting, on-call,
-and probably a ticket system. Draw the line explicitly and write it on the page:
-**this loop is for changes to the app itself** — its features, its bugs, its
-usability. Incidents in the *systems it monitors* belong wherever they already
-belong. Without a stated boundary this becomes a second, worse incident queue
-inside six weeks.
+**Verification stays with the filer, not the shipper.** Alex knows the change is
+deployed; only the person who asked knows whether it's what they meant. Never
+let the shipper close their own build as accepted — on the reference project
+this separation is what surfaces the misreads, and there have been plenty.
 
 ---
 
 ## 3. The data model
 
-One table. Everything below the line is what a team needs beyond the
-single-owner original.
+One table.
 
 | Column | Type | Why |
 |---|---|---|
 | `id` | text PK | |
 | `filed_by` | text NOT NULL | who reported it |
-| `title` | text NOT NULL | short name; the builder may rewrite for clarity |
+| `title` | text NOT NULL | short name; Alex may rewrite for clarity |
 | `report` | text NOT NULL | **the filer's own words, never edited** — §4 |
 | `proposed_fix` | text | what they think should happen, kept separate — §4 |
-| `spec` | text | the refined, buildable statement — §4 |
+| `spec` | text | Alex's buildable statement — §4 |
 | `status` | text NOT NULL | §5 |
-| `priority` | text NOT NULL | one field only: `urgent`/`high`/`medium`/`low` |
-| `area` | text | which part of the app — drives filtering, not logic |
+| `priority` | text NOT NULL | one field: `urgent`/`high`/`medium`/`low` |
+| `area` | text | which part of the app; filtering only |
 | `dev_notes` | text | append-only, written TO the filer — §8 |
 | `review_note` | text | the filer's words when they send it back |
 | `clarification_question` / `clarification_answer` | text | the question lane |
-| `shipped_at`, `created_at`, `updated_at` | timestamptz | |
-| — | | |
-| `assigned_to` | text | **who owns it now** (§2.1) |
-| `approved_by` / `approved_at` | text / timestamptz | who accepted, on a team (§2.2) |
-| `duplicate_of` | text FK → same table | merge target (§2.3) |
-| `status_changed_at` | timestamptz | **age-in-status, the basis of monitoring (§6)** |
+| `duplicate_of` | text → same table | merge target — §7 |
+| `status_changed_at` | timestamptz | **age-in-status; the basis of §6** |
 | `resolved_by_ref` | text | commit SHA / deploy id that closed it |
+| `accepted_by` / `accepted_at` | text / timestamptz | the filer's sign-off |
+| `shipped_at`, `created_at`, `updated_at` | timestamptz | |
 
 Notes from experience:
 
-- **`status_changed_at` is not the same as `updated_at`.** A note added to an
-  item touches `updated_at` but the item hasn't *moved*. Every staleness view
-  you'll want is built on time-in-current-status, so store it separately and set
-  it only on a status transition.
-- **`resolved_by_ref` is nearly free here and worth it.** For a DevOps audience,
-  "which deploy fixed this" is a question that will absolutely get asked.
-- **One priority field.** The reference app carries both a boolean `urgent` and a
-  text `priority` because they were added at different times. It's a scar, not a
-  design. Don't reproduce it.
+- **`status_changed_at` ≠ `updated_at`.** Adding a note touches `updated_at`, but
+  the item hasn't *moved*. Every staleness view is built on time-in-status, so
+  set this only on a status transition.
+- **No `assigned_to` field.** Build is always Alex, so an assignee column would
+  be a lie that eventually gets believed. If a second shipper is ever added, that
+  is the moment to introduce it — not before.
+- **`resolved_by_ref` is nearly free and this audience will ask for it** —
+  "which deploy fixed this" is a natural DevOps question.
+- **One priority field.** The reference app carries both an `urgent` boolean and
+  a `priority` text because they arrived at different times. It's a scar, not a
+  design.
 
 ---
 
 ## 4. Filing: separate the symptom from the proposed fix
 
-This is the adaptation that matters most for a technical audience.
+The most important adaptation for a technical audience. Three fields on the
+create form:
 
-Give the create form **three** fields, in this order:
+1. **What happened / what's wrong** → `report`
+2. **What you think should happen** (optional) → `proposed_fix`
+3. **How to see it** → repro steps
 
-1. **What happened / what's wrong** → `report`. The observed behavior.
-2. **What you think should happen** (optional) → `proposed_fix`.
-3. **How to see it** → repro steps, into `report` or its own field.
+Alex then writes `spec`, leaving `report` untouched forever.
 
-Then the builder writes `spec` — the buildable statement — while leaving
-`report` untouched forever.
+Why: an engineer filing *"add a retry to the deploy webhook"* has already made a
+design decision. Build exactly that and you may fix nothing — the real report
+might be *"deploys silently fail about once a week,"* better served by surfacing
+the failure than retrying it. **Keep both. Build against the report; treat the
+proposed fix as expert input, not as the requirement.**
 
-Why the split: an engineer filing "add a retry to the deploy webhook" has
-already made a design decision, and if you build exactly that you may fix
-nothing. The underlying report ("deploys silently fail about once a week") might
-be better served by surfacing the failure than by retrying it. **Keep both. Build
-against the report; treat the proposed fix as expert input, not as the spec.**
-
-Every spec should end with an explicit, observable close condition:
+Every spec ends with an observable close condition:
 
 ```
 Fixed when: <the thing someone can look at and agree about>
 ```
 
-If you can't write that line, you don't understand the request yet. Ask (§9).
+If Alex can't write that line, the request isn't understood yet — that's what
+§9 is for.
 
 ---
 
-## 5. Statuses and who may move them
+## 5. Statuses
 
 ```
 new  →  triaged  →  in_progress  →  shipped  →  done
-          ↑                            │
-          └────── sent back ───────────┘
-                (review_note set)
-
-needs_input   — blocked on an answer
-blocked       — blocked on something else (name it in dev_notes)
-duplicate     — closed, pointing at duplicate_of
-wont_do       — closed deliberately, with a reason in dev_notes
+  │        ↑                           │
+  │        └────── sent back ──────────┘
+  │             (review_note set)
+  │
+  └──→ needs_input / blocked / duplicate / wont_do
 ```
 
-- **`new`** — as filed. Unrefined, unassigned.
-- **`triaged`** — has an **owner**, a priority, and a spec. Nothing enters this
-  state without an `assigned_to`. (The reference app calls this `planned`; use
-  whatever word your admins already say.)
-- **`in_progress`** — actively being worked. Set it honestly; a queue where
-  everything sits in `in_progress` tells you nothing.
-- **`shipped`** — **deployed and verified live**, not "the code is merged." The
-  rule that has saved the reference project repeatedly: tests green → pushed →
-  deploy reports SUCCESS **on that commit's hash** → health check passes. A
-  failed push followed by a health check will cheerfully report the *previous*
-  version as healthy; match the hash.
-- **`done`** — the filer confirmed it (§2.2).
-- **`wont_do`** — a real state. An unanswered "no" rots at the bottom of a board
-  forever; a stated "no, because…" closes cleanly.
+- **`new`** — as filed. **Show the filer that it's been received but not yet
+  read** (§2).
+- **`triaged`** — Alex has set a priority and written a spec. This is the
+  promise that it's real work, not a wish.
+- **`in_progress`** — actively being built. Set it honestly; a board where
+  everything sits here tells nobody anything.
+- **`shipped`** — **deployed and verified live**, never "the code is merged."
+  The rule that has repeatedly saved the reference project: tests green →
+  pushed → deploy reports SUCCESS **on that commit's hash** → health check
+  passes. A failed push followed by a health check will happily report the
+  *previous* version as healthy. Match the hash.
+- **`done`** — the filer confirmed it. Only they can set it.
+- **`wont_do`** — a real, respectful state. An unanswered "no" rots at the
+  bottom of a board forever; a stated "no, because…" closes cleanly.
 
 ---
 
-## 6. Monitoring the queue (your "monitored" requirement)
+## 6. Monitoring — mostly about keeping the bottleneck honest
 
-With a team, the queue itself needs watching or it silently rots. Build a small
-admin dashboard on top of `status_changed_at`. Everything here is a single
-query:
+With one shipper, queue health *is* Alex's throughput and the filers' trust.
+Build a small dashboard on `status_changed_at`; each line is one query:
 
-- **Counts by status**, with the total in flight.
-- **Unowned work** — anything in `triaged` with no `assigned_to`. Should be zero.
-- **Stalled** — items whose `status_changed_at` is older than a threshold you
-  agree per status (e.g. `in_progress` > 7 days, `needs_input` > 3 days). These
-  are the two that actually hurt: work that stopped, and questions nobody
-  answered.
+- **Untriaged, and how old** — the single most important number. If items sit in
+  `new` for weeks, the loop is decaying regardless of how much is shipping.
+- **Time-to-first-response** — filing to triage. This is what an admin
+  experiences as "does anyone read these?"
 - **Awaiting verification** — `shipped` items nobody has confirmed. On a team
-  this is the biggest silent pile; things get built, deployed, and never
-  looked at. Nudge the filer, not the whole channel.
-- **Oldest open item** — a single number that keeps everyone honest.
+  this becomes the biggest silent pile: built, deployed, never looked at. Nudge
+  the filer directly, not a channel.
+- **Unanswered questions** — `needs_input` older than a few days. The most
+  expensive state an item can be in: the work is loaded and stopped.
+- **Oldest open item** — one number that keeps everyone honest.
 - **Reopen rate** — how often shipped items come back. If it climbs, the
   refinement step (§4) is being skipped, not the coding.
 
-Make it a page admins actually land on, and keep it to numbers they can act on.
-A dashboard with fourteen charts gets ignored exactly as fast as no dashboard.
+Keep it to numbers someone can act on. A dashboard with fourteen charts is
+ignored exactly as fast as no dashboard.
 
 ---
 
-## 7. Notifications without fatigue
+## 7. Duplicates and notifications
 
-- **In-app is the source of truth; email/Slack is best-effort.** Never let a
-  delivery failure break the action that triggered it. Log and move on.
-- **Per-user, per-event-type preferences**, stored as a sparse map of opt-outs
-  where a missing key means "on." Default sensible, let people trim.
-- **Route by role in the item, not by broadcast.** The assignee hears about
-  their items; the filer hears when theirs ships or needs an answer; an admin
-  lead can opt into the firehose. Nobody should need to mute the whole thing.
-- **A daily digest beats per-event mail** for anything that isn't blocking.
+**Duplicates are guaranteed.** Three admins will file the same broken thing
+during the same incident. Give the create form a search-before-file (a naive
+title match is enough) and let Alex link an item to a primary via
+`duplicate_of`. Skip this and the board fills with near-duplicates within a
+month, and people stop trusting it as a picture of reality.
+
+**Notifications, routed by role in the item:**
+
+- **Alex gets everything** — he's the single gatekeeper, so his channel is the
+  one at real risk of fatigue. Give him a **daily digest** for new filings and
+  immediate alerts only for `urgent`.
+- **A filer hears about their own items only**: triaged, shipped (please verify),
+  and any question aimed at them.
+- **In-app is the source of truth; email/Slack is best-effort** — never let a
+  delivery failure break the action that triggered it.
+- **Per-user, per-event opt-outs**, stored as a sparse map where a missing key
+  means "on." Retrofitting preferences after everyone has muted the channel is
+  too late.
+
+**This is not an incident tool.** Your DevOps app already has alerting and
+on-call. Write the boundary on the page: **this loop is for changes to the app
+itself.** Incidents in the systems it monitors belong where they already belong.
+Without a stated boundary this becomes a second, worse incident queue inside six
+weeks.
 
 ---
 
 ## 8. Dev notes are written to the filer
 
 `dev_notes` is append-only, chronological, and addressed to the person who filed
-it. Even with a technical audience:
+it — even for a technical audience:
 
-- **Lead with what they'll see**, not what you changed. "Deploys that fail now
-  surface in the activity feed within a minute" beats "added a webhook retry."
-- **Say what was actually wrong** — especially when the app was at fault.
-- **State limits in the same note, not later.** "Failures from before today
-  weren't recorded, so the history starts now." People forgive limits they're
-  told about and lose confidence over ones they discover.
-- **Say what you did NOT do.** Deferred scope and judgment calls belong in
-  writing. An admin who finds an undisclosed gap stops trusting the disclosed
-  ones.
-- **When the filer was right, say so plainly.** Costs nothing.
-- Reference the commit or deploy in `resolved_by_ref`, not in prose.
+- **Lead with what they'll see**, not what changed. "Failed deploys now appear in
+  the activity feed within a minute" beats "added a webhook retry."
+- **Say what was actually wrong**, especially when the app was at fault.
+- **State limits in the same note, not later.** "Failures before today weren't
+  recorded, so the history starts now." People forgive limits they're told about
+  and lose confidence over ones they discover.
+- **Say what you did NOT do** — deferred scope and judgment calls, in writing.
+- **When the filer was right, say so plainly.** Costs nothing, buys a lot.
+- Put the commit or deploy in `resolved_by_ref`, not in prose.
 
 ---
 
 ## 9. The clarification lane
 
 1. `status = needs_input` plus **one** question, with the trade-off stated in
-   terms the filer can decide on.
-2. They answer in the app; the answer stays attached.
+   terms the filer can actually decide on.
+2. They answer in the app; the answer stays attached to the item.
 3. Back to `triaged`.
 
-**Only ask when the answer changes what you build.** Otherwise pick the
+**Only ask when the answer changes what gets built.** Otherwise pick the
 defensible option, build it, and record the choice in the dev notes with an
 offer to change it. A queue that asks five questions a week trains people to
-ignore the sixth. Also: put an SLA on this lane in your monitoring (§6) — an
-unanswered question is the most expensive state an item can be in, because the
-work is loaded and stopped.
+ignore the sixth.
 
 ---
 
@@ -269,15 +269,15 @@ Learned the hard way on the reference project:
 1. **"Still not working" usually means the interpretation missed, not the code.**
    Reproduce the filer's exact steps before touching anything. One complaint
    there took four rounds because each pass re-read the diff instead of the
-   report — the real issue was that the field they wanted to edit had no input
+   report — the real problem was that the field they wanted to edit had no input
    at all.
-2. **Verify against real data before believing anything**, including your own
-   prior fix and including comments in the code. A comment there asserted an
+2. **Verify against real data before believing anything** — including your own
+   prior fix, and including comments in the code. A comment there asserted an
    authorization rule that was false for 8 of 11 endpoints.
 3. **Never mark shipped what isn't live.** Match the deployed hash (§5).
 4. **Validate risky database changes against production in a rolled-back
-   transaction** before deploying them — especially anything touching a
-   wholesale write path. Cheap, and it has caught real breakage.
+   transaction** before deploying — especially anything touching a wholesale
+   write path. Cheap, and it has caught real breakage repeatedly.
 5. **Own mistakes out loud in the notes.** Trust compounds; so does its absence.
 
 ---
@@ -285,31 +285,30 @@ Learned the hard way on the reference project:
 ## 11. Build order
 
 1. Table + statuses + a list grouped by status. Nothing else.
-2. Filing (three fields, §4) and triage (owner + priority + spec).
-3. Dev notes on the item.
-4. The verification step: accept, or send back with the filer's words.
-5. Assignment and the unowned/stalled views (§6) — early, not last. This is what
-   makes it work for a team rather than a person.
-6. Notifications with preferences.
-7. Duplicate linking.
-8. Brainstorm chat only if they actually want it.
+2. Filing (three fields, §4), with the permission model enforced server-side
+   from the first endpoint — not added later.
+3. Triage: priority + spec, Alex only.
+4. Dev notes on the item.
+5. The verification step: the filer accepts, or sends back in their own words.
+6. The untriaged/awaiting-verification views (§6). Early — this is what keeps a
+   single-gatekeeper queue from silently rotting.
+7. Notifications with preferences and Alex's digest.
+8. Duplicate linking.
 
-Steps 1–5 are the product.
+Steps 1–6 are the product.
 
 ---
 
-## 12. Decide these with the admins before building
+## 12. Decide with the admins before building
 
-- **Who may file?** All admins, or everyone who uses the app? (Wider means more
-  signal and more triage load. Pick deliberately.)
-- **Who triages, and how often?** An unowned queue is the default failure. A
-  standing 15 minutes on a set day beats good intentions.
-- **Who accepts a shipped item if the filer is out?**
-- **What's the boundary against your existing incident/ticket tooling** (§2.6),
-  and should items link to it rather than duplicate it?
-- **What's your dangerous window** — the change-freeze equivalent (release
-  weeks, audits, peak season)? The reference project holds risky changes during
-  its client's month-end close. Yours will have one; honor it in the workflow
-  rather than in someone's memory.
-- **Do stalled items nudge a person or a channel?** (A person. Almost always a
-  person.)
+- **Who counts as an admin who can file?** Just the admin group, or anyone who
+  uses the app? Wider means more signal and more triage load on one person.
+- **What's the promise on first response?** Not a delivery date — just "someone
+  has read it by X." That single expectation is what keeps people filing.
+- **What happens when Alex is away?** Items wait. Decide whether the page says
+  so, and whether anything can jump the queue in a genuine emergency.
+- **Where's the boundary against existing incident/ticket tooling** (§7), and
+  should items link to it rather than duplicate it?
+- **What's the dangerous window** — change-freeze, release week, audit season?
+  The reference project holds risky changes during its client's month-end close.
+  Encode yours in the workflow rather than in someone's memory.
