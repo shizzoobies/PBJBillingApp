@@ -284,7 +284,12 @@ export async function createTimeEntry(entry: Omit<TimeEntry, 'id' | 'approvalSta
   })
 
   if (!response.ok) {
-    throw new ApiError(response.status, `Failed to create time entry (${response.status})`)
+    // Surface the server's own sentence — the weekly-submission gate and the
+    // month lock both refuse with a message that tells the person exactly how
+    // to unblock themselves ("submit the week of August 9…"). Swallowing it
+    // into a generic string turned a self-service nudge into a support email.
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to create time entry (${response.status})`)
   }
 
   return (await response.json()) as TimeEntry
