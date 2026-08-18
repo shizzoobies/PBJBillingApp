@@ -44,6 +44,21 @@ export type InProgressScope = {
   query?: string
   /** Needed only to match the query against client names. */
   clients?: Client[]
+  /**
+   * The `?focus=` checklist, admitted unconditionally.
+   *
+   * A jump has to land on the card or it silently does nothing, and the report
+   * period is what usually swallows it: the default is the current month, so a
+   * task jumped to from the pinned Overdue panel — past due by definition — is
+   * routinely outside it. The alternative was widening the period on the user's
+   * behalf, which is not this page's to widen: `reportPeriod` is a SHARED,
+   * PERSISTED preference, and quietly turning it into a custom range breaks the
+   * Timesheet's weekly submit/lock (`isSingleWeek` goes false) and survives a
+   * reload. Exempting one transient row costs nothing and touches no
+   * preference. The param self-clears after ~1.5s, so this is not a way to pin
+   * a row into the list.
+   */
+  focusId?: string | null
 }
 
 export function filterInProgressChecklists(
@@ -54,6 +69,8 @@ export function filterInProgressChecklists(
   const clients = scope.clients ?? []
 
   return checklists.filter((checklist) => {
+    // Ahead of every other narrowing: see `focusId` above.
+    if (scope.focusId && checklist.id === scope.focusId) return true
     if (!isInReportPeriod(effectiveChecklistDue(checklist), scope.reportPeriod)) return false
     if (scope.assignee && checklist.assigneeId !== scope.assignee) return false
     if (scope.client && checklist.clientId !== scope.client) return false

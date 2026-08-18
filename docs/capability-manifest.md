@@ -426,6 +426,33 @@ Clients page meanwhile. Owner-only.
 
 ## Checklists (tasks)
 
+- **Overdue work is PINNED to the top of the page, above everything.** When you
+  have anything past due, a red "Overdue — needs attention" panel is the first
+  thing on the Checklists page, with a count and one row per late task: the
+  business, the task, when it was due and how many days late it is, and whose
+  task it is. Longest-overdue first.
+  - **Nothing can bury it.** It sits above the tabs, so it shows on every tab;
+    it ignores the assignee/client/status filters, the search box, the group-by
+    choice and the report period. Those all narrow the list below — the whole
+    point of the panel is that none of them reach it. (The panel's count is of
+    the tasks IN the panel, so it can differ from the "Overdue" section count in
+    the list below, which the report period and filters do narrow.)
+  - **Clicking a row takes you to that task's card** in the In progress list and
+    clears whatever was hiding it: it switches back to the In progress tab,
+    clears the filters and the search box, and shows the task even when it falls
+    outside the current report period. **It does not change your report period**
+    — that setting is shared with the Timesheet, where a changed range would
+    break the weekly submit; the one task you jumped to is simply let through.
+  - Late tasks appear **twice** on purpose: once in the panel, once in their
+    normal place in the list. The panel is the nudge; the list is where you
+    actually work.
+  - **A skipped cycle never appears there.** A task deliberately moved to its
+    next occurrence is not late, so it is not in the panel — same rule as
+    everywhere else in the app.
+  - **When nothing is overdue the panel is simply absent** — there is no "all
+    caught up" banner. Not seeing it IS the good news.
+  - Each person sees their own scope: staff see their own overdue tasks, the
+    owner sees the whole firm's.
 - **The page is split into four TABS: "In progress", "Repeating", "Standard"
   and "Completed"**, each showing a count. They used to sit stacked on top of
   each other, so getting to a repeating task meant scrolling past every

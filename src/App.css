@@ -4584,9 +4584,111 @@ td strong {
   white-space: nowrap;
 }
 
+/* Was a hardcoded #b3261e, a shade off the --red everything else late wears.
+   "20 days overdue" now appears twice on one screen — in the pinned panel and
+   on the card — so the two had to be the same red. */
 .checklist-due-cue.overdue {
-  background: rgba(200, 52, 52, 0.12);
-  color: #b3261e;
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  color: var(--red);
+}
+
+/* Pinned "Overdue — needs attention" panel at the top of the Checklists page.
+   A thick red left rule and a tinted ground, so it reads as a different KIND of
+   thing from the panels under it before a word is read. Same --red the Board's
+   overdue chip and the card due cue wear — one danger color across the app. */
+.overdue-pin {
+  border-left: 4px solid var(--red);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: color-mix(in srgb, var(--red) 4%, var(--surface));
+}
+
+.overdue-pin-heading {
+  align-items: center;
+  color: var(--red);
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.overdue-pin-heading h2 {
+  color: var(--red);
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+
+/* The count is a solid red badge, not a soft pill: it is the number the whole
+   panel exists to shrink. */
+.overdue-pin-count {
+  background: var(--red);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 22px;
+  padding: 2px 9px;
+  text-align: center;
+}
+
+.overdue-pin-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Each row is one button — the whole row is the click target that jumps to the
+   task's card in the list below. */
+.overdue-pin-row {
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--red) 22%, transparent);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 2px;
+  padding: 10px 12px;
+  text-align: left;
+  transition: border-color var(--ease), box-shadow var(--ease);
+  width: 100%;
+}
+
+.overdue-pin-row:hover,
+.overdue-pin-row:focus-visible {
+  border-color: var(--red);
+  box-shadow: var(--shadow-sm);
+}
+
+.overdue-pin-client {
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.overdue-pin-title {
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+
+.overdue-pin-meta {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px;
+}
+
+/* "12 days overdue" — the one number in the row that has to carry weight. */
+.overdue-pin-late {
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  border-radius: 999px;
+  color: var(--red);
+  font-weight: 700;
+  padding: 1px 8px;
+  white-space: nowrap;
 }
 .stages-accordion {
   display: flex;

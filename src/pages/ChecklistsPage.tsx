@@ -1,4 +1,12 @@
-import { ChevronDown, ChevronRight, Copy, GripVertical, MoreHorizontal, Plus } from 'lucide-react'
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  GripVertical,
+  MoreHorizontal,
+  Plus,
+} from 'lucide-react'
 import {
   useEffect,
   useMemo,
@@ -54,6 +62,7 @@ import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { completedTaskRows } from '../lib/completedTasks'
 import { filterInProgressChecklists } from '../lib/inProgressFilter'
+import { overdueChecklists } from '../lib/overdueChecklists'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { selectableClients } from '../lib/clientLifecycle'
 import {
@@ -241,6 +250,48 @@ export function ChecklistsPage() {
     setSearchParams(next, { replace: true })
   }
 
+  const todayDateOnly = localDateOnly()
+
+  // Overdue work, pinned above everything. Derived from `visibleChecklists` —
+  // the same list the In-progress list below is built from — so the panel is
+  // scoped to the viewer (staff see their own, owners see everything) and never
+  // sees a quietly-skipped occurrence. See src/lib/overdueChecklists.ts for why
+  // that scoping is NOT repeated here.
+  const overdue = useMemo(
+    () => overdueChecklists(visibleChecklists, todayDateOnly),
+    [visibleChecklists, todayDateOnly],
+  )
+
+  // Jump from the pin to the task's card in the list below.
+  //
+  // The pin is a call to action; the list is the workspace — so an overdue task
+  // is shown TWICE, once here and once in its normal place. That duplication is
+  // the point: the panel can't be reached by a filter, but the card you actually
+  // work in stays where you expect it.
+  //
+  // Getting there means undoing every piece of view state that could be hiding
+  // that card, which is the whole reason overdue work got buried:
+  //   - the wrong task-area tab. `?focus=` routes back to In progress via
+  //     resolveTaskArea, but only if nothing outranks it — `?focusTemplate=`
+  //     does, and it self-clears on a 1.5s timer that a busy tab can starve, so
+  //     a stale one would silently swallow the jump. Both go.
+  //   - the filter bar (assignee / client / status);
+  //   - the list's own search box, cleared by the focus handler inside the
+  //     section, where that state lives.
+  // The report period is NOT touched: it is a shared, persisted preference the
+  // Timesheet also reads, so the focused row is exempted from it in
+  // `filterInProgressChecklists` instead. See `InProgressScope.focusId`.
+  const openOverdueChecklist = (checklist: Checklist) => {
+    const next = new URLSearchParams(searchParams)
+    next.set('focus', checklist.id)
+    next.delete('area')
+    next.delete('focusTemplate')
+    next.delete('assignee')
+    next.delete('client')
+    next.delete('status')
+    setSearchParams(next, { replace: true })
+  }
+
   // ---- Which area is open ------------------------------------------------
   // DERIVED from the URL, not stored in state, so a deep link always wins and
   // there is no flash from an effect correcting it after paint.
@@ -285,8 +336,11 @@ export function ChecklistsPage() {
         client: areaClient,
         status: areaStatus,
         today: localDateOnly(),
+        // The list admits the focused row past the report period; the count has
+        // to admit it too, or it contradicts what is under it for that ~1.5s.
+        focusId: searchParams.get('focus'),
       }).length,
-    [visibleChecklists, reportPeriod, areaAssignee, areaClient, areaStatus],
+    [visibleChecklists, reportPeriod, areaAssignee, areaClient, areaStatus, searchParams],
   )
   // Completed history. Built from `data.checklists` (the server's client-scoped
   // feed), NOT `visibleChecklists` — that one is already narrowed to "mine",
@@ -386,6 +440,15 @@ export function ChecklistsPage() {
 
   return (
     <section className="content-grid one-column" id="checklists">
+      {/* First thing on the page, OUTSIDE the Tasks panel — so no tab, filter,
+          group-by or collapsed section can put it out of sight. */}
+      <OverduePinnedPanel
+        checklists={overdue}
+        clients={data.clients}
+        employees={data.employees}
+        onOpen={openOverdueChecklist}
+        todayDateOnly={todayDateOnly}
+      />
       {/* The approver queue is shown to ANY user who is the approver of ≥1
           pending edit (the server already scopes the list: owner sees all,
           staff see only edits routed to them). */}
@@ -639,6 +702,74 @@ export function ChecklistsPage() {
           onApplyToClient={applyTemplateToClient}
         />
       ) : null}
+    </section>
+  )
+}
+
+/**
+ * Overdue work, pinned to the top of the Checklists page.
+ *
+ * The reported problem was that overdue tasks "can get buried" — behind the
+ * task-area tabs, the filter bar, the report period, a collapsed group, or
+ * simply a long list. So this panel deliberately reads NONE of that state: it
+ * is handed the already-scoped overdue list and renders it, or renders nothing.
+ *
+ * Nothing is the good state. An empty overdue list means the panel is absent —
+ * no "all caught up" banner, because a banner that appears every day is
+ * furniture, and furniture is what people stop seeing.
+ *
+ * Loud, but in the app's own voice: the red left rule and the red count are the
+ * same danger language the Board's overdue chip and the due cue on a card
+ * already use. Not a modal and not a toast — this is a standing call to action,
+ * not an interruption, and it must still be there tomorrow morning.
+ */
+function OverduePinnedPanel({
+  checklists,
+  clients,
+  employees,
+  onOpen,
+  todayDateOnly,
+}: {
+  /** Already overdue, already viewer-scoped, already oldest-first. */
+  checklists: Checklist[]
+  clients: Client[]
+  employees: Employee[]
+  onOpen: (checklist: Checklist) => void
+  todayDateOnly: string
+}) {
+  if (checklists.length === 0) return null
+
+  return (
+    <section className="panel overdue-pin" aria-labelledby="overdue-pin-heading">
+      <div className="overdue-pin-heading">
+        <AlertTriangle size={18} aria-hidden="true" />
+        <h2 id="overdue-pin-heading">Overdue — needs attention</h2>
+        <span className="overdue-pin-count">{checklists.length}</span>
+      </div>
+      <ul className="overdue-pin-list">
+        {checklists.map((checklist) => {
+          const due = effectiveChecklistDue(checklist)
+          return (
+            <li key={checklist.id}>
+              <button
+                type="button"
+                className="overdue-pin-row"
+                onClick={() => onOpen(checklist)}
+              >
+                <span className="overdue-pin-client">
+                  {clientName(clients, checklist.clientId)}
+                </span>
+                <span className="overdue-pin-title">{checklist.title}</span>
+                <span className="overdue-pin-meta">
+                  <span>Due {shortDate.format(new Date(`${due}T12:00:00`))}</span>
+                  <span className="overdue-pin-late">{dueDateLabel(due, todayDateOnly)}</span>
+                  <span>{employeeName(employees, checklist.assigneeId)}</span>
+                </span>
+              </button>
+            </li>
+          )
+        })}
+      </ul>
     </section>
   )
 }
@@ -1441,16 +1572,28 @@ function ChecklistInProgressSection({
 
   useEffect(() => {
     if (!focusId) return
-    if (focusRef.current) {
-      focusRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
+    // Deferred out of the effect body (no synchronous setState-in-effect),
+    // exactly like the ?focusTemplate= handler below.
+    const scrollTimer = window.setTimeout(() => {
+      // Drop any active search, or the card we just jumped to stays filtered
+      // out and the deep link — or a click in the pinned Overdue panel —
+      // appears to do nothing. Same reasoning as that sibling handler. The
+      // functional form bails out when the box is already empty, so this can't
+      // cascade. The report period needs no such handling: `filtered` admits
+      // the focused row past it outright.
+      setQuery((current) => (current ? '' : current))
+      focusRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 50)
     // clear focus param after handling so it doesn't keep re-firing
-    const timer = window.setTimeout(() => {
+    const clearTimer = window.setTimeout(() => {
       const next = new URLSearchParams(searchParams)
       next.delete('focus')
       setSearchParams(next, { replace: true })
     }, 1500)
-    return () => window.clearTimeout(timer)
+    return () => {
+      window.clearTimeout(scrollTimer)
+      window.clearTimeout(clearTimer)
+    }
   }, [focusId, searchParams, setSearchParams])
 
   const filtered = useMemo(
@@ -1463,8 +1606,9 @@ function ChecklistInProgressSection({
         today: todayDateOnly,
         query,
         clients,
+        focusId,
       }),
-    [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod],
+    [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod, focusId],
   )
 
   // Status grouping (current behavior, unchanged).
