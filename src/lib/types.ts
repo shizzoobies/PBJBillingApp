@@ -267,7 +267,9 @@ export type AdhocMode = 'billed' | 'courtesy' | 'omitted'
 /** A line on a PERSISTED invoice. `kind` records what produced it. */
 export type PersistedInvoiceLine = {
   /** `card-fee` is appended by the payment webhook when a client pays by card.
-   *  `adhoc` is one entry of out-of-scope time, billed on its own. */
+   *  `adhoc` is one entry of out-of-scope time, billed on its own.
+   *  `retainer` is the single line of a retainer invoice; `retainer_credit` is
+   *  that money given back on a later invoice, and is always <= 0. */
   kind:
     | 'plan'
     | 'hourly'
@@ -277,6 +279,8 @@ export type PersistedInvoiceLine = {
     | 'custom'
     | 'card-fee'
     | 'adhoc'
+    | 'retainer'
+    | 'retainer_credit'
   label: string
   detail: string
   amount: number
@@ -287,6 +291,12 @@ export type PersistedInvoiceLine = {
    * line sits at $0.00, which is what makes courtesy and omit reversible.
    */
   adhocAmount?: number
+  /**
+   * `retainer_credit` lines only: WHICH retainer this credit came out of. The
+   * save reads it to mark that retainer spent, and reads its absence — the line
+   * having been deleted — to put the money back on account.
+   */
+  retainerInvoiceId?: string | null
 }
 
 /** Something on the draft worth a decision before sending — never a charge. */
@@ -304,9 +314,19 @@ export type InvoiceScopeFlag = {
 export type PersistedInvoice = {
   id: string
   clientId: string
-  /** 'YYYY-MM' */
+  /** 'YYYY-MM'. On a retainer this is the month it was ISSUED, not a billing
+   *  window — the unique index is scoped to monthly invoices, so a retainer is
+   *  free to share a month with the client's real invoice. */
   period: string
   number: string | null
+  /**
+   * What kind of document this is. 'monthly' is the month run's output;
+   * 'retainer' is issued by hand when a client signs an engagement letter.
+   * Required rather than optional: both backends always answer with it, and a
+   * money document that could not say which of the two it is would be worse
+   * than a compile error.
+   */
+  kind: 'monthly' | 'retainer'
   status: 'draft' | 'reviewed' | 'sent' | 'processing' | 'paid' | 'overdue' | 'void'
   lineItems: PersistedInvoiceLine[]
   /** This month's work, excluding any prior-month adjustment. */
@@ -336,6 +356,12 @@ export type PersistedInvoice = {
     total?: number
     error?: string
   }>
+  /**
+   * RETAINER invoices only: the invoice this retainer's credit was given back
+   * on. Non-null means the money has been spent and cannot be spent again — the
+   * server enforces that on save, so this is a fact to READ, never a lever.
+   */
+  appliedToInvoiceId: string | null
   createdAt: string | null
   updatedAt: string | null
 }

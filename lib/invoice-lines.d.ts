@@ -5,7 +5,16 @@
 
 /** What produced this line — the persisted invoice stores it, and Client Recap
  *  uses it to separate service revenue from reimbursements. */
-export type InvoiceLineKind = 'plan' | 'hourly' | 'reimbursement' | 'recurring' | 'adhoc'
+export type InvoiceLineKind =
+  | 'plan'
+  | 'hourly'
+  | 'reimbursement'
+  | 'recurring'
+  | 'adhoc'
+  /** The single line of a retainer invoice. */
+  | 'retainer'
+  /** A paid retainer given back on a later invoice. Always <= 0. */
+  | 'retainer_credit'
 
 /** The owner's per-line decision about one piece of ad hoc work. */
 export type AdhocMode = 'billed' | 'courtesy' | 'omitted'
@@ -99,4 +108,23 @@ export function cardProcessingFeeLine(invoice: { total?: number }): {
   label: string
   detail: string
   amount: number
+}
+
+export const RETAINER_LABEL: string
+export const RETAINER_CREDIT_LABEL: string
+export function retainerCreditAmount(
+  lines: Array<{ kind?: string; amount?: number }> | null | undefined,
+  retainerAmount: number,
+): number
+export function retainerCreditLine(args: {
+  lines: Array<{ kind?: string; amount?: number }> | null | undefined
+  retainerAmount: number
+  retainerId?: string | null
+  retainerNumber?: string | null
+}): {
+  kind: 'retainer_credit'
+  label: string
+  detail: string
+  amount: number
+  retainerInvoiceId: string | null
 }

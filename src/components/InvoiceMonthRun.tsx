@@ -8,6 +8,7 @@ import {
   RefreshCw,
   RotateCcw,
   Trash2,
+  Undo2,
 } from 'lucide-react'
 import {
   useCallback,
@@ -22,6 +23,7 @@ import {
   createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
   listInvoicesRequest,
+  listUnappliedRetainersRequest,
   regenerateInvoicesRequest,
   sendInvoiceRequest,
   updateInvoiceRequest,
@@ -31,13 +33,15 @@ import {
   adhocLineForMode,
   normalizeAdhocMode,
   renderedInvoiceLines,
+  retainerCreditLine,
 } from '../../lib/invoice-lines.js'
-import type {
-  AdhocMode,
-  Client,
-  Contact,
-  PersistedInvoice,
-  PersistedInvoiceLine,
+import {
+  ApiError,
+  type AdhocMode,
+  type Client,
+  type Contact,
+  type PersistedInvoice,
+  type PersistedInvoiceLine,
 } from '../lib/types'
 import {
   INVOICE_STATUS_LABELS,
@@ -133,6 +137,28 @@ const ADHOC_CHOICES: ReadonlyArray<{ value: AdhocMode; label: string }> = [
   { value: 'omitted', label: 'Leave off the invoice' },
 ]
 
+/**
+ * What a save answers with.
+ *
+ * A refused save used to come back as `null`, which told the caller nothing —
+ * and one refusal needs handling rather than reporting: a retainer credit the
+ * server would not honor has to be taken back OUT of the editor's lines, or she
+ * is left holding a credit that will be refused again on every save.
+ */
+type PatchResult =
+  | { ok: true; invoice: PersistedInvoice }
+  | { ok: false; message: string; retainer: boolean }
+
+/**
+ * The statuses in which a retainer credit may be ADDED. Mirrors
+ * `RETAINER_CREDITABLE_STATUSES` in db/store.js — the server is what enforces
+ * it; this only decides whether to hold out a button that would be refused.
+ */
+const RETAINER_CREDITABLE_STATUSES: ReadonlySet<PersistedInvoice['status']> = new Set([
+  'draft',
+  'reviewed',
+])
+
 /** The current month as YYYY-MM, in local time. */
 function currentPeriod() {
   const now = new Date()
@@ -174,6 +200,14 @@ export function InvoiceMonthRun({
 }) {
   const [period, setPeriod] = useState(currentPeriod)
   const [invoices, setInvoices] = useState<PersistedInvoice[]>([])
+  // Every retainer the firm is holding — paid and not yet given back. Kept
+  // apart from `invoices` because these belong to no month: the one this August
+  // invoice credits was probably issued in January.
+  const [retainers, setRetainers] = useState<PersistedInvoice[]>([])
+  // Bumped by a save, to re-ask what is still on account. A counter rather than
+  // a callback so the fetch stays inside its effect, with the same cancellation
+  // guard the invoice load has.
+  const [retainerToken, setRetainerToken] = useState(0)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -298,6 +332,32 @@ export function InvoiceMonthRun({
       cancelled = true
     }
   }, [period, refreshToken])
+
+  /**
+   * Re-read the retainers on hand — on mount, and again after every save,
+   * because applying a credit spends one and removing the line hands it back.
+   * An offer that outlived its retainer would be an offer to double-spend, and
+   * one that failed to reappear would look like the money had gone.
+   *
+   * A failure here is deliberately SILENT: this decides whether an optional
+   * button is offered, and an error banner over the month run would be shouting
+   * about something she was not doing.
+   */
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const held = await listUnappliedRetainersRequest()
+        if (!cancelled) setRetainers(held)
+      } catch {
+        /* the Apply affordance simply does not appear */
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [retainerToken, refreshToken])
 
   // Number order. A voided invoice keeps its number and its place, so the run
   // reads the same way before and after something is voided.
@@ -481,7 +541,7 @@ export function InvoiceMonthRun({
   const patch = async (
     invoiceId: string,
     body: Parameters<typeof updateInvoiceRequest>[1],
-  ) => {
+  ): Promise<PatchResult> => {
     setBusy(true)
     setError(null)
     try {
@@ -489,10 +549,26 @@ export function InvoiceMonthRun({
       setInvoices((current) =>
         current.map((invoice) => (invoice.id === updated.id ? updated : invoice)),
       )
-      return updated
+      // A save can have spent a retainer or handed one back. Re-ask rather than
+      // guess: the server decides, and the offer on the next row has to agree
+      // with what it decided.
+      setRetainerToken((token) => token + 1)
+      return { ok: true, invoice: updated }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save that change.')
-      return null
+      const message = err instanceof Error ? err.message : 'Could not save that change.'
+      // A refused retainer credit is answered by the editor, not by the run's
+      // banner: it is about the lines she is looking at, the sentence names the
+      // other invoice involved, and it comes with the credit line being taken
+      // back out — none of which reads as a message about the month.
+      const refusedRetainer = err instanceof ApiError && err.status === 409
+      if (refusedRetainer) {
+        // Whatever the server knows about that retainer, we now do not. Re-ask
+        // before offering it to anybody else.
+        setRetainerToken((token) => token + 1)
+      } else {
+        setError(message)
+      }
+      return { ok: false, message, retainer: refusedRetainer }
     } finally {
       setBusy(false)
     }
@@ -653,6 +729,13 @@ export function InvoiceMonthRun({
                     clientName={clientName(invoice.clientId)}
                     cardEnabled={cardEnabled(invoice.clientId)}
                     recipients={recipientsFor(invoice.clientId)}
+                    // A retainer invoice is not itself a thing you credit —
+                    // offering to give it back on itself would be circular.
+                    retainer={
+                      invoice.kind === 'retainer'
+                        ? null
+                        : (retainers.find((held) => held.clientId === invoice.clientId) ?? null)
+                    }
                     open={openId === invoice.id}
                     busy={busy}
                     onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
@@ -676,6 +759,7 @@ function InvoiceRow({
   clientName,
   cardEnabled,
   recipients,
+  retainer,
   open,
   busy,
   onToggle,
@@ -690,10 +774,12 @@ function InvoiceRow({
   cardEnabled: boolean
   /** Every address this invoice would be emailed to, resolved before any click. */
   recipients: ResolvedInvoiceRecipients
+  /** A paid retainer of this client's that has not been given back yet, if any. */
+  retainer: PersistedInvoice | null
   open: boolean
   busy: boolean
   onToggle: () => void
-  onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PersistedInvoice | null>
+  onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PatchResult>
   onPrint: () => void
   /** Push a server-returned invoice back into the list (payment link marks it sent). */
   onInvoiceChanged: (invoice: PersistedInvoice) => void
@@ -721,6 +807,12 @@ function InvoiceRow({
           <span className="invoice-run-title">
             <span className="invoice-run-client">{clientName}</span>
             <span className="invoice-run-number">{invoice.number ?? '—'}</span>
+            {/* A retainer sits in the month it was issued in, beside that
+                client's real invoice for the same month. Without this tag the
+                two read as a duplicate. */}
+            {invoice.kind === 'retainer' ? (
+              <span className="invoice-run-kind-tag">Retainer</span>
+            ) : null}
           </span>
           <span className="invoice-run-meta">
             {/* What the client will SEE — an ad hoc line she left off is on the
@@ -778,6 +870,7 @@ function InvoiceRow({
           invoice={invoice}
           clientName={clientName}
           recipients={recipients}
+          retainer={retainer}
           busy={busy}
           onPatch={onPatch}
           onPrint={onPrint}
@@ -856,14 +949,22 @@ function InvoiceLineRow({
       <td className="invoice-run-amount-cell">
         {/* A line that is not being charged has no amount to type: it reads
             $0.00, which is what the client's invoice will say. What it WOULD
-            have charged is shown beside the choice above. */}
+            have charged is shown beside the choice above.
+
+            A retainer credit's amount is not hers to type either, for a
+            different reason: the server sizes it from the retainer and the rest
+            of the invoice, and rewrites whatever it is sent. An editable box
+            there would accept a number and then silently replace it on save.
+            The label stays hers. */}
         <input
           className="input"
           type="number"
           step="0.01"
           value={line.amount}
           aria-label="Amount"
-          readOnly={Boolean(onModeChange) && mode !== 'billed'}
+          readOnly={
+            (Boolean(onModeChange) && mode !== 'billed') || line.kind === 'retainer_credit'
+          }
           onChange={(event) => onChange(index, { amount: Number(event.target.value) })}
         />
       </td>
@@ -890,6 +991,7 @@ function InvoiceEditor({
   invoice,
   clientName,
   recipients,
+  retainer,
   busy,
   onPatch,
   onPrint,
@@ -900,8 +1002,10 @@ function InvoiceEditor({
   clientName: string
   /** Who this would go to, resolved by the same code the send endpoint uses. */
   recipients: ResolvedInvoiceRecipients
+  /** A paid retainer of this client's with nothing spent against it yet. */
+  retainer: PersistedInvoice | null
   busy: boolean
-  onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PersistedInvoice | null>
+  onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PatchResult>
   onPrint: () => void
   /** Push a server-returned invoice back into the list — creating a payment
    *  link marks it sent, and the row must show that immediately. */
@@ -921,6 +1025,10 @@ function InvoiceEditor({
   const [sendError, setSendError] = useState<string | null>(null)
   // Open only when there is a choice to make — see `startSend`.
   const [picking, setPicking] = useState(false)
+  // Why the last save's retainer credit was refused. Kept here rather than on
+  // the run, because it is about the lines on this screen and it arrives with
+  // the credit line being removed from them.
+  const [retainerError, setRetainerError] = useState<string | null>(null)
 
   // The last send that actually landed. Read off the invoice rather than local
   // state on purpose: a send remounts this editor, so anything transient is gone
@@ -1047,9 +1155,58 @@ function InvoiceEditor({
     setSaved(false)
   }
 
+  /**
+   * Whether to offer the retainer credit, and what it would be worth right now.
+   *
+   * THE APP OFFERS; SHE DECIDES. There is no "final invoice" flag for this to
+   * key off — which invoice ends an engagement is her judgment, made once, on a
+   * month that looks like any other from here. So the offer stands on every
+   * invoice for a client whose retainer is still on account, and nothing applies
+   * it on her behalf.
+   *
+   * The figure comes from the shared calculator, off the lines AS TYPED rather
+   * than the saved ones, so the button promises what pressing it would actually
+   * add. It is a preview either way: the server re-sizes the credit on save.
+   *
+   * Only offered while the invoice is a draft or reviewed, mirroring the rule
+   * the server enforces: crediting an invoice that has already gone out would
+   * leave the client's copy and the copy of record disagreeing about the amount.
+   * A credit already applied is untouched by that — it travels with the invoice
+   * through sent and paid like any other line.
+   */
+  const creditLine = lines.find((line) => line.kind === 'retainer_credit') ?? null
+  const offeredCredit =
+    retainer && !creditLine && RETAINER_CREDITABLE_STATUSES.has(invoice.status)
+      ? retainerCreditLine({
+          lines,
+          retainerAmount: retainer.total,
+          retainerId: retainer.id,
+          retainerNumber: retainer.number,
+        })
+      : null
+
+  const applyRetainerCredit = () => {
+    if (!offeredCredit) return
+    setLines((current) => [...current, offeredCredit as PersistedInvoiceLine])
+    setRetainerError(null)
+    setSaved(false)
+  }
+
   const save = async () => {
-    const updated = await onPatch({ lineItems: lines, blurb })
-    if (updated) setSaved(true)
+    setRetainerError(null)
+    const result = await onPatch({ lineItems: lines, blurb })
+    if (result.ok) {
+      setSaved(true)
+      return
+    }
+    if (!result.retainer) return
+    // The server would not honor the credit — most often because that retainer
+    // was given back somewhere else while this tab sat open. Say so HERE, beside
+    // the lines it is about, and take the credit back out: leaving it in would
+    // mean every subsequent save failed the same way, and the note to the client
+    // she typed alongside it would never land either.
+    setRetainerError(result.message)
+    setLines((current) => current.filter((line) => line.kind !== 'retainer_credit'))
   }
 
   return (
@@ -1090,20 +1247,67 @@ function InvoiceEditor({
         ) : null}
       </table>
 
-      <button
-        type="button"
-        className="secondary-action"
-        onClick={() => {
-          setLines((current) => [
-            ...current,
-            { kind: 'custom', label: '', detail: '', amount: 0 },
-          ])
-          setSaved(false)
-        }}
-      >
-        <Plus size={15} />
-        Add a line
-      </button>
+      <div className="invoice-run-line-actions">
+        <button
+          type="button"
+          className="secondary-action"
+          onClick={() => {
+            setLines((current) => [
+              ...current,
+              { kind: 'custom', label: '', detail: '', amount: 0 },
+            ])
+            setSaved(false)
+          }}
+        >
+          <Plus size={15} />
+          Add a line
+        </button>
+        {/* The credit, offered and never taken. Disabled rather than hidden when
+            there is nothing left to credit, so a $0 invoice explains itself
+            instead of quietly dropping the button she was looking for.
+
+            The retainer is NAMED, not just priced. A client can hold more than
+            one, and "Apply retainer credit ($500.00)" would not say which — this
+            offers the oldest one, and she should be able to see that before
+            pressing it rather than after saving. Picking between several is
+            deferred; naming the one on offer is what makes that deferral safe. */}
+        {offeredCredit ? (
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={offeredCredit.amount === 0}
+            title={
+              offeredCredit.amount === 0
+                ? 'There is nothing on this invoice left to credit'
+                : `Give back the retainer ${retainer?.number ?? ''} held for this client`.trim()
+            }
+            onClick={applyRetainerCredit}
+          >
+            <Undo2 size={15} />
+            {retainer?.number
+              ? `Apply retainer ${retainer.number} credit (${currency.format(Math.abs(offeredCredit.amount))})`
+              : `Apply retainer credit (${currency.format(Math.abs(offeredCredit.amount))})`}
+          </button>
+        ) : null}
+      </div>
+      {/* The whole retainer does not always fit. Saying so beside the button is
+          what stops the remainder looking like a rounding error later. */}
+      {offeredCredit && retainer && Math.abs(offeredCredit.amount) < retainer.total ? (
+        <p className="invoice-run-retainer-note">
+          {currency.format(retainer.total)} is held on account; this invoice can take{' '}
+          {currency.format(Math.abs(offeredCredit.amount))} of it. Applying it here settles the
+          retainer in full — the rest is yours to return outside the app.
+        </p>
+      ) : null}
+      {/* The credit the last save would not honor. It sits with the lines rather
+          than in the run's banner because it is about them, and because the
+          credit line has just been taken back out — the message is the only
+          record of why the table changed. */}
+      {retainerError ? (
+        <p className="invoice-run-error" role="alert">
+          {retainerError}
+        </p>
+      ) : null}
 
       <label className="field invoice-run-blurb">
         <span>Note to the client</span>

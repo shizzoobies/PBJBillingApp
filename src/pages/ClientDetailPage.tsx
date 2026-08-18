@@ -41,6 +41,7 @@ import {
   SavingTextInput,
 } from '../components/SectionKit'
 import {
+  issueRetainerInvoiceRequest,
   recordClientProfileActivity,
   setClientAssignedTeamRequest,
 } from '../lib/api'
@@ -63,6 +64,7 @@ import {
 import {
   addDays,
   clientName,
+  currency,
   effectiveSessions,
   emailForClient,
   ensureTemplateStages,
@@ -387,6 +389,15 @@ export function ClientDetailPage() {
 
           <CollapsibleSection id="client-section-invoice" kicker="Invoice settings" title="Invoice customization" lockable>
             <InvoiceSettingsSectionBody client={client} onCommit={commit} />
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            id="client-section-retainer"
+            kicker="Engagement"
+            title="Retainer invoice"
+            lockable
+          >
+            <RetainerSectionBody client={client} />
           </CollapsibleSection>
         </div>
       ) : null}
@@ -923,6 +934,108 @@ function BillingSectionBody({
         addLabel="+ Add plan / service"
         emptyHelper="No plans/services selected yet."
       />
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Retainer invoice                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Issue the retainer invoice that opens an engagement.
+ *
+ * MANUAL, and it lives here rather than in the month run because that is what
+ * it actually is: the app has no idea when an engagement letter comes back
+ * signed, so this button IS that event. One amount, an optional note, and a
+ * confirm — everything after it is the ordinary invoice life, on the Invoices
+ * page, so this deliberately does not grow a second editor.
+ */
+function RetainerSectionBody({ client }: { client: Client }) {
+  const [amount, setAmount] = useState('')
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [issued, setIssued] = useState<string | null>(null)
+
+  const value = Number(amount)
+  const valid = Number.isFinite(value) && value > 0
+
+  const issue = async () => {
+    if (!valid) return
+    // A money document going out under a number that is then real. Worth one
+    // question, because there is no delete — the way back is voiding it.
+    if (
+      !window.confirm(
+        `Issue a ${currency.format(value)} retainer invoice for ${client.name}? ` +
+          'It appears as a draft on the Invoices page, where you review and send it like any other.',
+      )
+    ) {
+      return
+    }
+    setBusy(true)
+    setError(null)
+    setIssued(null)
+    try {
+      const invoice = await issueRetainerInvoiceRequest(client.id, value, note.trim() || undefined)
+      setIssued(invoice.number ?? invoice.id)
+      setAmount('')
+      setNote('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not issue the retainer invoice.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="retainer-issue">
+      <p className="retainer-issue-help">
+        Issue this once the engagement letter is signed. When the engagement ends, the paid
+        retainer is offered back as a credit on the invoice you choose — you decide which one.
+      </p>
+      <div className="form-grid two-col">
+        <label className="field">
+          <span>Retainer amount</span>
+          <input
+            className="input"
+            type="number"
+            min="0"
+            step="0.01"
+            value={amount}
+            placeholder="0.00"
+            onChange={(event) => setAmount(event.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>Note (optional)</span>
+          <input
+            className="input"
+            value={note}
+            placeholder="Shown on the invoice line"
+            onChange={(event) => setNote(event.target.value)}
+          />
+        </label>
+      </div>
+      {error ? (
+        <p className="invoice-run-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {issued ? (
+        <p className="invoice-run-note">
+          Issued {issued} as a draft. Review and send it from the Invoices page.
+        </p>
+      ) : null}
+      <button
+        type="button"
+        className="secondary-action"
+        disabled={busy || !valid}
+        title={valid ? 'Issue a retainer invoice for this client' : 'Enter an amount first'}
+        onClick={() => void issue()}
+      >
+        {busy ? 'Issuing…' : 'Issue retainer invoice…'}
+      </button>
     </div>
   )
 }

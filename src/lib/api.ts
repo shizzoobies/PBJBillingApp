@@ -3142,6 +3142,54 @@ export async function regenerateInvoicesRequest(period: string) {
 }
 
 /**
+ * Issue a retainer invoice for one client — the front end of an engagement.
+ *
+ * Manual on purpose: nothing in the app knows the engagement letter came back
+ * signed, so pressing this IS that event. What comes back is an ordinary draft
+ * that lives on the normal editor / send / pay rails from here on.
+ */
+export async function issueRetainerInvoiceRequest(
+  clientId: string,
+  amount: number,
+  note?: string,
+) {
+  const response = await apiFetch('/api/invoices/retainer', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientId, amount, ...(note ? { note } : {}) }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not issue the retainer invoice (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
+}
+
+/**
+ * The retainers this firm is holding — paid, and not yet given back.
+ *
+ * Fetched apart from the month list because a retainer is not part of any one
+ * month: January's retainer is what August's final invoice credits, and August's
+ * list would never contain it. The answer only decides whether to OFFER the
+ * credit; the save re-checks it server-side, because this can go stale between
+ * the page loading and the owner pressing Save.
+ */
+export async function listUnappliedRetainersRequest() {
+  const response = await apiFetch('/api/invoices/unapplied-retainers', {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to load retainers (${response.status})`)
+  }
+  return ((await response.json()) as { retainers: PersistedInvoice[] }).retainers
+}
+
+/**
  * Edit one invoice. Totals are NOT sent — the server recomputes them from the
  * lines, so what is stored can never disagree with what is printed.
  */

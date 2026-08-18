@@ -949,6 +949,12 @@ function fakePostgres({
     if (/^select\b[\s\S]*\bfrom invoices\b/i.test(trimmed)) {
       return { rows: invoices }
     }
+    // `update invoices … returning id` — the void pass reads its OWN output to
+    // decide which retainers to hand back, so the fake has to answer with the
+    // rows it claims to have touched or that second statement never runs.
+    if (/^update invoices\b[\s\S]*\breturning id$/i.test(trimmed)) {
+      return { rows: invoices.map((invoice) => ({ id: invoice.id })) }
+    }
     // The bulk save's created_at snapshots — one bare select per table in
     // CREATED_AT_PRESERVED_TABLES, taken before the wipe.
     const createdAtSnapshot = /^select id, created_at from (\w+)$/i.exec(trimmed)
@@ -1087,12 +1093,15 @@ describe('bulk save preserves invoices (postgres branch)', () => {
     const inserts = fake.matching(/^insert into invoices/i)
     expect(inserts).toHaveLength(1)
     // Every column restored verbatim — a SENT invoice must come back exactly
-    // as it was, not regenerated from current data.
-    expect(inserts[0].params.slice(0, 5)).toEqual([
+    // as it was, not regenerated from current data. `kind` sits between the
+    // number and the status; a fixture written before that column existed
+    // restores as 'monthly', which is what it is.
+    expect(inserts[0].params.slice(0, 6)).toEqual([
       'inv-1',
       'c1',
       '2026-08',
       'INV-2026-08-001',
+      'monthly',
       'sent',
     ])
     expect(inserts[0].params).toContain(existingInvoice.created_at)
@@ -4659,5 +4668,858 @@ describe('ad hoc time on the postgres branch', () => {
     expect(updates).toHaveLength(1)
     expect(updates[0].text).toMatch(/is_adhoc = \$2/)
     expect(updates[0].params).toEqual(['t1', true])
+  })
+})
+
+/**
+ * Retainers — the invoice at the start of an engagement, and the credit that
+ * gives it back at the end.
+ *
+ * Two invariants live here, and both are about a SECOND ROW rather than about
+ * arithmetic (the arithmetic is pinned in lib/retainer-invoicing.test.mjs):
+ *
+ *   1. The unique index learned kinds. It used to say "one live invoice per
+ *      (client, period)", which would have refused a retainer issued in a month
+ *      the client already had an invoice for — and `_insertInvoice` reads a
+ *      refusal as "someone else got there first", so it would have been silent.
+ *   2. A retainer can be spent ONCE. The fact lives on the retainer row
+ *      (`appliedToInvoiceId`), set and cleared by the save that adds or removes
+ *      the credit line, so there is no window where the two disagree.
+ */
+describe('retainer invoices (file backend)', () => {
+  const period = '2026-08'
+
+  async function seedClients() {
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            billingMode: 'hourly',
+            hourlyRate: 100,
+            paymentTerms: 'Net 30',
+          },
+          { id: 'c2', name: 'Globex', billingMode: 'hourly', hourlyRate: 100 },
+        ],
+        timeEntries: [],
+      }),
+    )
+  }
+
+  async function storedInvoices() {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.invoices ?? []
+  }
+
+  it('issues a draft with its own kind, number and line', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 2500,
+      note: 'Signed 2026-08-12',
+      period,
+    })
+
+    expect(retainer).toMatchObject({
+      clientId: 'c1',
+      period,
+      kind: 'retainer',
+      status: 'draft',
+      number: 'INV-RET-2026-001',
+      subtotal: 2500,
+      total: 2500,
+      appliedToInvoiceId: null,
+    })
+    expect(retainer.lineItems).toEqual([
+      { kind: 'retainer', label: 'Retainer', detail: 'Signed 2026-08-12', amount: 2500 },
+    ])
+  })
+
+  it('refuses an amount that is not real money', async () => {
+    await seedClients()
+    expect(await store.createRetainerInvoice({ clientId: 'c1', amount: 0 })).toBeNull()
+    expect(await store.createRetainerInvoice({ clientId: 'c1', amount: -50 })).toBeNull()
+    expect(await store.createRetainerInvoice({ clientId: 'c1', amount: 'lots' })).toBeNull()
+    expect(await store.createRetainerInvoice({ clientId: 'ghost', amount: 500 })).toBeNull()
+    expect(await storedInvoices()).toHaveLength(0)
+  })
+
+  it('continues the retainer sequence across clients and months', async () => {
+    await seedClients()
+    await store.createRetainerInvoice({ clientId: 'c1', amount: 500, period: '2026-08' })
+    const second = await store.createRetainerInvoice({
+      clientId: 'c2',
+      amount: 500,
+      period: '2026-09',
+    })
+    expect(second.number).toBe('INV-RET-2026-002')
+  })
+
+  // The landmine. Before the index learned kinds this insert came back null and
+  // the retainer simply never appeared.
+  it('coexists with the same client monthly invoice for the same month', async () => {
+    await seedClients()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-monthly',
+        clientId: 'c1',
+        period,
+        number: 'INV-2026-08-001',
+        kind: 'monthly',
+        status: 'draft',
+        lineItems: [{ kind: 'hourly', label: 'Billable hours', detail: '', amount: 400 }],
+        subtotal: 400,
+        total: 400,
+        dueDate: null,
+        blurb: '',
+        scopeFlags: [],
+        sentAt: null,
+        paidAt: null,
+        paymentMethod: null,
+        appliedToInvoiceId: null,
+        createdAt: '2026-08-31T00:00:00.000Z',
+        updatedAt: '2026-08-31T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const retainer = await store.createRetainerInvoice({ clientId: 'c1', amount: 2500, period })
+    expect(retainer).not.toBeNull()
+    expect(await storedInvoices()).toHaveLength(2)
+  })
+
+  // A second engagement is a second retainer. Nothing about them is unique.
+  it('allows two live retainers for one client', async () => {
+    await seedClients()
+    expect(
+      await store.createRetainerInvoice({ clientId: 'c1', amount: 500, period }),
+    ).not.toBeNull()
+    expect(
+      await store.createRetainerInvoice({ clientId: 'c1', amount: 750, period }),
+    ).not.toBeNull()
+    expect(await storedInvoices()).toHaveLength(2)
+  })
+
+  // The other half of the same rule: MONTHLY invoices are still unique, and a
+  // retainer in the month must not be mistaken for one.
+  it('still refuses a second live monthly invoice, and builds one beside a retainer', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [
+          {
+            id: 't1',
+            employeeId: 'emp-1',
+            clientId: 'c1',
+            date: '2026-08-04',
+            minutes: 120,
+            billable: true,
+            approvalStatus: 'approved',
+          },
+        ],
+      }),
+    )
+    await store.createRetainerInvoice({ clientId: 'c1', amount: 2500, period })
+
+    // The retainer does not count as "already billed for August".
+    const first = await store.generateInvoicesForPeriod(period)
+    expect(first.created).toHaveLength(1)
+    expect(first.created[0].kind).toBe('monthly')
+
+    // ...but the monthly invoice it just made does.
+    const second = await store.generateInvoicesForPeriod(period)
+    expect(second.created).toHaveLength(0)
+    expect(second.skipped).toEqual([{ clientId: 'c1', reason: 'already-generated' }])
+  })
+
+  // "Void & regenerate" only rebuilds MONTHLY invoices, so voiding a hand-issued
+  // retainer would throw it away with nothing to put it back.
+  it('leaves a draft retainer alone when the month is regenerated', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({ clientId: 'c1', amount: 2500, period })
+
+    const result = await store.voidUnsentInvoicesForPeriod(period)
+
+    expect(result.voided).toBe(0)
+    expect((await store.listInvoices()).find((i) => i.id === retainer.id).status).toBe('draft')
+  })
+
+  it('reads a row written before the columns existed as an unapplied monthly invoice', async () => {
+    await seedClients()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-legacy',
+        clientId: 'c1',
+        period,
+        number: 'INV-2026-08-001',
+        status: 'sent',
+        lineItems: [],
+        subtotal: 0,
+        total: 0,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const [legacy] = await store.listInvoices()
+    expect(legacy.kind).toBe('monthly')
+    expect(legacy.appliedToInvoiceId).toBeNull()
+  })
+})
+
+describe('applying a retainer credit (file backend)', () => {
+  const period = '2026-08'
+  const hoursLine = { kind: 'hourly', label: 'Billable hours', detail: '', amount: 600 }
+
+  function invoiceRow(id, overrides = {}) {
+    return {
+      id,
+      clientId: 'c1',
+      period,
+      number: id,
+      kind: 'monthly',
+      status: 'draft',
+      lineItems: [{ ...hoursLine }],
+      subtotal: 600,
+      total: 600,
+      dueDate: null,
+      blurb: '',
+      scopeFlags: [],
+      sentAt: null,
+      paidAt: null,
+      paymentMethod: null,
+      appliedToInvoiceId: null,
+      createdAt: '2026-08-31T00:00:00.000Z',
+      updatedAt: '2026-08-31T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  function retainerRow(overrides = {}) {
+    return invoiceRow('inv-ret', {
+      kind: 'retainer',
+      number: 'INV-RET-2026-001',
+      status: 'paid',
+      period: '2026-01',
+      lineItems: [{ kind: 'retainer', label: 'Retainer', detail: '', amount: 500 }],
+      subtotal: 500,
+      total: 500,
+      ...overrides,
+    })
+  }
+
+  /** The line the editor sends. Its amount is a PREVIEW — the server re-sizes it. */
+  function creditLine(amount = -500, retainerInvoiceId = 'inv-ret') {
+    return {
+      kind: 'retainer_credit',
+      label: 'Retainer applied — credit',
+      detail: 'Retainer INV-RET-2026-001',
+      amount,
+      retainerInvoiceId,
+    }
+  }
+
+  async function seed(rows) {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 },
+          { id: 'c2', name: 'Globex', billingMode: 'hourly', hourlyRate: 100 },
+        ],
+        timeEntries: [],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = rows
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const byId = async (id) => (await store.listInvoices()).find((invoice) => invoice.id === id)
+
+  it('records the application on the retainer, not just on the lines', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+
+    const updated = await store.updateInvoice('inv-final', {
+      lineItems: [{ ...hoursLine }, creditLine()],
+    })
+
+    expect(updated.total).toBe(100)
+    // The subtotal is what the month was WORTH; the credit sits outside it.
+    expect(updated.subtotal).toBe(600)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBe('inv-final')
+  })
+
+  it('is offered only while it is unspent', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+    expect(await store.listUnappliedRetainers()).toHaveLength(1)
+
+    await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] })
+
+    expect(await store.listUnappliedRetainers()).toHaveLength(0)
+  })
+
+  it('a retainer that was only SENT is not on offer, and cannot be credited', async () => {
+    await seed([retainerRow({ status: 'sent' }), invoiceRow('inv-final')])
+    expect(await store.listUnappliedRetainers()).toHaveLength(0)
+
+    await expect(
+      store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] }),
+    ).rejects.toThrow(/not been paid/i)
+  })
+
+  // NEVER TWICE. The second invoice's save is refused outright rather than
+  // quietly crediting money that has already been given back.
+  it('refuses a second invoice trying to spend the same retainer', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final'), invoiceRow('inv-other')])
+    await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] })
+
+    await expect(
+      store.updateInvoice('inv-other', { lineItems: [{ ...hoursLine }, creditLine()] }),
+    ).rejects.toThrow(/already been applied/i)
+
+    // And nothing of that save survived.
+    expect((await byId('inv-other')).total).toBe(600)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBe('inv-final')
+  })
+
+  it('lets the SAME invoice be saved again without tripping the never-twice rule', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+    await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] })
+
+    const again = await store.updateInvoice('inv-final', {
+      lineItems: [{ ...hoursLine }, creditLine()],
+      blurb: 'Final invoice — thank you!',
+    })
+
+    expect(again.total).toBe(100)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBe('inv-final')
+  })
+
+  // Removing the line hands the money back, on the same save. Symmetric with
+  // applying it — she can change her mind about which invoice is the last one.
+  it('frees the retainer when the credit line is removed', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+    await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] })
+
+    const cleared = await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }] })
+
+    expect(cleared.total).toBe(600)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBeNull()
+    expect(await store.listUnappliedRetainers()).toHaveLength(1)
+  })
+
+  // The floor, enforced server-side rather than trusted from the page.
+  it('clamps the credit to what the invoice comes to', async () => {
+    const small = { kind: 'hourly', label: 'Billable hours', detail: '', amount: 200 }
+    await seed([
+      retainerRow(),
+      invoiceRow('inv-small', { lineItems: [{ ...small }], subtotal: 200, total: 200 }),
+    ])
+
+    const updated = await store.updateInvoice('inv-small', {
+      lineItems: [{ ...small }, creditLine(-500)],
+    })
+
+    expect(updated.lineItems[1].amount).toBe(-200)
+    expect(updated.total).toBe(0)
+  })
+
+  it('ignores an amount the page made up', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+
+    const updated = await store.updateInvoice('inv-final', {
+      lineItems: [{ ...hoursLine }, creditLine(-9999)],
+    })
+
+    expect(updated.lineItems[1].amount).toBe(-500)
+    expect(updated.total).toBe(100)
+  })
+
+  it('refuses a retainer belonging to somebody else', async () => {
+    await seed([retainerRow({ clientId: 'c2' }), invoiceRow('inv-final')])
+
+    await expect(
+      store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] }),
+    ).rejects.toThrow(/different client/i)
+  })
+
+  it('refuses a credit naming a retainer we do not hold', async () => {
+    await seed([invoiceRow('inv-final')])
+
+    await expect(
+      store.updateInvoice('inv-final', {
+        lineItems: [{ ...hoursLine }, creditLine(-500, 'inv-nope')],
+      }),
+    ).rejects.toThrow(/does not name a retainer/i)
+  })
+
+  it('refuses two credits on one invoice', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+
+    await expect(
+      store.updateInvoice('inv-final', {
+        lineItems: [{ ...hoursLine }, creditLine(), creditLine()],
+      }),
+    ).rejects.toThrow(/only one retainer credit/i)
+  })
+
+  it('refuses a credit on an invoice with nothing left to credit', async () => {
+    await seed([retainerRow(), invoiceRow('inv-empty', { lineItems: [], subtotal: 0, total: 0 })])
+
+    await expect(
+      store.updateInvoice('inv-empty', { lineItems: [creditLine()] }),
+    ).rejects.toThrow(/nothing on this invoice left to credit/i)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBeNull()
+  })
+
+  it('keeps the retainer id through a save, so removing the line can find it', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+
+    const updated = await store.updateInvoice('inv-final', {
+      lineItems: [{ ...hoursLine }, creditLine()],
+    })
+
+    expect(updated.lineItems[1].retainerInvoiceId).toBe('inv-ret')
+  })
+})
+
+describe('retainer writes on the postgres branch', () => {
+  const finalRow = {
+    id: 'inv-final',
+    client_id: 'c1',
+    period: '2026-08',
+    number: 'INV-2026-08-001',
+    kind: 'monthly',
+    status: 'draft',
+    line_items: [{ kind: 'hourly', label: 'Hours', detail: '', amount: 600 }],
+    subtotal: 600,
+    total: 600,
+  }
+  const retainerRow = {
+    id: 'inv-ret',
+    client_id: 'c1',
+    period: '2026-01',
+    number: 'INV-RET-2026-001',
+    kind: 'retainer',
+    status: 'paid',
+    line_items: [{ kind: 'retainer', label: 'Retainer', detail: '', amount: 500 }],
+    subtotal: 500,
+    total: 500,
+  }
+
+  it('scopes the live-invoice index to monthly, dropping the old one first', async () => {
+    const fake = fakePostgres()
+    // `initialize()` issues the DDL and then seeds. The fake answers every
+    // select with nothing, so the SEEDING half throws — by which point the DDL
+    // has already been issued, and the DDL is the whole point here.
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+
+    expect(fake.matching(/alter table invoices add column if not exists kind text/i)).toHaveLength(
+      1,
+    )
+    expect(
+      fake.matching(/alter table invoices add column if not exists applied_to_invoice_id/i),
+    ).toHaveLength(1)
+    // Order matters: a new index created while the strict one still exists
+    // would never get a chance to be the rule.
+    const dropped = fake.indexOf(/drop index if exists invoices_client_period_live/i)
+    const created = fake.indexOf(
+      /create unique index if not exists invoices_client_period_monthly_live/i,
+    )
+    expect(dropped).toBeGreaterThan(-1)
+    expect(created).toBeGreaterThan(dropped)
+    expect(fake.statements[created].text).toMatch(/where kind = 'monthly' and status <> 'void'/i)
+  })
+
+  it('names the same predicate on the insert, so a retainer can never conflict', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)._insertInvoice({
+      id: 'inv-ret',
+      clientId: 'c1',
+      period: '2026-08',
+      number: 'INV-RET-2026-001',
+      kind: 'retainer',
+      status: 'draft',
+      lineItems: [],
+      subtotal: 500,
+      total: 500,
+      dueDate: null,
+      blurb: '',
+      scopeFlags: [],
+    })
+
+    const inserts = fake.matching(/insert into invoices/i)
+    expect(inserts).toHaveLength(1)
+    expect(inserts[0].text).toMatch(
+      /on conflict \(client_id, period\) where kind = 'monthly' and status <> 'void'/i,
+    )
+    // Positional, one past `number` — the bug this catches is the kind landing
+    // in the status column when someone adds the next one.
+    expect(inserts[0].params[4]).toBe('retainer')
+  })
+
+  it('marks the retainer inside the same transaction as the lines', async () => {
+    const fake = fakePostgres({ invoices: [finalRow, retainerRow] })
+
+    await postgresStore(fake).updateInvoice('inv-final', {
+      lineItems: [
+        { kind: 'hourly', label: 'Hours', detail: '', amount: 600 },
+        {
+          kind: 'retainer_credit',
+          label: 'Retainer applied — credit',
+          detail: '',
+          amount: -500,
+          retainerInvoiceId: 'inv-ret',
+        },
+      ],
+    })
+
+    const begin = fake.indexOf(/^BEGIN$/i)
+    const applied = fake.indexOf(/set applied_to_invoice_id = \$2/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+    expect(begin).toBeGreaterThan(-1)
+    expect(applied).toBeGreaterThan(begin)
+    expect(commit).toBeGreaterThan(applied)
+    // The never-twice rule as a WHERE clause: two racing saves both read the
+    // column as null, and only the one that gets here first matches a row.
+    expect(fake.statements[applied].text).toMatch(
+      /applied_to_invoice_id is null or applied_to_invoice_id = \$2/i,
+    )
+    expect(fake.statements[applied].params).toEqual(['inv-ret', 'inv-final'])
+  })
+
+  it('leaves an ordinary edit as one statement, with no transaction at all', async () => {
+    const fake = fakePostgres({ invoices: [finalRow] })
+
+    await postgresStore(fake).updateInvoice('inv-final', { blurb: 'Thank you!' })
+
+    expect(fake.matching(/^BEGIN$/i)).toHaveLength(0)
+    expect(fake.matching(/set applied_to_invoice_id/i)).toHaveLength(0)
+  })
+
+  it('carries kind and the applied fact through the bulk-save restore', async () => {
+    const fake = fakePostgres({
+      invoices: [
+        {
+          ...retainerRow,
+          scope_flags: [],
+          email_log: [],
+          applied_to_invoice_id: 'inv-final',
+          created_at: '2026-01-05T00:00:00.000Z',
+        },
+      ],
+    })
+    await postgresStore(fake).write(workspace())
+
+    const restores = fake.matching(/insert into invoices \(/i)
+    expect(restores).toHaveLength(1)
+    expect(restores[0].text).toMatch(/number, kind, status/i)
+    expect(restores[0].text).toMatch(/email_log, applied_to_invoice_id, created_at/i)
+    // A retainer that came back as 'monthly' would collide with that client's
+    // real invoice on the very next generate; one that came back unapplied
+    // would be spendable a second time.
+    expect(restores[0].params[4]).toBe('retainer')
+    expect(restores[0].params[19]).toBe('inv-final')
+  })
+})
+
+/**
+ * The lifecycle edges of a retainer credit — what happens when the invoice
+ * holding it, or the retainer behind it, moves on.
+ *
+ * The invariant is that a retainer is in exactly ONE of two states at all times:
+ * on account, or spent on a live invoice. Every test here is a way the pair
+ * could otherwise end up in a third state — spent on a document nobody is
+ * paying, where the money is neither creditable nor recoverable and nothing on
+ * screen would ever say so.
+ */
+describe('retainer credits at the lifecycle edges (file backend)', () => {
+  const period = '2026-08'
+  const hoursLine = { kind: 'hourly', label: 'Billable hours', detail: '', amount: 600 }
+
+  function invoiceRow(id, overrides = {}) {
+    return {
+      id,
+      clientId: 'c1',
+      period,
+      number: id,
+      kind: 'monthly',
+      status: 'draft',
+      lineItems: [{ ...hoursLine }],
+      subtotal: 600,
+      total: 600,
+      dueDate: null,
+      blurb: '',
+      scopeFlags: [],
+      sentAt: null,
+      paidAt: null,
+      paymentMethod: null,
+      appliedToInvoiceId: null,
+      createdAt: '2026-08-31T00:00:00.000Z',
+      updatedAt: '2026-08-31T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  function retainerRow(overrides = {}) {
+    return invoiceRow('inv-ret', {
+      kind: 'retainer',
+      number: 'INV-RET-2026-001',
+      status: 'paid',
+      period: '2026-01',
+      lineItems: [{ kind: 'retainer', label: 'Retainer', detail: '', amount: 500 }],
+      subtotal: 500,
+      total: 500,
+      ...overrides,
+    })
+  }
+
+  function creditLine(amount = -500, retainerInvoiceId = 'inv-ret') {
+    return {
+      kind: 'retainer_credit',
+      label: 'Retainer applied — credit',
+      detail: 'Retainer INV-RET-2026-001',
+      amount,
+      retainerInvoiceId,
+    }
+  }
+
+  async function seed(rows) {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        timeEntries: [],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = rows
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const byId = async (id) => (await store.listInvoices()).find((invoice) => invoice.id === id)
+
+  // ---- Voiding the invoice hands the retainer back -------------------------
+
+  it('frees the retainer when the invoice holding it is voided', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+    await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] })
+    expect(await store.listUnappliedRetainers()).toHaveLength(0)
+
+    await store.updateInvoice('inv-final', { status: 'void' })
+
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBeNull()
+    expect(await store.listUnappliedRetainers()).toHaveLength(1)
+  })
+
+  // The likeliest way a credited invoice gets voided: she rebuilds the month.
+  it('frees the retainer when the month is voided and regenerated', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+    await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] })
+
+    const result = await store.voidUnsentInvoicesForPeriod(period)
+
+    expect(result.voided).toBe(1)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBeNull()
+    expect(await store.listUnappliedRetainers()).toHaveLength(1)
+  })
+
+  it('leaves a retainer spent on an invoice in ANOTHER month alone', async () => {
+    await seed([
+      retainerRow(),
+      invoiceRow('inv-july', { period: '2026-07' }),
+      invoiceRow('inv-final'),
+    ])
+    await store.updateInvoice('inv-july', { lineItems: [{ ...hoursLine }, creditLine()] })
+
+    await store.voidUnsentInvoicesForPeriod(period)
+
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBe('inv-july')
+  })
+
+  // ---- Review comes before the money moves ---------------------------------
+
+  it('refuses a NEW credit on an invoice that has already gone out', async () => {
+    await seed([retainerRow(), invoiceRow('inv-sent', { status: 'sent' })])
+
+    await expect(
+      store.updateInvoice('inv-sent', { lineItems: [{ ...hoursLine }, creditLine()] }),
+    ).rejects.toThrow(/draft or reviewed/i)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBeNull()
+  })
+
+  // ...but a credit that was applied BEFORE the invoice went out travels with
+  // it. Re-checking the status on every later save would make a legitimately
+  // credited invoice unsaveable the moment it was sent.
+  it('keeps saving an invoice that already carried its credit when it went out', async () => {
+    await seed([
+      retainerRow({ appliedToInvoiceId: 'inv-sent' }),
+      invoiceRow('inv-sent', {
+        status: 'sent',
+        lineItems: [{ ...hoursLine }, creditLine()],
+        total: 100,
+      }),
+    ])
+
+    const updated = await store.updateInvoice('inv-sent', {
+      lineItems: [{ ...hoursLine }, creditLine()],
+      blurb: 'Thanks for a great year.',
+    })
+
+    expect(updated.total).toBe(100)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBe('inv-sent')
+  })
+
+  // Same rule, the other side: the RETAINER's own status is only a bar to
+  // spending it, not to saving an invoice that already spent it.
+  it('keeps saving a credited invoice after the retainer’s status moves on', async () => {
+    await seed([
+      retainerRow({ appliedToInvoiceId: 'inv-final', status: 'overdue' }),
+      invoiceRow('inv-final', { lineItems: [{ ...hoursLine }, creditLine()], total: 100 }),
+    ])
+
+    const updated = await store.updateInvoice('inv-final', {
+      lineItems: [{ ...hoursLine }, creditLine()],
+    })
+
+    expect(updated.total).toBe(100)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBe('inv-final')
+  })
+
+  // ---- An unrelated PATCH is not a statement about the credit --------------
+
+  it('marks a credited invoice reviewed even when its retainer was voided', async () => {
+    await seed([
+      retainerRow({ appliedToInvoiceId: 'inv-final', status: 'void' }),
+      invoiceRow('inv-final', { lineItems: [{ ...hoursLine }, creditLine()], total: 100 }),
+    ])
+
+    const updated = await store.updateInvoice('inv-final', {
+      blurb: 'Final invoice — thank you!',
+    })
+
+    expect(updated.blurb).toBe('Final invoice — thank you!')
+    expect(updated.total).toBe(100)
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBe('inv-final')
+  })
+
+  it('still settles the credit when the save DOES carry lines', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+
+    await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] })
+
+    expect((await byId('inv-ret')).appliedToInvoiceId).toBe('inv-final')
+  })
+
+  // ---- Voiding a spent retainer is refused, with somewhere to go -----------
+
+  it('refuses to void a retainer that has been given back, and says where', async () => {
+    await seed([
+      retainerRow({ appliedToInvoiceId: 'inv-final' }),
+      invoiceRow('inv-final', { number: 'INV-2026-08-004' }),
+    ])
+
+    await expect(store.updateInvoice('inv-ret', { status: 'void' })).rejects.toThrow(
+      /applied to INV-2026-08-004 — remove the credit from that invoice first/i,
+    )
+    expect((await byId('inv-ret')).status).toBe('paid')
+  })
+
+  it('voids a retainer that is still on account', async () => {
+    await seed([retainerRow()])
+    expect((await store.updateInvoice('inv-ret', { status: 'void' })).status).toBe('void')
+  })
+
+  // ---- Kinds that do not belong on this document --------------------------
+
+  it('will not let a monthly invoice claim a retainer LINE', async () => {
+    await seed([invoiceRow('inv-final')])
+
+    const updated = await store.updateInvoice('inv-final', {
+      lineItems: [{ kind: 'retainer', label: 'Retainer', detail: '', amount: 2500 }],
+    })
+
+    // Demoted, not dropped — the charge survives as an ordinary line rather
+    // than the save failing on her.
+    expect(updated.lineItems[0]).toMatchObject({ kind: 'custom', amount: 2500 })
+  })
+
+  it('keeps the retainer line on an actual retainer invoice', async () => {
+    await seed([retainerRow({ appliedToInvoiceId: null })])
+
+    const updated = await store.updateInvoice('inv-ret', {
+      lineItems: [{ kind: 'retainer', label: 'Retainer', detail: 'Signed', amount: 2500 }],
+    })
+
+    expect(updated.lineItems[0].kind).toBe('retainer')
+  })
+
+  it('refuses to credit a retainer against another retainer', async () => {
+    await seed([
+      retainerRow(),
+      retainerRow({ id: 'inv-ret-2', number: 'INV-RET-2026-002', status: 'draft' }),
+    ])
+
+    await expect(
+      store.updateInvoice('inv-ret-2', {
+        lineItems: [
+          { kind: 'retainer', label: 'Retainer', detail: '', amount: 500 },
+          creditLine(),
+        ],
+      }),
+    ).rejects.toThrow(/belongs on a monthly invoice/i)
+  })
+})
+
+describe('retainer lifecycle edges on the postgres branch', () => {
+  it('swaps the index inside one transaction, so uniqueness is never off', async () => {
+    const fake = fakePostgres()
+    // See the sibling DDL test: the seeding half of initialize() throws against
+    // a fake that answers every select with nothing. The DDL has already run.
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+
+    const dropped = fake.indexOf(/drop index if exists invoices_client_period_live/i)
+    const created = fake.indexOf(
+      /create unique index if not exists invoices_client_period_monthly_live/i,
+    )
+    expect(dropped).toBeGreaterThan(-1)
+    // ADJACENT, not merely ordered: between the drop and the create there is no
+    // index enforcing one live invoice per client per month, and this is the
+    // invoice of record. `create index` is transactional in Postgres, so the gap
+    // can simply be closed — and nothing may be issued inside it.
+    expect(fake.statements[dropped - 1].text).toMatch(/^BEGIN$/i)
+    expect(created).toBe(dropped + 1)
+    expect(fake.statements[created + 1].text).toMatch(/^COMMIT$/i)
+  })
+
+  it('frees the stranded retainers in the same transaction as the voids', async () => {
+    const fake = fakePostgres({ invoices: [{ id: 'inv-final' }] })
+    await postgresStore(fake).voidUnsentInvoicesForPeriod('2026-08')
+
+    const voided = fake.indexOf(/set status = 'void'/i)
+    const freed = fake.indexOf(/set applied_to_invoice_id = null/i)
+    const begin = fake.indexOf(/^BEGIN$/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+
+    expect(begin).toBeLessThan(voided)
+    expect(freed).toBeGreaterThan(voided)
+    expect(commit).toBeGreaterThan(freed)
+    // Scoped to exactly the ids that were just voided — a retainer spent on a
+    // live invoice in another month must not be handed back.
+    expect(fake.statements[freed].text).toMatch(/applied_to_invoice_id = any\(\$1::text\[\]\)/i)
+    expect(fake.statements[freed].params).toEqual([['inv-final']])
+  })
+
+  it('does not run the freeing statement when nothing was voided', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).voidUnsentInvoicesForPeriod('2026-08')
+
+    expect(fake.matching(/set applied_to_invoice_id = null/i)).toHaveLength(0)
   })
 })

@@ -11718,6 +11718,33 @@ tr.is-inactive-client .client-name-link {
   font-style: italic;
 }
 
+/* "Retainer" beside the number. A retainer shares its month with that client's
+   real invoice, so the two rows need telling apart at a glance. */
+.invoice-run-kind-tag {
+  background: var(--surface-muted, rgba(0, 0, 0, 0.05));
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 8px;
+  text-transform: uppercase;
+}
+
+.invoice-run-line-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.invoice-run-retainer-note {
+  color: var(--muted);
+  font-size: 12.5px;
+  margin: 6px 0 0;
+}
+
 .invoice-run-blurb {
   margin: 0;
 }

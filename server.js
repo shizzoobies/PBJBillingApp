@@ -4,7 +4,12 @@ import { createServer } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
-import { AppDataStore, coerceEntryMinutes, TimeEntrySplitError } from './db/store.js'
+import {
+  AppDataStore,
+  coerceEntryMinutes,
+  RetainerCreditError,
+  TimeEntrySplitError,
+} from './db/store.js'
 import {
   allocateGroupMinutes,
   classifySplitTarget,
@@ -2907,6 +2912,83 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // GET /api/invoices/unapplied-retainers — the retainers this firm is holding
+    // (owner only). Paid, and not yet given back on anybody's invoice.
+    //
+    // Its own endpoint rather than a field on the month list, because a retainer
+    // is not part of any one month: the one issued in January is what the August
+    // final invoice credits, and August's list would never contain it. Declared
+    // before the /:id routes for the same reason export.csv is.
+    if (normalizedPath === '/api/invoices/unapplied-retainers' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see invoices' })
+        return
+      }
+      sendJson(response, 200, { retainers: await appDataStore.listUnappliedRetainers() })
+      return
+    }
+
+    // POST /api/invoices/retainer — issue a retainer invoice for one client
+    // (owner only). Manual by design: nothing in this app knows an engagement
+    // letter came back signed, so this button IS the signing event.
+    if (normalizedPath === '/api/invoices/retainer' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can issue a retainer invoice' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const retainerClientId = typeof payload?.clientId === 'string' ? payload.clientId : ''
+      const retainerAmount = Number(payload?.amount)
+      if (!retainerClientId) {
+        sendJson(response, 400, { error: 'clientId is required' })
+        return
+      }
+      if (!Number.isFinite(retainerAmount) || retainerAmount <= 0) {
+        sendJson(response, 400, { error: 'amount must be more than zero' })
+        return
+      }
+
+      let retainer
+      try {
+        retainer = await appDataStore.createRetainerInvoice({
+          clientId: retainerClientId,
+          amount: retainerAmount,
+          note: typeof payload?.note === 'string' ? payload.note : '',
+        })
+      } catch (error) {
+        console.error('[invoices] retainer create failed:', error)
+        sendJson(response, 500, {
+          error: 'retainer_create_failed',
+          message: 'Could not issue the retainer invoice — please try again.',
+        })
+        return
+      }
+      if (!retainer) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'retainer_invoice_issued',
+        `${retainer.number ?? retainer.id}: ${retainer.total}`,
+      )
+      sendJson(response, 200, { invoice: retainer })
+      return
+    }
+
     // PATCH /api/invoices/:id — edit a draft (owner only).
     // The page sends lines, blurb, due date and review status; the SERVER
     // recomputes subtotal and total from those lines, so a total can never
@@ -2935,6 +3017,13 @@ const server = createServer(async (request, response) => {
       try {
         updated = await appDataStore.updateInvoice(invoiceId, payload ?? {})
       } catch (error) {
+        // A refused retainer credit is a FACT about the data, not a failure —
+        // most often "that retainer has already been given back". She needs the
+        // sentence, not "please try again".
+        if (error instanceof RetainerCreditError) {
+          sendJson(response, 409, { error: 'retainer_credit_refused', message: error.message })
+          return
+        }
         console.error('[invoices] update failed:', error)
         sendJson(response, 500, {
           error: 'invoice_update_failed',

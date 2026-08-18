@@ -1555,6 +1555,102 @@ Clients page meanwhile. Owner-only.
 > so, rather than moving you somewhere nothing happened. Until months have been
 > generated, History says so and shows nothing.
 >
+> **RETAINERS — the two ends of an engagement.** An engagement is bookended by
+> two documents: a **retainer invoice** when the client signs, and a **retainer
+> credit** on the invoice you decide is the last one. The monthly invoicing in
+> between is completely untouched by this.
+>
+> **Issuing one.** On the client's **Billing** tab there is a **Retainer
+> invoice** panel: type the amount, optionally a note for the invoice line, and
+> press **Issue retainer invoice…**. It asks to confirm, then creates a DRAFT
+> retainer invoice for that client. This is a deliberate manual act — the app
+> has no way of knowing when an engagement letter comes back signed, so pressing
+> that button IS the signing event. Nothing generates one for you.
+>
+> **After that it is an ordinary invoice.** It appears in the month run for the
+> month it was issued in, tagged **Retainer**, and in History the same way. You
+> review it, edit its line, send it, take payment on it and print it exactly
+> like any other. It is allowed to sit in the same month as that client's
+> regular invoice — the two are separate documents and the tag is what tells
+> them apart. **Generate** and **Void & regenerate** ignore retainers entirely:
+> a retainer does not stop the month's real invoice being built, and rebuilding
+> a month never throws a retainer away.
+>
+> **Retainer numbers run on their own sequence:** `INV-RET-2026-001`,
+> `INV-RET-2026-002`, … counted per YEAR, not per month, because a retainer is
+> not part of any month's batch. They can never collide with the monthly
+> `INV-2026-08-001` numbers.
+>
+> **Giving it back — THE APP OFFERS, YOU DECIDE WHEN.** Once a retainer has been
+> **paid**, every invoice for that client shows an **Apply retainer credit
+> ($X)** button beside "Add a line". Nothing is ever applied automatically:
+> which invoice ends an engagement is your judgment, and from the app's side the
+> final invoice looks like any other month. Press it when you mean it. It adds a
+> line reading **"Retainer applied — credit"** at a negative amount and the
+> total drops accordingly.
+>
+> **Applying and removing are both yours.** Delete the credit line with its
+> ordinary bin icon and save — the retainer goes straight back on account and is
+> offered again on the next invoice you open. Nothing about this is one-way.
+>
+> **The credit is added before the invoice goes out, not after.** The Apply
+> button appears on **Draft** and **Reviewed** invoices only. Crediting one that
+> has already been sent would leave the copy in the client's inbox and the copy
+> of record disagreeing about the amount, with no send to tell them so. A credit
+> that was applied BEFORE the invoice went out is untouched by this — it travels
+> with the invoice through Sent and Paid like any other line, and the invoice
+> stays editable.
+>
+> **The amount on the credit line is not typed.** The app sizes it from the
+> retainer and the rest of the invoice and re-sizes it on every save, so the box
+> is read-only; the wording of the line is still yours to change.
+>
+> **Voiding gives the retainer back.** Void a credited invoice — one at a time,
+> or by regenerating the whole month — and the retainer returns to the account
+> automatically, offered again on the next invoice. A voided invoice is one
+> nobody is going to pay, so the money it was going to hand back never will be,
+> and leaving it marked spent would strand it where nothing would ever show it.
+>
+> **You cannot void a retainer that has been given back.** It would leave the
+> other invoice carrying a credit against a withdrawn document. The app refuses
+> and says exactly where to go: "This retainer is applied to INV-2026-08-004 —
+> remove the credit from that invoice first."
+>
+> **If a retainer holds more than one client's worth of history, the button
+> names the one it is offering** ("Apply retainer INV-RET-2026-001 credit
+> ($500.00)"). A client with two retainers is offered the older one first;
+> choosing between them is not built yet, so apply the first, then the second.
+>
+> **A retainer can never be given back twice.** The moment it is applied, the
+> app records which invoice took it, and that is enforced when you save, not
+> just hidden in the buttons: if the same retainer is somehow applied to a
+> second invoice — another tab, another owner — that save is refused outright
+> with "That retainer has already been applied to another invoice", and nothing
+> of it is stored.
+>
+> **The credit can never make an invoice negative.** If the retainer is larger
+> than the final invoice, the credit stops at the invoice's own total and takes
+> it to exactly $0.00 — never below. The app says so on the button ("$2,500.00
+> is held on account; this invoice can take $400.00 of it"). Applying it settles
+> the retainer in full; returning the remainder to the client is something you
+> do outside the app, deliberately, because paying a client is not something a
+> billing screen should do on its own.
+>
+> **A fully credited invoice still goes out.** If the credit takes the total to
+> $0.00 the invoice sends as a statement, with no pay button, because there is
+> nothing to pay. If money is still owed, the pay link and the card option (if
+> that client has one) charge the NET amount — the credit is part of the lines
+> the total is computed from, so everything downstream agrees.
+>
+> **Where retainers show up elsewhere.** They appear in **History** tagged
+> Retainer, and in **Download for QBO** — both the retainer invoice and the
+> credit line export, sharing one item name so they net out over the life of the
+> engagement. **Client Recap revenue does NOT count retainers.** That is
+> deliberate: a retainer is money held on account, not revenue in the month it
+> is paid, and it is recognized through the monthly invoices it later offsets.
+> Crediting the final invoice therefore does not dent the revenue the recap
+> reports for that month — the work was still worth what it was worth.
+>
 > The per-client section BELOW the run is the older live-calculation view, kept
 > for its preview and print.
 

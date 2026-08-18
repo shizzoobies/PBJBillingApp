@@ -14,7 +14,9 @@ import { waitingOnStage } from '../lib/waiting-on-state.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
   buildInvoiceDraft,
+  dueDateFromTerms,
   nextInvoiceNumber,
+  nextRetainerInvoiceNumber,
   previousPeriod,
 } from '../lib/invoice-draft.js'
 import {
@@ -22,7 +24,11 @@ import {
   fileWorkspaceVersion,
   postgresWorkspaceVersion,
 } from '../lib/workspace-version.js'
-import { normalizeAdhocMode } from '../lib/invoice-lines.js'
+import {
+  RETAINER_LABEL,
+  normalizeAdhocMode,
+  retainerCreditAmount,
+} from '../lib/invoice-lines.js'
 
 /**
  * Per-file operation queue for the JSON file backend. A plain
@@ -740,6 +746,18 @@ const EDITABLE_INVOICE_STATUSES = new Set(['draft', 'reviewed', 'void'])
 const PAYMENT_INVOICE_STATUSES = new Set(['sent', 'processing', 'paid', 'overdue'])
 
 /**
+ * Statuses an invoice may be in when a retainer credit is ADDED to it.
+ *
+ * Deliberately the pre-send half of the lifecycle. Applying the credit changes
+ * what the client owes, and doing that to an invoice that has already gone out
+ * would mean the copy in their inbox and the copy of record disagree about the
+ * amount — with no send to tell them so. It does NOT constrain an invoice that
+ * already carries a credit: once applied, the decision travels with the invoice
+ * through sent, paid and the rest.
+ */
+const RETAINER_CREDITABLE_STATUSES = new Set(['draft', 'reviewed'])
+
+/**
  * The line kinds an invoice may contain, including the ones only I2 adds.
  *
  * `card-fee` is written by the payment webhook, not by a person: it is the
@@ -762,7 +780,28 @@ const INVOICE_LINE_KINDS = new Set([
   // 'card-fee' is: falling back to 'custom' would lose the owner's
   // billed/courtesy/omitted choice and the group it belongs to.
   'adhoc',
+  // The single line of a retainer invoice, and the negative line that gives that
+  // money back on the final invoice. Both are listed for the same reason as the
+  // two above: falling back to 'custom' would make the credit an ordinary
+  // hand-typed negative line, and the never-applied-twice rule below has nothing
+  // left to recognize.
+  'retainer',
+  'retainer_credit',
 ])
+
+/**
+ * The retainer-credit rules the store enforces, raised so the API can answer
+ * with a sentence rather than a 500.
+ *
+ * Same shape as `StaleWorkspaceError`: a refusal that is a FACT about the data,
+ * not a bug, and the person who hit it needs to be told which fact.
+ */
+export class RetainerCreditError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'RetainerCreditError'
+  }
+}
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
 
@@ -773,17 +812,38 @@ const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
  * an unrecognized `kind` falls back to 'custom' rather than being persisted
  * verbatim. A line with no label and no amount is dropped — that is an empty
  * row she left behind, not a charge.
+ *
+ * `invoiceKind` is the kind of the invoice these lines belong to. Only a
+ * RETAINER invoice may carry a 'retainer' line: that kind means "this is the
+ * money an engagement was opened with", and a monthly invoice claiming one
+ * would be a second retainer nobody issued, holding no `applied_to_invoice_id`
+ * and creditable by nothing. On a monthly invoice it falls back to 'custom' —
+ * the same treatment any other kind that does not belong gets — so the charge
+ * survives as an ordinary line rather than the save failing on her.
  */
-function sanitizeInvoiceLines(raw) {
+function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
   return (Array.isArray(raw) ? raw : [])
     .map((line) => {
-      const kind = INVOICE_LINE_KINDS.has(line?.kind) ? line.kind : 'custom'
+      const claimed = INVOICE_LINE_KINDS.has(line?.kind) ? line.kind : 'custom'
+      const kind = claimed === 'retainer' && invoiceKind !== 'retainer' ? 'custom' : claimed
       const base = {
         kind,
         label: String(line?.label ?? '').trim().slice(0, 300),
         detail: String(line?.detail ?? '').trim().slice(0, 300),
         amount: roundMoney(line?.amount),
       }
+      // A retainer credit carries the id of the retainer it came out of. That
+      // is what lets a save know WHICH retainer to mark applied, and what lets
+      // removing the line free that same one again — matching by client and
+      // amount would pick the wrong one the moment a client has two.
+      if (kind === 'retainer_credit') {
+        const retainerInvoiceId =
+          typeof line?.retainerInvoiceId === 'string' && line.retainerInvoiceId
+            ? line.retainerInvoiceId
+            : null
+        return { ...base, retainerInvoiceId }
+      }
+
       if (kind !== 'adhoc') return base
 
       // The owner's three-way choice, made money. While a line is BILLED its
@@ -828,12 +888,19 @@ function sanitizeInvoiceLines(raw) {
  * PATCH (which recomputes from whatever the page sent) and by the webhook path
  * that appends a card processing fee, so a payment can never leave an invoice
  * whose total disagrees with the lines printed next to it.
+ *
+ * A retainer credit sits outside it for the same reason an adjustment does, and
+ * it is the clearer of the two cases: the work done this month did not become
+ * cheaper because money was collected up front, so the subtotal keeps saying
+ * what the month was worth and the total says what is left to pay.
  */
+const SUBTOTAL_EXCLUDED_KINDS = new Set(['adjustment', 'retainer_credit'])
+
 function recomputeInvoiceMoney(lineItems) {
   return {
     subtotal: roundMoney(
       lineItems
-        .filter((line) => line.kind !== 'adjustment')
+        .filter((line) => !SUBTOTAL_EXCLUDED_KINDS.has(line.kind))
         .reduce((sum, line) => sum + line.amount, 0),
     ),
     total: roundMoney(lineItems.reduce((sum, line) => sum + line.amount, 0)),
@@ -877,10 +944,10 @@ function withStatusChanged(invoice, statusChanged) {
  *
  * A unit test pins the parity (see db/store-staleness.test.mjs).
  */
-export const INVOICE_SELECT_COLUMNS = `id, client_id, period, number, status, line_items, subtotal, total,
+export const INVOICE_SELECT_COLUMNS = `id, client_id, period, number, kind, status, line_items, subtotal, total,
           due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
           stripe_checkout_session_id, stripe_card_session_id,
-          stripe_payment_intent_id, email_log,
+          stripe_payment_intent_id, email_log, applied_to_invoice_id,
           created_at, updated_at`
 
 /**
@@ -896,6 +963,9 @@ export function mapInvoiceRow(row) {
     clientId: row.client_id,
     period: row.period,
     number: row.number,
+    // 'monthly' or 'retainer'. Defaulted rather than passed through raw so a row
+    // written before the column existed reads as what it actually is.
+    kind: row.kind ?? 'monthly',
     status: row.status,
     lineItems: Array.isArray(row.line_items) ? row.line_items : [],
     subtotal: Number(row.subtotal) || 0,
@@ -913,6 +983,10 @@ export function mapInvoiceRow(row) {
     stripeCardSessionId: row.stripe_card_session_id ?? null,
     stripePaymentIntentId: row.stripe_payment_intent_id ?? null,
     emailLog: Array.isArray(row.email_log) ? row.email_log : [],
+    // RETAINER invoices only: the invoice this retainer's credit was applied to.
+    // Non-null is what makes "already applied" a fact on the row rather than a
+    // scan of every other invoice's lines — see `updateInvoice`.
+    appliedToInvoiceId: row.applied_to_invoice_id ?? null,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
   }
@@ -3393,15 +3467,65 @@ export class AppDataStore {
       await this.pool.query(
         `alter table invoices add column if not exists stripe_card_session_id text`,
       )
+      // What KIND of document this is: 'monthly' (the month run's output) or
+      // 'retainer' (issued once when a client signs the engagement letter).
+      // Additive with a default, so every existing production row becomes what
+      // it already was.
+      await this.pool.query(
+        `alter table invoices add column if not exists kind text not null default 'monthly'`,
+      )
+      // On a RETAINER row: the invoice its credit was given back on. Null means
+      // the money is still held on account. This column is the never-twice rule
+      // — see `updateInvoice`, which only ever sets it from null.
+      await this.pool.query(
+        `alter table invoices add column if not exists applied_to_invoice_id text`,
+      )
       // PARTIAL unique — one live invoice per client per month, but a VOIDED
       // one must not block re-generating. Same lesson as the checklist
       // materializer's instance index, applied from day one rather than after
       // duplicates appeared.
-      await this.pool.query(`
-        create unique index if not exists invoices_client_period_live
-          on invoices (client_id, period)
-          where status <> 'void'
-      `)
+      //
+      // Now scoped to MONTHLY invoices as well. A retainer is issued alongside
+      // whatever month it lands in, so the old (client_id, period) rule would
+      // have refused it — silently, since `_insertInvoice` reads a refusal as
+      // "someone else got there first". The old index is dropped BY NAME first:
+      // `create ... if not exists` under a new name would otherwise leave the
+      // strict one in place and the new one would never get a chance to matter.
+      //
+      // THE SWAP IS ONE TRANSACTION. Between the drop and the create there is no
+      // index enforcing one live invoice per client per month, and this table is
+      // the invoice of record — a generate landing in that gap could write a
+      // client two live invoices for the same month, which nothing downstream
+      // would ever notice. `create index` (non-concurrent) is transactional in
+      // Postgres, so the gap can simply be closed.
+      //
+      // EXPECTED DURING THE DEPLOY MINUTE: the OLD container is still serving
+      // and its `_insertInvoice` names the old predicate, which now matches no
+      // index — that inference fails with 42P10 ("no unique or exclusion
+      // constraint matching the ON CONFLICT specification"). It surfaces as a
+      // 500 on Generate for the seconds before the old container goes away, and
+      // is benign on a single replica: nothing is written, and a retry against
+      // the new container succeeds.
+      const indexClient = await this.pool.connect()
+      try {
+        await indexClient.query('BEGIN')
+        await indexClient.query(`drop index if exists invoices_client_period_live`)
+        await indexClient.query(`
+          create unique index if not exists invoices_client_period_monthly_live
+            on invoices (client_id, period)
+            where kind = 'monthly' and status <> 'void'
+        `)
+        await indexClient.query('COMMIT')
+      } catch (error) {
+        try {
+          await indexClient.query('ROLLBACK')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        throw error
+      } finally {
+        indexClient.release()
+      }
       await this.pool.query(`
         create unique index if not exists invoices_number_unique
           on invoices (number)
@@ -4644,11 +4768,11 @@ export class AppDataStore {
         // Brittany generated would vanish on the next owner autosave, silently.
         const preservedInvoices = (
           await client.query(
-            `select id, client_id, period, number, status, line_items, subtotal, total,
+            `select id, client_id, period, number, kind, status, line_items, subtotal, total,
                     due_date, blurb, scope_flags, sent_at, paid_at,
                     stripe_checkout_session_id, stripe_card_session_id,
                     stripe_payment_intent_id, payment_method,
-                    email_log, created_at
+                    email_log, applied_to_invoice_id, created_at
                from invoices`,
           )
         ).rows
@@ -4921,19 +5045,24 @@ export class AppDataStore {
           await client.query(
             `
               insert into invoices (
-                id, client_id, period, number, status, line_items, subtotal, total,
+                id, client_id, period, number, kind, status, line_items, subtotal, total,
                 due_date, blurb, scope_flags, sent_at, paid_at,
                 stripe_checkout_session_id, stripe_card_session_id,
                 stripe_payment_intent_id, payment_method,
-                email_log, created_at, updated_at
+                email_log, applied_to_invoice_id, created_at, updated_at
               )
-              values ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17,$18::jsonb,$19, now())
+              values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21, now())
             `,
             [
               invoice.id,
               invoice.client_id,
               invoice.period,
               invoice.number,
+              // Both new columns ride the restore verbatim like every other one.
+              // A retainer that came back as 'monthly' would collide with the
+              // client's real invoice for that month on the very next generate;
+              // one that came back unapplied would be spendable a second time.
+              invoice.kind ?? 'monthly',
               invoice.status,
               JSON.stringify(invoice.line_items ?? []),
               invoice.subtotal,
@@ -4948,6 +5077,7 @@ export class AppDataStore {
               invoice.stripe_payment_intent_id,
               invoice.payment_method,
               JSON.stringify(invoice.email_log ?? []),
+              invoice.applied_to_invoice_id ?? null,
               invoice.created_at,
             ],
           )
@@ -7097,7 +7227,15 @@ export class AppDataStore {
     const all = Array.isArray(data.invoices) ? data.invoices : []
     return all
       .filter((invoice) => !period || invoice.period === period)
-      .slice()
+      // Postgres answers `kind` 'monthly' and `applied_to_invoice_id` null for
+      // every row written before those columns existed. The file backend has to
+      // say the same thing, or a test passes on a shape production never
+      // produces (cardinal rule 1 — this is exactly how `email_log` got away).
+      .map((invoice) => ({
+        ...invoice,
+        kind: invoice.kind ?? 'monthly',
+        appliedToInvoiceId: invoice.appliedToInvoiceId ?? null,
+      }))
       .sort((a, b) => String(a.number ?? '').localeCompare(String(b.number ?? '')))
   }
 
@@ -7124,8 +7262,13 @@ export class AppDataStore {
   async generateInvoicesForPeriod(period, { defaultNetDays = 30, clientId = null } = {}) {
     const data = await this.read()
     const existing = await this.listInvoices({ period })
+    // MONTHLY only. A retainer issued this month is not the month's invoice, and
+    // counting it here would tell the run that a client who signed in August has
+    // already been billed for August.
     const liveClientIds = new Set(
-      existing.filter((invoice) => invoice.status !== 'void').map((invoice) => invoice.clientId),
+      existing
+        .filter((invoice) => invoice.kind === 'monthly' && invoice.status !== 'void')
+        .map((invoice) => invoice.clientId),
     )
     const takenNumbers = existing.map((invoice) => invoice.number).filter(Boolean)
 
@@ -7133,9 +7276,12 @@ export class AppDataStore {
     // for the same reason `liveClientIds` excludes them: a voided invoice was
     // withdrawn, so truing up against what it said would carry forward an
     // amount nobody was ever asked to pay.
+    // Monthly only, for the same reason as `liveClientIds` plus one of its own:
+    // this is a Map keyed by client, so a retainer sharing last month with a
+    // real invoice would overwrite it and quietly drop that client's true-up.
     const priorByClient = new Map(
       (await this.listInvoices({ period: previousPeriod(period) }))
-        .filter((invoice) => invoice.status !== 'void')
+        .filter((invoice) => invoice.kind === 'monthly' && invoice.status !== 'void')
         .map((invoice) => [invoice.clientId, invoice]),
     )
 
@@ -7195,6 +7341,7 @@ export class AppDataStore {
         clientId: client.id,
         period,
         number,
+        kind: 'monthly',
         status: 'draft',
         lineItems: draft.lineItems,
         subtotal: draft.subtotal,
@@ -7205,6 +7352,7 @@ export class AppDataStore {
         sentAt: null,
         paidAt: null,
         paymentMethod: null,
+        appliedToInvoiceId: null,
         createdAt: nowIso(),
         updatedAt: nowIso(),
       }
@@ -7217,6 +7365,94 @@ export class AppDataStore {
     }
 
     return { period, created, skipped }
+  }
+
+  /**
+   * Issue a RETAINER invoice for one client — the front end of an engagement.
+   *
+   * Deliberately a manual act. There is no engagement-signing event in this app,
+   * so nothing here can know the letter came back signed; the owner does, and
+   * she presses the button. That is the whole trigger, and it is why this is not
+   * wired into the month run.
+   *
+   * What comes out is an ordinary DRAFT invoice with `kind: 'retainer'` and one
+   * line. From there it lives on the existing rails without a special case:
+   * edited in the month-run editor, reviewed, sent, paid, printed, exported.
+   * `period` is the month it was issued in — bookkeeping, not a billing window;
+   * the kind-scoped unique index is what lets it share that month with the
+   * client's real invoice.
+   *
+   * Returns the invoice, or null when the client does not exist. `amount` must
+   * be a positive number — a $0 retainer is a document nobody asked for, and a
+   * negative one is a credit note this app has no concept of.
+   */
+  async createRetainerInvoice({ clientId, amount, note = '', period = null, defaultNetDays = 30 }) {
+    const value = roundMoney(amount)
+    if (!Number.isFinite(value) || value <= 0) return null
+
+    const data = await this.read()
+    const client = (data.clients ?? []).find((entry) => entry.id === clientId)
+    if (!client) return null
+
+    const today = nowIso().slice(0, 10)
+    const issuedPeriod = /^\d{4}-\d{2}$/.test(String(period ?? '')) ? period : today.slice(0, 7)
+    const year = issuedPeriod.slice(0, 4)
+
+    // Year-scoped counter, derived from the retainers that already exist —
+    // same idiom as the monthly numbering, and it reads across the whole
+    // archive rather than one month's list because that is the scope of the
+    // sequence.
+    const takenNumbers = (await this.listInvoices())
+      .filter((invoice) => invoice.kind === 'retainer')
+      .map((invoice) => invoice.number)
+      .filter(Boolean)
+
+    const detail = String(note ?? '').trim().slice(0, 300)
+    const record = {
+      id: `inv-${randomUUID().slice(0, 8)}`,
+      clientId: client.id,
+      period: issuedPeriod,
+      number: nextRetainerInvoiceNumber(year, takenNumbers),
+      kind: 'retainer',
+      status: 'draft',
+      lineItems: [{ kind: 'retainer', label: RETAINER_LABEL, detail, amount: value }],
+      subtotal: value,
+      total: value,
+      // From TODAY, not from the end of the month. A retainer is due on the
+      // client's terms from the day it is issued; a monthly invoice's clock
+      // starts at the end of the period it bills for, and borrowing that here
+      // would date the retainer to a month that has not happened yet.
+      dueDate: dueDateFromTerms(today, client.paymentTerms, defaultNetDays),
+      blurb: '',
+      scopeFlags: [],
+      sentAt: null,
+      paidAt: null,
+      paymentMethod: null,
+      appliedToInvoiceId: null,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    }
+
+    return await this._insertInvoice(record)
+  }
+
+  /**
+   * Every retainer that has been PAID and not yet given back — the money this
+   * firm is holding on account, client by client.
+   *
+   * Paid is the bar on purpose: a retainer that was only sent is a promise, and
+   * crediting a client for money that never arrived would be giving away work.
+   * The UI uses this to decide whether to offer the credit at all; the SAVE does
+   * not trust it (see `updateInvoice`), because the answer can go stale between
+   * the page loading and the owner pressing Save.
+   */
+  async listUnappliedRetainers() {
+    return (await this.listInvoices()).filter(
+      (invoice) =>
+        invoice.kind === 'retainer' &&
+        invoice.status === 'paid' &&
+        !invoice.appliedToInvoiceId,
+    )
   }
 
   /**
@@ -7234,17 +7470,46 @@ export class AppDataStore {
    * Voiding is deliberately destructive to edits: the whole point is to throw
    * away a stale snapshot, so the lines, the note to the client and the review
    * status of the voided invoices are gone. The caller warns about that first.
+   *
+   * A voided invoice holds no retainer, so any retainer marked against one of
+   * these goes back on account in the SAME transaction. Regenerating a month is
+   * the likeliest way to void a credited invoice, and leaving the retainer spent
+   * on a withdrawn document would strand it: not on account, not credited to
+   * anyone, and invisible because nobody works a voided invoice.
    */
   async voidUnsentInvoicesForPeriod(period) {
     if (this.pool) {
-      const { rows } = await this.pool.query(
-        `update invoices
-            set status = 'void', updated_at = now()
-          where period = $1 and status in ('draft', 'reviewed')
-        returning id`,
-        [period],
-      )
-      return { voided: rows.length, ids: rows.map((row) => row.id) }
+      const dbClient = await this.pool.connect()
+      try {
+        await dbClient.query('BEGIN')
+        const { rows } = await dbClient.query(
+          `update invoices
+              set status = 'void', updated_at = now()
+            where period = $1 and kind = 'monthly' and status in ('draft', 'reviewed')
+          returning id`,
+          [period],
+        )
+        const ids = rows.map((row) => row.id)
+        if (ids.length > 0) {
+          await dbClient.query(
+            `update invoices
+                set applied_to_invoice_id = null, updated_at = now()
+              where applied_to_invoice_id = any($1::text[])`,
+            [ids],
+          )
+        }
+        await dbClient.query('COMMIT')
+        return { voided: ids.length, ids }
+      } catch (error) {
+        try {
+          await dbClient.query('ROLLBACK')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        throw error
+      } finally {
+        dbClient.release()
+      }
     }
 
     const data = await readJson(localDataPath)
@@ -7252,13 +7517,176 @@ export class AppDataStore {
     const ids = []
     for (const invoice of data.invoices) {
       if (invoice.period !== period) continue
+      // MONTHLY only. The rebuild pass that follows this only ever builds
+      // monthly invoices, so voiding a draft retainer here would throw it away
+      // with nothing to put it back — and it was issued by hand, deliberately,
+      // which is the opposite of a stale generated snapshot.
+      if ((invoice.kind ?? 'monthly') !== 'monthly') continue
       if (invoice.status !== 'draft' && invoice.status !== 'reviewed') continue
       invoice.status = 'void'
       invoice.updatedAt = nowIso()
       ids.push(invoice.id)
     }
-    if (ids.length > 0) await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    // Same read-modify-write, which is this backend's version of the
+    // transaction above.
+    if (ids.length > 0) {
+      const voided = new Set(ids)
+      for (const invoice of data.invoices) {
+        if (!invoice.appliedToInvoiceId || !voided.has(invoice.appliedToInvoiceId)) continue
+        invoice.appliedToInvoiceId = null
+        invoice.updatedAt = nowIso()
+      }
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
     return { voided: ids.length, ids }
+  }
+
+  /**
+   * Work out what a save means for the retainer behind it, and REWRITE the
+   * credit line's amount to the figure the server is willing to stand behind.
+   *
+   * Called by `updateInvoice` before the money is recomputed, so everything
+   * downstream — subtotal, total, the pay link, the PDF — is derived from a
+   * credit the store itself sized. The page's number is a preview; this is the
+   * one that counts, which is what stops a hand-rolled PATCH from posting a
+   * -$9,999 credit against a $400 invoice.
+   *
+   * Answers `{ apply, clear }`, each a retainer invoice id or null:
+   *   apply — mark this retainer spent on this invoice
+   *   clear — release this retainer, because the line that spent it is gone
+   *           (or because she swapped it for a different one in the same save)
+   *
+   * THE RULES THAT ONLY BITE ON A NEW APPLICATION. Everything that decides
+   * whether a retainer MAY be spent — the invoice's status, the retainer's
+   * status, the invoice's kind — is checked only when this save is the one doing
+   * the spending. Re-checking them on every later save would mean an invoice
+   * that legitimately carries a credit became unsaveable the moment it was sent,
+   * or the moment the retainer's own status moved on; the decision was made once
+   * and re-litigating it turns an ordinary edit into a dead end.
+   *
+   * Mutates the credit line in `next.lineItems` in place. Throws
+   * `RetainerCreditError` for anything it will not honor.
+   */
+  _resolveRetainerCredit({ id, current, next, patch, all }) {
+    // Voiding a retainer that has already been given back would strand the
+    // credit: the invoice would keep a negative line pointing at a withdrawn
+    // document, and the money would be neither on account nor spent. Named
+    // rather than silent, because the way out is a specific act on a specific
+    // other invoice.
+    if (
+      current.kind === 'retainer' &&
+      next.status === 'void' &&
+      current.appliedToInvoiceId
+    ) {
+      const target = all.find((invoice) => invoice.id === current.appliedToInvoiceId)
+      throw new RetainerCreditError(
+        `This retainer is applied to ${target?.number ?? current.appliedToInvoiceId} — ` +
+          'remove the credit from that invoice first.',
+      )
+    }
+
+    // Whatever retainer currently believes it was spent on this invoice. Found
+    // by the fact on the retainer row rather than by re-reading the old lines,
+    // because that row is the record — if the two ever disagree, the row is what
+    // another save would refuse.
+    const held =
+      all.find(
+        (invoice) => invoice.kind === 'retainer' && invoice.appliedToInvoiceId === id,
+      ) ?? null
+
+    // A VOIDED invoice holds nothing. It was withdrawn, so the money it was
+    // going to give back never will be, and leaving the retainer marked against
+    // it would strand that money on a document nobody is paying — invisible,
+    // because a void does not show up as an invoice anyone is working on.
+    if (next.status === 'void') {
+      return { apply: null, clear: held?.id ?? null }
+    }
+
+    const credits = next.lineItems.filter((line) => line.kind === 'retainer_credit')
+    if (credits.length > 1) {
+      throw new RetainerCreditError('An invoice can carry only one retainer credit.')
+    }
+
+    const credit = credits[0] ?? null
+    if (!credit) {
+      // The line is gone, so the money goes back on account. Symmetric with
+      // applying it, and it happens on the same save.
+      return { apply: null, clear: held?.id ?? null }
+    }
+
+    // A PATCH that does not touch the lines is not a statement about the credit.
+    // "Mark reviewed" on a credited invoice sends only a status, and running it
+    // through the checks below would re-litigate a decision it was not making —
+    // most sharply if the retainer has since been voided, where marking an
+    // invoice reviewed would start failing for a reason that has nothing to do
+    // with reviewing it.
+    if (
+      !Array.isArray(patch?.lineItems) &&
+      held &&
+      credit.retainerInvoiceId === held.id
+    ) {
+      return { apply: null, clear: null }
+    }
+
+    const retainerId = credit.retainerInvoiceId ?? held?.id ?? null
+    const retainer = retainerId
+      ? all.find((invoice) => invoice.id === retainerId && invoice.kind === 'retainer')
+      : null
+    if (!retainer) {
+      throw new RetainerCreditError('That retainer credit does not name a retainer we hold.')
+    }
+    if (retainer.clientId !== current.clientId) {
+      throw new RetainerCreditError('That retainer belongs to a different client.')
+    }
+    // The read-side half of never-twice. The write-side half is the conditional
+    // UPDATE in `updateInvoice`; this one exists so the common case gets a
+    // sentence instead of a rolled-back transaction.
+    if (retainer.appliedToInvoiceId && retainer.appliedToInvoiceId !== id) {
+      throw new RetainerCreditError(
+        'That retainer has already been applied to another invoice.',
+      )
+    }
+
+    // Is THIS save the one spending it? Everything below is gated on that.
+    const isNewApplication = !held || held.id !== retainer.id
+    if (isNewApplication) {
+      // A retainer is not a thing you credit against another retainer.
+      if (current.kind !== 'monthly') {
+        throw new RetainerCreditError(
+          'A retainer credit belongs on a monthly invoice, not on another retainer.',
+        )
+      }
+      // Review comes before money leaves. An invoice that has gone out is the
+      // client's copy of a promise, and quietly changing what it says by
+      // crediting it afterwards is the thing the review step exists to prevent.
+      if (!RETAINER_CREDITABLE_STATUSES.has(next.status)) {
+        throw new RetainerCreditError(
+          'A retainer credit can only be added while the invoice is a draft or reviewed.',
+        )
+      }
+      // Paid is the bar: crediting a client for money that never arrived would
+      // be giving away work.
+      if (retainer.status !== 'paid') {
+        throw new RetainerCreditError(
+          'That retainer has not been paid yet, so there is nothing to credit.',
+        )
+      }
+    }
+
+    const amount = retainerCreditAmount(next.lineItems, retainer.total)
+    if (amount === 0) {
+      throw new RetainerCreditError('There is nothing on this invoice left to credit.')
+    }
+    credit.amount = amount
+    credit.retainerInvoiceId = retainer.id
+
+    return {
+      apply: retainer.id,
+      // She swapped one retainer for another inside a single save: the old one
+      // has to go back on account, or it is spent on an invoice that no longer
+      // names it.
+      clear: held && held.id !== retainer.id ? held.id : null,
+    }
   }
 
   /**
@@ -7269,14 +7697,23 @@ export class AppDataStore {
    * lines it wants; `subtotal` and `total` are derived from them server-side,
    * so a stale or malformed tab cannot post a total that disagrees with its own
    * lines. Returns the updated invoice, or null if it does not exist.
+   *
+   * THE RETAINER CREDIT IS SETTLED HERE, not in the page. Adding the credit line
+   * and removing it are both ordinary line edits as far as the editor is
+   * concerned; this is where they become the fact on the retainer row. Doing it
+   * on the save — in the same transaction as the lines — is what makes the pair
+   * inseparable: there is no window in which an invoice carries a credit no
+   * retainer is marked against, or a retainer is spent on lines that were never
+   * stored. Throws `RetainerCreditError` when the credit cannot be honored.
    */
   async updateInvoice(id, patch = {}) {
-    const current = (await this.listInvoices()).find((invoice) => invoice.id === id)
+    const all = await this.listInvoices()
+    const current = all.find((invoice) => invoice.id === id)
     if (!current) return null
 
     const next = { ...current }
     if (Array.isArray(patch.lineItems)) {
-      next.lineItems = sanitizeInvoiceLines(patch.lineItems)
+      next.lineItems = sanitizeInvoiceLines(patch.lineItems, { invoiceKind: current.kind })
     }
     if (typeof patch.blurb === 'string') next.blurb = patch.blurb
     if (typeof patch.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(patch.dueDate)) {
@@ -7284,26 +7721,103 @@ export class AppDataStore {
     }
     if (EDITABLE_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
 
+    const retainerWork = this._resolveRetainerCredit({ id, current, next, patch, all })
+
     Object.assign(next, recomputeInvoiceMoney(next.lineItems))
     next.updatedAt = nowIso()
 
     if (this.pool) {
-      const { rowCount } = await this.pool.query(
-        `update invoices
-            set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
-                blurb = $6, status = $7, updated_at = now()
-          where id = $1`,
-        [
-          id,
-          JSON.stringify(next.lineItems),
-          next.subtotal,
-          next.total,
-          next.dueDate,
-          next.blurb,
-          next.status,
-        ],
-      )
-      if (rowCount === 0) return null
+      // No retainer moved, so no second row to keep in step — the single
+      // statement is still the whole write.
+      if (!retainerWork.apply && !retainerWork.clear) {
+        const { rowCount } = await this.pool.query(
+          `update invoices
+              set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
+                  blurb = $6, status = $7, updated_at = now()
+            where id = $1`,
+          [
+            id,
+            JSON.stringify(next.lineItems),
+            next.subtotal,
+            next.total,
+            next.dueDate,
+            next.blurb,
+            next.status,
+          ],
+        )
+        if (rowCount === 0) return null
+        return (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null
+      }
+
+      const dbClient = await this.pool.connect()
+      try {
+        await dbClient.query('BEGIN')
+        const { rowCount } = await dbClient.query(
+          `update invoices
+              set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
+                  blurb = $6, status = $7, updated_at = now()
+            where id = $1`,
+          [
+            id,
+            JSON.stringify(next.lineItems),
+            next.subtotal,
+            next.total,
+            next.dueDate,
+            next.blurb,
+            next.status,
+          ],
+        )
+        if (rowCount === 0) {
+          await dbClient.query('ROLLBACK')
+          return null
+        }
+
+        // Freeing first, so swapping one retainer for another inside a single
+        // save cannot trip over its own predecessor.
+        if (retainerWork.clear) {
+          await dbClient.query(
+            `update invoices
+                set applied_to_invoice_id = null, updated_at = now()
+              where id = $1 and applied_to_invoice_id = $2`,
+            [retainerWork.clear, id],
+          )
+        }
+
+        if (retainerWork.apply) {
+          // THE never-twice rule, and it is this WHERE clause rather than the
+          // read above: two saves racing both passed that check, and only the
+          // one that gets here first finds the column still null. The loser
+          // matches no row, rolls the whole save back, and is told why.
+          const applied = await dbClient.query(
+            `update invoices
+                set applied_to_invoice_id = $2, updated_at = now()
+              where id = $1
+                and kind = 'retainer'
+                and status = 'paid'
+                and (applied_to_invoice_id is null or applied_to_invoice_id = $2)`,
+            [retainerWork.apply, id],
+          )
+          if (applied.rowCount === 0) {
+            await dbClient.query('ROLLBACK')
+            throw new RetainerCreditError(
+              'That retainer has already been applied to another invoice.',
+            )
+          }
+        }
+
+        await dbClient.query('COMMIT')
+      } catch (error) {
+        // A rollback after a rollback is a no-op; what matters is that a thrown
+        // statement never leaves this connection inside an open transaction.
+        try {
+          await dbClient.query('ROLLBACK')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        throw error
+      } finally {
+        dbClient.release()
+      }
       return (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null
     }
 
@@ -7312,6 +7826,25 @@ export class AppDataStore {
     const index = data.invoices.findIndex((invoice) => invoice.id === id)
     if (index === -1) return null
     data.invoices[index] = next
+    // One read-modify-write covers both rows, which is this backend's version of
+    // the transaction above.
+    if (retainerWork.clear) {
+      const held = data.invoices.find((invoice) => invoice.id === retainerWork.clear)
+      if (held && held.appliedToInvoiceId === id) {
+        held.appliedToInvoiceId = null
+        held.updatedAt = nowIso()
+      }
+    }
+    if (retainerWork.apply) {
+      const retainer = data.invoices.find((invoice) => invoice.id === retainerWork.apply)
+      if (!retainer || (retainer.appliedToInvoiceId && retainer.appliedToInvoiceId !== id)) {
+        throw new RetainerCreditError(
+          'That retainer has already been applied to another invoice.',
+        )
+      }
+      retainer.appliedToInvoiceId = id
+      retainer.updatedAt = nowIso()
+    }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return next
   }
@@ -7412,7 +7945,9 @@ export class AppDataStore {
     if (patch.sentAt === null || typeof patch.sentAt === 'string') next.sentAt = patch.sentAt
 
     // Additive only, and only for a kind the invoice does not already carry.
-    const appended = sanitizeInvoiceLines(patch.appendLines).filter(
+    const appended = sanitizeInvoiceLines(patch.appendLines, {
+      invoiceKind: current.kind,
+    }).filter(
       (line) => !(current.lineItems ?? []).some((existing) => existing.kind === line.kind),
     )
     const linesChanged = appended.length > 0
@@ -7588,22 +8123,34 @@ export class AppDataStore {
     )
   }
 
-  /** Insert one invoice; null when the live-per-(client, period) index refuses it. */
+  /**
+   * Insert one invoice; null when the live-monthly-per-(client, period) index
+   * refuses it.
+   *
+   * The `on conflict` inference names the index's own predicate, which is what
+   * picks `invoices_client_period_monthly_live` as the arbiter. A RETAINER row
+   * does not satisfy that predicate, so it can never conflict — which is the
+   * whole point: a retainer is allowed to sit in the same month as the client's
+   * monthly invoice, and two live retainers for one client are allowed too
+   * (a second engagement is a second retainer).
+   */
   async _insertInvoice(record) {
+    const kind = record.kind ?? 'monthly'
     if (this.pool) {
       const { rows } = await this.pool.query(
         `insert into invoices (
-           id, client_id, period, number, status, line_items, subtotal, total,
+           id, client_id, period, number, kind, status, line_items, subtotal, total,
            due_date, blurb, scope_flags, created_at, updated_at
          )
-         values ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb, now(), now())
-         on conflict (client_id, period) where status <> 'void' do nothing
+         values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb, now(), now())
+         on conflict (client_id, period) where kind = 'monthly' and status <> 'void' do nothing
          returning id`,
         [
           record.id,
           record.clientId,
           record.period,
           record.number,
+          kind,
           record.status,
           JSON.stringify(record.lineItems),
           record.subtotal,
@@ -7619,13 +8166,18 @@ export class AppDataStore {
     const data = await readJson(localDataPath)
     if (!Array.isArray(data.invoices)) data.invoices = []
     // Mirror the partial unique index by hand — the file backend has no
-    // constraints, and cardinal rule 1 means it has to behave the same.
-    const clash = data.invoices.some(
-      (invoice) =>
-        invoice.clientId === record.clientId &&
-        invoice.period === record.period &&
-        invoice.status !== 'void',
-    )
+    // constraints, and cardinal rule 1 means it has to behave the same. Kind is
+    // part of the mirror: only a MONTHLY invoice can be blocked, and only by
+    // another monthly one.
+    const clash =
+      kind === 'monthly' &&
+      data.invoices.some(
+        (invoice) =>
+          (invoice.kind ?? 'monthly') === 'monthly' &&
+          invoice.clientId === record.clientId &&
+          invoice.period === record.period &&
+          invoice.status !== 'void',
+      )
     if (clash) return null
     data.invoices.push(record)
     await writeFile(localDataPath, JSON.stringify(data, null, 2))

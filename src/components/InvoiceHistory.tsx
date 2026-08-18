@@ -429,6 +429,13 @@ export function InvoiceHistory({
                           >
                             {invoice.number ?? '—'}
                           </button>
+                          {/* Retainers live in the archive beside the monthly
+                              invoices they sit next to. The number already says
+                              so (INV-RET-…), but a tag survives someone scanning
+                              the Client column instead. */}
+                          {invoice.kind === 'retainer' ? (
+                            <span className="invoice-run-kind-tag">Retainer</span>
+                          ) : null}
                         </td>
                         <td>{clientName(invoice.clientId)}</td>
                         <td>

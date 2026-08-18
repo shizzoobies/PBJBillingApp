@@ -17,6 +17,7 @@ vi.mock('../lib/api', () => ({
   createInvoicePaymentLinkRequest: vi.fn(),
   generateInvoicesRequest: vi.fn(),
   listInvoicesRequest: vi.fn(),
+  listUnappliedRetainersRequest: vi.fn(async () => []),
   regenerateInvoicesRequest: vi.fn(),
   sendInvoiceRequest: vi.fn(),
   updateInvoiceRequest: vi.fn(),
@@ -43,6 +44,7 @@ const invoice: PersistedInvoice = {
   id: 'inv-1',
   clientId: 'client-acme',
   period: '2026-08',
+  kind: 'monthly',
   number: 'INV-2026-08-001',
   status: 'draft',
   lineItems: [
@@ -64,6 +66,7 @@ const invoice: PersistedInvoice = {
   sentAt: null,
   paidAt: null,
   paymentMethod: null,
+  appliedToInvoiceId: null,
   createdAt: null,
   updatedAt: null,
 }
