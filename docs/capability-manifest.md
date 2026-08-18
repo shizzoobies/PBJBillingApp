@@ -598,8 +598,17 @@ Clients page meanwhile. Owner-only.
 - Waiting on (the hourglass ⏳): flag a step as waiting, write who/what it's
   waiting on (free text), optionally pick the SPECIFIC other task it's waiting
   for — when that task completes, the blocked step's assignee gets an in-app +
-  email notification ("Ready to continue"). Waiting items also appear on the
-  Delayed page.
+  email notification ("Ready to continue"). That picker offers **only this
+  client's other tasks that you can actually open** — never the whole workspace,
+  so there is nothing unrelated to scroll past. Skipped occurrences are left out
+  (a skipped task never completes, so the ping would never fire), as are tasks in
+  the recycle bin and other people's tasks you aren't on; an internal task with
+  no client sees only the other no-client tasks. A link **already saved** is the
+  exception to all of that: it stays in the list and selected even if that task
+  belongs to another client, has since been skipped or recycled, or isn't yours
+  — a cross-client one shows its client's name in brackets — so opening the
+  editor can never quietly break an existing dependency. Waiting items also
+  appear on the Delayed page.
 - Resolving a waiting step — **Done vs Clear** in the waiting editor: **Done**
   retires the blocker and keeps the waiting note visible on that checklist as a
   "Was waiting on: …" record (that instance only — future recurring instances

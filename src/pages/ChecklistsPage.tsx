@@ -8,6 +8,7 @@ import {
   Plus,
 } from 'lucide-react'
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -65,6 +66,7 @@ import { filterInProgressChecklists } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { selectableClients } from '../lib/clientLifecycle'
+import { waitForTaskOptions } from '../lib/waitForTaskOptions'
 import {
   addDays,
   checklistFrequencies,
@@ -3037,6 +3039,7 @@ function DraggableTaskList({
   // disabling its delete control (can't re-request a pending deletion).
   const {
     data: appData,
+    visibleChecklists,
     pendingItemDeletionKeys,
     activeEmployeeId: meId,
     addWaitingOn,
@@ -3079,16 +3082,29 @@ function DraggableTaskList({
       ),
     )
   }
-  const availableTasks = useMemo(() => {
-    const current = appData.checklists.find((entry) => entry.id === checklistId)
-    if (!current) return []
-    return appData.checklists
-      .filter(
-        (entry) =>
-          entry.id !== checklistId && !entry.deletedAt && entry.clientId === current.clientId,
-      )
-      .map((entry) => ({ id: entry.id, title: entry.title }))
-  }, [appData.checklists, checklistId])
+  // Every task a saved link could point at — the active feed plus the owner's
+  // recycle bin, which the store keeps as a separate array. Only ever used to
+  // RESOLVE an existing choice, never to offer one.
+  const allTasksForResolution = useMemo(
+    () => [...appData.checklists, ...(appData.recycledChecklists ?? [])],
+    [appData.checklists, appData.recycledChecklists],
+  )
+  // The "waiting for another task" choices for one step. Per-step rather than
+  // one shared list, because the rule depends on what that step already points
+  // at: see {@link waitForTaskOptions}, which keeps a saved link in the list
+  // (even a skipped, recycled or cross-client one) so opening the editor can't
+  // quietly break it.
+  const tasksWaitableFrom = useCallback(
+    (selectedId?: string | null) =>
+      waitForTaskOptions({
+        offerable: visibleChecklists,
+        all: allTasksForResolution,
+        clients: appData.clients,
+        checklistId,
+        selectedId,
+      }),
+    [allTasksForResolution, appData.clients, checklistId, visibleChecklists],
+  )
 
   const handleDragStart = (event: DragEvent<HTMLDivElement>, itemId: string) => {
     if (!canReorder) return
@@ -3315,7 +3331,7 @@ function DraggableTaskList({
               <WaitingEditor
                 note={item.waitingOn ?? ''}
                 employees={employees}
-                availableTasks={availableTasks}
+                availableTasks={tasksWaitableFrom(item.waitingForChecklistId)}
                 waitingForChecklistId={item.waitingForChecklistId}
                 waitingOns={item.waitingOns ?? []}
                 activeEmployeeId={meId}
@@ -3463,7 +3479,7 @@ function DraggableTaskList({
                         <WaitingEditor
                           note={sub.waitingOn ?? ''}
                           employees={employees}
-                          availableTasks={availableTasks}
+                          availableTasks={tasksWaitableFrom(sub.waitingForChecklistId)}
                           waitingForChecklistId={sub.waitingForChecklistId}
                           waitingOns={sub.waitingOns ?? []}
                           activeEmployeeId={meId}

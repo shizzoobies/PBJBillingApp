@@ -60,12 +60,20 @@ const handlers = {
   onSendBackWaitingOn: vi.fn(),
 }
 
-function renderEditor(options: { viewerId?: string; waitingOns?: WaitingOn[] } = {}) {
+function renderEditor(
+  options: {
+    viewerId?: string
+    waitingOns?: WaitingOn[]
+    availableTasks?: Array<{ id: string; title: string }>
+    waitingForChecklistId?: string
+  } = {},
+) {
   return render(
     <WaitingEditor
       note=""
       employees={EMPLOYEES}
-      availableTasks={[]}
+      availableTasks={options.availableTasks ?? []}
+      waitingForChecklistId={options.waitingForChecklistId}
       waitingOns={options.waitingOns ?? []}
       activeEmployeeId={options.viewerId ?? A}
       isOwner={false}
@@ -412,5 +420,42 @@ describe('you cannot wait on yourself', () => {
       .map((option) => option.textContent)
     expect(names).not.toContain('Lisa Chen')
     expect(names).toContain('Brittany Fox')
+  })
+})
+
+/**
+ * The task picker (featreq-5dd514b8). The list itself is built and unit-tested
+ * in `src/lib/waitForTaskOptions.ts`; what is pinned here is that whatever it
+ * returns actually reaches the select AND that a saved cross-client link shows
+ * as the chosen row rather than silently reading "not waiting on a task".
+ */
+describe('the waiting-for-a-task picker', () => {
+  const OTHER_CLIENT = { id: 'cl-globex', title: 'Globex close (Globex Freight)' }
+
+  it('renders exactly the options it is handed', () => {
+    renderEditor({ availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }] })
+    const names = within(screen.getByRole('combobox', { name: /Waiting for another task/i }))
+      .getAllByRole('option')
+      .map((option) => option.textContent)
+    expect(names).toEqual(['— not waiting on a task —', 'Acme bank rec'])
+  })
+
+  it('shows an appended cross-client link as the selected task', () => {
+    renderEditor({
+      availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }, OTHER_CLIENT],
+      waitingForChecklistId: OTHER_CLIENT.id,
+    })
+    const select = screen.getByRole('combobox', {
+      name: /Waiting for another task/i,
+    }) as HTMLSelectElement
+    expect(select.value).toBe(OTHER_CLIENT.id)
+    expect(within(select).getByRole('option', { name: OTHER_CLIENT.title })).toBeInTheDocument()
+  })
+
+  it('hides the row entirely when there is nothing to wait on', () => {
+    renderEditor({ availableTasks: [] })
+    expect(
+      screen.queryByRole('combobox', { name: /Waiting for another task/i }),
+    ).not.toBeInTheDocument()
   })
 })
