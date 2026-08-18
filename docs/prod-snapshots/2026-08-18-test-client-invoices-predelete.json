@@ -1,0 +1,92 @@
+[
+  {
+    "id": "inv-3cf6fa6d",
+    "client_id": "client-ee19df0a",
+    "period": "2026-08",
+    "number": "INV-2026-08-001",
+    "status": "void",
+    "line_items": [
+      {
+        "kind": "reimbursement",
+        "label": "Reimbursement: Test Subscription",
+        "amount": 15,
+        "detail": "Aug 8, 2026"
+      }
+    ],
+    "subtotal": "15.00",
+    "total": "15.00",
+    "due_date": "2026-08-31",
+    "blurb": "",
+    "scope_flags": [],
+    "sent_at": "2026-08-09T14:07:21.772Z",
+    "paid_at": "2026-08-09T14:09:09.000Z",
+    "stripe_checkout_session_id": "cs_test_a16zjaPiw61yZ8Q4Woe46ox4A6csSWx2tbVUgo6yHYdV2ncvGndn78NCIp",
+    "stripe_payment_intent_id": "pi_3U2XOdLJaLIMSV5O1zteSL70",
+    "payment_method": "us_bank_account",
+    "email_log": [
+      {
+        "at": "2026-08-09T14:07:44.957Z",
+        "ok": true,
+        "to": [
+          "alex@ka-performancefl.com"
+        ],
+        "total": 15,
+        "subject": "Invoice INV-2026-08-001 from PB&J Strategic Accounting"
+      }
+    ],
+    "created_at": "2026-08-09T14:07:10.823Z",
+    "updated_at": "2026-08-18T13:52:37.322Z",
+    "stripe_card_session_id": null,
+    "client_name": "Test"
+  },
+  {
+    "id": "inv-33ee1de1",
+    "client_id": "client-ee19df0a",
+    "period": "2026-08",
+    "number": "INV-2026-08-002",
+    "status": "paid",
+    "line_items": [
+      {
+        "kind": "reimbursement",
+        "label": "Reimbursement: Test Subscription",
+        "amount": 15,
+        "detail": "Aug 8, 2026"
+      }
+    ],
+    "subtotal": "15.00",
+    "total": "15.00",
+    "due_date": "2026-08-31",
+    "blurb": "",
+    "scope_flags": [],
+    "sent_at": "2026-08-11T14:09:55.488Z",
+    "paid_at": "2026-08-11T14:27:37.000Z",
+    "stripe_checkout_session_id": "cs_test_a1X2XqNek9HjA5GIiNlwUI2mCAWln1oYSGAFHlFeQesmXGk3ali364wN5s",
+    "stripe_payment_intent_id": "pi_3U3GdULJaLIMSV5O0nbp5mwP",
+    "payment_method": "us_bank_account",
+    "email_log": [
+      {
+        "at": "2026-08-11T14:10:41.195Z",
+        "ok": true,
+        "to": [
+          "alex@ka-performancefl.com"
+        ],
+        "total": 15,
+        "subject": "Invoice INV-2026-08-002 from PB&J Strategic Accounting"
+      },
+      {
+        "at": "2026-08-18T13:51:53.514Z",
+        "ok": true,
+        "to": [
+          "asoalexander@gmail.com",
+          "Alex@ka-performancefl.com"
+        ],
+        "total": 15,
+        "subject": "Invoice INV-2026-08-002 from PB&J Strategic Accounting"
+      }
+    ],
+    "created_at": "2026-08-11T14:07:33.183Z",
+    "updated_at": "2026-08-18T13:52:37.322Z",
+    "stripe_card_session_id": null,
+    "client_name": "Test"
+  }
+]
