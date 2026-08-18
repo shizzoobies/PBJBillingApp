@@ -722,6 +722,12 @@ export function ChecklistsPage() {
  * same danger language the Board's overdue chip and the due cue on a card
  * already use. Not a modal and not a toast — this is a standing call to action,
  * not an interruption, and it must still be there tomorrow morning.
+ *
+ * COLLAPSED by default (Alex's revision, 2026-08-18: "we don't need it to be
+ * so much"): the standing element is one slim bar — Overdue + the count — and
+ * the rows appear only when it is expanded. The count is the signal; the list
+ * is on demand. Collapse state is deliberately per-mount, not persisted: every
+ * visit starts at the quiet bar.
  */
 function OverduePinnedPanel({
   checklists,
@@ -737,16 +743,35 @@ function OverduePinnedPanel({
   onOpen: (checklist: Checklist) => void
   todayDateOnly: string
 }) {
+  // State before the empty-return so hook order survives the list emptying
+  // while mounted (finishing the last overdue task removes the panel).
+  const [expanded, setExpanded] = useState(false)
   if (checklists.length === 0) return null
 
   return (
     <section className="panel overdue-pin" aria-labelledby="overdue-pin-heading">
-      <div className="overdue-pin-heading">
+      <button
+        type="button"
+        className="overdue-pin-heading"
+        aria-expanded={expanded}
+        aria-controls="overdue-pin-list"
+        onClick={() => setExpanded((current) => !current)}
+      >
         <AlertTriangle size={18} aria-hidden="true" />
-        <h2 id="overdue-pin-heading">Overdue — needs attention</h2>
+        {/* A span, not an h2 — headings are not valid inside a <button>. The
+            section's accessible name still comes from this via aria-labelledby. */}
+        <span id="overdue-pin-heading" className="overdue-pin-title-text">
+          Overdue
+        </span>
         <span className="overdue-pin-count">{checklists.length}</span>
-      </div>
-      <ul className="overdue-pin-list">
+        {expanded ? (
+          <ChevronDown size={16} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={16} aria-hidden="true" />
+        )}
+      </button>
+      {expanded ? (
+        <ul className="overdue-pin-list" id="overdue-pin-list">
         {checklists.map((checklist) => {
           const due = effectiveChecklistDue(checklist)
           return (
@@ -769,7 +794,8 @@ function OverduePinnedPanel({
             </li>
           )
         })}
-      </ul>
+        </ul>
+      ) : null}
     </section>
   )
 }

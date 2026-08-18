@@ -427,10 +427,12 @@ Clients page meanwhile. Owner-only.
 ## Checklists (tasks)
 
 - **Overdue work is PINNED to the top of the page, above everything.** When you
-  have anything past due, a red "Overdue — needs attention" panel is the first
-  thing on the Checklists page, with a count and one row per late task: the
+  have anything past due, a slim red "Overdue" bar with a count is the first
+  thing on the Checklists page — collapsed by default so it signals without
+  shouting. Click the bar to expand it into one row per late task: the
   business, the task, when it was due and how many days late it is, and whose
-  task it is. Longest-overdue first.
+  task it is. Longest-overdue first. It starts collapsed on every visit; when
+  nothing is overdue there is no bar at all.
   - **Nothing can bury it.** It sits above the tabs, so it shows on every tab;
     it ignores the assignee/client/status filters, the search box, the group-by
     choice and the report period. Those all narrow the list below — the whole

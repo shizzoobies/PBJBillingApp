@@ -4592,29 +4592,51 @@ td strong {
   color: var(--red);
 }
 
-/* Pinned "Overdue — needs attention" panel at the top of the Checklists page.
-   A thick red left rule and a tinted ground, so it reads as a different KIND of
-   thing from the panels under it before a word is read. Same --red the Board's
-   overdue chip and the card due cue wear — one danger color across the app. */
+/* Pinned "Overdue" bar at the top of the Checklists page. A thick red left
+   rule and a tinted ground, so it reads as a different KIND of thing from the
+   panels under it before a word is read. Same --red the Board's overdue chip
+   and the card due cue wear — one danger color across the app.
+   COLLAPSED by default: the standing element is the slim bar + count; the row
+   list only takes space once expanded (Alex: "we don't need it to be so much"). */
 .overdue-pin {
   border-left: 4px solid var(--red);
   border-radius: 0 var(--radius) var(--radius) 0;
   background: color-mix(in srgb, var(--red) 4%, var(--surface));
+  padding: 10px 14px;
 }
 
+/* The heading is the expand/collapse toggle — full-width so the whole bar is
+   the click target, styled as the bar itself rather than as a button. */
 .overdue-pin-heading {
   align-items: center;
+  background: none;
+  border: 0;
   color: var(--red);
+  cursor: pointer;
   display: flex;
+  font: inherit;
   gap: 10px;
-  margin-bottom: 14px;
+  padding: 0;
+  text-align: left;
+  width: 100%;
 }
 
-.overdue-pin-heading h2 {
+.overdue-pin-heading:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 3px;
+}
+
+/* The chevron rides the far right edge so the bar reads as expandable. */
+.overdue-pin-heading > svg:last-child {
+  margin-left: auto;
+}
+
+
+.overdue-pin-title-text {
   color: var(--red);
   font-size: 1.05rem;
+  font-weight: 700;
   letter-spacing: 0.01em;
-  margin: 0;
 }
 
 /* The count is a solid red badge, not a soft pill: it is the number the whole
@@ -4634,7 +4656,7 @@ td strong {
   display: grid;
   gap: 6px;
   list-style: none;
-  margin: 0;
+  margin: 12px 0 0;
   padding: 0;
 }
 

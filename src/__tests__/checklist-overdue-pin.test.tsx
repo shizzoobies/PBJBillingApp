@@ -174,11 +174,24 @@ const renderPage = (entry = '/checklists') =>
   )
 
 /** The pinned panel, or null when it isn't on the page at all. */
-const pin = () => screen.queryByRole('region', { name: /Overdue — needs attention/i })
+const pin = () => screen.queryByRole('region', { name: /^Overdue/i })
 
-/** Task titles inside the pin, in render order. */
-const pinnedTitles = (panel: HTMLElement) =>
-  [...panel.querySelectorAll('.overdue-pin-title')].map((node) => node.textContent)
+/**
+ * Expand the pin if it is collapsed (the default since Alex's 2026-08-18
+ * revision — the standing element is a slim bar; rows are on demand). Folded
+ * into the queries below so every row assertion exercises the real path a
+ * person takes: see the count, click the bar, read the rows.
+ */
+const expandPin = (panel: HTMLElement) => {
+  const toggle = panel.querySelector('button.overdue-pin-heading') as HTMLElement
+  if (toggle && toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle)
+}
+
+/** Task titles inside the pin, in render order (expands the bar first). */
+const pinnedTitles = (panel: HTMLElement) => {
+  expandPin(panel)
+  return [...panel.querySelectorAll('.overdue-pin-title')].map((node) => node.textContent)
+}
 
 // On this page the client name leads each card and the task name sits under it
 // (`.checklist-card-title-sub`); `.checklist-card-title` is the client-page
@@ -199,12 +212,32 @@ const overdueGroupTitles = () => {
   return [...(group?.querySelectorAll(CARD_TITLE) ?? [])].map((node) => node.textContent)
 }
 
-const clickPinned = (title: string) =>
+const clickPinned = (title: string) => {
+  expandPin(pin() as HTMLElement)
   fireEvent.click(
     within(pin() as HTMLElement).getByText(title).closest('button') as HTMLElement,
   )
+}
 
 describe('the pinned overdue panel', () => {
+  it('starts as a collapsed bar: count visible, rows hidden until the bar is clicked', () => {
+    signInAs(LISA, false)
+    renderPage()
+
+    const panel = pin() as HTMLElement
+    expect(panel).toBeInTheDocument()
+    // The count is the standing signal…
+    expect(within(panel).getByText('2')).toBeInTheDocument()
+    // …and the rows are on demand.
+    expect(panel.querySelectorAll('.overdue-pin-title').length).toBe(0)
+
+    const toggle = panel.querySelector('button.overdue-pin-heading') as HTMLElement
+    fireEvent.click(toggle)
+    expect(panel.querySelectorAll('.overdue-pin-title').length).toBe(2)
+    fireEvent.click(toggle)
+    expect(panel.querySelectorAll('.overdue-pin-title').length).toBe(0)
+  })
+
   it('lists a staff member’s overdue tasks with client, title, lateness and assignee', () => {
     signInAs(LISA, false)
     renderPage()
@@ -213,6 +246,7 @@ describe('the pinned overdue panel', () => {
     expect(panel).toBeInTheDocument()
     expect(within(panel).getByText('2')).toBeInTheDocument()
 
+    expandPin(panel)
     const row = within(panel).getByText('Q2 sales tax filing').closest('button') as HTMLElement
     expect(within(row).getByText('Shared Books LLC')).toBeInTheDocument()
     expect(within(row).getByText('20 days overdue')).toBeInTheDocument()
@@ -229,19 +263,24 @@ describe('the pinned overdue panel', () => {
     ])
   })
 
+  // The absence assertions below EXPAND first: against a collapsed bar they
+  // would pass vacuously (nothing renders collapsed, including bugs).
   it('never shows a skipped cycle — a deliberately deferred task is not late', () => {
     signInAs(LISA, false)
     renderPage()
 
-    expect(
-      within(pin() as HTMLElement).queryByText('Skipped month-end close'),
-    ).not.toBeInTheDocument()
+    const panel = pin() as HTMLElement
+    expandPin(panel)
+    expect(within(panel).getByText('Q2 sales tax filing')).toBeInTheDocument() // non-vacuous
+    expect(within(panel).queryByText('Skipped month-end close')).not.toBeInTheDocument()
   })
 
   it('leaves out work that is not overdue: still upcoming, or finished after its date', () => {
     signInAs(LISA, false)
     const panel = (renderPage(), pin() as HTMLElement)
+    expandPin(panel)
 
+    expect(within(panel).getByText('Q2 sales tax filing')).toBeInTheDocument() // non-vacuous
     expect(within(panel).queryByText('Next month close')).not.toBeInTheDocument()
     expect(within(panel).queryByText('Already finished cleanup')).not.toBeInTheDocument()
   })
@@ -250,7 +289,10 @@ describe('the pinned overdue panel', () => {
     signInAs(LISA, false)
     renderPage()
 
-    expect(within(pin() as HTMLElement).queryByText("Dana's payroll run")).not.toBeInTheDocument()
+    const panel = pin() as HTMLElement
+    expandPin(panel)
+    expect(within(panel).getByText('Q2 sales tax filing')).toBeInTheDocument() // non-vacuous
+    expect(within(panel).queryByText("Dana's payroll run")).not.toBeInTheDocument()
   })
 
   it('scopes to the viewer: an owner sees the whole firm’s', () => {
@@ -383,6 +425,7 @@ describe('the pin and the list agree on what "overdue" means', () => {
     signInAs(LISA, false, [stepLate, UPCOMING])
     renderPage()
 
+    expandPin(pin() as HTMLElement)
     const row = within(pin() as HTMLElement)
       .getByText('Year-end package')
       .closest('button') as HTMLElement
