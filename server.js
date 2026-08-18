@@ -88,6 +88,7 @@ import {
   createInvoiceCheckoutSession,
   expireCheckoutSession,
   isStripeConfigured,
+  isStripeTestMode,
   isStripeWebhookConfigured,
   resolveWebhookChannel,
   stripeClient,
@@ -952,7 +953,16 @@ const server = createServer(async (request, response) => {
     const normalizedPath = decodeURIComponent(requestUrl.pathname)
 
     if (normalizedPath === '/health') {
-      sendJson(response, 200, { ok: true, mode: appDataStore.mode })
+      // `stripe` names which money mode this process is running in. It exists
+      // for the sandbox->live cutover and for every operator after it: nothing
+      // else in the app tells a human whether real money moves, and "live key
+      // with the test webhook secret" is the classic silent misconfiguration.
+      sendJson(response, 200, {
+        ok: true,
+        mode: appDataStore.mode,
+        stripe: !isStripeConfigured() ? 'unconfigured' : isStripeTestMode() ? 'test' : 'live',
+        stripeWebhook: isStripeWebhookConfigured() ? 'configured' : 'missing',
+      })
       return
     }
 
