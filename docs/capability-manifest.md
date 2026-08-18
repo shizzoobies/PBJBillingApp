@@ -606,20 +606,30 @@ Clients page meanwhile. Owner-only.
   start fresh), so there's a history of what the team keeps waiting on. Done
   does **NOT** check the step off — completing the work stays with the normal
   checkboxes (owner feedback: the reference should sit on the still-open step).
-  **Clear** just un-flags and erases the note. Resolved steps stop counting on
-  the Delayed page and the Board's pending chips. Done retires the WHOLE wait in
-  one press — including any "waiting on a person" blockers on that step — and
-  you see it happen: the amber "Waiting on: …" badge turns into a green "Was
-  waiting on: … ✓" and the amber editor closes. If the server refuses (e.g. a
-  blocker only its owner may mark done), the reason appears in red inside the
-  waiting editor instead of the button appearing to do nothing.
+  **Clear** just un-flags and erases the note — the free-text note only; it has
+  never touched a saved "waiting on a person" record and still doesn't. Resolved
+  steps stop counting on the Delayed page and the Board's pending chips. Done
+  retires the wait in one press — including any "waiting on a person" blockers on
+  that step **that are yours to finish or yours to approve** — and you see it
+  happen: the amber "Waiting on: …" badge turns into a green "Was waiting on: … ✓"
+  and the amber editor closes. A blocker somebody ELSE owes you is left exactly
+  where it is (Done used to delete it): the editor says "Still waiting on <name> —
+  only they can mark their part done", or "Waiting on <name>'s approval" when it's
+  already reported done and sitting with whoever asked — and the step stays amber,
+  because it is genuinely still blocked. Done offers exactly what the buttons on
+  the chip beside it offer, to the same people (an owner can press it on anyone's
+  behalf; the step's assignee can approve). If the server refuses anything, the
+  reason appears in red inside the waiting editor instead of the button appearing
+  to do nothing.
 - Waiting on a PERSON (two-way): you can also flag a step as waiting on a
   specific team member. That person is notified immediately that someone's
   blocked on them, sees it in a "Waiting on you" card on their Dashboard, and
   gets a "Mark done" button — clicking it notifies BOTH the step's assignee and
   whoever flagged it that they can continue. A step can wait on several people
-  independently; each is cleared (and notified) on its own. The blocked side can
-  cancel a waiting-on, which notifies that person it's no longer needed.
+  independently; each is cleared (and notified) on its own. You can wait on a
+  colleague or on the task's client — **never on yourself**: your own name isn't
+  in the picker, and the server refuses it ("A wait names who you are waiting ON
+  — pick the client or a colleague, not yourself").
 - **The hand-off has TWO steps, and the record is kept.** Clearing a wait used to
   delete it, which meant the name of whoever did the check disappeared the moment
   they finished. Now a wait moves through three states and is never destroyed:
@@ -637,13 +647,21 @@ Clients page meanwhile. Owner-only.
      waiting editor closes, and whether or not you can edit the task. The tick
      belongs to the WAIT, not the step: confirming a wait never checks the step
      itself off, and the box can't be un-ticked.
-  You cannot approve work nobody has reported finished (the app says so and
-  points you at Cancel instead), and the person who did the work cannot approve
-  their own. Owners can do either step on anyone's behalf. **Cancel** (the ×) is
-  unchanged and still erases the wait outright — that means "this never needed to
-  happen", so no record is kept — but it is only offered while the wait is still
-  amber. Once someone has reported it done, the only two answers are Approve and
-  Send back.
+  You cannot approve work nobody has reported finished (the app says so — the
+  wait keeps until they press Done), and the person who did the work cannot
+  approve their own. Owners can do either step on anyone's behalf.
+- **A saved wait can never be removed — by anyone.** There used to be a **Cancel**
+  (the ×) that erased it outright. It is gone, and so is the route behind it: a
+  wait is the shared record of who asked, who did it and who confirmed, so
+  removing one would take that receipt away from everybody on it, not just from
+  whoever pressed the button. Nothing in the app deletes a wait, and the old
+  `cancel` request is refused server-side with the reason ("A saved wait is the
+  record of who asked and who did it, so it stays on the task. Mark it done and
+  approve it instead."), so an old browser tab can't do it either. The way out of
+  a wait is forward: Mark done → Approve, or Send back for another lap. The record
+  — who asked, who did it, who confirmed, and the dates — stays on the task
+  permanently through every stage. (This applies to the saved wait only. The
+  step's own free-text note keeps its editor and its Clear button, unchanged.)
 - **Send back — "not approved, do it again."** At step 2 the person who asked
   gets a **Send back** button beside Approve. It asks for a note (required) and
   hands the wait straight back: it turns amber again, reappears in the other
@@ -656,8 +674,8 @@ Clients page meanwhile. Owner-only.
   the wait on the spot: you pick the person (or the client), type the note that
   goes WITH the wait, then press **Save**. **Clear** discards it if you opened
   the picker by accident — nothing is created and nothing is notified. Once
-  saved, the person and the note cannot be edited; the only things left are the
-  buttons above (Mark done / Approve / Send back / Cancel).
+  saved, the person and the note cannot be edited or removed; the only things
+  left are the buttons above (Mark done / Approve / Send back).
 - **Waiting on the CLIENT.** The same picker offers the task's own client
   alongside the team. You never choose which client — the task already belongs to
   one. Because a client has no login, there is nobody to hand back to and nobody

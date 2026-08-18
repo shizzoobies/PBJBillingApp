@@ -7143,8 +7143,7 @@ button.repeating-task-toggle-pill {
 .waiting-done-btn:disabled,
 .waiting-clear-btn:disabled,
 .waiting-person-select:disabled,
-.waiting-blocker-done:disabled,
-.waiting-blocker-cancel:disabled {
+.waiting-blocker-done:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -7341,21 +7340,8 @@ button.repeating-task-toggle-pill {
   text-transform: uppercase;
 }
 
-.waiting-blocker-cancel {
-  background: transparent;
-  border: none;
-  border-radius: 999px;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 15px;
-  line-height: 1;
-  padding: 0 4px;
-  transition: color 0.15s ease;
-}
-
-.waiting-blocker-cancel:hover {
-  color: #b3261e;
-}
+/* No `.waiting-blocker-cancel`: the × that removed a saved wait is gone, and
+   with it the only control on a chip that destroyed anything. */
 
 /* ---- Closed-out waits, kept on the step as completed sub-items ------- */
 /* "The waiting and information in it needs to stay as a sub task shown as
@@ -7489,7 +7475,6 @@ button.repeating-task-toggle-pill {
 
 @media (prefers-reduced-motion: reduce) {
   .waiting-blocker-done,
-  .waiting-blocker-cancel,
   .waiting-on-you-done {
     transition: none;
   }

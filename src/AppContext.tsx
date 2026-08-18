@@ -512,8 +512,7 @@ export type AppContextValue = {
     waitingOnId: string,
     note: string,
   ) => Promise<void>
-  /** Cancel a waiting-on blocker (notifies the blocker it's no longer needed). */
-  waitingOnCancel: (checklistId: string, waitingOnId: string) => Promise<void>
+  /* No cancel: a saved wait is a permanent record and nothing removes one. */
   /** Owner-only: restore a recycled checklist back to the active list. */
   restoreChecklist: (checklistId: string) => Promise<void>
   /** Owner-only: permanently delete every recycled checklist. Not reversible. */

@@ -9812,11 +9812,12 @@ export class AppDataStore {
   // ---- Structured "waiting on a person" blockers (waitingOns) ----
   //
   // Additive to the legacy free-text `waitingOn` note + `waiting` flag. Each
-  // entry is a pending blocker; resolving (done/cancel) REMOVES it. Top-level
-  // items persist the list in the `waiting_ons` column; sub-items / sub-sub
-  // ride the parent item's `sub_items` JSONB. The file backend keeps the array
-  // on each node object. All four methods reuse `this.read()` for the in-memory
-  // shape, then persist the one affected node.
+  // entry is a permanent record: the stage methods below EDIT it in place and
+  // there is no method that removes one. Top-level items persist the list in the
+  // `waiting_ons` column; sub-items / sub-sub ride the parent item's `sub_items`
+  // JSONB. The file backend keeps the array on each node object. All of them
+  // reuse `this.read()` for the in-memory shape, then persist the one affected
+  // node.
 
   /**
    * Locate a node (item / sub-item / sub-sub-item) inside a checklist by path.
@@ -9945,9 +9946,14 @@ export class AppDataStore {
 
   /**
    * Walk a checklist (item → sub-item → sub-sub-item) to the node holding
-   * `waitingOnId` and replace that entry with whatever `mutate` returns —
-   * returning `null` removes it. Yields `{ checklist, entry, assigneeId, label }
-   * | null`, where `entry` is the value AFTER the mutation.
+   * `waitingOnId` and replace that entry with whatever `mutate` returns. Yields
+   * `{ checklist, entry, assigneeId, label } | null`, where `entry` is the value
+   * AFTER the mutation.
+   *
+   * `mutate` MUST return the updated entry. It used to be allowed to return
+   * `null` to delete the row, which is what Cancel did; a saved wait is a
+   * permanent record now (see lib/waiting-on-state.js), so that branch is gone
+   * and a falsy return is a bug rather than an instruction.
    *
    * Both backends need this identical walk and differ only in how they persist.
    * Cardinal rule 1 says a persisted change must touch both; the surest way to
@@ -9960,10 +9966,13 @@ export class AppDataStore {
       if (index === -1) return null
       const previous = list[index]
       const next = mutate(previous)
-      node.waitingOns = next
-        ? [...list.slice(0, index), next, ...list.slice(index + 1)]
-        : list.filter((w) => w.id !== waitingOnId)
-      return next ?? previous
+      if (!next) {
+        throw new Error(
+          'a waiting-on mutation must return the updated entry — saved waits are never removed',
+        )
+      }
+      node.waitingOns = [...list.slice(0, index), next, ...list.slice(index + 1)]
+      return next
     }
 
     const locate = (checklist) => {
@@ -10016,15 +10025,6 @@ export class AppDataStore {
       assigneeId: hit.item.assigneeId ?? null,
       label: hit.label,
     }
-  }
-
-  /**
-   * CANCEL — remove the entry outright. "This never needed to happen" is not
-   * worth keeping a receipt for, so this is the one path that still deletes.
-   * Returns `{ checklist, entry, assigneeId, label } | null`.
-   */
-  async resolveWaitingOn(checklistId, waitingOnId) {
-    return this._mutateWaitingOn(checklistId, waitingOnId, () => null)
   }
 
   /**

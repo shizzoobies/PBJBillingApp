@@ -50,6 +50,18 @@ export type WaitingOnPermissionArgs = {
 
 export const WAITING_STAGES: readonly WaitingOnStage[]
 export const DELAYED_TABS: readonly DelayedTab[]
+export const SAVED_WAIT_IS_PERMANENT: string
+export const SELF_WAIT_REFUSAL: string
+export const REFUSED_WAITING_ON_ACTIONS: readonly string[]
+
+export function waitingOnActionRefusal(
+  action: string,
+): { status: number; error: string } | null
+export function isSelfWait(args: {
+  blockerId?: string
+  requestedBy?: string
+  blockerType?: 'employee' | 'client'
+}): boolean
 
 export function waitingOnStage(entry: WaitingOnLike | undefined): WaitingOnStage
 export function isClientWait(entry: WaitingOnLike | undefined): boolean

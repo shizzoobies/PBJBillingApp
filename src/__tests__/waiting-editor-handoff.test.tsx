@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { WaitingEditor } from '../pages/ChecklistsPage'
 import { CompletedWaits } from '../components/CompletedWaits'
@@ -29,9 +29,11 @@ vi.mock('../AppContext', () => ({ useAppContext: () => ({ dataSyncState: 'idle' 
 
 const A = 'emp-brit' // asked for the help
 const B = 'emp-lisa' // is being waited on
+const C = 'emp-avery' // a third party, for steps carrying more than one wait
 const EMPLOYEES = [
   { id: A, name: 'Brittany Fox', role: 'owner' },
   { id: B, name: 'Lisa Chen', role: 'Bookkeeper' },
+  { id: C, name: 'Avery Diaz', role: 'Bookkeeper' },
 ] as Employee[]
 
 const waiting = (over: Partial<WaitingOn> = {}): WaitingOn => ({
@@ -53,7 +55,6 @@ const handlers = {
   onClear: vi.fn(),
   onDone: vi.fn(),
   onAddWaitingOn: vi.fn(),
-  onCancelWaitingOn: vi.fn(),
   onDoneWaitingOn: vi.fn(),
   onVerifyWaitingOn: vi.fn(),
   onSendBackWaitingOn: vi.fn(),
@@ -162,12 +163,12 @@ describe('the three states, read off the step', () => {
     expect(chip()).toHaveTextContent('the bank statements')
   })
 
-  it('PENDING gives the requester nothing to press but cancel', () => {
+  // Her fifth round: "User should not be able to remove the information once it
+  // is saved." The × that erased the wait outright lived here, and it is gone —
+  // the requester now has nothing to press until the blocker reports done.
+  it('PENDING gives the requester nothing to press at all', () => {
     renderEditor({ viewerId: A, waitingOns: [waiting()] })
-    const labels = within(chip())
-      .getAllByRole('button')
-      .map((button) => button.textContent)
-    expect(labels).toEqual(['×'])
+    expect(within(chip()).queryAllByRole('button')).toHaveLength(0)
   })
 
   it('PENDING gives the blocker their Mark done', () => {
@@ -177,8 +178,8 @@ describe('the three states, read off the step', () => {
   })
 
   // "if completed then we just need one button to approve and mark completed or
-  // a button to not approve and send back with another note." Exactly two —
-  // which is why the × is gone at this stage.
+  // a button to not approve and send back with another note." Exactly two, and
+  // neither of them removes anything.
   it('RESOLVED gives the requester exactly Approve and Send back', () => {
     renderEditor({ viewerId: A, waitingOns: [resolved()] })
     const labels = within(chip())
@@ -239,5 +240,177 @@ describe('the three states, read off the step', () => {
     expect(
       screen.getByRole('checkbox', { name: 'Waited on Lisa Chen — completed' }),
     ).toBeChecked()
+  })
+})
+
+/**
+ * Her fifth round (the send-back that produced this file's second pass):
+ *
+ *   "User should not be able to remove the information once it is saved, we
+ *    don't want to lose the data and we don't want to impact other people
+ *    interacting with it."
+ *
+ * The × was one of two ways to erase a saved wait from this editor. The other
+ * was the primary Done, which used to CANCEL any blocker that wasn't yours to
+ * finish — the quiet one, because it deleted somebody else's record as a side
+ * effect of tidying your own step.
+ */
+describe('a saved wait cannot be removed from the editor', () => {
+  it('offers no removal control at any stage, to anyone', () => {
+    for (const viewerId of [A, B]) {
+      for (const entry of [waiting(), resolved()]) {
+        const view = renderEditor({ viewerId, waitingOns: [entry] })
+        const labels = within(chip())
+          .queryAllByRole('button')
+          .map((button) => button.textContent)
+        expect(labels).not.toContain('×')
+        expect(labels.join(' ')).not.toMatch(/cancel|remove|delete/i)
+        view.unmount()
+      }
+    }
+  })
+
+  it("Done leaves a colleague's open wait alone and says whose move it is", async () => {
+    renderEditor({ viewerId: A, waitingOns: [waiting()] })
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Still waiting on Lisa Chen — only they can mark their part done.',
+    )
+    // Nothing was retired on her behalf, and the step was not un-flagged either:
+    // it is genuinely still blocked.
+    expect(handlers.onDoneWaitingOn).not.toHaveBeenCalled()
+    expect(handlers.onVerifyWaitingOn).not.toHaveBeenCalled()
+    expect(handlers.onDone).not.toHaveBeenCalled()
+  })
+
+  it('Done still retires the waits that ARE yours to finish', async () => {
+    renderEditor({ viewerId: B, waitingOns: [waiting()] })
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+
+    await waitFor(() => expect(handlers.onDoneWaitingOn).toHaveBeenCalledWith('wo-1'))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('Done still confirms one the other side has reported done', async () => {
+    renderEditor({ viewerId: A, waitingOns: [resolved()] })
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+
+    await waitFor(() => expect(handlers.onVerifyWaitingOn).toHaveBeenCalledWith('wo-1'))
+  })
+
+  /**
+   * The blocker clearing her own amber. Her wait is reported done and sitting
+   * with whoever asked, so Done is not hers to press — but it used to be planned
+   * as `verify`, which the server answers "You cannot confirm this waiting-on
+   * request". The refusal is now stated before the request is made, in terms of
+   * the person she is actually waiting on.
+   */
+  it('tells the blocker whose approval it is sitting with, without a 403', async () => {
+    renderEditor({ viewerId: B, waitingOns: [resolved()] })
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent("Waiting on Brittany Fox's approval.")
+    expect(alert).not.toHaveTextContent('cannot')
+    expect(handlers.onVerifyWaitingOn).not.toHaveBeenCalled()
+    expect(handlers.onDone).not.toHaveBeenCalled()
+  })
+
+  // An OWNER gets what the chip offers them, not a lecture about whose move it
+  // is: `canMarkWaitingOnDone` says yes for an owner at the amber stage.
+  it('lets an owner press Done on a colleague’s wait, as the chip does', async () => {
+    render(
+      <WaitingEditor
+        note=""
+        employees={EMPLOYEES}
+        availableTasks={[]}
+        waitingOns={[waiting()]}
+        activeEmployeeId={C}
+        isOwner
+        stepAssigneeId={null}
+        clientName="Acme Dental"
+        {...handlers}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+
+    await waitFor(() => expect(handlers.onDoneWaitingOn).toHaveBeenCalledWith('wo-1'))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  /**
+   * THE contract for a step carrying more than one wait: the half that is yours
+   * moves, the half that isn't stays put and is named. A future tidy-up that
+   * made Done all-or-nothing would break this silently in either direction —
+   * either stranding your own wait or reaching for someone else's again.
+   */
+  it('on a mixed step, retires only my own wait and names the other', async () => {
+    renderEditor({
+      viewerId: B,
+      waitingOns: [
+        waiting({ id: 'wo-mine', blockerId: B, requestedBy: A }),
+        waiting({ id: 'wo-avery', blockerId: C, requestedBy: B }),
+      ],
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+
+    await waitFor(() => expect(handlers.onDoneWaitingOn).toHaveBeenCalledWith('wo-mine'))
+    expect(handlers.onDoneWaitingOn).toHaveBeenCalledTimes(1)
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Still waiting on Avery Diaz')
+    expect(alert).not.toHaveTextContent('Lisa Chen')
+    // The step is still blocked on Avery, so it is NOT un-flagged.
+    expect(handlers.onDone).not.toHaveBeenCalled()
+  })
+
+  it('names each person once, however many of their waits are on the step', async () => {
+    renderEditor({
+      viewerId: A,
+      waitingOns: [
+        waiting({ id: 'wo-1', blockerId: B }),
+        waiting({ id: 'wo-2', blockerId: B }),
+      ],
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent?.match(/Lisa Chen/g)).toHaveLength(1)
+    // …and never the placeholder `employeeName` hands back for an unknown id.
+    expect(alert).not.toHaveTextContent('Unassigned')
+  })
+
+  // The scope guard: this round is about the saved wait, not the step's own
+  // free-text note, which keeps its editor and its Clear exactly as they were.
+  it('leaves the free-text note section untouched', () => {
+    renderEditor({ waitingOns: [waiting()] })
+    expect(
+      screen.getByPlaceholderText('e.g. the client to send statements (free-text note)'),
+    ).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(handlers.onClear).toHaveBeenCalled()
+  })
+})
+
+/** "it should either be waiting on another employee or the client" — ANOTHER. */
+describe('you cannot wait on yourself', () => {
+  it('leaves you out of the picker', () => {
+    renderEditor({ viewerId: A })
+    const names = within(picker())
+      .getAllByRole('option')
+      .map((option) => option.textContent)
+    expect(names).not.toContain('Brittany Fox')
+    expect(names).toContain('Lisa Chen')
+    expect(names).toContain('Acme Dental')
+  })
+
+  it('leaves the OTHER person out when they are the one looking', () => {
+    renderEditor({ viewerId: B })
+    const names = within(picker())
+      .getAllByRole('option')
+      .map((option) => option.textContent)
+    expect(names).not.toContain('Lisa Chen')
+    expect(names).toContain('Brittany Fox')
   })
 })

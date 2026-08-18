@@ -2587,7 +2587,6 @@ export function WaitingEditor({
   onClear,
   onDone,
   onAddWaitingOn,
-  onCancelWaitingOn,
   onDoneWaitingOn,
   onVerifyWaitingOn,
   onSendBackWaitingOn,
@@ -2621,8 +2620,6 @@ export function WaitingEditor({
    * which client is never asked, the server reads it off the checklist.
    */
   onAddWaitingOn: (blocker: string | 'client', note: string) => Promise<void> | void
-  /** Cancel a pending blocker (the blocked side). */
-  onCancelWaitingOn: (waitingOnId: string) => Promise<void> | void
   /** Stage 1 — the person being waited on reports their part finished. */
   onDoneWaitingOn: (waitingOnId: string) => Promise<void> | void
   /** Stage 2 — the person who asked approves and closes it out. */
@@ -2685,16 +2682,57 @@ export function WaitingEditor({
   // Done = retire the whole wait. The structured person-blockers have to go
   // first: `stepIsWaiting` counts them, so leaving them behind kept the step
   // amber and this editor open, which is why the click looked dead.
+  //
+  // What it can NO LONGER do is erase somebody else's open wait to get the step
+  // clear. Those are left alone and named below — the step stays amber because
+  // it is genuinely still blocked.
   const handleDone = () =>
     run(async () => {
-      for (const step of planWaitingDone(waitingOns, activeEmployeeId)) {
+      const plan = planWaitingDone(waitingOns, activeEmployeeId, {
+        isOwner,
+        assigneeId: stepAssigneeId,
+      })
+      for (const step of plan) {
         if (step.action === 'done') {
           await onDoneWaitingOn(step.id)
         } else if (step.action === 'verify') {
           await onVerifyWaitingOn(step.id)
-        } else {
-          await onCancelWaitingOn(step.id)
         }
+      }
+      const stranded = plan
+        .filter((step) => step.action === 'theirs')
+        .map((step) => waitingOns.find((wait) => wait.id === step.id))
+        .filter((entry): entry is WaitingOn => Boolean(entry))
+      if (stranded.length > 0) {
+        // A name we can say out loud. `employeeName` answers "Unassigned" for an
+        // id it doesn't know, which reads as a bug in a sentence about a person.
+        const personName = (id: string | undefined) =>
+          employees.find((emp) => emp.id === id)?.name ?? 'a colleague'
+        const listOf = (names: string[]) => Array.from(new Set(names)).join(', ')
+        // Two different waits, two different sentences. One is still on the
+        // blocker; the other is finished and sitting with whoever asked.
+        const owed = listOf(
+          stranded
+            .filter((entry) => waitingOnStage(entry) !== 'resolved')
+            .map((entry) =>
+              isClientWait(entry) ? clientName || 'the client' : personName(entry.blockerId),
+            ),
+        )
+        const approvers = listOf(
+          stranded
+            .filter((entry) => waitingOnStage(entry) === 'resolved')
+            .map((entry) => personName(entry.requestedBy)),
+        )
+        setError(
+          [
+            owed ? `Still waiting on ${owed} — only they can mark their part done.` : '',
+            approvers ? `Waiting on ${approvers}'s approval.` : '',
+            'A saved wait stays on the task until it is done and approved.',
+          ]
+            .filter(Boolean)
+            .join(' '),
+        )
+        return
       }
       await onDone()
     })
@@ -2734,14 +2772,18 @@ export function WaitingEditor({
         >
           <option value="">+ Waiting on…</option>
           {/* Her words: "it should either be waiting on another employee or the
-              client". No client picker — the task already belongs to one. */}
+              client". No client picker — the task already belongs to one.
+              ANOTHER employee: you are not in this list, because a wait names
+              who you are waiting ON. The server refuses a self-wait too. */}
           <option value="client">{clientName || 'The client'}</option>
           <optgroup label="Team">
-            {employees.map((emp) => (
-              <option key={emp.id} value={emp.id}>
-                {emp.name}
-              </option>
-            ))}
+            {employees
+              .filter((emp) => emp.id !== activeEmployeeId)
+              .map((emp) => (
+                <option key={emp.id} value={emp.id}>
+                  {emp.name}
+                </option>
+              ))}
           </optgroup>
         </select>
         {draftBlocker ? (
@@ -2782,7 +2824,7 @@ export function WaitingEditor({
               ? 'Never mind — discard this before it is created'
               : busy
                 ? 'Retiring this wait — one moment…'
-                : 'Un-flag without finishing — removes the waiting note entirely'
+                : 'Un-flag without finishing — removes the free-text note entirely (saved waits are not affected)'
           }
           onClick={draftBlocker ? clearDraft : onClear}
         >
@@ -2877,8 +2919,10 @@ export function WaitingEditor({
                 ) : null}
                 {/* RESOLVED, seen by the requester: "we just need one button to
                     approve and mark completed or a button to not approve and
-                    send back with another note." Exactly two — which is why the
-                    × below is limited to the still-waiting stage. */}
+                    send back with another note." Exactly two, at every stage —
+                    the × that removed a wait outright is gone. Her fifth round:
+                    "User should not be able to remove the information once it is
+                    saved." */}
                 {canVerifyWaitingOn(permission) ? (
                   <WaitApprovalActions
                     busy={busy}
@@ -2888,22 +2932,6 @@ export function WaitingEditor({
                       void run(() => onSendBackWaitingOn(entry.id, sendBackNote))
                     }
                   />
-                ) : null}
-                {stage === 'waiting' ? (
-                  <button
-                    type="button"
-                    className="waiting-blocker-cancel"
-                    aria-label={`Cancel waiting on ${blockerName}`}
-                    disabled={busy}
-                    title={
-                      busy
-                        ? 'Working on it — one moment…'
-                        : 'Never mind — remove this wait entirely (no record kept)'
-                    }
-                    onClick={() => void run(() => onCancelWaitingOn(entry.id))}
-                  >
-                    ×
-                  </button>
                 ) : null}
               </li>
             )
@@ -3012,7 +3040,6 @@ function DraggableTaskList({
     pendingItemDeletionKeys,
     activeEmployeeId: meId,
     addWaitingOn,
-    waitingOnCancel,
     waitingOnDone,
     waitingOnVerify,
     waitingOnSendBack,
@@ -3318,9 +3345,6 @@ function DraggableTaskList({
                       : { itemId: item.id, blockerId: blocker, note: waitNote },
                   )
                 }
-                onCancelWaitingOn={(waitingOnId) =>
-                  void waitingOnCancel(checklistId, waitingOnId)
-                }
                 onDoneWaitingOn={(waitingOnId) => void waitingOnDone(checklistId, waitingOnId)}
                 onVerifyWaitingOn={(waitingOnId) =>
                   void waitingOnVerify(checklistId, waitingOnId)
@@ -3480,9 +3504,6 @@ function DraggableTaskList({
                                     note: waitNote,
                                   },
                             )
-                          }
-                          onCancelWaitingOn={(waitingOnId) =>
-                            void waitingOnCancel(checklistId, waitingOnId)
                           }
                           onDoneWaitingOn={(waitingOnId) =>
                             void waitingOnDone(checklistId, waitingOnId)

@@ -3172,15 +3172,57 @@ describe('the waiting-on hand-off round-trips (file backend)', () => {
     expect(entries[0]).toMatchObject({ blockerType: 'client', verifiedBy: 'emp-brit' })
   })
 
-  it('CANCEL is still the one path that deletes', async () => {
+  /**
+   * Her fifth round: "User should not be able to remove the information once it
+   * is saved." Cancel used to delete the row outright; the store now has no way
+   * to remove one at all, which is what makes the server-side refusal more than
+   * a hidden button.
+   */
+  it('has no removal path left — the record cannot be deleted', async () => {
+    expect(store.resolveWaitingOn).toBeUndefined()
+
     const added = await store.addWaitingOn(
       'cl-1',
       { itemId: 'it-1' },
       { blockerId: 'emp-lisa', requestedBy: 'emp-brit' },
     )
-    await store.resolveWaitingOn('cl-1', added.entry.id)
+    // The walk that every stage transition rides refuses to drop an entry, so a
+    // future mutation that returns nothing fails loudly instead of erasing it.
+    await expect(
+      store._mutateWaitingOn('cl-1', added.entry.id, () => null),
+    ).rejects.toThrow(/never removed/)
 
-    expect(await readWaitingOns(store, { itemId: 'it-1' })).toHaveLength(0)
+    expect(await readWaitingOns(store, { itemId: 'it-1' })).toHaveLength(1)
+  })
+
+  it('keeps the record through a send-back and back again', async () => {
+    const added = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'emp-lisa', requestedBy: 'emp-brit', note: 'the bank statements' },
+    )
+    await store.markWaitingOnDone('cl-1', added.entry.id, { userId: 'emp-lisa' })
+    await store.markWaitingOnSentBack('cl-1', added.entry.id, {
+      userId: 'emp-brit',
+      note: 'the March page is missing',
+    })
+    // Sent back = the blocker's move again. Locking deletion must not wedge it.
+    const midFlight = await readWaitingOns(store, { itemId: 'it-1' })
+    expect(midFlight).toHaveLength(1)
+    expect(midFlight[0].resolvedAt).toBeUndefined()
+    expect(midFlight[0].sendBacks).toHaveLength(1)
+
+    await store.markWaitingOnDone('cl-1', added.entry.id, { userId: 'emp-lisa' })
+    await store.markWaitingOnVerified('cl-1', added.entry.id, { userId: 'emp-brit' })
+
+    const closed = await readWaitingOns(store, { itemId: 'it-1' })
+    expect(closed).toHaveLength(1)
+    expect(closed[0]).toMatchObject({
+      note: 'the bank statements',
+      resolvedBy: 'emp-lisa',
+      verifiedBy: 'emp-brit',
+    })
+    expect(closed[0].sendBacks).toHaveLength(1)
   })
 })
 

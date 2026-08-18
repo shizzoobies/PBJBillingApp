@@ -1415,25 +1415,9 @@ export async function waitingOnSendBackRequest(
   return ((await response.json()) as { checklist: Checklist }).checklist
 }
 
-/** Cancel a waiting-on blocker (the flagger, the step assignee, or an owner). */
-export async function waitingOnCancelRequest(checklistId: string, waitingOnId: string) {
-  const response = await apiFetch(
-    `/api/checklists/${encodeURIComponent(checklistId)}/waiting-ons/${encodeURIComponent(
-      waitingOnId,
-    )}/cancel`,
-    {
-      credentials: 'same-origin',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    },
-  )
-  if (!response.ok) {
-    const message = await safeErrorMessage(response)
-    throw new ApiError(response.status, message || `Failed to cancel (${response.status})`)
-  }
-  return ((await response.json()) as { checklist: Checklist }).checklist
-}
+// There is no cancel request. A saved wait is the shared record of who asked,
+// who did it and who confirmed, so nothing in the app removes one — the server
+// refuses the old `/cancel` route outright (see lib/waiting-on-state.js).
 
 /** Every pending blocker where the caller is the person being waited on. */
 export async function fetchWaitingOnMe() {

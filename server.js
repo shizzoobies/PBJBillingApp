@@ -106,6 +106,10 @@ import {
   canSendBackWaitingOn,
   canVerifyWaitingOn,
   isClientWait,
+  isSelfWait,
+  REFUSED_WAITING_ON_ACTIONS,
+  SELF_WAIT_REFUSAL,
+  waitingOnActionRefusal,
   waitingOnStage,
 } from './lib/waiting-on-state.js'
 import {
@@ -260,6 +264,19 @@ const WORKSPACE_VERSION_HEADER = 'x-workspace-version'
 // an oversized (multi-GB) body can't OOM the process. Throws past the limit;
 // the global request handler catch turns it into a 500.
 const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024 // 10 MB
+
+/**
+ * The waiting-on action route. The three stage moves are listed here; the
+ * removal words come from `REFUSED_WAITING_ON_ACTIONS`, so anything that would
+ * erase a saved wait MATCHES and is answered with the reason (409) instead of
+ * falling through to a bare 404. Built once at module load rather than per
+ * request.
+ */
+const WAITING_ON_ACTION_ROUTE = new RegExp(
+  `^/api/checklists/([^/]+)/waiting-ons/([^/]+)/(done|verify|send-back|${REFUSED_WAITING_ON_ACTIONS.join(
+    '|',
+  )})$`,
+)
 
 // True when the request declares a JSON body. Used to return a clean 415
 // instead of letting a non-JSON body blow up inside JSON.parse → generic 500.
@@ -6773,10 +6790,12 @@ const server = createServer(async (request, response) => {
     //   send-back — the requester does NOT approve: the wait returns to the
     //               blocker carrying a new note, and the rejected resolution is
     //               kept on `sendBacks[]`. Body: { note }.
-    //   cancel    — unchanged: removes the row outright.
-    const waitingOnActionMatch = normalizedPath.match(
-      /^\/api\/checklists\/([^/]+)\/waiting-ons\/([^/]+)\/(done|cancel|verify|send-back)$/,
-    )
+    //   cancel    — REFUSED (with `delete` / `remove`, its reserved synonyms).
+    //               It used to delete the row. A saved wait is a shared record
+    //               now, so the word stays in the pattern only so an old tab (or
+    //               anything hand-rolling the URL) gets the reason back instead
+    //               of a bare 404. See WAITING_ON_ACTION_ROUTE.
+    const waitingOnActionMatch = normalizedPath.match(WAITING_ON_ACTION_ROUTE)
     if (waitingOnActionMatch) {
       const session = await requireSession(request, response)
       if (!session) return
@@ -6797,6 +6816,15 @@ const server = createServer(async (request, response) => {
       const checklistId = waitingOnActionMatch[1]
       const waitingOnId = decodeURIComponent(waitingOnActionMatch[2])
       const action = waitingOnActionMatch[3]
+
+      // Nobody removes a saved wait — not the person who asked, not the person
+      // being waited on, not an owner. Answered before the record is even looked
+      // up, because the answer does not depend on the record or the caller.
+      const removalRefusal = waitingOnActionRefusal(action)
+      if (removalRefusal) {
+        sendJson(response, removalRefusal.status, { error: removalRefusal.error })
+        return
+      }
 
       const existing = await appDataStore.getWaitingOn(checklistId, waitingOnId)
       if (!existing) {
@@ -6836,17 +6864,19 @@ const server = createServer(async (request, response) => {
             error:
               waitingOnStage(entry) === 'waiting'
                 ? // You cannot confirm work the other person has not reported
-                  // finished. Cancel is still available if you want out.
-                  'Nobody has marked this done yet — cancel it instead if you no longer need it'
+                  // finished — and there is no longer a way out at this stage
+                  // either, so the answer is to wait for their Done.
+                  'Nobody has marked this done yet — it can be approved once they do'
                 : waitingOnStage(entry) === 'verified'
                   ? 'This wait is already closed out'
                   : 'You cannot confirm this waiting-on request',
           })
           return
         }
-      } else if (action === 'send-back') {
-        // Same people, same stage as verify — approving and rejecting are the
-        // two doors out of one room.
+      } else {
+        // Send back. Same people, same stage as verify — approving and
+        // rejecting are the two doors out of one room, and after the refusal
+        // above they are the only two.
         if (!canSendBackWaitingOn(permissionArgs)) {
           sendJson(response, waitingOnStage(entry) === 'resolved' ? 403 : 409, {
             error: clientWait
@@ -6867,13 +6897,6 @@ const server = createServer(async (request, response) => {
           sendJson(response, 400, { error: 'Say what still needs doing before sending it back' })
           return
         }
-      } else {
-        // Cancel: the flagger, the step assignee, or an owner.
-        const isAssignee = existing.assigneeId && existing.assigneeId === session.user.id
-        if (entry.requestedBy !== session.user.id && !isAssignee && !isOwner) {
-          sendJson(response, 403, { error: 'You cannot cancel this waiting-on request' })
-          return
-        }
       }
 
       const resolved =
@@ -6886,12 +6909,10 @@ const server = createServer(async (request, response) => {
             ? await appDataStore.markWaitingOnVerified(checklistId, waitingOnId, {
                 userId: session.user.id,
               })
-            : action === 'send-back'
-              ? await appDataStore.markWaitingOnSentBack(checklistId, waitingOnId, {
-                  userId: session.user.id,
-                  note: sendBackNote,
-                })
-              : await appDataStore.resolveWaitingOn(checklistId, waitingOnId)
+            : await appDataStore.markWaitingOnSentBack(checklistId, waitingOnId, {
+                userId: session.user.id,
+                note: sendBackNote,
+              })
       if (!resolved) {
         sendJson(response, 404, { error: 'Waiting-on request not found' })
         return
@@ -6941,7 +6962,7 @@ const server = createServer(async (request, response) => {
             'waiting_on_verified',
             `${checklistTitle}: ${resolved.label}`,
           )
-        } else if (action === 'send-back') {
+        } else {
           // It is the blocker's move again, so this is the same fact the wait
           // announced when it was first created — reusing that event keeps it
           // inside the "Waiting-on updates" notification preference rather than
@@ -6956,19 +6977,6 @@ const server = createServer(async (request, response) => {
           await appDataStore.recordActivity(
             session.user.id,
             'waiting_on_sent_back',
-            `${checklistTitle}: ${resolved.label}`,
-          )
-        } else {
-          const cancellerName = nameOf(session.user.id)
-          await notify(appDataStore, resolved.entry.blockerId, 'waiting_on_cancelled', {
-            checklistId,
-            message: `${cancellerName} no longer needs you on "${resolved.label}" in "${checklistTitle}"`,
-            link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
-            appPublicUrl: getPublicAppUrl(request),
-          })
-          await appDataStore.recordActivity(
-            session.user.id,
-            'waiting_on_cancelled',
             `${checklistTitle}: ${resolved.label}`,
           )
         }
@@ -7048,6 +7056,20 @@ const server = createServer(async (request, response) => {
         }
       } else if (!blockerId || !employees.some((e) => e.id === blockerId)) {
         sendJson(response, 400, { error: 'blockerId must be a valid employee' })
+        return
+      }
+      // Her answered clarification: a wait names another employee or the client,
+      // never yourself. Enforced here as well as in the picker, because a saved
+      // wait can no longer be removed — a self-wait would have nobody to notify,
+      // nobody to hand it back to, and no way off the step.
+      if (
+        isSelfWait({
+          blockerId: effectiveBlockerId,
+          requestedBy: session.user.id,
+          blockerType: isClientRequest ? 'client' : 'employee',
+        })
+      ) {
+        sendJson(response, 400, { error: SELF_WAIT_REFUSAL })
         return
       }
 
