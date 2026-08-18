@@ -71,9 +71,9 @@ notification / Customize-in-email).
 
 | | |
 |---|---|
-| `STRIPE_SECRET_KEY` | set, **sandbox** (`sk_test_`) |
-| `STRIPE_WEBHOOK_SECRET` | set; rolled 2026-08-09 after I leaked the old one to the transcript |
-| Stripe webhook endpoint | exists in the sandbox, enabled, `https://app.pbjsa.com/api/stripe/webhook`, exactly the three events |
+| `STRIPE_SECRET_KEY` | **LIVE** (`sk_live_`) as of 2026-08-18 — real money moves. `/health` reports `stripe: "live"` |
+| `STRIPE_WEBHOOK_SECRET` | **live endpoint's secret** as of 2026-08-18, set machine-to-machine at cutover (never in a transcript) |
+| Stripe webhook endpoint | LIVE mode: `we_1U5pHpQ0WOYRCGot7btJgn4i`, `https://app.pbjsa.com/api/stripe/webhook`, exactly the three events. Live ACH capability verified **active** via the API at cutover. The old test-mode endpoint still exists (harmless; sandbox events now 400 against the live secret, correctly) |
 | ACH + Financial Connections | Alex confirmed the account is live and set up for payments |
 | `RESEND_API_KEY` | set — **replaced 2026-08-09**; the previous key was domain-scoped and 403'd with a misleading "domain is not verified" |
 | `pbjsa.com` in Resend | verified. DKIM at the root, envelope SPF on `send.pbjsa.com`, root SPF untouched |
