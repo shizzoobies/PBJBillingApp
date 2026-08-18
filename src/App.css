@@ -9410,12 +9410,32 @@ button.repeating-task-toggle-pill {
   color: var(--red);
 }
 
-/* Chip sits directly above its card in the expanded client row. */
+/* A teammate's checklist, folded in by an accountant's "Show my bookkeepers'"
+   toggle. Muted + dashed (the same idiom the "Upcoming" ghosts use) so a
+   revealed card never reads as your own work. */
+.board-chip-team {
+  background: rgba(66, 84, 102, 0.1);
+  border: 1px dashed rgba(66, 84, 102, 0.5);
+  color: var(--bluegray);
+}
+
+/* Chips sit directly above their card in the expanded client row. */
 .board-card-with-status {
   display: flex;
   flex-direction: column;
   gap: 4px;
   align-items: flex-start;
+}
+
+.board-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.board-card-with-status[data-team='true'] .checklist-card {
+  opacity: 0.85;
 }
 
 /* Owner-only column manager. */

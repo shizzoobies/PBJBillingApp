@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { checklistsVisibleTo } from '../lib/checklistVisibility'
+import {
+  boardChecklistsFor,
+  boardTeamMemberIds,
+  checklistsVisibleTo,
+} from '../lib/checklistVisibility'
 import { openTaskAssigneeScope, scopeChecklistsToOpenTaskOwners } from '../lib/openTaskScope'
 import type { Checklist, Client } from '../lib/types'
 
@@ -101,6 +105,131 @@ describe('openTaskAssigneeScope', () => {
     expect(scope?.has(LISA)).toBe(true)
     // Nobody from a client they are not on.
     expect(scope?.has('emp-dana')).toBe(false)
+  })
+})
+
+/**
+ * The Board, reworked after the owner reviewed it signed in as Lisa:
+ *
+ * "The standard view should be checklist they are active on only — a bookkeeper
+ * should only see hers and an accountant should see hers, and could we add a
+ * button like show upcoming that she could see those 'under' her aka the
+ * bookkeepers?"   — featreq-9b47ab5b, reopened
+ */
+describe('the Board — whose work it shows', () => {
+  const clients = [
+    client('client-shared', [BRITTANY, LISA]),
+    client('client-elsewhere', ['emp-dana']),
+  ]
+  const danas = checklist({ id: 'cl-dana', clientId: 'client-elsewhere', assigneeId: 'emp-dana' })
+  const feed = [lisas, britts, danas]
+
+  it('shows a bookkeeper only the checklists she is active on', () => {
+    const board = boardChecklistsFor(feed, {
+      viewerId: LISA,
+      isOwner: false,
+      staffRole: 'Bookkeeper',
+      clients,
+    })
+    expect(board.map((entry) => entry.id)).toEqual(['cl-lisa'])
+  })
+
+  it('shows an accountant only her own by default', () => {
+    const board = boardChecklistsFor(feed, {
+      viewerId: BRITTANY,
+      isOwner: false,
+      staffRole: 'Accountant',
+      clients,
+    })
+    expect(board.map((entry) => entry.id)).toEqual(['cl-brit'])
+  })
+
+  it('folds in her bookkeepers’ work when the toggle is on — and nobody else’s', () => {
+    const board = boardChecklistsFor(feed, {
+      viewerId: BRITTANY,
+      isOwner: false,
+      staffRole: 'Accountant',
+      clients,
+      includeTeam: true,
+    })
+    expect(board.map((entry) => entry.id).sort()).toEqual(['cl-brit', 'cl-lisa'])
+    // Dana is on a client this accountant is not staffed on.
+    expect(board.some((entry) => entry.id === 'cl-dana')).toBe(false)
+  })
+
+  it('leaves a bookkeeper’s board alone even if the toggle is somehow on', () => {
+    const board = boardChecklistsFor(feed, {
+      viewerId: LISA,
+      isOwner: false,
+      staffRole: 'Bookkeeper',
+      clients,
+      includeTeam: true,
+    })
+    expect(board.map((entry) => entry.id)).toEqual(['cl-lisa'])
+  })
+
+  it('leaves the owner’s board untouched — Brittany reviews everyone', () => {
+    const board = boardChecklistsFor(feed, {
+      viewerId: OWNER,
+      isOwner: true,
+      staffRole: 'Owner',
+      clients,
+      includeTeam: false,
+    })
+    expect(board).toEqual(feed)
+  })
+
+  it('never duplicates a task the accountant is already active on', () => {
+    const shared = checklist({ id: 'cl-shared', assigneeId: LISA, viewerIds: [BRITTANY] })
+    const board = boardChecklistsFor([shared], {
+      viewerId: BRITTANY,
+      isOwner: false,
+      staffRole: 'Accountant',
+      clients,
+      includeTeam: true,
+    })
+    expect(board.map((entry) => entry.id)).toEqual(['cl-shared'])
+  })
+
+  describe('boardTeamMemberIds — who the toggle is offered for', () => {
+    it('gives an accountant the people staffed alongside her, minus herself', () => {
+      expect(
+        boardTeamMemberIds({
+          viewerId: BRITTANY,
+          isOwner: false,
+          staffRole: 'Accountant',
+          clients,
+        }),
+      ).toEqual([LISA])
+    })
+
+    it('gives a bookkeeper nobody, so the toggle never renders for her', () => {
+      expect(
+        boardTeamMemberIds({
+          viewerId: LISA,
+          isOwner: false,
+          staffRole: 'Bookkeeper',
+          clients,
+        }),
+      ).toEqual([])
+    })
+
+    it('gives an owner nobody — her board is already everyone’s', () => {
+      expect(
+        boardTeamMemberIds({ viewerId: OWNER, isOwner: true, staffRole: 'Owner', clients }),
+      ).toEqual([])
+    })
+
+    it('gives an accountant alone on all her clients nobody', () => {
+      expect(
+        boardTeamMemberIds({
+          viewerId: BRITTANY,
+          isOwner: false,
+          staffRole: 'Accountant',
+          clients: [client('client-solo', [BRITTANY])],
+        }),
+      ).toEqual([])
+    })
   })
 })
 

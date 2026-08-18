@@ -8,6 +8,8 @@ import {
   type BoardColumn,
 } from '../lib/activeBoard'
 import { useAppContext } from '../AppContext'
+import { boardChecklistsFor, boardTeamMemberIds } from '../lib/checklistVisibility'
+import { isChecklistSkipped } from '../../lib/checklist-skip.js'
 import { ListSearch } from '../components/ListSearch'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
 import { reportPeriodLabel } from '../lib/reportPeriod'
@@ -23,19 +25,27 @@ import type { Checklist, ServiceCategory } from '../lib/types'
  * Completing a client's checklist drops it off automatically. The shared Report
  * period scopes the horizon: a client shows while it has open work whose
  * effective due date is on or before the period's end (overdue work stays
- * visible — the board is a horizon view, not a strict window). Staff see only
- * their assigned clients (visibleChecklists is already scoped server-side).
+ * visible — the board is a horizon view, not a strict window).
+ *
+ * WHOSE WORK IT SHOWS: only what the viewer is ACTIVE on — the same "mine"
+ * predicate the Checklists tab uses. A bookkeeper sees hers; an accountant sees
+ * hers, plus her bookkeepers' when she ticks "Show my bookkeepers'"; an owner
+ * still sees the whole board. The narrowing is re-derived here from the
+ * session's own feed rather than read off `visibleChecklists`, because that memo
+ * keys off the SESSION role — while an owner previews a bookkeeper it stays
+ * owner-wide, which is exactly how the leak was spotted. This only ever narrows
+ * the feed the session already holds; it can't widen anything.
  */
 export function ActiveChecklistsBoardPage() {
   const ctx = useAppContext()
   const {
-    visibleChecklists,
     visibleClientIds,
     data,
     serviceCategories,
     ownerMode,
     role,
     activeEmployeeId,
+    effectiveUser,
     reportPeriod,
     setReportPeriod,
   } = ctx
@@ -45,6 +55,10 @@ export function ActiveChecklistsBoardPage() {
   // Upcoming (projected) items default OFF — owner preference: the board opens
   // showing only real, materialized work; the toggle brings ghosts back.
   const [showUpcoming, setShowUpcoming] = useState(false)
+  // Accountants only, and OFF by default: the standard board is her own work.
+  // Ticking it folds in the bookkeepers under her (see `boardTeamMemberIds` for
+  // how "under her" is derived — there is no supervisor field in the data).
+  const [showTeam, setShowTeam] = useState(false)
   // Client filter: empty = all clients; otherwise the board shows only items for
   // the selected clients (single or multiple).
   const [clientFilter, setClientFilter] = useState<string[]>([])
@@ -81,16 +95,61 @@ export function ActiveChecklistsBoardPage() {
     }).filter((ghost) => visibleClientIds.has(ghost.clientId))
   }, [showUpcoming, data, today, reportPeriod.to, visibleClientIds])
 
+  // The bookkeepers under this viewer, if any — empty for a bookkeeper and for
+  // an owner, so the toggle only appears where it means something.
+  const teamMemberIds = useMemo(
+    () =>
+      boardTeamMemberIds({
+        viewerId: activeEmployeeId,
+        isOwner: ownerMode,
+        staffRole: effectiveUser?.staffRole,
+        clients: data.clients,
+      }),
+    [activeEmployeeId, ownerMode, effectiveUser?.staffRole, data.clients],
+  )
+
+  // Whose card is this, when it isn't yours? Names the teammate on cards the
+  // "Show my bookkeepers'" toggle folded in, so a revealed card never reads as
+  // your own work. Null for your own tasks and for owners (whose board is
+  // everyone's by definition — the team filter already answers "whose").
+  const teamTagFor = (checklist: Checklist): string | null => {
+    const assigneeId = checklist.assigneeId ?? ''
+    if (!assigneeId || !teamMemberIds.includes(assigneeId)) return null
+    return employeeNameById[assigneeId] ?? 'A teammate'
+  }
+
+  // Everything the board may render, scoped to whom it belongs to. Built from
+  // the session's own feed (minus quietly-skipped occurrences, the same
+  // narrowing App.tsx applies) so previewing a staff member shows their board,
+  // not the owner's. Projected ghosts ride along and get scoped identically.
+  const boardChecklists = useMemo(() => {
+    const feed = data.checklists.filter((checklist) => !isChecklistSkipped(checklist))
+    return boardChecklistsFor([...feed, ...projectedGhosts], {
+      viewerId: activeEmployeeId,
+      isOwner: ownerMode,
+      staffRole: effectiveUser?.staffRole,
+      clients: data.clients,
+      includeTeam: showTeam,
+    })
+  }, [
+    data.checklists,
+    data.clients,
+    projectedGhosts,
+    activeEmployeeId,
+    ownerMode,
+    effectiveUser?.staffRole,
+    showTeam,
+  ])
+
   // The clients that actually have work on the board right now — the filter only
   // offers clients you could meaningfully pick (and it hides itself for ≤1).
   const clientFilterOptions = useMemo(() => {
     const ids = new Set<string>()
-    for (const checklist of visibleChecklists) ids.add(checklist.clientId)
-    for (const ghost of projectedGhosts) ids.add(ghost.clientId)
+    for (const checklist of boardChecklists) ids.add(checklist.clientId)
     return [...ids]
       .map((id) => ({ id, label: clientNameById[id] ?? id }))
       .sort((a, b) => a.label.localeCompare(b.label))
-  }, [visibleChecklists, projectedGhosts, clientNameById])
+  }, [boardChecklists, clientNameById])
 
   const clientFilterSet = useMemo(() => new Set(clientFilter), [clientFilter])
   const assigneeFilterSet = useMemo(() => new Set(assigneeFilter), [assigneeFilter])
@@ -98,21 +157,17 @@ export function ActiveChecklistsBoardPage() {
   // Members offered by the team filter: only those with work on the board now.
   const assigneeFilterOptions = useMemo(() => {
     const ids = new Set<string>()
-    for (const checklist of visibleChecklists) {
+    for (const checklist of boardChecklists) {
       if (checklist.assigneeId) ids.add(checklist.assigneeId)
-    }
-    for (const ghost of projectedGhosts) {
-      if (ghost.assigneeId) ids.add(ghost.assigneeId)
     }
     const nameById = new Map(data.employees.map((employee) => [employee.id, employee.name]))
     return [...ids]
       .map((id) => ({ id, label: nameById.get(id) ?? id }))
       .sort((a, b) => a.label.localeCompare(b.label))
-  }, [visibleChecklists, projectedGhosts, data.employees])
+  }, [boardChecklists, data.employees])
 
   const board = useMemo(() => {
-    const all = [...visibleChecklists, ...projectedGhosts]
-    const scoped = all.filter(
+    const scoped = boardChecklists.filter(
       (checklist) =>
         (clientFilterSet.size === 0 || clientFilterSet.has(checklist.clientId)) &&
         (assigneeFilterSet.size === 0 ||
@@ -129,8 +184,7 @@ export function ActiveChecklistsBoardPage() {
       clientNameById,
     })
   }, [
-    visibleChecklists,
-    projectedGhosts,
+    boardChecklists,
     clientFilterSet,
     assigneeFilterSet,
     serviceCategories,
@@ -255,6 +309,19 @@ export function ActiveChecklistsBoardPage() {
               />
               Show upcoming
             </label>
+            {teamMemberIds.length > 0 ? (
+              <label
+                className="upcoming-toggle"
+                title="The people staffed alongside you on your clients."
+              >
+                <input
+                  type="checkbox"
+                  checked={showTeam}
+                  onChange={(event) => setShowTeam(event.target.checked)}
+                />
+                Show my bookkeepers’
+              </label>
+            ) : null}
             {ownerMode ? (
               <button
                 type="button"
@@ -288,6 +355,7 @@ export function ActiveChecklistsBoardPage() {
                 column={column}
                 renderCard={renderCard}
                 statusFor={statusFor}
+                teamTagFor={teamTagFor}
               />
             ))}
           </div>
@@ -450,10 +518,13 @@ function BoardColumnView({
   column,
   renderCard,
   statusFor,
+  teamTagFor,
 }: {
   column: BoardColumn
   renderCard: (checklist: Checklist) => ReactNode
   statusFor: (checklist: Checklist) => BoardChecklistStatus
+  /** Teammate's name when this card belongs to someone under the viewer. */
+  teamTagFor: (checklist: Checklist) => string | null
 }) {
   return (
     <div className="board-column" data-uncategorized={column.id === UNCATEGORIZED_ID}>
@@ -472,6 +543,7 @@ function BoardColumnView({
               checklists={clientRow.checklists}
               renderCard={renderCard}
               statusFor={statusFor}
+              teamTagFor={teamTagFor}
             />
           ))
         )}
@@ -485,11 +557,13 @@ function BoardClientRow({
   checklists,
   renderCard,
   statusFor,
+  teamTagFor,
 }: {
   name: string
   checklists: Checklist[]
   renderCard: (checklist: Checklist) => ReactNode
   statusFor: (checklist: Checklist) => BoardChecklistStatus
+  teamTagFor: (checklist: Checklist) => string | null
 }) {
   const [open, setOpen] = useState(false)
   // Collapsed roll-up: how many of this client's checklists are blocked vs
@@ -517,12 +591,24 @@ function BoardClientRow({
       </button>
       {open ? (
         <div className="board-client-cards">
-          {checklists.map((checklist, index) => (
-            <div className="board-card-with-status" key={checklist.id}>
-              <StatusChip status={statuses[index]} />
-              {renderCard(checklist)}
-            </div>
-          ))}
+          {checklists.map((checklist, index) => {
+            const teamTag = teamTagFor(checklist)
+            return (
+              <div
+                className="board-card-with-status"
+                data-team={teamTag ? 'true' : undefined}
+                key={checklist.id}
+              >
+                <div className="board-card-chips">
+                  <StatusChip status={statuses[index]} />
+                  {teamTag ? (
+                    <span className="board-chip board-chip-team">{teamTag}’s</span>
+                  ) : null}
+                </div>
+                {renderCard(checklist)}
+              </div>
+            )
+          })}
         </div>
       ) : null}
     </div>

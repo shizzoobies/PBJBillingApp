@@ -752,7 +752,12 @@ Clients page meanwhile. Owner-only.
     ACCOUNTANT also sees those of the people staffed alongside them on their
     clients. (There is no supervisor field in the data — "the bookkeepers you
     oversee" is read as shared client assignment.)
-  - The **Board** tab is unchanged: it stays the whole shared board.
+  - **Board** — your own active checklists, same as the Checklists tab. An
+    ACCOUNTANT can tick "Show my bookkeepers'" to fold in the work of the people
+    staffed alongside her on her clients; their cards are tagged with whose they
+    are and stay read-only. (It used to be the whole shared board — every
+    colleague's task on every client you share. That's what the owner spotted
+    reviewing as a bookkeeper.)
 - Recurring checklists (the repeating "recipes") — team members can VIEW the
   recurring checklists for the clients they're assigned to in TWO places:
   (1) the main Checklists page has a read-only "Recurring checklists" section
@@ -827,8 +832,19 @@ Clients page meanwhile. Owner-only.
   multi-select and compose with search and the Report period). **"Show
   upcoming" now defaults OFF** — the board opens with real, materialized work
   only; tick the toggle to overlay the faded upcoming (projected) items.
-- **Scoping:** staff see only the clients they're assigned to (same as the rest
-  of the app). The board is available to everyone, not owner-only.
+- **Scoping — whose work you see:** the standard board is **only the checklists
+  you're active on** (the task's assignee, or someone the owner named a viewer
+  on it) — a bookkeeper sees hers, an accountant sees hers. The OWNER still sees
+  the whole board. Staff also only ever see clients they're assigned to, same as
+  the rest of the app. The board is available to everyone, not owner-only.
+- **"Show my bookkeepers'" (accountants):** a toggle beside "Show upcoming",
+  offered only to an accountant who actually has people under her. Ticking it
+  folds their checklists onto the board, each tagged with whose it is and faded
+  so it never reads as your own; untick to go back to just yours. Their cards
+  are read-only — seeing is not editing, and the server enforces that anyway.
+  There is no supervisor field in the data, so "the bookkeepers under her" is
+  read as **the people staffed alongside her on her clients** — the same
+  substitution the open/late task counts on the Clients list make.
 - **Filter by client:** a "Filter by client" dropdown in the board toolbar
   narrows the board to one or more selected clients (multi-select checkboxes);
   "Clear" (or no selection) shows all clients again. It only lists clients that
