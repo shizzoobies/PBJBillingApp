@@ -672,6 +672,9 @@ export function TimeCapture({
   const [taskId, setTaskId] = useState<string>('')
   const [taskLabel, setTaskLabel] = useState('')
   const [isAdministrative, setIsAdministrative] = useState(false)
+  // Out-of-scope one-off work. Only the compose-state copy; while a timer runs
+  // the answer lives on the timer itself — see `shownAdhoc`.
+  const [isAdhoc, setIsAdhoc] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopError, setStopError] = useState('')
   // A Stop & log has been attempted and blocked — see `fieldPrompt`. Prompts
@@ -750,6 +753,10 @@ export function TimeCapture({
   const runningAdmin = Boolean(timer?.isAdministrative)
   const shownBillTo = isRunning ? (runningGroup ? 'group' : 'single') : billTo
   const shownAdmin = isRunning ? runningAdmin : isAdministrative
+  // Ad hoc follows the same read-through-the-timer rule as everything else:
+  // ticked mid-run it patches the running timer, so it survives a refresh and
+  // is still true at Stop. Administrative time can never be ad hoc.
+  const shownAdhoc = !shownAdmin && (isRunning ? Boolean(timer?.isAdhoc) : isAdhoc)
   const shownGroupMode = isRunning ? runningGroup : groupMode
   const shownClientId = isRunning ? timer?.clientId ?? '' : effectiveClientId
   const shownTaskId = isRunning ? timer?.taskId ?? '' : effectiveTaskId
@@ -811,6 +818,9 @@ export function TimeCapture({
         startedAt: Date.now(),
         taskId: null,
         isAdministrative: false,
+        // The whole block is out-of-scope work, so every slice the split
+        // produces is too — the store carries the flag onto them.
+        isAdhoc,
         groupClientIds,
       })
       return
@@ -831,6 +841,7 @@ export function TimeCapture({
       taskLabel:
         !isAdministrative && !effectiveTaskId && taskLabel.trim() ? taskLabel.trim() : undefined,
       isAdministrative,
+      isAdhoc: !isAdministrative && isAdhoc,
     })
   }
 
@@ -880,6 +891,7 @@ export function TimeCapture({
     setTaskId('')
     setTaskLabel('')
     setIsAdministrative(false)
+    setIsAdhoc(false)
     setBillTo('single')
     setGroupClientIds([])
     setStopAttempted(false)
@@ -999,6 +1011,24 @@ export function TimeCapture({
               disabled={inputsDisabled || isRunning}
             />
             <span>Administrative work (company meeting, internal — no client or task)</span>
+          </label>
+        ) : null}
+        {/* One-off work the client's arrangement does not cover. It bills on its
+            own line at your rate instead of disappearing into the month's
+            hours, and the owner decides per line what to do with it. Can be
+            ticked mid-run — the answer rides on the timer to the stop. */}
+        {!shownAdmin ? (
+          <label className="check-row full-span">
+            <input
+              checked={shownAdhoc}
+              onChange={(event) => {
+                if (isRunning) onUpdateTimer({ isAdhoc: event.target.checked })
+                else setIsAdhoc(event.target.checked)
+              }}
+              type="checkbox"
+              disabled={inputsDisabled}
+            />
+            <span>Ad hoc (outside scoped work)</span>
           </label>
         ) : null}
         {shownGroupMode ? (
@@ -1207,6 +1237,7 @@ export function ManualEntryModal({
   const [taskId, setTaskId] = useState<string>('')
   const [taskLabel, setTaskLabel] = useState('')
   const [isAdministrative, setIsAdministrative] = useState(false)
+  const [isAdhoc, setIsAdhoc] = useState(false)
   const [reason, setReason] = useState('')
   const [submitError, setSubmitError] = useState('')
   const [submitPending, setSubmitPending] = useState(false)
@@ -1387,6 +1418,8 @@ export function ManualEntryModal({
             minutes: row.minutes,
             description: description.trim(),
             billable: true,
+            // Every slice of one out-of-scope block is out-of-scope work.
+            isAdhoc,
             taskId: null,
             entryMethod: 'manual',
             manualReason: reason.trim(),
@@ -1417,6 +1450,7 @@ export function ManualEntryModal({
         minutes: totalMinutes,
         description: description.trim(),
         billable: isAdministrative ? false : billable,
+        isAdhoc: isAdministrative ? false : isAdhoc,
         taskId: isAdministrative ? null : effectiveTaskId || null,
         // Sent whenever no real task is attached (see the timer form) — the old
         // zero-tasks gate silently dropped every custom name.
@@ -1552,6 +1586,19 @@ export function ManualEntryModal({
                     type="checkbox"
                   />
                   <span>Administrative work (company meeting, internal — no client or task)</span>
+                </label>
+              ) : null}
+              {/* Same position and rule as the timer panel: offered on any
+                  client time, including a group block (every slice inherits
+                  it), and never on administrative time. */}
+              {!isAdministrative ? (
+                <label className="check-row full-span">
+                  <input
+                    checked={isAdhoc}
+                    onChange={(event) => setIsAdhoc(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Ad hoc (outside scoped work)</span>
                 </label>
               ) : null}
               {groupMode ? (
@@ -2555,6 +2602,7 @@ function TimeEntryRow({
       billable?: boolean
       clientId?: string
       isAdministrative?: boolean
+      isAdhoc?: boolean
       taskId?: string | null
       date?: string
       startAt?: string
@@ -2586,6 +2634,7 @@ function TimeEntryRow({
   const [spansTouched, setSpansTouched] = useState(false)
   const [description, setDescription] = useState(entry.description)
   const [billable, setBillable] = useState(entry.billable)
+  const [isAdhoc, setIsAdhoc] = useState(Boolean(entry.isAdhoc))
   const [reassignTo, setReassignTo] = useState(entry.employeeId)
   // Every other field is editable too — the client it's billed to, the task,
   // whether it's administrative, and the date it lands on.
@@ -2636,6 +2685,7 @@ function TimeEntryRow({
     setSpansTouched(withExtraSession)
     setDescription(entry.description)
     setBillable(entry.billable)
+    setIsAdhoc(Boolean(entry.isAdhoc))
     setReassignTo(entry.employeeId)
     setEditClientId(entry.clientId ?? '')
     setEditIsAdmin(Boolean(entry.isAdministrative))
@@ -2665,17 +2715,22 @@ function TimeEntryRow({
     const patch: {
       clientId?: string
       isAdministrative?: boolean
+      isAdhoc?: boolean
       taskId?: string | null
       date?: string
     } = {}
     if (editIsAdmin !== Boolean(entry.isAdministrative)) patch.isAdministrative = editIsAdmin
     if (editIsAdmin) {
-      // Admin time carries no client or task; the server enforces this too.
+      // Admin time carries no client or task; the server enforces this too. It
+      // also has no client to be outside the scope of, so the ad hoc flag goes
+      // with it rather than lingering on a re-filed entry.
       if (entry.clientId) patch.clientId = ''
       if (entry.taskId) patch.taskId = null
+      if (entry.isAdhoc) patch.isAdhoc = false
     } else {
       if (editClientId !== (entry.clientId ?? '')) patch.clientId = editClientId
       if ((editTaskId || null) !== (entry.taskId ?? null)) patch.taskId = editTaskId || null
+      if (isAdhoc !== Boolean(entry.isAdhoc)) patch.isAdhoc = isAdhoc
     }
     if (editDate && editDate !== entry.date) patch.date = editDate
     return patch
@@ -3072,6 +3127,18 @@ function TimeEntryRow({
             />
             <span>Billable</span>
           </label>
+          {/* Hidden on administrative time, which has no client to be outside
+              the scope of — the same rule the create path and server apply. */}
+          {!editIsAdmin ? (
+            <label className="check-row">
+              <input
+                checked={isAdhoc}
+                type="checkbox"
+                onChange={(event) => setIsAdhoc(event.target.checked)}
+              />
+              <span>Ad hoc (outside scoped work)</span>
+            </label>
+          ) : null}
           {error ? <p className="auth-error">{error}</p> : null}
           <div className="button-row">
             <button
@@ -3217,6 +3284,9 @@ function TimeEntryRow({
         <div className="entry-tags">
           <StatusPill status={entry.approvalStatus} />
           {entry.entryMethod === 'manual' ? <ManualBadge /> : null}
+          {/* Visible without opening the editor: this is the flag that decides
+              how the time is billed, so it should not take a click to see. */}
+          {entry.isAdhoc ? <span className="adhoc-chip">Ad hoc</span> : null}
           {taskTitle ? <span className="task-chip">Task: {taskTitle}</span> : null}
         </div>
         {entry.entryMethod === 'manual' && entry.manualReason ? (

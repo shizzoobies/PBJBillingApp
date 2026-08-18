@@ -90,6 +90,7 @@ export type AppContextValue = {
       billable?: boolean
       clientId?: string
       isAdministrative?: boolean
+      isAdhoc?: boolean
       taskId?: string | null
       date?: string
       startAt?: string

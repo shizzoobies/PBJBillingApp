@@ -144,6 +144,22 @@ Clients page meanwhile. Owner-only.
   - Editing an entry can't blank a detail that was filled in. Older entries
     saved before this rule (blank description) still load and stay fully
     editable — their minutes, client and date can be fixed as before.
+- **AD HOC TIME — one-off work outside what the client is scoped for.** Tick
+  **"Ad hoc (outside scoped work)"** and the time is billed on its own invoice
+  line at that person's rate, instead of disappearing into the month's hours.
+  - Anyone who logs time can set it, on all three surfaces: the live timer
+    (tickable while it runs — the answer rides on the timer to the stop and
+    survives a refresh), "Log time manually", and the edit form on a saved
+    entry. Flagged entries show an "Ad hoc" chip in Recent time.
+  - Administrative time never offers it — there's no client for it to be
+    outside the scope of. Marking an entry administrative clears the flag.
+  - Splitting flagged time across clients carries the flag onto every slice,
+    and so does adjusting a split: dividing out-of-scope work doesn't make it
+    scoped.
+  - **The owner has the final say at review** — see Time Approvals — and
+    decides per line what to do with it on the invoice. See Invoices.
+  - Internal (non-billable) ad hoc time still doesn't bill, same as any other
+    internal time. Ad hoc is about WHICH line billable time lands on.
 - The TASK box on the Time page — in the live timer AND in "Log time manually" —
   is pick-or-type, not a fixed dropdown. One box that suggests:
   - that client's open tasks (picking one attaches the time to the real
@@ -373,6 +389,18 @@ Clients page meanwhile. Owner-only.
   allocations created by splitting a group time block, and any entry that gets
   EDITED afterwards (editing an approved entry re-queues it as pending — a
   changed client/time/date never keeps its old sign-off silently).
+- **AD HOC — the owner's backstop.** Every entry in the approval queue carries
+  an **"Ad hoc (outside scoped work)"** tick. Employees set it when they log the
+  time; review is where a missed one gets added or a wrong one taken off. It
+  saves the moment it's ticked (no need to also approve the entry), because it
+  decides how the time bills and the invoice run reads it straight off the
+  entry. **Only owners can change it on somebody else's time** — enforced on the
+  server, not just hidden in the page. Administrative entries have no tick.
+  **An owner ticking it does NOT un-approve an already-approved entry** — the
+  flag doesn't change the record of the work, only how it bills, and the person
+  ticking it is the approver. (Every other edit still re-queues, and so does
+  this one if a bookkeeper changes it on their own approved time, or if an owner
+  changes anything else alongside it.)
 - Weekly submissions: staff submit a week; approving seals every pending
   entry in it. Rejecting unlocks the week so the bookkeeper can edit and
   resubmit.
@@ -1014,6 +1042,12 @@ Clients page meanwhile. Owner-only.
   staff, vs. the prior period); Tasks & workflow (due / completed / overdue this
   period); Billing (revenue for the period, rate/plan, reimbursements); and
   Profitability (realized rate = fee ÷ hours, and margin).
+- **Ad hoc work counts toward the period's revenue at its default value** —
+  what invoicing it would charge. The recap is computed from the time itself,
+  not from a particular draft invoice, so it can't see a "show detail only" or
+  "leave off" you set on one month's invoice (the same way it has never seen a
+  line you hand-edited). It answers "what is this client's work worth", not
+  "what was billed".
 - **Labor cost counts team members who have a pay rate on file; owner time
   carries no hourly cost.** The recap used to withhold margin entirely — showing
   "—" — whenever anyone who logged time had no cost rate. Because the owner
@@ -1270,6 +1304,44 @@ Clients page meanwhile. Owner-only.
 > Reviewed can go
 > **Back to draft**. **Void** keeps the invoice on the record, struck through,
 > and frees that client to be generated again.
+>
+> **AD HOC WORK IS SHOWN SEPARATELY, AND YOU DECIDE WHAT TO DO WITH EACH
+> PIECE.** Time flagged "Ad hoc" on the Time page (one-off work outside what the
+> client is scoped for — see Time tracking) does not disappear into "Billable
+> hours — <name>". It gets its own block on the draft, headed **"Ad hoc —
+> outside scope"**, with one line per piece of work: `Adhoc — <what was done>`,
+> and underneath it the day, who did it, and the hours at their rate. Each line
+> carries a dropdown with three answers:
+>
+> - **Invoice it** (the default) — an ordinary charge at that person's rate. You
+>   can overtype the amount like any other line.
+> - **Show detail only ($0.00)** — the line still appears on the client's
+>   invoice, at no charge, so they can see the work was done and not billed. No
+>   reason or explanation is asked for.
+> - **Leave off the invoice** — the client never sees it. The line stays on your
+>   draft at $0.00 so you can put it back; changing your mind restores the
+>   amount it was holding.
+>
+> On the two you're not charging, the row reads $0.00 (which is what the client
+> will see) with **"would be $X"** beside the dropdown, so you can see what
+> you're giving away without switching back to look.
+>
+> The choice flows through everything: the month total above, the printed
+> invoice, the PDF and the emailed invoice all agree, because they are all
+> reading the same lines. Courtesy lines print at $0.00; omitted lines are not
+> printed at all (and are left out of the QBO export — a courtesy line is
+> exported, since it IS on their invoice).
+>
+> **A piece of time is billed exactly once.** An ad hoc entry is either an ad hoc
+> line or part of the ordinary hours — never both — so flagging time can add a
+> charge or move one, but it can never double it.
+>
+> Ad hoc applies to **hourly clients** from June 2026 onward. Flat-fee
+> (subscription / annual) clients are unaffected for now: their billable hours
+> are already covered by the fee, so flagged time there is recorded but not
+> charged. Regenerating a month rebuilds the ad hoc lines from current data like
+> everything else — which means it also discards the choices you made on them,
+> the same as any other edit.
 >
 > **Download for QBO** exports the month as a line-level CSV for QuickBooks'
 > invoice import. Voided invoices are left out. ⚠️ The `Item` column is a

@@ -27,7 +27,18 @@ import {
   updateInvoiceRequest,
 } from '../lib/api'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
-import type { Client, Contact, PersistedInvoice, PersistedInvoiceLine } from '../lib/types'
+import {
+  adhocLineForMode,
+  normalizeAdhocMode,
+  renderedInvoiceLines,
+} from '../../lib/invoice-lines.js'
+import type {
+  AdhocMode,
+  Client,
+  Contact,
+  PersistedInvoice,
+  PersistedInvoiceLine,
+} from '../lib/types'
 import {
   INVOICE_STATUS_LABELS,
   currency,
@@ -109,6 +120,17 @@ const RUN_TABS: ReadonlyArray<{ id: RunTabId; label: string; empty: string }> = 
   { id: 'sent', label: 'Sent', empty: 'Nothing has gone out for this month yet.' },
   { id: 'paid', label: 'Paid', empty: 'Nothing paid for this month yet.' },
   { id: 'voided', label: 'Voided', empty: 'Nothing voided this month.' },
+]
+
+/**
+ * What the owner can decide about one piece of ad hoc work, in the order the
+ * decision usually goes: bill it, show it for nothing, or leave it off.
+ * Wording is the client's-eye view, because that is what she is choosing.
+ */
+const ADHOC_CHOICES: ReadonlyArray<{ value: AdhocMode; label: string }> = [
+  { value: 'billed', label: 'Invoice it' },
+  { value: 'courtesy', label: 'Show detail only ($0.00)' },
+  { value: 'omitted', label: 'Leave off the invoice' },
 ]
 
 /** The current month as YYYY-MM, in local time. */
@@ -701,7 +723,11 @@ function InvoiceRow({
             <span className="invoice-run-number">{invoice.number ?? '—'}</span>
           </span>
           <span className="invoice-run-meta">
-            {invoice.lineItems.length} line{invoice.lineItems.length === 1 ? '' : 's'} ·{' '}
+            {/* What the client will SEE — an ad hoc line she left off is on the
+                draft but not on their invoice, and counting it here would make
+                the row promise a line that never prints. */}
+            {renderedInvoiceLines(invoice.lineItems).length} line
+            {renderedInvoiceLines(invoice.lineItems).length === 1 ? '' : 's'} ·{' '}
             {formatDue(invoice.dueDate)}
             {adjustment
               ? ` · carries ${currency.format(adjustment.amount)} from last month`
@@ -760,6 +786,98 @@ function InvoiceRow({
         />
       ) : null}
     </li>
+  )
+}
+
+/**
+ * One editable line. Shared by the scoped block and the ad hoc block so the two
+ * cannot drift into different-looking rows; the only difference is the ad hoc
+ * one carries the three-way decision beneath its description.
+ */
+function InvoiceLineRow({
+  line,
+  index,
+  onChange,
+  onRemove,
+  onModeChange,
+}: {
+  line: PersistedInvoiceLine
+  /** Position in the SAVED array — every edit addresses a line by this. */
+  index: number
+  onChange: (index: number, patch: Partial<PersistedInvoiceLine>) => void
+  onRemove: (index: number) => void
+  /** Passed for ad hoc lines only; its absence is what makes a row scoped. */
+  onModeChange?: (index: number, mode: AdhocMode) => void
+}) {
+  const mode = normalizeAdhocMode(line.adhocMode)
+  return (
+    <tr>
+      <td>
+        <input
+          className="input"
+          value={line.label}
+          aria-label="Line description"
+          onChange={(event) => onChange(index, { label: event.target.value })}
+        />
+        <input
+          className="input invoice-run-detail"
+          value={line.detail}
+          aria-label="Line detail"
+          placeholder="Detail (optional)"
+          onChange={(event) => onChange(index, { detail: event.target.value })}
+        />
+        {onModeChange ? (
+          <div className="invoice-run-adhoc-choice">
+            <label>
+              <span className="visually-hidden">What to do with this ad hoc work</span>
+              <select
+                className="compact-input"
+                value={mode}
+                onChange={(event) => onModeChange(index, event.target.value as AdhocMode)}
+              >
+                {ADHOC_CHOICES.map((choice) => (
+                  <option key={choice.value} value={choice.value}>
+                    {choice.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {/* What she is giving away. The amount box reads $0.00 for both
+                non-billed choices, so without this the only way to see the
+                figure would be to switch back and look. */}
+            {mode !== 'billed' ? (
+              <span className="invoice-run-adhoc-reserve">
+                would be {currency.format(Number(line.adhocAmount) || 0)}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </td>
+      <td className="invoice-run-amount-cell">
+        {/* A line that is not being charged has no amount to type: it reads
+            $0.00, which is what the client's invoice will say. What it WOULD
+            have charged is shown beside the choice above. */}
+        <input
+          className="input"
+          type="number"
+          step="0.01"
+          value={line.amount}
+          aria-label="Amount"
+          readOnly={Boolean(onModeChange) && mode !== 'billed'}
+          onChange={(event) => onChange(index, { amount: Number(event.target.value) })}
+        />
+      </td>
+      <td>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label={`Remove ${line.label || 'line'}`}
+          onClick={() => onRemove(index)}
+        >
+          <Trash2 size={15} />
+        </button>
+      </td>
+    </tr>
   )
 }
 
@@ -881,8 +999,51 @@ function InvoiceEditor({
 
   const setLine = (index: number, patch: Partial<PersistedInvoiceLine>) => {
     setLines((current) =>
-      current.map((line, i) => (i === index ? { ...line, ...patch } : line)),
+      current.map((line, i) => {
+        if (i !== index) return line
+        const next = { ...line, ...patch }
+        // Overtyping the amount of a BILLED ad hoc line moves its reserve too.
+        // The server's sanitizer resolves a billed line from `amount` and
+        // rewrites `adhocAmount` to match; without this the two sides would
+        // disagree about which field is authoritative, and flipping the line to
+        // courtesy and back would hand her the rate calculation instead of the
+        // number she typed — silently, and permanently once saved.
+        if (
+          next.kind === 'adhoc' &&
+          patch.amount !== undefined &&
+          normalizeAdhocMode(next.adhocMode) === 'billed'
+        ) {
+          next.adhocAmount = Number(patch.amount) || 0
+        }
+        return next
+      }),
     )
+    setSaved(false)
+  }
+
+  /**
+   * Change what happens to one piece of ad hoc work. The amount follows through
+   * the SHARED rule the server's sanitizer uses, so the running total below
+   * matches what the save will store — courtesy and omit both go to $0.00, and
+   * flipping back to billed restores the figure the line was holding.
+   */
+  const setAdhocMode = (index: number, mode: AdhocMode) => {
+    setLines((current) =>
+      current.map((line, i) => (i === index ? adhocLineForMode(line, mode) : line)),
+    )
+    setSaved(false)
+  }
+
+  // Ad hoc work is shown apart from scoped work — the owner asked for the
+  // separation to review it. Original indices travel with the lines, because
+  // everything that edits a line addresses it by its position in the saved
+  // array; splitting the display must not renumber the data.
+  const numbered = lines.map((line, index) => ({ line, index }))
+  const scopedRows = numbered.filter((row) => row.line.kind !== 'adhoc')
+  const adhocRows = numbered.filter((row) => row.line.kind === 'adhoc')
+
+  const removeLine = (index: number) => {
+    setLines((current) => current.filter((_, i) => i !== index))
     setSaved(false)
   }
 
@@ -895,51 +1056,38 @@ function InvoiceEditor({
     <div className="invoice-run-editor">
       <table className="invoice-run-lines">
         <tbody>
-          {lines.map((line, index) => (
-            <tr key={`${line.kind}-${index}`}>
-              <td>
-                <input
-                  className="input"
-                  value={line.label}
-                  aria-label="Line description"
-                  onChange={(event) => setLine(index, { label: event.target.value })}
-                />
-                <input
-                  className="input invoice-run-detail"
-                  value={line.detail}
-                  aria-label="Line detail"
-                  placeholder="Detail (optional)"
-                  onChange={(event) => setLine(index, { detail: event.target.value })}
-                />
-              </td>
-              <td className="invoice-run-amount-cell">
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  value={line.amount}
-                  aria-label="Amount"
-                  onChange={(event) =>
-                    setLine(index, { amount: Number(event.target.value) })
-                  }
-                />
-              </td>
-              <td>
-                <button
-                  type="button"
-                  className="icon-button"
-                  aria-label={`Remove ${line.label || 'line'}`}
-                  onClick={() => {
-                    setLines((current) => current.filter((_, i) => i !== index))
-                    setSaved(false)
-                  }}
-                >
-                  <Trash2 size={15} />
-                </button>
-              </td>
-            </tr>
+          {scopedRows.map(({ line, index }) => (
+            <InvoiceLineRow
+              key={`${line.kind}-${index}`}
+              line={line}
+              index={index}
+              onChange={setLine}
+              onRemove={removeLine}
+            />
           ))}
         </tbody>
+        {/* Out-of-scope work, set off in its own block so it can be reviewed as
+            a group. Each line carries its own decision: bill it, show it for
+            nothing, or leave it off entirely. */}
+        {adhocRows.length > 0 ? (
+          <tbody className="invoice-run-adhoc">
+            <tr className="invoice-run-adhoc-heading">
+              <th colSpan={3} scope="colgroup">
+                Ad hoc — outside scope
+              </th>
+            </tr>
+            {adhocRows.map(({ line, index }) => (
+              <InvoiceLineRow
+                key={`${line.kind}-${index}`}
+                line={line}
+                index={index}
+                onChange={setLine}
+                onRemove={removeLine}
+                onModeChange={setAdhocMode}
+              />
+            ))}
+          </tbody>
+        ) : null}
       </table>
 
       <button

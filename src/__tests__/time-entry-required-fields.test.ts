@@ -3,6 +3,8 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   TIME_ENTRY_FIELD_PROMPTS,
+  adhocAfterEntryEdit,
+  editRequiresReapproval,
   validateTimeEntryEdit,
   validateTimeEntryRequiredFields,
 } from '../../lib/time-entry.js'
@@ -165,5 +167,120 @@ describe('TIME_ENTRY_FIELD_PROMPTS', () => {
     expect(TIME_ENTRY_FIELD_PROMPTS.detail).toMatch(/detail/i)
     expect(TIME_ENTRY_FIELD_PROMPTS.task).toMatch(/task/i)
     expect(TIME_ENTRY_FIELD_PROMPTS.client).toMatch(/client/i)
+  })
+})
+
+/**
+ * Where the ad hoc flag ends up after an edit. The rule has to be read against
+ * where the entry ENDS UP, not where it started — one save can both re-file an
+ * administrative entry onto a client and tick the ad hoc box, and resolving the
+ * flag first threw the tick away without saying so.
+ */
+describe('adhocAfterEntryEdit', () => {
+  // The regression. The Time page's edit form sends exactly this body when
+  // someone un-ticks "Administrative", picks a client, and ticks "Ad hoc" in
+  // one save. Resolved against the entry's OLD state it read as administrative
+  // time and forced the flag off.
+  it('keeps the flag when the same save re-files admin time onto a client', () => {
+    expect(
+      adhocAfterEntryEdit({
+        payload: { isAdministrative: false, clientId: 'client-1', isAdhoc: true },
+        effectiveIsAdministrative: false,
+        becameAdministrative: false,
+      }),
+    ).toBe(true)
+  })
+
+  it('forces the flag off when the same save moves a client entry to admin', () => {
+    expect(
+      adhocAfterEntryEdit({
+        payload: { isAdministrative: true, isAdhoc: true },
+        effectiveIsAdministrative: true,
+        becameAdministrative: true,
+      }),
+    ).toBe(false)
+  })
+
+  // Administrative time has no client to be outside the scope of, so a caller
+  // asking for the flag on one that stays administrative is refused.
+  it('refuses the flag on an entry that stays administrative', () => {
+    expect(
+      adhocAfterEntryEdit({ payload: { isAdhoc: true }, effectiveIsAdministrative: true }),
+    ).toBe(false)
+  })
+
+  it('clears a flag the entry was carrying when an edit makes it administrative', () => {
+    expect(
+      adhocAfterEntryEdit({
+        payload: { isAdministrative: true },
+        effectiveIsAdministrative: true,
+        becameAdministrative: true,
+      }),
+    ).toBe(false)
+  })
+
+  it('takes the person’s answer on ordinary client time, both ways', () => {
+    expect(
+      adhocAfterEntryEdit({ payload: { isAdhoc: true }, effectiveIsAdministrative: false }),
+    ).toBe(true)
+    expect(
+      adhocAfterEntryEdit({ payload: { isAdhoc: false }, effectiveIsAdministrative: false }),
+    ).toBe(false)
+  })
+
+  // Writing a key nobody asked for is what would make a no-op save look like a
+  // change — and `editRequiresReapproval` counts keys.
+  it('writes nothing when nobody asked and nothing forced it', () => {
+    expect(
+      adhocAfterEntryEdit({ payload: { description: 'x' }, effectiveIsAdministrative: false }),
+    ).toBeUndefined()
+    expect(
+      adhocAfterEntryEdit({ payload: { description: 'x' }, effectiveIsAdministrative: true }),
+    ).toBeUndefined()
+    expect(adhocAfterEntryEdit({ payload: null, effectiveIsAdministrative: false })).toBeUndefined()
+  })
+
+  it('ignores a non-boolean flag rather than coercing it', () => {
+    expect(
+      adhocAfterEntryEdit({ payload: { isAdhoc: 'yes' }, effectiveIsAdministrative: false }),
+    ).toBeUndefined()
+  })
+})
+
+/**
+ * What costs an entry its sign-off. Money-adjacent in both directions: too
+ * eager and an owner's own review correction silently un-approves the row she
+ * is looking at; too lax and a changed client or duration keeps an approval
+ * that was given for different facts.
+ */
+describe('editRequiresReapproval', () => {
+  it('sends a changed approved entry back through approval', () => {
+    expect(editRequiresReapproval('approved', { minutes: 90 }, true)).toBe(true)
+    expect(editRequiresReapproval('rejected', { clientId: 'c2' }, false)).toBe(true)
+  })
+
+  it('leaves a pending entry alone — there is nothing to revoke', () => {
+    expect(editRequiresReapproval('pending', { minutes: 90 }, false)).toBe(false)
+  })
+
+  it('ignores a patch that changes nothing, so a no-op save cannot churn the queue', () => {
+    expect(editRequiresReapproval('approved', {}, false)).toBe(false)
+  })
+
+  // The owner IS the approver, and the review surface is where she is meant to
+  // set this. Re-queueing would pull the row out of the list she is working
+  // through, which is the opposite of a backstop.
+  it('does NOT un-approve when an owner flips only the ad hoc flag', () => {
+    expect(editRequiresReapproval('approved', { isAdhoc: true }, true)).toBe(false)
+  })
+
+  it('still un-approves when an owner changes the flag AND something else', () => {
+    expect(editRequiresReapproval('approved', { isAdhoc: true, minutes: 45 }, true)).toBe(true)
+  })
+
+  // A bookkeeper re-flagging their own approved time changes what it bills;
+  // that has to go back past an owner.
+  it('still un-approves when a non-owner changes the flag', () => {
+    expect(editRequiresReapproval('approved', { isAdhoc: true }, false)).toBe(true)
   })
 })

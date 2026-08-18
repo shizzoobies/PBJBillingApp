@@ -9,6 +9,7 @@
   type Client,
   type NewClientInput,
   type PersistedInvoice,
+  type PersistedInvoiceLine,
   type ClientNote,
   type FeatureRequest,
   type FeatureRequestType,
@@ -314,6 +315,8 @@ export async function updateTimeEntryRequest(
     billable?: boolean
     clientId?: string
     isAdministrative?: boolean
+    /** Out-of-scope one-off work. Owner-settable on anyone's entry at review. */
+    isAdhoc?: boolean
     taskId?: string | null
     date?: string
     startAt?: string
@@ -3145,7 +3148,10 @@ export async function regenerateInvoicesRequest(period: string) {
 export async function updateInvoiceRequest(
   invoiceId: string,
   patch: {
-    lineItems?: Array<{ kind: string; label: string; detail: string; amount: number }>
+    // The real line type, not a structural stand-in: an ad hoc line carries the
+    // owner's billed/courtesy/omitted choice, and a declaration that stops at
+    // label/amount would let a future refactor rebuild the array and drop it.
+    lineItems?: PersistedInvoiceLine[]
     blurb?: string
     dueDate?: string
     status?: 'draft' | 'reviewed' | 'void'

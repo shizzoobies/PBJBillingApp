@@ -6419,6 +6419,28 @@ h2 {
   padding: 2px 9px;
 }
 
+/* The owner's ad hoc toggle inside an approval row. Quieter than the facts
+   above it — it is an occasional correction, not part of reading the entry. */
+.approval-adhoc-toggle {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* "Ad hoc" chip — this time is outside the client's scoped work and bills on
+   its own invoice line. Gold rather than berry so it reads as a note about the
+   work, not a warning about how it was captured (that is the Manual badge). */
+.adhoc-chip {
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent);
+  border-radius: 999px;
+  color: var(--gold);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 760;
+  padding: 2px 9px;
+}
+
 .entry-manual-reason {
   color: var(--muted);
   display: block;
@@ -11659,6 +11681,41 @@ tr.is-inactive-client .client-name-link {
 
 .invoice-run-amount-cell {
   width: 130px;
+}
+
+/* Ad hoc lines sit in their own block on the draft — work outside the client's
+   scope, grouped so it can be reviewed as a set rather than hunted for among
+   the month's ordinary charges. */
+.invoice-run-adhoc td,
+.invoice-run-adhoc th {
+  background: color-mix(in srgb, var(--gold) 5%, transparent);
+}
+
+.invoice-run-adhoc-heading th {
+  border-top: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line));
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  padding: 10px 6px 4px 0;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.invoice-run-adhoc-choice {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+/* What a courtesy or omitted line would have charged. Quiet — it is context for
+   the decision, not a second amount competing with the one in the row. */
+.invoice-run-adhoc-reserve {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
 }
 
 .invoice-run-blurb {

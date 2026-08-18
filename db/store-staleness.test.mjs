@@ -2051,14 +2051,14 @@ describe('adjustSplitGroup (postgres branch)', () => {
 
     const inserts = fake.matching(/^insert into time_entries/i)
     expect(inserts).toHaveLength(2)
-    // group_id ($17) is the same one, and it is set on every new slice.
-    expect(inserts.map((statement) => statement.params[16])).toEqual(['grp-live', 'grp-live'])
+    // group_id ($18) is the same one, and it is set on every new slice.
+    expect(inserts.map((statement) => statement.params[17])).toEqual(['grp-live', 'grp-live'])
     expect(inserts.map((statement) => statement.params[2])).toEqual(['c1', 'c3'])
     expect(inserts.map((statement) => statement.params[4])).toEqual([45, 15])
     // approval_status ($10): back in the queue.
     expect(inserts.map((statement) => statement.params[9])).toEqual(['pending', 'pending'])
-    // sessions ($16) carried across verbatim as JSON.
-    expect(JSON.parse(inserts[0].params[15])).toEqual(row('s1', 'c1', 30).sessions)
+    // sessions ($17) carried across verbatim as JSON.
+    expect(JSON.parse(inserts[0].params[16])).toEqual(row('s1', 'c1', 30).sessions)
 
     const audit = fake.matching(/^insert into activity_log/i)
     expect(audit).toHaveLength(1)
@@ -4328,5 +4328,336 @@ describe('quiet skip (postgres branch)', () => {
     // Anything other than an explicit true is off — skipping is opt-in.
     expect(inserts[0].params.at(-2)).toBe(true)
     expect(inserts[1].params.at(-2)).toBe(false)
+  })
+})
+
+/**
+ * Ad hoc time and the ad hoc invoice line — the persistence half of
+ * featreq-d0f2da14.
+ *
+ * The flag decides HOW a piece of time bills (its own line, at the employee's
+ * rate, instead of inside the month's hours), so a backend that quietly drops
+ * it changes money. Cardinal rule 1 applies in full: the file-backend contracts
+ * are below, and the Postgres statement shapes are pinned underneath them,
+ * because CI only ever runs the file branch.
+ */
+describe('ad hoc time entries (file backend)', () => {
+  it('persists the flag and reads it back', async () => {
+    const created = await store.createTimeEntry({
+      employeeId: 'emp-1',
+      clientId: 'c1',
+      date: '2026-08-04',
+      minutes: 30,
+      description: 'Rush 1099 question',
+      billable: true,
+      isAdhoc: true,
+      entryMethod: 'manual',
+      manualReason: 'forgot the timer',
+    })
+
+    expect(created.isAdhoc).toBe(true)
+    expect((await store.getTimeEntry(created.id)).isAdhoc).toBe(true)
+    expect((await store.read()).timeEntries.find((e) => e.id === created.id).isAdhoc).toBe(true)
+  })
+
+  // Postgres has `not null default false`, so an entry logged without the flag
+  // reads back as `false` there. The file backend has to say the same thing, or
+  // a test passes on data production would never produce.
+  it('stores a real false rather than nothing when the flag is not set', async () => {
+    const created = await store.createTimeEntry({
+      employeeId: 'emp-1',
+      clientId: 'c1',
+      date: '2026-08-04',
+      minutes: 30,
+      description: 'Scoped work',
+      billable: true,
+      entryMethod: 'timer',
+    })
+    expect(created.isAdhoc).toBe(false)
+    expect((await store.getTimeEntry(created.id)).isAdhoc).toBe(false)
+  })
+
+  // The owner's backstop at review: flagging one that was missed, and taking
+  // the flag off one that should never have had it.
+  it('lets an update set and clear the flag', async () => {
+    const created = await store.createTimeEntry({
+      employeeId: 'emp-1',
+      clientId: 'c1',
+      date: '2026-08-04',
+      minutes: 30,
+      description: 'Scoped work',
+      billable: true,
+      entryMethod: 'timer',
+    })
+
+    expect((await store.updateTimeEntry(created.id, { isAdhoc: true })).isAdhoc).toBe(true)
+    expect((await store.updateTimeEntry(created.id, { isAdhoc: false })).isAdhoc).toBe(false)
+  })
+
+  it('carries the flag onto every slice when the time is split across clients', async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients = [
+      { id: 'c1', name: 'Acme' },
+      { id: 'c2', name: 'Beta' },
+    ]
+    data.timeEntries = [
+      {
+        id: 't-adhoc',
+        employeeId: 'emp-1',
+        clientId: 'c1',
+        date: '2026-08-04',
+        minutes: 60,
+        description: 'One-off cleanup for two clients',
+        billable: true,
+        isAdhoc: true,
+        approvalStatus: 'approved',
+        entryMethod: 'timer',
+        sessions: [],
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const { created } = await store.splitTimeEntry(
+      't-adhoc',
+      [
+        { clientId: 'c1', minutes: 30 },
+        { clientId: 'c2', minutes: 30 },
+      ],
+      'emp-1',
+      'grp-1',
+      'even',
+    )
+
+    expect(created).toHaveLength(2)
+    expect(created.every((slice) => slice.isAdhoc === true)).toBe(true)
+  })
+})
+
+describe('ad hoc invoice lines (file backend)', () => {
+  async function seedAdhocInvoice() {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-adhoc',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-002',
+        status: 'draft',
+        lineItems: [
+          { kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 200 },
+          {
+            kind: 'adhoc',
+            label: 'Adhoc — Rush 1099 question',
+            detail: 'Aug 4, 2026 · Lisa · 0.50h at $100.00/hr',
+            amount: 50,
+            adhocMode: 'billed',
+            adhocAmount: 50,
+          },
+        ],
+        subtotal: 250,
+        total: 250,
+        dueDate: '2026-09-30',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: null,
+        paidAt: null,
+        paymentMethod: null,
+        createdAt: '2026-09-01T00:00:00.000Z',
+        updatedAt: '2026-09-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('keeps the kind and the choice through a save', async () => {
+    await seedAdhocInvoice()
+    const updated = await store.updateInvoice('inv-adhoc', {
+      lineItems: [
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 200 },
+        {
+          kind: 'adhoc',
+          label: 'Adhoc — Rush 1099 question',
+          detail: '',
+          amount: 50,
+          adhocMode: 'billed',
+          adhocAmount: 50,
+        },
+      ],
+    })
+
+    expect(updated.lineItems[1]).toMatchObject({
+      kind: 'adhoc',
+      adhocMode: 'billed',
+      adhocAmount: 50,
+      amount: 50,
+    })
+    expect(updated.total).toBe(250)
+  })
+
+  // "Show detail only" — the line stays on the client's invoice, at nothing.
+  it('zeroes a courtesy line and drops it out of the total', async () => {
+    await seedAdhocInvoice()
+    const updated = await store.updateInvoice('inv-adhoc', {
+      lineItems: [
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 200 },
+        {
+          kind: 'adhoc',
+          label: 'Adhoc — Rush 1099 question',
+          detail: '',
+          amount: 50,
+          adhocMode: 'courtesy',
+          adhocAmount: 50,
+        },
+      ],
+    })
+
+    expect(updated.lineItems[1].amount).toBe(0)
+    // Held in reserve, which is what makes the choice reversible.
+    expect(updated.lineItems[1].adhocAmount).toBe(50)
+    expect(updated.total).toBe(200)
+  })
+
+  // An omitted line is worth nothing and still has to SURVIVE, or she could
+  // never put it back.
+  it('keeps an omitted line on the draft at zero', async () => {
+    await seedAdhocInvoice()
+    const updated = await store.updateInvoice('inv-adhoc', {
+      lineItems: [
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 200 },
+        {
+          kind: 'adhoc',
+          label: 'Adhoc — Rush 1099 question',
+          detail: '',
+          amount: 0,
+          adhocMode: 'omitted',
+          adhocAmount: 50,
+        },
+      ],
+    })
+
+    expect(updated.lineItems).toHaveLength(2)
+    expect(updated.lineItems[1]).toMatchObject({ adhocMode: 'omitted', amount: 0, adhocAmount: 50 })
+    expect(updated.total).toBe(200)
+  })
+
+  // She overtyped the figure. The reserve follows it, so flipping the line to
+  // courtesy and back gives her number back rather than the rate calculation's.
+  it('lets the owner overtype a billed amount, and remembers it', async () => {
+    await seedAdhocInvoice()
+    const overtyped = await store.updateInvoice('inv-adhoc', {
+      lineItems: [
+        {
+          kind: 'adhoc',
+          label: 'Adhoc — Rush 1099 question',
+          detail: '',
+          amount: 40,
+          adhocMode: 'billed',
+          adhocAmount: 50,
+        },
+      ],
+    })
+    expect(overtyped.lineItems[0]).toMatchObject({ amount: 40, adhocAmount: 40 })
+  })
+
+  // The line at $0.00 is $0.00 BY DECISION and still holds what it would
+  // charge. Resting its survival on the label alone meant clearing that box
+  // deleted the reserve for good.
+  it('keeps a courtesy line whose label was cleared', async () => {
+    await seedAdhocInvoice()
+    const updated = await store.updateInvoice('inv-adhoc', {
+      lineItems: [
+        { kind: 'adhoc', label: '', detail: '', amount: 0, adhocMode: 'courtesy', adhocAmount: 50 },
+      ],
+    })
+
+    expect(updated.lineItems).toHaveLength(1)
+    expect(updated.lineItems[0].adhocAmount).toBe(50)
+  })
+
+  // ...but a genuinely empty row still goes, adhoc or not.
+  it('still drops an adhoc row with nothing on it at all', async () => {
+    await seedAdhocInvoice()
+    const updated = await store.updateInvoice('inv-adhoc', {
+      lineItems: [
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 200 },
+        { kind: 'adhoc', label: '', detail: '', amount: 0, adhocMode: 'omitted', adhocAmount: 0 },
+      ],
+    })
+
+    expect(updated.lineItems).toHaveLength(1)
+  })
+
+  it('reads a line with no stated choice as billed', async () => {
+    await seedAdhocInvoice()
+    const updated = await store.updateInvoice('inv-adhoc', {
+      lineItems: [{ kind: 'adhoc', label: 'Adhoc — legacy', detail: '', amount: 25 }],
+    })
+    expect(updated.lineItems[0]).toMatchObject({ adhocMode: 'billed', amount: 25, adhocAmount: 25 })
+  })
+})
+
+describe('ad hoc time on the postgres branch', () => {
+  it('writes is_adhoc on create', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createTimeEntry({
+      employeeId: 'emp-1',
+      clientId: 'c1',
+      date: '2026-08-04',
+      minutes: 30,
+      description: 'Rush 1099 question',
+      billable: true,
+      isAdhoc: true,
+      entryMethod: 'timer',
+    })
+
+    const inserts = fake.matching(/insert into time_entries/i)
+    expect(inserts).toHaveLength(1)
+    expect(inserts[0].text).toMatch(/is_administrative,\s*is_adhoc/i)
+    // Positional, one past is_administrative. `toContain(true)` would pass on
+    // the fixture's `billable: true` no matter where the flag actually landed.
+    expect(inserts[0].params[13]).toBe(true)
+  })
+
+  it('writes is_adhoc on the bulk save, defaulting to false', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        timeEntries: [
+          {
+            id: 't1',
+            employeeId: 'emp-1',
+            clientId: 'c1',
+            date: '2026-08-04',
+            minutes: 30,
+            isAdhoc: true,
+          },
+          {
+            id: 't2',
+            employeeId: 'emp-1',
+            clientId: 'c1',
+            date: '2026-08-05',
+            minutes: 30,
+          },
+        ],
+      }),
+    )
+
+    const inserts = fake.matching(/insert into time_entries/i)
+    expect(inserts).toHaveLength(2)
+    expect(inserts[0].text).toMatch(/is_administrative,\s*\n?\s*is_adhoc/i)
+    // Positional, one past is_administrative — the bug this catches is a value
+    // landing in the wrong column when someone adds the next one.
+    expect(inserts[0].params[16]).toBe(true)
+    expect(inserts[1].params[16]).toBe(false)
+  })
+
+  it('sets is_adhoc when an update carries it', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).updateTimeEntry('t1', { isAdhoc: true })
+
+    const updates = fake.matching(/update time_entries set/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toMatch(/is_adhoc = \$2/)
+    expect(updates[0].params).toEqual(['t1', true])
   })
 })

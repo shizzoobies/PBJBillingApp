@@ -53,6 +53,29 @@ export declare function validateTimeEntryEdit(
   payload?: ({ description?: unknown } & Record<string, unknown>) | null,
 ): { error: string | null }
 
+/**
+ * What `isAdhoc` becomes on an edit, or `undefined` for "leave it alone".
+ * Takes the admin state AFTER the re-target — see the implementation for why
+ * the ordering is the point.
+ */
+export declare function adhocAfterEntryEdit(args: {
+  // The whole PATCH body: only `isAdhoc` is inspected, but the rest rides along
+  // — the same shape `validateTimeEntryEdit` takes, and for the same reason.
+  payload?: ({ isAdhoc?: unknown } & Record<string, unknown>) | null
+  effectiveIsAdministrative: boolean
+  becameAdministrative?: boolean
+}): boolean | undefined
+
+/**
+ * Whether an edit costs the entry its approval. See the implementation for the
+ * one exemption: an owner changing nothing but the ad hoc flag.
+ */
+export declare function editRequiresReapproval(
+  approvalStatus: string,
+  patch?: Record<string, unknown>,
+  isOwner?: boolean,
+): boolean
+
 export declare function normalizeWorkSessions(rawSessions?: unknown): {
   sessions?: { startAt: string; endAt: string }[]
   minutes?: number

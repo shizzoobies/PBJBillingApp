@@ -54,6 +54,8 @@ import {
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
   validateTimeEntryEdit,
+  adhocAfterEntryEdit,
+  editRequiresReapproval,
   validateTimeEntryRequiredFields,
   weekStartOf,
 } from './lib/time-entry.js'
@@ -3916,6 +3918,11 @@ const server = createServer(async (request, response) => {
             : 'General'
         const description = typeof payload?.description === 'string' ? payload.description : ''
         const billable = isAdministrative ? false : Boolean(payload?.billable)
+        // Ad hoc: a one-off request outside the client's scoped work. Anyone
+        // logging time may flag their own; the owner corrects it at review.
+        // Administrative time has no client to be out of scope OF, so it can
+        // never be ad hoc — the same shape as `billable` on the line above.
+        const isAdhoc = isAdministrative ? false : Boolean(payload?.isAdhoc)
         const taskIdRaw = payload?.taskId
         const taskId = isAdministrative
           ? null
@@ -4130,6 +4137,7 @@ const server = createServer(async (request, response) => {
           employeeId,
           clientId,
           isAdministrative,
+          isAdhoc,
           date,
           minutes: finalMinutes,
           category,
@@ -4765,6 +4773,23 @@ const server = createServer(async (request, response) => {
             effectiveClientId = nextClientId
           }
         }
+        // Ad hoc, resolved AFTER the re-target above so it reads where the entry
+        // ENDS UP — see `adhocAfterEntryEdit`. Sits beside `taskId` below because
+        // the two follow the same rule for the same reason: both belong to a
+        // client, and both have to be decided against the effective state, not
+        // the state the entry is leaving.
+        //
+        // No permission check of its own: the gate at the top of this handler
+        // already refuses a non-owner any edit to somebody else's entry, which
+        // IS the rule — an employee flags their own time, and only an owner may
+        // flag or unflag another person's at review. A second check here would
+        // be a second place for the two to disagree.
+        const nextAdhoc = adhocAfterEntryEdit({
+          payload,
+          effectiveIsAdministrative: effectiveIsAdmin,
+          becameAdministrative: patch.isAdministrative === true,
+        })
+        if (nextAdhoc !== undefined) patch.isAdhoc = nextAdhoc
         if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'taskId')) {
           patch.taskId =
             effectiveIsAdmin || !(typeof payload.taskId === 'string' && payload.taskId.trim())
@@ -4873,15 +4898,10 @@ const server = createServer(async (request, response) => {
           }
         }
 
-        // Editing resubmits the entry for approval: a rejected entry flips back
-        // to pending, and so does an already-APPROVED one — an approved entry
-        // that gets changed (different client, time, date…) has to be re-approved
-        // rather than silently keeping its old sign-off. No-op patches are left
-        // alone so a save with nothing changed can't churn the approval queue.
-        if (
-          (entry.approvalStatus === 'rejected' || entry.approvalStatus === 'approved') &&
-          Object.keys(patch).length > 0
-        ) {
+        // Editing resubmits the entry for approval — see `editRequiresReapproval`
+        // for the rule, including the one thing that does NOT cost an entry its
+        // sign-off (an owner flipping only the ad hoc flag at review).
+        if (editRequiresReapproval(entry.approvalStatus, patch, isOwner)) {
           patch.approvalStatus = 'pending'
           patch.approvalNote = null
           patch.approvedBy = null

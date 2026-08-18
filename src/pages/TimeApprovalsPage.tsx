@@ -76,6 +76,23 @@ export function TimeApprovalsPage() {
   const reassignEntry = (entryId: string, employeeId: string) =>
     updateTimeEntry(entryId, { employeeId })
 
+  // The owner's backstop on ad hoc: employees flag their own time at entry, and
+  // review is where a missed flag gets added or a wrong one taken off. This
+  // whole page is owner-gated below, and the PATCH route refuses a non-owner any
+  // edit to somebody else's entry — so the rule is enforced on the server, not
+  // merely hidden here.
+  //
+  // Unlike the reassign control beside it, this does NOT cost an approved entry
+  // its sign-off. Approval asks "is this record of the work right", and the flag
+  // does not touch that — it decides how the time BILLS. Re-queueing would make
+  // the backstop yank the row out of the list she is working through, which is
+  // the opposite of what a backstop is for. The server carves out exactly this
+  // case and nothing wider: a bookkeeper re-flagging their own approved time
+  // still goes back through approval, and so does an owner's change the moment
+  // it carries any other field. See `editRequiresReapproval`.
+  const setEntryAdhoc = (entryId: string, isAdhoc: boolean) =>
+    updateTimeEntry(entryId, { isAdhoc })
+
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('pending')
 
   // Month-end's period lives HERE, not inside MonthEndSection, so its tab count
@@ -216,6 +233,7 @@ export function TimeApprovalsPage() {
           onReject={rejectTimeEntry}
           onApproveBatch={approveTimeEntriesBatch}
           onReassign={reassignEntry}
+          onSetAdhoc={setEntryAdhoc}
         />
       ) : null}
 
@@ -841,6 +859,7 @@ function ApprovalQueue({
   onReject,
   onApproveBatch,
   onReassign,
+  onSetAdhoc,
 }: {
   employees: Employee[]
   reassignTargets: Employee[]
@@ -853,6 +872,8 @@ function ApprovalQueue({
   onReject: (entryId: string, note: string) => Promise<void>
   onApproveBatch: (entryIds: string[]) => Promise<void>
   onReassign: (entryId: string, employeeId: string) => Promise<void>
+  /** Owner backstop: add or remove the ad hoc flag during review. */
+  onSetAdhoc: (entryId: string, isAdhoc: boolean) => Promise<void>
 }) {
   const filtered = useMemo(() => {
     // Unsplit group holding entries are drafts — keep them out of approvals
@@ -941,6 +962,7 @@ function ApprovalQueue({
               onReject={onReject}
               onApproveBatch={onApproveBatch}
               onReassign={onReassign}
+              onSetAdhoc={onSetAdhoc}
             />
           ))}
         </div>
@@ -960,6 +982,7 @@ function EmployeeApprovalGroup({
   onReject,
   onApproveBatch,
   onReassign,
+  onSetAdhoc,
 }: {
   employee: Employee
   entries: TimeEntry[]
@@ -971,6 +994,8 @@ function EmployeeApprovalGroup({
   onReject: (entryId: string, note: string) => Promise<void>
   onApproveBatch: (entryIds: string[]) => Promise<void>
   onReassign: (entryId: string, employeeId: string) => Promise<void>
+  /** Owner backstop: add or remove the ad hoc flag during review. */
+  onSetAdhoc: (entryId: string, isAdhoc: boolean) => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
   const pendingIds = entries
@@ -1014,6 +1039,7 @@ function EmployeeApprovalGroup({
             onApprove={onApprove}
             onReject={onReject}
             onReassign={onReassign}
+            onSetAdhoc={onSetAdhoc}
           />
         ))}
       </div>
@@ -1030,6 +1056,7 @@ function ApprovalRow({
   onApprove,
   onReject,
   onReassign,
+  onSetAdhoc,
 }: {
   entry: TimeEntry
   clientLabel: string
@@ -1039,6 +1066,8 @@ function ApprovalRow({
   onApprove: (entryId: string) => Promise<void>
   onReject: (entryId: string, note: string) => Promise<void>
   onReassign: (entryId: string, employeeId: string) => Promise<void>
+  /** Owner backstop: add or remove the ad hoc flag during review. */
+  onSetAdhoc: (entryId: string, isAdhoc: boolean) => Promise<void>
 }) {
   // The dropdown must SHOW the entry's actual current person — even a former/
   // inactive teammate (e.g. a leftover seed employee) who isn't a valid
@@ -1079,6 +1108,20 @@ function ApprovalRow({
       await onApprove(entry.id)
     } catch {
       setError('Could not approve this entry.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleAdhoc = async (next: boolean) => {
+    setBusy(true)
+    setError('')
+    try {
+      await onSetAdhoc(entry.id, next)
+    } catch {
+      // Deliberately not "the month may be locked": owners are exempt from the
+      // lock check, and this control only exists on the owner-only review page.
+      setError('Could not change the ad hoc flag.')
     } finally {
       setBusy(false)
     }
@@ -1139,11 +1182,27 @@ function ApprovalRow({
           {entry.approvalStatus === 'rejected' && entry.approvalNote ? (
             <small className="entry-reject-note">Rejected: {entry.approvalNote}</small>
           ) : null}
+          {/* The owner's backstop on ad hoc. Saves on the spot rather than
+              waiting for an Approve, because this decides how the time BILLS and
+              the invoice run reads it straight from the entry. Administrative
+              time has no client to be outside the scope of, so it has no flag. */}
+          {!entry.isAdministrative ? (
+            <label className="check-row approval-adhoc-toggle">
+              <input
+                type="checkbox"
+                checked={Boolean(entry.isAdhoc)}
+                disabled={busy}
+                onChange={(event) => void handleAdhoc(event.target.checked)}
+              />
+              <span>Ad hoc (outside scoped work)</span>
+            </label>
+          ) : null}
         </div>
         <div className="approval-row-pills">
           {entry.entryMethod === 'manual' ? (
             <span className="manual-badge">Manual</span>
           ) : null}
+          {entry.isAdhoc ? <span className="adhoc-chip">Ad hoc</span> : null}
           <span className={`time-status-pill time-status-${entry.approvalStatus}`}>
             {entry.approvalStatus === 'approved'
               ? 'Approved'

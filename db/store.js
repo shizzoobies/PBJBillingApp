@@ -22,6 +22,7 @@ import {
   fileWorkspaceVersion,
   postgresWorkspaceVersion,
 } from '../lib/workspace-version.js'
+import { normalizeAdhocMode } from '../lib/invoice-lines.js'
 
 /**
  * Per-file operation queue for the JSON file backend. A plain
@@ -757,6 +758,10 @@ const INVOICE_LINE_KINDS = new Set([
   'adjustment',
   'custom',
   'card-fee',
+  // One-off work outside the client's scope. Listed here for the same reason
+  // 'card-fee' is: falling back to 'custom' would lose the owner's
+  // billed/courtesy/omitted choice and the group it belongs to.
+  'adhoc',
 ])
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
@@ -771,13 +776,48 @@ const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
  */
 function sanitizeInvoiceLines(raw) {
   return (Array.isArray(raw) ? raw : [])
-    .map((line) => ({
-      kind: INVOICE_LINE_KINDS.has(line?.kind) ? line.kind : 'custom',
-      label: String(line?.label ?? '').trim().slice(0, 300),
-      detail: String(line?.detail ?? '').trim().slice(0, 300),
-      amount: roundMoney(line?.amount),
-    }))
-    .filter((line) => line.label !== '' || line.amount !== 0)
+    .map((line) => {
+      const kind = INVOICE_LINE_KINDS.has(line?.kind) ? line.kind : 'custom'
+      const base = {
+        kind,
+        label: String(line?.label ?? '').trim().slice(0, 300),
+        detail: String(line?.detail ?? '').trim().slice(0, 300),
+        amount: roundMoney(line?.amount),
+      }
+      if (kind !== 'adhoc') return base
+
+      // The owner's three-way choice, made money. While a line is BILLED its
+      // amount is hers to overtype, and `adhocAmount` follows it so flipping to
+      // courtesy and back restores the number she typed rather than the rate
+      // calculation. While it is courtesy or omitted the line is $0.00 and
+      // `adhocAmount` is what it holds in reserve.
+      //
+      // Zeroing here rather than at render is what keeps the totals honest:
+      // `recomputeInvoiceMoney` just adds the amounts up, so a courtesy line
+      // costs the client nothing and an omitted one is worth nothing whether or
+      // not a given surface remembered to filter it.
+      const mode = normalizeAdhocMode(line?.adhocMode)
+      const reserved = roundMoney(
+        mode === 'billed' ? line?.amount : line?.adhocAmount ?? line?.amount,
+      )
+      return {
+        ...base,
+        amount: mode === 'billed' ? reserved : 0,
+        adhocMode: mode,
+        adhocAmount: reserved,
+      }
+    })
+    // A courtesy or omitted adhoc line is $0.00 BY DECISION, not by being an
+    // empty row someone left behind, and it still holds the amount it would
+    // charge. Resting its survival on the free-text label alone would mean
+    // clearing that box deleted the reserve with no way back short of voiding
+    // and regenerating the month — so a reserve keeps the line too.
+    .filter(
+      (line) =>
+        line.label !== '' ||
+        line.amount !== 0 ||
+        (line.kind === 'adhoc' && line.adhocAmount !== 0),
+    )
 }
 
 /**
@@ -2943,6 +2983,16 @@ export class AppDataStore {
       )
       await this.pool.query(`alter table time_entries alter column client_id drop not null`)
 
+      // Ad hoc time: a one-off request outside the client's scoped work. Flagged
+      // by whoever logs it (any employee, at entry) and correctable by an owner
+      // at review. It bills as its OWN invoice line at that employee's rate
+      // rather than inside "Billable hours — <name>", so the flag is what
+      // decides which of the two paths the time is billed through — never both.
+      // Additive + idempotent; every existing row is scoped work.
+      await this.pool.query(
+        `alter table time_entries add column if not exists is_adhoc boolean not null default false`,
+      )
+
       // Audit timestamps: the exact start/stop of the work. Populated for new
       // timer entries (from the timer span) and manual entries (entered by the
       // user). Nullable — legacy rows predate this and simply have no span.
@@ -3890,7 +3940,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                    approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                   is_administrative, started_at, ended_at, sessions, group_id, group_client_ids,
+                   is_administrative, is_adhoc, started_at, ended_at, sessions, group_id, group_client_ids,
                    group_allocation, task_label, created_at
             from time_entries
             order by entry_date desc, id desc
@@ -4174,6 +4224,7 @@ export class AppDataStore {
           employeeId: row.user_id,
           clientId: row.client_id ?? '',
           isAdministrative: Boolean(row.is_administrative),
+          isAdhoc: Boolean(row.is_adhoc),
           date: row.entry_date.toISOString().slice(0, 10),
           minutes: Number(row.minutes),
           category: row.category,
@@ -4907,8 +4958,8 @@ export class AppDataStore {
             `
               insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                                         approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative,
-                                        started_at, ended_at, sessions, group_id, group_client_ids, group_allocation, task_label, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20, $21, $22, $23, $24, now())
+                                        is_adhoc, started_at, ended_at, sessions, group_id, group_client_ids, group_allocation, task_label, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, now())
             `,
             [
               entry.id,
@@ -4928,6 +4979,7 @@ export class AppDataStore {
               entry.entryMethod === 'manual' ? 'manual' : 'timer',
               entry.entryMethod === 'manual' ? entry.manualReason ?? null : null,
               Boolean(entry.isAdministrative),
+              Boolean(entry.isAdhoc),
               entry.startAt ?? null,
               entry.endAt ?? null,
               JSON.stringify(Array.isArray(entry.sessions) ? entry.sessions : []),
@@ -5373,6 +5425,10 @@ export class AppDataStore {
       ...entry,
       id: entry.id ?? `time-${randomUUID().slice(0, 8)}`,
       taskId: entry.taskId ?? null,
+      // Normalized to a real boolean so the file backend stores what Postgres's
+      // `not null default false` column would — the two backends have to read
+      // back identically or a flag set in production behaves differently in CI.
+      isAdhoc: Boolean(entry.isAdhoc),
       approvalStatus: autoApproved ? 'approved' : 'pending',
       entryMethod,
       manualReason,
@@ -5382,8 +5438,8 @@ export class AppDataStore {
     if (this.pool) {
       await this.pool.query(
         `
-          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, started_at, ended_at, sessions, group_id, group_client_ids, group_allocation, task_label, created_at, updated_at)
-          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, now())
+          insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, is_adhoc, started_at, ended_at, sessions, group_id, group_client_ids, group_allocation, task_label, created_at, updated_at)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22, now())
         `,
         [
           nextEntry.id,
@@ -5401,6 +5457,7 @@ export class AppDataStore {
           nextEntry.entryMethod,
           nextEntry.manualReason ?? null,
           Boolean(nextEntry.isAdministrative),
+          Boolean(nextEntry.isAdhoc),
           nextEntry.startAt ?? null,
           nextEntry.endAt ?? null,
           JSON.stringify(Array.isArray(nextEntry.sessions) ? nextEntry.sessions : []),
@@ -5513,6 +5570,10 @@ export class AppDataStore {
         employeeId: holding.employeeId,
         clientId: row.clientId,
         isAdministrative: false,
+        // Ad hoc travels with the work: dividing one out-of-scope block across
+        // three clients makes three pieces of out-of-scope work, not three
+        // pieces of scoped work.
+        isAdhoc: Boolean(holding.isAdhoc),
         date: holding.date,
         minutes: coerceEntryMinutes(row.minutes),
         category: holding.category ?? 'General',
@@ -5554,7 +5615,7 @@ export class AppDataStore {
         // and then finds the row gone — a clean conflict instead of duplicates.
         const held = await client.query(
           `select id, user_id, client_id, entry_date, minutes, category, description, billable,
-                  entry_method, manual_reason, is_administrative, started_at, ended_at, sessions,
+                  entry_method, manual_reason, is_administrative, is_adhoc, started_at, ended_at, sessions,
                   group_client_ids, task_label
            from time_entries where id = $1 for update`,
           [entryId],
@@ -5567,6 +5628,7 @@ export class AppDataStore {
         const holding = {
           clientId: row.client_id ?? '',
           isAdministrative: Boolean(row.is_administrative),
+          isAdhoc: Boolean(row.is_adhoc),
           groupClientIds: Array.isArray(row.group_client_ids)
             ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
             : [],
@@ -5593,9 +5655,9 @@ export class AppDataStore {
           await client.query(
             `insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description,
                                        billable, task_id, approval_status, entry_method, manual_reason,
-                                       is_administrative, started_at, ended_at, sessions, group_id,
+                                       is_administrative, is_adhoc, started_at, ended_at, sessions, group_id,
                                        group_client_ids, group_allocation, task_label, created_at, updated_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, now())`,
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22, now())`,
             [
               slice.id,
               slice.employeeId,
@@ -5610,6 +5672,7 @@ export class AppDataStore {
               slice.entryMethod,
               slice.manualReason ?? null,
               false,
+              Boolean(slice.isAdhoc),
               slice.startAt ?? null,
               slice.endAt ?? null,
               JSON.stringify(slice.sessions),
@@ -5736,6 +5799,8 @@ export class AppDataStore {
         employeeId: template.employeeId,
         clientId: row.clientId,
         isAdministrative: false,
+        // Re-dividing the billing does not make out-of-scope work scoped.
+        isAdhoc: Boolean(template.isAdhoc),
         date: template.date,
         minutes: coerceEntryMinutes(row.minutes),
         category: template.category ?? 'General',
@@ -5776,7 +5841,7 @@ export class AppDataStore {
         // one slice) waits here and then sees the group as this one left it.
         const held = await client.query(
           `select id, user_id, client_id, entry_date, minutes, category, description, billable,
-                  entry_method, manual_reason, started_at, ended_at, sessions, task_label
+                  entry_method, manual_reason, is_adhoc, started_at, ended_at, sessions, task_label
            from time_entries where group_id = $1 order by created_at, id for update`,
           [sharedGroupId],
         )
@@ -5792,6 +5857,7 @@ export class AppDataStore {
           category: row.category,
           description: row.description,
           billable: row.billable,
+          isAdhoc: Boolean(row.is_adhoc),
           entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
           manualReason: row.manual_reason ?? undefined,
           startAt: row.started_at ? row.started_at.toISOString() : undefined,
@@ -5809,9 +5875,9 @@ export class AppDataStore {
           await client.query(
             `insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description,
                                        billable, task_id, approval_status, entry_method, manual_reason,
-                                       is_administrative, started_at, ended_at, sessions, group_id,
+                                       is_administrative, is_adhoc, started_at, ended_at, sessions, group_id,
                                        group_client_ids, group_allocation, task_label, created_at, updated_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, now())`,
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22, now())`,
             [
               slice.id,
               slice.employeeId,
@@ -5826,6 +5892,7 @@ export class AppDataStore {
               slice.entryMethod,
               slice.manualReason ?? null,
               false,
+              Boolean(slice.isAdhoc),
               slice.startAt ?? null,
               slice.endAt ?? null,
               JSON.stringify(slice.sessions),
@@ -5902,7 +5969,7 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
                 approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason,
-                is_administrative, started_at, ended_at, sessions, group_id, group_client_ids,
+                is_administrative, is_adhoc, started_at, ended_at, sessions, group_id, group_client_ids,
                 group_allocation, task_label, created_at
          from time_entries where id = $1`,
         [entryId],
@@ -5914,6 +5981,7 @@ export class AppDataStore {
         employeeId: row.user_id,
         clientId: row.client_id ?? '',
         isAdministrative: Boolean(row.is_administrative),
+        isAdhoc: Boolean(row.is_adhoc),
         date: row.entry_date.toISOString().slice(0, 10),
         minutes: Number(row.minutes),
         category: row.category,
@@ -5957,6 +6025,7 @@ export class AppDataStore {
         employeeId: 'user_id',
         clientId: 'client_id',
         isAdministrative: 'is_administrative',
+        isAdhoc: 'is_adhoc',
         minutes: 'minutes',
         description: 'description',
         billable: 'billable',
@@ -5998,7 +6067,7 @@ export class AppDataStore {
       if (entry.id !== entryId) return entry
       const next = { ...entry }
       for (const key of [
-        'employeeId', 'clientId', 'isAdministrative', 'minutes', 'description', 'billable',
+        'employeeId', 'clientId', 'isAdministrative', 'isAdhoc', 'minutes', 'description', 'billable',
         'taskId', 'category', 'date',
         'approvalStatus', 'approvalNote', 'approvedBy', 'approvedAt', 'startAt', 'endAt', 'sessions',
       ]) {

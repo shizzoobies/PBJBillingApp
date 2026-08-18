@@ -5,13 +5,20 @@
 
 /** What produced this line — the persisted invoice stores it, and Client Recap
  *  uses it to separate service revenue from reimbursements. */
-export type InvoiceLineKind = 'plan' | 'hourly' | 'reimbursement' | 'recurring'
+export type InvoiceLineKind = 'plan' | 'hourly' | 'reimbursement' | 'recurring' | 'adhoc'
+
+/** The owner's per-line decision about one piece of ad hoc work. */
+export type AdhocMode = 'billed' | 'courtesy' | 'omitted'
 
 export type InvoiceLineOut = {
   kind: InvoiceLineKind
   label: string
   detail: string
   amount: number
+  /** Present on `adhoc` lines only. Defaults to 'billed'. */
+  adhocMode?: AdhocMode
+  /** What billing this work WOULD charge, kept while the line sits at $0.00. */
+  adhocAmount?: number
 }
 
 export type BuildInvoiceLinesResult = {
@@ -41,6 +48,9 @@ export type BuildInvoiceLinesArgs = {
     billable?: boolean
     minutes: number
     date?: string
+    description?: string
+    /** Out-of-scope one-off work — billed as its own line, never inside hours. */
+    isAdhoc?: boolean
   }>
   plans?: Array<{ id: string; name: string }>
   billingPeriod: string
@@ -64,6 +74,15 @@ export function formatDecimalHours(minutes: number): string
 export function normalizeBillingMonth(value: unknown): number
 export function getBillingPeriodLabel(period: string): string
 export function isInBillingPeriod(entry: { date?: string }, period: string): boolean
+export const ADHOC_MODES: AdhocMode[]
+export function normalizeAdhocMode(value: unknown): AdhocMode
+export function adhocLineForMode<T extends { adhocAmount?: number; amount: number }>(
+  line: T,
+  mode: unknown,
+): T & { adhocMode: AdhocMode; adhocAmount: number; amount: number }
+export function renderedInvoiceLines<T extends { kind?: string; adhocMode?: string }>(
+  lines: T[] | null | undefined,
+): T[]
 export function recurringReimbursementAppliesToPeriod(
   recurring: { startDate?: string; frequency?: string },
   period: string,

@@ -1450,6 +1450,9 @@ function App() {
         employeeId: timer.employeeId,
         clientId: '',
         isAdministrative: false,
+        // Carried onto the holding block so the slices the split creates inherit
+        // it — dividing out-of-scope work does not make it scoped.
+        isAdhoc: Boolean(timer.isAdhoc),
         groupClientIds,
         // The LOCAL day the work started (matches the manual form + the user's
         // wall clock); UTC would roll an evening entry to the next day/week.
@@ -1472,6 +1475,10 @@ function App() {
       employeeId: timer.employeeId,
       clientId: timer.clientId,
       isAdministrative,
+      // Whether this was a one-off outside the client's scope — ticked on the
+      // timer panel while it ran, so the answer travels with the stop.
+      // Administrative time never carries it (the server agrees).
+      isAdhoc: !isAdministrative && Boolean(timer.isAdhoc),
       // Local start day (see the group path above) — never the UTC day.
       date: localDateOnly(timer.startedAt),
       // Seconds-precise (min 1 second). The server recomputes this from the
@@ -1500,6 +1507,7 @@ function App() {
       billable?: boolean
       clientId?: string
       isAdministrative?: boolean
+      isAdhoc?: boolean
       taskId?: string | null
       date?: string
       startAt?: string

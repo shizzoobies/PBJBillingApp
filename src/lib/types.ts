@@ -256,9 +256,18 @@ export type NewClientInput = Omit<Client, 'id'> & {
 }
 
 
+/**
+ * The owner's decision about one piece of ad hoc work, made per line in the
+ * month run. `billed` is the default; `courtesy` still prints the line at
+ * $0.00 so the client sees the work was done and not charged; `omitted` keeps
+ * it off their invoice entirely while leaving it on the draft to put back.
+ */
+export type AdhocMode = 'billed' | 'courtesy' | 'omitted'
+
 /** A line on a PERSISTED invoice. `kind` records what produced it. */
 export type PersistedInvoiceLine = {
-  /** `card-fee` is appended by the payment webhook when a client pays by card. */
+  /** `card-fee` is appended by the payment webhook when a client pays by card.
+   *  `adhoc` is one entry of out-of-scope time, billed on its own. */
   kind:
     | 'plan'
     | 'hourly'
@@ -267,9 +276,17 @@ export type PersistedInvoiceLine = {
     | 'adjustment'
     | 'custom'
     | 'card-fee'
+    | 'adhoc'
   label: string
   detail: string
   amount: number
+  /** `adhoc` lines only. Absent is read as 'billed'. */
+  adhocMode?: AdhocMode
+  /**
+   * `adhoc` lines only: what billing this work would charge. Held while the
+   * line sits at $0.00, which is what makes courtesy and omit reversible.
+   */
+  adhocAmount?: number
 }
 
 /** Something on the draft worth a decision before sending — never a charge. */
@@ -363,6 +380,18 @@ export type TimeEntry = {
    * is never billable — the employee just records hours + notes.
    */
   isAdministrative?: boolean
+  /**
+   * One-off work OUTSIDE the client's scoped arrangement — a favor, a rush
+   * request, something their plan or their usual hours never covered. Set by
+   * whoever logs the time and correctable by an owner at review.
+   *
+   * At invoicing this decides which path the time bills through: a flagged
+   * entry becomes its own `adhoc` invoice line at that employee's rate and is
+   * EXCLUDED from the client's "Billable hours — <name>" total, so the work is
+   * billed exactly once. Never set on administrative time (no client to be
+   * outside the scope of).
+   */
+  isAdhoc?: boolean
   date: string
   minutes: number
   /**
@@ -1203,6 +1232,8 @@ export type TimerState = {
   taskLabel?: string
   /** Administrative / internal timing — no client or task. */
   isAdministrative?: boolean
+  /** Timing a one-off request outside the client's scoped work — see `TimeEntry.isAdhoc`. */
+  isAdhoc?: boolean
   /**
    * Group timing: the member client ids this block will be split across for
    * billing later. When set, the timer is tracking against a group — on stop it
@@ -1219,6 +1250,13 @@ export type TimerState = {
 }
 
 export type InvoiceLine = {
+  /**
+   * What produced this line. The shared builder has always set it; it is
+   * declared here so a consumer can tell an `adhoc` line from a scoped one
+   * without matching on label text, which is how the per-client preview used to
+   * do it and why a renamed line silently changed that page's behavior.
+   */
+  kind?: string
   label: string
   detail: string
   amount: number

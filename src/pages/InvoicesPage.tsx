@@ -28,6 +28,7 @@ import {
   resolveInvoiceRecipients,
   type InvoiceRecipientDetail,
 } from '../lib/utils'
+import { renderedInvoiceLines } from '../../lib/invoice-lines.js'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
 import { generateInvoicesRequest, listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
 import { selectableClients } from '../lib/clientLifecycle'
@@ -225,8 +226,17 @@ function buildDisplayInvoice(
 
   // Build per-entry rate-based lines, then merge with subscription/plan lines
   // from the base invoice so subscription clients still see their plan fee.
+  // Ad hoc lines are dropped here because `entryLines` below re-lists EVERY
+  // client entry, ad hoc ones included — keeping both would show the same work
+  // twice on this preview. (The label test is a pre-existing weakness: since the
+  // June 2026 cutover the scoped line reads "Billable hours — <name>" and no
+  // longer matches either, so hourly work is already listed twice here. That is
+  // older than this feature and is left alone rather than quietly changed.)
   const subscriptionLines = invoice.lines.filter(
-    (line) => line.label !== 'Billable hours' && line.label !== 'Hourly overage',
+    (line) =>
+      line.kind !== 'adhoc' &&
+      line.label !== 'Billable hours' &&
+      line.label !== 'Hourly overage',
   )
 
   // Work-type categorization is retired; fall back to a generic label so
@@ -297,13 +307,17 @@ function buildDisplayInvoice(
  * The time-breakdown flags are forced off: a stored invoice carries its lines,
  * not the underlying entries, so there is no per-entry detail to expand and
  * pretending otherwise would print an empty section.
+ *
+ * Ad hoc lines the owner left off drop out here, through the same shared filter
+ * the PDF and the email use — the printed page and the emailed one have to be
+ * the same document. They carry $0.00, so nothing below moves.
  */
 function persistedToDisplay(
   stored: PersistedInvoice,
   client: Client,
   periodLabel: string,
 ): DisplayInvoice {
-  const lines: DisplayLine[] = stored.lineItems.map((line) => ({
+  const lines: DisplayLine[] = renderedInvoiceLines(stored.lineItems).map((line) => ({
     label: line.label,
     detail: line.detail,
     amount: line.amount,
