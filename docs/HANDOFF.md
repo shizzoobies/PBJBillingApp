@@ -146,6 +146,30 @@ snapshot first, single transaction, re-verify after.
 
 ## 5. Where things stand (newest first)
 
+**2026-08-18/19 — the sent-back queue run + Brittany's review night.** Two days,
+nine feature deploys, suite 1834 → **2113 tests / 125 files**. Railway had a
+declared incident on the 18th (deploys stuck QUEUED 20–50 min, two FAILEDs with
+empty build logs) — recovery that works: push the next ready commit to supersede
+a stuck QUEUED entry; `redeploy` is refused while one is queued. Every tracker
+flip stayed gated on deploy SUCCESS + `/health` 200.
+
+| Commit | What |
+|---|---|
+| `55a9fe2` | **Waiting lifecycle** (featreq-8b7d06d7 + b05a2f3a, from Brittany's annotated "done button" email): draft with Save/Clear → one atomic create → EVERYTHING locked (who/message/task; `waitingLockRefusal` + `waitForTaskLinkDenial` in `lib/waiting-on-state.js`, shared server/UI); Question button (Delayed + step chip; `questions[]` append-only beside `sendBacks[]`; `waiting_on_question` event); A's awaiting-OK view is Approve/Send-back only; `planWaitingDone` deleted. Permanence made STRUCTURAL: `preservedNodeWaits()` in `write()` preserves waits from stored rows on the bulk save. |
+| `9328f0c` | **Recap rework** (featreq-926862e2, from her marked-up PDF): the page IS the comparison — per-role ESTIMATE\|ACTUAL\|OVER/UNDER tables for hours and profit with exact Total rows, Yearly period (`lib/periods.js` `'year'`, `MONTHS_IN_PERIOD`), Tasks last, bolt-on panel deleted, staff payloads redacted of estimates (`estimatesVisible`). Multi-month Billing captions "today's rates" — NO rate history exists. |
+| `fc7119f` | **Payroll rounding, third and final** (featreq-7c8f64d7, HER rule verbatim: 2dp hours × rate): `displayHours()` is both the printed and the costing hours; every Hours/Cost column sums its displayed rows; detail rows are a largest-remainder split of person-period pay; firm-analytics/assistant quote the same 2dp hours; Raw CSV stopped double-charging full-mode repeats. |
+| `54ff1cc` | **Reimbursed-expense auto-advance** (featreq-fe3f8b0f): coverage verbiage set once, window advances per generation, `coverage_history` ledger is the one truth (gate derived server-side, send route enforces, void releases the period, anchor day follows a confirmed end). Skip/pause-resume/backfill ASK; consecutive is hands-off. Rebased over the chip commits (kept both protections + interaction suite). |
+| `cf6a0d6` | **Wait-for-task picker** (featreq-5dd514b8): same-client filter existed since June — the real fix is offerable-vs-resolvable (`src/lib/waitForTaskOptions.ts`): offers only visible+unskipped, but a saved link to a recycled/skipped/cross-client task always renders (labeled with client name) and stays clearable. |
+| `190333a` `26b0ef8` | **Board scoping** (active-on only + "Show my bookkeepers" toggle) and **waiting permanence** (no deletion path; Done agrees with the chip; no self-waits) — see the queue-ships memory for the full story. |
+| `22c55ce` `1c3b61b` `aec01f9` `d3a386a` | The three chip sessions landed mid-run (firm-analytics labor cost; owner-preview scope leak — preview now sees what THEY see; materializer write-back guard). The rebase of `54ff1cc` over `d3a386a` is where the coverage-preserve and the write-back guard were reconciled. |
+
+**Facts settled (do not re-derive):** Brittany pays 2dp hours × rate — "the
+staple for all comparisons" (her words, on the tracker); a wait names another
+employee or the client, never yourself; lock-at-save reverses the editable-note
+scope on her explicit email. **Open with her:** the recurring-pile picker
+question, step-deletion wait warning, card fee/surcharge. **Open with Alex:**
+featreq-79b6d974 engagement-to-billing needs a planning session.
+
 **2026-08-09/10 — the invoicing ship run.** One long session with Alex actively
 testing as features landed: I4 finished, then five follow-on features, then a
 queue item — eight deploys, all verified live (deploy SUCCESS on the pushed
