@@ -65,6 +65,7 @@ let contextValue: AppContextValue
 const waitingOnDone = vi.fn()
 const waitingOnVerify = vi.fn()
 const waitingOnSendBack = vi.fn()
+const waitingOnQuestion = vi.fn()
 const toggleChecklistItem = vi.fn()
 const toggleSubItem = vi.fn()
 
@@ -85,6 +86,7 @@ function signInAs(viewerId: string, checklists: Checklist[]) {
     waitingOnDone,
     waitingOnVerify,
     waitingOnSendBack,
+    waitingOnQuestion,
   } as unknown as AppContextValue
 }
 
@@ -315,6 +317,105 @@ describe('send back', () => {
 
     expect(tab(/I'm waiting on others/)).toHaveTextContent('1')
     expect(within(waitLine(/Waiting on Lisa Chen/)).queryAllByRole('button')).toHaveLength(0)
+  })
+})
+
+/**
+ * The second button on her annotated Delayed screenshot (featreq-8b7d06d7):
+ * "a question / send back button that opens a message box… sending does not
+ * complete the wait." It is the mirror of the requester's Send back — same
+ * conversation, other direction — and the ONLY control on this page that leaves
+ * the row exactly where it is.
+ */
+describe('the question button', () => {
+  const ask = (line: HTMLElement) =>
+    within(line).getByRole('button', { name: 'Question' })
+
+  it('sits beside Done on the blocker tab, and nothing else changes', () => {
+    signInAs(B, [checklistWith([step([wait()])])])
+    renderPage()
+
+    const line = waitLine(/Waiting on Lisa Chen/)
+    const labels = within(line)
+      .getAllByRole('button')
+      .map((button) => button.textContent?.trim())
+    expect(labels).toEqual(['Done', 'Question'])
+  })
+
+  it('asks for the message before it will send anything', () => {
+    signInAs(B, [checklistWith([step([wait()])])])
+    renderPage()
+
+    fireEvent.click(ask(waitLine(/Waiting on Lisa Chen/)))
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    expect(waitingOnQuestion).not.toHaveBeenCalled()
+  })
+
+  it('sends the message without finishing the wait', () => {
+    signInAs(B, [checklistWith([step([wait()])])])
+    renderPage()
+
+    fireEvent.click(ask(waitLine(/Waiting on Lisa Chen/)))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Question for Brittany Fox' }), {
+      target: { value: '  which account?  ' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    expect(waitingOnQuestion).toHaveBeenCalledWith('cl-1', 'wo-1', 'which account?')
+    // The three things it must NOT do: finish, approve, or tick the step off.
+    expect(waitingOnDone).not.toHaveBeenCalled()
+    expect(waitingOnVerify).not.toHaveBeenCalled()
+    expect(toggleChecklistItem).not.toHaveBeenCalled()
+  })
+
+  it('can be backed out of without sending anything', () => {
+    signInAs(B, [checklistWith([step([wait()])])])
+    renderPage()
+
+    fireEvent.click(ask(waitLine(/Waiting on Lisa Chen/)))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(waitingOnQuestion).not.toHaveBeenCalled()
+    expect(ask(waitLine(/Waiting on Lisa Chen/))).toBeInTheDocument()
+  })
+
+  // The whole point: it is still B's move afterwards.
+  it('leaves the wait on the blocker tab, still waiting', () => {
+    const asked = wait({
+      questions: [{ at: '2026-08-08T09:00:00.000Z', by: B, note: 'which account?' }],
+    })
+    signInAs(B, [checklistWith([step([asked])])])
+    renderPage()
+
+    expect(tab(/Waiting on me/)).toHaveTextContent('1')
+    const line = waitLine(/Waiting on Lisa Chen/)
+    expect(within(line).getByRole('button', { name: /Done/ })).toBeInTheDocument()
+    expect(line).toHaveTextContent('Question from Lisa Chen — which account?')
+  })
+
+  it('shows the question to the person who has to answer it', () => {
+    const asked = wait({
+      questions: [{ at: '2026-08-08T09:00:00.000Z', by: B, note: 'which account?' }],
+    })
+    signInAs(A, [checklistWith([step([asked])])])
+    renderPage()
+
+    const line = waitLine(/Waiting on Lisa Chen/)
+    expect(line).toHaveTextContent('Question from Lisa Chen — which account?')
+    // Reading it is all A can do from here — a question is not an approval.
+    expect(within(line).queryAllByRole('button')).toHaveLength(0)
+  })
+
+  it('is never offered on a client wait — a client has no login to read it', () => {
+    const clientWait = wait({ blockerId: CLIENT.id, blockerType: 'client' })
+    signInAs(A, [checklistWith([step([clientWait])])])
+    renderPage()
+
+    const line = waitLine(/Waiting on Acme Dental/)
+    const labels = within(line)
+      .getAllByRole('button')
+      .map((button) => button.textContent?.trim())
+    expect(labels).not.toContain('Question')
   })
 })
 

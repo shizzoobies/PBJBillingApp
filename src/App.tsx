@@ -56,6 +56,7 @@ import {
   waitingOnDoneRequest,
   waitingOnVerifyRequest,
   waitingOnSendBackRequest,
+  waitingOnQuestionRequest,
   fetchWaitingOnMe,
   updateChecklistMetaRequest,
   listPendingTaskEdits,
@@ -1202,6 +1203,7 @@ function App() {
         blockerId?: string
         blockerType?: 'employee' | 'client'
         note?: string
+        waitingForChecklistId?: string | null
       },
     ) => {
       if (previewActiveRef.current) return
@@ -1239,6 +1241,18 @@ function App() {
       mergeChecklist(updated)
       // It is the blocker's move again, so it reappears in THEIR queue —
       // refreshing here is what makes that show up without a reload.
+      await refreshWaitingOnMe()
+    },
+    [mergeChecklist, refreshWaitingOnMe],
+  )
+
+  const waitingOnQuestion = useCallback(
+    async (checklistId: string, waitingOnId: string, note: string) => {
+      if (previewActiveRef.current) return
+      const updated = await waitingOnQuestionRequest(checklistId, waitingOnId, note)
+      mergeChecklist(updated)
+      // The wait has not moved — it is still theirs — but the refreshed queue
+      // carries the question they just asked, so their own row shows it too.
       await refreshWaitingOnMe()
     },
     [mergeChecklist, refreshWaitingOnMe],
@@ -3880,6 +3894,7 @@ function App() {
     waitingOnDone,
     waitingOnVerify,
     waitingOnSendBack,
+    waitingOnQuestion,
     restoreChecklist,
     emptyChecklistRecycleBin,
     deleteTeamMember,

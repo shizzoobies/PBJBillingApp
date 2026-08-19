@@ -4,8 +4,10 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
 import { WaitApprovalActions } from '../components/WaitApprovalActions'
+import { WaitQuestionAction } from '../components/WaitQuestionAction'
 import type { WaitingOn } from '../lib/types'
 import {
+  canAskWaitingOnQuestion,
   canMarkWaitingOnDone,
   canVerifyWaitingOn,
   isClientWait,
@@ -107,6 +109,7 @@ export function DelayedPage() {
     waitingOnDone,
     waitingOnVerify,
     waitingOnSendBack,
+    waitingOnQuestion,
     activeEmployeeId: meId,
   } = useAppContext()
   const { clients, employees, checklists } = data
@@ -128,7 +131,12 @@ export function DelayedPage() {
   // is exactly what "the button does nothing" looks like from the outside.
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const run = async (work: () => Promise<void> | void) => {
+  /**
+   * `rethrow` is for the callers that also need to know it failed — the question
+   * composer keeps what was typed when the send is refused, which it can only do
+   * if the rejection reaches it. The red line above shows the reason either way.
+   */
+  const run = async (work: () => Promise<void> | void, { rethrow = false } = {}) => {
     setError(null)
     setBusy(true)
     try {
@@ -139,6 +147,7 @@ export function DelayedPage() {
           ? err.message
           : "Couldn't update this wait — please try again.",
       )
+      if (rethrow) throw err
     } finally {
       setBusy(false)
     }
@@ -364,7 +373,7 @@ export function DelayedPage() {
 
       <p className="panel-intro">
         {activeTab === 'blocking'
-          ? 'Steps a colleague is waiting on YOU for. Press Done when your part is finished — it leaves this list and goes back to whoever asked, who has the final say.'
+          ? 'Steps a colleague is waiting on YOU for. Press Done when your part is finished — it leaves this list and goes back to whoever asked, who has the final say. Not sure what they need? Question sends them a message and leaves the item right here.'
           : "Steps YOU are waiting on. Nothing to press until they mark their part done — then you can approve it or send it back with a note."}
       </p>
 
@@ -459,6 +468,17 @@ export function DelayedPage() {
                                               waitingOnSendBack(row.checklistId, entry.id, note),
                                             )
                                           }
+                                          onAsk={(note) =>
+                                            run(
+                                              () =>
+                                                waitingOnQuestion(
+                                                  row.checklistId,
+                                                  entry.id,
+                                                  note,
+                                                ),
+                                              { rethrow: true },
+                                            )
+                                          }
                                         />
                                       ))}
                                     </ul>
@@ -507,7 +527,9 @@ export function DelayedPage() {
  * One structured wait inside a Delayed row, with whatever the viewer is allowed
  * to press on this tab — which is the whole point of the split:
  *
- *   blocking / waiting    → Done (yours to finish)
+ *   blocking / waiting    → Done (yours to finish) and Question (ask first).
+ *                           Her annotated screenshot has both, and only Done
+ *                           finishes anything — a question leaves the row here.
  *   requesting / waiting  → nothing. "no button to push done just so they can
  *                           see and remember it". The one exception is a CLIENT
  *                           wait, which has no second party: whoever chased the
@@ -525,6 +547,7 @@ function DelayedWaitRow({
   onDone,
   onApprove,
   onSendBack,
+  onAsk,
 }: {
   entry: WaitingOn
   tab: DelayedTab
@@ -536,12 +559,15 @@ function DelayedWaitRow({
   onDone: () => void
   onApprove: () => void
   onSendBack: (note: string) => void
+  /** The question composer's Send — appends a message, finishes nothing. */
+  onAsk: (note: string) => void
 }) {
   const stage = waitingOnStage(entry)
   // The owner override is deliberately off: this page shows everyone their own
   // part in the hand-off, owners included.
   const permission = { entry, userId: meId, isOwner: false, assigneeId }
   const lastSendBack = entry.sendBacks?.[entry.sendBacks.length - 1]
+  const lastQuestion = entry.questions?.[entry.questions.length - 1]
   const nameOf = (id: string) => employees.find((e) => e.id === id)?.name ?? 'A team member'
 
   return (
@@ -556,6 +582,16 @@ function DelayedWaitRow({
         <span className="delayed-wait-sendback">
           {`Sent back by ${nameOf(lastSendBack.by)}${
             lastSendBack.note ? ` — ${lastSendBack.note}` : ''
+          }`}
+        </span>
+      ) : null}
+      {/* The other direction of the same conversation: what the person being
+          waited on still needs to know. Shown on both tabs — A has to read the
+          question, and B has to remember they asked it. */}
+      {lastQuestion ? (
+        <span className="delayed-wait-question">
+          {`Question from ${nameOf(lastQuestion.by)}${
+            lastQuestion.note ? ` — ${lastQuestion.note}` : ''
           }`}
         </span>
       ) : null}
@@ -574,6 +610,15 @@ function DelayedWaitRow({
         >
           <Check size={14} /> Done
         </button>
+      ) : null}
+      {/* Beside Done, never instead of it: asking appends a message and leaves
+          the row exactly here. */}
+      {tab === 'blocking' && canAskWaitingOnQuestion(permission) ? (
+        <WaitQuestionAction
+          busy={busy}
+          requesterName={entry.requestedBy ? nameOf(entry.requestedBy) : 'whoever asked'}
+          onAsk={onAsk}
+        />
       ) : null}
       {tab === 'requesting' && stage === 'resolved' && canVerifyWaitingOn(permission) ? (
         <WaitApprovalActions

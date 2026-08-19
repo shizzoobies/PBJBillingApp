@@ -511,8 +511,6 @@ import {
   checklistMonthKey,
 } from '../../lib/checklist-identity.js'
 import {
-  canMarkWaitingOnDone,
-  canVerifyWaitingOn,
   isClientWait,
   isWaitingOnOpen,
   type WaitingOnLike,
@@ -779,63 +777,6 @@ export function describeWaitProvenance(
     )
   }
   return parts.join(' · ')
-}
-
-/**
- * What "Done" in the waiting editor does to each open person-blocker on the
- * step: report my part done, confirm theirs — or nothing at all, because it is
- * still someone else's move.
- *
- * That third case used to be a CANCEL, which deleted the record. Her fifth round
- * ended that: "we don't want to lose the data and we don't want to impact other
- * people interacting with it." Pressing Done on a wait you are not the blocker
- * for is not consent to erase the other person's half of it, so it is planned as
- * `'theirs'` and left exactly where it is. The editor names them instead of
- * quietly doing nothing — a wait that stays open keeps the step amber, which is
- * the whole reason the old version reached for a delete.
- *
- * The two capability questions are asked with the SAME predicates the chip and
- * the server use, and `isOwner` / `assigneeId` are passed through, so the button
- * agrees with the buttons beside it. Deciding with a bare `blockerId === meId`
- * told an owner "only they can mark their part done" about a wait the chip was
- * offering them, and sent a blocker's press at `verify` — which the server
- * answers with a raw 403.
- *
- * Retiring the ones you CAN is not optional: `stepIsWaiting` ORs `waitingOns`
- * in, so a "Done" that only flipped the `waiting` boolean left the step amber
- * and the editor open — the click produced no visible change whatsoever.
- */
-export function planWaitingDone(
-  waitingOns: ReadonlyArray<{
-    id: string
-    blockerId: string
-    requestedBy?: string
-    blockerType?: 'employee' | 'client'
-    resolvedAt?: string
-    verifiedAt?: string
-  }>,
-  meId: string,
-  context: { isOwner?: boolean; assigneeId?: string | null } = {},
-): Array<{ id: string; action: 'done' | 'theirs' | 'verify' }> {
-  return waitingOns.filter(isWaitingOnOpen).map((entry) => {
-    const permission = {
-      entry,
-      userId: meId,
-      isOwner: context.isOwner ?? false,
-      assigneeId: context.assigneeId ?? null,
-    }
-    // Mine to finish (or a client wait, which nobody hands back) — the first
-    // Done. Only ever true while the wait is still amber.
-    if (canMarkWaitingOnDone(permission)) {
-      return { id: entry.id, action: 'done' as const }
-    }
-    // Reported done by the other side and mine to approve — this press is the
-    // confirmation. Only ever true at `resolved`.
-    if (canVerifyWaitingOn(permission)) {
-      return { id: entry.id, action: 'verify' as const }
-    }
-    return { id: entry.id, action: 'theirs' as const }
-  })
 }
 
 export type ChecklistStatus = 'Done' | 'Overdue' | 'In progress' | 'Not started'

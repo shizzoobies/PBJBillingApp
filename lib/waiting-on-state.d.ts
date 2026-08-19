@@ -23,6 +23,17 @@ export type WaitingSendBack = {
   resolvedBy?: string
 }
 
+/**
+ * One question the person being waited on asked without finishing the wait.
+ * Append-only: asking never resolves anything, so these accumulate beside the
+ * send-backs as the two sides of the same conversation.
+ */
+export type WaitingQuestion = {
+  at: string
+  by: string
+  note?: string
+}
+
 /** The shape the predicates actually read. Deliberately structural. */
 export type WaitingOnLike = {
   id?: string
@@ -34,6 +45,7 @@ export type WaitingOnLike = {
   verifiedAt?: string
   verifiedBy?: string
   sendBacks?: WaitingSendBack[]
+  questions?: WaitingQuestion[]
 }
 
 export type WaitingStepLike = {
@@ -51,8 +63,22 @@ export type WaitingOnPermissionArgs = {
 export const WAITING_STAGES: readonly WaitingOnStage[]
 export const DELAYED_TABS: readonly DelayedTab[]
 export const SAVED_WAIT_IS_PERMANENT: string
+export const SAVED_WAIT_FIELDS_ARE_LOCKED: string
+export const LOCKED_WAIT_STEP_FIELDS: readonly string[]
 export const SELF_WAIT_REFUSAL: string
 export const REFUSED_WAITING_ON_ACTIONS: readonly string[]
+
+export function hasLiveSavedWait(node: WaitingStepLike | undefined): boolean
+export function waitForTaskLinkDenial(args: {
+  checklist: { id?: string; clientId?: string } | undefined
+  pool?: Array<{ id?: string; clientId?: string }>
+  taskId: string
+  current?: string
+}): { status: number; error: string } | null
+export function waitingLockRefusal(
+  node: WaitingStepLike | undefined,
+  patch: Record<string, unknown> | undefined,
+): { status: number; error: string } | null
 
 export function waitingOnActionRefusal(
   action: string,
@@ -69,6 +95,7 @@ export function isWaitingOnOpen(entry: WaitingOnLike | undefined): boolean
 export function canMarkWaitingOnDone(args: WaitingOnPermissionArgs): boolean
 export function canVerifyWaitingOn(args: WaitingOnPermissionArgs): boolean
 export function canSendBackWaitingOn(args: WaitingOnPermissionArgs): boolean
+export function canAskWaitingOnQuestion(args: WaitingOnPermissionArgs): boolean
 export function waitingOnConcernsUser(args: {
   entry: WaitingOnLike
   userId: string

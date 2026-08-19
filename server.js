@@ -103,6 +103,7 @@ import {
   verifyStripeEvent,
 } from './lib/stripe-rail.js'
 import {
+  canAskWaitingOnQuestion,
   canMarkWaitingOnDone,
   canSendBackWaitingOn,
   canVerifyWaitingOn,
@@ -110,6 +111,8 @@ import {
   isSelfWait,
   REFUSED_WAITING_ON_ACTIONS,
   SELF_WAIT_REFUSAL,
+  waitForTaskLinkDenial,
+  waitingLockRefusal,
   waitingOnActionRefusal,
   waitingOnStage,
 } from './lib/waiting-on-state.js'
@@ -267,14 +270,22 @@ const WORKSPACE_VERSION_HEADER = 'x-workspace-version'
 const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024 // 10 MB
 
 /**
- * The waiting-on action route. The three stage moves are listed here; the
+ * How much of a send-back note or a question is kept. Both are APPENDED to the
+ * wait forever and both ride inside the step's JSONB, so an unbounded message
+ * is paid for on every read of that checklist, by everyone, permanently.
+ */
+const WAIT_MESSAGE_MAX_CHARS = 500
+
+/**
+ * The waiting-on action route. The three stage moves are listed here, plus
+ * `question` — which moves no stage at all, it only appends a message; the
  * removal words come from `REFUSED_WAITING_ON_ACTIONS`, so anything that would
  * erase a saved wait MATCHES and is answered with the reason (409) instead of
  * falling through to a bare 404. Built once at module load rather than per
  * request.
  */
 const WAITING_ON_ACTION_ROUTE = new RegExp(
-  `^/api/checklists/([^/]+)/waiting-ons/([^/]+)/(done|verify|send-back|${REFUSED_WAITING_ON_ACTIONS.join(
+  `^/api/checklists/([^/]+)/waiting-ons/([^/]+)/(done|verify|send-back|question|${REFUSED_WAITING_ON_ACTIONS.join(
     '|',
   )})$`,
 )
@@ -6890,6 +6901,30 @@ const server = createServer(async (request, response) => {
               ? ''
               : String(payload.waitingForChecklistId ?? '')
         }
+        // A live saved wait freezes this sub-step's note, its task link and its
+        // amber flag. The editor stops offering those controls the moment a wait
+        // is saved; this is the same rule stated where it can actually be
+        // enforced. See lib/waiting-on-state.js.
+        const targetSubItem = (targetItem.subItems ?? []).find((sub) => sub.id === subItemId)
+        const subLockRefusal = waitingLockRefusal(targetSubItem, patch)
+        if (subLockRefusal) {
+          sendJson(response, subLockRefusal.status, { error: subLockRefusal.error })
+          return
+        }
+        // Parity with the item route: a link this sub-step could not honestly
+        // wait for is refused rather than stored.
+        if (patch.waitingForChecklistId !== undefined) {
+          const subLinkDenial = waitForTaskLinkDenial({
+            checklist,
+            pool: [...(data.checklists ?? []), ...(data.recycledChecklists ?? [])],
+            taskId: patch.waitingForChecklistId,
+            current: targetSubItem?.waitingForChecklistId ?? '',
+          })
+          if (subLinkDenial) {
+            sendJson(response, subLinkDenial.status, { error: subLinkDenial.error })
+            return
+          }
+        }
         const updated = await appDataStore.updateChecklistSubItem(
           checklistId,
           itemId,
@@ -6927,6 +6962,10 @@ const server = createServer(async (request, response) => {
     //   send-back — the requester does NOT approve: the wait returns to the
     //               blocker carrying a new note, and the rejected resolution is
     //               kept on `sendBacks[]`. Body: { note }.
+    //   question  — the blocker asks the requester something WITHOUT finishing.
+    //               No stage moves: the message is appended to `questions[]`,
+    //               the requester is notified, and the wait stays theirs.
+    //               Body: { note }.
     //   cancel    — REFUSED (with `delete` / `remove`, its reserved synonyms).
     //               It used to delete the row. A saved wait is a shared record
     //               now, so the word stays in the pattern only so an old tab (or
@@ -6982,8 +7021,37 @@ const server = createServer(async (request, response) => {
       const clientWait = isClientWait(entry)
       /** Set by the send-back branch below; the note that rides back to the blocker. */
       let sendBackNote = ''
+      /** Set by the question branch below; the message that rides back to the requester. */
+      let questionNote = ''
 
-      if (action === 'done') {
+      if (action === 'question') {
+        // Her new button on the Delayed page: B asks A something without
+        // finishing. Same people and same stage as Done, because it is the same
+        // move seen from the other side — see canAskWaitingOnQuestion.
+        if (!canAskWaitingOnQuestion(permissionArgs)) {
+          sendJson(response, waitingOnStage(entry) === 'waiting' ? 403 : 409, {
+            error: clientWait
+              ? // No login on the far end, and the person holding it would be
+                // asking themselves.
+                'A client wait has nobody to ask — clients have no login here'
+              : waitingOnStage(entry) === 'waiting'
+                ? 'Only the person being waited on can send a question back'
+                : 'This wait has already been marked done, so there is nothing to ask about',
+          })
+          return
+        }
+        // A blank message is the whole point of the button, so it is required
+        // exactly the way a send-back note is. Capped at the same length: these
+        // are appended forever and ride inside the step's JSONB, so an
+        // unbounded one bloats every read of the checklist it sits on.
+        questionNote = String((await readJsonBody(request))?.note ?? '')
+          .trim()
+          .slice(0, WAIT_MESSAGE_MAX_CHARS)
+        if (!questionNote) {
+          sendJson(response, 400, { error: 'Say what you need to know before sending it' })
+          return
+        }
+      } else if (action === 'done') {
         if (!canMarkWaitingOnDone(permissionArgs)) {
           sendJson(response, waitingOnStage(entry) === 'waiting' ? 403 : 409, {
             error:
@@ -7029,7 +7097,9 @@ const server = createServer(async (request, response) => {
         }
         // Her words: "send back with another note". A bare rejection tells the
         // blocker nothing, so the note is the payload, not a decoration.
-        sendBackNote = String((await readJsonBody(request))?.note ?? '').trim()
+        sendBackNote = String((await readJsonBody(request))?.note ?? '')
+          .trim()
+          .slice(0, WAIT_MESSAGE_MAX_CHARS)
         if (!sendBackNote) {
           sendJson(response, 400, { error: 'Say what still needs doing before sending it back' })
           return
@@ -7046,10 +7116,16 @@ const server = createServer(async (request, response) => {
             ? await appDataStore.markWaitingOnVerified(checklistId, waitingOnId, {
                 userId: session.user.id,
               })
-            : await appDataStore.markWaitingOnSentBack(checklistId, waitingOnId, {
-                userId: session.user.id,
-                note: sendBackNote,
-              })
+            : action === 'question'
+              ? // Appends a message and nothing else — the wait does not move.
+                await appDataStore.addWaitingOnQuestion(checklistId, waitingOnId, {
+                  userId: session.user.id,
+                  note: questionNote,
+                })
+              : await appDataStore.markWaitingOnSentBack(checklistId, waitingOnId, {
+                  userId: session.user.id,
+                  note: sendBackNote,
+                })
       if (!resolved) {
         sendJson(response, 404, { error: 'Waiting-on request not found' })
         return
@@ -7089,6 +7165,34 @@ const server = createServer(async (request, response) => {
           await appDataStore.recordActivity(
             session.user.id,
             'waiting_on_done',
+            `${checklistTitle}: ${resolved.label}`,
+          )
+        } else if (action === 'question') {
+          // The message goes to the side that is waiting — whoever asked, and
+          // the step's assignee, who is the one actually held up. Same recipient
+          // rule as `done` for the same reason, and the same dedupe.
+          //
+          // Plus the BLOCKER: an owner may ask on their behalf (the predicate
+          // lets them), and the person actually being waited on has to see a
+          // question that was sent in their name. When they asked it themselves
+          // the delete below takes them straight back out.
+          const askerName = nameOf(session.user.id)
+          const recipients = new Set()
+          if (resolved.assigneeId) recipients.add(resolved.assigneeId)
+          if (resolved.entry.requestedBy) recipients.add(resolved.entry.requestedBy)
+          if (resolved.entry.blockerId) recipients.add(resolved.entry.blockerId)
+          recipients.delete(session.user.id)
+          for (const recipientId of recipients) {
+            await notify(appDataStore, recipientId, 'waiting_on_question', {
+              checklistId,
+              message: `${askerName} has a question about "${resolved.label}" in "${checklistTitle}" — ${questionNote}`,
+              link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+          await appDataStore.recordActivity(
+            session.user.id,
+            'waiting_on_question',
             `${checklistTitle}: ${resolved.label}`,
           )
         } else if (action === 'verify') {
@@ -7173,6 +7277,16 @@ const server = createServer(async (request, response) => {
         typeof payload?.subSubItemId === 'string' ? payload.subSubItemId : null
       const blockerId = typeof payload?.blockerId === 'string' ? payload.blockerId : ''
       const note = typeof payload?.note === 'string' ? payload.note : undefined
+      // The task this step waits for travels WITH the wait now. The editor
+      // holds who / message / task as one unsaved draft and Save posts all
+      // three, so the link cannot half-save — and once it is here it is locked
+      // like everything else on the record. Absent means "leave it as it is".
+      const waitingForChecklistId =
+        'waitingForChecklistId' in (payload ?? {})
+          ? payload.waitingForChecklistId === null
+            ? ''
+            : String(payload.waitingForChecklistId ?? '')
+          : undefined
       if (!itemId) {
         sendJson(response, 400, { error: 'itemId is required' })
         return
@@ -7210,6 +7324,62 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // The node this wait is being pinned to. Looked up here — before the
+      // store writes anything — because the two rules below are about what is
+      // ALREADY on that step. A sub-sub-item is addressed the same way the
+      // store's `_findChecklistNode` walks it.
+      const targetItemNode = (checklist.items ?? []).find((entry) => entry.id === itemId)
+      const targetSubNode = subItemId
+        ? (targetItemNode?.subItems ?? []).find((entry) => entry.id === subItemId)
+        : null
+      // NOTE: a sub-sub-item can carry a wait, and there is no PATCH route that
+      // reaches one — so the lock below is currently the ONLY guard on that
+      // depth. Any future sub-sub waiting UI (a note box, a task picker) must
+      // bring its own refusal with it, or it reopens the hole this closes.
+      const targetSubSubNode =
+        subItemId && subSubItemId
+          ? (targetSubNode?.subItems ?? []).find((entry) => entry.id === subSubItemId)
+          : null
+      const targetNode = subSubItemId
+        ? targetSubSubNode
+        : subItemId
+          ? targetSubNode
+          : targetItemNode
+      if (!targetNode) {
+        sendJson(response, 404, { error: 'Step not found' })
+        return
+      }
+
+      // Creating a SECOND wait must not become the back door into the fields the
+      // first one locked. Only a CHANGE is refused — an identical value, or no
+      // value at all, passes straight through, so adding a second wait to a
+      // locked step still works.
+      const createLockRefusal = waitingLockRefusal(
+        targetNode,
+        waitingForChecklistId !== undefined &&
+          waitingForChecklistId !== (targetNode.waitingForChecklistId ?? '')
+          ? { waitingForChecklistId }
+          : {},
+      )
+      if (createLockRefusal) {
+        sendJson(response, createLockRefusal.status, { error: createLockRefusal.error })
+        return
+      }
+
+      // …and the link itself has to be a task this step could honestly wait for.
+      if (waitingForChecklistId !== undefined) {
+        const linkDenial = waitForTaskLinkDenial({
+          checklist,
+          pool: [...(data.checklists ?? []), ...(data.recycledChecklists ?? [])],
+          taskId: waitingForChecklistId,
+          current: targetNode.waitingForChecklistId ?? '',
+        })
+        if (linkDenial) {
+          sendJson(response, linkDenial.status, { error: linkDenial.error })
+          return
+        }
+      }
+
       const result = await appDataStore.addWaitingOn(
         checklistId,
         { itemId, subItemId, subSubItemId },
@@ -7218,6 +7388,7 @@ const server = createServer(async (request, response) => {
           requestedBy: session.user.id,
           note,
           blockerType: isClientRequest ? 'client' : 'employee',
+          waitingForChecklistId,
         },
       )
       if (!result) {
@@ -7428,6 +7599,34 @@ const server = createServer(async (request, response) => {
             payload.waitingForChecklistId === null
               ? ''
               : String(payload.waitingForChecklistId ?? '')
+        }
+
+        // A live saved wait freezes this step's note, its task link and its
+        // amber flag — her latest word is that everything about a saved wait is
+        // fixed. The editor hides those controls; this is where it is actually
+        // enforced. Rename / due date / assignee are untouched by the lock:
+        // they are the step's business, not the wait's.
+        const itemLockRefusal = waitingLockRefusal(targetItem, patch)
+        if (itemLockRefusal) {
+          sendJson(response, itemLockRefusal.status, { error: itemLockRefusal.error })
+          return
+        }
+
+        // The link has to name a task this step could honestly wait for: one
+        // that exists (actives or the recycle bin), that is not this task, and
+        // that belongs to the same client. The picker has offered exactly that
+        // set since featreq-5dd514b8; the route used to take any string.
+        if (patch.waitingForChecklistId !== undefined) {
+          const linkDenial = waitForTaskLinkDenial({
+            checklist,
+            pool: [...(data.checklists ?? []), ...(data.recycledChecklists ?? [])],
+            taskId: patch.waitingForChecklistId,
+            current: targetItem.waitingForChecklistId ?? '',
+          })
+          if (linkDenial) {
+            sendJson(response, linkDenial.status, { error: linkDenial.error })
+            return
+          }
         }
 
         // Step edits (rename / due date / assignee) apply directly for anyone

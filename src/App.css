@@ -7789,10 +7789,59 @@ button.repeating-task-toggle-pill {
   opacity: 0.55;
 }
 
-.wait-sendback-composer {
+.wait-sendback-composer,
+.wait-question-composer {
   display: grid;
   gap: 6px;
   min-width: 220px;
+}
+
+/* ---- Question: "I need something before I can finish" ---------------- */
+/* The blocker's second button, beside Done. Amber rather than red or green,
+   because it settles nothing: the wait stays exactly where it is. */
+.waiting-blocker-question {
+  background: #fff;
+  border: 1px solid rgba(211, 155, 42, 0.6);
+  border-radius: 999px;
+  color: #8a6d1a;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+
+.waiting-blocker-question:hover:not(:disabled) {
+  background: #8a6d1a;
+  color: #fff;
+}
+
+.waiting-blocker-question:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.delayed-wait-question {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+/* A ticked step that still carries a live wait — the chips are all that's left. */
+.waiting-editor-done-note {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0;
+}
+
+/* The saved "waiting for" task on a locked step: it reads, it does not edit. */
+.waiting-for-locked {
+  color: #8a6d1a;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0;
 }
 
 .wait-sendback-note {
@@ -7822,7 +7871,8 @@ button.repeating-task-toggle-pill {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .waiting-blocker-sendback {
+  .waiting-blocker-sendback,
+  .waiting-blocker-question {
     transition: none;
   }
 }

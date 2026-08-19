@@ -497,6 +497,12 @@ export type AppContextValue = {
       blockerId?: string
       blockerType?: 'employee' | 'client'
       note?: string
+      /**
+       * The task this step waits for, saved WITH the wait. The editor holds
+       * who / message / task as one local draft and this call commits all
+       * three — after it, every one of them is locked.
+       */
+      waitingForChecklistId?: string | null
     },
   ) => Promise<void>
   /** Stage 1 — the blocker reports their part done (notifies the assignee + flagger). */
@@ -509,6 +515,17 @@ export type AppContextValue = {
    * `sendBacks[]`. The note is required by the server.
    */
   waitingOnSendBack: (
+    checklistId: string,
+    waitingOnId: string,
+    note: string,
+  ) => Promise<void>
+  /**
+   * The blocker's other button — a question for whoever asked, sent WITHOUT
+   * finishing. Nothing about the wait moves: it stays on their Delayed page and
+   * stays their move; the message lands on the record and the requester is
+   * notified. The message is required by the server.
+   */
+  waitingOnQuestion: (
     checklistId: string,
     waitingOnId: string,
     note: string,

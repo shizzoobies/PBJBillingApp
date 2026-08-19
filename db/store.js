@@ -10,7 +10,7 @@ import {
   findChecklistInstance,
 } from '../lib/checklist-identity.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
-import { waitingOnStage } from '../lib/waiting-on-state.js'
+import { isWaitingOnOpen, waitingOnStage } from '../lib/waiting-on-state.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
   buildInvoiceDraft,
@@ -750,6 +750,30 @@ export function normalizeWaitingOns(raw) {
           })
         if (events.length > 0) base.sendBacks = events
       }
+      // Questions the person being waited on asked WITHOUT finishing. Same
+      // stamped shape as a send-back and the same reason for existing: every
+      // read re-normalizes, so a key that isn't listed here is erased on the
+      // next load. Append-only — asking never resolves anything, so nothing
+      // rewrites or removes an entry.
+      if (Array.isArray(entry.questions)) {
+        const asked = entry.questions
+          .filter(
+            (event) =>
+              event &&
+              typeof event.at === 'string' &&
+              event.at &&
+              typeof event.by === 'string' &&
+              event.by,
+          )
+          .map((event) => {
+            const stamped = { at: event.at, by: event.by }
+            if (typeof event.note === 'string' && event.note.trim()) {
+              stamped.note = event.note.trim()
+            }
+            return stamped
+          })
+        if (asked.length > 0) base.questions = asked
+      }
       return base
     })
 }
@@ -1353,6 +1377,70 @@ export function preservedItemCompletion(done, previous) {
   if (previous?.done) return null
   // This save is what completed it (or the item is new and arrives complete).
   return new Date()
+}
+
+/**
+ * Return `node` with its waiting-on state taken from what is ALREADY STORED
+ * rather than from the bulk-save payload, recursing through sub-items and
+ * sub-sub-items. Both backends call it (Cardinal rule 1).
+ *
+ * WHY THE PAYLOAD CANNOT BE TRUSTED WITH THIS. `waitingOns` is written only by
+ * the dedicated waiting-on routes — nothing in the UI edits it — so a bulk save
+ * carrying a different value is always a stale snapshot, never an intention.
+ * The staleness guard normally catches that, and for the ordinary tab it does;
+ * this is the belt to its braces, and there is at least one live scenario where
+ * the braces alone are thin: a scoped GET hands back the FULL-workspace
+ * fingerprint, so a tab that only ever saw part of the workspace can still
+ * present a "current" token. Preserving on write makes the permanence her rule
+ * asks for STRUCTURAL — a wait cannot be erased by a save that never meant to
+ * touch it, whatever the fingerprint said.
+ *
+ * The trio (`waiting`, `waitingOn`, `waitingForChecklistId`) is preserved only
+ * while a LIVE saved wait sits on the node — exactly the fields, and exactly the
+ * window, that `waitingLockRefusal` freezes on the PATCH routes. With no live
+ * wait they are ordinary editable step fields and the payload wins, because the
+ * free-text note and the amber flag genuinely are a tab's to change.
+ *
+ * These fields are deliberately NOT in `VERSION_IGNORED_*`: unlike the coverage
+ * ledger, a wait mutation SHOULD move the fingerprint — every open tab needs to
+ * refetch a wait that changed, and ordinary tab payloads carry the same values
+ * back, so nothing here produces the false 409s that exclusion exists to avoid.
+ *
+ * @param {object} node - the payload's node.
+ * @param {object|undefined} stored - the same node as persisted, or undefined
+ *   when it is genuinely new (then the payload is all there is, which is right).
+ */
+export function preservedNodeWaits(node, stored) {
+  if (!node || typeof node !== 'object') return node
+  const next = { ...node }
+  if (stored) {
+    const storedWaits = normalizeWaitingOns(stored.waitingOns)
+    if (storedWaits.length > 0) next.waitingOns = storedWaits
+    else delete next.waitingOns
+    if (storedWaits.some(isWaitingOnOpen)) {
+      if (stored.waiting) next.waiting = true
+      else delete next.waiting
+      if (typeof stored.waitingOn === 'string' && stored.waitingOn) {
+        next.waitingOn = stored.waitingOn
+      } else delete next.waitingOn
+      if (typeof stored.waitingForChecklistId === 'string' && stored.waitingForChecklistId) {
+        next.waitingForChecklistId = stored.waitingForChecklistId
+      } else delete next.waitingForChecklistId
+    }
+  }
+  if (Array.isArray(node.subItems)) {
+    const storedSubById = new Map(
+      (Array.isArray(stored?.subItems) ? stored.subItems : [])
+        .filter((sub) => sub && typeof sub.id === 'string')
+        .map((sub) => [sub.id, sub]),
+    )
+    next.subItems = node.subItems.map((sub) =>
+      sub && typeof sub.id === 'string'
+        ? preservedNodeWaits(sub, storedSubById.get(sub.id))
+        : sub,
+    )
+  }
+  return next
 }
 
 /**
@@ -5126,10 +5214,30 @@ export class AppDataStore {
         // Completion stamps, for the same reason and with the same rule (see
         // `preservedItemCompletion`): the payload's copy is ignored, the stored
         // one wins, and only a step this save actually completes gets now().
+        //
+        // The same snapshot carries the WAITING state, for a stronger version of
+        // the same rule: a bulk payload may not create, alter or erase a saved
+        // wait at all (see `preservedNodeWaits`). One query rather than two —
+        // the rows are the same rows.
+        const priorItemRows = (
+          await client.query(
+            `select id, done, completed_at, waiting, waiting_on, waiting_for_checklist_id, waiting_ons, sub_items from checklist_items`,
+          )
+        ).rows
         const priorItemCompletion = new Map(
-          (
-            await client.query(`select id, done, completed_at from checklist_items`)
-          ).rows.map((row) => [row.id, { done: row.done, completedAt: row.completed_at }]),
+          priorItemRows.map((row) => [row.id, { done: row.done, completedAt: row.completed_at }]),
+        )
+        const priorItemWaits = new Map(
+          priorItemRows.map((row) => [
+            row.id,
+            {
+              waiting: row.waiting,
+              waitingOn: row.waiting_on,
+              waitingForChecklistId: row.waiting_for_checklist_id,
+              waitingOns: row.waiting_ons,
+              subItems: normalizeSubItems(row.sub_items, { withDone: true }),
+            },
+          ]),
         )
 
         await client.query('delete from checklist_items')
@@ -5696,7 +5804,10 @@ export class AppDataStore {
             continue
           }
 
-          for (const [index, item] of checklist.items.entries()) {
+          for (const [index, payloadItem] of checklist.items.entries()) {
+            // What is stored wins for every waiting field on this step and on
+            // each of its sub-nodes — a bulk save has no business writing them.
+            const item = preservedNodeWaits(payloadItem, priorItemWaits.get(payloadItem.id))
             const subItems = normalizeSubItems(item.subItems, { withDone: true })
             // `done` is derived for items with sub-items (recursing through any
             // sub-sub-items) — persist the roll-up.
@@ -5824,8 +5935,12 @@ export class AppDataStore {
             const next = { ...checklist }
             if (prior?.createdAt) next.createdAt = prior.createdAt
             if (Array.isArray(checklist.items)) {
-              next.items = checklist.items.map((item) => {
-                if (!item || typeof item.id !== 'string') return item
+              next.items = checklist.items.map((payloadItem) => {
+                if (!payloadItem || typeof payloadItem.id !== 'string') return payloadItem
+                // Cardinal rule 1 mirror of the Postgres branch: the stored
+                // waiting state wins over the payload's, all the way down the
+                // sub-item tree. See `preservedNodeWaits`.
+                const item = preservedNodeWaits(payloadItem, priorItemById.get(payloadItem.id))
                 const done = rollUpItemDone(item)
                 const completedAt = preservedItemCompletion(done, priorItemById.get(item.id))
                 const merged = { ...item }
@@ -10800,8 +10915,22 @@ export class AppDataStore {
    * Push a new structured blocker onto the node at `location`. Returns
    * `{ checklist, entry, node: { assigneeId, label } }` or null when the node
    * (or checklist) is missing.
+   *
+   * THE ONE WRITE. Everything a wait carries — who, the message, and the task
+   * it waits for — arrives here together, because the editor holds all three as
+   * an unsaved draft until Save (featreq-8b7d06d7). `waitingForChecklistId` is
+   * therefore applied to the node in the SAME call rather than by a follow-up
+   * PATCH: a wait that saved but whose task link didn't would be a wait nobody
+   * could repair, now that the saved fields are locked.
+   *
+   * Pass it as `undefined` to leave the node's existing link alone; `null` or
+   * `''` clears it.
    */
-  async addWaitingOn(checklistId, location, { blockerId, requestedBy, note, blockerType }) {
+  async addWaitingOn(
+    checklistId,
+    location,
+    { blockerId, requestedBy, note, blockerType, waitingForChecklistId },
+  ) {
     const entry = {
       id: `wo-${randomUUID().slice(0, 8)}`,
       blockerId: String(blockerId),
@@ -10813,6 +10942,18 @@ export class AppDataStore {
     // so existing rows and new ones look identical.
     if (blockerType === 'client') entry.blockerType = 'client'
 
+    // Applied to the node itself (not the entry) so the existing "the task you
+    // were waiting on is done" notification keeps reading the one field it has
+    // always read — see server.js's `waitingForChecklistId === updatedChecklist.id`.
+    const applyTaskLink = (node) => {
+      if (waitingForChecklistId === undefined) return
+      if (waitingForChecklistId === null || waitingForChecklistId === '') {
+        delete node.waitingForChecklistId
+      } else {
+        node.waitingForChecklistId = String(waitingForChecklistId)
+      }
+    }
+
     if (this.pool) {
       const data = await this.read()
       const checklist = data.checklists.find((c) => c.id === checklistId)
@@ -10820,7 +10961,17 @@ export class AppDataStore {
       const found = this._findChecklistNode(checklist, location)
       if (!found) return null
       found.node.waitingOns = [...(found.node.waitingOns ?? []), entry]
+      applyTaskLink(found.node)
       await this._persistItemWaitingOns(checklistId, found.item, Boolean(location.subItemId))
+      // A sub-node's link rides the `sub_items` JSONB the line above just
+      // rewrote; a top-level item keeps it in its own column.
+      if (!location.subItemId && waitingForChecklistId !== undefined) {
+        await this.pool.query(
+          `update checklist_items set waiting_for_checklist_id = $3, updated_at = now()
+           where checklist_id = $1 and id = $2`,
+          [checklistId, found.item.id, found.node.waitingForChecklistId ?? null],
+        )
+      }
       const fresh = await this.read()
       return {
         checklist: fresh.checklists.find((c) => c.id === checklistId) ?? checklist,
@@ -10835,6 +10986,7 @@ export class AppDataStore {
     const found = this._findChecklistNode(checklist, location)
     if (!found) return null
     found.node.waitingOns = [...(found.node.waitingOns ?? []), entry]
+    applyTaskLink(found.node)
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return {
       checklist,
@@ -11011,6 +11163,28 @@ export class AppDataStore {
       if (resolvedAt) event.resolvedAt = resolvedAt
       if (resolvedBy) event.resolvedBy = resolvedBy
       return { ...rest, sendBacks: [...(entry.sendBacks ?? []), event] }
+    })
+  }
+
+  /**
+   * QUESTION — the person being waited on says something back without finishing.
+   * Her annotated Delayed screenshot puts it beside Done: "a question / send
+   * back button that opens a message box… sending does not complete the wait."
+   *
+   * So this touches NO stage field. `resolvedAt` is not set, nothing is
+   * cleared, and the wait stays exactly where it was — on the blocker's Delayed
+   * page, still their move. All that changes is one appended message (and the
+   * notification the route sends afterwards).
+   *
+   * Append-only, like `sendBacks`: the two lists are the two directions of the
+   * same conversation, and neither ever rewrites what is already in it.
+   */
+  async addWaitingOnQuestion(checklistId, waitingOnId, { userId, note }) {
+    const at = nowIso()
+    return this._mutateWaitingOn(checklistId, waitingOnId, (entry) => {
+      const event = { at, by: String(userId) }
+      if (typeof note === 'string' && note.trim()) event.note = note.trim()
+      return { ...entry, questions: [...(entry.questions ?? []), event] }
     })
   }
 

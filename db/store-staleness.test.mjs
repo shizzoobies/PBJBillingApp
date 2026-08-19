@@ -994,8 +994,9 @@ function fakePostgres({
     if (createdAtSnapshot) {
       return { rows: createdAtRows[createdAtSnapshot[1]] ?? [] }
     }
-    // The sibling snapshot of what was already complete.
-    if (/^select id, done, completed_at from checklist_items$/i.test(trimmed)) {
+    // The sibling snapshot of what was already complete — and, since the wait
+    // preservation, of what waiting state each row already carried.
+    if (/^select id, done, completed_at[\s\S]*from checklist_items$/i.test(trimmed)) {
       return { rows: priorItemRows }
     }
     // The clients read inside read() — lets a test exercise the row mapper.
@@ -7376,5 +7377,500 @@ describe('the guarded write-back and the covered-date ledger (file backend)', ()
     const added = data.recurringReimbursements.find((entry) => entry.id === 'recur-payroll')
     expect(added.coverageAnchorDay).toBe(5)
     expect(added.coverageHistory).toEqual({})
+  })
+})
+
+/**
+ * The waiting-on record's two newest facts, on the file backend (Cardinal rule
+ * 1: the Postgres branch runs the identical walk through `_mutateWaitingOn` and
+ * the identical `normalizeWaitingOns`, so what is pinned here is the contract
+ * both implement).
+ *
+ *   1. A wait is created by ONE write carrying who, the message AND the task it
+ *      waits for. The editor holds all three as an unsaved draft, and after
+ *      Save every one of them is locked — a link that half-saved would be
+ *      unrepairable (featreq-8b7d06d7).
+ *   2. A QUESTION appends a message and moves NOTHING. "Sending does not
+ *      complete the wait."
+ */
+describe('a saved wait carries its task link and its questions (file backend)', () => {
+  const checklists = () => [
+    {
+      id: 'cl-1',
+      clientId: 'c1',
+      title: 'August close',
+      items: [
+        {
+          id: 'it-1',
+          label: 'Bank rec',
+          done: false,
+          subItems: [{ id: 'sub-1', title: 'Statements', done: false }],
+        },
+      ],
+    },
+  ]
+
+  const step = async () => {
+    const data = await store.read()
+    return data.checklists.find((c) => c.id === 'cl-1').items[0]
+  }
+
+  beforeEach(async () => {
+    await store.write(workspace({ checklists: checklists() }))
+  })
+
+  it('writes the wait and the waited-for task together', async () => {
+    const result = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      {
+        blockerId: 'emp-1',
+        requestedBy: 'emp-2',
+        note: 'the bank statements',
+        waitingForChecklistId: 'cl-other',
+      },
+    )
+    expect(result).not.toBeNull()
+
+    const item = await step()
+    expect(item.waitingOns).toHaveLength(1)
+    expect(item.waitingOns[0]).toMatchObject({
+      blockerId: 'emp-1',
+      requestedBy: 'emp-2',
+      note: 'the bank statements',
+    })
+    expect(item.waitingForChecklistId).toBe('cl-other')
+  })
+
+  it('leaves an existing task link alone when none is supplied', async () => {
+    await store.updateChecklistItem('cl-1', 'it-1', { waitingForChecklistId: 'cl-kept' })
+    await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'emp-1', requestedBy: 'emp-2' },
+    )
+    expect((await step()).waitingForChecklistId).toBe('cl-kept')
+  })
+
+  it('clears the link when the draft chose no task', async () => {
+    await store.updateChecklistItem('cl-1', 'it-1', { waitingForChecklistId: 'cl-old' })
+    await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'emp-1', requestedBy: 'emp-2', waitingForChecklistId: '' },
+    )
+    expect((await step()).waitingForChecklistId).toBeUndefined()
+  })
+
+  it('carries the link onto a SUB-item, where it rides the sub_items JSONB', async () => {
+    await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1', subItemId: 'sub-1' },
+      { blockerId: 'emp-1', requestedBy: 'emp-2', waitingForChecklistId: 'cl-other' },
+    )
+    const sub = (await step()).subItems[0]
+    expect(sub.waitingOns).toHaveLength(1)
+    expect(sub.waitingForChecklistId).toBe('cl-other')
+  })
+
+  it('appends a question and moves no stage at all', async () => {
+    const created = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'emp-1', requestedBy: 'emp-2', note: 'the bank statements' },
+    )
+    await store.addWaitingOnQuestion('cl-1', created.entry.id, {
+      userId: 'emp-1',
+      note: '  which account?  ',
+    })
+
+    const entry = (await step()).waitingOns[0]
+    expect(entry.questions).toEqual([
+      { at: expect.any(String), by: 'emp-1', note: 'which account?' },
+    ])
+    // Untouched: it is still theirs to finish, and the original ask survives.
+    expect(entry.resolvedAt).toBeUndefined()
+    expect(entry.verifiedAt).toBeUndefined()
+    expect(entry.note).toBe('the bank statements')
+  })
+
+  // Every read re-normalizes, so a key the normalizer does not list is erased
+  // on the next load — which is how this shape can silently vanish.
+  it('keeps every question through the normalizer, in order', async () => {
+    const created = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'emp-1', requestedBy: 'emp-2' },
+    )
+    await store.addWaitingOnQuestion('cl-1', created.entry.id, {
+      userId: 'emp-1',
+      note: 'which account?',
+    })
+    await store.addWaitingOnQuestion('cl-1', created.entry.id, {
+      userId: 'emp-1',
+      note: 'and which month?',
+    })
+
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const stored = persisted.checklists[0].items[0].waitingOns[0]
+    expect(stored.questions.map((q) => q.note)).toEqual(['which account?', 'and which month?'])
+    // …and again after a full read, which re-normalizes everything.
+    expect((await step()).waitingOns[0].questions.map((q) => q.note)).toEqual([
+      'which account?',
+      'and which month?',
+    ])
+  })
+
+  it('never removes a wait — questions accumulate beside the send-backs', async () => {
+    const created = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { blockerId: 'emp-1', requestedBy: 'emp-2' },
+    )
+    await store.addWaitingOnQuestion('cl-1', created.entry.id, {
+      userId: 'emp-1',
+      note: 'which account?',
+    })
+    await store.markWaitingOnDone('cl-1', created.entry.id, { userId: 'emp-1' })
+    await store.markWaitingOnSentBack('cl-1', created.entry.id, {
+      userId: 'emp-2',
+      note: 'the March page is missing',
+    })
+
+    const entry = (await step()).waitingOns[0]
+    expect(entry.questions).toHaveLength(1)
+    expect(entry.sendBacks).toHaveLength(1)
+    expect(entry.resolvedAt).toBeUndefined()
+  })
+})
+
+/**
+ * WAIT PERMANENCE, MADE STRUCTURAL ON THE BULK WRITE.
+ *
+ * Her rule is that a saved wait cannot be removed, and the routes enforce it —
+ * but `write()` re-inserts every checklist row from whatever snapshot the
+ * calling tab holds, so a payload that never meant to touch a wait could still
+ * flatten one. The staleness guard normally stops that; this is the belt to its
+ * braces, and there is a live scenario where the braces are thin: a scoped GET
+ * hands back the FULL-workspace fingerprint, so a tab that only saw part of the
+ * workspace can still present a "current" token.
+ *
+ * The rule (`preservedNodeWaits`, both backends): what is STORED wins for
+ * `waitingOns` always, and for the free-text trio while a live wait sits on the
+ * node — the same fields, in the same window, that `waitingLockRefusal` freezes
+ * on the PATCH routes.
+ */
+describe('a bulk save cannot touch a saved wait (file backend)', () => {
+  const savedWait = {
+    id: 'wo-keep',
+    blockerId: 'emp-1',
+    requestedBy: 'emp-2',
+    note: 'the bank statements',
+    createdAt: '2026-08-05T15:00:00.000Z',
+  }
+
+  const withWaits = (over = {}) => [
+    {
+      id: 'cl-1',
+      clientId: 'c1',
+      title: 'August close',
+      items: [
+        {
+          id: 'it-1',
+          label: 'Bank rec',
+          done: false,
+          waiting: true,
+          waitingOn: 'Lisa to send them',
+          waitingForChecklistId: 'cl-other',
+          waitingOns: [savedWait],
+          subItems: [
+            {
+              id: 'sub-1',
+              title: 'Statements',
+              done: false,
+              waitingOns: [{ ...savedWait, id: 'wo-sub' }],
+            },
+          ],
+          ...over,
+        },
+      ],
+    },
+  ]
+
+  const storedItem = async () => {
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return persisted.checklists[0].items[0]
+  }
+
+  beforeEach(async () => {
+    // The wait exists on disk first — as if the waiting-on route had written it.
+    await store.write(workspace({ checklists: withWaits() }))
+  })
+
+  it('ignores a payload that dropped the wait entirely', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          {
+            id: 'cl-1',
+            clientId: 'c1',
+            title: 'August close',
+            items: [
+              {
+                id: 'it-1',
+                label: 'Bank rec',
+                done: false,
+                subItems: [{ id: 'sub-1', title: 'Statements', done: false }],
+              },
+            ],
+          },
+        ],
+      }),
+    )
+
+    const item = await storedItem()
+    expect(item.waitingOns).toHaveLength(1)
+    expect(item.waitingOns[0].id).toBe('wo-keep')
+    // …and the SUB-item's wait, which rides the same JSONB.
+    expect(item.subItems[0].waitingOns).toHaveLength(1)
+    expect(item.subItems[0].waitingOns[0].id).toBe('wo-sub')
+  })
+
+  it('ignores a payload that rewrote the wait', async () => {
+    await store.write(
+      workspace({
+        checklists: withWaits({
+          waitingOns: [{ ...savedWait, note: 'something else entirely', blockerId: 'emp-9' }],
+        }),
+      }),
+    )
+
+    const entry = (await storedItem()).waitingOns[0]
+    expect(entry.note).toBe('the bank statements')
+    expect(entry.blockerId).toBe('emp-1')
+  })
+
+  it('ignores a payload that resolved or approved it', async () => {
+    await store.write(
+      workspace({
+        checklists: withWaits({
+          waitingOns: [
+            {
+              ...savedWait,
+              resolvedAt: '2026-08-09T00:00:00.000Z',
+              resolvedBy: 'emp-1',
+              verifiedAt: '2026-08-09T00:00:00.000Z',
+              verifiedBy: 'emp-2',
+            },
+          ],
+        }),
+      }),
+    )
+
+    const entry = (await storedItem()).waitingOns[0]
+    expect(entry.resolvedAt).toBeUndefined()
+    expect(entry.verifiedAt).toBeUndefined()
+  })
+
+  // The same three fields the PATCH routes freeze, frozen here for the same
+  // window — a bulk save is exactly the stale write that rule exists for.
+  it('keeps the note, the task link and the amber flag while the wait is live', async () => {
+    await store.write(
+      workspace({
+        checklists: withWaits({
+          waiting: false,
+          waitingOn: 'never mind',
+          waitingForChecklistId: 'cl-somewhere-else',
+        }),
+      }),
+    )
+
+    const item = await storedItem()
+    expect(item.waiting).toBe(true)
+    expect(item.waitingOn).toBe('Lisa to send them')
+    expect(item.waitingForChecklistId).toBe('cl-other')
+  })
+
+  /**
+   * The lock is not forever. Once every wait is approved the step is ordinary
+   * again and a tab may edit its note and un-flag it — otherwise a finished
+   * hand-off would leave the step amber with nothing able to quiet it.
+   */
+  it('lets the payload edit those fields again once the wait is approved', async () => {
+    const approved = {
+      ...savedWait,
+      resolvedAt: '2026-08-09T00:00:00.000Z',
+      resolvedBy: 'emp-1',
+      verifiedAt: '2026-08-10T00:00:00.000Z',
+      verifiedBy: 'emp-2',
+    }
+    // Straight to disk: only the waiting-on routes can approve a wait, and this
+    // stands in for them having done so.
+    const onDisk = JSON.parse(await readFile(localDataPath, 'utf8'))
+    onDisk.checklists[0].items[0].waitingOns = [approved]
+    await writeFile(localDataPath, JSON.stringify(onDisk, null, 2))
+
+    await store.write(
+      workspace({
+        checklists: withWaits({
+          waiting: false,
+          waitingOn: '',
+          waitingForChecklistId: '',
+          waitingOns: [approved],
+        }),
+      }),
+    )
+
+    const item = await storedItem()
+    // The payload's own values, kept verbatim — nothing is being preserved over
+    // them any more.
+    expect(item.waiting).toBeFalsy()
+    expect(item.waitingOn).toBeFalsy()
+    expect(item.waitingForChecklistId).toBeFalsy()
+    // The record itself is still there. It always is.
+    expect(item.waitingOns[0].verifiedAt).toBe('2026-08-10T00:00:00.000Z')
+  })
+
+  it('takes the payload at its word for a brand-new step', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          {
+            id: 'cl-1',
+            clientId: 'c1',
+            title: 'August close',
+            items: [
+              ...withWaits()[0].items,
+              { id: 'it-new', label: 'New step', done: false, waiting: true, waitingOn: 'a note' },
+            ],
+          },
+        ],
+      }),
+    )
+
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const fresh = persisted.checklists[0].items.find((item) => item.id === 'it-new')
+    expect(fresh.waiting).toBe(true)
+    expect(fresh.waitingOn).toBe('a note')
+  })
+})
+
+/** Cardinal rule 1: the same guarantee, stated against the Postgres statements. */
+describe('a bulk save cannot touch a saved wait (postgres branch)', () => {
+  const storedWait = {
+    id: 'wo-keep',
+    blockerId: 'emp-1',
+    requestedBy: 'emp-2',
+    note: 'the bank statements',
+    createdAt: '2026-08-05T15:00:00.000Z',
+  }
+  const priorRow = {
+    id: 'item-1',
+    done: false,
+    completed_at: null,
+    waiting: true,
+    waiting_on: 'Lisa to send them',
+    waiting_for_checklist_id: 'cl-other',
+    waiting_ons: [storedWait],
+    sub_items: [
+      {
+        id: 'sub-1',
+        title: 'Statements',
+        done: false,
+        waitingOns: [{ ...storedWait, id: 'wo-sub' }],
+      },
+    ],
+  }
+  const payload = (over = {}) =>
+    workspace({
+      clients: [{ id: 'c1', name: 'Acme' }],
+      checklists: [
+        {
+          id: 'cl-1',
+          title: 'August close',
+          clientId: 'c1',
+          dueDate: '2026-08-31',
+          items: [
+            {
+              id: 'item-1',
+              label: 'Bank rec',
+              done: false,
+              subItems: [{ id: 'sub-1', title: 'Statements', done: false }],
+              ...over,
+            },
+          ],
+        },
+      ],
+    })
+
+  const itemSnapshot = /^select id, done, completed_at[\s\S]*from checklist_items$/i
+
+  it('snapshots the waiting columns before the wipe', async () => {
+    const fake = fakePostgres({ priorItemRows: [priorRow] })
+    await postgresStore(fake).write(payload())
+
+    const snapshot = fake.matching(itemSnapshot)[0]
+    expect(snapshot.text).toMatch(/waiting_ons/)
+    expect(snapshot.text).toMatch(/sub_items/)
+    // Taken BEFORE the delete, or there would be nothing left to preserve.
+    expect(fake.indexOf(itemSnapshot)).toBeLessThan(fake.indexOf(/^delete from checklist_items$/i))
+  })
+
+  it('re-inserts the STORED waits rather than the payload copy', async () => {
+    const fake = fakePostgres({ priorItemRows: [priorRow] })
+    await postgresStore(fake).write(payload({ waitingOns: [] }))
+
+    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
+    const waitingOns = JSON.parse(insert.params[11])
+    expect(waitingOns).toHaveLength(1)
+    expect(waitingOns[0].id).toBe('wo-keep')
+    // The sub-item's wait rides the sub_items JSONB and survives the same way.
+    expect(String(insert.params[12])).toContain('wo-sub')
+  })
+
+  it('re-inserts the stored note, task link and flag while the wait is live', async () => {
+    const fake = fakePostgres({ priorItemRows: [priorRow] })
+    await postgresStore(fake).write(
+      payload({
+        waiting: false,
+        waitingOn: 'never mind',
+        waitingForChecklistId: 'cl-somewhere-else',
+        waitingOns: [],
+      }),
+    )
+
+    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
+    expect(insert.params[8]).toBe('Lisa to send them')
+    expect(insert.params[9]).toBe(true)
+    expect(insert.params[10]).toBe('cl-other')
+  })
+
+  it('lets the payload win once the stored wait is approved', async () => {
+    const fake = fakePostgres({
+      priorItemRows: [
+        {
+          ...priorRow,
+          waiting_ons: [
+            {
+              ...storedWait,
+              resolvedAt: '2026-08-09T00:00:00.000Z',
+              resolvedBy: 'emp-1',
+              verifiedAt: '2026-08-10T00:00:00.000Z',
+              verifiedBy: 'emp-2',
+            },
+          ],
+        },
+      ],
+    })
+    await postgresStore(fake).write(
+      payload({ waiting: false, waitingOn: '', waitingForChecklistId: '' }),
+    )
+
+    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
+    expect(insert.params[8]).toBeNull()
+    expect(insert.params[9]).toBe(false)
+    expect(insert.params[10]).toBeNull()
+    // The record is still restored — it is never the thing that goes.
+    expect(JSON.parse(insert.params[11])[0].id).toBe('wo-keep')
   })
 })

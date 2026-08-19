@@ -58,6 +58,7 @@ const handlers = {
   onDoneWaitingOn: vi.fn(),
   onVerifyWaitingOn: vi.fn(),
   onSendBackWaitingOn: vi.fn(),
+  onAskWaitingOn: vi.fn(),
 }
 
 function renderEditor(
@@ -66,6 +67,7 @@ function renderEditor(
     waitingOns?: WaitingOn[]
     availableTasks?: Array<{ id: string; title: string }>
     waitingForChecklistId?: string
+    stepDone?: boolean
   } = {},
 ) {
   return render(
@@ -79,6 +81,7 @@ function renderEditor(
       isOwner={false}
       stepAssigneeId={A}
       clientName="Acme Dental"
+      stepDone={options.stepDone ?? false}
       {...handlers}
     />,
   )
@@ -122,7 +125,9 @@ describe('creating a wait is Save, and it is final', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
-    expect(handlers.onAddWaitingOn).toHaveBeenCalledWith(B, 'the bank statements')
+    // `undefined`, not null: the task picker was never touched, so Save says
+    // nothing about the link and the step keeps whatever it had.
+    expect(handlers.onAddWaitingOn).toHaveBeenCalledWith(B, 'the bank statements', undefined)
   })
 
   it('saves a wait on the CLIENT the same way', () => {
@@ -130,7 +135,89 @@ describe('creating a wait is Save, and it is final', () => {
     fireEvent.change(picker(), { target: { value: 'client' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
-    expect(handlers.onAddWaitingOn).toHaveBeenCalledWith('client', '')
+    expect(handlers.onAddWaitingOn).toHaveBeenCalledWith('client', '', undefined)
+  })
+
+  it('says nothing about the task link when the picker was never touched', () => {
+    renderEditor({
+      availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }],
+      waitingForChecklistId: 'cl-a2',
+    })
+    fireEvent.change(picker(), { target: { value: B } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(handlers.onAddWaitingOn).toHaveBeenCalledWith(B, '', undefined)
+  })
+
+  it('sends an explicit null when the draft clears the task', () => {
+    renderEditor({
+      availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }],
+      waitingForChecklistId: 'cl-a2',
+    })
+    fireEvent.change(picker(), { target: { value: B } })
+    fireEvent.change(screen.getByRole('combobox', { name: /Waiting for another task/i }), {
+      target: { value: '' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(handlers.onAddWaitingOn).toHaveBeenCalledWith(B, '', null)
+  })
+
+  /**
+   * The third field of the same draft (featreq-8b7d06d7). It used to save
+   * itself the instant the select changed, which meant a task link could
+   * outlive a wait that was never created — and, now that a saved wait is
+   * locked, a link that half-saved would be unrepairable.
+   */
+  it('carries the waited-for task in the same Save, writing nothing before it', () => {
+    renderEditor({ availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }] })
+    fireEvent.change(picker(), { target: { value: B } })
+    fireEvent.change(screen.getByRole('combobox', { name: /Waiting for another task/i }), {
+      target: { value: 'cl-a2' },
+    })
+    // Nothing has been written yet — not the wait, and not the task link.
+    expect(handlers.onSetWaitingFor).not.toHaveBeenCalled()
+    expect(handlers.onAddWaitingOn).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(handlers.onAddWaitingOn).toHaveBeenCalledWith(B, '', 'cl-a2')
+    expect(handlers.onSetWaitingFor).not.toHaveBeenCalled()
+  })
+
+  /**
+   * The back door: composing a SECOND wait re-opened the editor, and the draft
+   * carried a freely-changeable copy of a task link the first wait had already
+   * locked. Save would then write the very field the PATCH route 409s. The
+   * picker belongs to the FIRST wait only; the server refuses the change too.
+   */
+  it('offers no task picker at all while a saved wait is live', () => {
+    renderEditor({
+      waitingOns: [waiting()],
+      availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }],
+      waitingForChecklistId: 'cl-a2',
+    })
+    fireEvent.change(picker(), { target: { value: C } })
+
+    expect(
+      screen.queryByRole('combobox', { name: /Waiting for another task/i }),
+    ).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    // …and the create says nothing about the locked link.
+    expect(handlers.onAddWaitingOn).toHaveBeenCalledWith(C, '', undefined)
+  })
+
+  it('throws the whole draft away on Clear, task link included', () => {
+    renderEditor({ availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }] })
+    fireEvent.change(picker(), { target: { value: B } })
+    fireEvent.change(screen.getByRole('combobox', { name: /Waiting for another task/i }), {
+      target: { value: 'cl-a2' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+
+    expect(handlers.onAddWaitingOn).not.toHaveBeenCalled()
+    expect(handlers.onSetWaitingFor).not.toHaveBeenCalled()
+    expect(handlers.onClear).not.toHaveBeenCalled()
   })
 
   // "or clear should you accidentally have clicked waiting"
@@ -252,16 +339,104 @@ describe('the three states, read off the step', () => {
 })
 
 /**
- * Her fifth round (the send-back that produced this file's second pass):
+ * SAVE LOCKS EVERYTHING — her annotated screenshots (featreq-8b7d06d7): "all
+ * info is locked and cannot be changed." This deliberately REVERSES the earlier
+ * round where the step's note stayed editable beside a saved wait; her email is
+ * the newer word.
  *
- *   "User should not be able to remove the information once it is saved, we
- *    don't want to lose the data and we don't want to impact other people
- *    interacting with it."
+ * So while a wait is live the editor has no note box, no task picker, no Clear
+ * and no Done. What is left is the wait's own chip, which carries the only
+ * actions there are — and on an "awaiting your OK" wait that is exactly the
+ * Approve / Send back pair she drew, with the Done she crossed out gone.
  *
- * The × was one of two ways to erase a saved wait from this editor. The other
- * was the primary Done, which used to CANCEL any blocker that wasn't yours to
- * finish — the quiet one, because it deleted somebody else's record as a side
- * effect of tidying your own step.
+ * The lock LIFTS once every wait is approved, or a step whose hand-offs are all
+ * finished would sit amber forever with nothing left to quiet it.
+ */
+describe('a saved wait locks the step', () => {
+  const surfaces = () => ({
+    note: screen.queryByPlaceholderText('e.g. the client to send statements (free-text note)'),
+    taskPicker: screen.queryByRole('combobox', { name: /Waiting for another task/i }),
+    clear: screen.queryByRole('button', { name: 'Clear' }),
+    done: screen.queryByRole('button', { name: 'Done' }),
+  })
+
+  it('takes the note box, the task picker, Clear and Done away', () => {
+    renderEditor({
+      viewerId: A,
+      waitingOns: [waiting()],
+      availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }],
+    })
+    const found = surfaces()
+    expect(found.note).toBeNull()
+    expect(found.taskPicker).toBeNull()
+    expect(found.clear).toBeNull()
+    expect(found.done).toBeNull()
+  })
+
+  it('locks it for the person being waited on too, not just whoever asked', () => {
+    renderEditor({ viewerId: B, waitingOns: [waiting()] })
+    expect(surfaces().clear).toBeNull()
+    expect(surfaces().done).toBeNull()
+  })
+
+  // Her item 4, verbatim in shape: READ-ONLY, and exactly two actions.
+  it('leaves an AWAITING YOUR OK wait with Approve and Send back, and nothing else', () => {
+    renderEditor({
+      viewerId: A,
+      waitingOns: [resolved()],
+      availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }],
+    })
+    expect(surfaces().done).toBeNull()
+    expect(surfaces().note).toBeNull()
+    expect(surfaces().taskPicker).toBeNull()
+    expect(
+      screen.getAllByRole('button').map((button) => button.textContent),
+    ).toEqual(['Approve', 'Send back'])
+  })
+
+  it('still says what task the step is waiting for, without offering to change it', () => {
+    renderEditor({
+      viewerId: A,
+      waitingOns: [waiting()],
+      availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }],
+      waitingForChecklistId: 'cl-a2',
+    })
+    expect(screen.getByText('Waiting for: Acme bank rec')).toBeInTheDocument()
+    expect(surfaces().taskPicker).toBeNull()
+  })
+
+  it('gives the step its controls back once every wait is approved', () => {
+    renderEditor({
+      viewerId: A,
+      waitingOns: [verified()],
+      availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }],
+    })
+    const found = surfaces()
+    expect(found.note).not.toBeNull()
+    expect(found.clear).not.toBeNull()
+    expect(found.done).not.toBeNull()
+    expect(found.taskPicker).not.toBeNull()
+  })
+
+  // Adding ANOTHER wait is not editing the saved one — the picker stays, and it
+  // brings the draft's own Save and Clear back with it.
+  it('still lets a second wait be composed, with its own Save and Clear', () => {
+    renderEditor({ viewerId: A, waitingOns: [waiting()] })
+    fireEvent.change(picker(), { target: { value: C } })
+
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Clear' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    // The escape hatch discarded the draft and touched nothing that was saved.
+    expect(handlers.onAddWaitingOn).not.toHaveBeenCalled()
+    expect(handlers.onClear).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Her fifth round, still standing: "User should not be able to remove the
+ * information once it is saved, we don't want to lose the data and we don't
+ * want to impact other people interacting with it."
  */
 describe('a saved wait cannot be removed from the editor', () => {
   it('offers no removal control at any stage, to anyone', () => {
@@ -278,126 +453,35 @@ describe('a saved wait cannot be removed from the editor', () => {
     }
   })
 
-  it("Done leaves a colleague's open wait alone and says whose move it is", async () => {
+  // The whole editor, not just the chip: nothing anywhere on it erases a wait.
+  it('offers nothing that erases one anywhere else on the editor either', () => {
     renderEditor({ viewerId: A, waitingOns: [waiting()] })
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    const labels = screen.queryAllByRole('button').map((button) => button.textContent)
+    expect(labels.join(' ')).not.toMatch(/cancel|remove|delete|clear/i)
+  })
+})
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Still waiting on Lisa Chen — only they can mark their part done.',
-    )
-    // Nothing was retired on her behalf, and the step was not un-flagged either:
-    // it is genuinely still blocked.
-    expect(handlers.onDoneWaitingOn).not.toHaveBeenCalled()
-    expect(handlers.onVerifyWaitingOn).not.toHaveBeenCalled()
-    expect(handlers.onDone).not.toHaveBeenCalled()
+/**
+ * The question B sends back WITHOUT finishing (featreq-8b7d06d7). It is asked
+ * from the Delayed page — see delayed-tabs.test.tsx — but A reads it here, on
+ * the step, which is the only reason it is rendered at all.
+ */
+describe('a question on a live wait', () => {
+  const asked = waiting({
+    questions: [{ at: '2026-08-08T09:00:00.000Z', by: B, note: 'which account?' }],
   })
 
-  it('Done still retires the waits that ARE yours to finish', async () => {
-    renderEditor({ viewerId: B, waitingOns: [waiting()] })
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
-
-    await waitFor(() => expect(handlers.onDoneWaitingOn).toHaveBeenCalledWith('wo-1'))
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  it('reads on the chip, attributed, beside the original ask', () => {
+    renderEditor({ viewerId: A, waitingOns: [asked] })
+    expect(chip()).toHaveTextContent('the bank statements')
+    expect(chip()).toHaveTextContent('Question from Lisa Chen — which account?')
   })
 
-  it('Done still confirms one the other side has reported done', async () => {
-    renderEditor({ viewerId: A, waitingOns: [resolved()] })
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
-
-    await waitFor(() => expect(handlers.onVerifyWaitingOn).toHaveBeenCalledWith('wo-1'))
-  })
-
-  /**
-   * The blocker clearing her own amber. Her wait is reported done and sitting
-   * with whoever asked, so Done is not hers to press — but it used to be planned
-   * as `verify`, which the server answers "You cannot confirm this waiting-on
-   * request". The refusal is now stated before the request is made, in terms of
-   * the person she is actually waiting on.
-   */
-  it('tells the blocker whose approval it is sitting with, without a 403', async () => {
-    renderEditor({ viewerId: B, waitingOns: [resolved()] })
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
-
-    const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent("Waiting on Brittany Fox's approval.")
-    expect(alert).not.toHaveTextContent('cannot')
-    expect(handlers.onVerifyWaitingOn).not.toHaveBeenCalled()
-    expect(handlers.onDone).not.toHaveBeenCalled()
-  })
-
-  // An OWNER gets what the chip offers them, not a lecture about whose move it
-  // is: `canMarkWaitingOnDone` says yes for an owner at the amber stage.
-  it('lets an owner press Done on a colleague’s wait, as the chip does', async () => {
-    render(
-      <WaitingEditor
-        note=""
-        employees={EMPLOYEES}
-        availableTasks={[]}
-        waitingOns={[waiting()]}
-        activeEmployeeId={C}
-        isOwner
-        stepAssigneeId={null}
-        clientName="Acme Dental"
-        {...handlers}
-      />,
-    )
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
-
-    await waitFor(() => expect(handlers.onDoneWaitingOn).toHaveBeenCalledWith('wo-1'))
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-  })
-
-  /**
-   * THE contract for a step carrying more than one wait: the half that is yours
-   * moves, the half that isn't stays put and is named. A future tidy-up that
-   * made Done all-or-nothing would break this silently in either direction —
-   * either stranding your own wait or reaching for someone else's again.
-   */
-  it('on a mixed step, retires only my own wait and names the other', async () => {
-    renderEditor({
-      viewerId: B,
-      waitingOns: [
-        waiting({ id: 'wo-mine', blockerId: B, requestedBy: A }),
-        waiting({ id: 'wo-avery', blockerId: C, requestedBy: B }),
-      ],
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
-
-    await waitFor(() => expect(handlers.onDoneWaitingOn).toHaveBeenCalledWith('wo-mine'))
-    expect(handlers.onDoneWaitingOn).toHaveBeenCalledTimes(1)
-
-    const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('Still waiting on Avery Diaz')
-    expect(alert).not.toHaveTextContent('Lisa Chen')
-    // The step is still blocked on Avery, so it is NOT un-flagged.
-    expect(handlers.onDone).not.toHaveBeenCalled()
-  })
-
-  it('names each person once, however many of their waits are on the step', async () => {
-    renderEditor({
-      viewerId: A,
-      waitingOns: [
-        waiting({ id: 'wo-1', blockerId: B }),
-        waiting({ id: 'wo-2', blockerId: B }),
-      ],
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
-
-    const alert = await screen.findByRole('alert')
-    expect(alert.textContent?.match(/Lisa Chen/g)).toHaveLength(1)
-    // …and never the placeholder `employeeName` hands back for an unknown id.
-    expect(alert).not.toHaveTextContent('Unassigned')
-  })
-
-  // The scope guard: this round is about the saved wait, not the step's own
-  // free-text note, which keeps its editor and its Clear exactly as they were.
-  it('leaves the free-text note section untouched', () => {
-    renderEditor({ waitingOns: [waiting()] })
-    expect(
-      screen.getByPlaceholderText('e.g. the client to send statements (free-text note)'),
-    ).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
-    expect(handlers.onClear).toHaveBeenCalled()
+  it('changes nothing about the stage — it is still theirs to finish', () => {
+    renderEditor({ viewerId: A, waitingOns: [asked] })
+    // Still PENDING, so A has nothing to press: a question is not an approval.
+    expect(within(chip()).queryAllByRole('button')).toHaveLength(0)
+    expect(screen.getByText('Waiting on Lisa Chen')).toBeInTheDocument()
   })
 })
 
@@ -457,5 +541,181 @@ describe('the waiting-for-a-task picker', () => {
     expect(
       screen.queryByRole('combobox', { name: /Waiting for another task/i }),
     ).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Save is a REQUEST, and it has to be treated like one. It was fired and
+ * forgotten: the draft was wiped before the create landed, so a refusal threw
+ * away everything typed and surfaced nowhere, and the button re-enabled
+ * immediately — a second press on a slow connection creating a second wait that
+ * can never be removed.
+ */
+describe('Save waits for the server', () => {
+  it('keeps the draft, and says why, when the create is refused', async () => {
+    handlers.onAddWaitingOn.mockRejectedValueOnce(
+      new Error('This wait was saved, so who it names is fixed.'),
+    )
+    renderEditor({ availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }] })
+    fireEvent.change(picker(), { target: { value: B } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Note for this wait' }), {
+      target: { value: 'the bank statements' },
+    })
+    fireEvent.change(screen.getByRole('combobox', { name: /Waiting for another task/i }), {
+      target: { value: 'cl-a2' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('who it names is fixed')
+    // Everything typed is still on screen, beside the reason.
+    expect(screen.getByRole('textbox', { name: 'Note for this wait' })).toHaveValue(
+      'the bank statements',
+    )
+    expect(picker()).toHaveValue(B)
+    expect(screen.getByRole('combobox', { name: /Waiting for another task/i })).toHaveValue('cl-a2')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+  })
+
+  it('stays disabled until the create lands, so one click is one wait', async () => {
+    let land = () => {}
+    handlers.onAddWaitingOn.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { land = resolve }),
+    )
+    renderEditor()
+    fireEvent.change(picker(), { target: { value: B } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    const saving = await screen.findByRole('button', { name: 'Saving…' })
+    expect(saving).toBeDisabled()
+    // A second press while it is in flight cannot reach the handler.
+    fireEvent.click(saving)
+    expect(handlers.onAddWaitingOn).toHaveBeenCalledTimes(1)
+
+    land()
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Saving…' })).not.toBeInTheDocument(),
+    )
+    // The draft is discarded only now, on success.
+    expect(picker()).toHaveValue('')
+  })
+})
+
+/**
+ * The blocker's Question, on the step (featreq-8b7d06d7). Mark done has always
+ * been reachable from the checklist; asking should not require a trip to the
+ * Delayed page to answer "which account?".
+ */
+describe('the Question button on the chip', () => {
+  it('is offered to the person being waited on, beside Mark done', () => {
+    renderEditor({ viewerId: B, waitingOns: [waiting()] })
+    const labels = within(chip())
+      .getAllByRole('button')
+      .map((button) => button.textContent)
+    expect(labels).toEqual(['Mark done', 'Question'])
+  })
+
+  it('is not offered to the person who asked — they have Send back', () => {
+    renderEditor({ viewerId: A, waitingOns: [resolved()] })
+    const labels = within(chip())
+      .getAllByRole('button')
+      .map((button) => button.textContent)
+    expect(labels).not.toContain('Question')
+  })
+
+  it('sends the message and finishes nothing', async () => {
+    renderEditor({ viewerId: B, waitingOns: [waiting()] })
+    fireEvent.click(within(chip()).getByRole('button', { name: 'Question' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Question for Brittany Fox' }), {
+      target: { value: '  which account?  ' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() =>
+      expect(handlers.onAskWaitingOn).toHaveBeenCalledWith('wo-1', 'which account?'),
+    )
+    expect(handlers.onDoneWaitingOn).not.toHaveBeenCalled()
+    expect(handlers.onVerifyWaitingOn).not.toHaveBeenCalled()
+  })
+
+  it('never appears on a client wait — a client has no login to read it', () => {
+    renderEditor({
+      viewerId: A,
+      waitingOns: [waiting({ blockerId: 'client-acme', blockerType: 'client' })],
+    })
+    const labels = within(chip())
+      .getAllByRole('button')
+      .map((button) => button.textContent)
+    expect(labels).toEqual(['Heard back'])
+  })
+})
+
+/**
+ * Ticking the step off used to unmount this editor outright — including a wait
+ * that was still LIVE, which stayed on the Delayed page with no Approve left on
+ * the step. The step is done; the hand-off is not.
+ */
+describe('a ticked step with a wait still open', () => {
+  it('keeps the chip and its actions', () => {
+    renderEditor({ viewerId: A, waitingOns: [resolved()], stepDone: true })
+    expect(screen.getByText(/This step is checked off/)).toBeInTheDocument()
+    const labels = within(chip())
+      .getAllByRole('button')
+      .map((button) => button.textContent)
+    expect(labels).toEqual(['Approve', 'Send back'])
+  })
+
+  it('offers nothing that starts, edits or un-flags anything', () => {
+    renderEditor({
+      viewerId: A,
+      waitingOns: [resolved()],
+      availableTasks: [{ id: 'cl-a2', title: 'Acme bank rec' }],
+      stepDone: true,
+    })
+    expect(screen.queryByRole('combobox', { name: 'Waiting on a person' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByPlaceholderText('e.g. the client to send statements (free-text note)'),
+    ).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * A refused question must not eat what was typed — the same rule Save follows.
+ * The composer can only manage that if the rejection actually reaches it, which
+ * is why the editor rethrows for this one caller after showing the reason.
+ */
+describe('a question the server refuses', () => {
+  it('keeps the message on screen and says why', async () => {
+    handlers.onAskWaitingOn.mockRejectedValueOnce(
+      new Error('This wait has already been marked done'),
+    )
+    renderEditor({ viewerId: B, waitingOns: [waiting()] })
+    fireEvent.click(within(chip()).getByRole('button', { name: 'Question' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Question for Brittany Fox' }), {
+      target: { value: 'which account?' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('already been marked done')
+    expect(screen.getByRole('textbox', { name: 'Question for Brittany Fox' })).toHaveValue(
+      'which account?',
+    )
+  })
+
+  it('closes the composer once it lands', async () => {
+    renderEditor({ viewerId: B, waitingOns: [waiting()] })
+    fireEvent.click(within(chip()).getByRole('button', { name: 'Question' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Question for Brittany Fox' }), {
+      target: { value: 'which account?' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('textbox', { name: 'Question for Brittany Fox' }),
+      ).not.toBeInTheDocument(),
+    )
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })

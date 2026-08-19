@@ -587,6 +587,21 @@ export type WaitingOn = {
    * requester's new note is appended here rather than overwriting `note`.
    */
   sendBacks?: WaitingSendBack[]
+  /**
+   * Every question the person being waited on asked WITHOUT finishing, oldest
+   * first. Asking moves no stage — the wait stays theirs — so these are purely
+   * additive, the other direction of the same conversation as `sendBacks`.
+   */
+  questions?: WaitingQuestion[]
+}
+
+/** One "I need something before I can do this" message on a {@link WaitingOn}. */
+export type WaitingQuestion = {
+  /** When it was asked, and by whom (the person being waited on). */
+  at: string
+  by: string
+  /** What they need to know. Required by the endpoint — a blank question helps nobody. */
+  note?: string
 }
 
 /** One "not approved — do it again" lap on a {@link WaitingOn}. */
@@ -1518,6 +1533,8 @@ export type NotificationEvent =
   | 'waiting_cleared'
   | 'waiting_on_requested'
   | 'waiting_on_done'
+  /** The person being waited on asked a question instead of finishing. */
+  | 'waiting_on_question'
   | 'waiting_on_cancelled'
   | 'checklist_deletion_requested'
   | 'checklist_item_deletion_requested'

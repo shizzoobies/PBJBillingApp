@@ -609,29 +609,22 @@ Clients page meanwhile. Owner-only.
   exception to all of that: it stays in the list and selected even if that task
   belongs to another client, has since been skipped or recycled, or isn't yours
   — a cross-client one shows its client's name in brackets — so opening the
-  editor can never quietly break an existing dependency. Waiting items also
-  appear on the Delayed page.
-- Resolving a waiting step — **Done vs Clear** in the waiting editor: **Done**
-  retires the blocker and keeps the waiting note visible on that checklist as a
-  "Was waiting on: …" record (that instance only — future recurring instances
-  start fresh), so there's a history of what the team keeps waiting on. Done
-  does **NOT** check the step off — completing the work stays with the normal
-  checkboxes (owner feedback: the reference should sit on the still-open step).
-  **Clear** just un-flags and erases the note — the free-text note only; it has
-  never touched a saved "waiting on a person" record and still doesn't. Resolved
-  steps stop counting on the Delayed page and the Board's pending chips. Done
-  retires the wait in one press — including any "waiting on a person" blockers on
-  that step **that are yours to finish or yours to approve** — and you see it
-  happen: the amber "Waiting on: …" badge turns into a green "Was waiting on: … ✓"
-  and the amber editor closes. A blocker somebody ELSE owes you is left exactly
-  where it is (Done used to delete it): the editor says "Still waiting on <name> —
-  only they can mark their part done", or "Waiting on <name>'s approval" when it's
-  already reported done and sitting with whoever asked — and the step stays amber,
-  because it is genuinely still blocked. Done offers exactly what the buttons on
-  the chip beside it offer, to the same people (an owner can press it on anyone's
-  behalf; the step's assignee can approve). If the server refuses anything, the
-  reason appears in red inside the waiting editor instead of the button appearing
-  to do nothing.
+  editor can never quietly break an existing dependency. The task you pick is
+  part of the wait you're composing — it saves WITH it (see "Creating a wait is
+  Save" below) and is fixed afterwards. Waiting items also appear on the Delayed
+  page.
+- Resolving a waiting step — **Done vs Clear** in the waiting editor. These two
+  belong to a step flagged waiting the free-text way, with **no saved wait live
+  on it**; the moment a wait is saved they both disappear (see the lock below).
+  **Done** retires the flag and keeps the waiting note visible on that checklist
+  as a "Was waiting on: …" record (that instance only — future recurring
+  instances start fresh), so there's a history of what the team keeps waiting on.
+  Done does **NOT** check the step off — completing the work stays with the
+  normal checkboxes (owner feedback: the reference should sit on the still-open
+  step). **Clear** just un-flags and erases the note. Resolved steps stop
+  counting on the Delayed page and the Board's pending chips. If the server
+  refuses anything, the reason appears in red inside the waiting editor instead
+  of the button appearing to do nothing.
 - Waiting on a PERSON (two-way): you can also flag a step as waiting on a
   specific team member. That person is notified immediately that someone's
   blocked on them, sees it in a "Waiting on you" card on their Dashboard, and
@@ -671,8 +664,7 @@ Clients page meanwhile. Owner-only.
   approve it instead."), so an old browser tab can't do it either. The way out of
   a wait is forward: Mark done → Approve, or Send back for another lap. The record
   — who asked, who did it, who confirmed, and the dates — stays on the task
-  permanently through every stage. (This applies to the saved wait only. The
-  step's own free-text note keeps its editor and its Clear button, unchanged.)
+  permanently through every stage.
 - **Send back — "not approved, do it again."** At step 2 the person who asked
   gets a **Send back** button beside Approve. It asks for a note (required) and
   hands the wait straight back: it turns amber again, reappears in the other
@@ -681,12 +673,60 @@ Clients page meanwhile. Owner-only.
   every send-back note is kept in order alongside who had reported it done and
   when, so a wait that went round three times reads back in full. The step itself
   is never ticked off by any of this.
-- **Creating a wait is Save, and it is final.** Picking a name no longer creates
-  the wait on the spot: you pick the person (or the client), type the note that
-  goes WITH the wait, then press **Save**. **Clear** discards it if you opened
-  the picker by accident — nothing is created and nothing is notified. Once
-  saved, the person and the note cannot be edited or removed; the only things
-  left are the buttons above (Mark done / Approve / Send back).
+- **Question — "what exactly do you need?"** The person being waited on gets a
+  second button beside Done — on their Delayed page AND on the wait's chip on the
+  checklist step, so they never have to go looking for it: **Question**, which
+  opens a message box. Sending it does **NOT** complete the wait — the item stays
+  right where it is on their list, still their move. Every question is kept on
+  the wait (attributed and timestamped, alongside the send-back history) and
+  whoever asked gets a notification with the question in it, so they can answer;
+  the step's assignee and the person being waited on are told too, so a question
+  an owner sends on someone's behalf is never invisible to them. The LATEST
+  question shows on both sides — on the Delayed page and on the checklist step —
+  so nobody has to remember what was asked. A wait on the CLIENT has no Question:
+  a client has no login to read one.
+- **Creating a wait is Save, and it is final.** The first click on "Waiting on…"
+  opens an editor and commits **nothing**. You pick the person (or the client),
+  type the message that goes WITH the wait, and optionally choose the other task
+  it's waiting for — all three are held on your screen until you press **Save**,
+  which writes them in one go. **Clear** discards the whole draft if you opened
+  the picker by accident: nothing is created, nothing is notified, and nothing
+  the step already had is touched. Clear is only available before Save.
+- **Save locks everything.** Once a wait is saved, the person or client it names,
+  its message and the task it waits for are all fixed — "all info is locked and
+  cannot be changed." On a step carrying a live wait the editor no longer shows a
+  note box, a task picker, a Clear or a Done at all; the saved task link still
+  READS ("Waiting for: <task>") so you can see the dependency. The only controls
+  left are the wait's own: Mark done, Question, Approve, Send back. The server
+  enforces the same rule rather than trusting the screen — an attempt to change
+  the step's waiting note, its task link, or to un-flag it while a wait is live
+  is refused with the reason ("This wait was saved, so who it names, its message
+  and the task it waits for are fixed. Mark it done and approve it instead."), so
+  an old browser tab can't do it either. Adding a SECOND wait to the same step
+  still works, but it cannot be used as a way in: the composer for it offers no
+  task picker, and the server refuses a create that would change the locked link.
+  Renaming the step, changing its due date or reassigning it are untouched by the
+  lock — they're the step's business, not the wait's. The lock lifts once every
+  wait on the step is approved, so a step whose hand-offs are finished can be
+  tidied up normally.
+- **Save is a request, and the app waits for it.** Save stays disabled until the
+  wait is actually created, so a double-click on a slow connection can't create
+  two permanent waits; if the server refuses, everything typed stays on screen
+  beside the reason instead of being thrown away.
+- **A wait cannot be lost to an unrelated save.** Waits are written only by the
+  waiting-on buttons. Every other save — including the big background one the app
+  does as you work — leaves them exactly as they are on the server, whatever the
+  saving tab happened to have loaded. So a wait can't be flattened by somebody
+  else's autosave, and neither can the note, task link and flag it locked.
+- **Ticking a step off doesn't hide a live wait.** A checked-off step that still
+  has an open wait keeps showing it ("This step is checked off, but a wait on it
+  is still open"), so Approve / Send back stay reachable from the step.
+- **The waited-for task is checked, not just filtered.** The picker only offers
+  this client's other tasks; the server now holds the same line, so a link to a
+  task that no longer exists, to another client's task, or to the task itself is
+  refused with a plain sentence rather than saved. A link that was ALREADY saved
+  can always be re-sent, so an older cross-client dependency never becomes
+  unsavable.
 - **Waiting on the CLIENT.** The same picker offers the task's own client
   alongside the team. You never choose which client — the task already belongs to
   one. Because a client has no login, there is nobody to hand back to and nobody
@@ -901,10 +941,14 @@ Clients page meanwhile. Owner-only.
 - **Two tabs: "Waiting on me" and "I'm waiting on others."** Same underline tab
   bar as Time Approvals, with a live count in each label; the page opens on
   whichever has work (clicking the quiet one sticks — it won't bounce back).
-  - **Waiting on me** — someone is blocked on you. Each wait has a plain **Done**
-    button. Pressing it says "my part is finished": the wait leaves this list and
-    goes back to whoever asked, who has the final say. It does NOT tick the
-    checklist step off.
+  - **Waiting on me** — someone is blocked on you. Each wait has two buttons.
+    **Done** says "my part is finished": the wait leaves this list and goes back
+    to whoever asked, who has the final say. It does NOT tick the checklist step
+    off. **Question** opens a message box and sends what you type to whoever
+    asked — it finishes nothing, so the item stays right here and stays yours;
+    they get a notification with your question in it, and the question is kept on
+    the wait for both of you to read. (A wait on a client has no Question — a
+    client has no login.)
   - **I'm waiting on others** — waits you asked for (and waits on a client). While
     the other person hasn't finished, the row is a **read-only reminder**: no
     Done, no buttons, just what you're waiting on and why. Once they mark it done
@@ -1950,7 +1994,9 @@ Clients page meanwhile. Owner-only.
 
 - In-app bell with unread count + email (when email service is configured):
   task assigned, workflow stage advanced, case completed, manual time entry
-  needs approval, "waiting cleared" (the task a step was waiting on is done).
+  needs approval, "waiting cleared" (the task a step was waiting on is done),
+  and the waiting-on hand-off itself: someone is waiting on you, they finished
+  your part, or they have a question about it.
 - Every notification email names the CLIENT it's about — a labeled "Client:
   <name>" line at the top of the email and appended to the subject, so the
   recipient can tell which client the notice refers to straight from their
@@ -1963,7 +2009,8 @@ Clients page meanwhile. Owner-only.
   then "Email preferences" in the dropdown footer — it jumps straight to the
   section. Owners also see the same section on the Settings page. Toggle types: task assigned to you,
   workflow progress (someone advances/completes a workflow you opened),
-  waiting-on updates, time entries needing approval, your time entry was
+  waiting-on updates (including a question sent back about one), time entries
+  needing approval, your time entry was
   sent back, deletion requests, edit requests/decisions, skipped recurring
   tasks, and Updates tracker activity. Turning a type off stops the EMAIL only —
   in-app bell notifications always arrive. All types default to on.

@@ -1326,6 +1326,10 @@ export async function rejectItemDeletion(requestId: string) {
  * Flag a checklist step as waiting on a teammate — or on the task's own CLIENT
  * (`blockerType: 'client'`, in which case `blockerId` is omitted and the server
  * reads the client off the checklist). Returns the updated checklist.
+ *
+ * THE ONE WRITE that creates a wait. Who, the message and the task it waits for
+ * are composed as a local draft and posted together, because after this call
+ * every one of them is locked (featreq-8b7d06d7).
  */
 export async function addWaitingOnRequest(
   checklistId: string,
@@ -1336,6 +1340,8 @@ export async function addWaitingOnRequest(
     blockerId?: string
     blockerType?: 'employee' | 'client'
     note?: string
+    /** The task this step waits for. Omit to leave the step's existing link alone. */
+    waitingForChecklistId?: string | null
   },
 ) {
   const response = await apiFetch(
@@ -1426,6 +1432,35 @@ export async function waitingOnSendBackRequest(
   if (!response.ok) {
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to send back (${response.status})`)
+  }
+  return ((await response.json()) as { checklist: Checklist }).checklist
+}
+
+/**
+ * Question — the person being waited on asks the requester something WITHOUT
+ * finishing. The wait does not move: the message is appended to the record and
+ * the requester is notified, and it is still sitting on the blocker's Delayed
+ * page afterwards. Refused with 400 when the message is empty.
+ */
+export async function waitingOnQuestionRequest(
+  checklistId: string,
+  waitingOnId: string,
+  note: string,
+) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/waiting-ons/${encodeURIComponent(
+      waitingOnId,
+    )}/question`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to send question (${response.status})`)
   }
   return ((await response.json()) as { checklist: Checklist }).checklist
 }

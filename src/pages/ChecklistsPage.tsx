@@ -20,8 +20,10 @@ import {
 } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
+  canAskWaitingOnQuestion,
   canMarkWaitingOnDone,
   canVerifyWaitingOn,
+  hasLiveSavedWait,
   isClientWait,
   isWaitingOnOpen,
   waitingOnStage,
@@ -36,6 +38,7 @@ import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { CompletedTasksSection } from '../components/CompletedTasksSection'
 import { CompletedWaits } from '../components/CompletedWaits'
 import { WaitApprovalActions } from '../components/WaitApprovalActions'
+import { WaitQuestionAction } from '../components/WaitQuestionAction'
 import { FilterBar } from '../components/FilterBar'
 import { ListSearch } from '../components/ListSearch'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
@@ -84,7 +87,6 @@ import {
   localDateOnly,
   makeId,
   monthShortNames,
-  planWaitingDone,
   shortDate,
   stageNameFor,
   stepIsWaiting,
@@ -2592,6 +2594,8 @@ export function WaitingEditor({
   onDoneWaitingOn,
   onVerifyWaitingOn,
   onSendBackWaitingOn,
+  onAskWaitingOn,
+  stepDone = false,
 }: {
   note: string
   employees: Employee[]
@@ -2618,16 +2622,32 @@ export function WaitingEditor({
    */
   onDone: () => Promise<void> | void
   /**
-   * Flag a new blocker on this step. `'client'` means this task's own client —
-   * which client is never asked, the server reads it off the checklist.
+   * Save the composed wait — the ONE write that creates one. `'client'` means
+   * this task's own client, which is never asked for (the server reads it off
+   * the checklist). The note and the waited-for task travel with it because
+   * every one of them is locked the moment it lands.
    */
-  onAddWaitingOn: (blocker: string | 'client', note: string) => Promise<void> | void
+  onAddWaitingOn: (
+    blocker: string | 'client',
+    note: string,
+    /** `undefined` leaves the step's existing link alone; `null` clears it. */
+    waitingForChecklistId: string | null | undefined,
+  ) => Promise<void> | void
   /** Stage 1 — the person being waited on reports their part finished. */
   onDoneWaitingOn: (waitingOnId: string) => Promise<void> | void
   /** Stage 2 — the person who asked approves and closes it out. */
   onVerifyWaitingOn: (waitingOnId: string) => Promise<void> | void
   /** Stage 2's other door — not approved, back to the blocker with a new note. */
   onSendBackWaitingOn: (waitingOnId: string, note: string) => Promise<void> | void
+  /** Stage 1's other door — a question for whoever asked, finishing nothing. */
+  onAskWaitingOn: (waitingOnId: string, note: string) => Promise<void> | void
+  /**
+   * The step itself is ticked off but a wait on it is still live. The editor
+   * then shows the wait and nothing else: no picker, no Done, no Clear — just
+   * the chips, so "Approve / Send back" stays reachable from the step instead of
+   * being hidden the moment somebody checks the box.
+   */
+  stepDone?: boolean
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const { state, flash } = useSaveFlash()
@@ -2652,18 +2672,66 @@ export function WaitingEditor({
    *
    * Picking a name used to POST immediately, with no note attached — so the
    * note she describes had nowhere to go and a misclick created a real wait
-   * somebody had to cancel. Now the pick is held here until Save, and the note
-   * typed alongside it becomes the WAIT's own note, which is immutable
-   * thereafter (nothing in this editor writes `entry.note` again).
+   * somebody had to cancel. Now ALL THREE fields — who, the message, and the
+   * task this step is waiting for — are held here until Save, which writes them
+   * in one atomic create. Clear throws the draft away and writes nothing at all.
+   *
+   * After that they are frozen: her annotated screenshots (featreq-8b7d06d7)
+   * say "all info is locked and cannot be changed", which is why the boxes
+   * below disappear rather than going read-only, and why the server refuses the
+   * PATCHes that used to reach them (lib/waiting-on-state.js).
    */
   const [draftBlocker, setDraftBlocker] = useState<string | null>(null)
   const [draftNote, setDraftNote] = useState('')
+  /**
+   * The draft's task choice, or null for UNTOUCHED. Null is not "no task": it
+   * means the picker was never used, so Save omits the field entirely and the
+   * step keeps whatever link it already had. That also makes the value
+   * self-refreshing — an untouched draft always reads the live prop, so a link
+   * changed elsewhere can never be resurrected from stale component state.
+   */
+  const [draftWaitFor, setDraftWaitFor] = useState<string | null>(null)
+  const composing = draftBlocker !== null
+  /**
+   * A saved wait is live on this step, and nothing about it is editable. The
+   * step's own note box, its task picker, Clear and Done all go — the wait's
+   * own chip below carries the only actions left. Keyed on LIVE waits: once
+   * every wait is approved the step is ordinary again and gets its controls
+   * back, which is the only way an amber step ever goes quiet.
+   */
+  const locked = !composing && openWaitingOns.length > 0
+  /**
+   * The saved "waiting for another task" link, resolved for display while the
+   * step is locked. `availableTasks` always carries the saved selection even
+   * when the filter would not offer it (see src/lib/waitForTaskOptions.ts), so
+   * a cross-client or skipped link still reads instead of vanishing.
+   */
+  const savedWaitForTask = waitingForChecklistId
+    ? (availableTasks.find((task) => task.id === waitingForChecklistId) ?? null)
+    : null
+  /**
+   * Whether the draft may choose a task at all. A step already carrying a live
+   * wait has that field LOCKED — and composing a second wait must not become
+   * the back door into it, which is exactly what the server refuses. So the
+   * picker only appears on the first wait; the server enforces the same rule.
+   */
+  const draftCanPickTask = openWaitingOns.length === 0 && availableTasks.length > 0
   const clearDraft = () => {
     setDraftBlocker(null)
     setDraftNote('')
+    setDraftWaitFor(null)
   }
 
-  const run = async (work: () => Promise<void> | void) => {
+  /**
+   * Every waiting mutation goes through here so a refusal lands in the red line
+   * instead of dying as an unhandled rejection.
+   *
+   * `rethrow` is for the callers that ALSO need to know it failed — the question
+   * composer keeps what was typed on failure, which it can only do if the
+   * failure reaches it. The error is still shown either way; rethrowing only
+   * adds a second listener, so those callers must handle it.
+   */
+  const run = async (work: () => Promise<void> | void, { rethrow = false } = {}) => {
     setError(null)
     setBusy(true)
     try {
@@ -2674,6 +2742,7 @@ export function WaitingEditor({
           ? err.message
           : "Couldn't update this wait — please try again.",
       )
+      if (rethrow) throw err
     } finally {
       // A success usually unmounts this editor (the step stops being
       // "waiting"); setting state on an unmounted component is a no-op.
@@ -2681,70 +2750,31 @@ export function WaitingEditor({
     }
   }
 
-  // Done = retire the whole wait. The structured person-blockers have to go
-  // first: `stepIsWaiting` counts them, so leaving them behind kept the step
-  // amber and this editor open, which is why the click looked dead.
-  //
-  // What it can NO LONGER do is erase somebody else's open wait to get the step
-  // clear. Those are left alone and named below — the step stays amber because
-  // it is genuinely still blocked.
-  const handleDone = () =>
-    run(async () => {
-      const plan = planWaitingDone(waitingOns, activeEmployeeId, {
-        isOwner,
-        assigneeId: stepAssigneeId,
-      })
-      for (const step of plan) {
-        if (step.action === 'done') {
-          await onDoneWaitingOn(step.id)
-        } else if (step.action === 'verify') {
-          await onVerifyWaitingOn(step.id)
-        }
-      }
-      const stranded = plan
-        .filter((step) => step.action === 'theirs')
-        .map((step) => waitingOns.find((wait) => wait.id === step.id))
-        .filter((entry): entry is WaitingOn => Boolean(entry))
-      if (stranded.length > 0) {
-        // A name we can say out loud. `employeeName` answers "Unassigned" for an
-        // id it doesn't know, which reads as a bug in a sentence about a person.
-        const personName = (id: string | undefined) =>
-          employees.find((emp) => emp.id === id)?.name ?? 'a colleague'
-        const listOf = (names: string[]) => Array.from(new Set(names)).join(', ')
-        // Two different waits, two different sentences. One is still on the
-        // blocker; the other is finished and sitting with whoever asked.
-        const owed = listOf(
-          stranded
-            .filter((entry) => waitingOnStage(entry) !== 'resolved')
-            .map((entry) =>
-              isClientWait(entry) ? clientName || 'the client' : personName(entry.blockerId),
-            ),
-        )
-        const approvers = listOf(
-          stranded
-            .filter((entry) => waitingOnStage(entry) === 'resolved')
-            .map((entry) => personName(entry.requestedBy)),
-        )
-        setError(
-          [
-            owed ? `Still waiting on ${owed} — only they can mark their part done.` : '',
-            approvers ? `Waiting on ${approvers}'s approval.` : '',
-            'A saved wait stays on the task until it is done and approved.',
-          ]
-            .filter(Boolean)
-            .join(' '),
-        )
-        return
-      }
-      await onDone()
-    })
+  /**
+   * Done = un-flag a step that was only ever waiting the OLD free-text way.
+   *
+   * It no longer has anything to say about saved waits, because it is no longer
+   * rendered while one is live — those are finished from their own chip (Mark
+   * done) and closed from it (Approve / Send back), which is exactly the pair
+   * her screenshots leave on an "awaiting your OK" wait. A Done sitting above
+   * them was a third door onto the same two moves, and the one she crossed out.
+   */
+  const handleDone = () => run(async () => onDone())
 
   // SAVE — create the composed wait. Same button element as Done above; only
   // the label and the action change while a name is picked but uncreated.
   const handleSave = () =>
     run(async () => {
       if (!draftBlocker) return
-      await onAddWaitingOn(draftBlocker, draftNote.trim())
+      // `undefined` — the picker was never rendered or never touched — omits the
+      // field, so the step keeps the link it had. The draft is only discarded
+      // AFTER the create resolves: if the server refuses, everything typed is
+      // still on screen beside the reason.
+      await onAddWaitingOn(
+        draftBlocker,
+        draftNote.trim(),
+        draftWaitFor === null ? undefined : draftWaitFor || null,
+      )
       clearDraft()
     })
 
@@ -2759,6 +2789,13 @@ export function WaitingEditor({
 
   return (
     <div className="waiting-editor">
+      {/* Ticked off with a wait still open. Nothing here is startable or
+          editable — the chips below are the whole point of still rendering. */}
+      {stepDone ? (
+        <p className="waiting-editor-done-note">
+          This step is checked off, but a wait on it is still open.
+        </p>
+      ) : (
       <div className="waiting-editor-row">
         <span className="waiting-editor-label">⏳ Waiting on</span>
         <SaveBadge state={state} />
@@ -2788,7 +2825,7 @@ export function WaitingEditor({
               ))}
           </optgroup>
         </select>
-        {draftBlocker ? (
+        {composing ? (
           <button
             type="button"
             className="waiting-done-btn"
@@ -2796,13 +2833,13 @@ export function WaitingEditor({
             title={
               busy
                 ? 'Saving this wait — one moment…'
-                : 'Create this wait and notify them. The person and the note are fixed once saved.'
+                : 'Create this wait and notify them. The person, the message and the task it waits for are all fixed once saved.'
             }
             onClick={() => void handleSave()}
           >
             {busy ? 'Saving…' : 'Save'}
           </button>
-        ) : (
+        ) : locked ? null : (
           <button
             type="button"
             className="waiting-done-btn"
@@ -2817,34 +2854,60 @@ export function WaitingEditor({
             {busy ? 'Retiring…' : 'Done'}
           </button>
         )}
-        <button
-          type="button"
-          className="waiting-clear-btn"
-          disabled={busy}
-          title={
-            draftBlocker
-              ? 'Never mind — discard this before it is created'
-              : busy
-                ? 'Retiring this wait — one moment…'
-                : 'Un-flag without finishing — removes the free-text note entirely (saved waits are not affected)'
-          }
-          onClick={draftBlocker ? clearDraft : onClear}
-        >
-          Clear
-        </button>
+        {/* Clear is the escape hatch for a misclick, and ONLY that: it exists
+            while a draft is being composed, and on a step with no saved wait to
+            protect. Once one is saved it disappears — "user should not be able
+            to remove the information once it is saved". */}
+        {locked ? null : (
+          <button
+            type="button"
+            className="waiting-clear-btn"
+            disabled={busy}
+            title={
+              composing
+                ? 'Never mind — discard this before it is created'
+                : busy
+                  ? 'Retiring this wait — one moment…'
+                  : 'Un-flag without finishing — removes the free-text note entirely (saved waits are not affected)'
+            }
+            onClick={composing ? clearDraft : onClear}
+          >
+            Clear
+          </button>
+        )}
       </div>
-      {/* The note travels WITH the wait, so it is composed here and then frozen
-          — there is no edit path for it afterwards, by her instruction. */}
-      {draftBlocker ? (
-        <textarea
-          className="waiting-note-textarea"
-          rows={2}
-          autoFocus
-          aria-label="Note for this wait"
-          placeholder="What do you need from them? (saved with the wait)"
-          value={draftNote}
-          onChange={(event) => setDraftNote(event.target.value)}
-        />
+      )}
+      {/* Everything the wait carries is composed here and then frozen — there is
+          no edit path for any of it afterwards, by her instruction. */}
+      {composing ? (
+        <>
+          <textarea
+            className="waiting-note-textarea"
+            rows={2}
+            autoFocus
+            aria-label="Note for this wait"
+            placeholder="What do you need from them? (saved with the wait)"
+            value={draftNote}
+            onChange={(event) => setDraftNote(event.target.value)}
+          />
+          {draftCanPickTask ? (
+            <label className="waiting-for-row">
+              <span>Waiting for another task to finish? (we'll notify you when it's done)</span>
+              <select
+                className="waiting-person-select"
+                value={draftWaitFor ?? (waitingForChecklistId ?? '')}
+                onChange={(event) => setDraftWaitFor(event.target.value)}
+              >
+                <option value="">— not waiting on a task —</option>
+                {availableTasks.map((task) => (
+                  <option key={task.id} value={task.id}>
+                    {task.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+        </>
       ) : null}
       {error ? (
         <p className="waiting-editor-error" role="alert">
@@ -2870,6 +2933,7 @@ export function WaitingEditor({
               ? employeeName(employees, entry.resolvedBy)
               : null
             const lastSendBack = entry.sendBacks?.[entry.sendBacks.length - 1]
+            const lastQuestion = entry.questions?.[entry.questions.length - 1]
             return (
               <li key={entry.id} className={`waiting-blocker-chip is-${stage}`}>
                 {/* The name is the point: it survives both stages, so there is
@@ -2902,6 +2966,16 @@ export function WaitingEditor({
                     }`}
                   </span>
                 ) : null}
+                {/* The other direction: what the person being waited on asked
+                    without finishing. It changes nothing about the wait — it is
+                    here so whoever asked can actually read it. */}
+                {lastQuestion ? (
+                  <span className="waiting-blocker-note">
+                    {`Question from ${employeeName(employees, lastQuestion.by)}${
+                      lastQuestion.note ? ` — ${lastQuestion.note}` : ''
+                    }`}
+                  </span>
+                ) : null}
                 {canMarkWaitingOnDone(permission) ? (
                   <button
                     type="button"
@@ -2925,6 +2999,21 @@ export function WaitingEditor({
                     the × that removed a wait outright is gone. Her fifth round:
                     "User should not be able to remove the information once it is
                     saved." */}
+                {/* The blocker's other door, the same one the Delayed page
+                    gives them: ask instead of finishing. Here for parity — you
+                    should not have to leave the checklist to say "which
+                    account?" when Mark done is right there. */}
+                {canAskWaitingOnQuestion(permission) ? (
+                  <WaitQuestionAction
+                    busy={busy}
+                    requesterName={
+                      entry.requestedBy ? employeeName(employees, entry.requestedBy) : 'whoever asked'
+                    }
+                    onAsk={(questionNote) =>
+                      run(() => onAskWaitingOn(entry.id, questionNote), { rethrow: true })
+                    }
+                  />
+                ) : null}
                 {canVerifyWaitingOn(permission) ? (
                   <WaitApprovalActions
                     busy={busy}
@@ -2942,8 +3031,9 @@ export function WaitingEditor({
       ) : null}
       {/* Hidden while composing: the step's own free-text note is a different
           field from the new wait's, and two note boxes side by side is exactly
-          the ambiguity "put in the note" was meant to remove. */}
-      {draftBlocker ? null : (
+          the ambiguity "put in the note" was meant to remove. Hidden once a wait
+          is saved, for the opposite reason — there is nothing left to edit. */}
+      {composing || locked ? null : (
         <textarea
           ref={textareaRef}
           key={note}
@@ -2954,7 +3044,13 @@ export function WaitingEditor({
           onBlur={(event) => save(event.target.value)}
         />
       )}
-      {!draftBlocker && availableTasks.length > 0 ? (
+      {/* The saved task link is read-only from here on: it was chosen with the
+          wait and is part of what Save froze. It still READS, so the step says
+          what it is waiting for. */}
+      {locked && savedWaitForTask ? (
+        <p className="waiting-for-locked">Waiting for: {savedWaitForTask.title}</p>
+      ) : null}
+      {!composing && !locked && availableTasks.length > 0 ? (
         <label className="waiting-for-row">
           <span>Waiting for another task to finish? (we'll notify you when it's done)</span>
           <select
@@ -3046,6 +3142,7 @@ function DraggableTaskList({
     waitingOnDone,
     waitingOnVerify,
     waitingOnSendBack,
+    waitingOnQuestion,
     role,
   } = useAppContext()
   const isOwner = role === 'owner'
@@ -3276,10 +3373,17 @@ function DraggableTaskList({
                       aria-label="Toggle waiting on"
                       aria-pressed={item.waiting ?? false}
                       className={`item-waiting-toggle${item.waiting ? ' is-waiting' : ''}`}
+                      // A live saved wait owns this flag: un-flagging would take
+                      // the wait off everyone's Delayed page, which is exactly
+                      // what the server refuses. Disabled rather than left to
+                      // fail, so the button never looks dead.
+                      disabled={hasLiveSavedWait(item)}
                       title={
-                        item.waiting
-                          ? 'Waiting on — click to clear'
-                          : 'Flag as waiting on something'
+                        hasLiveSavedWait(item)
+                          ? 'A saved wait is live on this step — mark it done and approve it to clear it'
+                          : item.waiting
+                            ? 'Waiting on — click to clear'
+                            : 'Flag as waiting on something'
                       }
                       onClick={() => {
                         if (item.waiting) {
@@ -3327,7 +3431,11 @@ function DraggableTaskList({
                 )}
               </span>
             </div>
-            {canEdit && stepIsWaiting(item) && !item.done ? (
+            {/* Ticking a step off used to unmount this outright, taking a LIVE
+                wait's only controls with it — the wait was still open, still on
+                the Delayed page, and suddenly had no Approve on the step. A done
+                step with an open wait still shows it (chips only). */}
+            {canEdit && stepIsWaiting(item) && (!item.done || hasLiveSavedWait(item)) ? (
               <WaitingEditor
                 note={item.waitingOn ?? ''}
                 employees={employees}
@@ -3353,21 +3461,38 @@ function DraggableTaskList({
                   await onUpdateItem(item.id, WAITING_DONE_PATCH)
                   markRetired(item.id)
                 }}
-                onAddWaitingOn={(blocker, waitNote) =>
-                  void addWaitingOn(
+                // RETURNED, never `void`ed: the editor awaits these to decide
+                // whether the draft is safe to discard, to keep Save disabled
+                // until the create lands (a double press would otherwise create
+                // a second permanent wait), and to show a refusal instead of
+                // swallowing it as an unhandled rejection.
+                onAddWaitingOn={(blocker, waitNote, waitFor) =>
+                  addWaitingOn(
                     checklistId,
                     blocker === 'client'
-                      ? { itemId: item.id, blockerType: 'client', note: waitNote }
-                      : { itemId: item.id, blockerId: blocker, note: waitNote },
+                      ? {
+                          itemId: item.id,
+                          blockerType: 'client',
+                          note: waitNote,
+                          ...(waitFor === undefined ? {} : { waitingForChecklistId: waitFor }),
+                        }
+                      : {
+                          itemId: item.id,
+                          blockerId: blocker,
+                          note: waitNote,
+                          ...(waitFor === undefined ? {} : { waitingForChecklistId: waitFor }),
+                        },
                   )
                 }
-                onDoneWaitingOn={(waitingOnId) => void waitingOnDone(checklistId, waitingOnId)}
-                onVerifyWaitingOn={(waitingOnId) =>
-                  void waitingOnVerify(checklistId, waitingOnId)
-                }
+                onDoneWaitingOn={(waitingOnId) => waitingOnDone(checklistId, waitingOnId)}
+                onVerifyWaitingOn={(waitingOnId) => waitingOnVerify(checklistId, waitingOnId)}
                 onSendBackWaitingOn={(waitingOnId, sendBackNote) =>
-                  void waitingOnSendBack(checklistId, waitingOnId, sendBackNote)
+                  waitingOnSendBack(checklistId, waitingOnId, sendBackNote)
                 }
+                onAskWaitingOn={(waitingOnId, questionNote) =>
+                  waitingOnQuestion(checklistId, waitingOnId, questionNote)
+                }
+                stepDone={item.done}
               />
             ) : null}
             {/* Outside the editor on purpose — the editor unmounts the moment
@@ -3434,10 +3559,14 @@ function DraggableTaskList({
                             className={`item-waiting-toggle sub-item-waiting-toggle${
                               sub.waiting ? ' is-waiting' : ''
                             }`}
+                            // Same rule as the item-level toggle above.
+                            disabled={hasLiveSavedWait(sub)}
                             title={
-                              sub.waiting
-                                ? 'Waiting on — click to clear'
-                                : 'Flag as waiting on something'
+                              hasLiveSavedWait(sub)
+                                ? 'A saved wait is live on this sub-step — mark it done and approve it to clear it'
+                                : sub.waiting
+                                  ? 'Waiting on — click to clear'
+                                  : 'Flag as waiting on something'
                             }
                             onClick={() => {
                               if (sub.waiting) {
@@ -3475,7 +3604,9 @@ function DraggableTaskList({
                           </span>
                         ) : null}
                       </div>
-                      {canEdit && stepIsWaiting(sub) && !sub.done ? (
+                      {/* Same rule as the item level: a ticked sub-step keeps a
+                          live wait's chips. */}
+                      {canEdit && stepIsWaiting(sub) && (!sub.done || hasLiveSavedWait(sub)) ? (
                         <WaitingEditor
                           note={sub.waitingOn ?? ''}
                           employees={employees}
@@ -3503,8 +3634,9 @@ function DraggableTaskList({
                             onUpdateSubItemWaiting(item.id, sub.id, WAITING_DONE_PATCH)
                             markRetired(sub.id)
                           }}
-                          onAddWaitingOn={(blocker, waitNote) =>
-                            void addWaitingOn(
+                          // Returned, not `void`ed — see the item level.
+                          onAddWaitingOn={(blocker, waitNote, waitFor) =>
+                            addWaitingOn(
                               checklistId,
                               blocker === 'client'
                                 ? {
@@ -3512,24 +3644,34 @@ function DraggableTaskList({
                                     subItemId: sub.id,
                                     blockerType: 'client',
                                     note: waitNote,
+                                    ...(waitFor === undefined
+                                      ? {}
+                                      : { waitingForChecklistId: waitFor }),
                                   }
                                 : {
                                     itemId: item.id,
                                     subItemId: sub.id,
                                     blockerId: blocker,
                                     note: waitNote,
+                                    ...(waitFor === undefined
+                                      ? {}
+                                      : { waitingForChecklistId: waitFor }),
                                   },
                             )
                           }
                           onDoneWaitingOn={(waitingOnId) =>
-                            void waitingOnDone(checklistId, waitingOnId)
+                            waitingOnDone(checklistId, waitingOnId)
                           }
                           onVerifyWaitingOn={(waitingOnId) =>
-                            void waitingOnVerify(checklistId, waitingOnId)
+                            waitingOnVerify(checklistId, waitingOnId)
                           }
                           onSendBackWaitingOn={(waitingOnId, sendBackNote) =>
-                            void waitingOnSendBack(checklistId, waitingOnId, sendBackNote)
+                            waitingOnSendBack(checklistId, waitingOnId, sendBackNote)
                           }
+                          onAskWaitingOn={(waitingOnId, questionNote) =>
+                            waitingOnQuestion(checklistId, waitingOnId, questionNote)
+                          }
+                          stepDone={sub.done}
                         />
                       ) : null}
                       {/* Same reasoning as the item level — see above. */}
