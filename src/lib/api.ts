@@ -663,6 +663,21 @@ export async function deletePlanRequest(id: string) {
   return (await response.json()) as { removedPlanId: string; unlinkedClientIds: string[] }
 }
 
+/**
+ * The covered-date half of a recurring reimbursement, as the setup form sends
+ * it. Every field optional: an expense that does not name its covered period
+ * simply omits them, and a PATCH that says nothing about coverage is not a
+ * statement about it. `coverageHistory` is absent on purpose — the ledger is
+ * the server's to write.
+ */
+export type RecurringReimbursementCoverageInput = {
+  coverageEnabled?: boolean
+  coverageTemplate?: string
+  coverageStart?: string | null
+  coverageEnd?: string | null
+  coveragePaused?: boolean
+}
+
 /** Owner-only: create a recurring reimbursement on a client. */
 export async function addRecurringReimbursementRequest(input: {
   clientId: string
@@ -670,7 +685,7 @@ export async function addRecurringReimbursementRequest(input: {
   amount: number
   frequency: RecurringReimbursementFrequency
   startDate: string
-}) {
+} & RecurringReimbursementCoverageInput) {
   const response = await apiFetch('/api/recurring-reimbursements', {
     credentials: 'same-origin',
     method: 'POST',
@@ -695,7 +710,7 @@ export async function updateRecurringReimbursementRequest(
     amount?: number
     frequency?: RecurringReimbursementFrequency
     startDate?: string
-  },
+  } & RecurringReimbursementCoverageInput,
 ) {
   const response = await apiFetch(
     `/api/recurring-reimbursements/${encodeURIComponent(id)}`,
@@ -3198,6 +3213,38 @@ export async function updateInvoiceRequest(
   if (!response.ok) {
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to save (${response.status})`)
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
+}
+
+/**
+ * Owner-only: answer "confirm the covered dates" on one reimbursed-expense
+ * line. Omit the dates to accept the window the invoice already proposes.
+ *
+ * Separate from `updateInvoiceRequest` because it writes somewhere the line
+ * edit does not — the expense's own ledger, which is what the NEXT cycle
+ * advances from. Returns the invoice with the line settled.
+ */
+export async function confirmInvoiceCoverageRequest(
+  invoiceId: string,
+  recurringId: string,
+  range?: { coverageStart: string; coverageEnd: string },
+) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/confirm-coverage`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recurringId, ...(range ?? {}) }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to confirm the covered dates (${response.status})`,
+    )
   }
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }

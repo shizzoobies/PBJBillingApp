@@ -11,13 +11,17 @@ import {
   INVOICE_SELECT_COLUMNS,
   mapChecklistItemRow,
   mapInvoiceRow,
+  mapRecurringReimbursementRow,
+  sanitizeAppData,
 } from './store.js'
 import {
   BULK_SAVE_TABLES,
   StaleWorkspaceError,
   fileWorkspaceVersion,
+  tableVersionSql,
   workspaceVersionSql,
 } from '../lib/workspace-version.js'
+import { normalizeRecurringReimbursement } from '../lib/expense-coverage.js'
 
 /**
  * End-to-end `appDataStore.write()` contracts on the FILE backend: the
@@ -949,6 +953,7 @@ function fakePostgres({
   templateStageRows = [],
   templateItemRows = [],
   versionResponses = null,
+  recurringRows = [],
 } = {}) {
   const statements = []
   const record = (text, params) => {
@@ -1007,6 +1012,14 @@ function fakePostgres({
     // instead — the same empty-`valid` failure a live regression would cause.
     if (/^select id from users\s*$/i.test(trimmed)) {
       return { rows: userRows }
+    }
+    // Recurring reimbursements, for the covered-date tests — both the read
+    // inside `read()` and the single-row read the update path starts with.
+    if (/^select\b[\s\S]*\bfrom recurring_reimbursements\b/i.test(trimmed)) {
+      return { rows: recurringRows, rowCount: recurringRows.length }
+    }
+    if (/^update recurring_reimbursements set[\s\S]*returning/i.test(trimmed)) {
+      return { rows: recurringRows, rowCount: recurringRows.length }
     }
     return { rows: [] }
   }
@@ -5768,6 +5781,635 @@ describe("read()'s materializer write-back is guarded (file backend)", () => {
 })
 
 /**
+ * Covered-date windows on reimbursed expenses — the store's half.
+ *
+ * The arithmetic is pinned in lib/expense-coverage.test.mjs. What lives here is
+ * the part that is a fact about STORED ROWS rather than about dates:
+ *
+ *   - generation writes the window it billed into the expense's ledger, and
+ *     only after the invoice actually landed;
+ *   - regenerating a month reuses that window instead of stepping the cycle a
+ *     second time — the guarantee that makes "void & regenerate" safe;
+ *   - a window the owner has not confirmed stands between the invoice and being
+ *     reviewed, and confirming it moves the ledger, not just the line.
+ */
+describe('reimbursed-expense covered dates (file backend)', () => {
+  const period = '2026-08'
+
+  async function seedCoverageWorkspace(overrides = {}) {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 500 }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [],
+        recurringReimbursements: [
+          {
+            id: 'recur-qbo',
+            clientId: 'c1',
+            description: 'QuickBooks Online',
+            amount: 90,
+            frequency: 'monthly',
+            startDate: '2026-07-01',
+            coverageEnabled: true,
+            coverageTemplate: '{description} — {range}',
+            coverageStart: '2026-07-13',
+            coverageEnd: '2026-08-13',
+            coveragePaused: false,
+            coverageResumePending: false,
+            coverageHistory: {},
+            ...overrides,
+          },
+        ],
+      }),
+    )
+    // Invoices live outside the bulk save, so start the period genuinely empty.
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const readExpense = async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.recurringReimbursements.find((entry) => entry.id === 'recur-qbo')
+  }
+
+  const recurringLineOf = (invoice) => invoice.lineItems.find((line) => line.kind === 'recurring')
+
+  it('bills the first window she typed, and records it against the period', async () => {
+    await seedCoverageWorkspace()
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    const line = recurringLineOf(result.created[0])
+    expect(line.label).toBe('QuickBooks Online — July 13 – August 13, 2026')
+    expect(line).toMatchObject({
+      recurringId: 'recur-qbo',
+      coverageStart: '2026-07-13',
+      coverageEnd: '2026-08-13',
+    })
+    // The ledger now answers for August, which is what the next run reads.
+    expect((await readExpense()).coverageHistory['2026-08']).toMatchObject({
+      start: '2026-07-13',
+      end: '2026-08-13',
+      needsConfirmation: false,
+    })
+  })
+
+  it('walks the window forward on the next month, with no confirmation asked', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    const september = await store.generateInvoicesForPeriod('2026-09', { clientId: 'c1' })
+
+    const line = recurringLineOf(september.created[0])
+    expect(line.label).toBe('QuickBooks Online — August 13 – September 13, 2026')
+    expect(line.needsCoverageConfirmation).toBeFalsy()
+  })
+
+  // THE ONE THAT MATTERS. Voiding a month and building it again must give the
+  // client the same covered period — not next month's, which is what a cycle
+  // that advanced on every generation would print.
+  it('reuses the same window when a month is voided and regenerated', async () => {
+    await seedCoverageWorkspace()
+    const first = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const before = recurringLineOf(first.created[0])
+
+    await store.voidUnsentInvoicesForPeriod(period)
+    const rebuilt = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const after = recurringLineOf(rebuilt.created[0])
+
+    expect(after.coverageStart).toBe(before.coverageStart)
+    expect(after.coverageEnd).toBe(before.coverageEnd)
+    expect(after.label).toBe(before.label)
+    // And the ledger still holds exactly one answer for August.
+    expect(Object.keys((await readExpense()).coverageHistory)).toEqual(['2026-08'])
+  })
+
+  // A client who was skipped must not have their window moved. The invoice is
+  // what advances the cycle, so no invoice means no advance.
+  it('leaves the ledger alone when nothing was generated', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const afterFirst = await readExpense()
+
+    // Second run skips — the client already has a live invoice for the period.
+    const second = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    expect(second.created).toHaveLength(0)
+
+    expect((await readExpense()).coverageHistory).toEqual(afterFirst.coverageHistory)
+  })
+
+  it('asks about the window when a cycle was skipped', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    // September and October never billed. November must not stride across them.
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+
+    expect(recurringLineOf(november.created[0])).toMatchObject({
+      needsCoverageConfirmation: true,
+      coverageReason: 'gap',
+      coverageStart: '2026-08-13',
+      coverageEnd: '2026-09-13',
+    })
+  })
+
+  it('asks about the window on the first invoice after a pause is lifted', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    await store.updateRecurringReimbursement('recur-qbo', { coveragePaused: true })
+    // Paused: September bills the plan and nothing else.
+    const paused = await store.generateInvoicesForPeriod('2026-09', { clientId: 'c1' })
+    expect(recurringLineOf(paused.created[0])).toBeUndefined()
+
+    await store.updateRecurringReimbursement('recur-qbo', { coveragePaused: false })
+    expect((await readExpense()).coverageResumePending).toBe(true)
+
+    const resumed = await store.generateInvoicesForPeriod('2026-10', { clientId: 'c1' })
+    expect(recurringLineOf(resumed.created[0])).toMatchObject({
+      needsCoverageConfirmation: true,
+      coverageReason: 'resumed',
+    })
+    // Spent by the invoice that asked — the month after must not ask again.
+    expect((await readExpense()).coverageResumePending).toBe(false)
+  })
+
+  it('refuses to mark an invoice reviewed while its dates are unanswered', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+
+    await expect(
+      store.updateInvoice(november.created[0].id, { status: 'reviewed' }),
+    ).rejects.toThrow(/confirm the covered dates/i)
+  })
+
+  // Voiding is deliberately still allowed: withdrawing an invoice she does not
+  // want to answer for is the right way out, not a dead end.
+  it('still lets her void an invoice she has not answered for', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+
+    const voided = await store.updateInvoice(november.created[0].id, { status: 'void' })
+    expect(voided.status).toBe('void')
+  })
+
+  it('keeps the window and the expense id through an ordinary line save', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+    const invoice = november.created[0]
+
+    // She retypes the label — the dates and the id must survive it, or the line
+    // would lose the very thing being confirmed.
+    const saved = await store.updateInvoice(invoice.id, {
+      lineItems: invoice.lineItems.map((line) =>
+        line.kind === 'recurring' ? { ...line, label: 'QBO subscription' } : line,
+      ),
+    })
+
+    expect(recurringLineOf(saved)).toMatchObject({
+      label: 'QBO subscription',
+      recurringId: 'recur-qbo',
+      coverageStart: '2026-08-13',
+      coverageEnd: '2026-09-13',
+      needsCoverageConfirmation: true,
+    })
+  })
+
+  it('accepts the proposed window and unblocks review', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+    const invoiceId = november.created[0].id
+
+    const confirmed = await store.confirmExpenseCoverage(invoiceId, 'recur-qbo')
+
+    expect(recurringLineOf(confirmed).needsCoverageConfirmation).toBe(false)
+    const reviewed = await store.updateInvoice(invoiceId, { status: 'reviewed' })
+    expect(reviewed.status).toBe('reviewed')
+  })
+
+  // Correcting the window must reach the LEDGER, or the following month would
+  // step from the range she corrected away from — the same retyping this
+  // feature removes, arriving a month later.
+  it('carries an edited window into the ledger, and the next cycle steps from it', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+
+    const confirmed = await store.confirmExpenseCoverage(november.created[0].id, 'recur-qbo', {
+      start: '2026-10-13',
+      end: '2026-11-13',
+    })
+
+    // The wording is re-rendered around the dates she actually approved.
+    expect(recurringLineOf(confirmed).label).toBe(
+      'QuickBooks Online — October 13 – November 13, 2026',
+    )
+    expect((await readExpense()).coverageHistory['2026-11']).toMatchObject({
+      start: '2026-10-13',
+      end: '2026-11-13',
+      needsConfirmation: false,
+    })
+
+    const december = await store.generateInvoicesForPeriod('2026-12', { clientId: 'c1' })
+    expect(recurringLineOf(december.created[0])).toMatchObject({
+      coverageStart: '2026-11-13',
+      coverageEnd: '2026-12-13',
+      needsCoverageConfirmation: false,
+    })
+  })
+
+  it('refuses a window that ends before it starts', async () => {
+    await seedCoverageWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+
+    await expect(
+      store.confirmExpenseCoverage(november.created[0].id, 'recur-qbo', {
+        start: '2026-11-13',
+        end: '2026-10-13',
+      }),
+    ).rejects.toThrow(/must come after/i)
+  })
+
+  it('refuses to confirm an expense that is not on the invoice', async () => {
+    await seedCoverageWorkspace()
+    const august = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    await expect(store.confirmExpenseCoverage(august.created[0].id, 'recur-ghost')).rejects.toThrow(
+      /not on this invoice/i,
+    )
+  })
+
+  it('refuses to switch coverage on without a first window', async () => {
+    await seedCoverageWorkspace()
+    expect(
+      await store.updateRecurringReimbursement('recur-qbo', {
+        coverageStart: null,
+        coverageEnd: null,
+      }),
+    ).toBeNull()
+    expect(
+      await store.addRecurringReimbursement({
+        clientId: 'c1',
+        description: 'Payroll service',
+        amount: 25,
+        frequency: 'monthly',
+        startDate: '2026-08-01',
+        coverageEnabled: true,
+      }),
+    ).toBeNull()
+  })
+
+  it('refuses a first window that ends before it starts', async () => {
+    await seedCoverageWorkspace()
+    expect(
+      await store.addRecurringReimbursement({
+        clientId: 'c1',
+        description: 'Payroll service',
+        amount: 25,
+        frequency: 'monthly',
+        startDate: '2026-08-01',
+        coverageEnabled: true,
+        coverageStart: '2026-09-05',
+        coverageEnd: '2026-08-05',
+      }),
+    ).toBeNull()
+  })
+
+  it('stores the covered dates a create was given', async () => {
+    await seedCoverageWorkspace()
+    const created = await store.addRecurringReimbursement({
+      clientId: 'c1',
+      description: 'Payroll service',
+      amount: 25,
+      frequency: 'monthly',
+      startDate: '2026-08-01',
+      coverageEnabled: true,
+      coverageTemplate: 'Payroll — {range}',
+      coverageStart: '2026-08-05',
+      coverageEnd: '2026-09-05',
+    })
+
+    expect(created).toMatchObject({
+      coverageEnabled: true,
+      coverageTemplate: 'Payroll — {range}',
+      coverageStart: '2026-08-05',
+      coverageEnd: '2026-09-05',
+      coverageHistory: {},
+    })
+  })
+})
+
+/**
+ * The Postgres half of the same feature. Cardinal rule 1: this store has two
+ * backends and a Postgres-only omission passes CI in silence, because the tests
+ * above run the file backend and production runs this one.
+ */
+describe('reimbursed-expense covered dates (postgres branch)', () => {
+  const COVERAGE_COLUMNS = [
+    'coverage_enabled',
+    'coverage_template',
+    'coverage_start',
+    'coverage_end',
+    'coverage_paused',
+    'coverage_resume_pending',
+    'coverage_history',
+  ]
+
+  it('adds every coverage column to the existing table', async () => {
+    const fake = fakePostgres()
+    // See the sibling DDL tests: the seeding half of initialize() throws against
+    // a fake that answers every select with nothing. The DDL has already run.
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+
+    for (const column of COVERAGE_COLUMNS) {
+      expect(
+        fake.matching(
+          new RegExp(
+            `alter table recurring_reimbursements add column if not exists ${column}\\b`,
+            'i',
+          ),
+        ),
+      ).toHaveLength(1)
+    }
+  })
+
+  // The read is what feeds the resolver. A select that forgot the ledger would
+  // make every month look like the first one — and would therefore advance the
+  // window on every single generation, in production only.
+  it('reads every coverage column the row mapper needs', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .read()
+      .catch(() => {})
+
+    const select = fake.statements.find((statement) =>
+      /^select[\s\S]*from recurring_reimbursements/i.test(statement.text),
+    )
+    expect(select).toBeDefined()
+    for (const column of COVERAGE_COLUMNS) {
+      expect(select.text).toMatch(new RegExp(`\\b${column}\\b`))
+    }
+  })
+
+  // node-pg materializes a `date` column as a JS Date at LOCAL midnight — which
+  // is why these fixtures use `new Date(y, m, d)` and not an ISO string with a
+  // Z. Reading such a Date back through `toISOString()` would slide the day
+  // backwards on any host east of Greenwich, and `coverage_end` is what seeds
+  // the cycle's anchor, so a one-day slip would move a client's billing date.
+  const pgDate = (year, month, day) => new Date(year, month - 1, day)
+
+  it('maps a row into the shape the resolver reads', () => {
+    expect(
+      mapRecurringReimbursementRow({
+        id: 'recur-qbo',
+        client_id: 'c1',
+        description: 'QuickBooks Online',
+        amount: '90.00',
+        frequency: 'monthly',
+        start_date: pgDate(2026, 7, 1),
+        coverage_enabled: true,
+        coverage_template: '{description} — {range}',
+        coverage_start: pgDate(2026, 7, 13),
+        coverage_end: pgDate(2026, 8, 13),
+        coverage_anchor_day: 13,
+        coverage_paused: false,
+        coverage_resume_pending: false,
+        coverage_history: { '2026-08': { start: '2026-07-13', end: '2026-08-13' } },
+      }),
+    ).toEqual({
+      id: 'recur-qbo',
+      clientId: 'c1',
+      description: 'QuickBooks Online',
+      // pg hands numerics back as strings; money is coerced by the mapper.
+      amount: 90,
+      frequency: 'monthly',
+      startDate: '2026-07-01',
+      coverageEnabled: true,
+      coverageTemplate: '{description} — {range}',
+      coverageStart: '2026-07-13',
+      coverageEnd: '2026-08-13',
+      coverageAnchorDay: 13,
+      coveragePaused: false,
+      coverageResumePending: false,
+      coverageHistory: { '2026-08': { start: '2026-07-13', end: '2026-08-13' } },
+    })
+  })
+
+  // A row written before this feature has none of the coverage columns. It must
+  // come back in the SAME shape the file backend produces, or the resolver sees
+  // `coverageHistory: undefined` on one backend and `{}` on the other.
+  it('gives a pre-feature row the same shape both backends produce', () => {
+    expect(
+      mapRecurringReimbursementRow({
+        id: 'recur-old',
+        client_id: 'c1',
+        description: 'Annual filing fee',
+        amount: '40.00',
+        frequency: 'monthly',
+        start_date: pgDate(2026, 1, 1),
+      }),
+    ).toEqual(
+      normalizeRecurringReimbursement({
+        id: 'recur-old',
+        clientId: 'c1',
+        description: 'Annual filing fee',
+        amount: 40,
+        frequency: 'monthly',
+        startDate: '2026-01-01',
+      }),
+    )
+  })
+
+  // MERGED into the ledger, never assigned over it. `coverage_history = $2`
+  // would erase every earlier period the moment one more was billed — and the
+  // gap detection reads exactly those earlier periods.
+  it('merges one period into the ledger without disturbing the others', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)._writeCoverageLedgerEntry('recur-qbo', '2026-09', {
+      start: '2026-08-13',
+      end: '2026-09-13',
+      needsConfirmation: false,
+    })
+
+    const written = fake.matching(/^update recurring_reimbursements/i)
+    expect(written).toHaveLength(1)
+    expect(written[0].text).toMatch(/jsonb_set\(/i)
+    expect(written[0].text).toMatch(/coalesce\(coverage_history/i)
+    // The resume flag is spent by the invoice that asked.
+    expect(written[0].text).toMatch(/coverage_resume_pending = false/i)
+    expect(written[0].params[1]).toBe('2026-09')
+    expect(JSON.parse(written[0].params[2])).toMatchObject({
+      start: '2026-08-13',
+      end: '2026-09-13',
+      needsConfirmation: false,
+    })
+  })
+
+  it('writes the coverage columns an update was given', async () => {
+    const fake = fakePostgres({
+      recurringRows: [
+        {
+          id: 'recur-qbo',
+          client_id: 'c1',
+          description: 'QuickBooks Online',
+          amount: '90.00',
+          frequency: 'monthly',
+          start_date: new Date('2026-07-01T00:00:00Z'),
+          coverage_enabled: false,
+          coverage_template: null,
+          coverage_start: null,
+          coverage_end: null,
+          coverage_paused: false,
+          coverage_resume_pending: false,
+          coverage_history: {},
+        },
+      ],
+    })
+
+    await postgresStore(fake).updateRecurringReimbursement('recur-qbo', {
+      coverageEnabled: true,
+      coverageTemplate: 'Payroll — {range}',
+      coverageStart: '2026-08-05',
+      coverageEnd: '2026-09-05',
+    })
+
+    const updates = fake.matching(/^update recurring_reimbursements set/i)
+    expect(updates).toHaveLength(1)
+    for (const column of [
+      'coverage_enabled',
+      'coverage_template',
+      'coverage_start',
+      'coverage_end',
+    ]) {
+      expect(updates[0].text).toMatch(new RegExp(`${column} = \\$\\d+`))
+    }
+    // The anchor rides along: re-typing the first window in SETUP is her saying
+    // where the cycle stands, and the 5th is the day it turns.
+    expect(updates[0].params).toEqual([
+      'recur-qbo',
+      true,
+      'Payroll — {range}',
+      '2026-08-05',
+      '2026-09-05',
+      5,
+    ])
+  })
+
+  // The bulk save wipes and rewrites these rows. An insert that forgot the
+  // ledger would erase every client's billing history on the next full save —
+  // and every expense would restart at its seed window.
+  it('carries the ledger through the bulk save', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .write({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        employees: [],
+        timeEntries: [],
+        checklists: [],
+        checklistTemplates: [],
+        recycledChecklists: [],
+        plans: [],
+        contacts: [],
+        reimbursements: [],
+        recurringReimbursements: [
+          {
+            id: 'recur-qbo',
+            clientId: 'c1',
+            description: 'QuickBooks Online',
+            amount: 90,
+            frequency: 'monthly',
+            startDate: '2026-07-01',
+            coverageEnabled: true,
+            coverageTemplate: '{description} — {range}',
+            coverageStart: '2026-07-13',
+            coverageEnd: '2026-08-13',
+            coveragePaused: false,
+            coverageResumePending: false,
+            coverageHistory: { '2026-08': { start: '2026-07-13', end: '2026-08-13' } },
+          },
+        ],
+        timesheetLocks: [],
+        weeklySubmissions: [],
+      })
+      .catch(() => {})
+
+    const insert = fake.matching(/^insert into recurring_reimbursements/i)
+    expect(insert).toHaveLength(1)
+    for (const column of COVERAGE_COLUMNS) {
+      expect(insert[0].text).toMatch(new RegExp(`\\b${column}\\b`))
+    }
+    expect(JSON.parse(insert[0].params[13])).toEqual({
+      '2026-08': { start: '2026-07-13', end: '2026-08-13' },
+    })
+  })
+
+  // The other half of the same promise: when the row ALREADY EXISTS, the stored
+  // ledger wins over whatever the payload carries. A tab that loaded this
+  // morning holds an empty ledger; its autosave this afternoon, after a month
+  // run, would otherwise restart every expense at its seed window and re-bill
+  // windows the client has already been sent.
+  it('keeps the STORED ledger when a stale tab saves an empty one', async () => {
+    const fake = fakePostgres({
+      recurringRows: [
+        {
+          id: 'recur-qbo',
+          coverage_anchor_day: 20,
+          coverage_resume_pending: true,
+          coverage_history: { '2026-08': { start: '2026-07-13', end: '2026-08-13' } },
+        },
+      ],
+    })
+    await postgresStore(fake)
+      .write({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        employees: [],
+        timeEntries: [],
+        checklists: [],
+        checklistTemplates: [],
+        recycledChecklists: [],
+        plans: [],
+        contacts: [],
+        reimbursements: [],
+        recurringReimbursements: [
+          {
+            id: 'recur-qbo',
+            clientId: 'c1',
+            description: 'QuickBooks Online',
+            amount: 90,
+            frequency: 'monthly',
+            startDate: '2026-07-01',
+            coverageEnabled: true,
+            coverageStart: '2026-07-13',
+            coverageEnd: '2026-08-13',
+            // What a tab loaded before the month run would send back.
+            coverageAnchorDay: 13,
+            coverageResumePending: false,
+            coverageHistory: {},
+          },
+        ],
+        timesheetLocks: [],
+        weeklySubmissions: [],
+      })
+      .catch(() => {})
+
+    const insert = fake.matching(/^insert into recurring_reimbursements/i)[0]
+    expect(insert.params[10]).toBe(20)
+    expect(insert.params[12]).toBe(true)
+    expect(JSON.parse(insert.params[13])).toEqual({
+      '2026-08': { start: '2026-07-13', end: '2026-08-13' },
+    })
+  })
+})
+
+/**
  * The same guarded write-back on the POSTGRES branch — the one production runs.
  * The fake can't prove transaction isolation, but it CAN pin the mechanics:
  * the fingerprint is captured, the snapshot handed to write() is read AFTER
@@ -5908,5 +6550,831 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
     expect(fake.matching(/^insert into checklists\b/i)).toEqual([])
     expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
     expect(warn).toHaveBeenCalled()
+  })
+})
+
+/**
+ * The enforcement around covered-date windows, as opposed to the arithmetic
+ * inside them. Every test here was written against a hole a review reproduced:
+ * a gate whose condition the caller supplied, a void that left the ledger
+ * claiming a window nobody billed, a confirm that answered for a withdrawn
+ * invoice or overwrote wording the owner had typed, and a cycle anchor that
+ * snapped back to the seed the month after she moved it.
+ */
+describe('covered dates — the gate cannot be talked around (file backend)', () => {
+  const period = '2026-08'
+
+  async function seedTwoExpenses() {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 500 }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [],
+        recurringReimbursements: [
+          {
+            id: 'recur-qbo',
+            clientId: 'c1',
+            description: 'QuickBooks Online',
+            amount: 90,
+            frequency: 'monthly',
+            startDate: '2026-07-01',
+            coverageEnabled: true,
+            coverageTemplate: '{description} — {range}',
+            coverageStart: '2026-07-13',
+            coverageEnd: '2026-08-13',
+            coverageAnchorDay: 13,
+            coveragePaused: false,
+            coverageResumePending: false,
+            coverageHistory: {},
+          },
+          {
+            id: 'recur-payroll',
+            clientId: 'c1',
+            description: 'Payroll service',
+            amount: 25,
+            frequency: 'monthly',
+            startDate: '2026-07-01',
+            coverageEnabled: true,
+            coverageTemplate: '{description} — {range}',
+            coverageStart: '2026-07-05',
+            coverageEnd: '2026-08-05',
+            coverageAnchorDay: 5,
+            coveragePaused: false,
+            coverageResumePending: false,
+            coverageHistory: {},
+          },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const readExpense = async (id) => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.recurringReimbursements.find((entry) => entry.id === id)
+  }
+
+  const lineFor = (invoice, recurringId) =>
+    invoice.lineItems.find((line) => line.kind === 'recurring' && line.recurringId === recurringId)
+
+  // THE CRITICAL ONE. The flag arrives on the line, so a hand-rolled PATCH can
+  // simply not send it. A gate whose condition the caller supplies is not a
+  // gate — the answer has to come from the store's own ledger.
+  it('refuses review even when the PATCH strips the flag off the line', async () => {
+    await seedTwoExpenses()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+    const invoice = november.created[0]
+    expect(lineFor(invoice, 'recur-qbo').needsCoverageConfirmation).toBe(true)
+
+    // Exactly what a stale or forged tab would send: the same lines, minus the
+    // inconvenient field, plus the status it wants.
+    const stripped = invoice.lineItems.map((line) => {
+      const { needsCoverageConfirmation: _flag, coverageReason: _why, ...rest } = line
+      return rest
+    })
+
+    await expect(
+      store.updateInvoice(invoice.id, { status: 'reviewed', lineItems: stripped }),
+    ).rejects.toThrow(/confirm the covered dates/i)
+  })
+
+  // ...and the flag is put BACK on the stored line, so the next reader of that
+  // invoice sees the question too rather than inheriting the stripped copy.
+  it('restores the flag the PATCH tried to drop', async () => {
+    await seedTwoExpenses()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+    const invoice = november.created[0]
+
+    const saved = await store.updateInvoice(invoice.id, {
+      lineItems: invoice.lineItems.map((line) => {
+        const { needsCoverageConfirmation: _flag, ...rest } = line
+        return rest
+      }),
+    })
+
+    expect(lineFor(saved, 'recur-qbo')).toMatchObject({
+      needsCoverageConfirmation: true,
+      coverageReason: 'gap',
+    })
+  })
+
+  // The mirror image: a stale line still CLAIMING the question after she has
+  // answered it must not keep the invoice hostage.
+  it('clears a stale flag the caller sent after the answer landed', async () => {
+    await seedTwoExpenses()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+    const invoice = november.created[0]
+    await store.confirmExpenseCoverage(invoice.id, 'recur-qbo')
+    await store.confirmExpenseCoverage(invoice.id, 'recur-payroll')
+
+    // A tab that loaded before the confirm re-sends the old lines.
+    const reviewed = await store.updateInvoice(invoice.id, {
+      status: 'reviewed',
+      lineItems: invoice.lineItems,
+    })
+
+    expect(reviewed.status).toBe('reviewed')
+    expect(lineFor(reviewed, 'recur-qbo').needsCoverageConfirmation).toBeUndefined()
+  })
+
+  it('keeps two expenses on one client in separate ledgers', async () => {
+    await seedTwoExpenses()
+    const august = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const invoice = august.created[0]
+
+    expect(lineFor(invoice, 'recur-qbo').label).toBe(
+      'QuickBooks Online — July 13 – August 13, 2026',
+    )
+    expect(lineFor(invoice, 'recur-payroll').label).toBe('Payroll service — July 5 – August 5, 2026')
+
+    const september = await store.generateInvoicesForPeriod('2026-09', { clientId: 'c1' })
+    // Each walks on its OWN anchor — the 13th and the 5th, not one shared day.
+    expect(lineFor(september.created[0], 'recur-qbo')).toMatchObject({
+      coverageStart: '2026-08-13',
+      coverageEnd: '2026-09-13',
+    })
+    expect(lineFor(september.created[0], 'recur-payroll')).toMatchObject({
+      coverageStart: '2026-08-05',
+      coverageEnd: '2026-09-05',
+    })
+  })
+})
+
+describe('covered dates — voiding un-bills the window (file backend)', () => {
+  const period = '2026-08'
+
+  async function seedOne() {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 500 }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [],
+        recurringReimbursements: [
+          {
+            id: 'recur-qbo',
+            clientId: 'c1',
+            description: 'QuickBooks Online',
+            amount: 90,
+            frequency: 'monthly',
+            startDate: '2026-07-01',
+            coverageEnabled: true,
+            coverageTemplate: '{description} — {range}',
+            coverageStart: '2026-07-13',
+            coverageEnd: '2026-08-13',
+            coverageAnchorDay: 13,
+            coveragePaused: false,
+            coverageResumePending: false,
+            coverageHistory: {},
+          },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const readExpense = async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.recurringReimbursements.find((entry) => entry.id === 'recur-qbo')
+  }
+
+  const recurringLineOf = (invoice) => invoice.lineItems.find((line) => line.kind === 'recurring')
+
+  it('drops the period from the ledger when the month is voided', async () => {
+    await seedOne()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    expect((await readExpense()).coverageHistory['2026-08']).toBeDefined()
+
+    await store.voidUnsentInvoicesForPeriod(period)
+
+    expect((await readExpense()).coverageHistory['2026-08']).toBeUndefined()
+  })
+
+  it('drops it for a single invoice voided on its own', async () => {
+    await seedOne()
+    const august = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    await store.updateInvoice(august.created[0].id, { status: 'void' })
+
+    expect((await readExpense()).coverageHistory['2026-08']).toBeUndefined()
+  })
+
+  // THE BUG THIS CLOSES. August voided and never rebuilt used to leave 2026-08
+  // in the ledger; September then read it, saw the consecutive period it
+  // expected, and advanced in silence — so August's window was billed to nobody
+  // and never mentioned again.
+  it('makes the next month ASK when a voided month was never rebuilt', async () => {
+    await seedOne()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    await store.voidUnsentInvoicesForPeriod(period)
+
+    const september = await store.generateInvoicesForPeriod('2026-09', { clientId: 'c1' })
+
+    // Nothing has ever been billed, so this is the seed window again — August's
+    // period, offered for September, which is exactly the thing to look at.
+    expect(recurringLineOf(september.created[0])).toMatchObject({
+      coverageStart: '2026-07-13',
+      coverageEnd: '2026-08-13',
+    })
+  })
+
+  // The idempotency promise is UNCHANGED by the release: void and regenerate
+  // still lands on the same window, because it is recomputed from the same
+  // inputs rather than remembered.
+  it('still gives the same window on void and regenerate', async () => {
+    await seedOne()
+    const first = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const before = recurringLineOf(first.created[0])
+
+    await store.voidUnsentInvoicesForPeriod(period)
+    const rebuilt = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    expect(recurringLineOf(rebuilt.created[0])).toMatchObject({
+      coverageStart: before.coverageStart,
+      coverageEnd: before.coverageEnd,
+      label: before.label,
+    })
+  })
+
+  it('refuses to confirm dates on a voided invoice', async () => {
+    await seedOne()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+    const invoiceId = november.created[0].id
+    await store.updateInvoice(invoiceId, { status: 'void' })
+
+    await expect(store.confirmExpenseCoverage(invoiceId, 'recur-qbo')).rejects.toThrow(
+      /voided/i,
+    )
+  })
+
+  // Generating a month BEHIND one already billed cannot be reasoned forward
+  // from anything — the cycle has moved past it — so it is proposed and asked
+  // about rather than assumed.
+  it('asks when a month behind one already billed is generated', async () => {
+    await seedOne()
+    await store.generateInvoicesForPeriod('2026-09', { clientId: 'c1' })
+
+    const august = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    expect(recurringLineOf(august.created[0])).toMatchObject({
+      needsCoverageConfirmation: true,
+      coverageReason: 'backfill',
+    })
+  })
+})
+
+describe('covered dates — confirming respects what she typed (file backend)', () => {
+  const period = '2026-08'
+
+  async function seedOne() {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 500 }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [],
+        recurringReimbursements: [
+          {
+            id: 'recur-qbo',
+            clientId: 'c1',
+            description: 'QuickBooks Online',
+            amount: 90,
+            frequency: 'monthly',
+            startDate: '2026-07-01',
+            coverageEnabled: true,
+            coverageTemplate: '{description} — {range}',
+            coverageStart: '2026-07-13',
+            coverageEnd: '2026-08-13',
+            coverageAnchorDay: 13,
+            coveragePaused: false,
+            coverageResumePending: false,
+            coverageHistory: {},
+          },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const readExpense = async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.recurringReimbursements.find((entry) => entry.id === 'recur-qbo')
+  }
+
+  const recurringLineOf = (invoice) => invoice.lineItems.find((line) => line.kind === 'recurring')
+
+  /** Generate August, then November — which lands unconfirmed on the gap. */
+  async function throughToTheQuestion() {
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+    return november.created[0]
+  }
+
+  it('leaves wording the owner typed herself alone', async () => {
+    await seedOne()
+    const invoice = await throughToTheQuestion()
+
+    // She rewrites the line for this client's contract.
+    const edited = await store.updateInvoice(invoice.id, {
+      lineItems: invoice.lineItems.map((line) =>
+        line.kind === 'recurring'
+          ? { ...line, label: 'QBO subscription (per contract)' }
+          : line,
+      ),
+    })
+    expect(recurringLineOf(edited).label).toBe('QBO subscription (per contract)')
+
+    const confirmed = await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+      start: '2026-10-13',
+      end: '2026-11-13',
+    })
+
+    // Her sentence survives; only the dates behind it move.
+    expect(recurringLineOf(confirmed).label).toBe('QBO subscription (per contract)')
+    expect(recurringLineOf(confirmed)).toMatchObject({
+      coverageStart: '2026-10-13',
+      coverageEnd: '2026-11-13',
+    })
+  })
+
+  it('still refreshes wording that is still the generated sentence', async () => {
+    await seedOne()
+    const invoice = await throughToTheQuestion()
+
+    const confirmed = await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+      start: '2026-10-13',
+      end: '2026-11-13',
+    })
+
+    expect(recurringLineOf(confirmed).label).toBe(
+      'QuickBooks Online — October 13 – November 13, 2026',
+    )
+  })
+
+  // THE ANCHOR. She moves the end to the 20th; the cycle now turns on the 20th.
+  // Snapping back to the 13th would bill a 23-day period at the full monthly
+  // price and say nothing about it.
+  it('moves the cycle when she moves the end onto a different day', async () => {
+    await seedOne()
+    const invoice = await throughToTheQuestion()
+
+    await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+      start: '2026-10-20',
+      end: '2026-11-20',
+    })
+    expect((await readExpense()).coverageAnchorDay).toBe(20)
+
+    const december = await store.generateInvoicesForPeriod('2026-12', { clientId: 'c1' })
+    expect(recurringLineOf(december.created[0])).toMatchObject({
+      coverageStart: '2026-11-20',
+      coverageEnd: '2026-12-20',
+    })
+  })
+
+  it('leaves the anchor alone when she just accepts the proposal', async () => {
+    await seedOne()
+    const invoice = await throughToTheQuestion()
+
+    await store.confirmExpenseCoverage(invoice.id, 'recur-qbo')
+
+    expect((await readExpense()).coverageAnchorDay).toBe(13)
+  })
+
+  // The anchor is what makes a short month a detour rather than a permanent
+  // move. Confirmed onto the 31st, February clamps to the 28th and March comes
+  // back to the 31st.
+  // The CONFIRMED anchor survives a short month rather than being consumed by
+  // it: moved to the 31st, February clamps to the 28th and March comes back to
+  // the 31st. Before the anchor was stored, the confirm was forgotten entirely
+  // and every cycle re-derived the 13th from the seed.
+  it('carries a confirmed anchor across a short month', async () => {
+    await seedOne()
+    const invoice = await throughToTheQuestion()
+    await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+      start: '2026-11-30',
+      end: '2026-12-31',
+    })
+    expect((await readExpense()).coverageAnchorDay).toBe(31)
+
+    const walked = []
+    for (const month of ['2026-12', '2027-01', '2027-02']) {
+      const run = await store.generateInvoicesForPeriod(month, { clientId: 'c1' })
+      const line = recurringLineOf(run.created[0])
+      walked.push([line.coverageStart, line.coverageEnd, Boolean(line.needsCoverageConfirmation)])
+    }
+
+    expect(walked).toEqual([
+      // Consecutive all the way, so nothing is ever asked about.
+      ['2026-12-31', '2027-01-31', false],
+      // February is short: clamped, not spilled into March.
+      ['2027-01-31', '2027-02-28', false],
+      // ...and March returns to the 31st rather than keeping February's day.
+      ['2027-02-28', '2027-03-31', false],
+    ])
+  })
+})
+
+describe('covered dates — the send route and the derived gate (postgres branch)', () => {
+  const recurringRow = (history) => ({
+    id: 'recur-qbo',
+    client_id: 'c1',
+    description: 'QuickBooks Online',
+    amount: '90.00',
+    frequency: 'monthly',
+    start_date: new Date(2026, 6, 1),
+    coverage_enabled: true,
+    coverage_template: '{description} — {range}',
+    coverage_start: new Date(2026, 6, 13),
+    coverage_end: new Date(2026, 7, 13),
+    coverage_anchor_day: 13,
+    coverage_paused: false,
+    coverage_resume_pending: false,
+    coverage_history: history,
+  })
+
+  const invoiceRow = {
+    id: 'inv-1',
+    client_id: 'c1',
+    period: '2026-11',
+    number: 'INV-2026-11-001',
+    kind: 'monthly',
+    status: 'reviewed',
+    // Stored WITHOUT the flag — an invoice reviewed before the question existed.
+    line_items: [
+      {
+        kind: 'recurring',
+        label: 'QuickBooks Online — August 13 – September 13, 2026',
+        detail: 'monthly',
+        amount: 90,
+        recurringId: 'recur-qbo',
+        coverageStart: '2026-08-13',
+        coverageEnd: '2026-09-13',
+      },
+    ],
+    subtotal: 90,
+    total: 90,
+  }
+
+  it('reports an unanswered window even when the stored line does not', async () => {
+    const fake = fakePostgres({
+      recurringRows: [
+        recurringRow({
+          '2026-11': {
+            start: '2026-08-13',
+            end: '2026-09-13',
+            needsConfirmation: true,
+            reason: 'gap',
+          },
+        }),
+      ],
+    })
+
+    expect(
+      await postgresStore(fake).invoiceHasUnconfirmedCoverage({
+        period: '2026-11',
+        lineItems: invoiceRow.line_items,
+      }),
+    ).toBe(true)
+  })
+
+  it('reports nothing to answer once the ledger says confirmed', async () => {
+    const fake = fakePostgres({
+      recurringRows: [
+        recurringRow({
+          '2026-11': { start: '2026-08-13', end: '2026-09-13', needsConfirmation: false },
+        }),
+      ],
+    })
+
+    expect(
+      await postgresStore(fake).invoiceHasUnconfirmedCoverage({
+        period: '2026-11',
+        lineItems: invoiceRow.line_items.map((line) => ({
+          ...line,
+          // Even a line SHOUTING that it is unconfirmed loses to the ledger.
+          needsCoverageConfirmation: true,
+        })),
+      }),
+    ).toBe(false)
+  })
+
+  it('removes the period from the ledger with a jsonb subtraction on void', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)._clearCoverageLedgerForPeriod('2026-08', ['recur-qbo'])
+
+    const cleared = fake.matching(/^update recurring_reimbursements/i)
+    expect(cleared).toHaveLength(1)
+    expect(cleared[0].text).toMatch(/coverage_history\s*=\s*coalesce\(coverage_history[^)]*\)\s*-\s*\$2/i)
+    expect(cleared[0].params).toEqual([['recur-qbo'], '2026-08'])
+  })
+
+  // The insert and the ledger write are ONE transaction: an invoice on file
+  // whose expense never advanced would re-bill the same window next month.
+  it('generates the invoice and moves the window inside one transaction', async () => {
+    const fake = fakePostgres({ clientRows: [{ id: 'c1' }] })
+    await postgresStore(fake)
+      .generateInvoicesForPeriod('2026-08')
+      .catch(() => {})
+
+    const begin = fake.indexOf(/^BEGIN$/i)
+    // No clients come back from this fake, so nothing is generated and no
+    // transaction is opened — the shape assertion belongs with a real insert.
+    if (begin === -1) {
+      expect(fake.matching(/^insert into invoices/i)).toHaveLength(0)
+      return
+    }
+    const inserted = fake.indexOf(/^insert into invoices/i)
+    const ledger = fake.indexOf(/jsonb_set\(/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+    expect(begin).toBeLessThan(inserted)
+    expect(ledger).toBeGreaterThan(inserted)
+    expect(commit).toBeGreaterThan(ledger)
+  })
+})
+
+describe('the fingerprint ignores the columns a bulk save cannot write', () => {
+  it('drops the covered-date ledger, anchor and resume flag from the digest SQL', () => {
+    const sql = tableVersionSql('recurring_reimbursements')
+    for (const column of ['coverage_history', 'coverage_anchor_day', 'coverage_resume_pending']) {
+      expect(sql).toContain(`- '${column}'`)
+    }
+    // Setup fields a tab CAN legitimately change stay in — dropping those would
+    // reopen the wipe this guard exists for.
+    expect(sql).not.toContain(`- 'coverage_start'`)
+    expect(sql).not.toContain(`- 'coverage_template'`)
+  })
+
+  it('still drops only the timestamps from a table with nothing server-owned', () => {
+    expect(tableVersionSql('clients')).toBe(
+      `select md5(coalesce(string_agg(x, ',' order by x), '')) as h
+            from (select (to_jsonb(t) - 'updated_at' - 'created_at')::text as x
+                    from clients t) s`,
+    )
+  })
+
+  // The point of the exclusion: a month run writes ledgers, and that must not
+  // strand every tab Brittany has open on the invoices she is working through.
+  it('does not change when only the ledger moves (file backend)', () => {
+    const base = {
+      recurringReimbursements: [
+        {
+          id: 'recur-qbo',
+          clientId: 'c1',
+          description: 'QuickBooks Online',
+          amount: 90,
+          coverageHistory: {},
+          coverageAnchorDay: 13,
+          coverageResumePending: false,
+        },
+      ],
+    }
+    const afterGeneration = {
+      recurringReimbursements: [
+        {
+          ...base.recurringReimbursements[0],
+          coverageHistory: { '2026-08': { start: '2026-07-13', end: '2026-08-13' } },
+          coverageAnchorDay: 20,
+          coverageResumePending: true,
+        },
+      ],
+    }
+    expect(fileWorkspaceVersion(afterGeneration)).toBe(fileWorkspaceVersion(base))
+  })
+
+  it('DOES change when a field a tab can write moves', () => {
+    const base = {
+      recurringReimbursements: [{ id: 'recur-qbo', amount: 90, coverageHistory: {} }],
+    }
+    const edited = {
+      recurringReimbursements: [{ id: 'recur-qbo', amount: 95, coverageHistory: {} }],
+    }
+    expect(fileWorkspaceVersion(edited)).not.toBe(fileWorkspaceVersion(base))
+  })
+})
+
+describe('sanitizeAppData guards the covered-date columns', () => {
+  const payload = (recurring) => ({
+    clients: [],
+    employees: [],
+    timeEntries: [],
+    checklists: [],
+    checklistTemplates: [],
+    plans: [],
+    contacts: [],
+    reimbursements: [],
+    recurringReimbursements: [recurring],
+    timesheetLocks: [],
+    weeklySubmissions: [],
+  })
+
+  // A malformed date reaches a `date` column and fails the INSERT — taking the
+  // whole bulk save down on every autosave, on Postgres only, while the file
+  // backend accepts it and CI stays green. That is the plan-refs outage shape.
+  it('drops a covered date that is not a date', () => {
+    const clean = sanitizeAppData(
+      payload({
+        id: 'recur-qbo',
+        clientId: 'c1',
+        amount: 90,
+        coverageStart: 'whenever',
+        coverageEnd: '2026-08-13',
+      }),
+    )
+    expect(clean.recurringReimbursements[0].coverageStart).toBeUndefined()
+    expect(clean.recurringReimbursements[0].coverageEnd).toBe('2026-08-13')
+  })
+
+  it('coerces a ledger that is not a map into an empty one', () => {
+    for (const bad of [[], 'nope', 7, null]) {
+      const clean = sanitizeAppData(
+        payload({ id: 'recur-qbo', clientId: 'c1', amount: 90, coverageHistory: bad }),
+      )
+      expect(clean.recurringReimbursements[0].coverageHistory).toEqual({})
+    }
+  })
+
+  it('nulls an anchor day that is not a day of the month', () => {
+    for (const bad of [0, 32, 'the 13th', 4.5]) {
+      const clean = sanitizeAppData(
+        payload({ id: 'recur-qbo', clientId: 'c1', amount: 90, coverageAnchorDay: bad }),
+      )
+      expect(clean.recurringReimbursements[0].coverageAnchorDay).toBeNull()
+    }
+    const good = sanitizeAppData(
+      payload({ id: 'recur-qbo', clientId: 'c1', amount: 90, coverageAnchorDay: 13 }),
+    )
+    expect(good.recurringReimbursements[0].coverageAnchorDay).toBe(13)
+  })
+})
+
+/**
+ * WHERE THE TWO PROTECTIONS MEET: the materializer's guarded write-back
+ * (d3a386a) and the covered-date ledger's preserve-on-save.
+ *
+ * These landed independently and overlap on one code path — `write()`
+ * re-inserting `recurring_reimbursements` from a snapshot that may be stale.
+ * Each covers a different half of the row, and the split is deliberate:
+ *
+ *   - the STALENESS GUARD protects every field a tab is allowed to write
+ *     (description, amount, frequency, the covered-date SETUP). A save whose
+ *     fingerprint has moved is refused outright.
+ *   - the PRESERVE protects the three fields a tab may NOT write — the ledger,
+ *     the cycle's anchor day, the pending-resume flag. Those are excluded from
+ *     the fingerprint (`VERSION_IGNORED_FIELDS`), so a month run writing
+ *     ledgers does not move the version at all.
+ *
+ * Why the exclusion is not a hole: the guard never sees those fields, but the
+ * preserve reads them back off the persisted file inside the same queue slot
+ * and puts them back. Why the preserve is not enough on its own: it only
+ * covers those three fields; everything else still needs the guard.
+ *
+ * The failure mode if either half is removed is the same shape and invisible
+ * either way — a month run's covered windows quietly reverting to the seed on
+ * the next page load that happens to spawn a checklist.
+ */
+describe('the guarded write-back and the covered-date ledger (file backend)', () => {
+  const expense = (overrides = {}) => ({
+    id: 'recur-qbo',
+    clientId: 'c1',
+    description: 'QuickBooks Online',
+    amount: 90,
+    frequency: 'monthly',
+    startDate: '2026-07-01',
+    coverageEnabled: true,
+    coverageTemplate: '{description} — {range}',
+    coverageStart: '2026-07-13',
+    coverageEnd: '2026-08-13',
+    coverageAnchorDay: 13,
+    coveragePaused: false,
+    coverageResumePending: false,
+    coverageHistory: {},
+    ...overrides,
+  })
+
+  const snapshot = (overrides = {}) =>
+    workspace({ recurringReimbursements: [expense()], ...overrides })
+
+  const persistedExpense = async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.recurringReimbursements.find((entry) => entry.id === 'recur-qbo')
+  }
+
+  /** What a month run writes: one billed window onto the expense's ledger. */
+  const billAugust = () =>
+    store._writeCoverageLedgerEntry('recur-qbo', '2026-08', {
+      start: '2026-07-13',
+      end: '2026-08-13',
+      needsConfirmation: false,
+    })
+
+  beforeEach(async () => {
+    await store.write(snapshot())
+  })
+
+  // The exclusion doing its job. If the ledger moved the fingerprint, every
+  // month run would make the next materializer write-back refuse itself — and
+  // strand every tab Brittany has open on the invoices she is working through.
+  it('a month run does not move the workspace fingerprint', async () => {
+    const before = await store.computeWorkspaceVersion()
+    await billAugust()
+    expect(await store.computeWorkspaceVersion()).toBe(before)
+  })
+
+  // ...so the write-back is NOT refused — and must therefore not erase it.
+  it('the write-back is allowed through, and the ledger survives it', async () => {
+    const pageLoadVersion = await store.computeWorkspaceVersion()
+    await billAugust()
+
+    // Exactly what read() now does: replay the snapshot it read, under the
+    // fingerprint it captured. That snapshot predates the month run.
+    await expect(
+      store.write(snapshot(), { expectedVersion: pageLoadVersion }),
+    ).resolves.toBeUndefined()
+
+    expect((await persistedExpense()).coverageHistory).toEqual({
+      '2026-08': {
+        start: '2026-07-13',
+        end: '2026-08-13',
+        needsConfirmation: false,
+        reason: null,
+      },
+    })
+  })
+
+  it('keeps the anchor and the resume flag through the same write-back', async () => {
+    await store.updateRecurringReimbursement('recur-qbo', { coveragePaused: true })
+    await store.updateRecurringReimbursement('recur-qbo', { coveragePaused: false })
+    await store._writeCoverageLedgerEntry('recur-qbo', '2026-08', {
+      start: '2026-10-20',
+      end: '2026-11-20',
+      needsConfirmation: false,
+    })
+    // The ledger write spends the resume flag; move the anchor separately so
+    // both server-owned fields differ from what the stale snapshot carries.
+    await store.updateRecurringReimbursement('recur-qbo', { coverageEnd: '2026-08-20' })
+    const stored = await persistedExpense()
+    expect(stored.coverageAnchorDay).toBe(20)
+
+    const version = await store.computeWorkspaceVersion()
+    await store.write(snapshot(), { expectedVersion: version })
+
+    const after = await persistedExpense()
+    expect(after.coverageAnchorDay).toBe(20)
+    expect(after.coverageHistory['2026-08']).toBeDefined()
+  })
+
+  // The other half of the pair, unweakened: a field a tab CAN write still
+  // moves the fingerprint and still refuses a stale write-back. Excluding the
+  // three server-owned fields must not have opened the door generally.
+  it('still refuses the write-back when a tab-writable field moved', async () => {
+    const pageLoadVersion = await store.computeWorkspaceVersion()
+    // A concurrent save changes the amount — squarely a tab's business.
+    await store.write(snapshot({ recurringReimbursements: [expense({ amount: 95 })] }))
+
+    await expect(
+      store.write(snapshot(), { expectedVersion: pageLoadVersion }),
+    ).rejects.toBeInstanceOf(StaleWorkspaceError)
+
+    // Refused means nothing written: the concurrent amount stands.
+    expect((await persistedExpense()).amount).toBe(95)
+  })
+
+  // A brand-new expense in the payload has no persisted row to preserve from,
+  // so the payload is all there is — and its anchor comes from the first
+  // window she typed rather than coming back null.
+  it('seeds a genuinely new expense rather than preserving nothing', async () => {
+    const version = await store.computeWorkspaceVersion()
+    await store.write(
+      snapshot({
+        recurringReimbursements: [
+          expense(),
+          {
+            id: 'recur-payroll',
+            clientId: 'c1',
+            description: 'Payroll service',
+            amount: 25,
+            frequency: 'monthly',
+            startDate: '2026-08-01',
+            coverageEnabled: true,
+            coverageStart: '2026-08-05',
+            coverageEnd: '2026-09-05',
+          },
+        ],
+      }),
+      { expectedVersion: version },
+    )
+
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const added = data.recurringReimbursements.find((entry) => entry.id === 'recur-payroll')
+    expect(added.coverageAnchorDay).toBe(5)
+    expect(added.coverageHistory).toEqual({})
   })
 })

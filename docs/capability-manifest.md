@@ -1707,6 +1707,38 @@ Clients page meanwhile. Owner-only.
 - This invoice's reimbursements: add out-of-pocket expenses (date,
   description, amount) — each becomes a line on the invoice. Recurring
   reimbursements supported.
+- Reimbursed expenses can name the DATES THEY COVER, and keep those dates
+  current on their own. Set up on the client page (Recurring reimbursements):
+  tick "The invoice wording names the dates this covers", write the wording ONCE
+  with placeholders — `{range}`, `{start}`, `{end}`, `{description}` — and enter
+  the first covered period by hand (for example July 13 to August 13). Every
+  invoice after that fills in its own cycle's dates: "QuickBooks Online — August
+  13 – September 13, 2026". The day the first period ENDS on is the day the
+  cycle turns; short months clamp (a 31st becomes the 28th in February) and the
+  cycle returns to its own day the following month.
+  - The window moves when an invoice is GENERATED, not on a calendar. Voiding a
+    month and regenerating it reuses that month's window rather than stepping
+    the cycle again, so a rebuilt invoice covers the same dates as the first one.
+  - VOIDING un-bills the window. A month that is voided and never rebuilt goes
+    back to being unbilled, so the next invoice generated offers that same
+    period instead of quietly moving past it.
+  - Quarterly and annual expenses cover three months and twelve months per
+    cycle respectively, matching their own frequency.
+  - Pause an expense (the pause button on its row) and it stops billing
+    entirely. It keeps its place — nothing advances while it sits out.
+  - The invoice ASKS, rather than guessing, whenever the next window is not
+    simply the one after the last: a skipped cycle, a paused expense switched
+    back on, or a month generated behind one already billed. That line is
+    flagged "Confirm the covered dates" in the month-run editor with a proposed
+    period she can accept or edit. Until she answers, the invoice can be neither
+    marked reviewed NOR sent to the client — both are refused, and voiding it is
+    the way out if she does not want to answer.
+  - What she confirms is what the following cycle counts forward from, including
+    the day of the month: moving a covered period's end onto a different day
+    moves the whole cycle onto that day rather than snapping back next month.
+  - Confirming refreshes the invoice wording around the new dates — unless she
+    has typed her own wording on that line, which is left exactly as she wrote it.
+  - An expense that does not use this bills exactly as it always did.
 - Customize: adjust line items, the intro/footer notes and which client fields
   appear — on the PRINTED sheet only. These edits are session-only and are not
   emailed: Email invoice always sends the stored invoice. To change what a

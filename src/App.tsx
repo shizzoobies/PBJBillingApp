@@ -69,6 +69,7 @@ import {
   startOnboardingRequest,
   setClientLifecycleStageRequest,
   addRecurringReimbursementRequest,
+  type RecurringReimbursementCoverageInput,
   addReimbursementRequest,
   approveWeeklySubmissionRequest,
   reopenWeeklySubmissionRequest,
@@ -1950,7 +1951,7 @@ function App() {
     amount: number
     frequency: 'monthly' | 'quarterly' | 'annually'
     startDate: string
-  }) => {
+  } & RecurringReimbursementCoverageInput) => {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
@@ -1980,7 +1981,7 @@ function App() {
       amount?: number
       frequency?: 'monthly' | 'quarterly' | 'annually'
       startDate?: string
-    },
+    } & RecurringReimbursementCoverageInput,
   ) => {
     if (previewActiveRef.current) return
     try {

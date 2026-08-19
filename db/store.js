@@ -29,6 +29,14 @@ import {
   normalizeAdhocMode,
   retainerCreditAmount,
 } from '../lib/invoice-lines.js'
+import {
+  anchorDayFromRange,
+  anchorDayOf,
+  coverageLineLabel,
+  hasUnconfirmedCoverage,
+  isIsoDate,
+  normalizeRecurringReimbursement,
+} from '../lib/expense-coverage.js'
 
 /**
  * Per-file operation queue for the JSON file backend. A plain
@@ -810,6 +818,18 @@ export class RetainerCreditError extends Error {
   }
 }
 
+/**
+ * A covered-date window the owner has been asked about and not yet answered,
+ * standing between an invoice and being marked reviewed. Same shape and same
+ * reason as `RetainerCreditError`: a fact about the data, said in a sentence.
+ */
+export class CoverageConfirmationError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'CoverageConfirmationError'
+  }
+}
+
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
 
 /**
@@ -849,6 +869,27 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
             ? line.retainerInvoiceId
             : null
         return { ...base, retainerInvoiceId }
+      }
+
+      // A recurring line with a covered-date window carries the window itself
+      // and the expense it belongs to. Dropping these on save would strip an
+      // unconfirmed line of the very thing being confirmed — and, worse, of the
+      // id that ties it back to the ledger the next cycle advances from. The
+      // owner may retype the LABEL freely; the dates are hers to change through
+      // the confirm control, which is why they are read here rather than
+      // trusted from an arbitrary PATCH body's shape.
+      if (kind === 'recurring' && typeof line?.recurringId === 'string' && line.recurringId) {
+        const covered = {
+          ...base,
+          recurringId: line.recurringId,
+        }
+        if (isIsoDate(line?.coverageStart)) covered.coverageStart = line.coverageStart
+        if (isIsoDate(line?.coverageEnd)) covered.coverageEnd = line.coverageEnd
+        if (line?.needsCoverageConfirmation) covered.needsCoverageConfirmation = true
+        if (line?.coverageReason === 'gap' || line?.coverageReason === 'resumed') {
+          covered.coverageReason = line.coverageReason
+        }
+        return covered
       }
 
       if (kind !== 'adhoc') return base
@@ -997,6 +1038,94 @@ export function mapInvoiceRow(row) {
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
   }
+}
+
+/**
+ * A `date` column -> yyyy-mm-dd, whether pg handed back a Date or a string.
+ *
+ * Built from the LOCAL components, not `toISOString()`. node-pg materializes a
+ * `date` as a JS Date at LOCAL midnight, so converting to UTC first shifts the
+ * day backwards on any host east of Greenwich — 2026-08-13 comes back as
+ * 2026-08-12. Railway runs UTC, which is exactly what makes this the kind of
+ * bug that never shows up until it does. It matters more here than it used to:
+ * `coverage_end` is what seeds the cycle's anchor day, so a one-day slip would
+ * move a client's billing date.
+ */
+const columnDateOnly = (value) => {
+  if (!value) return null
+  if (value instanceof Date) {
+    const pad2 = (n) => String(n).padStart(2, '0')
+    return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`
+  }
+  return String(value).slice(0, 10)
+}
+
+/**
+ * One recurring_reimbursements row -> the camelCase shape the app speaks.
+ *
+ * Exists because the coverage columns made this a seven-field job done in three
+ * places (the workspace read, create, update) — and Cardinal rule 1 says a
+ * Postgres-only omission passes CI in silence, so the three read one function.
+ *
+ * Exported for the column-parity test.
+ */
+export function mapRecurringReimbursementRow(row) {
+  // Column names become field names here; the SHARED normalizer then decides
+  // what every absent or malformed coverage field means, so this backend and
+  // the file backend cannot disagree about a row that predates the feature.
+  return normalizeRecurringReimbursement({
+    id: row.id,
+    clientId: row.client_id,
+    description: row.description,
+    amount: Number(row.amount),
+    frequency: row.frequency,
+    startDate: columnDateOnly(row.start_date),
+    coverageEnabled: row.coverage_enabled,
+    coverageTemplate: row.coverage_template,
+    coverageStart: columnDateOnly(row.coverage_start),
+    coverageEnd: columnDateOnly(row.coverage_end),
+    coverageAnchorDay: row.coverage_anchor_day,
+    coveragePaused: row.coverage_paused,
+    coverageResumePending: row.coverage_resume_pending,
+    coverageHistory: row.coverage_history,
+  })
+}
+
+/**
+ * The coverage half of a recurring reimbursement, validated.
+ *
+ * Everything the page can send about covered dates passes through here, on
+ * BOTH the create and the update path, so a hand-rolled PATCH cannot seed a
+ * window with a nonsense date or an end that precedes its start.
+ *
+ * Returns `{ ok: false }` when something is wrong — the caller answers null,
+ * matching how the rest of this record's validation already behaves.
+ */
+function sanitizeCoverageInput(patch, { partial = false } = {}) {
+  const out = {}
+  if (patch.coverageEnabled !== undefined) out.coverageEnabled = Boolean(patch.coverageEnabled)
+  if (patch.coveragePaused !== undefined) out.coveragePaused = Boolean(patch.coveragePaused)
+  if (patch.coverageTemplate !== undefined) {
+    out.coverageTemplate = String(patch.coverageTemplate ?? '').trim().slice(0, 500)
+  }
+  for (const key of ['coverageStart', 'coverageEnd']) {
+    if (patch[key] === undefined) continue
+    const value = patch[key]
+    // Empty clears the window — that is how she turns the feature back off
+    // without deleting the expense.
+    if (value === null || value === '') {
+      out[key] = null
+      continue
+    }
+    if (!isIsoDate(value)) return { ok: false }
+    out[key] = value
+  }
+  // Only checkable when both ends are in hand. On a partial update the caller
+  // re-checks against the merged record, which is where the pair really lives.
+  if (!partial && out.coverageStart && out.coverageEnd && out.coverageEnd <= out.coverageStart) {
+    return { ok: false }
+  }
+  return { ok: true, values: out }
 }
 
 function normalizeSubSubItems(raw, { withDone = true } = {}) {
@@ -1736,6 +1865,33 @@ export function sanitizeAppData(data) {
   for (const recurring of data.recurringReimbursements) {
     recurring.amount = clampMoney(recurring.amount)
     dropInvalidDateField(recurring, 'startDate')
+    // The covered-date fields go into `date`, `int` and `jsonb` columns, so a
+    // malformed one is not a cosmetic problem: it fails the INSERT and takes
+    // the whole bulk save down — every autosave, on Postgres only, while the
+    // file backend accepts it and CI stays green. That is the shape of the
+    // plan-refs outage, and this is the same guard that closed it.
+    dropInvalidDateField(recurring, 'coverageStart')
+    dropInvalidDateField(recurring, 'coverageEnd')
+    if ('coverageAnchorDay' in recurring) {
+      const anchor = Number(recurring.coverageAnchorDay)
+      recurring.coverageAnchorDay =
+        Number.isInteger(anchor) && anchor >= 1 && anchor <= 31 ? anchor : null
+    }
+    // An array is an object too, and `jsonb_set(… array[period] …)` on one would
+    // behave in ways nobody intends. Only a plain map is a ledger.
+    //
+    // Guarded on PRESENCE, because this function's contract is that a clean
+    // save passes through untouched — a record that never mentioned a ledger
+    // must not come out of here having grown one. Absence is given its meaning
+    // on the way back out, by `normalizeRecurringReimbursement`.
+    if (
+      'coverageHistory' in recurring &&
+      (!recurring.coverageHistory ||
+        typeof recurring.coverageHistory !== 'object' ||
+        Array.isArray(recurring.coverageHistory))
+    ) {
+      recurring.coverageHistory = {}
+    }
   }
 
   for (const entry of data.timeEntries) {
@@ -3171,6 +3327,56 @@ export class AppDataStore {
           on recurring_reimbursements(client_id)
       `)
 
+      // Covered-date windows. An expense whose invoice wording has to name the
+      // period it covers (the QBO subscription, 13th to 13th) carries the
+      // wording ONCE, with placeholders, plus the first window typed by hand;
+      // generation walks the window forward from there.
+      //
+      // `coverage_history` is the ledger: billing period -> the window that
+      // period was billed for. It is what makes the advance idempotent — void
+      // and regenerate a month and the stored answer is handed straight back,
+      // rather than the window stepping again. See lib/expense-coverage.js.
+      //
+      // All added rather than baked into the create above, because the table
+      // predates this and production already has rows in it.
+      await this.pool.query(
+        `alter table recurring_reimbursements add column if not exists coverage_enabled boolean not null default false`,
+      )
+      await this.pool.query(
+        `alter table recurring_reimbursements add column if not exists coverage_template text`,
+      )
+      await this.pool.query(
+        `alter table recurring_reimbursements add column if not exists coverage_start date`,
+      )
+      await this.pool.query(
+        `alter table recurring_reimbursements add column if not exists coverage_end date`,
+      )
+      // The day of the month the cycle turns on. STORED rather than re-derived
+      // from `coverage_start`/`coverage_end`, because a window the owner
+      // CONFIRMED onto a different day would otherwise snap back on the next
+      // advance — moving an end from the 13th to the 20th and having the cycle
+      // after it propose the 13th again bills a 23-day period at full price.
+      await this.pool.query(
+        `alter table recurring_reimbursements add column if not exists coverage_anchor_day int`,
+      )
+      // Backfill for rows that predate the column: the seed window's end day is
+      // exactly what the resolver used to derive, so this is a no-op in
+      // behavior and simply makes the value explicit from here on.
+      await this.pool.query(
+        `update recurring_reimbursements
+            set coverage_anchor_day = extract(day from coverage_end)::int
+          where coverage_anchor_day is null and coverage_end is not null`,
+      )
+      await this.pool.query(
+        `alter table recurring_reimbursements add column if not exists coverage_paused boolean not null default false`,
+      )
+      await this.pool.query(
+        `alter table recurring_reimbursements add column if not exists coverage_resume_pending boolean not null default false`,
+      )
+      await this.pool.query(
+        `alter table recurring_reimbursements add column if not exists coverage_history jsonb not null default '{}'::jsonb`,
+      )
+
       // Weekly lock-for-review submissions: a bookkeeper / accountant
       // submits their Sun-Sat week and an owner approves or rejects it.
       // Exactly one row per (user, week) — a resubmit after rejection
@@ -4133,7 +4339,9 @@ export class AppDataStore {
             order by date desc, id asc
           `),
           this.pool.query(`
-            select id, client_id, description, amount, frequency, start_date
+            select id, client_id, description, amount, frequency, start_date,
+                   coverage_enabled, coverage_template, coverage_start, coverage_end,
+                   coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history
             from recurring_reimbursements
             order by start_date desc, id asc
           `),
@@ -4454,14 +4662,9 @@ export class AppDataStore {
           description: row.description,
           amount: Number(row.amount),
         })),
-        recurringReimbursements: recurringReimbursementsResult.rows.map((row) => ({
-          id: row.id,
-          clientId: row.client_id,
-          description: row.description,
-          amount: Number(row.amount),
-          frequency: row.frequency,
-          startDate: row.start_date.toISOString().slice(0, 10),
-        })),
+        recurringReimbursements: recurringReimbursementsResult.rows.map(
+          mapRecurringReimbursementRow,
+        ),
         inactiveEmployees: inactiveUsersResult.rows.map((row) => ({
           id: row.id,
           name: row.name,
@@ -4877,6 +5080,45 @@ export class AppDataStore {
         }
         const createdAtFor = (table, id) => preservedCreatedAt.get(table)?.get(id) ?? new Date()
 
+        // Covered-date state, snapshotted for the same reason and by the same
+        // technique as the two above.
+        //
+        // `recurring_reimbursements` IS in the bulk-save payload — unlike
+        // `invoices` — so a tab CAN legitimately rewrite an expense's
+        // description, amount, frequency and covered-date SETUP. What it must
+        // never rewrite is the part generation and confirmation own: the ledger
+        // of which window each period was billed for, the cycle's anchor day,
+        // and the pending-resume flag. A tab that loaded this morning holds an
+        // empty ledger; its autosave this afternoon, after a month run, would
+        // otherwise restart every expense at its seed window and re-bill windows
+        // already sent. Stored wins, always.
+        const preservedCoverageById = new Map(
+          (
+            await client.query(
+              `select id, coverage_anchor_day, coverage_resume_pending, coverage_history
+                 from recurring_reimbursements`,
+            )
+          ).rows.map((row) => [
+            row.id,
+            {
+              coverageAnchorDay: row.coverage_anchor_day,
+              coverageResumePending: row.coverage_resume_pending,
+              coverageHistory: row.coverage_history,
+            },
+          ]),
+        )
+        // A row with no snapshot entry is genuinely new — the payload's value is
+        // all there is, and for a brand-new expense that is exactly right.
+        const preservedCoverage = (recurring, field) => {
+          const stored = preservedCoverageById.get(recurring.id)
+          if (stored) return stored[field]
+          if (field === 'coverageHistory') return recurring.coverageHistory ?? {}
+          if (field === 'coverageAnchorDay') {
+            return anchorDayFromRange(recurring.coverageEnd) ?? null
+          }
+          return Boolean(recurring.coverageResumePending)
+        }
+
         // Completion stamps, for the same reason and with the same rule (see
         // `preservedItemCompletion`): the payload's copy is ignored, the stored
         // one wins, and only a step this save actually completes gets now().
@@ -5258,8 +5500,11 @@ export class AppDataStore {
           await client.query(
             `
               insert into recurring_reimbursements
-                (id, client_id, description, amount, frequency, start_date, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, now())
+                (id, client_id, description, amount, frequency, start_date,
+                 coverage_enabled, coverage_template, coverage_start, coverage_end,
+                 coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history,
+                 created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, now())
             `,
             [
               recurring.id,
@@ -5268,6 +5513,18 @@ export class AppDataStore {
               recurring.amount,
               recurring.frequency,
               recurring.startDate,
+              Boolean(recurring.coverageEnabled),
+              recurring.coverageTemplate ?? null,
+              recurring.coverageStart || null,
+              recurring.coverageEnd || null,
+              // The ledger, the anchor and the resume flag are NEVER taken from
+              // the payload — see `preservedCoverage`. A tab that loaded before
+              // a month run holds an empty ledger, and letting it win would
+              // restart every expense's cycle at its seed window.
+              preservedCoverage(recurring, 'coverageAnchorDay'),
+              Boolean(recurring.coveragePaused),
+              preservedCoverage(recurring, 'coverageResumePending'),
+              JSON.stringify(preservedCoverage(recurring, 'coverageHistory') ?? {}),
               createdAtFor('recurring_reimbursements', recurring.id),
             ],
           )
@@ -5584,6 +5841,50 @@ export class AppDataStore {
           }
           if (Array.isArray(data.recycledChecklists)) {
             data.recycledChecklists = data.recycledChecklists.map(withPreservedHistory)
+          }
+
+          // Cardinal rule 1 mirror of `preservedCoverage` in the Postgres
+          // branch: the covered-date ledger, the cycle's anchor day and the
+          // pending-resume flag belong to invoice generation and to the confirm
+          // control, never to a bulk-save payload.
+          //
+          // THIS IS ALSO THE OTHER HALF OF THE STALENESS GUARD ABOVE. Those
+          // three fields are deliberately EXCLUDED from the fingerprint
+          // (`VERSION_IGNORED_FIELDS`), so a month run writing ledgers does not
+          // move the version and does not strand every open tab — nor, since
+          // d3a386a, does it make `read()`'s materializer write-back refuse
+          // itself. What keeps that exclusion safe is exactly this block: the
+          // guard covers the fields a tab may write, and this covers the fields
+          // it may not. Remove either one and a concurrent month run loses its
+          // ledger to the next save.
+          const priorRecurringById = new Map(
+            (Array.isArray(previous.recurringReimbursements)
+              ? previous.recurringReimbursements
+              : []
+            )
+              .filter((entry) => entry && typeof entry.id === 'string')
+              .map((entry) => [entry.id, entry]),
+          )
+          if (Array.isArray(data.recurringReimbursements)) {
+            data.recurringReimbursements = data.recurringReimbursements.map((recurring) => {
+              if (!recurring || typeof recurring.id !== 'string') return recurring
+              const prior = priorRecurringById.get(recurring.id)
+              if (!prior) {
+                // Genuinely new: the payload is all there is, and the anchor
+                // comes from the first window she typed.
+                return normalizeRecurringReimbursement({
+                  ...recurring,
+                  coverageAnchorDay:
+                    recurring.coverageAnchorDay ?? anchorDayFromRange(recurring.coverageEnd),
+                })
+              }
+              return normalizeRecurringReimbursement({
+                ...recurring,
+                coverageAnchorDay: prior.coverageAnchorDay ?? anchorDayFromRange(prior.coverageEnd),
+                coverageResumePending: prior.coverageResumePending,
+                coverageHistory: prior.coverageHistory,
+              })
+            })
           }
         }
       } catch {
@@ -7026,7 +7327,14 @@ export class AppDataStore {
    * (same month each year) per `frequency`. Returns the persisted row,
    * or null on validation / unknown-client failure.
    */
-  async addRecurringReimbursement({ clientId, description, amount, frequency, startDate }) {
+  async addRecurringReimbursement({
+    clientId,
+    description,
+    amount,
+    frequency,
+    startDate,
+    ...coverage
+  }) {
     if (!clientId || typeof clientId !== 'string') return null
     const trimmedDescription = typeof description === 'string' ? description.trim() : ''
     if (!trimmedDescription) return null
@@ -7036,6 +7344,14 @@ export class AppDataStore {
       return null
     }
     if (typeof startDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null
+    const checked = sanitizeCoverageInput(coverage)
+    if (!checked.ok) return null
+    // Turning it on without a first window is the one combination that cannot
+    // work: there would be nothing for the wording to name and nothing to
+    // advance from. Refused here rather than silently ignored.
+    if (checked.values.coverageEnabled && !(checked.values.coverageStart && checked.values.coverageEnd)) {
+      return null
+    }
     const id = `recur-${randomUUID().slice(0, 8)}`
     const record = {
       id,
@@ -7044,7 +7360,19 @@ export class AppDataStore {
       amount: numericAmount,
       frequency,
       startDate,
+      coverageEnabled: false,
+      coverageTemplate: '',
+      coverageStart: null,
+      coverageEnd: null,
+      coveragePaused: false,
+      coverageResumePending: false,
+      coverageHistory: {},
+      ...checked.values,
     }
+    // The day the first window ENDS on is the day the cycle turns. Stored from
+    // here on rather than re-derived, so a window she later confirms onto a
+    // different day does not snap back to this one.
+    record.coverageAnchorDay = anchorDayFromRange(record.coverageEnd)
 
     if (this.pool) {
       const exists = await this.pool.query(
@@ -7054,9 +7382,26 @@ export class AppDataStore {
       if (!exists.rowCount) return null
       await this.pool.query(
         `insert into recurring_reimbursements
-           (id, client_id, description, amount, frequency, start_date)
-         values ($1, $2, $3, $4, $5, $6)`,
-        [id, clientId, trimmedDescription, numericAmount, frequency, startDate],
+           (id, client_id, description, amount, frequency, start_date,
+            coverage_enabled, coverage_template, coverage_start, coverage_end,
+            coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)`,
+        [
+          id,
+          clientId,
+          trimmedDescription,
+          numericAmount,
+          frequency,
+          startDate,
+          record.coverageEnabled,
+          record.coverageTemplate,
+          record.coverageStart,
+          record.coverageEnd,
+          record.coverageAnchorDay,
+          record.coveragePaused,
+          record.coverageResumePending,
+          JSON.stringify(record.coverageHistory),
+        ],
       )
       return record
     }
@@ -7077,6 +7422,14 @@ export class AppDataStore {
    */
   async updateRecurringReimbursement(id, patch) {
     if (!id) return null
+
+    // Read BEFORE deciding. The coverage fields are not independent of each
+    // other — an end date has to follow the start it is being merged onto, and
+    // "she just un-paused this" is only knowable against the stored row — so
+    // this is a read-merge-write rather than the blind SET it used to be.
+    const current = await this._readRecurringReimbursement(id)
+    if (!current) return null
+
     const updates = {}
     if (patch.description !== undefined) {
       const trimmed = typeof patch.description === 'string' ? patch.description.trim() : ''
@@ -7104,63 +7457,67 @@ export class AppDataStore {
       }
       updates.startDate = patch.startDate
     }
-    if (Object.keys(updates).length === 0) {
-      if (this.pool) {
-        const result = await this.pool.query(
-          `select id, client_id, description, amount, frequency, start_date
-           from recurring_reimbursements where id = $1`,
-          [id],
-        )
-        if (!result.rowCount) return null
-        const row = result.rows[0]
-        return {
-          id: row.id,
-          clientId: row.client_id,
-          description: row.description,
-          amount: Number(row.amount),
-          frequency: row.frequency,
-          startDate: row.start_date.toISOString().slice(0, 10),
-        }
-      }
-      const data = await readJson(localDataPath)
-      return (data.recurringReimbursements ?? []).find((entry) => entry.id === id) ?? null
+
+    const checked = sanitizeCoverageInput(patch, { partial: true })
+    if (!checked.ok) return null
+    Object.assign(updates, checked.values)
+
+    const merged = { ...current, ...updates }
+    if (merged.coverageStart && merged.coverageEnd && merged.coverageEnd <= merged.coverageStart) {
+      return null
+    }
+    if (merged.coverageEnabled && !(merged.coverageStart && merged.coverageEnd)) return null
+
+    // Re-typing the first window in SETUP re-seeds the anchor — she is saying
+    // where the cycle stands, and the day she puts the end on is that day. (The
+    // confirm control moves the anchor too, but only when she actually shifts
+    // the end onto a different day-of-month; see `confirmExpenseCoverage`.)
+    if (updates.coverageEnd !== undefined) {
+      updates.coverageAnchorDay = anchorDayFromRange(updates.coverageEnd)
     }
 
+    // SWITCHED BACK ON. The owner decided this: an expense that sat out one or
+    // more cycles must ask before it bills again, because the months it missed
+    // are months the window did not move and nobody can tell from here which
+    // window the next invoice should name. The flag is spent by the first
+    // generation that sees it — see `_resolveExpenseCoverage`.
+    if (current.coveragePaused && merged.coveragePaused === false) {
+      updates.coverageResumePending = true
+    }
+
+    if (Object.keys(updates).length === 0) return current
+
     if (this.pool) {
+      const columns = {
+        description: 'description',
+        amount: 'amount',
+        frequency: 'frequency',
+        startDate: 'start_date',
+        coverageEnabled: 'coverage_enabled',
+        coverageTemplate: 'coverage_template',
+        coverageStart: 'coverage_start',
+        coverageEnd: 'coverage_end',
+        coverageAnchorDay: 'coverage_anchor_day',
+        coveragePaused: 'coverage_paused',
+        coverageResumePending: 'coverage_resume_pending',
+      }
       const setClauses = []
       const values = [id]
-      if (updates.description !== undefined) {
-        values.push(updates.description)
-        setClauses.push(`description = $${values.length}`)
-      }
-      if (updates.amount !== undefined) {
-        values.push(updates.amount)
-        setClauses.push(`amount = $${values.length}`)
-      }
-      if (updates.frequency !== undefined) {
-        values.push(updates.frequency)
-        setClauses.push(`frequency = $${values.length}`)
-      }
-      if (updates.startDate !== undefined) {
-        values.push(updates.startDate)
-        setClauses.push(`start_date = $${values.length}`)
+      for (const [key, column] of Object.entries(columns)) {
+        if (updates[key] === undefined) continue
+        values.push(updates[key])
+        setClauses.push(`${column} = $${values.length}`)
       }
       setClauses.push('updated_at = now()')
       const result = await this.pool.query(
         `update recurring_reimbursements set ${setClauses.join(', ')} where id = $1
-         returning id, client_id, description, amount, frequency, start_date`,
+         returning id, client_id, description, amount, frequency, start_date,
+                   coverage_enabled, coverage_template, coverage_start, coverage_end,
+                   coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history`,
         values,
       )
       if (!result.rowCount) return null
-      const row = result.rows[0]
-      return {
-        id: row.id,
-        clientId: row.client_id,
-        description: row.description,
-        amount: Number(row.amount),
-        frequency: row.frequency,
-        startDate: row.start_date.toISOString().slice(0, 10),
-      }
+      return mapRecurringReimbursementRow(result.rows[0])
     }
 
     const data = await readJson(localDataPath)
@@ -7169,6 +7526,56 @@ export class AppDataStore {
     Object.assign(target, updates)
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return target
+  }
+
+  /**
+   * Run `work` inside one Postgres transaction, or straight through on the file
+   * backend — which is single-writer and whose queue already serializes a
+   * read-modify-write, so a transaction there would be a no-op wrapper.
+   *
+   * Same BEGIN / ROLLBACK-on-throw / release-in-finally shape the retainer save
+   * and the void pass already use; factored out because three call sites now
+   * need it and a hand-rolled fourth is how one of them ends up leaking a
+   * connection inside an open transaction.
+   */
+  async _withTransaction(work) {
+    if (!this.pool) return await work(null)
+    const dbClient = await this.pool.connect()
+    try {
+      await dbClient.query('BEGIN')
+      const result = await work(dbClient)
+      await dbClient.query('COMMIT')
+      return result
+    } catch (error) {
+      try {
+        await dbClient.query('ROLLBACK')
+      } catch {
+        /* already rolled back, or the connection is gone */
+      }
+      throw error
+    } finally {
+      dbClient.release()
+    }
+  }
+
+  /** One recurring reimbursement by id, in app shape, from either backend. */
+  async _readRecurringReimbursement(id) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, description, amount, frequency, start_date,
+                coverage_enabled, coverage_template, coverage_start, coverage_end,
+                coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history
+           from recurring_reimbursements where id = $1`,
+        [id],
+      )
+      if (!result.rowCount) return null
+      return mapRecurringReimbursementRow(result.rows[0])
+    }
+    const data = await readJson(localDataPath)
+    const found = (data.recurringReimbursements ?? []).find((entry) => entry.id === id)
+    // Through the SAME normalizer the Postgres mapper uses, so a row written
+    // before this feature reads identically on both backends. Cardinal rule 1.
+    return found ? normalizeRecurringReimbursement(found) : null
   }
 
   /** Delete one recurring reimbursement. Returns true on success. */
@@ -7189,6 +7596,340 @@ export class AppDataStore {
     if (data.recurringReimbursements.length === before) return false
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return true
+  }
+
+  /**
+   * Record what window an expense was billed for in one period.
+   *
+   * THE LEDGER IS WRITTEN FROM THE LINE, never recomputed alongside it. The
+   * invoice says "this covers July 13 – August 13" and this stores that exact
+   * pair, so the document and the thing the next cycle advances from cannot
+   * describe different windows. It is also what makes regeneration idempotent:
+   * the next run finds the period already answered and hands the same range
+   * back rather than stepping again.
+   *
+   * `coverage_resume_pending` is cleared here because its whole job — make the
+   * first invoice after a pause ask — is done the moment that invoice exists.
+   */
+  async _writeCoverageLedgerEntry(id, period, entry, { dbClient = null, anchorDay = null } = {}) {
+    if (!id || !/^\d{4}-\d{2}$/.test(String(period))) return
+    const value = {
+      start: entry.start,
+      end: entry.end,
+      needsConfirmation: Boolean(entry.needsConfirmation),
+      reason: entry.reason ?? null,
+    }
+    if (this.pool) {
+      // `dbClient` is the caller's OPEN TRANSACTION when there is one. The
+      // ledger and the invoice it describes have to land together or not at
+      // all: a connection lost between the two would leave an invoice that
+      // exists and a cycle that never moved, and the next month would re-bill
+      // the same window without asking anybody.
+      const runner = dbClient ?? this.pool
+      await runner.query(
+        `update recurring_reimbursements
+            set coverage_history = jsonb_set(
+                  coalesce(coverage_history, '{}'::jsonb), array[$2], $3::jsonb, true),
+                coverage_resume_pending = false,
+                coverage_anchor_day = coalesce($4, coverage_anchor_day),
+                updated_at = now()
+          where id = $1`,
+        [id, period, JSON.stringify(value), anchorDay],
+      )
+      return
+    }
+    // The file backend is single-writer and its queue serializes reads against
+    // writes, so one read-modify-write IS the atomic unit here.
+    const data = await readJson(localDataPath)
+    const target = (data.recurringReimbursements ?? []).find((expense) => expense.id === id)
+    if (!target) return
+    if (!target.coverageHistory || typeof target.coverageHistory !== 'object') {
+      target.coverageHistory = {}
+    }
+    target.coverageHistory[period] = value
+    target.coverageResumePending = false
+    if (anchorDay !== null) target.coverageAnchorDay = anchorDay
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  /**
+   * Forget that a period was ever billed, for every expense on it.
+   *
+   * VOIDING AN INVOICE UN-BILLS ITS WINDOW. Without this, an August invoice
+   * voided and never regenerated leaves 2026-08 sitting in the ledger: September
+   * reads it, sees the consecutive period it expects, advances quietly — and the
+   * window August was going to cover is never billed to anyone and never
+   * mentioned again. Removing the entry puts the expense back where it stood,
+   * so a regenerated August resolves to the same window as before (the guarantee
+   * is unchanged — the answer is recomputed from the same inputs) and a
+   * September generated without one correctly sees the gap and asks.
+   */
+  async _clearCoverageLedgerForPeriod(period, expenseIds, { dbClient = null } = {}) {
+    const ids = [...new Set((expenseIds ?? []).filter(Boolean))]
+    if (ids.length === 0 || !/^\d{4}-\d{2}$/.test(String(period))) return
+    if (this.pool) {
+      const runner = dbClient ?? this.pool
+      await runner.query(
+        `update recurring_reimbursements
+            set coverage_history = coalesce(coverage_history, '{}'::jsonb) - $2,
+                updated_at = now()
+          where id = any($1::text[])`,
+        [ids, period],
+      )
+      return
+    }
+    const data = await readJson(localDataPath)
+    const wanted = new Set(ids)
+    let changed = false
+    for (const expense of data.recurringReimbursements ?? []) {
+      if (!wanted.has(expense.id)) continue
+      if (expense.coverageHistory && period in expense.coverageHistory) {
+        delete expense.coverageHistory[period]
+        changed = true
+      }
+    }
+    if (changed) await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  /**
+   * Re-assert `needsCoverageConfirmation` on every recurring line from the
+   * AUTHORITATIVE ledger, discarding whatever the caller claimed.
+   *
+   * The answer lives in `coverage_history[period]` on the expense — that is
+   * where confirming writes it and where generation reads it. Anything else is
+   * a copy, and a copy that arrives in a request body is not evidence.
+   *
+   * A line naming an expense that no longer exists, or a period the ledger has
+   * no entry for, is left alone: the flag it carries is the only record left,
+   * and clearing it would silently open the gate.
+   */
+  async _deriveCoverageFlags(lineItems, period) {
+    const lines = Array.isArray(lineItems) ? lineItems : []
+    if (!lines.some((line) => line?.kind === 'recurring' && line?.recurringId)) return lines
+
+    // ONE read for the whole invoice. Per-line reads meant a client with three
+    // reimbursed expenses re-read the workspace three times on every save.
+    const wanted = [
+      ...new Set(
+        lines
+          .filter((line) => line?.kind === 'recurring' && line?.recurringId)
+          .map((line) => line.recurringId),
+      ),
+    ]
+    const resolved = new Map()
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select id, coverage_history from recurring_reimbursements where id = any($1::text[])`,
+        [wanted],
+      )
+      for (const row of rows) {
+        resolved.set(row.id, row.coverage_history?.[period] ?? null)
+      }
+    } else {
+      const data = await readJson(localDataPath)
+      const byId = new Map(
+        (data.recurringReimbursements ?? []).map((expense) => [expense.id, expense]),
+      )
+      for (const id of wanted) {
+        resolved.set(id, byId.get(id)?.coverageHistory?.[period] ?? null)
+      }
+    }
+
+    return lines.map((line) => {
+      if (line?.kind !== 'recurring' || !line.recurringId) return line
+      const entry = resolved.get(line.recurringId)
+      if (!entry) return line
+      const pending = Boolean(entry.needsConfirmation)
+      const next = { ...line, needsCoverageConfirmation: pending }
+      if (pending) next.coverageReason = entry.reason ?? 'gap'
+      else delete next.coverageReason
+      if (!pending) delete next.needsCoverageConfirmation
+      return next
+    })
+  }
+
+  /**
+   * Does this invoice carry a covered-date window nobody has answered for?
+   *
+   * Derived from the ledger, not from the invoice's stored lines — the public
+   * form of `_deriveCoverageFlags`, for the send route, which has to be able to
+   * refuse an invoice that was reviewed before the question was ever asked.
+   */
+  async invoiceHasUnconfirmedCoverage(invoice) {
+    if (!invoice) return false
+    const lines = await this._deriveCoverageFlags(invoice.lineItems, invoice.period)
+    return hasUnconfirmedCoverage(lines)
+  }
+
+  /** Every expense id a set of invoices' recurring lines names. */
+  _coveredExpenseIds(invoices) {
+    const ids = []
+    for (const invoice of invoices ?? []) {
+      for (const line of invoice?.lineItems ?? []) {
+        if (line?.kind === 'recurring' && line.recurringId) ids.push(line.recurringId)
+      }
+    }
+    return ids
+  }
+
+  /**
+   * Commit every covered-date window a freshly generated invoice just claimed.
+   *
+   * Called AFTER the insert lands, so a client who was skipped — or an insert
+   * the unique index refused — never moves an expense's window. A window that
+   * advanced for an invoice that does not exist is the quiet version of the bug
+   * this whole feature is meant to prevent.
+   */
+  async _commitCoverageForInvoice(period, lineItems, { dbClient = null } = {}) {
+    for (const line of Array.isArray(lineItems) ? lineItems : []) {
+      if (line?.kind !== 'recurring') continue
+      if (!line.recurringId || !isIsoDate(line.coverageStart) || !isIsoDate(line.coverageEnd)) {
+        continue
+      }
+      await this._writeCoverageLedgerEntry(
+        line.recurringId,
+        period,
+        {
+          start: line.coverageStart,
+          end: line.coverageEnd,
+          needsConfirmation: Boolean(line.needsCoverageConfirmation),
+          reason: line.coverageReason ?? null,
+        },
+        { dbClient },
+      )
+    }
+  }
+
+  /**
+   * The owner's answer to "confirm the dates this invoice covers".
+   *
+   * Two things move together and must not come apart: the LINE the client will
+   * read, and the LEDGER the next cycle steps from. Confirming an edited window
+   * that only landed on the invoice would leave the following month advancing
+   * from the range she corrected away from — the exact retyping this feature
+   * exists to end, arriving a month later.
+   *
+   * The wording is re-rendered from her saved template, because the dates are
+   * what the template is for; correcting them and leaving the sentence naming
+   * the old ones would be worse than not asking at all.
+   *
+   * Throws `CoverageConfirmationError` for anything it will not accept.
+   * Returns the updated invoice, or null when there is no such invoice.
+   */
+  async confirmExpenseCoverage(invoiceId, recurringId, { start, end } = {}) {
+    const all = await this.listInvoices()
+    const current = all.find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+
+    // A withdrawn invoice is not a thing to confirm dates on. Writing the ledger
+    // for one would advance a cycle on behalf of a document nobody is paying —
+    // and voiding is precisely the escape hatch offered to an owner who does not
+    // want to answer the question. Same bar as `recordInvoiceSent` and
+    // `applyInvoicePayment`, for the same reason.
+    if (current.status === 'void') {
+      throw new CoverageConfirmationError(
+        'This invoice has been voided — generate the month again to bill it.',
+      )
+    }
+
+    const index = current.lineItems.findIndex(
+      (line) => line?.kind === 'recurring' && line?.recurringId === recurringId,
+    )
+    if (index === -1) {
+      throw new CoverageConfirmationError('That expense is not on this invoice.')
+    }
+    const line = current.lineItems[index]
+
+    // Absent dates mean "the proposed window is right" — she pressed confirm
+    // without touching them, which is the common case and must not require the
+    // page to echo values back.
+    const nextStart = start === undefined ? line.coverageStart : start
+    const nextEnd = end === undefined ? line.coverageEnd : end
+    if (!isIsoDate(nextStart) || !isIsoDate(nextEnd)) {
+      throw new CoverageConfirmationError('Covered dates must look like 2026-08-13.')
+    }
+    if (nextEnd <= nextStart) {
+      throw new CoverageConfirmationError('The end of the covered period must come after its start.')
+    }
+
+    const expense = await this._readRecurringReimbursement(recurringId)
+
+    // WHOSE WORDING IS THIS? The template exists to put dates into a sentence,
+    // so a confirmed window should refresh that sentence — unless she has since
+    // typed her own, in which case rewriting it would throw away an edit she
+    // made deliberately ("QBO subscription (per contract)" becoming the template
+    // output the moment she pressed Confirm).
+    //
+    // The test is whether the label still LOOKS generated: it matches what the
+    // template would have produced for the window the line is carrying. If it
+    // does, she has not touched it and it is ours to update. If it does not, it
+    // is hers and it stays. Re-rendering is also skipped outright when the
+    // window did not move — there would be nothing new to say.
+    const rangeMoved = nextStart !== line.coverageStart || nextEnd !== line.coverageEnd
+    const generatedNow = coverageLineLabel(expense, {
+      start: line.coverageStart,
+      end: line.coverageEnd,
+    })
+    const untouched = generatedNow !== null && generatedNow === line.label
+    const relabeled =
+      rangeMoved && untouched
+        ? coverageLineLabel(expense, { start: nextStart, end: nextEnd })
+        : null
+
+    const lineItems = current.lineItems.map((entry, i) =>
+      i === index
+        ? {
+            ...entry,
+            ...(relabeled ? { label: relabeled } : {}),
+            coverageStart: nextStart,
+            coverageEnd: nextEnd,
+            needsCoverageConfirmation: false,
+            coverageReason: null,
+          }
+        : entry,
+    )
+
+    // Moving the END onto a different day of the month MOVES THE CYCLE. She has
+    // just said this window runs to the 20th; proposing the 13th again next
+    // month would bill a 23-day period at the full monthly price and never
+    // mention it. Only a genuine change is written — `coalesce` in the ledger
+    // write leaves the stored anchor alone when this is null.
+    const movedAnchor = anchorDayFromRange(nextEnd)
+    const anchorDay =
+      rangeMoved && movedAnchor !== null && movedAnchor !== anchorDayOf(expense)
+        ? movedAnchor
+        : null
+
+    // The line and the ledger land TOGETHER. Confirming is the one moment the
+    // two are guaranteed to agree, and a connection lost between them would
+    // leave the invoice settled while the cycle it advances still asks.
+    const next = { ...current, lineItems, updatedAt: nowIso() }
+    await this._withTransaction(async (dbClient) => {
+      if (this.pool) {
+        await dbClient.query(
+          `update invoices set line_items = $2::jsonb, updated_at = now() where id = $1`,
+          [invoiceId, JSON.stringify(lineItems)],
+        )
+      }
+      // The ledger gets the CONFIRMED window, so the next cycle steps from what
+      // she approved rather than from what was proposed.
+      await this._writeCoverageLedgerEntry(
+        recurringId,
+        current.period,
+        { start: nextStart, end: nextEnd, needsConfirmation: false, reason: null },
+        { dbClient, anchorDay },
+      )
+      if (!this.pool) {
+        const data = await readJson(localDataPath)
+        const stored = (data.invoices ?? []).find((invoice) => invoice.id === invoiceId)
+        if (stored) {
+          stored.lineItems = lineItems
+          stored.updatedAt = next.updatedAt
+          await writeFile(localDataPath, JSON.stringify(data, null, 2))
+        }
+      }
+    })
+    return next
   }
 
   /**
@@ -7419,7 +8160,12 @@ export class AppDataStore {
         entries: data.timeEntries ?? [],
         plans: data.plans ?? [],
         reimbursements: data.reimbursements ?? [],
-        recurringReimbursements: data.recurringReimbursements ?? [],
+        // Normalized through the shared definition, exactly as the Postgres
+        // mapper does — the resolver must not see `coverageHistory: undefined`
+        // on one backend and `{}` on the other.
+        recurringReimbursements: (data.recurringReimbursements ?? []).map(
+          normalizeRecurringReimbursement,
+        ),
         employees: data.employees ?? [],
         defaultHourlyRate: Number(client.hourlyRate) || 0,
         priorInvoice: priorByClient.get(client.id) ?? null,
@@ -7452,10 +8198,21 @@ export class AppDataStore {
         createdAt: nowIso(),
         updatedAt: nowIso(),
       }
-      const saved = await this._insertInvoice(record)
-      // A null return means the partial unique index refused it — another run
-      // created this client's invoice between our read and our write. That is
-      // the index doing its job, not an error.
+      // The invoice and the covered-date windows it claims are ONE write. A
+      // connection lost between them would leave an invoice on file whose
+      // expense never advanced, and the next month would re-bill the same
+      // window silently — the exact failure this feature exists to prevent,
+      // arriving through the back door.
+      const saved = await this._withTransaction(async (dbClient) => {
+        const inserted = await this._insertInvoice(record, { dbClient })
+        // A null return means the partial unique index refused it — another run
+        // created this client's invoice between our read and our write. That is
+        // the index doing its job, not an error, and nothing may advance.
+        if (inserted) {
+          await this._commitCoverageForInvoice(period, inserted.lineItems, { dbClient })
+        }
+        return inserted
+      })
       if (saved) created.push(saved)
       else skipped.push({ clientId: client.id, reason: 'already-generated' })
     }
@@ -7574,6 +8331,17 @@ export class AppDataStore {
    * anyone, and invisible because nobody works a voided invoice.
    */
   async voidUnsentInvoicesForPeriod(period) {
+    // Which expenses these invoices had claimed windows for, read BEFORE the
+    // void — the lines survive the status change, but reading first keeps the
+    // release scoped to exactly the invoices this pass touches.
+    const releasing = this._coveredExpenseIds(
+      (await this.listInvoices({ period })).filter(
+        (invoice) =>
+          (invoice.kind ?? 'monthly') === 'monthly' &&
+          (invoice.status === 'draft' || invoice.status === 'reviewed'),
+      ),
+    )
+
     if (this.pool) {
       const dbClient = await this.pool.connect()
       try {
@@ -7593,6 +8361,11 @@ export class AppDataStore {
               where applied_to_invoice_id = any($1::text[])`,
             [ids],
           )
+          // Voiding un-bills the month's covered windows. Regenerating then
+          // resolves each one from the same inputs as before and lands on the
+          // same range — the idempotency promise is unchanged — while a month
+          // voided and LEFT voided correctly reads as unbilled next time.
+          await this._clearCoverageLedgerForPeriod(period, releasing, { dbClient })
         }
         await dbClient.query('COMMIT')
         return { voided: ids.length, ids }
@@ -7631,6 +8404,14 @@ export class AppDataStore {
         if (!invoice.appliedToInvoiceId || !voided.has(invoice.appliedToInvoiceId)) continue
         invoice.appliedToInvoiceId = null
         invoice.updatedAt = nowIso()
+      }
+      // Same release as the Postgres branch, in the same read-modify-write.
+      const freeing = new Set(releasing)
+      for (const expense of data.recurringReimbursements ?? []) {
+        if (!freeing.has(expense.id)) continue
+        if (expense.coverageHistory && period in expense.coverageHistory) {
+          delete expense.coverageHistory[period]
+        }
       }
       await writeFile(localDataPath, JSON.stringify(data, null, 2))
     }
@@ -7817,15 +8598,44 @@ export class AppDataStore {
     }
     if (EDITABLE_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
 
+    // THE GATE. Review is where the owner says "this is what goes to the
+    // client", and a line whose covered dates are still a proposal is not
+    // something she has said that about.
+    //
+    // The flag is RE-DERIVED from the ledger, never read from the body. It
+    // arrives on the line, so a PATCH is free to send lines with it stripped —
+    // `{status:'reviewed', lineItems:[…no flag…]}` walked straight through the
+    // version of this that trusted the sanitized input. A gate whose condition
+    // the caller supplies is not a gate. The store's own ledger is the only
+    // thing here that knows whether she has answered.
+    //
+    // Void is deliberately still allowed: withdrawing an invoice she does not
+    // want to answer for is exactly the right escape.
+    next.lineItems = await this._deriveCoverageFlags(next.lineItems, current.period)
+    if (next.status === 'reviewed' && hasUnconfirmedCoverage(next.lineItems)) {
+      throw new CoverageConfirmationError(
+        'Confirm the covered dates on this invoice before marking it reviewed.',
+      )
+    }
+
     const retainerWork = this._resolveRetainerCredit({ id, current, next, patch, all })
+
+    // A VOIDED invoice un-bills its covered windows — see
+    // `_clearCoverageLedgerForPeriod`. Done from the invoice's OWN stored lines
+    // rather than the patch's, because the patch may have removed them and the
+    // window still needs releasing.
+    const coverageToRelease =
+      next.status === 'void' && current.status !== 'void'
+        ? this._coveredExpenseIds([current])
+        : []
 
     Object.assign(next, recomputeInvoiceMoney(next.lineItems))
     next.updatedAt = nowIso()
 
     if (this.pool) {
-      // No retainer moved, so no second row to keep in step — the single
-      // statement is still the whole write.
-      if (!retainerWork.apply && !retainerWork.clear) {
+      // No retainer moved and no window released, so no second row to keep in
+      // step — the single statement is still the whole write.
+      if (!retainerWork.apply && !retainerWork.clear && coverageToRelease.length === 0) {
         const { rowCount } = await this.pool.query(
           `update invoices
               set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
@@ -7901,6 +8711,12 @@ export class AppDataStore {
           }
         }
 
+        // The void and the windows it releases land together, for the same
+        // reason the generation pair does.
+        if (coverageToRelease.length > 0) {
+          await this._clearCoverageLedgerForPeriod(current.period, coverageToRelease, { dbClient })
+        }
+
         await dbClient.query('COMMIT')
       } catch (error) {
         // A rollback after a rollback is a no-op; what matters is that a thrown
@@ -7940,6 +8756,17 @@ export class AppDataStore {
       }
       retainer.appliedToInvoiceId = id
       retainer.updatedAt = nowIso()
+    }
+    // The windows this void releases, inside the SAME read-modify-write — the
+    // file backend's version of the transaction above.
+    if (coverageToRelease.length > 0) {
+      const releasing = new Set(coverageToRelease)
+      for (const expense of data.recurringReimbursements ?? []) {
+        if (!releasing.has(expense.id)) continue
+        if (expense.coverageHistory && current.period in expense.coverageHistory) {
+          delete expense.coverageHistory[current.period]
+        }
+      }
     }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return next
@@ -8230,10 +9057,13 @@ export class AppDataStore {
    * monthly invoice, and two live retainers for one client are allowed too
    * (a second engagement is a second retainer).
    */
-  async _insertInvoice(record) {
+  async _insertInvoice(record, { dbClient = null } = {}) {
     const kind = record.kind ?? 'monthly'
     if (this.pool) {
-      const { rows } = await this.pool.query(
+      // Runs inside the caller's transaction when one is open, so the invoice
+      // and the covered-date ledger it moves commit together — see
+      // `generateInvoicesForPeriod`.
+      const { rows } = await (dbClient ?? this.pool).query(
         `insert into invoices (
            id, client_id, period, number, kind, status, line_items, subtotal, total,
            due_date, blurb, scope_flags, created_at, updated_at

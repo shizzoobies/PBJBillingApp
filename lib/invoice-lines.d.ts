@@ -28,6 +28,17 @@ export type InvoiceLineOut = {
   adhocMode?: AdhocMode
   /** What billing this work WOULD charge, kept while the line sits at $0.00. */
   adhocAmount?: number
+  /* -- `recurring` lines with a covered-date window configured -------------- */
+  /** The recurring reimbursement this line came from, for confirming its dates. */
+  recurringId?: string
+  /** yyyy-mm-dd, inclusive start of the window this line's wording names. */
+  coverageStart?: string
+  /** yyyy-mm-dd, the day the cycle turns. */
+  coverageEnd?: string
+  /** The owner has to confirm these dates before the invoice can be reviewed. */
+  needsCoverageConfirmation?: boolean
+  /** Why she is being asked: a skipped cycle, or a resumed pause. */
+  coverageReason?: 'gap' | 'resumed'
 }
 
 export type BuildInvoiceLinesResult = {
@@ -64,13 +75,16 @@ export type BuildInvoiceLinesArgs = {
   plans?: Array<{ id: string; name: string }>
   billingPeriod: string
   reimbursements?: Array<{ clientId: string; date: string; description: string; amount: number }>
-  recurringReimbursements?: Array<{
-    clientId: string
-    description: string
-    amount: number
-    frequency: string
-    startDate: string
-  }>
+  recurringReimbursements?: Array<
+    {
+      id?: string
+      clientId: string
+      description: string
+      amount: number
+      frequency: string
+      startDate: string
+    } & import('./expense-coverage.js').CoverageConfig
+  >
   employees?: Array<{ id: string; name?: string; billRate?: number | null }>
   defaultHourlyRate?: number
 }

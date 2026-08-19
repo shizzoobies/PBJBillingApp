@@ -1,9 +1,15 @@
-import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { Check, Pause, Pencil, Play, Plus, Trash2, X } from 'lucide-react'
 import { useMemo, useState, type FormEvent } from 'react'
 import { useAppContext } from '../AppContext'
 import type { RecurringReimbursement, RecurringReimbursementFrequency } from '../lib/types'
 import { ApiError } from '../lib/types'
 import { currency, localDateOnly } from '../lib/utils'
+import {
+  COVERAGE_PLACEHOLDERS,
+  DEFAULT_COVERAGE_TEMPLATE,
+  applyCoverageTemplate,
+  formatCoverageRange,
+} from '../../lib/expense-coverage.js'
 
 /**
  * Owner-only "Recurring reimbursements" card. Each row auto-populates the
@@ -43,6 +49,163 @@ function formatStartLabel(startDate: string): string {
   }).format(parsed)
 }
 
+/**
+ * The window this expense is sitting on right now — the last one actually
+ * billed, or the first one she typed if it has never billed yet. Read off the
+ * ledger rather than recomputed, so the card and the invoice agree.
+ */
+function currentWindow(entry: RecurringReimbursement): { start: string; end: string } | null {
+  const history = entry.coverageHistory ?? {}
+  const periods = Object.keys(history).sort()
+  const latest = periods.length > 0 ? history[periods[periods.length - 1]] : null
+  if (latest?.start && latest?.end) return { start: latest.start, end: latest.end }
+  if (entry.coverageStart && entry.coverageEnd) {
+    return { start: entry.coverageStart, end: entry.coverageEnd }
+  }
+  return null
+}
+
+/** The shape the coverage sub-form edits, in both the add and the edit paths. */
+type CoverageDraft = {
+  enabled: boolean
+  template: string
+  start: string
+  end: string
+}
+
+const EMPTY_COVERAGE: CoverageDraft = {
+  enabled: false,
+  template: DEFAULT_COVERAGE_TEMPLATE,
+  start: '',
+  end: '',
+}
+
+function coverageDraftFrom(entry: RecurringReimbursement): CoverageDraft {
+  return {
+    enabled: Boolean(entry.coverageEnabled),
+    template: entry.coverageTemplate || DEFAULT_COVERAGE_TEMPLATE,
+    start: entry.coverageStart ?? '',
+    end: entry.coverageEnd ?? '',
+  }
+}
+
+/**
+ * Why this window will not do, in a sentence — or '' when it is fine. Says the
+ * same three things the store says; this one just gets to say them before a
+ * round trip.
+ */
+function validateCoverage(draft: CoverageDraft): string {
+  if (!draft.enabled) return ''
+  if (!draft.start || !draft.end) {
+    return 'Enter the first covered period — a start date and an end date.'
+  }
+  if (draft.end <= draft.start) {
+    return 'The covered period must end after it starts.'
+  }
+  return ''
+}
+
+/** What the server is sent. Empty dates clear the window rather than fail. */
+function coveragePayload(draft: CoverageDraft) {
+  return {
+    coverageEnabled: draft.enabled,
+    coverageTemplate: draft.template,
+    coverageStart: draft.start || null,
+    coverageEnd: draft.end || null,
+  }
+}
+
+/**
+ * "Name the dates this covers" — the whole point of the feature, configured
+ * ONCE here so it never has to be retyped on an invoice.
+ *
+ * The first window is typed by hand because only she knows where the cycle
+ * currently stands; every window after it is the app's job. The live preview
+ * matters more than it looks: a template is only correct if you can see the
+ * sentence it produces, and the alternative is generating an invoice to find
+ * out.
+ */
+function CoverageFields({
+  value,
+  description,
+  onChange,
+}: {
+  value: CoverageDraft
+  /** Fills `{description}` in the preview, so it reads as the real line will. */
+  description: string
+  onChange: (next: CoverageDraft) => void
+}) {
+  const preview =
+    value.start && value.end
+      ? applyCoverageTemplate(value.template || DEFAULT_COVERAGE_TEMPLATE, {
+          start: value.start,
+          end: value.end,
+          description,
+        })
+      : ''
+
+  return (
+    <div style={{ gridColumn: '1 / -1', display: 'grid', gap: 8 }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={value.enabled}
+          onChange={(event) => onChange({ ...value, enabled: event.target.checked })}
+        />
+        <span>The invoice wording names the dates this covers</span>
+      </label>
+
+      {value.enabled ? (
+        <>
+          <label className="field">
+            <span>Invoice wording</span>
+            <input
+              className="input"
+              type="text"
+              value={value.template}
+              placeholder={DEFAULT_COVERAGE_TEMPLATE}
+              onChange={(event) => onChange({ ...value, template: event.target.value })}
+            />
+            <span className="muted-text" style={{ fontSize: 12 }}>
+              Fill in the dates with {COVERAGE_PLACEHOLDERS.join(', ')}. Written once — every
+              invoice from here gets that cycle&rsquo;s dates put in for you.
+            </span>
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <label className="field">
+              <span>First covered period starts</span>
+              <input
+                className="input"
+                type="date"
+                value={value.start}
+                onChange={(event) => onChange({ ...value, start: event.target.value })}
+              />
+            </label>
+            <label className="field">
+              <span>and ends</span>
+              <input
+                className="input"
+                type="date"
+                value={value.end}
+                onChange={(event) => onChange({ ...value, end: event.target.value })}
+              />
+              <span className="muted-text" style={{ fontSize: 12 }}>
+                This day of the month is where the cycle turns — a 13th-to-13th expense ends on
+                the 13th. Enter it once; it moves forward on its own after that.
+              </span>
+            </label>
+          </div>
+          {preview ? (
+            <p className="muted-text" style={{ margin: 0 }}>
+              First invoice will read: <strong>{preview}</strong>
+            </p>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  )
+}
+
 export function RecurringReimbursementsCard({
   clientId,
   bare = false,
@@ -64,9 +227,11 @@ export function RecurringReimbursementsCard({
   const [description, setDescription] = useState('')
   const [amount, setAmount] = useState('')
   const [frequency, setFrequency] = useState<RecurringReimbursementFrequency>('monthly')
+  const [coverage, setCoverage] = useState<CoverageDraft>(EMPTY_COVERAGE)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [removingId, setRemovingId] = useState<string | null>(null)
+  const [pausingId, setPausingId] = useState<string | null>(null)
 
   // Inline edit state — only one row is editable at a time.
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -74,6 +239,7 @@ export function RecurringReimbursementsCard({
   const [editAmount, setEditAmount] = useState('')
   const [editFrequency, setEditFrequency] = useState<RecurringReimbursementFrequency>('monthly')
   const [editStartDate, setEditStartDate] = useState('')
+  const [editCoverage, setEditCoverage] = useState<CoverageDraft>(EMPTY_COVERAGE)
   const [savingEdit, setSavingEdit] = useState(false)
   const [editError, setEditError] = useState('')
 
@@ -83,6 +249,7 @@ export function RecurringReimbursementsCard({
     setEditAmount(String(entry.amount))
     setEditFrequency(entry.frequency)
     setEditStartDate(entry.startDate)
+    setEditCoverage(coverageDraftFrom(entry))
     setEditError('')
   }
 
@@ -102,6 +269,11 @@ export function RecurringReimbursementsCard({
       setEditError('Amount must be a positive number.')
       return
     }
+    const coverageProblem = validateCoverage(editCoverage)
+    if (coverageProblem) {
+      setEditError(coverageProblem)
+      return
+    }
     setSavingEdit(true)
     setEditError('')
     try {
@@ -110,6 +282,7 @@ export function RecurringReimbursementsCard({
         amount: numericAmount,
         frequency: editFrequency,
         startDate: editStartDate,
+        ...coveragePayload(editCoverage),
       })
       setEditingId(null)
     } catch (err) {
@@ -141,6 +314,11 @@ export function RecurringReimbursementsCard({
       setError('Amount must be a positive number.')
       return
     }
+    const coverageProblem = validateCoverage(coverage)
+    if (coverageProblem) {
+      setError(coverageProblem)
+      return
+    }
     setSubmitting(true)
     setError('')
     try {
@@ -150,15 +328,33 @@ export function RecurringReimbursementsCard({
         amount: numericAmount,
         frequency,
         startDate,
+        ...coveragePayload(coverage),
       })
       setDescription('')
       setAmount('')
       setFrequency('monthly')
       setStartDate(today)
+      setCoverage(EMPTY_COVERAGE)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not add recurring reimbursement.')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleTogglePause = async (entry: RecurringReimbursement) => {
+    if (pausingId) return
+    setPausingId(entry.id)
+    try {
+      await updateRecurringReimbursement(entry.id, {
+        coveragePaused: !entry.coveragePaused,
+      })
+    } catch (err) {
+      window.alert(
+        err instanceof ApiError ? err.message : 'Could not change the pause on that expense.',
+      )
+    } finally {
+      setPausingId(null)
     }
   }
 
@@ -297,6 +493,11 @@ export function RecurringReimbursementsCard({
                     <X size={14} />
                   </button>
                 </div>
+                <CoverageFields
+                  value={editCoverage}
+                  description={editDescription}
+                  onChange={setEditCoverage}
+                />
                 {editError ? (
                   <p className="auth-error" style={{ gridColumn: '1 / -1', margin: 0 }}>
                     {editError}
@@ -320,12 +521,48 @@ export function RecurringReimbursementsCard({
                   <div className="checklist-meta-line">
                     {formatFrequency(entry.frequency)} · starting{' '}
                     {formatStartLabel(entry.startDate)}
+                    {entry.coveragePaused ? ' · paused' : ''}
                   </div>
+                  {/* Where the cycle stands. Without this the only way to see
+                      which window the next invoice will name is to generate it. */}
+                  {entry.coverageEnabled ? (
+                    <div className="checklist-meta-line">
+                      {(() => {
+                        // Named `covered`, not `window` — shadowing the global
+                        // inside a component that also calls window.confirm and
+                        // window.alert is a trap waiting for the next edit.
+                        const covered = currentWindow(entry)
+                        if (!covered) return 'Covered dates not set up yet'
+                        return `Covering ${formatCoverageRange(covered.start, covered.end)}`
+                      })()}
+                    </div>
+                  ) : null}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                   <strong>{currency.format(entry.amount)}</strong>
                   {ownerMode ? (
                     <>
+                      {/* Pausing stops it billing. Resuming does NOT quietly
+                          stride across the months it sat out — the next invoice
+                          asks which window it covers. */}
+                      <button
+                        type="button"
+                        className="item-delete-btn"
+                        aria-label={
+                          entry.coveragePaused
+                            ? `Resume ${entry.description}`
+                            : `Pause ${entry.description}`
+                        }
+                        title={
+                          entry.coveragePaused
+                            ? 'Start billing this again — the next invoice will ask you to confirm the dates it covers'
+                            : 'Stop billing this for now'
+                        }
+                        disabled={editingId !== null || pausingId === entry.id}
+                        onClick={() => void handleTogglePause(entry)}
+                      >
+                        {entry.coveragePaused ? <Play size={14} /> : <Pause size={14} />}
+                      </button>
                       <button
                         type="button"
                         className="item-delete-btn"
@@ -425,6 +662,7 @@ export function RecurringReimbursementsCard({
             <Plus size={14} />
             Add
           </button>
+          <CoverageFields value={coverage} description={description} onChange={setCoverage} />
         </form>
       ) : null}
       {error ? <p className="auth-error">{error}</p> : null}

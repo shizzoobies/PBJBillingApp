@@ -7,6 +7,7 @@ import QRCode from 'qrcode'
 import {
   AppDataStore,
   coerceEntryMinutes,
+  CoverageConfirmationError,
   RetainerCreditError,
   TimeEntrySplitError,
 } from './db/store.js'
@@ -737,6 +738,35 @@ async function notifyOwnersOfUpdateActivity(request, session, event, message) {
   } catch (err) {
     console.error(`[notify] ${event} dispatch failed:`, err?.message || err)
   }
+}
+
+/**
+ * The covered-date half of a recurring reimbursement body, picked field by
+ * field off whatever was posted.
+ *
+ * Only fields the page actually sends are forwarded, so a PATCH that says
+ * nothing about coverage stays a patch about the description. `coverageHistory`
+ * is deliberately absent: the ledger is written by generation and by the
+ * confirm endpoint, and letting a request body set it would let a stale tab
+ * rewrite which windows a client has already been billed for.
+ *
+ * Shape only — the store does the real validating, once, for both routes.
+ */
+function readCoverageFields(payload) {
+  const out = {}
+  if (typeof payload?.coverageEnabled === 'boolean') {
+    out.coverageEnabled = payload.coverageEnabled
+  }
+  if (typeof payload?.coveragePaused === 'boolean') out.coveragePaused = payload.coveragePaused
+  if (typeof payload?.coverageTemplate === 'string') {
+    out.coverageTemplate = payload.coverageTemplate
+  }
+  for (const key of ['coverageStart', 'coverageEnd']) {
+    const value = payload?.[key]
+    if (typeof value === 'string') out[key] = value.trim()
+    else if (value === null) out[key] = null
+  }
+  return out
 }
 
 /**
@@ -2690,6 +2720,20 @@ const server = createServer(async (request, response) => {
         sendJson(response, 409, { error: 'This invoice is voided, so it cannot be sent.' })
         return
       }
+      // A covered-date window the owner has not answered for must not reach the
+      // client. Review already blocks on this, but review is not the only door:
+      // this route is reachable directly, and an invoice reviewed BEFORE the
+      // question existed carries no flag in its stored lines at all. So the
+      // answer is re-derived from the expense's ledger, exactly as the review
+      // gate does — the stored line is a copy, and a copy is not evidence.
+      if (await appDataStore.invoiceHasUnconfirmedCoverage(invoice)) {
+        sendJson(response, 409, {
+          error: 'coverage_unconfirmed',
+          message:
+            'Confirm the covered dates on this invoice before sending it to the client.',
+        })
+        return
+      }
 
       const sendAppData = await appDataStore.read()
       const sendClient = (sendAppData.clients ?? []).find((entry) => entry.id === invoice.clientId)
@@ -3041,6 +3085,12 @@ const server = createServer(async (request, response) => {
           sendJson(response, 409, { error: 'retainer_credit_refused', message: error.message })
           return
         }
+        // An unanswered "confirm the covered dates" standing in front of review.
+        // Same treatment as a refused credit: a sentence, not "try again".
+        if (error instanceof CoverageConfirmationError) {
+          sendJson(response, 409, { error: 'coverage_unconfirmed', message: error.message })
+          return
+        }
         console.error('[invoices] update failed:', error)
         sendJson(response, 500, {
           error: 'invoice_update_failed',
@@ -3053,6 +3103,82 @@ const server = createServer(async (request, response) => {
         return
       }
       sendJson(response, 200, { invoice: updated })
+      return
+    }
+
+    // POST /api/invoices/:id/confirm-coverage — answer "confirm the covered
+    // dates" on one reimbursed-expense line (owner only).
+    //
+    // Its own endpoint rather than a field on the invoice PATCH because it
+    // writes somewhere the PATCH does not: the expense's ledger, which is what
+    // the NEXT cycle advances from. Folding it into the line edit would make
+    // every ordinary save a statement about the schedule.
+    const coverageConfirmMatch = normalizedPath.match(
+      /^\/api\/invoices\/([^/]+)\/confirm-coverage$/,
+    )
+    if (coverageConfirmMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can confirm covered dates' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const coverageContentType = String(request.headers['content-type'] || '')
+      if (!coverageContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const coveragePayload = await readJsonBody(request)
+      const recurringId =
+        typeof coveragePayload?.recurringId === 'string' ? coveragePayload.recurringId : ''
+      if (!recurringId) {
+        sendJson(response, 400, { error: 'recurringId is required' })
+        return
+      }
+      // Absent means "the proposed window is right" — the store keeps what the
+      // line already carries. A present-but-not-a-string value is a malformed
+      // request, and is refused there rather than silently ignored here.
+      const confirmRange = {}
+      if (coveragePayload?.coverageStart !== undefined) {
+        confirmRange.start = coveragePayload.coverageStart
+      }
+      if (coveragePayload?.coverageEnd !== undefined) {
+        confirmRange.end = coveragePayload.coverageEnd
+      }
+
+      let confirmed
+      try {
+        confirmed = await appDataStore.confirmExpenseCoverage(
+          decodeURIComponent(coverageConfirmMatch[1]),
+          recurringId,
+          confirmRange,
+        )
+      } catch (error) {
+        if (error instanceof CoverageConfirmationError) {
+          sendJson(response, 400, { error: 'coverage_invalid', message: error.message })
+          return
+        }
+        console.error('[invoices] coverage confirm failed:', error)
+        sendJson(response, 500, {
+          error: 'coverage_confirm_failed',
+          message: 'Could not confirm those dates — please try again.',
+        })
+        return
+      }
+      if (!confirmed) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'invoice_coverage_confirmed',
+        `${confirmed.number ?? confirmed.id}: ${recurringId}`,
+      )
+      sendJson(response, 200, { invoice: confirmed })
       return
     }
 
@@ -5328,11 +5454,12 @@ const server = createServer(async (request, response) => {
         amount: payload?.amount,
         frequency: payload?.frequency,
         startDate: typeof payload?.startDate === 'string' ? payload.startDate.trim() : '',
+        ...readCoverageFields(payload),
       })
       if (!created) {
         sendJson(response, 400, {
           error:
-            'Invalid recurring reimbursement. Need clientId, description, positive amount, frequency (monthly/quarterly/annually), and YYYY-MM-DD startDate.',
+            'Invalid recurring reimbursement. Need clientId, description, positive amount, frequency (monthly/quarterly/annually), and YYYY-MM-DD startDate. Covered dates, when used, need a start and a later end.',
         })
         return
       }
@@ -5364,6 +5491,7 @@ const server = createServer(async (request, response) => {
         if (payload?.amount !== undefined) patch.amount = payload.amount
         if (typeof payload?.frequency === 'string') patch.frequency = payload.frequency
         if (typeof payload?.startDate === 'string') patch.startDate = payload.startDate.trim()
+        Object.assign(patch, readCoverageFields(payload))
         const updated = await appDataStore.updateRecurringReimbursement(id, patch)
         if (!updated) {
           sendJson(response, 400, { error: 'Recurring reimbursement not found or update invalid.' })

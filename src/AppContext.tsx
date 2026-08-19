@@ -26,6 +26,7 @@ import type {
   WaitingOnMeItem,
 } from './lib/types'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
+import type { RecurringReimbursementCoverageInput } from './lib/api'
 
 export type AppContextValue = {
   data: AppData
@@ -145,7 +146,7 @@ export type AppContextValue = {
     amount: number
     frequency: 'monthly' | 'quarterly' | 'annually'
     startDate: string
-  }) => Promise<void>
+  } & RecurringReimbursementCoverageInput) => Promise<void>
   /** Owner-only: edit a recurring reimbursement (partial patch). */
   updateRecurringReimbursement: (
     id: string,
@@ -154,7 +155,7 @@ export type AppContextValue = {
       amount?: number
       frequency?: 'monthly' | 'quarterly' | 'annually'
       startDate?: string
-    },
+    } & RecurringReimbursementCoverageInput,
   ) => Promise<void>
   /** Owner-only: stop a recurring reimbursement by deleting it. */
   deleteRecurringReimbursement: (id: string) => Promise<void>

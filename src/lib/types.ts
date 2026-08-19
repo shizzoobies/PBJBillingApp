@@ -292,6 +292,25 @@ export type PersistedInvoiceLine = {
    */
   adhocAmount?: number
   /**
+   * `recurring` lines whose expense carries a covered-date window. The id is
+   * how a confirmation finds its way back to that expense's ledger — matching
+   * on the label would break the moment the wording is edited, which is the one
+   * thing this line exists to let her do.
+   */
+  recurringId?: string
+  /** yyyy-mm-dd — inclusive start of the window this line's wording names. */
+  coverageStart?: string
+  /** yyyy-mm-dd — the day the cycle turns; becomes the next window's start. */
+  coverageEnd?: string
+  /**
+   * A cycle was skipped, or the expense was paused and resumed, so the window
+   * above is a PROPOSAL. The invoice cannot be marked reviewed until she
+   * confirms or edits it.
+   */
+  needsCoverageConfirmation?: boolean
+  /** Why she is being asked. `backfill` is a month behind one already billed. */
+  coverageReason?: 'gap' | 'resumed' | 'backfill'
+  /**
    * `retainer_credit` lines only: WHICH retainer this credit came out of. The
    * save reads it to mark that retainer spent, and reads its absence — the line
    * having been deleted — to put the money back on account.
@@ -1330,6 +1349,48 @@ export type RecurringReimbursement = {
    * annually recurs in the same month each year.
    */
   startDate: string
+  /* -- Covered-date window (opt-in) ---------------------------------------- */
+  /**
+   * This expense's invoice wording names the period it covers, so the wording
+   * is written once with placeholders and the dates are filled in per cycle.
+   * Off leaves the line exactly as it was before the feature existed.
+   */
+  coverageEnabled?: boolean
+  /** Her saved wording. Placeholders: `{range}`, `{start}`, `{end}`, `{description}`. */
+  coverageTemplate?: string
+  /** YYYY-MM-DD — the FIRST window's start, typed by hand once at setup. */
+  coverageStart?: string | null
+  /**
+   * YYYY-MM-DD — the first window's end. Its day-of-month anchors the cycle
+   * (the 13th, in the QuickBooks case), and each advance restores that day
+   * after a short month has clamped it.
+   */
+  coverageEnd?: string | null
+  /** Paused expenses bill nothing, and ask before billing again on resume. */
+  coveragePaused?: boolean
+  /** Set when a paused expense is switched back on; forces one confirmation. */
+  coverageResumePending?: boolean
+  /**
+   * Billing period -> the window that period was billed for. Written by
+   * invoice generation and by the confirm control, never by the setup form.
+   * This is what makes regenerating a month reuse its window rather than
+   * stepping the cycle a second time.
+   */
+  coverageHistory?: Record<
+    string,
+    {
+      start: string
+      end: string
+      needsConfirmation?: boolean
+      reason?: 'gap' | 'resumed' | 'backfill' | null
+    }
+  >
+  /**
+   * The day of the month the cycle turns on. Stored rather than re-derived from
+   * `coverageEnd`, so a window confirmed onto a different day does not snap back
+   * and quietly bill a short period at the full rate.
+   */
+  coverageAnchorDay?: number | null
 }
 
 export type Invoice = {

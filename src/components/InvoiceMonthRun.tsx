@@ -20,6 +20,7 @@ import {
   type Ref,
 } from 'react'
 import {
+  confirmInvoiceCoverageRequest,
   createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
   listInvoicesRequest,
@@ -35,6 +36,10 @@ import {
   renderedInvoiceLines,
   retainerCreditLine,
 } from '../../lib/invoice-lines.js'
+import {
+  coverageConfirmationPrompt,
+  hasUnconfirmedCoverage,
+} from '../../lib/expense-coverage.js'
 import {
   ApiError,
   type AdhocMode,
@@ -893,6 +898,7 @@ function InvoiceLineRow({
   onChange,
   onRemove,
   onModeChange,
+  coverage,
 }: {
   line: PersistedInvoiceLine
   /** Position in the SAVED array — every edit addresses a line by this. */
@@ -901,10 +907,18 @@ function InvoiceLineRow({
   onRemove: (index: number) => void
   /** Passed for ad hoc lines only; its absence is what makes a row scoped. */
   onModeChange?: (index: number, mode: AdhocMode) => void
+  /** Passed only for a recurring line whose covered dates are still a proposal. */
+  coverage?: {
+    start: string
+    end: string
+    busy: boolean
+    onEdit: (range: { start: string; end: string }) => void
+    onConfirm: () => void
+  }
 }) {
   const mode = normalizeAdhocMode(line.adhocMode)
   return (
-    <tr>
+    <tr className={coverage ? 'invoice-run-line-unconfirmed' : undefined}>
       <td>
         <input
           className="input"
@@ -919,6 +933,56 @@ function InvoiceLineRow({
           placeholder="Detail (optional)"
           onChange={(event) => onChange(index, { detail: event.target.value })}
         />
+        {/* THE ASK. A skipped cycle or a resumed pause means the app worked out
+            a window but will not bill it unchecked — she confirms or corrects
+            it here, and the invoice cannot be marked reviewed until she has.
+            Confirming also moves the ledger, so the NEXT cycle steps from what
+            she approved rather than from what was proposed. */}
+        {coverage ? (
+          <div className="invoice-run-coverage" role="group" aria-label="Confirm the covered dates">
+            <p className="invoice-run-coverage-prompt">
+              <AlertTriangle size={13} />
+              Confirm the covered dates
+            </p>
+            <p className="invoice-run-coverage-why">
+              {coverageConfirmationPrompt(line.coverageReason)}
+            </p>
+            <div className="invoice-run-coverage-row">
+              <label>
+                <span>From</span>
+                <input
+                  className="compact-input"
+                  type="date"
+                  value={coverage.start}
+                  aria-label="Covered period start"
+                  onChange={(event) =>
+                    coverage.onEdit({ start: event.target.value, end: coverage.end })
+                  }
+                />
+              </label>
+              <label>
+                <span>To</span>
+                <input
+                  className="compact-input"
+                  type="date"
+                  value={coverage.end}
+                  aria-label="Covered period end"
+                  onChange={(event) =>
+                    coverage.onEdit({ start: coverage.start, end: event.target.value })
+                  }
+                />
+              </label>
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={coverage.busy || !coverage.start || !coverage.end}
+                onClick={coverage.onConfirm}
+              >
+                {coverage.busy ? 'Confirming…' : 'Confirm dates'}
+              </button>
+            </div>
+          </div>
+        ) : null}
         {onModeChange ? (
           <div className="invoice-run-adhoc-choice">
             <label>
@@ -1030,6 +1094,48 @@ function InvoiceEditor({
   // the credit line being removed from them.
   const [retainerError, setRetainerError] = useState<string | null>(null)
 
+  /**
+   * Covered-date windows being edited before confirming, keyed by expense id.
+   *
+   * Held APART from `lines` on purpose: typing in these boxes must not make the
+   * editor dirty. Dirty gates Print, Send and the payment link behind "Save your
+   * changes first", and there is no sense in making her save an invoice in order
+   * to answer a question the invoice is asking her. Confirming persists the
+   * dates through its own endpoint and hands back a fresh invoice, which
+   * remounts this editor and clears all of it.
+   */
+  const [coverageEdits, setCoverageEdits] = useState<
+    Record<string, { start: string; end: string }>
+  >({})
+  const [coverageBusyId, setCoverageBusyId] = useState<string | null>(null)
+  const [coverageError, setCoverageError] = useState<string | null>(null)
+
+  const confirmCoverage = async (recurringId: string, range: { start: string; end: string }) => {
+    setCoverageBusyId(recurringId)
+    setCoverageError(null)
+    try {
+      const updated = await confirmInvoiceCoverageRequest(invoice.id, recurringId, {
+        coverageStart: range.start,
+        coverageEnd: range.end,
+      })
+      onInvoiceChanged(updated)
+    } catch (err) {
+      setCoverageError(
+        err instanceof Error ? err.message : 'Could not confirm those covered dates.',
+      )
+    } finally {
+      setCoverageBusyId(null)
+    }
+  }
+
+  /** The window shown in one line's boxes: what she has typed, else the proposal. */
+  const coverageValue = (line: PersistedInvoiceLine) => {
+    const id = line.recurringId ?? ''
+    return (
+      coverageEdits[id] ?? { start: line.coverageStart ?? '', end: line.coverageEnd ?? '' }
+    )
+  }
+
   // The last send that actually landed. Read off the invoice rather than local
   // state on purpose: a send remounts this editor, so anything transient is gone
   // by the time she looks, and this line has to survive that.
@@ -1096,6 +1202,10 @@ function InvoiceEditor({
   const dirty =
     JSON.stringify(lines) !== JSON.stringify(invoice.lineItems) || blurb !== invoice.blurb
   const localTotal = lines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0)
+  // Read off the lines ON SCREEN rather than the saved ones, so deleting the
+  // line that is asking clears the block as soon as she does it — the same
+  // shared rule the store applies on save, from the same function.
+  const coverageUnconfirmed = hasUnconfirmedCoverage(lines)
 
   // Keep the run's copy of "this editor has unsaved edits" in step, and clear
   // it on the way out — an unmounted editor cannot have anything unsaved, and a
@@ -1220,6 +1330,21 @@ function InvoiceEditor({
               index={index}
               onChange={setLine}
               onRemove={removeLine}
+              coverage={
+                line.needsCoverageConfirmation && line.recurringId
+                  ? {
+                      ...coverageValue(line),
+                      busy: coverageBusyId === line.recurringId,
+                      onEdit: (range) =>
+                        setCoverageEdits((current) => ({
+                          ...current,
+                          [line.recurringId as string]: range,
+                        })),
+                      onConfirm: () =>
+                        void confirmCoverage(line.recurringId as string, coverageValue(line)),
+                    }
+                  : undefined
+              }
             />
           ))}
         </tbody>
@@ -1306,6 +1431,12 @@ function InvoiceEditor({
       {retainerError ? (
         <p className="invoice-run-error" role="alert">
           {retainerError}
+        </p>
+      ) : null}
+
+      {coverageError ? (
+        <p className="invoice-run-error" role="alert">
+          {coverageError}
         </p>
       ) : null}
 
@@ -1430,8 +1561,16 @@ function InvoiceEditor({
             <button
               type="button"
               className="primary-action"
-              disabled={busy || dirty}
-              title={dirty ? 'Save your changes first' : 'Mark this invoice reviewed'}
+              disabled={busy || dirty || coverageUnconfirmed}
+              title={
+                dirty
+                  ? 'Save your changes first'
+                  : coverageUnconfirmed
+                    ? // The server refuses this too — saying so here is what stops
+                      // the refusal arriving as a surprise after the click.
+                      'Confirm the covered dates above first'
+                    : 'Mark this invoice reviewed'
+              }
               onClick={() => void onPatch({ status: 'reviewed' })}
             >
               Mark reviewed
