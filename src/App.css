@@ -8688,6 +8688,28 @@ button.repeating-task-toggle-pill {
   color: var(--muted);
 }
 
+/* The Total line of an estimate/actual/over-under table. It carries the figure
+   the owner checks first, so it is lifted off the rows above it rather than
+   being just another bordered line. */
+.recap-total-row td {
+  border-bottom: none;
+  border-top: 2px solid var(--line-strong);
+  padding-top: 9px;
+}
+
+/* "No estimate set for this client — set them on the Client page." The common
+   state, not an error state: quiet, informative, and never red. */
+.recap-estimate-banner {
+  background: var(--soft);
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+}
+
 /* The basis/definition line under an estimated figure. Quiet, but never
    optional: a projection without its method printed beside it is a claim. */
 .recap-estimate-caption {

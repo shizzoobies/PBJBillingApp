@@ -294,21 +294,25 @@ export function recipientCountLabel(count: number) {
 /**
  * Client Recap period helpers (UI-side mirror of lib/periods.js). The server
  * validates and labels periods; these just drive the page's selector. A period
- * is "2026-08" (month) or "2026-Q3" (quarter).
+ * is "2026-08" (month), "2026-Q3" (quarter) or "2026" (year).
  */
-export function currentReviewPeriod(type: 'month' | 'quarter'): string {
+export type ReviewPeriodType = 'month' | 'quarter' | 'year'
+
+export function currentReviewPeriod(type: ReviewPeriodType): string {
   const now = new Date()
   const year = now.getFullYear()
   const month = now.getMonth() + 1
+  if (type === 'year') return String(year)
   if (type === 'quarter') return `${year}-Q${Math.ceil(month / 3)}`
   return `${year}-${String(month).padStart(2, '0')}`
 }
 
 export function shiftReviewPeriod(
-  type: 'month' | 'quarter',
+  type: ReviewPeriodType,
   period: string,
   dir: number,
 ): string {
+  if (type === 'year') return String(Number(period.slice(0, 4)) + dir)
   if (type === 'quarter') {
     const year = Number(period.slice(0, 4))
     const q = Number(period.slice(6))

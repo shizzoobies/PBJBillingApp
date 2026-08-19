@@ -2677,6 +2677,10 @@ export class AppDataStore {
       // Owner-only financial data, deliberately endpoint-managed (NOT part of
       // the bulk /api/app-data wipe-and-reinsert) so it can't be clobbered.
       // `period` is the recap key: "2026-08" (monthly) or "2026-Q3" (quarterly).
+      // The recap also has a "2026" (yearly) key shape, and it is deliberately
+      // NOT accepted here — sales tax is filed monthly or quarterly, so a
+      // year-keyed figure would be a number with no filing behind it. The PUT
+      // route in server.js rejects periodType 'year' for exactly that reason.
       await this.pool.query(`
         create table if not exists sales_tax_records (
           id text primary key,

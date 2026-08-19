@@ -2450,9 +2450,9 @@ export async function resolvePendingFeatureRequest(id: string) {
   return (await response.json()) as { ok: boolean; removed: boolean }
 }
 
-// ---- Client Recap (per-client monthly/quarterly review) ----
+// ---- Client Recap (per-client monthly/quarterly/yearly review) ----
 
-export type ClientRecapPeriodType = 'month' | 'quarter'
+export type ClientRecapPeriodType = 'month' | 'quarter' | 'year'
 /**
  * `tier` is the fixed display grouping — 'CFO' | 'Accountant' | 'Bookkeeper' |
  * 'Other' — assigned server-side by `recapStaffTier` in lib/client-recap.js,
@@ -2485,6 +2485,8 @@ export type ClientRecap = {
   period: string
   periodLabel: string
   range: { start: string; end: string }
+  /** 1 / 3 / 12 — what a per-month estimate is multiplied by for this period. */
+  monthsInPeriod: number
   includeFinancials: boolean
   time: {
     totalHours: number
@@ -2493,6 +2495,32 @@ export type ClientRecap = {
     priorHours: number
     deltaHours: number
     byStaff: ClientRecapStaffRow[]
+    /**
+     * The ESTIMATE | ACTUAL | OVER/UNDER table, one row per role, in the recap's
+     * fixed order. Hours only — no rates, no money — so staff see it too.
+     */
+    byRole: ClientRecapRoleRow[]
+    roleTotals: {
+      estimatedHours: number | null
+      actualHours: number
+      deltaHours: number | null
+      direction: ClientRecapDirection
+    }
+    /**
+     * False = this payload has no estimate columns at all (a staff payload:
+     * estimates are owner-side planning data and arrive em-dashed). Distinct
+     * from `hasEstimate` — do not offer "go set them" when this is false.
+     */
+    estimatesVisible: boolean
+    /** False = no estimates on file for this client; show the banner. */
+    hasEstimate: boolean
+    /**
+     * Roles with real hours and no estimate. Their actual hours ARE in the
+     * Total, so the Total's over/under runs ahead of the sum of the row
+     * variances — say so on screen when this is non-empty.
+     */
+    unestimatedRoles: string[]
+    whereToSetEstimates: string
   }
   tasks: {
     dueThisPeriod: ClientRecapTask[]
@@ -2548,13 +2576,26 @@ export type ClientRecapRateBasis = 'assigned' | 'logged' | null
 /** `null` when there is nothing to compare against — never a default 'over'. */
 export type ClientRecapDirection = 'over' | 'under' | 'on' | null
 
-export type ClientRecapEstimateTier = {
+/**
+ * One role's plan against its reality, hours only.
+ *
+ * `actualHours` is the SUM OF THE DISPLAYED per-person rows in the role and
+ * `deltaHours` is `actualHours − estimatedHours` at two decimals, so every row
+ * subtracts by hand and the roles add to `roleTotals`.
+ */
+export type ClientRecapRoleRow = {
   tier: string
-  /** Null = no estimate set for this tier. Already scaled by monthsInPeriod. */
+  /** The people who logged time in this role, in the recap's fixed order. */
+  people: string[]
+  /** Null = no estimate set for this role. Already scaled by monthsInPeriod. */
   estimatedHours: number | null
   actualHours: number
   deltaHours: number | null
   direction: ClientRecapDirection
+}
+
+/** A {@link ClientRecapRoleRow} with the money added — owner-only. */
+export type ClientRecapEstimateTier = ClientRecapRoleRow & {
   /** Null = nobody in this role has a cost rate, so the role costs nothing. */
   costRate: number | null
   costRateBasis: ClientRecapRateBasis

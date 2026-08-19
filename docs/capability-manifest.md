@@ -1081,12 +1081,38 @@ Clients page meanwhile. Owner-only.
 
 ## Client Recap (owner only)
 
-- A per-client review page (sidebar: "Client Recap") with a Monthly / Quarterly
-  toggle and prev/next period navigation. Pick a client and see a full
-  breakdown for the period: Time & hours (total / billable / administrative, by
-  staff, vs. the prior period); Tasks & workflow (due / completed / overdue this
-  period); Billing (revenue for the period, rate/plan, reimbursements); and
-  Profitability (realized rate = fee ÷ hours, and margin).
+- A per-client review page (sidebar: "Client Recap") with a **Monthly /
+  Quarterly / Yearly** toggle and prev/next period navigation — the arrows step
+  by whichever one is active, so Yearly moves 2026 → 2025. A quarter is three
+  calendar months, a year is the calendar year (Jan 1 – Dec 31); nothing is
+  fiscal or prorated.
+- **The page reads plan against reality, top to bottom, in this order:** Time &
+  hours, Billing, Profitability, the projected invoice, and **Tasks & workflow
+  last**. Tasks used to sit second, above the money; it moved to the bottom
+  because the recap is opened for the numbers.
+- **Time & hours is a table: ESTIMATE | ACTUAL | OVER/UNDER, one row per role,
+  with a Total row.** It replaced four stat tiles (total hours, billable,
+  administrative, vs. the prior period). Each row is named for the people who
+  filled that role and tagged with the role, so it reads one person per line in
+  the normal case. Rows are per ROLE because that is the grain the estimate is
+  set at (Client page → Estimated monthly hours, per CFO / Accountant /
+  Bookkeeper) — a role estimate is never split between two people on a guess;
+  when several people share a role the row names all of them.
+- **Everything in that table adds up by hand.** A role's Actual is its people's
+  printed x.xx hours added together; the Total is the roles added together (and
+  is the same figure as the client's total hours everywhere else); every
+  Over/Under is that row's Actual minus that row's Estimate. When every role has
+  an estimate, the Total's Over/Under is exactly the rows' Over/Unders added up.
+  A role with hours but **no** estimate shows an em dash rather than a variance
+  against a zero nobody typed — its hours still count toward the Total (unplanned
+  work is still over plan), and the page says so in a line under the table.
+- **Profitability is the same three columns, for profit:** Estimate | Actual |
+  Over/Under, one row. The realized-rate and margin tiles are gone; **margin is
+  now the Actual column** — the same revenue − labor cost figure it always was,
+  standing next to the plan it is judged against. The definitions and the
+  labor-cost basis print underneath.
+- **Billing is unchanged:** revenue for the period, the rate or plan, and
+  reimbursements.
 - **Ad hoc work counts toward the period's revenue at its default value** —
   what invoicing it would charge. The recap is computed from the time itself,
   not from a particular draft invoice, so it can't see a "show detail only" or
@@ -1109,15 +1135,19 @@ Clients page meanwhile. Owner-only.
   priced from: pricing each person's shown hours at their cost rate and adding
   the results gives the recap's labor cost exactly (see "HOW LABOR COST IS
   CALCULATED" under Reports).
-- **The by-staff list is in a FIXED order that does not move month to month:**
+- **The role table is in a FIXED order that does not move month to month:**
   CFO tier first, then Accountant, then Bookkeeper, then anyone whose role isn't
-  set — and alphabetically by name inside a tier. It used to sort by hours, so
-  the list reshuffled every month as workload moved. The tier comes from the
+  set. Where a role is filled by several people, their names read alphabetically
+  inside the row. It used to sort by hours, so the list reshuffled every month
+  as workload moved. The tier comes from the
   team member's staff role: **Owner → CFO, Accountant → Accountant, Bookkeeper →
   Bookkeeper** (the app has no separate "CFO" staff role; CFO is the name used
   for the owner's own tier, matching the client's estimated CFO hours field).
-  A tier nobody logged time in simply doesn't appear — no zero row is invented —
-  and the tiers that are present keep their order regardless.
+  A role that nobody logged time in AND that has no estimate simply doesn't
+  appear — no zero row is invented — while a role that WAS estimated and never
+  worked does appear, at 0.00h actual, which is how "we planned eight hours of
+  CFO time and did none of it" gets caught. The roles that are present keep
+  their order regardless.
 - **Revenue here is now the same number the invoice bills.** It used to value an
   hourly client's time at that client's single hourly rate, but invoices have
   charged each team member's own bill rate since June 2026. On July 2026 data
@@ -1126,16 +1156,20 @@ Clients page meanwhile. Owner-only.
   invoice of $3,837.58, while another read $894.13 against $1,252.69. Recap and
   the invoice are now produced by one shared calculator, so **profit figures for
   hourly clients have shifted, some up and some down** — the new numbers are the
-  correct ones. Monthly and annual clients are unaffected. A quarter is summed
-  month by month rather than estimated as a rate times three.
-- **Estimated vs. actual** (owner only) — the panel that catches an overrun
-  while it is still happening:
+  correct ones. Monthly and annual clients are unaffected. A quarter or a year
+  is summed month by month rather than estimated as a rate times three or twelve.
+- **Estimated vs. actual** — the comparison that catches an overrun while it is
+  still happening. There is **no separate "Estimated vs. actual" panel** any
+  more: it was absorbed into the two sections above, hours into Time & hours and
+  profit into Profitability.
   - **Hours per role.** Estimated hours (the client's Estimated monthly hours
-    fields) against hours actually worked, per tier, with the difference and
+    fields) against hours actually worked, per role, with the difference and
     whether it ran **over** or **under** — e.g. a Bookkeeper estimated at 10
-    hours who worked 12 reads "+2.00h over". A quarterly recap multiplies the
-    monthly estimate by the three months it covers.
-  - **Profit.** Estimated profit = expected revenue − estimated cost, where
+    hours who worked 12 reads "+2.00h over". The estimates are stated per MONTH,
+    so a **quarterly** recap multiplies them by 3 and a **yearly** recap by 12,
+    and the column header says which ("monthly estimates × 12 months").
+  - **Profit** (owner only). Estimated profit = expected revenue − estimated
+    cost, where
     estimated cost is each role's estimated hours × that role's cost rate, and
     expected revenue is the client's monthly rate (monthly clients), a twelfth
     of the annual fee (annual clients), or the estimated hours at each role's
@@ -1152,8 +1186,8 @@ Clients page meanwhile. Owner-only.
   - **"No estimate set" is a normal, honest state** — most clients have no
     estimate on file. Those clients show the actual side only and **no
     variance at all**; nothing is ever compared against a zero nobody entered.
-    The panel points at where to set them (client page → Estimated monthly
-    hours).
+    A slim banner at the top of Time & hours says so and points at where to set
+    them (Client page → Estimated monthly hours).
 - **Projected end-of-month invoice** (owner only, monthly view only) — always
   labelled an Estimate, always with its basis printed underneath:
   - A monthly/annual (plan) client: the known, fixed plan amount plus the
@@ -1164,10 +1198,30 @@ Clients page meanwhile. Owner-only.
     extrapolated.
   - A month that has already ended shows the **actual** invoice, described as
     such, not a projection.
-  - Quarterly view shows no projection: it is a month-shaped question.
-- The whole estimated-vs-actual and projection area, like the rest of the
-  recap's money, is **owner-only** — the figures are absent from a staff
-  member's data entirely, not merely hidden on their screen.
+  - Quarterly and Yearly views show no projection: it is a month-shaped
+    question.
+- The recap's MONEY — billing, profitability, estimated profit and the
+  projection — is **owner-only**: those figures are absent from a staff member's
+  data entirely, not merely hidden on their screen. **So are the estimates**:
+  how many hours the firm planned to spend on a client is planning data, set on
+  the Client page, which staff do not manage. A staff payload gets the role
+  table with the same rows and the same ACTUAL hours, and the Estimate and
+  Over/Under columns em-dashed — and no "go set them on the Client page"
+  prompt, which would be a dead end for someone who can't. In practice the whole
+  page is owner-only anyway, since "Client Recap" only appears in an owner's
+  sidebar; the gate is defense in depth.
+- **A quarterly or yearly recap's revenue is a restatement, not a
+  reconciliation.** Every month in the period is priced with the client's rates
+  and plans **as they stand now** — no rate history is kept — so a client whose
+  rate changed part-way through has the earlier months repriced at the new rate,
+  and the figure will not match the invoices actually issued. It answers "what
+  is this work worth at today's rates", which is the right question for a
+  plan-vs-actual read. The Billing panel says so on screen whenever the period
+  spans more than one month. A monthly recap has no such gap.
+- **Sales tax stays monthly or quarterly.** The recap's sales-tax status is
+  month-shaped (it reports one filing task), and recording sales-tax figures
+  against a whole year is refused by the server — a year-keyed tax record would
+  be a figure with no filing behind it.
 
 ## Contacts
 

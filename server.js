@@ -2324,6 +2324,15 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'Invalid period' })
         return
       }
+      // The recap grew a Yearly view; sales tax did not. Tax is filed monthly or
+      // quarterly, so a year-keyed record would be a figure with no filing
+      // behind it — and it would sit in `sales_tax_records` looking authoritative.
+      // `isValidPeriodType` accepts 'year' for the recap's sake, so this route
+      // says no on its own.
+      if (periodType === 'year') {
+        sendJson(response, 400, { error: 'Sales tax is recorded by month or quarter, not by year' })
+        return
+      }
       const data = await appDataStore.read()
       const allowed = visibleClientIdSet(session, data.clients ?? [])
       if (!clientId || !allowed.has(clientId)) {

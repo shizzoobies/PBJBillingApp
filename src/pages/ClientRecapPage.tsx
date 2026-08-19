@@ -22,11 +22,13 @@ const hrs = (n: number) => formatDecimalHours(n * 60)
 const signed = (n: number, format: (value: number) => string) =>
   `${n > 0 ? '+' : ''}${format(n)}`
 
-/**
- * Green/red is chosen by what the row MEANS, never by the sign: hours over plan
- * is bad news, profit over plan is good news, and the same '+' leads both.
- * `goodDirection` says which way is the good way for this row.
- */
+/** The word for a period in a sentence — "a yearly review of one client". */
+const PERIOD_ADJECTIVE: Record<ClientRecapPeriodType, string> = {
+  month: 'monthly',
+  quarter: 'quarterly',
+  year: 'yearly',
+}
+
 /**
  * Printed once on every panel that shows a cost or a profit.
  *
@@ -39,10 +41,35 @@ const signed = (n: number, format: (value: number) => string) =>
 const LABOR_COST_BASIS_NOTE =
   'Labor cost counts team members who have a pay rate on file; owner time carries no hourly cost.'
 
+/**
+ * Green/red is chosen by what the row MEANS, never by the sign: hours over plan
+ * is bad news, profit over plan is good news, and the same '+' leads both.
+ * `goodDirection` says which way is the good way for this row.
+ */
 const varianceClass = (direction: ClientRecapDirection, goodDirection: 'over' | 'under') => {
   if (direction == null || direction === 'on') return 'recap-variance-none'
   return direction === goodDirection ? 'recap-variance-good' : 'recap-variance-bad'
 }
+
+/**
+ * The OVER/UNDER cell, said the same way everywhere it appears.
+ *
+ * A null delta is an em dash and nothing else — no zero, no color, no
+ * direction. Nothing is ever compared against an estimate nobody entered.
+ */
+const varianceText = (
+  delta: number | null,
+  direction: ClientRecapDirection,
+  format: (value: number) => string,
+) => {
+  if (delta == null) return '—'
+  if (direction === 'on') return 'On estimate'
+  return `${signed(delta, format)} ${direction}`
+}
+
+/** "(monthly estimates × 3 months)" — empty for a monthly recap. */
+const scaledEstimateNote = (monthsInPeriod: number) =>
+  monthsInPeriod > 1 ? ` (monthly estimates × ${monthsInPeriod} months)` : ''
 
 export function ClientRecapPage() {
   const { visibleClients } = useAppContext()
@@ -102,7 +129,7 @@ export function ClientRecapPage() {
           <div>
             <h2>Client Recap</h2>
             <p className="muted-text" style={{ margin: '4px 0 0' }}>
-              A {periodType === 'quarter' ? 'quarterly' : 'monthly'} review of one client.
+              A {PERIOD_ADJECTIVE[periodType]} review of one client.
             </p>
           </div>
         </div>
@@ -123,6 +150,8 @@ export function ClientRecapPage() {
             </select>
           </label>
 
+          {/* Monthly / Quarterly / Yearly. The prev/next arrows below step by
+              whichever one is active — a month, a quarter, or a whole year. */}
           <div className="recap-period-toggle" role="group" aria-label="Review period">
             <button
               type="button"
@@ -137,6 +166,13 @@ export function ClientRecapPage() {
               onClick={() => changePeriodType('quarter')}
             >
               Quarterly
+            </button>
+            <button
+              type="button"
+              className={periodType === 'year' ? 'is-active' : ''}
+              onClick={() => changePeriodType('year')}
+            >
+              Yearly
             </button>
           </div>
 
@@ -165,53 +201,81 @@ export function ClientRecapPage() {
 
       {recap && !loading ? (
         <>
-          {/* Time & hours */}
-          <section className="panel recap-card">
-            <h3>Time &amp; hours</h3>
-            <div className="recap-stats">
-              <div className="recap-stat">
-                <span className="recap-stat-value">{hrs(recap.time.totalHours)}</span>
-                <span className="recap-stat-label">Total hours</span>
-              </div>
-              <div className="recap-stat">
-                <span className="recap-stat-value">{hrs(recap.time.billableHours)}</span>
-                <span className="recap-stat-label">Billable</span>
-              </div>
-              <div className="recap-stat">
-                <span className="recap-stat-value">{hrs(recap.time.adminHours)}</span>
-                <span className="recap-stat-label">Administrative</span>
-              </div>
-              <div className="recap-stat">
-                <span className="recap-stat-value">
-                  {recap.time.deltaHours >= 0 ? '+' : ''}
-                  {hrs(recap.time.deltaHours)}
-                </span>
-                <span className="recap-stat-label">vs. prior ({hrs(recap.time.priorHours)})</span>
-              </div>
-            </div>
-            {recap.time.byStaff.length > 0 ? (
-              /* Server order is the display order: CFO tier, then Accountant,
-                 then Bookkeeper, by name inside a tier — the same sequence every
-                 month. Do NOT sort here. A tier nobody logged time in simply
-                 does not appear. */
-              <ul className="recap-list">
-                {recap.time.byStaff.map((row) => (
-                  <li key={row.name}>
-                    <span>
-                      {row.name} <span className="recap-staff-tier">{row.tier}</span>
-                    </span>
-                    <span>
-                      {hrs(row.hours)} ({hrs(row.billableHours)} billable)
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="muted-text">No time logged this period.</p>
-            )}
-          </section>
+          {/* SECTION ORDER IS THE OWNER'S, off her marked-up printout: hours,
+              then the money, then the workflow. Tasks & workflow sits LAST —
+              it used to be second, above Billing, and she moved it to the
+              bottom because a recap is read for the numbers first. */}
+          <TimeAndHoursCard time={recap.time} monthsInPeriod={recap.monthsInPeriod} />
 
-          {/* Tasks & workflow */}
+          {/* Billing (owner only) */}
+          {recap.billing ? (
+            <section className="panel recap-card">
+              <h3>Billing</h3>
+              <div className="recap-stats">
+                <div className="recap-stat">
+                  <span className="recap-stat-value">{money(recap.billing.revenue)}</span>
+                  <span className="recap-stat-label">Revenue this period</span>
+                </div>
+                <div className="recap-stat">
+                  <span className="recap-stat-value">
+                    {recap.billing.billingMode === 'hourly'
+                      ? `${money(recap.billing.hourlyRate)}/h`
+                      : `${money(recap.billing.monthlyRate)}/mo`}
+                  </span>
+                  <span className="recap-stat-label">
+                    {recap.billing.billingMode === 'hourly' ? 'Hourly rate' : 'Monthly rate'}
+                  </span>
+                </div>
+                <div className="recap-stat">
+                  <span className="recap-stat-value">{money(recap.billing.reimbursementTotal)}</span>
+                  <span className="recap-stat-label">Reimbursements</span>
+                </div>
+              </div>
+              {recap.billing.planNames.length > 0 ? (
+                <p className="muted-text">Plans: {recap.billing.planNames.join(', ')}</p>
+              ) : null}
+              {recap.billing.reimbursements.length > 0 ? (
+                <ul className="recap-list">
+                  {recap.billing.reimbursements.map((r, index) => (
+                    <li key={index}>
+                      <span>
+                        {r.date} · {r.description}
+                      </span>
+                      <span>{money(r.amount)}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {/* A multi-month period reprices every month at the client's
+                  CURRENT rates and plans — no rate history is kept — so a rate
+                  change part-way through will not reconcile against the
+                  invoices that were actually issued. Say it rather than let her
+                  find it. */}
+              {recap.monthsInPeriod > 1 ? (
+                <p className="recap-estimate-caption">
+                  Priced at the client's current rates and plans, not the rates in force each
+                  month. A rate or plan change part-way through the{' '}
+                  {recap.periodType === 'year' ? 'year' : 'quarter'} is applied to all{' '}
+                  {recap.monthsInPeriod} months, so this can differ from the invoices actually
+                  issued.
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+
+          {/* Profitability (owner only) */}
+          {recap.profitability ? (
+            <ProfitabilityCard
+              profitability={recap.profitability}
+              estimates={recap.estimates}
+              monthsInPeriod={recap.monthsInPeriod}
+            />
+          ) : null}
+
+          {/* Projected invoice (owner only, monthly only) */}
+          {recap.projection ? <ProjectionCard projection={recap.projection} /> : null}
+
+          {/* Tasks & workflow — last on the page, by request. */}
           <section className="panel recap-card">
             <h3>Tasks &amp; workflow</h3>
             <div className="recap-stats">
@@ -254,59 +318,6 @@ export function ClientRecapPage() {
               <p className="muted-text">No tasks due this period.</p>
             )}
           </section>
-
-          {/* Billing (owner only) */}
-          {recap.billing ? (
-            <section className="panel recap-card">
-              <h3>Billing</h3>
-              <div className="recap-stats">
-                <div className="recap-stat">
-                  <span className="recap-stat-value">{money(recap.billing.revenue)}</span>
-                  <span className="recap-stat-label">Revenue this period</span>
-                </div>
-                <div className="recap-stat">
-                  <span className="recap-stat-value">
-                    {recap.billing.billingMode === 'hourly'
-                      ? `${money(recap.billing.hourlyRate)}/h`
-                      : `${money(recap.billing.monthlyRate)}/mo`}
-                  </span>
-                  <span className="recap-stat-label">
-                    {recap.billing.billingMode === 'hourly' ? 'Hourly rate' : 'Monthly rate'}
-                  </span>
-                </div>
-                <div className="recap-stat">
-                  <span className="recap-stat-value">{money(recap.billing.reimbursementTotal)}</span>
-                  <span className="recap-stat-label">Reimbursements</span>
-                </div>
-              </div>
-              {recap.billing.planNames.length > 0 ? (
-                <p className="muted-text">Plans: {recap.billing.planNames.join(', ')}</p>
-              ) : null}
-              {recap.billing.reimbursements.length > 0 ? (
-                <ul className="recap-list">
-                  {recap.billing.reimbursements.map((r, index) => (
-                    <li key={index}>
-                      <span>
-                        {r.date} · {r.description}
-                      </span>
-                      <span>{money(r.amount)}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </section>
-          ) : null}
-
-          {/* Profitability (owner only) */}
-          {recap.profitability ? <ProfitabilityCard profitability={recap.profitability} /> : null}
-
-          {/* Estimated vs. actual (owner only) */}
-          {recap.estimates ? (
-            <EstimateVsActualCard estimates={recap.estimates} periodType={recap.periodType} />
-          ) : null}
-
-          {/* Projected invoice (owner only, monthly only) */}
-          {recap.projection ? <ProjectionCard projection={recap.projection} /> : null}
         </>
       ) : null}
     </section>
@@ -314,153 +325,190 @@ export function ClientRecapPage() {
 }
 
 /**
- * Realized rate and margin. Margin is always a figure now — a team member with
- * no pay rate contributes no cost rather than blanking the panel — so the note
- * explaining what labor cost counts is not optional decoration here.
+ * Time & hours: ESTIMATE | ACTUAL | OVER/UNDER, one row per role, with a Total.
+ *
+ * This replaced four stat tiles — total, billable, administrative, vs. prior —
+ * that the firm owner struck out on the printed recap. None of them answered
+ * the question she opens the page with, which is whether the work is running to
+ * plan and for whom.
+ *
+ * Rows are per ROLE because that is the grain the estimate is set at (the client
+ * has Estimated monthly hours for CFO / Accountant / Bookkeeper, not per
+ * person), and each row is NAMED by whoever fills that role — which reads as
+ * one person per row, the way she drew it, because that is what a role usually
+ * is. Nothing is split between two people on a guess.
+ *
+ * Everything on screen adds up: a role's actual is its people's printed hours
+ * added, the Total is the roles added, and every over/under is that row's
+ * actual minus that row's estimate. See lib/client-recap.js for the arithmetic.
  */
-export function ProfitabilityCard({
-  profitability,
+export function TimeAndHoursCard({
+  time,
+  monthsInPeriod,
 }: {
-  profitability: NonNullable<ClientRecap['profitability']>
+  time: ClientRecap['time']
+  monthsInPeriod: number
 }) {
+  const { roleTotals } = time
   return (
     <section className="panel recap-card">
-      <h3>Profitability</h3>
-      <div className="recap-stats">
-        <div className="recap-stat">
-          <span className="recap-stat-value">{money(profitability.realizedRate)}</span>
-          <span className="recap-stat-label">Realized rate (fee ÷ hours)</span>
-        </div>
-        <div className="recap-stat">
-          <span className="recap-stat-value">{money(profitability.margin)}</span>
-          <span className="recap-stat-label">Margin</span>
-        </div>
-      </div>
-      <p className="recap-estimate-caption">{LABOR_COST_BASIS_NOTE}</p>
+      <h3>Time &amp; hours</h3>
+
+      {/* The honest-empty case is the COMMON one — most clients have no
+          estimate on file — so it gets a banner that says where to fix it,
+          not an error and not a silent column of dashes.
+
+          Gated on `estimatesVisible`: a staff payload dashes the estimate
+          columns because estimates are owner-side planning data, which is a
+          different thing from "nobody has set any", and telling a staff member
+          to go edit the Client page would be a dead end. */}
+      {time.estimatesVisible && !time.hasEstimate ? (
+        <p className="recap-estimate-banner">
+          No estimate set for this client — the actual hours below are reported on their own. Set
+          them on the {time.whereToSetEstimates} to compare plan against reality here.
+        </p>
+      ) : null}
+
+      {time.byRole.length > 0 ? (
+        <table className="report-table">
+          <thead>
+            <tr>
+              <th>Team member</th>
+              <th>Estimate{scaledEstimateNote(monthsInPeriod)}</th>
+              <th>Actual</th>
+              <th>Over/Under</th>
+            </tr>
+          </thead>
+          <tbody>
+            {/* Server order is the display order: CFO tier, then Accountant,
+                then Bookkeeper, then anything unmapped. Do NOT sort here. */}
+            {time.byRole.map((row) => (
+              <tr key={row.tier}>
+                <td>
+                  {row.people.length > 0 ? (
+                    row.people.join(', ')
+                  ) : (
+                    <span className="muted-text">No time logged</span>
+                  )}{' '}
+                  <span className="recap-staff-tier">{row.tier}</span>
+                </td>
+                <td>
+                  {row.estimatedHours == null ? (
+                    <span className="muted-text">No estimate set</span>
+                  ) : (
+                    hrs(row.estimatedHours)
+                  )}
+                </td>
+                <td>{hrs(row.actualHours)}</td>
+                <td className={varianceClass(row.direction, 'under')}>
+                  {varianceText(row.deltaHours, row.direction, hrs)}
+                </td>
+              </tr>
+            ))}
+            <tr className="recap-total-row">
+              <td>
+                <strong>Total</strong>
+              </td>
+              <td>
+                {roleTotals.estimatedHours == null ? (
+                  <span className="muted-text">No estimate set</span>
+                ) : (
+                  <strong>{hrs(roleTotals.estimatedHours)}</strong>
+                )}
+              </td>
+              <td>
+                <strong>{hrs(roleTotals.actualHours)}</strong>
+              </td>
+              <td className={varianceClass(roleTotals.direction, 'under')}>
+                <strong>
+                  {varianceText(roleTotals.deltaHours, roleTotals.direction, hrs)}
+                </strong>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      ) : (
+        <p className="muted-text">No time logged this period.</p>
+      )}
+
+      {/* Said out loud rather than left to be spotted: unplanned work still
+          counts as over plan in the Total, which is why the Total's variance
+          can be bigger than the rows above it add to. */}
+      {time.unestimatedRoles.length > 0 && time.hasEstimate ? (
+        <p className="recap-estimate-caption">
+          {time.unestimatedRoles.join(', ')} {time.unestimatedRoles.length === 1 ? 'has' : 'have'}{' '}
+          hours but no estimate, so those hours show no variance of their own and still count
+          toward the Total's over/under.
+        </p>
+      ) : null}
     </section>
   )
 }
 
 /**
- * Plan against reality, for hours and for profit.
+ * Profitability: ESTIMATE | ACTUAL | OVER/UNDER for profit.
  *
- * The honest-empty case is the COMMON one — most clients have no estimate on
- * file — so "No estimate set" is a first-class state here, not an error state:
- * the actual column still reports everything it knows, and nothing is ever
- * compared against a zero nobody entered.
+ * The realized-rate and margin tiles are gone — the owner struck both out and
+ * wrote the three columns over them. Margin has not disappeared with the tile:
+ * it IS the Actual column here, the same `revenue − labor cost` figure it
+ * always was, now standing next to the plan it is supposed to be judged
+ * against.
+ *
+ * `estimates` is null only on a payload with no financials, which cannot reach
+ * this card (it renders behind `profitability`); the guard keeps the actual
+ * column truthful rather than the component optional.
  */
-export function EstimateVsActualCard({
+export function ProfitabilityCard({
+  profitability,
   estimates,
-  periodType,
+  monthsInPeriod,
 }: {
-  estimates: ClientRecapEstimates
-  periodType: ClientRecapPeriodType
+  profitability: NonNullable<ClientRecap['profitability']>
+  estimates: ClientRecapEstimates | null
+  monthsInPeriod: number
 }) {
-  const { profit } = estimates
-  const perPeriod =
-    periodType === 'quarter' && estimates.monthsInPeriod > 1
-      ? ` (monthly estimates × ${estimates.monthsInPeriod} months)`
-      : ''
-
+  const profit = estimates?.profit ?? null
   return (
     <section className="panel recap-card">
-      <h3>Estimated vs. actual</h3>
-      {!estimates.hasEstimate ? (
-        <p className="muted-text">
-          No estimate set for this client — the actual hours below are reported on their own. Set
-          them on the {estimates.whereToSet} to compare plan against reality here.
-        </p>
-      ) : null}
-
+      <h3>Profitability</h3>
       <table className="report-table">
         <thead>
           <tr>
-            <th>Role</th>
-            <th>Estimated hours{perPeriod}</th>
-            <th>Actual hours</th>
-            <th>Difference</th>
+            <th>Profit</th>
+            <th>Estimate{scaledEstimateNote(monthsInPeriod)}</th>
+            <th>Actual</th>
+            <th>Over/Under</th>
           </tr>
         </thead>
         <tbody>
-          {estimates.byTier.map((row) => (
-            <tr key={row.tier}>
-              <td>{row.tier}</td>
-              <td>
-                {row.estimatedHours == null ? (
-                  <span className="muted-text">No estimate set</span>
-                ) : (
-                  hrs(row.estimatedHours)
-                )}
-              </td>
-              <td>{hrs(row.actualHours)}</td>
-              <td className={varianceClass(row.direction, 'under')}>
-                {row.deltaHours == null
-                  ? '—'
-                  : row.direction === 'on'
-                    ? 'On estimate'
-                    : `${signed(row.deltaHours, hrs)} ${row.direction}`}
-              </td>
-            </tr>
-          ))}
-          {estimates.byTier.length > 0 ? (
-            <tr>
-              <td>
-                <strong>Total</strong>
-              </td>
-              <td>
-                {estimates.hours.estimated == null ? (
-                  <span className="muted-text">No estimate set</span>
-                ) : (
-                  <strong>{hrs(estimates.hours.estimated)}</strong>
-                )}
-              </td>
-              <td>
-                <strong>{hrs(estimates.hours.actual)}</strong>
-              </td>
-              <td className={varianceClass(estimates.hours.direction, 'under')}>
-                {estimates.hours.delta == null
-                  ? '—'
-                  : estimates.hours.direction === 'on'
-                    ? 'On estimate'
-                    : `${signed(estimates.hours.delta, hrs)} ${estimates.hours.direction}`}
-              </td>
-            </tr>
-          ) : null}
+          <tr>
+            <td>Profit this period</td>
+            <td>
+              {profit?.estimatedProfit == null ? (
+                <span className="muted-text">No estimate set</span>
+              ) : (
+                money(profit.estimatedProfit)
+              )}
+            </td>
+            <td>{money(profitability.margin)}</td>
+            <td className={varianceClass(profit?.direction ?? null, 'over')}>
+              {varianceText(profit?.delta ?? null, profit?.direction ?? null, money)}
+            </td>
+          </tr>
         </tbody>
       </table>
-
-      <div className="recap-stats" style={{ marginTop: 14 }}>
-        <div className="recap-stat">
-          <span className="recap-stat-value">
-            {profit.estimatedProfit == null ? '—' : money(profit.estimatedProfit)}
-          </span>
-          <span className="recap-stat-label">
-            {profit.estimatedProfit == null ? 'Estimated profit — no estimate set' : 'Estimated profit'}
-          </span>
-        </div>
-        <div className="recap-stat">
-          <span className="recap-stat-value">{money(profit.actualProfit)}</span>
-          <span className="recap-stat-label">Actual profit</span>
-        </div>
-        <div className="recap-stat">
-          <span className={`recap-stat-value ${varianceClass(profit.direction, 'over')}`}>
-            {profit.delta == null ? '—' : signed(profit.delta, (n) => money(n))}
-          </span>
-          <span className="recap-stat-label">Difference</span>
-        </div>
-      </div>
 
       {/* The definitions, on screen, because a profit figure nobody can restate
           is a figure nobody trusts. */}
       <p className="recap-estimate-caption">
-        Estimated profit = expected revenue{' '}
-        {profit.estimatedRevenue == null ? '' : `(${money(profit.estimatedRevenue)}) `}− estimated
-        cost{' '}
-        {profit.estimatedCost == null ? '' : `(${money(profit.estimatedCost)}) `}, where estimated
+        Estimated profit = expected revenue
+        {profit?.estimatedRevenue == null ? '' : ` (${money(profit.estimatedRevenue)})`} − estimated
+        cost
+        {profit?.estimatedCost == null ? '' : ` (${money(profit.estimatedCost)})`}, where estimated
         cost is each role's estimated hours × that role's cost rate. Actual profit = invoiced
-        service revenue ({money(profit.actualRevenue)}) − actual labor cost (
-        {money(profit.actualCost)}), the same figures the Billing and Profitability panels show.
-        Reimbursements are excluded from both sides. {LABOR_COST_BASIS_NOTE}
+        service revenue ({money(profit?.actualRevenue ?? null)}) − actual labor cost (
+        {money(profitability.laborCost)}) — the Billing panel's revenue, priced against the hours in
+        the table above. Reimbursements are excluded from both sides. {LABOR_COST_BASIS_NOTE}
       </p>
     </section>
   )
