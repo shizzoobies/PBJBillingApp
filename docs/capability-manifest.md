@@ -345,6 +345,34 @@ Clients page meanwhile. Owner-only.
   (already pending, already approved, or its month is locked), the prompt says
   so and offers only "Done". The server still accepts a submission for any week,
   so an owner can still ask someone to submit early.
+- **The "Submit timesheet" button grays out once there is nothing to send**
+  (Aug 2026, client request). It used to stay bright and clickable after a week
+  had already gone in, which read as "you still owe this." Now, on both the Time
+  page and the Timesheet page, the button is disabled — with a tooltip saying
+  why — whenever this click has nothing to submit: "Submitted — awaiting
+  review." for a week that is pending, "Approved — this week is closed." for an
+  approved one, a locked-month message when the month is sealed, and "Nothing
+  left to submit — every week you owe is in." otherwise. The reason quoted is
+  the week ON SCREEN, so paging to a week that is still owed lights the button
+  back up.
+- Two cases deliberately keep the button live. A week that was SENT BACK stays
+  clickable — that is the resubmit path, and graying it out would dead-end the
+  rejection flow. And a week that is pending or approved while an OLDER week is
+  still owed keeps the button enabled, because that older week is exactly what
+  the weekly gate blocks new time on; the tooltip then names the week the click
+  would actually send ("This week is submitted and awaiting review. Submitting
+  sends the week of Sun Aug 2 – Sat Aug 8 instead."). That naming applies
+  whenever the click would send a week OTHER than the one on screen, including
+  when the viewed week is itself still owed but an even older one is queued
+  ahead of it ("Submitting sends the week of Sun Aug 2 – Sat Aug 8 first.").
+- If no one is signed in the button reads "Sign in to submit a timesheet."
+  rather than claiming the person is caught up.
+- Inside the prompt, the confirm button disables itself and reads "Submitting…"
+  while the request is open, so a double-click can't fire two submissions.
+- None of this is UI-only: a weekly submission is one row per person per week,
+  so re-submitting the same week can never create a second one, and an
+  already-approved week is returned untouched rather than knocked back to
+  pending.
 
 ## Timesheet page
 

@@ -7874,3 +7874,109 @@ describe('a bulk save cannot touch a saved wait (postgres branch)', () => {
     expect(JSON.parse(insert.params[11])[0].id).toBe('wo-keep')
   })
 })
+
+/**
+ * featreq-cbb7efe8: "the submit button remains clickable even after a week or
+ * pay period has already been submitted, which can allow duplicate or erroneous
+ * submissions."
+ *
+ * The button is now grayed out (see `submitTimesheetButtonState`), but a UI-only
+ * guard is not a guard. These pin what the store already does, so the guarantee
+ * survives whatever the client sends: `weekly_submissions` is keyed on
+ * (user, weekStart), so a re-submit can never produce a SECOND row — and an
+ * already-approved week is returned untouched rather than knocked back to
+ * pending.
+ *
+ * The one re-submit that deliberately does something is a REJECTED week: it
+ * upgrades the same row back to 'pending' and clears the reviewer fields. That
+ * is the resubmit path the whole rejection flow depends on, so it is pinned
+ * here as behavior to preserve, not as a hole to close.
+ */
+describe('duplicate weekly submits (file backend)', () => {
+  const USER = 'emp-1'
+  const WEEK = '2026-08-09'
+
+  const submissions = async () =>
+    JSON.parse(await readFile(localDataPath, 'utf8')).weeklySubmissions ?? []
+
+  it('records a first submit as one pending row', async () => {
+    const result = await store.submitWeeklyTimesheet(USER, WEEK)
+
+    expect(result.status).toBe('pending')
+    expect(await submissions()).toHaveLength(1)
+  })
+
+  it('never writes a SECOND row for the same user and week', async () => {
+    const first = await store.submitWeeklyTimesheet(USER, WEEK)
+    const second = await store.submitWeeklyTimesheet(USER, WEEK)
+
+    const rows = await submissions()
+    expect(rows).toHaveLength(1)
+    expect(second.id).toBe(first.id)
+  })
+
+  it('leaves an APPROVED week approved — a re-submit cannot knock it back to pending', async () => {
+    await store.submitWeeklyTimesheet(USER, WEEK)
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.weeklySubmissions[0].status = 'approved'
+    data.weeklySubmissions[0].reviewedBy = 'owner-1'
+    data.weeklySubmissions[0].reviewedAt = '2026-08-17T00:00:00.000Z'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.submitWeeklyTimesheet(USER, WEEK)
+
+    expect(result.status).toBe('approved')
+    expect(result.reviewedBy).toBe('owner-1')
+    const rows = await submissions()
+    expect(rows).toHaveLength(1)
+    expect(rows[0].status).toBe('approved')
+  })
+
+  it('re-opens a REJECTED week on the same row — the resubmit path must survive', async () => {
+    await store.submitWeeklyTimesheet(USER, WEEK)
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.weeklySubmissions[0].status = 'rejected'
+    data.weeklySubmissions[0].reviewedBy = 'owner-1'
+    data.weeklySubmissions[0].reviewNote = 'Fix Tuesday'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.submitWeeklyTimesheet(USER, WEEK)
+
+    expect(result.status).toBe('pending')
+    expect(result.reviewedBy).toBeUndefined()
+    expect(result.reviewNote).toBeUndefined()
+    expect(await submissions()).toHaveLength(1)
+  })
+
+  it('keeps a different week, and a different user, on their own rows', async () => {
+    await store.submitWeeklyTimesheet(USER, WEEK)
+    await store.submitWeeklyTimesheet(USER, '2026-08-02')
+    await store.submitWeeklyTimesheet('emp-2', WEEK)
+
+    expect(await submissions()).toHaveLength(3)
+  })
+})
+
+/**
+ * The Postgres half of the same guarantee. Cardinal rule 1: production is
+ * Postgres, so the file-backend suite above proves nothing about it. The guard
+ * there is one statement — `on conflict (user_id, week_start) do update`, with
+ * the status held at 'approved' when it already was — so that is what gets
+ * pinned. Drop the conflict clause and a duplicate submit becomes a duplicate
+ * ROW; drop the `case` and it demotes an approved week.
+ */
+describe('duplicate weekly submits (postgres branch)', () => {
+  it('upserts on (user_id, week_start) and holds an approved week approved', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).submitWeeklyTimesheet('emp-1', '2026-08-09')
+
+    const insert = fake.matching(/^insert into weekly_submissions\b/i)[0]
+    expect(insert).toBeDefined()
+    // One row per (user, week) — the conflict target IS the no-duplicates rule.
+    expect(insert.text).toMatch(/on conflict \(user_id, week_start\) do update/i)
+    // …and the update refuses to demote an approved week back to pending.
+    expect(insert.text).toMatch(
+      /set status = case when weekly_submissions\.status = 'approved'[\s\S]*then weekly_submissions\.status/i,
+    )
+  })
+})

@@ -20,6 +20,7 @@ import {
 } from '../../lib/time-entry.js'
 import { isInReportPeriod } from '../lib/reportPeriod'
 import { selectableClients } from '../lib/clientLifecycle'
+import { submitTimesheetButtonState } from '../lib/timesheetSubmitPlan'
 import {
   buildTimeTaskOptions,
   resolveTimeTaskChoice,
@@ -221,6 +222,12 @@ export function TimePage() {
     setReportPeriod,
   } = useAppContext()
 
+  // Memoized, not just defaulted: these go to `WeeklySubmissionWidget`, whose
+  // submit-button memo has them as deps. A fresh `[]` on every render here
+  // would re-run that memo on every render there.
+  const weeklySubmissions = useMemo(() => data.weeklySubmissions ?? [], [data.weeklySubmissions])
+  const timesheetLocks = useMemo(() => data.timesheetLocks ?? [], [data.timesheetLocks])
+
   // The recent-entries list is scoped to the shared report period. The live
   // timer and the manual / log form are unaffected — only the displayed list.
   const periodEntries = useMemo(
@@ -260,7 +267,7 @@ export function TimePage() {
   const currentPeriod = currentBillingPeriod()
   const lockedThisPeriod =
     role !== 'owner' &&
-    (data.timesheetLocks ?? []).some(
+    timesheetLocks.some(
       (lock) => lock.userId === activeEmployeeId && lock.period === currentPeriod,
     )
 
@@ -329,8 +336,8 @@ export function TimePage() {
         <WeeklySubmissionWidget
           activeEmployeeId={activeEmployeeId}
           entries={visibleEntries}
-          submissions={data.weeklySubmissions ?? []}
-          locks={data.timesheetLocks ?? []}
+          submissions={weeklySubmissions}
+          locks={timesheetLocks}
           employees={data.employees}
           previewMode={previewMode}
           onSubmit={submitWeeklyTimesheet}
@@ -366,7 +373,7 @@ export function TimePage() {
           employees={data.employees}
           entries={sentBackEntries}
           role={role}
-          locks={data.timesheetLocks ?? []}
+          locks={timesheetLocks}
           timerRunning={Boolean(timer)}
           onUpdate={updateTimeEntry}
           onDelete={deleteTimeEntry}
@@ -383,7 +390,7 @@ export function TimePage() {
             <ReportPeriodControl value={reportPeriod} onChange={setReportPeriod} />
           }
           role={role}
-          locks={data.timesheetLocks ?? []}
+          locks={timesheetLocks}
           timerRunning={Boolean(timer)}
           onUpdate={updateTimeEntry}
           onDelete={deleteTimeEntry}
@@ -493,6 +500,21 @@ function WeeklySubmissionWidget({
       ? employees.find((employee) => employee.id === submission.reviewedBy)?.name
       : null
 
+  // Gray the button out when this click has nothing to send — an already
+  // submitted or approved week used to leave it bright and clickable.
+  const submitButton = useMemo(
+    () =>
+      submitTimesheetButtonState({
+        employeeId: activeEmployeeId,
+        entries,
+        submissions,
+        locks,
+        viewedWeekStart: weekStart,
+        previewMode,
+      }),
+    [activeEmployeeId, entries, submissions, locks, weekStart, previewMode],
+  )
+
   return (
     <section
       className="panel weekly-submission-widget"
@@ -569,13 +591,9 @@ function WeeklySubmissionWidget({
           <button
             type="button"
             className="primary-action"
-            disabled={previewMode}
+            disabled={submitButton.disabled}
             onClick={() => setFlowOpen(true)}
-            title={
-              previewMode
-                ? 'Cannot submit while previewing as another user.'
-                : 'Check any past weeks you still owe, then send a week for review.'
-            }
+            title={submitButton.title}
           >
             Submit timesheet
           </button>

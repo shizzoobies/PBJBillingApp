@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SubmitTimesheetModal } from '../components/SubmitTimesheetModal'
@@ -203,6 +203,56 @@ describe('SubmitTimesheetModal', () => {
     ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /submit this week/i })).not.toBeInTheDocument()
+  })
+
+  /**
+   * featreq-cbb7efe8 asked for the page-level button to gray out once a week is
+   * in. The in-flight half of "no duplicate submits" lives here instead: the
+   * confirm button is the one that actually POSTs, so it has to close behind
+   * itself while the request is open.
+   */
+  /**
+   * The whole in-flight window, start to finish: the button closes behind
+   * itself while the POST is open, exactly one POST goes out, and the flow
+   * comes back rather than wedging on a stuck `submitting`.
+   *
+   * Note on what is NOT asserted here. `handleConfirm` opens with
+   * `if (submitting || previewMode) return`, and there is no render test that
+   * can reach it: React drops click events on any element whose props say
+   * `disabled`, so while the request is open nothing gets through to the
+   * handler at all — not even a hand-dispatched click on a node whose
+   * attribute has been stripped. The disabled prop IS the mechanism; that
+   * short-circuit is a backstop behind it. Asserting "the disabled button did
+   * nothing when clicked" would only re-test the attribute, so this asserts the
+   * behavior that actually matters: one click, one POST, and a live button
+   * afterward.
+   */
+  it('disables the confirm button for the duration of one in-flight submit', async () => {
+    let release: () => void = () => {}
+    const onSubmit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        }),
+    )
+    renderModal({ entries: [entry('2026-08-11')], onSubmit })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, submit this week' }))
+
+    const pending = await screen.findByRole('button', { name: 'Submitting…' })
+    expect(pending).toBeDisabled()
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      release()
+    })
+
+    // The week landed, and the button is live again rather than stuck.
+    expect(
+      screen.getByText('Week of Sun Aug 9 – Sat Aug 15 submitted for approval.'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Yes, submit this week' })).toBeEnabled()
+    expect(onSubmit).toHaveBeenCalledTimes(1)
   })
 
   /**

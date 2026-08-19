@@ -1221,6 +1221,9 @@ textarea.input {
   filter: none;
   opacity: 0.55;
   transform: none;
+  /* Load-bearing since featreq-cbb7efe8: "Submit timesheet" grays out once the
+     week is in, and the cursor is the fastest way to read that on hover. */
+  cursor: not-allowed;
 }
 
 .secondary-action {

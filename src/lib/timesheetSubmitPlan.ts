@@ -150,6 +150,113 @@ export function buildTimesheetSubmitPlan({
   return { step: 'none', pastWeeks, target: null, remainingAfterTarget: 0, currentWeek }
 }
 
+/** How the page-level "Submit timesheet" button should render right now. */
+export type SubmitButtonState = {
+  disabled: boolean
+  /** Tooltip. When disabled it says why; when enabled it says what the click does. */
+  title: string
+}
+
+/**
+ * Whether the page-level "Submit timesheet" button can do anything on this
+ * click, and the tooltip that explains itself either way.
+ *
+ * The client's report: the button stayed bright and clickable after a week had
+ * already been sent, which reads as "you still owe this week." It never
+ * actually double-submitted — the guided modal declines to offer a pending or
+ * approved week, and `submitWeeklyTimesheet` in `db/store.js` leaves an
+ * approved row untouched — but the button has to say so BEFORE the click, not
+ * after it opens a modal that shrugs.
+ *
+ * The disable is deliberately not "something has been submitted." It is "this
+ * click has nothing to send" — `plan.target === null`, the same decision the
+ * modal makes — and the reason quoted in the tooltip is the VIEWED week's own
+ * state, so paging to a week that is still owed lights the button back up.
+ *
+ * One case is worth naming because it looks like an exception: the viewed week
+ * is pending or approved, but an OLDER week is still owed. The button stays
+ * enabled — graying it out would strand that older week, and an un-submitted
+ * older week is exactly what the weekly gate blocks new time on — so instead
+ * the tooltip names the week the click would actually send.
+ *
+ * A REJECTED week always keeps the button live: `listBlockingWeeks` queues a
+ * sent-back past week, and a sent-back current week is `eligible`, so the plan
+ * always has a target for it. Without that the rejection flow would dead-end.
+ */
+export function submitTimesheetButtonState({
+  employeeId,
+  entries,
+  submissions,
+  locks,
+  viewedWeekStart,
+  previewMode = false,
+  todayWeekStart = currentWeekStart(),
+}: {
+  employeeId: string
+  entries: readonly TimeEntry[]
+  submissions: readonly WeeklySubmission[]
+  locks?: readonly TimesheetLock[]
+  /** The Sunday-anchored week the widget is showing (drives the reason text). */
+  viewedWeekStart: string
+  previewMode?: boolean
+  todayWeekStart?: string
+}): SubmitButtonState {
+  if (previewMode) {
+    return { disabled: true, title: 'Cannot submit while previewing as another user.' }
+  }
+  // No signed-in employee means nothing was computed — `buildTimesheetSubmitPlan`
+  // short-circuits to an empty plan on a falsy id. Falling through would tell
+  // someone they were all caught up on the strength of a lookup that never ran.
+  if (!employeeId) {
+    return { disabled: true, title: 'Sign in to submit a timesheet.' }
+  }
+
+  const plan = buildTimesheetSubmitPlan({ employeeId, entries, submissions, locks, todayWeekStart })
+  const viewedStatus =
+    submissions.find(
+      (submission) => submission.userId === employeeId && submission.weekStart === viewedWeekStart,
+    )?.status ?? null
+
+  const target = plan.target
+  if (target) {
+    // Whenever the click would send a week OTHER than the one on screen, say so
+    // — not only when the viewed week is settled. Someone looking at an owed
+    // week while an even older one is queued ahead of it needs the same warning.
+    if (target.weekStart !== viewedWeekStart) {
+      const settled =
+        viewedStatus === 'approved'
+          ? 'This week is approved. '
+          : viewedStatus === 'pending'
+            ? 'This week is submitted and awaiting review. '
+            : ''
+      return {
+        disabled: false,
+        title: `${settled}Submitting sends the week of ${weekDayRangeLabel(target.weekStart)} ${
+          settled ? 'instead' : 'first'
+        }.`,
+      }
+    }
+    return {
+      disabled: false,
+      title: 'Check any past weeks you still owe, then send a week for review.',
+    }
+  }
+
+  if (viewedStatus === 'approved') {
+    return { disabled: true, title: 'Approved — this week is closed.' }
+  }
+  if (viewedStatus === 'pending') {
+    return { disabled: true, title: 'Submitted — awaiting review.' }
+  }
+  const viewedMonthLocked = (locks ?? []).some(
+    (lock) => lock.userId === employeeId && lock.period === viewedWeekStart.slice(0, 7),
+  )
+  if (viewedMonthLocked) {
+    return { disabled: true, title: 'This month is locked, so this week can no longer be submitted.' }
+  }
+  return { disabled: true, title: 'Nothing left to submit — every week you owe is in.' }
+}
+
 /**
  * "Sun Jul 27 – Sat Aug 2" — a week named the way the client asked for it, with
  * the weekday spelled out on both ends so there's no doubt which days are

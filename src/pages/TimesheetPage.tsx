@@ -12,6 +12,7 @@ import {
 // A timesheet row's duration is BILLED time (`entry.minutes`), never the length
 // of its clock span — see `src/lib/timesheetDays.ts` for why those differ.
 import { timesheetDays } from '../lib/timesheetDays'
+import { submitTimesheetButtonState } from '../lib/timesheetSubmitPlan'
 import type { TimeEntry, WeeklySubmission } from '../lib/types'
 import {
   clientName,
@@ -240,8 +241,13 @@ function WeeklyTimesheetControls({
 }) {
   const { data, role, activeEmployeeId, previewMode, submitWeeklyTimesheet } = useAppContext()
   const employees = data.employees
-  const submissions: WeeklySubmission[] = data.weeklySubmissions ?? []
-  const locks = data.timesheetLocks ?? []
+  // Memoized, not just defaulted: a fresh `[]` on every render would re-run the
+  // submit-button memo below on every render too.
+  const submissions: WeeklySubmission[] = useMemo(
+    () => data.weeklySubmissions ?? [],
+    [data.weeklySubmissions],
+  )
+  const locks = useMemo(() => data.timesheetLocks ?? [], [data.timesheetLocks])
 
   const [flowOpen, setFlowOpen] = useState(false)
 
@@ -271,6 +277,21 @@ function WeeklyTimesheetControls({
       entry.approvalStatus === 'rejected',
   ).length
 
+  // Gray the button out when this click has nothing to send — an already
+  // submitted or approved week used to leave it bright and clickable.
+  const submitButton = useMemo(
+    () =>
+      submitTimesheetButtonState({
+        employeeId: activeEmployeeId,
+        entries: data.timeEntries ?? [],
+        submissions,
+        locks,
+        viewedWeekStart: weekStart,
+        previewMode,
+      }),
+    [activeEmployeeId, data.timeEntries, submissions, locks, weekStart, previewMode],
+  )
+
   return (
     <div className="timesheet-week-controls">
       <div className="timesheet-week-status">
@@ -299,13 +320,9 @@ function WeeklyTimesheetControls({
         <button
           type="button"
           className="primary-action"
-          disabled={previewMode}
+          disabled={submitButton.disabled}
           onClick={() => setFlowOpen(true)}
-          title={
-            previewMode
-              ? 'Cannot submit while previewing as another user.'
-              : 'Check any past weeks you still owe, then send a week for review.'
-          }
+          title={submitButton.title}
         >
           Submit timesheet
         </button>
