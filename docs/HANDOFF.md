@@ -147,7 +147,16 @@ snapshot first, single transaction, re-verify after.
 ## 5. Where things stand (newest first)
 
 **2026-08-18/19 — the sent-back queue run + Brittany's review night.** Two days,
-nine feature deploys, suite 1834 → **2113 tests / 125 files**. Railway had a
+ten feature deploys, suite 1834 → **2130 tests / 126 files**. Brittany reviewed
+LIVE through this run — moving items Shipped→Done, sending items back with
+"sent you email" notes, answering clarification questions on the tracker
+(that channel works: `clarification_question`/`clarification_answer` columns),
+and filing new items. Assume the tracker moves while you work. Her review
+emails go to alex@ka-performancefl.com (the Gmail connector's account); the
+personal asoalexander@gmail.com is what the local Chrome is signed into —
+forwarding between them (with Alex's OK) is the proven way to read attachments,
+because some other Chrome extension holds the debugger and screenshots/JS
+mostly fail (read_page always works). Railway had a
 declared incident on the 18th (deploys stuck QUEUED 20–50 min, two FAILEDs with
 empty build logs) — recovery that works: push the next ready commit to supersede
 a stuck QUEUED entry; `redeploy` is refused while one is queued. Every tracker
@@ -155,6 +164,7 @@ flip stayed gated on deploy SUCCESS + `/health` 200.
 
 | Commit | What |
 |---|---|
+| `326b48b` | **Timesheet submit button disables with a reason** (featreq-cbb7efe8): `submitTimesheetButtonState()` in `src/lib/timesheetSubmitPlan.ts` — one predicate for both submit surfaces (TimePage widget + TimesheetPage controls), disabled exactly when the plan has no target, reason quoted from the VIEWED week. Deliberately enabled: sent-back weeks (resubmit path) and settled-week-viewed-while-older-owed (tooltip names the week the click sends). Duplicate submits were already impossible — `unique (user_id, week_start)` confirmed present on prod (`weekly_submissions_user_id_week_start_key`); the upsert is now pinned on both backends. Investigation note: the old button never double-submitted — the modal shrugged; the defect was the button lying about clickability. |
 | `55a9fe2` | **Waiting lifecycle** (featreq-8b7d06d7 + b05a2f3a, from Brittany's annotated "done button" email): draft with Save/Clear → one atomic create → EVERYTHING locked (who/message/task; `waitingLockRefusal` + `waitForTaskLinkDenial` in `lib/waiting-on-state.js`, shared server/UI); Question button (Delayed + step chip; `questions[]` append-only beside `sendBacks[]`; `waiting_on_question` event); A's awaiting-OK view is Approve/Send-back only; `planWaitingDone` deleted. Permanence made STRUCTURAL: `preservedNodeWaits()` in `write()` preserves waits from stored rows on the bulk save. |
 | `9328f0c` | **Recap rework** (featreq-926862e2, from her marked-up PDF): the page IS the comparison — per-role ESTIMATE\|ACTUAL\|OVER/UNDER tables for hours and profit with exact Total rows, Yearly period (`lib/periods.js` `'year'`, `MONTHS_IN_PERIOD`), Tasks last, bolt-on panel deleted, staff payloads redacted of estimates (`estimatesVisible`). Multi-month Billing captions "today's rates" — NO rate history exists. |
 | `fc7119f` | **Payroll rounding, third and final** (featreq-7c8f64d7, HER rule verbatim: 2dp hours × rate): `displayHours()` is both the printed and the costing hours; every Hours/Cost column sums its displayed rows; detail rows are a largest-remainder split of person-period pay; firm-analytics/assistant quote the same 2dp hours; Raw CSV stopped double-charging full-mode repeats. |
@@ -169,6 +179,19 @@ employee or the client, never yourself; lock-at-save reverses the editable-note
 scope on her explicit email. **Open with her:** the recurring-pile picker
 question, step-deletion wait warning, card fee/surcharge. **Open with Alex:**
 featreq-79b6d974 engagement-to-billing needs a planning session.
+
+**If you are picking this up fresh:** the queue is EMPTY as of `326b48b` —
+every tracker item is shipped/done/needs-input except the parked ones above.
+The working pipeline that produced this run, in one line: flip item
+in_progress → Opus executor (background) → Opus code-reviewer (they find real
+blockers on most money/permanence diffs — do not skip) → fix pass → rolled-back
+prod validation for any NEW SQL shape → `npm run verify` → commit (message
+style: statement-of-behavior first line, no conventional-commit prefix) → push
+→ background watcher polls the PUSHED hash to SUCCESS → `/health` 200 → flip
+tracker to shipped with dev notes written TO Brittany in her language → voice
+re-provision if the manifest changed. Tracker writes have standing approval;
+real prod writes need Alex's explicit yes + an undo snapshot (see the
+prod-write-log memory).
 
 **2026-08-09/10 — the invoicing ship run.** One long session with Alex actively
 testing as features landed: I4 finished, then five follow-on features, then a
