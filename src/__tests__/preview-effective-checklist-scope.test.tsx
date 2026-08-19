@@ -88,14 +88,10 @@ function buildAppData() {
   return data
 }
 
-/** The In-progress list ships its due-date groups collapsed — open them all. */
-function openDueGroups() {
-  for (const heading of screen.queryAllByRole('button', {
-    name: /^(Overdue|This week|This month|Later)/,
-  })) {
-    fireEvent.click(heading)
-  }
-}
+// No group-expansion helper on purpose: both fixture tasks land in groups the
+// In-progress list ships OPEN ("Overdue" and "Due this week" are
+// defaultOpen) — and clicking those headings would collapse them. Presence
+// assertions use findAllByText so they wait out the mocked app-data fetch.
 
 const navTo = (name: string) => {
   fireEvent.click(screen.getByRole('link', { name }))
@@ -116,13 +112,17 @@ describe('owner previewing a staff member: checklist surfaces scope to them', ()
   async function bootAndEnterPreview() {
     render(<App />)
     await screen.findByRole('navigation')
+    // Let the boot redirect ('/' → /dashboard) LAND before navigating: it
+    // commits asynchronously, and a link clicked in the gap gets yanked right
+    // back to the dashboard (the original flake in this file). The "Viewing
+    // as" picker only renders once the dashboard is actually on screen.
+    await screen.findByLabelText(/viewing as/i)
 
     // Sanity: outside preview the owner sees everything — both tasks in the
     // In-progress list and her overdue task pinned.
     navTo('Checklists')
-    openDueGroups()
     expect(await screen.findAllByText('Owner overdue payroll')).not.toHaveLength(0)
-    expect(screen.getAllByText('Jordan monthly close').length).toBeGreaterThan(0)
+    expect(await screen.findAllByText('Jordan monthly close')).not.toHaveLength(0)
     expect(document.querySelector('.overdue-pin')).not.toBeNull()
 
     // Enter preview the way the owner does: Dashboard → "Viewing as" picker.
@@ -136,7 +136,6 @@ describe('owner previewing a staff member: checklist surfaces scope to them', ()
     await bootAndEnterPreview()
 
     navTo('Checklists')
-    openDueGroups()
 
     // Jordan's task is there; the owner's is gone from every surface.
     expect(await screen.findAllByText('Jordan monthly close')).not.toHaveLength(0)
@@ -180,9 +179,8 @@ describe('owner previewing a staff member: checklist surfaces scope to them', ()
     expect(screen.queryByText(/Viewing as Jordan Ellis/)).not.toBeInTheDocument()
 
     navTo('Checklists')
-    openDueGroups()
     expect(await screen.findAllByText('Owner overdue payroll')).not.toHaveLength(0)
-    expect(screen.getAllByText('Jordan monthly close').length).toBeGreaterThan(0)
+    expect(await screen.findAllByText('Jordan monthly close')).not.toHaveLength(0)
     expect(document.querySelector('.overdue-pin')).not.toBeNull()
   })
 })
