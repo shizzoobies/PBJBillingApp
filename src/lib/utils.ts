@@ -1,3 +1,4 @@
+import { displayHours } from './payrollAggregation'
 import type {
   AppData,
   Checklist,
@@ -1293,10 +1294,10 @@ export function ensureRecurringChecklists(data: AppData) {
  * "20.22h / 1.00h / 0.50h" adds up by eye; "20.2h / 1h / .5h" does not. This
  * is the format the firm owner asked for.
  *
- * NOT a costing input. Cost is computed from exact minutes, so re-deriving a
- * dollar figure from these two decimals will be off by cents (20.22h × $16 =
- * $323.52 where the exact 1213.2833 min is $323.54). The payroll summary
- * prints an exact Minutes column beside the hours for that reason.
+ * It IS the costing input: labor cost is these two-decimal hours × the pay rate
+ * (`personPeriodCost` in `lib/payroll-cost.js`), so multiplying a printed Hours
+ * cell by hand reproduces the printed Cost cell. That is why the rounding lives
+ * in `displayHours` and is shared rather than repeated here.
  *
  * Live time-ENTRY surfaces (Time page rows, the running timer, approval
  * queues) deliberately keep `formatHoursMinutes` instead — "23m" reads better
@@ -1313,15 +1314,17 @@ export function formatDecimalHours(minutes: number) {
  * two can never drift apart.
  */
 export function decimalHours(minutes: number) {
-  const hours = minutes / 60
-  // Round the hundredths the same way `roundToCent` rounds cents: a value like
-  // 0.995 (59.7 minutes) is stored a hair BELOW its decimal form, so a bare
-  // `toFixed(2)` reports "0.99" and an accountant checking the arithmetic finds
-  // a discrepancy that isn't there. Normalizing through a fixed-precision
-  // string first makes a half-hundredth round up, as written arithmetic does.
-  const hundredths = Math.round(Number((hours * 100).toFixed(6)))
-  // -0 would render as "-0.00". Normalize it to zero.
-  return (hundredths === 0 ? 0 : hundredths / 100).toFixed(2)
+  return displayHours(minutes).toFixed(2)
+}
+
+/**
+ * The same "x.xxh" label for a figure that is ALREADY in hours and already
+ * rounded — a total built by summing the displayed rows (`sumDisplayHours`)
+ * rather than by rounding a pile of minutes. Kept beside `formatDecimalHours`
+ * so the two can only ever differ in what they take, never in what they print.
+ */
+export function formatHoursTotal(hours: number) {
+  return `${(hours === 0 ? 0 : hours).toFixed(2)}h`
 }
 
 /**

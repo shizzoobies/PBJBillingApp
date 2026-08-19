@@ -14,14 +14,15 @@
 export type { PayrollSlice } from '../../lib/payroll-cost.js'
 
 export {
+  allocatePersonCost,
   billableMinutes,
+  displayHours,
   duplicateFullSliceIds,
-  exactHoursCell,
-  exactMinutesCell,
   internalMinutes,
   laborCost,
   personPeriodCost,
   roundToCent,
+  sumDisplayHours,
   sumPersonCosts,
   trackedMinutes,
 } from '../../lib/payroll-cost.js'

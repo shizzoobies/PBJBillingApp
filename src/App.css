@@ -2625,13 +2625,6 @@ td strong {
 .payroll-job-cell {
   padding-left: 22px;
 }
-/* Exact minutes — the reconciliation column. Lining figures so the decimal
-   points stack and the column can be checked against a calculator. */
-.payroll-exact-minutes {
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 .report-metric-grid {
   display: grid;
   gap: 12px;

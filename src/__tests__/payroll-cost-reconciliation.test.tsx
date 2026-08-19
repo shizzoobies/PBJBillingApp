@@ -7,17 +7,21 @@ import type { AppContextValue } from '../AppContext'
 /**
  * The payroll report's Cost column, from the owner's side of the desk.
  *
- * She checked a period by hand and landed 16¢ under the report. Her arithmetic
- * was fine — she multiplied the 2-decimal hours the report showed her, while
- * the report divided seconds. The fix was never different math; it was making
- * the shown numbers add up to the shown total and shipping enough precision in
- * the exports to re-derive them. That is what this file pins:
+ * She checked a period by hand and landed under the report. Her arithmetic was
+ * fine — she multiplied the 2-decimal hours the report showed her, while the
+ * report divided seconds. Two rounds of "fixing the rounding" were rejected,
+ * because the disagreement was policy, not arithmetic. She settled it:
  *
- *   - every Cost cell is cent-rounded per person, and the column sums to the
- *     total under it, exactly, with a calculator;
- *   - the exports carry the exact minutes and 4-decimal hours needed to
- *     reproduce a cost figure by hand;
- *   - the page says out loud how cost is computed.
+ *   "I pay by the minute so if someone works 20 hours and 13.4 minutes rounded
+ *    to the 2nd decimal then I would pay 20.22 times her cost..."
+ *
+ * So the printed Hours ARE the costing input. This file pins what that buys:
+ *
+ *   - every Cost cell is the Hours cell beside it × the pay rate, on screen and
+ *     in the exports;
+ *   - the column of Cost cells sums to the total under it, exactly;
+ *   - the exact-minutes reconciliation column is gone, because the thing it
+ *     existed to explain no longer happens.
  */
 
 vi.mock('../lib/api', () => ({ fetchTeam: vi.fn() }))
@@ -35,9 +39,10 @@ const DAY = '2026-08-05'
 
 /**
  * Two people, ten minutes each, at $37/h. Chosen because it is the smallest
- * case that separates the rules: each person is $6.1666… → $6.17, so the
- * column reads 6.17 + 6.17 = $12.34, while summing the raw floats and rounding
- * once at the end gives $12.33. One of those can be checked by hand.
+ * case that separates the rules: ten minutes reads "0.17h", so her rule pays
+ * 0.17 × 37 = $6.29 each and $12.58 in total, where dividing seconds paid
+ * $6.17 each and $12.33 in total. Only one of those can be checked by hand
+ * against the report, and it is hers.
  */
 const COST_RATE = 37
 const employees = [
@@ -103,7 +108,7 @@ async function renderReport() {
   fireEvent.change(screen.getByLabelText('Period start date'), { target: { value: DAY } })
   // The Cost column only fills in once /api/team resolves the pay rates.
   await waitFor(() => expect(mockFetchTeam).toHaveBeenCalled())
-  await screen.findAllByText('$6.17')
+  await screen.findAllByText('$6.29')
   return view
 }
 
@@ -118,54 +123,69 @@ function summaryTable(container: HTMLElement) {
 }
 
 const dollars = (text: string) => Number(text.replace(/[$,]/g, ''))
+const hours = (text: string) => Number(text.replace('h', ''))
 
-/**
- * Summary column positions. Named rather than inlined because the Minutes
- * column was inserted between Hours and Billable, and a bare `row[4]` gave no
- * hint that it had moved.
- */
+/** Summary column positions, named so a future insertion is obvious. */
 const HOURS = 1
-const MINUTES = 2
-const COST = 5
+const BILLABLE = 2
+const COST = 4
 
 describe('payroll Cost column reconciles by hand', () => {
+  it('is the Hours cell times the pay rate, on every row', async () => {
+    const { container } = await renderReport()
+    const { body } = summaryTable(container)
+
+    for (const row of body) {
+      // The owner has no pay rate, so there is no cost to reproduce.
+      if (row[COST] === '—') continue
+      const byHand = (hours(row[HOURS]) * COST_RATE).toFixed(2)
+      expect(dollars(row[COST]).toFixed(2)).toBe(byHand)
+    }
+    // Spelled out for the reader: 0.17h × $37 = $6.29.
+    const avery = body.find((cells) => cells[0] === 'Avery Stone') as string[]
+    expect(avery[HOURS]).toBe('0.17h')
+    expect(avery[COST]).toBe('$6.29')
+  })
+
   it('sums the visible Cost cells to exactly the shown total', async () => {
     const { container } = await renderReport()
     const { body, footer } = summaryTable(container)
 
     const costCells = body.map((row) => row[COST])
-    expect(costCells).toContain('$6.17')
+    expect(costCells).toContain('$6.29')
     // The owner has no cost rate: "—", never "$0.00".
     expect(costCells).toContain('—')
 
     const byHand = costCells
       .filter((cell) => cell !== '—')
       .reduce((sum, cell) => sum + dollars(cell), 0)
-    expect(footer[COST]).toBe('$12.34')
-    expect(byHand.toFixed(2)).toBe('12.34')
+    expect(footer[COST]).toBe('$12.58')
+    expect(byHand.toFixed(2)).toBe('12.58')
   })
 
-  it('shows the total the per-person rule gives, not the old float sum', async () => {
+  it('shows HER number, not the exact-seconds one the send-backs were about', async () => {
     const { container } = await renderReport()
-    // Summing the unrounded floats and rounding once at display showed $12.33 —
-    // a figure the owner could never reproduce from the cells above it.
-    expect(summaryTable(container).footer[COST]).not.toBe('$12.33')
+    // Dividing seconds paid $6.17 a head and $12.33 in total — figures that
+    // could not be reproduced from anything printed on the page.
+    const { body, footer } = summaryTable(container)
+    expect(body.map((row) => row[COST])).not.toContain('$6.17')
+    expect(footer[COST]).not.toBe('$12.33')
   })
 
-  it('states the cost basis on the page, next to the totals', async () => {
+  it('states the cost basis under the payroll table AND the employee report', async () => {
     await renderReport()
-    expect(screen.getByText(/Cost comes from the exact Minutes column/i)).toBeInTheDocument()
+    // Both tables get printed, so both carry the sentence.
+    expect(screen.getAllByText(/Cost is the Hours shown times the pay rate/i)).toHaveLength(2)
   })
 })
 
 /**
- * ITEM 2 — the send-back. Two-decimal hours alone do NOT make cost checkable:
- * 20.22h × $16 = $323.52 where the real figure is $323.54. So the exact minutes
- * are on the screen, not only in the CSV, and `minutes ÷ 60 × rate` has to land
- * on the Cost cell for every row.
+ * The exact "Minutes" column is GONE. It sat between Hours and Billable for one
+ * reason — to explain why the printed hours would not multiply out — and that
+ * reason has been retired along with the exact-seconds rule.
  */
-describe('payroll summary shows exact minutes beside the hours', () => {
-  it('prints a Minutes column between Hours and Billable', async () => {
+describe('payroll summary drops the exact-minutes reconciliation column', () => {
+  it('runs Team member, Hours, Billable — with no Minutes between them', async () => {
     const { container } = await renderReport()
     const headers = [
       ...(container.querySelector('#payroll-hours table thead tr') as Element).querySelectorAll(
@@ -173,34 +193,8 @@ describe('payroll summary shows exact minutes beside the hours', () => {
       ),
     ].map((th) => th.textContent ?? '')
     expect(headers[HOURS]).toBe('Hours')
-    expect(headers[MINUTES]).toBe('Minutes')
-    expect(headers[3]).toBe('Billable')
-  })
-
-  it('reproduces every Cost cell from minutes ÷ 60 × rate', async () => {
-    const { container } = await renderReport()
-    const { body, footer } = summaryTable(container)
-
-    for (const row of body) {
-      const minutes = Number(row[MINUTES])
-      expect(Number.isFinite(minutes)).toBe(true)
-      // The owner has no pay rate, so there is no cost to reproduce.
-      if (row[COST] === '—') continue
-      const byHand = ((minutes / 60) * COST_RATE).toFixed(2)
-      expect(dollars(row[COST]).toFixed(2)).toBe(byHand)
-    }
-
-    // Exact, not rounded: 10 + 10 + 45.
-    expect(footer[MINUTES]).toBe('65')
-  })
-
-  it('would NOT reconcile from the 2-decimal hours alone — which is why it is there', async () => {
-    const { container } = await renderReport()
-    const row = summaryTable(container).body.find((cells) => cells[COST] === '$6.17') as string[]
-    // "0.17h" × $37 = $6.29, nowhere near the $6.17 the report shows. The hours
-    // column is for reading; the minutes column is for checking.
-    expect(row[HOURS]).toBe('0.17h')
-    expect((Number(row[HOURS].replace('h', '')) * COST_RATE).toFixed(2)).not.toBe('6.17')
+    expect(headers[BILLABLE]).toBe('Billable')
+    expect(headers).not.toContain('Minutes')
   })
 })
 
@@ -209,84 +203,143 @@ describe('payroll hours read as x.xx', () => {
     const { container } = await renderReport()
     const { body, footer } = summaryTable(container)
     for (const row of [...body, footer]) {
-      for (const cell of [row[HOURS], row[3]]) {
+      for (const cell of [row[HOURS], row[BILLABLE]]) {
         if (cell) expect(cell).toMatch(/^\d+\.\d{2}h$/)
       }
     }
-    // 65 minutes tracked in total → 1.0833h → "1.08h", not "1.1h".
-    expect(footer[HOURS]).toBe('1.08h')
   })
 })
 
-describe('payroll detail table keeps the per-person cost rule', () => {
-  it('explains the penny gap between per-row cents and the detail total', async () => {
-    await renderReport()
-    expect(screen.getByText(/row cents may differ by a penny or two/i)).toBeInTheDocument()
-  })
-
-  it('carries the same rule into the detail table’s grand total', async () => {
+/**
+ * The Hours TOTAL is the sum of the Hours COLUMN, not the rounding of the
+ * minutes behind it. This fixture is the case that separates them: 0.17h +
+ * 0.17h + 0.75h = 1.09h, while 10 + 10 + 45 minutes round to 1.08h.
+ *
+ * 1.08 was pinned here until 2026-08-19 and was the honest answer while Hours
+ * sat beside an exact Minutes column and cost came from the minutes. Deleting
+ * that column made Hours the only time figure on the report AND the figure cost
+ * is priced from, and a total that contradicts its own column is not something
+ * to explain to someone who adds the column — so the displayed sum wins.
+ */
+describe('hours totals are the sum of the displayed rows', () => {
+  it('adds the Hours column, not the minutes behind it', async () => {
     const { container } = await renderReport()
-    const tables = container.querySelectorAll('#payroll-hours table')
-    const detailFooter = [
-      ...(tables[1].querySelector('tfoot tr') as Element).querySelectorAll('td'),
-    ].map((td) => td.textContent ?? '')
-    // Last column of the detail table is Cost.
-    expect(detailFooter[detailFooter.length - 1]).toBe('$12.34')
+    const { body, footer } = summaryTable(container)
+    const byHand = body.reduce((sum, row) => sum + hours(row[HOURS]), 0)
+    expect(byHand.toFixed(2)).toBe('1.09')
+    expect(footer[HOURS]).toBe('1.09h')
+    // What rounding the raw 65 minutes would have said.
+    expect(footer[HOURS]).not.toBe('1.08h')
+  })
+
+  it('adds the Billable column the same way', async () => {
+    const { container } = await renderReport()
+    const { body, footer } = summaryTable(container)
+    const byHand = body.reduce((sum, row) => sum + hours(row[BILLABLE]), 0)
+    expect(footer[BILLABLE]).toBe(`${byHand.toFixed(2)}h`)
+  })
+
+  it('composes in the detail table: rows add to the day, days add to the total', async () => {
+    const { container } = await renderReport()
+    const table = container.querySelectorAll('#payroll-hours table')[1]
+    const dayTotals = [...table.querySelectorAll('tbody tr.payroll-day-row')].map((row) =>
+      hours([...row.querySelectorAll('td')].map((td) => td.textContent ?? '')[1]),
+    )
+    const footer = [...(table.querySelector('tfoot tr') as Element).querySelectorAll('td')].map(
+      (td) => td.textContent ?? '',
+    )
+    // One day in this fixture, and its subtotal is the sum of its three rows.
+    expect(dayTotals).toEqual([1.09])
+    expect(footer[1]).toBe(`${dayTotals.reduce((s, h) => s + h, 0).toFixed(2)}h`)
   })
 })
 
-describe('payroll exports carry enough precision to re-derive a cost', () => {
-  it('gives the Summary CSV exact minutes, 4dp hours and the Cost it shows', async () => {
+/**
+ * The per-entry Cost column (featreq-55212377) at the person-period rule.
+ *
+ * A row cannot be priced on its own AND add up to what the person is paid for
+ * the period. Pricing rows independently put the column DOLLARS away from the
+ * total over a real month — the same "her arithmetic doesn't match the page"
+ * shape that got this item sent back twice. So each person's period cost is
+ * split across their rows and the column sums exactly.
+ */
+describe('payroll detail Cost column adds up to its own total', () => {
+  it('sums the visible per-entry Cost cells to the printed grand total', async () => {
+    const { container } = await renderReport()
+    const table = container.querySelectorAll('#payroll-hours table')[1]
+    const entryRows = [...table.querySelectorAll('tbody tr:not(.payroll-day-row)')]
+    const costCells = entryRows.map((row) => {
+      const cells = [...row.querySelectorAll('td')].map((td) => td.textContent ?? '')
+      return cells[cells.length - 1]
+    })
+    const byHand = costCells
+      .filter((cell) => cell !== '—')
+      .reduce((sum, cell) => sum + dollars(cell), 0)
+    const footer = [...(table.querySelector('tfoot tr') as Element).querySelectorAll('td')].map(
+      (td) => td.textContent ?? '',
+    )
+    expect(byHand.toFixed(2)).toBe('12.58')
+    // Last column of the detail table is Cost, and it agrees with the summary.
+    expect(footer[footer.length - 1]).toBe('$12.58')
+  })
+
+  it('says on the page that rows are a split of the person’s period pay', async () => {
+    await renderReport()
+    expect(
+      screen.getByText(/split across their entries, so the column adds up to the total exactly/i),
+    ).toBeInTheDocument()
+  })
+})
+
+describe('payroll exports price off the hours they print', () => {
+  it('gives the Summary CSV its five original columns plus Cost, and nothing else', async () => {
     await renderReport()
     fireEvent.click(screen.getByRole('button', { name: /Summary CSV/i }))
 
     const [, headers, rows] = mockDownloadCsv.mock.calls[0]
     // The original five keep their names AND positions — the owner's own
-    // spreadsheets point at them.
-    expect(headers.slice(0, 5)).toEqual([
+    // spreadsheets point at them. The exact-minutes and 4dp-hours columns that
+    // used to follow are gone; Tracked hours × rate reproduces Cost on its own.
+    expect(headers).toEqual([
       'Employee',
       'Tracked hours',
       'Billable hours',
       'Internal hours',
       'Entries',
-    ])
-    expect(headers.slice(5)).toEqual([
-      'Tracked minutes (exact)',
-      'Tracked hours (4dp)',
       'Cost',
     ])
 
     const avery = rows.find((row) => row[0] === 'Avery Stone') as string[]
-    expect(avery[5]).toBe('10')
-    expect(avery[6]).toBe('0.1667')
-    expect(avery[7]).toBe('6.17')
+    expect(avery[1]).toBe('0.17')
+    expect(avery[5]).toBe('6.29')
+    expect((Number(avery[1]) * COST_RATE).toFixed(2)).toBe(avery[5])
 
     // The owner's cost is blank, not "0.00": a spreadsheet must not be told she
     // was paid nothing per hour.
-    expect((rows.find((row) => row[0] === 'Owner') as string[])[7]).toBe('')
+    expect((rows.find((row) => row[0] === 'Owner') as string[])[5]).toBe('')
 
+    // The summed-rows total, matching the on-screen footer: 0.17 + 0.17 + 0.75.
     const total = rows.find((row) => row[0] === 'TOTAL') as string[]
-    expect(total[5]).toBe('65') // 10 + 10 + 45, exact
-    expect(total[7]).toBe('12.34')
+    expect(total[1]).toBe('1.09')
+    expect(total[5]).toBe('12.58')
   })
 
-  it('gives the Raw hours CSV exact minutes and 4dp hours, appended', async () => {
+  it('gives the Raw hours CSV a Cost that its own Hours cell reproduces', async () => {
     await renderReport()
     fireEvent.click(screen.getByRole('button', { name: /Raw hours/i }))
 
     const [, headers, rows] = mockDownloadCsv.mock.calls[0]
-    // Appended, so anything already reading "Hours" at column 8 still does.
+    // Hours stays at column 8 — anything already reading it still does.
     expect(headers[7]).toBe('Hours')
-    expect(headers.slice(-2)).toEqual(['Minutes (exact)', 'Hours (4dp)'])
+    expect(headers).not.toContain('Minutes (exact)')
+    expect(headers).not.toContain('Hours (4dp)')
 
     const row = rows[0] as string[]
-    expect(row[headers.indexOf('Minutes (exact)')]).toBe('10')
-    expect(row[headers.indexOf('Hours (4dp)')]).toBe('0.1667')
-    // Per-entry cost is cent-rounded too, so the column is readable on its own.
-    expect(row[headers.indexOf('Cost')]).toBe('6.17')
+    expect(row[headers.indexOf('Hours')]).toBe('0.17')
+    expect(row[headers.indexOf('Cost')]).toBe('6.29')
   })
 
-  it('cent-rounds the Cost column in the employee report CSV', async () => {
+  it('prices the Cost column in the employee report CSV the same way', async () => {
     await renderReport()
     // Three sections offer a "Download CSV"; this is the Employee report's.
     const section = screen.getByRole('heading', { name: 'Employee report' }).closest('section')
@@ -294,8 +347,10 @@ describe('payroll exports carry enough precision to re-derive a cost', () => {
 
     const [, headers, rows] = mockDownloadCsv.mock.calls[0]
     const costIndex = headers.indexOf('Cost')
+    const hoursIndex = headers.indexOf('Tracked hours')
     const avery = rows.find((row) => row[0] === 'Avery Stone') as string[]
-    expect(avery[costIndex]).toBe('6.17')
+    expect(avery[costIndex]).toBe('6.29')
+    expect((Number(avery[hoursIndex]) * COST_RATE).toFixed(2)).toBe(avery[costIndex])
     expect((rows.find((row) => row[0] === 'Owner') as string[])[costIndex]).toBe('')
   })
 })

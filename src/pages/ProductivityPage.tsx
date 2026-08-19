@@ -438,9 +438,12 @@ function TeamComparison({
       stats.map((row) => [
         row.name,
         row.role,
-        (row.minutes / 60).toFixed(2),
-        (row.billableMinutes / 60).toFixed(2),
-        (row.internalMinutes / 60).toFixed(2),
+        // `decimalHours`, matching the table above it — a bare toFixed(2)
+        // truncates an exact half-hundredth (59.7 min printed 0.99 here and
+        // 1.00 on screen).
+        decimalHours(row.minutes),
+        decimalHours(row.billableMinutes),
+        decimalHours(row.internalMinutes),
         row.tasksCompleted,
         row.casesAdvanced,
         row.casesCompleted,
@@ -713,8 +716,8 @@ function PerPersonDetail({
               ['Period', 'Hours', 'Billable hours', 'Items completed', 'Cases moved'],
               periodRows.map((row) => [
                 formatPeriodLabel(row.period, granularity),
-                (row.minutes / 60).toFixed(2),
-                (row.billable / 60).toFixed(2),
+                decimalHours(row.minutes),
+                decimalHours(row.billable),
                 row.items,
                 row.cases,
               ]),

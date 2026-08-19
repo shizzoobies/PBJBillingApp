@@ -5,13 +5,14 @@ import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
 import { fetchTeam } from '../lib/api'
 import {
+  allocatePersonCost,
   billableMinutes as sumBillableMinutes,
+  displayHours,
   duplicateFullSliceIds,
-  exactHoursCell,
-  exactMinutesCell,
   internalMinutes as sumInternalMinutes,
   laborCost,
   personPeriodCost,
+  sumDisplayHours,
   sumPersonCosts,
   trackedMinutes as sumTrackedMinutes,
 } from '../lib/payrollAggregation'
@@ -27,11 +28,13 @@ import type {
 import {
   addDays,
   clientName,
+  decimalHours,
   effectiveSessions,
   formatAuditStamp,
   currency,
   employeeName,
   formatDecimalHours,
+  formatHoursTotal,
   getBillingPeriodLabel,
   getInvoice,
   isInBillingPeriod,
@@ -41,22 +44,25 @@ import {
 } from '../lib/utils'
 
 /**
- * The one sentence that tells the reader how a Cost figure was built. It is on
- * the page because the alternative is the owner re-deriving cost from the
- * 2-decimal Hours column, getting a different answer by a dime, and reporting a
- * bug — which is exactly what happened.
+ * The one sentence that tells the reader how a Cost figure was built. It stays
+ * on the page, but it now says something reassuring instead of something
+ * defensive: the obvious arithmetic is the right arithmetic.
  */
 const COST_BASIS_NOTE =
-  'Cost comes from the exact Minutes column, not the rounded Hours next to it — ' +
-  'divide the minutes by 60 and multiply by the pay rate and you get the Cost shown, to the penny.'
+  'Cost is the Hours shown times the pay rate — hours are rounded to two decimals first, so ' +
+  'multiplying an Hours cell by hand gives the Cost beside it. Both columns add up to their ' +
+  'own totals exactly.'
 
 /**
- * The honest footnote for the per-entry Cost column: row cents are each rounded
- * on their own, the total is the per-person figure, and those two can differ by
- * a penny or two. Said out loud here rather than left to be discovered.
+ * The honest footnote for the per-entry Cost column: rows are a BREAKDOWN of
+ * what each person is paid for the period, not independent prices. See
+ * `allocatePersonCost` — the column sums exactly, at the price of a row sitting
+ * a penny or two off its own hours × rate.
  */
 const COST_ROW_ROUNDING_NOTE =
-  'Cost totals are per person from exact seconds, rounded to the cent — row cents may differ by a penny or two from the total.'
+  'Each row’s Cost is that person’s pay for the period split across their entries, so the ' +
+  'column adds up to the total exactly; a single row can sit a few cents from its own hours ' +
+  'times the rate.'
 
 export function ReportsPage() {
   const { data, billingPeriod, ownerMode, firmSettings } = useAppContext()
@@ -331,7 +337,13 @@ type PayrollEntryRow = {
 }
 
 /** All the work logged on a single day, plus that day's total. */
-type PayrollDayGroup = { date: string; minutes: number; rows: PayrollEntryRow[] }
+/**
+ * `hours` is the sum of the DISPLAYED hours of the rows underneath it (skipping
+ * full-mode repeats), so a day subtotal always equals the column above it, and
+ * the grand total is in turn the sum of the day subtotals. Both levels
+ * reconcile because the composition is the same at each one.
+ */
+type PayrollDayGroup = { date: string; hours: number; rows: PayrollEntryRow[] }
 
 function PayrollHoursReport({
   checklists,
@@ -401,8 +413,18 @@ function PayrollHoursReport({
     [employees, inRange],
   )
 
-  const totalMinutes = rows.reduce((sum, row) => sum + row.minutes, 0)
-  const totalBillableMinutes = rows.reduce((sum, row) => sum + row.billable, 0)
+  /**
+   * TOTALS ARE THE SUM OF THE ROWS ON SCREEN, not the rounding of the minutes
+   * behind them. Three rows of 0.17h + 0.17h + 0.75h read 1.09h even though the
+   * underlying 10 + 10 + 45 minutes round to 1.08h — and 1.09 is the honest
+   * total, because it is the one the owner gets when she adds the column.
+   *
+   * This was tolerable while Hours was a reading aid beside an exact Minutes
+   * column. Hours is now the costing figure and the only time column on the
+   * report, so a total that contradicts its own column is not tolerable.
+   */
+  const totalHours = sumDisplayHours(rows.map((row) => displayHours(row.minutes)))
+  const totalBillableHours = sumDisplayHours(rows.map((row) => displayHours(row.billable)))
   const totalAmount = rows.reduce((sum, row) => sum + (row.amount ?? 0), 0)
   const fmtDay = (iso: string) => shortDate.format(new Date(`${iso}T12:00:00`))
   const rangeLabel = `${fmtDay(start)} – ${fmtDay(end)}`
@@ -478,9 +500,11 @@ function PayrollHoursReport({
     const byDate = new Map<string, PayrollDayGroup>()
     for (const row of rows) {
       const countedElsewhere = duplicates.has(row.id)
-      const group = byDate.get(row.date) ?? { date: row.date, minutes: 0, rows: [] }
+      const group = byDate.get(row.date) ?? { date: row.date, hours: 0, rows: [] }
       group.rows.push({ ...row, countedElsewhere })
-      if (!countedElsewhere) group.minutes += row.minutes
+      if (!countedElsewhere) {
+        group.hours = sumDisplayHours([group.hours, displayHours(row.minutes)])
+      }
       byDate.set(row.date, group)
     }
     // `rows` is already date-ordered, so insertion order is date order.
@@ -521,7 +545,9 @@ function PayrollHoursReport({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detailEntries, employees, clients, checklistTitleById])
 
-  const detailMinutes = dayGroups.reduce((sum, group) => sum + group.minutes, 0)
+  // Grand total = the sum of the DAY SUBTOTALS, each of which is the sum of its
+  // own rows. Every level of the table adds up to the level above it.
+  const detailHours = sumDisplayHours(dayGroups.map((group) => group.hours))
   const detailRows = dayGroups.flatMap((group) => group.rows)
   const showMemberColumn = memberFilter === 'all'
   // Columns before Hours: Day/job, [Team member], Task, Clock in, Clock out, Sessions.
@@ -557,11 +583,13 @@ function PayrollHoursReport({
    *  - it applies to ALL hours worked, not just billable ones. You pay for
    *    internal time too, which is the whole point of comparing the two.
    *
-   * Cent-rounded per person by `personPeriodCost`, so a column of these adds up
-   * to the total printed underneath it. `null` = no cost rate, and for an OWNER
-   * that is the correct, permanent answer rather than a missing value: an owner
-   * draws no hourly wage, so her time carries no labor cost. Never render it as
-   * $0.00, and never treat the blank as something to be filled in.
+   * Priced by `personPeriodCost` off the person's two-decimal hours — the same
+   * hours printed in the Hours cell — so the Cost cell is reproducible by hand
+   * and a column of these adds up to the total printed underneath it. `null` =
+   * no cost rate, and for an OWNER that is the correct, permanent answer rather
+   * than a missing value: an owner draws no hourly wage, so her time carries no
+   * labor cost. Never render it as $0.00, and never treat the blank as
+   * something to be filled in.
    */
   const costFor = (employeeId: string, minutesWorked: number) =>
     personPeriodCost(minutesWorked, costRates[employeeId])
@@ -575,53 +603,69 @@ function PayrollHoursReport({
   // person before rounding, so this lands on the same rule as the table above.
   const detailCost = laborCost(detailRows, (employeeId) => costRates[employeeId])
 
-  // Billable minutes and $ are NOT deduped: full mode bills each client the
-  // whole block deliberately, and this is the billing side of the report.
-  const detailBillableMinutes = detailRows.reduce((sum, row) => sum + row.billableMinutes, 0)
+  /**
+   * Per-ENTRY Cost cells, by row id.
+   *
+   * A row cannot be priced on its own AND add up to what the person is paid for
+   * the period — that is the grain conflict, and the total is the half that has
+   * to be right. So each person's period cost is split across their own rows
+   * (`allocatePersonCost`), which makes the column sum EXACTLY at the price of a
+   * row landing a penny or two off its own hours × rate. Full-mode repeats are
+   * excluded and render "—": the firm pays for the block once.
+   */
+  const detailCostByRowId = (() => {
+    const rowsByEmployee = new Map<string, { id: string; minutes: number }[]>()
+    for (const row of detailRows) {
+      if (row.countedElsewhere) continue
+      const mine = rowsByEmployee.get(row.employeeId) ?? []
+      mine.push({ id: row.id, minutes: row.minutes })
+      rowsByEmployee.set(row.employeeId, mine)
+    }
+    const byRowId = new Map<string, number | null>()
+    for (const [employeeId, mine] of rowsByEmployee) {
+      const costs = allocatePersonCost(
+        mine.map((row) => row.minutes),
+        costRates[employeeId],
+      )
+      mine.forEach((row, index) => byRowId.set(row.id, costs[index]))
+    }
+    return byRowId
+  })()
+  const rowCostOf = (rowId: string) => detailCostByRowId.get(rowId) ?? null
+
+  // Billable hours and $ are NOT deduped: full mode bills each client the whole
+  // block deliberately, and this is the billing side of the report. The hours
+  // total is still the sum of the displayed rows.
+  const detailBillableHours = sumDisplayHours(
+    detailRows.map((row) => displayHours(row.billableMinutes)),
+  )
   const detailAmount = detailRows.reduce(
     (sum, row) => sum + (amountFor(row.employeeId, row.billableMinutes) ?? 0),
     0,
   )
 
   // The original five columns keep their names and positions — they are what
-  // the owner's own spreadsheets point at. The reconciliation columns are
-  // APPENDED: exact minutes as stored, hours at 4dp, and the Cost the report
-  // shows, so `Tracked hours (4dp)` × rate reproduces `Cost` to the cent.
+  // the owner's own spreadsheets point at. `Cost` is appended after them. The
+  // exact-minutes and 4dp-hours columns that used to follow are gone: they
+  // existed only to re-derive a cost the printed hours could not reproduce, and
+  // `Tracked hours` × rate now reproduces `Cost` on its own.
   const exportCsv = () =>
     downloadCsv(
       `payroll-hours-${periodType}-${start}.csv`,
-      [
-        'Employee',
-        'Tracked hours',
-        'Billable hours',
-        'Internal hours',
-        'Entries',
-        'Tracked minutes (exact)',
-        'Tracked hours (4dp)',
-        'Cost',
-      ],
+      ['Employee', 'Tracked hours', 'Billable hours', 'Internal hours', 'Entries', 'Cost'],
       [
         ...rows.map((row) => [
           row.name,
-          (row.minutes / 60).toFixed(2),
-          (row.billable / 60).toFixed(2),
-          (row.internal / 60).toFixed(2),
+          decimalHours(row.minutes),
+          decimalHours(row.billable),
+          decimalHours(row.internal),
           row.count,
-          exactMinutesCell(row.minutes),
-          exactHoursCell(row.minutes),
           // Blank, not 0.00, when the person has no cost rate.
           costFor(row.id, row.minutes)?.toFixed(2) ?? '',
         ]),
-        [
-          'TOTAL',
-          (totalMinutes / 60).toFixed(2),
-          '',
-          '',
-          '',
-          exactMinutesCell(totalMinutes),
-          exactHoursCell(totalMinutes),
-          totalCost.toFixed(2),
-        ],
+        // Same summed-rows total the on-screen footer shows, so the CSV and the
+        // printout can never hand her two different numbers.
+        ['TOTAL', totalHours.toFixed(2), '', '', '', totalCost.toFixed(2)],
       ],
     )
 
@@ -637,8 +681,8 @@ function PayrollHoursReport({
         row.member,
         row.job,
         row.task,
-        (row.minutes / 60).toFixed(2),
-        (row.billableMinutes / 60).toFixed(2),
+        decimalHours(row.minutes),
+        decimalHours(row.billableMinutes),
       ]),
     )
 
@@ -664,10 +708,6 @@ function PayrollHoursReport({
         'Billable $',
         'Cost',
         'Description',
-        // Appended, not inserted: anything already pointing at column H stays
-        // pointing at Hours. These two make the Cost column re-derivable.
-        'Minutes (exact)',
-        'Hours (4dp)',
       ],
       [...detailEntries]
         .sort((a, b) => a.date.localeCompare(b.date))
@@ -683,19 +723,19 @@ function PayrollHoursReport({
             first ? formatAuditStamp(first.startAt) : '',
             last ? formatAuditStamp(last.endAt) : '',
             spans.length,
-            (entry.minutes / 60).toFixed(2),
+            decimalHours(entry.minutes),
             entry.billable ? 'Yes' : 'No',
-            entry.billable ? (entry.minutes / 60).toFixed(2) : '0.00',
+            entry.billable ? decimalHours(entry.minutes) : '0.00',
             // Blank, not 0.00, when the person has no bill rate configured —
             // a spreadsheet should not be told they billed nothing.
             amountFor(entry.employeeId, entry.billable ? entry.minutes : 0)?.toFixed(2) ?? '',
-            // Cost is on ALL minutes, billable or not, cent-rounded per row.
-            // Blank when no cost rate. Row cents can differ by a penny or two
-            // from the report's per-person total — see COST_ROW_ROUNDING_NOTE.
-            costFor(entry.employeeId, entry.minutes)?.toFixed(2) ?? '',
+            // The SAME allocated cent the on-screen detail row shows, so the
+            // export and the printout agree and the column sums to the report's
+            // total. Blank when there is no cost rate — and blank on a
+            // full-mode repeat, which the screen shows as "—" (the block is
+            // paid once). The export used to charge every repeat again.
+            rowCostOf(entry.id)?.toFixed(2) ?? '',
             entry.description ?? '',
-            exactMinutesCell(entry.minutes),
-            exactHoursCell(entry.minutes),
           ]
         }),
     )
@@ -771,14 +811,11 @@ function PayrollHoursReport({
           <thead>
             <tr>
               <th>Team member</th>
+              {/* Hours is the costing column: Cost is this figure × the pay
+                  rate. An exact "Minutes" column used to sit beside it to
+                  explain why the two didn't multiply out — that gap is gone,
+                  and so is the column. */}
               <th>Hours</th>
-              {/* The exact minutes as stored — the SAME value the Summary CSV
-                  carries. Cost is built from these, so `Minutes ÷ 60 × rate`
-                  reproduces the Cost cell by hand; the 2-decimal Hours beside
-                  it will not (20.22h × $16 = $323.52, the real figure $323.54).
-                  That gap is why this column is on screen and not only in the
-                  export. */}
-              <th>Minutes</th>
               <th>Billable</th>
               <th>Billable $</th>
               <th>Cost</th>
@@ -789,7 +826,7 @@ function PayrollHoursReport({
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="muted-text">
+                <td colSpan={7} className="muted-text">
                   No team members to report.
                 </td>
               </tr>
@@ -800,7 +837,6 @@ function PayrollHoursReport({
                     <strong>{row.name}</strong>
                   </td>
                   <td>{formatDecimalHours(row.minutes)}</td>
-                  <td className="payroll-exact-minutes">{exactMinutesCell(row.minutes)}</td>
                   <td>{formatDecimalHours(row.billable)}</td>
                   <td>{money(row.amount)}</td>
                   {/* Cost is on HOURS WORKED, not billable hours — the firm
@@ -818,13 +854,10 @@ function PayrollHoursReport({
                 <strong>Total</strong>
               </td>
               <td>
-                <strong>{formatDecimalHours(totalMinutes)}</strong>
-              </td>
-              <td className="payroll-exact-minutes">
-                <strong>{exactMinutesCell(totalMinutes)}</strong>
+                <strong>{formatHoursTotal(totalHours)}</strong>
               </td>
               <td>
-                <strong>{formatDecimalHours(totalBillableMinutes)}</strong>
+                <strong>{formatHoursTotal(totalBillableHours)}</strong>
               </td>
               <td>
                 <strong>{currency.format(totalAmount)}</strong>
@@ -896,7 +929,7 @@ function PayrollHoursReport({
                       <strong>{fmtDay(group.date)}</strong>
                     </td>
                     <td>
-                      <strong>{formatDecimalHours(group.minutes)}</strong>
+                      <strong>{formatHoursTotal(group.hours)}</strong>
                     </td>
                     <td />
                     <td />
@@ -931,9 +964,7 @@ function PayrollHoursReport({
                       <td>{money(amountFor(row.employeeId, row.billableMinutes))}</td>
                       {/* Deduped rows show no cost: the firm pays for the block
                           once, and the first row of the group carries it. */}
-                      <td>
-                        {row.countedElsewhere ? '—' : money(costFor(row.employeeId, row.minutes))}
-                      </td>
+                      <td>{row.countedElsewhere ? '—' : money(rowCostOf(row.id))}</td>
                     </tr>
                   ))}
                 </Fragment>
@@ -946,10 +977,10 @@ function PayrollHoursReport({
                 <strong>Total</strong>
               </td>
               <td>
-                <strong>{formatDecimalHours(detailMinutes)}</strong>
+                <strong>{formatHoursTotal(detailHours)}</strong>
               </td>
               <td>
-                <strong>{formatDecimalHours(detailBillableMinutes)}</strong>
+                <strong>{formatHoursTotal(detailBillableHours)}</strong>
               </td>
               <td>
                 <strong>{currency.format(detailAmount)}</strong>
@@ -1017,6 +1048,9 @@ function ReportsOverview({
    * `null` = no cost rate, which for an OWNER is the correct permanent answer
    * rather than a missing setting — she draws no hourly wage, so her time
    * carries no labor cost. It renders "—", never "$0.00".
+   *
+   * "Cent-rounded once per person" now means off that person's two-decimal
+   * hours, so the Tracked hours cell beside it multiplies straight into Cost.
    */
   const overviewCostFor = (employeeId: string, minutesWorked: number) =>
     personPeriodCost(minutesWorked, costRates[employeeId])
@@ -1037,12 +1071,14 @@ function ReportsOverview({
       ],
       employeeRows.map((row) => [
         employeeName(employees, row.employeeId),
-        (row.minutes / 60).toFixed(2),
-        (row.billableMinutes / 60).toFixed(2),
+        // `decimalHours`, not a bare toFixed: this is the figure Cost is built
+        // from, so the two must round the same way.
+        decimalHours(row.minutes),
+        decimalHours(row.billableMinutes),
         row.billableAmount.toFixed(2),
         // Blank, not 0.00, when the person has no cost rate.
         overviewCostFor(row.employeeId, row.minutes)?.toFixed(2) ?? '',
-        (row.internalMinutes / 60).toFixed(2),
+        decimalHours(row.internalMinutes),
         row.entryCount,
         row.clientCount,
       ]),
@@ -1061,9 +1097,9 @@ function ReportsOverview({
       ],
       clientRows.map((row) => [
         clientName(clients, row.clientId),
-        (row.minutes / 60).toFixed(2),
-        (row.billableMinutes / 60).toFixed(2),
-        (row.internalMinutes / 60).toFixed(2),
+        decimalHours(row.minutes),
+        decimalHours(row.billableMinutes),
+        decimalHours(row.internalMinutes),
         row.employeeCount,
         row.invoiceTotal.toFixed(2),
       ]),
@@ -1073,7 +1109,7 @@ function ReportsOverview({
     downloadCsv(
       `task-report-${periodSlug}.csv`,
       ['Task', 'Hours', 'Entries'],
-      taskRows.map((row) => [row.taskTitle, (row.minutes / 60).toFixed(2), row.entryCount]),
+      taskRows.map((row) => [row.taskTitle, decimalHours(row.minutes), row.entryCount]),
     )
 
   // Same bill-rate basis as the payroll report and the overview's
@@ -1126,9 +1162,9 @@ function ReportsOverview({
           first ? formatAuditStamp(first.startAt) : '',
           last ? formatAuditStamp(last.endAt) : '',
           spans.length,
-          (entry.minutes / 60).toFixed(2),
+          decimalHours(entry.minutes),
           entry.billable ? 'Yes' : 'No',
-          entry.billable ? (entry.minutes / 60).toFixed(2) : '0.00',
+          entry.billable ? decimalHours(entry.minutes) : '0.00',
           overviewAmountFor(entry.employeeId, entry.billable ? entry.minutes : 0)?.toFixed(2) ?? '',
           entry.description,
         ]
@@ -1211,6 +1247,9 @@ function ReportsOverview({
             ]
           })}
         />
+        {/* The same sentence the payroll report carries — this is the table she
+            prints, so the basis has to be legible here too. */}
+        <p className="report-caption muted-text">{COST_BASIS_NOTE}</p>
       </section>
 
       <section className="panel report-section">

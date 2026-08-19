@@ -32,19 +32,24 @@ export declare function internalMinutes(
 
 export declare function roundToCent(amount: number): number
 
+export declare function displayHours(minutes: number): number
+
 export declare function personPeriodCost(
   minutes: number,
   rate: number | null | undefined,
 ): number | null
 
+export declare function sumDisplayHours(hours: readonly (number | null | undefined)[]): number
+
 export declare function sumPersonCosts(costs: readonly (number | null | undefined)[]): number
+
+export declare function allocatePersonCost(
+  minutesPerRow: readonly number[],
+  rate: number | null | undefined,
+): (number | null)[]
 
 export declare function laborCost(
   entries: readonly PayrollSlice[],
   costRateOf: (employeeId: string) => number | null | undefined,
   duplicates?: ReadonlySet<string>,
 ): number
-
-export declare function exactMinutesCell(minutes: number): string
-
-export declare function exactHoursCell(minutes: number): string

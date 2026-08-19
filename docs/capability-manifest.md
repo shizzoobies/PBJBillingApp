@@ -24,8 +24,10 @@ Two formats, chosen by what the screen is for:
   the "time logged" line on a task or case. When someone is logging or approving
   ONE piece of work, "23m" is the honest reading and "0.38h" is not.
 
-Cost figures are never derived from the displayed hours — see the payroll Hours
-report below.
+The displayed hours ARE the costing input: labor cost is the two-decimal hours a
+report shows times the pay rate, so multiplying a printed Hours cell by hand
+reproduces the Cost cell beside it. The full rule is under the payroll Hours
+report below ("HOW LABOR COST IS CALCULATED").
 
 ## Navigation map
 
@@ -1103,7 +1105,10 @@ Clients page meanwhile. Owner-only.
   shows its full fee as profit. The reason is printed on screen under every
   cost and profit figure so the number is never a puzzle.
 - **Every hours figure on the recap reads as x.xx** — the totals and each
-  person's row.
+  person's row. Those printed per-person hours are also what labor cost is
+  priced from: pricing each person's shown hours at their cost rate and adding
+  the results gives the recap's labor cost exactly (see "HOW LABOR COST IS
+  CALCULATED" under Reports).
 - **The by-staff list is in a FIXED order that does not move month to month:**
   CFO tier first, then Accountant, then Bookkeeper, then anyone whose role isn't
   set — and alphabetically by name inside a tier. It used to sort by hours, so
@@ -1200,12 +1205,19 @@ Clients page meanwhile. Owner-only.
   the summary and the day-and-job detail alike. Two decimals, never one: the old
   one-decimal rounding printed a few-minute split allocation as "0.0h", so the
   hours appeared to vanish and the rows didn't add up to the total.
-- **An exact "Minutes" column sits beside Hours in the summary table**, carrying
-  the minutes as stored (seconds included) — the same value the Summary CSV
-  exports. It is there so cost can be checked ON SCREEN: **minutes ÷ 60 × the
-  pay rate reproduces the Cost cell to the penny**, which the 2-decimal Hours
-  column cannot (20.22h × $16 = $323.52 where the real figure is $323.54). The
-  note under the totals says exactly that.
+- **Every hours TOTAL is the sum of the rows shown above it**, not a rounding of
+  the minutes behind them — so adding the Hours column by hand lands on the
+  printed total. Rows of 0.17h + 0.17h + 0.75h total 1.09h, even though the
+  underlying 10 + 10 + 45 minutes would round to 1.08h; 1.09 is the answer she
+  gets with a calculator, so 1.09 is the answer printed. This composes down the
+  detail table too: each day subtotal is the sum of its rows, and the grand
+  total is the sum of the day subtotals. Same rule on the Client Recap card
+  (total and billable are the sum of the by-staff list, and Total − vs-prior
+  lands exactly on the printed delta) and in the assistant's hours summaries.
+- **Hours is the costing column.** Cost is that figure × the pay rate — nothing
+  else is needed to check it. An exact "Minutes" column used to sit between
+  Hours and Billable to explain why the two would not multiply out; that gap is
+  gone and so is the column.
 - **Billable time, Billable $ and Cost appear on the PRINTED report**, not just
   on screen — on both the per-member summary and the day-and-job detail, with
   totals.
@@ -1222,27 +1234,46 @@ Clients page meanwhile. Owner-only.
     total is therefore the firm's real STAFF labor cost.
   - Anyone with no rate configured shows "—" rather than "$0.00", so an unset
     rate never reads as "billed nothing" or "cost nothing".
-- **Cost is calculated PER PERSON from exact clock time, and every Cost total is
-  the sum of those per-person figures.** The rule, everywhere on every surface:
-  add up one person's exact minutes for the period (seconds included — nothing
-  is rounded to the minute along the way), convert to hours, multiply by their
-  cost rate, and round to the cent ONCE. A total is then the sum of those
-  cent-rounded per-person amounts. The consequence that matters: **adding up the
-  visible Cost column with a calculator always lands exactly on the total
-  printed underneath it.** A line under the summary totals says so: "Cost comes
-  from the exact Minutes column, not the rounded Hours next to it — divide the
-  minutes by 60 and multiply by the pay rate and you get the Cost shown, to the
-  penny."
-  - Recomputing cost from a report's 2-decimal Hours column will NOT match, and
-    that is expected, not a bug: two decimals of an hour is 36 seconds of slack,
-    so the hand figure can land a dime or two off over a pay period. Use the
-    **Minutes column on the report itself** (or the exact minutes in the exports
-    below) to re-derive a cost figure.
-  - Per-ENTRY Cost cells in the day-and-job detail table and the "Raw hours"
-    export are each rounded to the cent on their own, so each row is readable
-    by itself. The detail table's Cost TOTAL is still the per-person figure, so
-    the row cents can differ from it by a penny or two — a muted note under the
-    detail totals says so on the page rather than leaving it to be discovered.
+- **HOW LABOR COST IS CALCULATED — the rule, on every surface. Labor cost = the
+  two-decimal hours shown × the cost rate: round the hours FIRST, then
+  multiply.** In the firm owner's own words, verbatim: *"I pay by the minute so
+  if someone works 20 hours and 13.4 minutes rounded to the 2nd decimal then I
+  would pay 20.22 times her cost and that time because the staple for all
+  comparisons"*. So 20h 13.4m at a $16 cost rate is 20.22 × 16 = **$323.52**.
+  - **Per person, per period, at the grain the report prints.** Add up one
+    person's minutes for the period (seconds included — nothing is rounded to
+    the minute along the way), round those to two-decimal hours, multiply by
+    their cost rate, and settle the cent. A cost TOTAL is the sum of those
+    per-person amounts.
+  - The two consequences that matter, and the whole reason for the rule:
+    **multiplying a visible Hours cell by the pay rate gives the Cost cell
+    beside it**, and **adding up the visible Cost column lands exactly on the
+    total printed underneath it.** A line under the summary totals says so.
+  - It is the same rule EVERYWHERE — payroll Hours report (summary, detail and
+    all three exports), the Employee report, the Client Recap's labor cost and
+    margin, estimated-vs-actual cost, and the assistant's client profitability
+    and margin answers. They all call the same calculator, so no two surfaces
+    can disagree.
+  - **It changed on 2026-08-19.** Cost used to be computed from exact seconds
+    and rounded once at the end — a defensible rule, and not the one the firm
+    pays by: it made the printed Hours column un-multipliable, so reports had to
+    carry an exact-minutes column to explain a few cents of drift. Figures on
+    old and new reports differ slightly (typically a few cents to a couple of
+    dimes per person per pay period, in either direction) because the RULE
+    changed, not because anything was wrong before. Nothing stored changed —
+    every report, past and present, recomputes under the current rule.
+  - **Per-ENTRY Cost cells** in the day-and-job detail table and the "Raw
+    hours" export are that person's pay for the PERIOD split across their own
+    entries, so **the Cost column adds up to the total under it exactly**. A
+    row cannot both be priced on its own hours and add up to what the person is
+    paid — the per-row rounding reaches dollars over a month of entries — and
+    the total is the half that has to be right. In practice a row still lands
+    within a few cents of its own hours × rate, and closer the more entries
+    there are; a muted note under the detail totals says so on the page. A
+    full-mode repeat shows no cost, on screen and in the export alike (the firm
+    pays for the block once).
+  - **The owner has no cost rate**, so her rows read "—" and she contributes
+    nothing to any cost total. That is permanent and correct, not a gap.
 - Payroll report detail — "Time by day and job": below the per-member summary,
   the same period broken down day by day. **EVERY TIME ENTRY IS LISTED
   INDIVIDUALLY** — entries are never merged just because they share a day,
@@ -1270,14 +1301,14 @@ Clients page meanwhile. Owner-only.
 - Both RAW exports carry "Billable hours" and "Billable $"; the payroll
   "Raw hours" export also carries "Cost". These match the printed report — blank
   rather than 0.00 when the person has no rate set.
-- **The payroll exports carry EXACT MINUTES so any cost figure can be re-derived
-  by hand.** "Summary CSV" gains "Tracked minutes (exact)", "Tracked hours
-  (4dp)" and "Cost"; "Raw hours" gains "Minutes (exact)" and "Hours (4dp)". The
-  minutes are the value as stored (seconds included), so minutes ÷ 60 × the cost
-  rate reproduces the shown cost to the cent, every time; the 4-decimal hours
-  are the quick eyeball check, good to about a tenth of a cent. All of these
-  columns are APPENDED — the existing columns keep their names and their
-  positions, so an existing spreadsheet or pivot pointing at them still works.
+- **The payroll exports price Cost off the Hours column they carry**, so a
+  spreadsheet can re-derive it with one multiplication. "Summary CSV" is
+  Employee, Tracked hours, Billable hours, Internal hours, Entries, Cost — the
+  original five keep their names and positions, with Cost appended. The
+  "Tracked minutes (exact)" / "Tracked hours (4dp)" columns (and "Minutes
+  (exact)" / "Hours (4dp)" on "Raw hours") existed only to reconcile a cost the
+  printed hours could not reproduce, and were REMOVED on 2026-08-19 when that
+  stopped being true.
 - Both RAW exports (payroll "Raw hours" and the monthly "Hours by month") include
   CLOCK IN and CLOCK OUT stamps plus a Sessions count, so hours can be audited
   against when the work actually happened: clock in = the first start, clock out
