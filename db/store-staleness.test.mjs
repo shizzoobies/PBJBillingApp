@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   AppDataStore,
@@ -15,6 +15,7 @@ import {
 import {
   BULK_SAVE_TABLES,
   StaleWorkspaceError,
+  fileWorkspaceVersion,
   workspaceVersionSql,
 } from '../lib/workspace-version.js'
 
@@ -172,11 +173,14 @@ describe('bulk save staleness guard (file backend)', () => {
     ).rejects.toMatchObject({ currentVersion })
   })
 
-  it('lets an unguarded write through — read()\'s materializer must not be gated', async () => {
+  it('lets an unguarded write through — internal read-modify-write helpers are not gated', async () => {
     await store.write(workspace({ clients: [{ id: 'c1', name: 'Changed' }] }))
 
-    // No expectedVersion => no guard at all. `read()` writes its materialized
-    // output back this way, and gating that would deadlock it against itself.
+    // No expectedVersion => no guard at all. The internal read-modify-write
+    // helpers (createStandardTemplate, copyTemplateToClient, …) write this way
+    // and accept last-writer-wins. `read()`'s materializer write-back used to
+    // as well — it now passes the fingerprint it read under (see the guarded
+    // write-back suites at the bottom of this file).
     await expect(
       store.write(workspace({ clients: [{ id: 'c1', name: 'Materialized' }] })),
     ).resolves.toBeUndefined()
@@ -941,13 +945,37 @@ function fakePostgres({
   userRows = [],
   createdAtRows = {},
   priorItemRows = [],
+  templateRows = [],
+  templateStageRows = [],
+  templateItemRows = [],
+  versionResponses = null,
 } = {}) {
   const statements = []
   const record = (text, params) => {
     const trimmed = String(text).trim()
     statements.push({ text: trimmed, params })
+    // The workspace fingerprint (lib/workspace-version.js) — read()'s
+    // pre-capture and write()'s in-transaction re-check issue the same SQL.
+    // `versionResponses` scripts the answers in order, so a test can make the
+    // fingerprint MOVE between the capture and the check (i.e. simulate a
+    // concurrent write landing mid-read). Default: empty tables, stable value.
+    if (/md5\(coalesce\(string_agg/i.test(trimmed) && /union all/i.test(trimmed)) {
+      return { rows: Array.isArray(versionResponses) ? (versionResponses.shift() ?? []) : [] }
+    }
     if (/^select\b[\s\S]*\bfrom invoices\b/i.test(trimmed)) {
       return { rows: invoices }
+    }
+    // read()'s template/stage/item selects — column-anchored so the bulk
+    // save's bare `select id, created_at from checklist_templates` snapshot
+    // (handled below) never matches these.
+    if (/\bnext_due_date\b[\s\S]*from checklist_templates\b/i.test(trimmed)) {
+      return { rows: templateRows }
+    }
+    if (/\boffset_days\b[\s\S]*from checklist_template_stages\b/i.test(trimmed)) {
+      return { rows: templateStageRows }
+    }
+    if (/select id, template_id, label\b[\s\S]*from checklist_template_items\b/i.test(trimmed)) {
+      return { rows: templateItemRows }
     }
     // `update invoices … returning id` — the void pass reads its OWN output to
     // decide which retainers to hand back, so the fake has to answer with the
@@ -5563,5 +5591,322 @@ describe('retainer lifecycle edges on the postgres branch', () => {
     await postgresStore(fake).voidUnsentInvoicesForPeriod('2026-08')
 
     expect(fake.matching(/set applied_to_invoice_id = null/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * `read()`'s materializer write-back is GUARDED.
+ *
+ * The write-back is a full bulk save (wipe-and-reinsert of every workspace
+ * table), and it used to run with no `expectedVersion` at all — so anything
+ * created between read()'s snapshot and its write-back (a waiting-on entry, a
+ * checklist edit, a time entry) was silently erased whenever a new recurring
+ * cycle happened to spawn on the same page load. That was the one honest
+ * asterisk on "nothing removes a saved wait": the record IS permanent, unless
+ * the materializer's unguarded write-back raced you.
+ *
+ * The contract now: read() fingerprints the persisted workspace, re-reads, and
+ * hands the fingerprint to write(). If anything landed in between, the
+ * write-back is REFUSED (StaleWorkspaceError, nothing written), the freshly
+ * materialized data is served from memory, and the next read retries. A
+ * refused write-back loses nothing — a skipped spawn re-spawns; an erased wait
+ * is gone forever.
+ *
+ * Scope: the fingerprint covers BULK_SAVE_SLICES + employees
+ * (lib/workspace-version.js). A mid-read write to a slice OUTSIDE that set
+ * (invoices, firmSettings, serviceCategories) does not move it, so on the
+ * FILE backend such a write is still overwritten by the whole-file save.
+ * Postgres doesn't share that hole — its write() only touches the
+ * fingerprinted tables and restores invoices explicitly.
+ */
+describe("read()'s materializer write-back is guarded (file backend)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  // The materializer compares date-only strings from toISOString(), so "due
+  // yesterday, UTC" is always <= today and the template spawns on next read.
+  const utcDaysAgo = (days) =>
+    new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+
+  const spawnableWorkspace = () =>
+    workspace({
+      clients: [{ id: 'c1', name: 'Acme' }],
+      checklists: [
+        {
+          id: 'chk-1',
+          title: 'Existing task',
+          clientId: 'c1',
+          assigneeId: 'emp-1',
+          templateId: null,
+          frequency: 'once',
+          dueDate: utcDaysAgo(1),
+          caseId: 'chk-1',
+          stageId: null,
+          stageIndex: 0,
+          stageCount: 1,
+          items: [{ id: 'item-1', label: 'Reconcile the bank feed', done: false }],
+        },
+      ],
+      checklistTemplates: [
+        {
+          id: 'tpl-1',
+          title: 'Monthly bookkeeping',
+          clientId: 'c1',
+          assigneeId: 'emp-1',
+          frequency: 'monthly',
+          nextDueDate: utcDaysAgo(1),
+          active: true,
+          isStandard: false,
+          viewerIds: [],
+          editorIds: [],
+          stages: [
+            {
+              id: 'stage-1',
+              name: 'Stage 1',
+              assigneeId: 'emp-1',
+              offsetDays: 0,
+              viewerIds: [],
+              editorIds: [],
+              items: [{ id: 'ti-1', label: 'Close the month' }],
+            },
+          ],
+        },
+      ],
+    })
+
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const waitingOnsOnDisk = async () =>
+    (await persisted()).checklists
+      .find((c) => c.id === 'chk-1')
+      .items.find((i) => i.id === 'item-1').waitingOns ?? []
+
+  it('persists the spawn when nothing landed mid-read, exactly once', async () => {
+    await store.write(spawnableWorkspace())
+
+    const served = await store.read()
+    expect(served.checklists.filter((c) => c.templateId === 'tpl-1')).toHaveLength(1)
+
+    const afterFirst = await persisted()
+    expect(afterFirst.checklists.filter((c) => c.templateId === 'tpl-1')).toHaveLength(1)
+
+    // Idempotent: the next read spawns nothing new.
+    await store.read()
+    const afterSecond = await persisted()
+    expect(afterSecond.checklists.filter((c) => c.templateId === 'tpl-1')).toHaveLength(1)
+  })
+
+  it("hands write() the fingerprint of the workspace it actually read", async () => {
+    await store.write(spawnableWorkspace())
+    const preReadVersion = fileWorkspaceVersion(await persisted())
+
+    const writeSpy = vi.spyOn(store, 'write')
+    await store.read()
+
+    expect(writeSpy).toHaveBeenCalledTimes(1)
+    expect(writeSpy.mock.calls[0][1]).toMatchObject({ expectedVersion: preReadVersion })
+  })
+
+  it('refuses the write-back when a wait was saved mid-read — the wait survives', async () => {
+    await store.write(spawnableWorkspace())
+
+    // Deterministic interleaving: the moment read() hands its materialized
+    // snapshot to write(), land a waiting-on entry — the same shape as a
+    // bookkeeper saving a wait while an owner's page load spawns the new
+    // cycle. Without the guard, the write-back's wipe-and-reinsert erases it.
+    const realWrite = AppDataStore.prototype.write
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let interleaved = false
+    vi.spyOn(store, 'write').mockImplementation(async function (data, options) {
+      if (!interleaved) {
+        interleaved = true
+        await store.addWaitingOn(
+          'chk-1',
+          { itemId: 'item-1' },
+          { blockerId: 'emp-1', requestedBy: 'emp-1', note: 'client statements' },
+        )
+      }
+      return realWrite.call(store, data, options)
+    })
+
+    const served = await store.read()
+
+    // The read still serves the spawned checklist from memory...
+    expect(served.checklists.some((c) => c.templateId === 'tpl-1')).toBe(true)
+    // ...but persisted NOTHING: the wait saved mid-read is still on disk and
+    // the stale snapshot (which never contained it) was refused wholesale.
+    expect(await waitingOnsOnDisk()).toHaveLength(1)
+    expect((await persisted()).checklists.some((c) => c.templateId === 'tpl-1')).toBe(false)
+    expect(warn).toHaveBeenCalled()
+
+    // The next read retries with nothing in flight: the spawn lands AND the
+    // wait is still there. Nothing was lost on either side.
+    await store.read()
+    expect((await persisted()).checklists.some((c) => c.templateId === 'tpl-1')).toBe(true)
+    expect(await waitingOnsOnDisk()).toHaveLength(1)
+  })
+
+  it('the guard check and the write share one queue slot', async () => {
+    // The file equivalent of "the check runs inside the transaction": check and
+    // write share ONE queue slot, so a save that lands after the check cannot
+    // be erased by a write whose check predates it. Called in this order, the
+    // guarded write runs first (its fingerprint still current, it SUCCEEDS) and
+    // the unguarded one lands after — the final state must be the LATER write,
+    // not a stale snapshot that checked early and wrote late (which is exactly
+    // what the old three-slot shape produced here).
+    const version = await store.computeWorkspaceVersion()
+    const guarded = store.write(workspace({ clients: [{ id: 'c1', name: 'Guarded' }] }), {
+      expectedVersion: version,
+    })
+    const unguarded = store.write(workspace({ clients: [{ id: 'c1', name: 'Unguarded' }] }))
+    await expect(guarded).resolves.toBeUndefined()
+    await expect(unguarded).resolves.toBeUndefined()
+
+    const final = await persisted()
+    expect(final.clients[0].name).toBe('Unguarded')
+  })
+})
+
+/**
+ * The same guarded write-back on the POSTGRES branch — the one production runs.
+ * The fake can't prove transaction isolation, but it CAN pin the mechanics:
+ * the fingerprint is captured, the snapshot handed to write() is read AFTER
+ * the capture (never before — a snapshot older than its fingerprint is how a
+ * concurrent write gets erased with the guard still passing), and a moved
+ * fingerprint aborts the write-back before any delete is issued.
+ */
+describe("read()'s materializer write-back is guarded (postgres branch)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const spawnTemplateRow = {
+    id: 'tpl-mat',
+    title: 'Monthly bookkeeping',
+    client_id: 'c1',
+    assignee_id: 'emp-1',
+    frequency: 'monthly',
+    next_due_date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+    active: true,
+    is_standard: false,
+    category_id: null,
+    skip_allowed: false,
+    onboarding_for_client_id: null,
+    source_template_id: null,
+    viewer_ids: [],
+    editor_ids: [],
+    scheduled_months: null,
+    due_day_of_month: null,
+    monthly_due_days: null,
+    repeat_annually: true,
+    schedule_year: null,
+    lead_days: null,
+  }
+
+  const stageRow = {
+    id: 'stage-1',
+    template_id: 'tpl-mat',
+    name: 'Stage 1',
+    assignee_id: 'emp-1',
+    offset_days: 0,
+    due_date: null,
+    due_day_of_month: null,
+    position: 0,
+    viewer_ids: [],
+    editor_ids: [],
+  }
+
+  const templateItemRow = {
+    id: 'ti-1',
+    template_id: 'tpl-mat',
+    label: 'Close the month',
+    sort_order: 0,
+    due_date: null,
+    due_day_of_month: null,
+    assignee_id: null,
+    stage_id: 'stage-1',
+    sub_items: [],
+  }
+
+  const clientRow = {
+    id: 'c1',
+    name: 'Acme',
+    contact: 'Pat',
+    billing_mode: 'hourly',
+    hourly_rate: 0,
+    plan_id: null,
+    plan_ids: [],
+    contact_ids: [],
+    assigned_bookkeeper_ids: [],
+    lifecycle_stage: 'active',
+  }
+
+  const spawnableFake = (overrides = {}) =>
+    fakePostgres({
+      clientRows: [clientRow],
+      templateRows: [spawnTemplateRow],
+      templateStageRows: [stageRow],
+      templateItemRows: [templateItemRow],
+      ...overrides,
+    })
+
+  const VERSION_SQL = /md5\(coalesce\(string_agg/i
+  const nthIndexOf = (fake, pattern, n) => {
+    let seen = 0
+    for (let i = 0; i < fake.statements.length; i += 1) {
+      if (pattern.test(fake.statements[i].text)) {
+        seen += 1
+        if (seen === n) return i
+      }
+    }
+    return -1
+  }
+
+  it('captures the fingerprint, re-reads, and re-checks inside the transaction', async () => {
+    const fake = spawnableFake()
+    const data = await postgresStore(fake).read()
+
+    // The spawn happened and was written back.
+    expect(data.checklists.some((c) => c.templateId === 'tpl-mat')).toBe(true)
+    expect(fake.matching(/^insert into checklists\b/i).length).toBeGreaterThan(0)
+
+    // Fingerprint captured BEFORE the snapshot that gets written: the template
+    // table is read once to detect the spawn, then again AFTER the capture.
+    const captureAt = nthIndexOf(fake, VERSION_SQL, 1)
+    const secondTemplateReadAt = nthIndexOf(
+      fake,
+      /\bnext_due_date\b[\s\S]*from checklist_templates\b/i,
+      2,
+    )
+    expect(captureAt).toBeGreaterThan(-1)
+    expect(secondTemplateReadAt).toBeGreaterThan(-1)
+    expect(captureAt).toBeLessThan(secondTemplateReadAt)
+
+    // And write() re-checked it INSIDE the transaction.
+    const beginAt = fake.indexOf(/^begin$/i)
+    const recheckAt = nthIndexOf(fake, VERSION_SQL, 2)
+    const firstDeleteAt = fake.indexOf(/^delete from /i)
+    expect(beginAt).toBeGreaterThan(-1)
+    expect(recheckAt).toBeGreaterThan(beginAt)
+    expect(recheckAt).toBeLessThan(firstDeleteAt)
+  })
+
+  it('a moved fingerprint aborts the write-back before any delete', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fake = spawnableFake({
+      versionResponses: [
+        [{ t: 'clients', h: 'before' }],
+        [{ t: 'clients', h: 'after-a-concurrent-write' }],
+      ],
+    })
+
+    const data = await postgresStore(fake).read()
+
+    // Served from memory, nothing wiped, transaction rolled back.
+    expect(data.checklists.some((c) => c.templateId === 'tpl-mat')).toBe(true)
+    expect(fake.matching(/^delete from /i)).toEqual([])
+    expect(fake.matching(/^insert into checklists\b/i)).toEqual([])
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
+    expect(warn).toHaveBeenCalled()
   })
 })

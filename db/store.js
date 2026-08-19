@@ -45,7 +45,14 @@ const fileOperationQueues = new Map()
 function enqueueFileOperation(filePath, operation) {
   const tail = fileOperationQueues.get(filePath) ?? Promise.resolve()
   const run = tail.then(operation, operation)
-  const tracked = run.finally(() => {
+  // The stored tail must never be a rejected promise: an op that throws (the
+  // staleness guard refusing a save) would otherwise surface as an unhandled
+  // rejection once no further op chains behind it. The caller still receives
+  // the real rejection via `run`; the queue itself only needs settlement order.
+  const tracked = run.then(
+    () => {},
+    () => {},
+  ).finally(() => {
     if (fileOperationQueues.get(filePath) === tracked) {
       fileOperationQueues.delete(filePath)
     }
@@ -4004,8 +4011,18 @@ export class AppDataStore {
     return Array.isArray(data.clients) ? data.clients.length : 0
   }
 
-  async read() {
-    if (this.pool) {
+  /**
+   * The raw Postgres workspace snapshot — every table `read()` serves, mapped
+   * to the app shape, WITHOUT the materializer pass. Extracted from `read()`
+   * so the guarded write-back can re-read a snapshot that is provably no older
+   * than the fingerprint it writes under (see `read()`). The inner block is
+   * the original `if (this.pool)` body, kept verbatim.
+   */
+  async _readPostgresWorkspace() {
+    if (!this.pool) {
+      throw new Error('_readPostgresWorkspace requires the Postgres pool')
+    }
+    {
       const [
         usersResult,
         plansResult,
@@ -4470,26 +4487,67 @@ export class AppDataStore {
 
       data.firmSettings = await this.getFirmSettings()
 
+      return data
+    }
+  }
+
+  async read() {
+    if (this.pool) {
+      const data = await this._readPostgresWorkspace()
       const materialized = materializeRecurringChecklists(data)
-      if (materialized.changed) {
-        // Persist the freshly-materialized checklists — but NEVER let a failure
-        // here 500 the read. read() runs on every page load; if this write-back
-        // throws (e.g. a constraint violation on one bad row), an unguarded
-        // throw turns a single bad record into a TOTAL outage for every user
-        // (the 2026-06-17 incident). Serve the in-memory materialized data and
-        // let the next read retry the persistence.
-        try {
-          await this.write(materialized.data)
-        } catch (error) {
-          console.error('[read] materialize write-back failed; serving in-memory data:', error)
-        }
-        return materialized.data
+      if (!materialized.changed) {
+        return data
       }
 
-      return data
+      // Persist the freshly-materialized checklists — GUARDED. The write-back
+      // is a full wipe-and-reinsert, so a write that landed while we were
+      // reading (a waiting-on entry, a checklist edit) would be silently
+      // erased by an unguarded save of our now-stale snapshot. The order
+      // below is what makes the guard sound: capture the persisted
+      // fingerprint FIRST, then re-read, so the snapshot handed to write()
+      // is never older than the fingerprint it is written under. write()
+      // re-checks the fingerprint inside its transaction and refuses with
+      // StaleWorkspaceError if anything moved — in which case we serve the
+      // in-memory data and let the next read retry. The double read only
+      // happens when a spawn is actually due (rare), so ordinary page loads
+      // pay nothing.
+      //
+      // And NEVER let a failure here 500 the read. read() runs on every page
+      // load; if this write-back throws (e.g. a constraint violation on one
+      // bad row), an unguarded throw turns a single bad record into a TOTAL
+      // outage for every user (the 2026-06-17 incident).
+      let served = materialized.data
+      try {
+        const expectedVersion = await postgresWorkspaceVersion(this.pool)
+        const fresh = await this._readPostgresWorkspace()
+        const freshMaterialized = materializeRecurringChecklists(fresh)
+        if (!freshMaterialized.changed) {
+          // Another server (or a concurrent read) already persisted the spawn.
+          return fresh
+        }
+        served = freshMaterialized.data
+        await this.write(freshMaterialized.data, { expectedVersion })
+        return freshMaterialized.data
+      } catch (error) {
+        if (error instanceof StaleWorkspaceError) {
+          console.warn(
+            `[read] materialize write-back skipped: workspace moved to ${error.currentVersion} mid-read; serving in-memory data`,
+          )
+        } else {
+          console.error('[read] materialize write-back failed; serving in-memory data:', error)
+        }
+        // The freshest snapshot we materialized (the re-read when it got that
+        // far, the first read otherwise). Its spawned ids were never
+        // persisted; the next read's write-back mints its own.
+        return served
+      }
     }
 
     const data = await readJson(localDataPath)
+    // Fingerprint of the persisted file EXACTLY as read, captured before any
+    // in-place backfill below mutates `data` — this is what the guarded
+    // write-back at the bottom is compared against.
+    const persistedVersion = fileWorkspaceVersion(data)
     if (!Array.isArray(data.checklistTemplates)) {
       const seed = await this.getSeedData()
       data.checklistTemplates = seed.checklistTemplates ?? []
@@ -4602,7 +4660,28 @@ export class AppDataStore {
 
     const materialized = materializeRecurringChecklists(data)
     if (materialized.changed || backfilled) {
-      await writeFile(localDataPath, JSON.stringify(materialized.data, null, 2))
+      // Same guarded write-back as the Postgres branch above: the fingerprint
+      // captured right after the file was read gates the save, so a write that
+      // landed mid-read refuses this snapshot instead of being erased by it.
+      // Scope caveat: the fingerprint covers BULK_SAVE_SLICES + employees
+      // (lib/workspace-version.js) — a mid-read write to a slice OUTSIDE that
+      // set (invoices, firmSettings, serviceCategories) does not move it and
+      // is still overwritten by this whole-file save. Postgres doesn't share
+      // that hole (its write() only touches the fingerprinted tables and
+      // restores invoices explicitly); file mode is dev/test only.
+      // A refused (or failed) write-back serves the in-memory data and lets
+      // the next read retry — never 500s the read.
+      try {
+        await this.write(materialized.data, { expectedVersion: persistedVersion })
+      } catch (error) {
+        if (error instanceof StaleWorkspaceError) {
+          console.warn(
+            `[read] materialize write-back skipped: workspace moved ${persistedVersion} -> ${error.currentVersion}; serving in-memory data`,
+          )
+        } else {
+          console.error('[read] materialize write-back failed; serving in-memory data:', error)
+        }
+      }
       return materialized.data
     }
 
@@ -4621,9 +4700,10 @@ export class AppDataStore {
    *   happens INSIDE the transaction (and inside the file queue), so there is
    *   no check-then-write window for a concurrent save to slip through.
    *
-   *   Omit it for server-authoritative writes that must never be gated — most
-   *   importantly `read()`'s materializer write-back, which by definition
-   *   carries the freshest data and would deadlock against its own guard.
+   *   `read()`'s materializer write-back passes it too (fingerprint captured
+   *   before the snapshot it writes was read), so a spawn racing a real write
+   *   refuses itself instead of erasing the write. Omit it only for internal
+   *   read-modify-write helpers where last-writer-wins is acceptable.
    */
   async write(data, { expectedVersion = null } = {}) {
     // SECURITY (L1/L2): normalize/clamp clearly-bad values IN PLACE before
@@ -5404,99 +5484,115 @@ export class AppDataStore {
 
     // Staleness guard, file backend. Same contract as the Postgres branch
     // above: refuse the save outright when the caller's snapshot no longer
-    // matches what is on disk. `computeWorkspaceVersion()` reads the persisted
-    // file (not `read()`), and all file access is serialized through
-    // `enqueueFileOperation`, so nothing can land between this check and the
-    // write below.
-    if (expectedVersion) {
-      const currentVersion = await this.computeWorkspaceVersion()
-      if (currentVersion !== expectedVersion) {
-        throw new StaleWorkspaceError(currentVersion)
-      }
-    }
-
-    // SECURITY (H4) — file-fallback mirror. In file mode the auth-sensitive
-    // fields (the owner/employee `role`, `staffRole`, email and password_hash)
-    // live in the SEPARATE auth-state file, which this method never touches —
-    // so email and password_hash can't be changed by a bulk save here at all.
-    // The one auth-adjacent field carried in app-data is `employees[].role`
-    // (the staff-role label). Preserve it the same way the Postgres path does:
-    // for any employee id already present in the persisted app-data, keep the
-    // prior `role` and let ONLY `name` change. New ids fall through with
-    // whatever role the payload carried (real members are created via the
-    // invite path; this just stops a bulk save from rewriting an existing
-    // member's role). Best-effort: if there's no prior file yet, write as-is.
-    try {
+    // matches what is on disk. The file equivalent of "the check runs INSIDE
+    // the transaction" is running the check, the prior-file preservation reads
+    // and the final write in ONE `enqueueFileOperation` slot — as three
+    // separate queue entries (the old shape) another writer's op could land
+    // between the check and the write and be erased by a snapshot whose check
+    // predated it. Raw fs calls only in here: `readJson`/`writeFile` enqueue
+    // behind this very slot and would deadlock.
+    await enqueueFileOperation(localDataPath, async () => {
+      let previous = null
       if (existsSync(localDataPath)) {
-        const previous = await readJson(localDataPath)
-        const priorRoleById = new Map(
-          (Array.isArray(previous.employees) ? previous.employees : [])
-            .filter((e) => e && typeof e.id === 'string')
-            .map((e) => [e.id, e.role]),
-        )
-        if (Array.isArray(data.employees)) {
-          data.employees = data.employees.map((employee) =>
-            employee && priorRoleById.has(employee.id)
-              ? { ...employee, role: priorRoleById.get(employee.id) }
-              : employee,
-          )
-        }
-
-        // Cardinal rule 1 mirror of the created_at / completed_at preservation
-        // in the Postgres branch. This backend re-writes each record WHOLE, so
-        // a payload that dropped `createdAt`, or that carries a stale tab's
-        // `completedAt`, rewrites history exactly the way the Postgres wipe did
-        // — "it spreads the record" is not by itself protection. Same rule as
-        // there: what is already persisted wins; only a step this save actually
-        // completes gets a fresh stamp.
-        const priorChecklistById = new Map(
-          [
-            ...(Array.isArray(previous.checklists) ? previous.checklists : []),
-            ...(Array.isArray(previous.recycledChecklists) ? previous.recycledChecklists : []),
-          ]
-            .filter((checklist) => checklist && typeof checklist.id === 'string')
-            .map((checklist) => [checklist.id, checklist]),
-        )
-        const withPreservedHistory = (checklist) => {
-          if (!checklist || typeof checklist.id !== 'string') return checklist
-          const prior = priorChecklistById.get(checklist.id)
-          const priorItemById = new Map(
-            (Array.isArray(prior?.items) ? prior.items : [])
-              .filter((item) => item && typeof item.id === 'string')
-              .map((item) => [item.id, item]),
-          )
-          const next = { ...checklist }
-          if (prior?.createdAt) next.createdAt = prior.createdAt
-          if (Array.isArray(checklist.items)) {
-            next.items = checklist.items.map((item) => {
-              if (!item || typeof item.id !== 'string') return item
-              const done = rollUpItemDone(item)
-              const completedAt = preservedItemCompletion(done, priorItemById.get(item.id))
-              const merged = { ...item }
-              if (completedAt) {
-                merged.completedAt =
-                  completedAt instanceof Date ? completedAt.toISOString() : completedAt
-              } else {
-                delete merged.completedAt
-              }
-              return merged
-            })
-          }
-          return next
-        }
-        if (Array.isArray(data.checklists)) {
-          data.checklists = data.checklists.map(withPreservedHistory)
-        }
-        if (Array.isArray(data.recycledChecklists)) {
-          data.recycledChecklists = data.recycledChecklists.map(withPreservedHistory)
+        try {
+          previous = JSON.parse(await readFile(localDataPath, 'utf8'))
+        } catch {
+          // A malformed file must not break the guard. An unreadable workspace
+          // hashes as empty, which simply means a guarded save sees a mismatch
+          // and asks the tab to reload — the safe direction.
+          previous = null
         }
       }
-    } catch {
-      // A malformed/absent prior file must never block a legitimate save.
-      // Fall through and persist the incoming data unchanged.
-    }
 
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+      if (expectedVersion) {
+        const currentVersion = fileWorkspaceVersion(previous ?? {})
+        if (currentVersion !== expectedVersion) {
+          throw new StaleWorkspaceError(currentVersion)
+        }
+      }
+
+      // SECURITY (H4) — file-fallback mirror. In file mode the auth-sensitive
+      // fields (the owner/employee `role`, `staffRole`, email and password_hash)
+      // live in the SEPARATE auth-state file, which this method never touches —
+      // so email and password_hash can't be changed by a bulk save here at all.
+      // The one auth-adjacent field carried in app-data is `employees[].role`
+      // (the staff-role label). Preserve it the same way the Postgres path does:
+      // for any employee id already present in the persisted app-data, keep the
+      // prior `role` and let ONLY `name` change. New ids fall through with
+      // whatever role the payload carried (real members are created via the
+      // invite path; this just stops a bulk save from rewriting an existing
+      // member's role). Best-effort: if there's no prior file yet, write as-is.
+      try {
+        if (previous) {
+          const priorRoleById = new Map(
+            (Array.isArray(previous.employees) ? previous.employees : [])
+              .filter((e) => e && typeof e.id === 'string')
+              .map((e) => [e.id, e.role]),
+          )
+          if (Array.isArray(data.employees)) {
+            data.employees = data.employees.map((employee) =>
+              employee && priorRoleById.has(employee.id)
+                ? { ...employee, role: priorRoleById.get(employee.id) }
+                : employee,
+            )
+          }
+
+          // Cardinal rule 1 mirror of the created_at / completed_at preservation
+          // in the Postgres branch. This backend re-writes each record WHOLE, so
+          // a payload that dropped `createdAt`, or that carries a stale tab's
+          // `completedAt`, rewrites history exactly the way the Postgres wipe did
+          // — "it spreads the record" is not by itself protection. Same rule as
+          // there: what is already persisted wins; only a step this save actually
+          // completes gets a fresh stamp.
+          const priorChecklistById = new Map(
+            [
+              ...(Array.isArray(previous.checklists) ? previous.checklists : []),
+              ...(Array.isArray(previous.recycledChecklists) ? previous.recycledChecklists : []),
+            ]
+              .filter((checklist) => checklist && typeof checklist.id === 'string')
+              .map((checklist) => [checklist.id, checklist]),
+          )
+          const withPreservedHistory = (checklist) => {
+            if (!checklist || typeof checklist.id !== 'string') return checklist
+            const prior = priorChecklistById.get(checklist.id)
+            const priorItemById = new Map(
+              (Array.isArray(prior?.items) ? prior.items : [])
+                .filter((item) => item && typeof item.id === 'string')
+                .map((item) => [item.id, item]),
+            )
+            const next = { ...checklist }
+            if (prior?.createdAt) next.createdAt = prior.createdAt
+            if (Array.isArray(checklist.items)) {
+              next.items = checklist.items.map((item) => {
+                if (!item || typeof item.id !== 'string') return item
+                const done = rollUpItemDone(item)
+                const completedAt = preservedItemCompletion(done, priorItemById.get(item.id))
+                const merged = { ...item }
+                if (completedAt) {
+                  merged.completedAt =
+                    completedAt instanceof Date ? completedAt.toISOString() : completedAt
+                } else {
+                  delete merged.completedAt
+                }
+                return merged
+              })
+            }
+            return next
+          }
+          if (Array.isArray(data.checklists)) {
+            data.checklists = data.checklists.map(withPreservedHistory)
+          }
+          if (Array.isArray(data.recycledChecklists)) {
+            data.recycledChecklists = data.recycledChecklists.map(withPreservedHistory)
+          }
+        }
+      } catch {
+        // A malformed prior file must never block a legitimate save. Fall
+        // through and persist the incoming data unchanged.
+      }
+
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+    })
   }
 
   /**
