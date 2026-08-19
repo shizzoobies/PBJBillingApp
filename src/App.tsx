@@ -1038,6 +1038,38 @@ function App() {
     writeStoredTimer(timer)
   }, [timer])
 
+  // The EFFECTIVE identity — who the app should behave as. Outside preview
+  // it is simply the session user; while an owner previews a staff member it
+  // is that staff member, downgraded to 'employee'. Derived HERE, above the
+  // visibility memos, because those memos must key off the effective identity:
+  // they once read the session `role`/`activeEmployeeId`, so an owner
+  // previewing a bookkeeper still got the owner-wide feed on every consumer
+  // (Checklists In-progress list, sidebar badge, overdue pin — the
+  // featreq-9b47ab5b leak). `sessionUser` stays the real owner (account pill,
+  // 2FA banner, logout), and the server independently blocks preview writes
+  // via the X-Preview-Mode header.
+  const previewMode = previewActive
+  const previewEmployee = previewMode
+    ? data.employees.find((employee) => employee.id === previewUserId)
+    : null
+  const effectiveUser: SessionUser =
+    previewMode && previewEmployee && sessionUser
+      ? {
+          id: previewEmployee.id,
+          name: previewEmployee.name,
+          email: sessionUser.email,
+          role: 'employee',
+          staffRole: previewEmployee.role,
+        }
+      : (sessionUser as SessionUser)
+  // While previewing, the whole app must behave as the previewed person:
+  // their role drives the sidebar, owner-only routing, and permission-gated
+  // controls; their id drives the per-user data memos below.
+  const effectiveRole = effectiveUser?.role ?? 'employee'
+  const ownerMode = effectiveRole === 'owner'
+  const effectiveEmployeeId =
+    previewMode && previewEmployee ? previewEmployee.id : activeEmployeeId
+
   // Quietly-skipped occurrences are dropped HERE and nowhere else.
   //
   // This is the one narrowing every "my work" surface reads (Checklists tab,
@@ -1056,31 +1088,31 @@ function App() {
         checklistsVisibleTo(
           data.checklists.filter((checklist) => !isChecklistSkipped(checklist)),
           {
-            viewerId: activeEmployeeId,
-            isOwner: role === 'owner',
+            viewerId: effectiveEmployeeId,
+            isOwner: effectiveRole === 'owner',
           },
         ),
       ),
-    [activeEmployeeId, data.checklists, role],
+    [effectiveEmployeeId, data.checklists, effectiveRole],
   )
 
   const visibleClientIds = useMemo(() => {
-    if (role === 'owner') {
+    if (effectiveRole === 'owner') {
       return new Set(data.clients.map((client) => client.id))
     }
 
     return new Set([
       ...data.clients
-        .filter((client) => getAssignedTeamIds(client).includes(activeEmployeeId))
+        .filter((client) => getAssignedTeamIds(client).includes(effectiveEmployeeId))
         .map((client) => client.id),
       ...data.checklists
-        .filter((checklist) => checklist.assigneeId === activeEmployeeId)
+        .filter((checklist) => checklist.assigneeId === effectiveEmployeeId)
         .map((checklist) => checklist.clientId),
       ...data.timeEntries
-        .filter((entry) => entry.employeeId === activeEmployeeId)
+        .filter((entry) => entry.employeeId === effectiveEmployeeId)
         .map((entry) => entry.clientId),
     ])
-  }, [activeEmployeeId, data.checklists, data.clients, data.timeEntries, role])
+  }, [effectiveEmployeeId, data.checklists, data.clients, data.timeEntries, effectiveRole])
 
   const visibleClients = useMemo(
     () => data.clients.filter((client) => visibleClientIds.has(client.id)),
@@ -1088,12 +1120,12 @@ function App() {
   )
 
   const visibleEntries = useMemo(() => {
-    if (role === 'owner') {
+    if (effectiveRole === 'owner') {
       return data.timeEntries
     }
 
-    return data.timeEntries.filter((entry) => entry.employeeId === activeEmployeeId)
-  }, [activeEmployeeId, data.timeEntries, role])
+    return data.timeEntries.filter((entry) => entry.employeeId === effectiveEmployeeId)
+  }, [effectiveEmployeeId, data.timeEntries, effectiveRole])
 
   const updateWorkspaceData = (updater: (current: AppData) => AppData) => {
     // Preview mode is strictly read-only: every workspace-config mutator
@@ -3645,29 +3677,6 @@ function App() {
       setTimer(null)
     }
   }
-
-  const previewMode = previewActive
-  const previewEmployee = previewMode
-    ? data.employees.find((employee) => employee.id === previewUserId)
-    : null
-  const effectiveUser: SessionUser =
-    previewMode && previewEmployee && sessionUser
-      ? {
-          id: previewEmployee.id,
-          name: previewEmployee.name,
-          email: sessionUser.email,
-          role: 'employee',
-          staffRole: previewEmployee.role,
-        }
-      : (sessionUser as SessionUser)
-  // While previewing, the whole app must behave as the previewed person:
-  // their role drives the sidebar, owner-only routing, and permission-gated
-  // controls; their id drives the per-user data memos below. `sessionUser`
-  // stays the real owner (account pill, 2FA banner, logout).
-  const effectiveRole = effectiveUser?.role ?? 'employee'
-  const ownerMode = effectiveRole === 'owner'
-  const effectiveEmployeeId =
-    previewMode && previewEmployee ? previewEmployee.id : activeEmployeeId
 
   // Strict "what clients can this user log time against?" — drives the
   // timer and manual-entry dropdowns on TimePage. A team member only ever

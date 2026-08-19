@@ -31,10 +31,12 @@ import type { Checklist, ServiceCategory } from '../lib/types'
  * predicate the Checklists tab uses. A bookkeeper sees hers; an accountant sees
  * hers, plus her bookkeepers' when she ticks "Show my bookkeepers'"; an owner
  * still sees the whole board. The narrowing is re-derived here from the
- * session's own feed rather than read off `visibleChecklists`, because that memo
- * keys off the SESSION role — while an owner previews a bookkeeper it stays
- * owner-wide, which is exactly how the leak was spotted. This only ever narrows
- * the feed the session already holds; it can't widen anything.
+ * session's own feed rather than read off `visibleChecklists` because the board
+ * folds in extras that memo can't carry — projected ghosts and the team reveal —
+ * and both must pass through the same scoping. (`visibleChecklists` now keys off
+ * the EFFECTIVE identity too, so preview no longer depends on this local
+ * derivation.) This only ever narrows the feed the session already holds; it
+ * can't widen anything.
  */
 export function ActiveChecklistsBoardPage() {
   const ctx = useAppContext()
