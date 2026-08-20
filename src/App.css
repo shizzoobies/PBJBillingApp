@@ -3241,17 +3241,28 @@ td strong {
     background: #fff;
   }
 
-  /* Invoice-only print: hide the entire app shell and show just the
-     formatted invoice sheet. Scoped to body.printing-invoice (set via a
-     beforeprint listener when the invoice .print-sheet is mounted) so it
-     wins by specificity over the later report-print block — which keeps the
-     app shell visible — instead of leaking the whole Invoices screen (billing
-     queue, every client) into the printout. */
-  body.printing-invoice .app-shell {
+  /* Invoice-only print: hide the whole app and show just the formatted
+     invoice sheet. Scoped to body.printing-invoice (set via a beforeprint
+     listener when the invoice .print-sheet is mounted) so it wins by
+     specificity over the later report-print block — which keeps the app shell
+     visible — instead of leaking the whole Invoices screen (billing queue,
+     every client) into the printout.
+
+     HIDE #root, NOT .app-shell. `#root { min-height: 100vh }` survives its
+     child being hidden, and in PAGED media `vh` resolves against the page box
+     — so an emptied-out #root is still a full sheet tall and the printout
+     leads with a blank page before the invoice. Hiding #root itself is what
+     collapses that. It is only safe because the sheet below is portaled to
+     <body>, making it a SIBLING of #root rather than something inside it. */
+  body.printing-invoice #root {
     display: none;
   }
 
-  body.printing-invoice .print-document {
+  /* .invoice-print, not .print-document: the report modal's sheet is also a
+     .print-document, and this class is set whenever the invoice sheet is
+     merely MOUNTED — so the unscoped selector printed the invoice on top of
+     (or instead of) a report started from the Invoices page. */
+  body.printing-invoice .invoice-print {
     color: #1b1720;
     display: block;
     font-family: Georgia, "Times New Roman", serif;
@@ -8958,10 +8969,12 @@ button.repeating-task-toggle-pill {
 }
 
 @media print {
-  body.printing-report .app-shell,
-  body.printing-report .report-modal-overlay,
-  body.printing-report .assistant-fab,
-  body.printing-report .assistant-panel {
+  /* Same shape as the invoice block above, and hidden for the same two
+     reasons: #root rather than .app-shell so `min-height: 100vh` cannot eat a
+     blank leading page, and one selector rather than four because the shell,
+     the modal overlay, the assistant fab and its panel all live inside #root.
+     Safe only because the report sheet is portaled to <body>. */
+  body.printing-report #root {
     display: none !important;
   }
 

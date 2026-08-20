@@ -1,4 +1,5 @@
 import { Download, X } from 'lucide-react'
+import { createPortal } from 'react-dom'
 import { useAppContext } from '../AppContext'
 import type { AssistantReport } from '../lib/api'
 import { isSafeImageSrc } from '../lib/utils'
@@ -7,7 +8,8 @@ import { isSafeImageSrc } from '../lib/utils'
  * Displays an assistant-generated report in a modal and offers "Save as PDF"
  * via the browser print path. A hidden `.print-document` holds the print-only
  * sheet (with the firm header); the `@media print` rules under
- * `body.printing-report` swap the app for just that sheet.
+ * `body.printing-report` swap the app for just that sheet. That sheet must be
+ * portaled OUTSIDE #root for those rules to work — see the comment on it.
  */
 export function AssistantReportModal({
   report,
@@ -101,22 +103,33 @@ export function AssistantReportModal({
         </div>
       </div>
 
-      {/* Print-only sheet — hidden on screen, shown under body.printing-report. */}
-      <div className="print-document report-print" aria-hidden="true">
-        <div className="report-print-sheet">
-          <div className="print-header">
-            {logoUrl && isSafeImageSrc(logoUrl) ? (
-              <img className="print-header-logo" src={logoUrl} alt="" />
-            ) : null}
-            <div className="print-header-firm-text">
-              <strong>{firmName}</strong>
+      {/* Print-only sheet — hidden on screen, shown under body.printing-report.
+          PORTALED TO <body> ON PURPOSE: the print rules hide #root and show
+          only this sheet, and this modal renders inside #root. Left in place it
+          would be a DESCENDANT of the hidden element, which no rule can bring
+          back — "Save as PDF" produced a blank page. #root rather than the app
+          shell because #root's `min-height: 100vh` measures against the PAGE
+          box when printing, so hiding only its contents still costs a full
+          blank sheet. Same fix, and same reason, as the invoice sheet in
+          pages/InvoicesPage.tsx. */}
+      {createPortal(
+        <div className="print-document report-print" aria-hidden="true">
+          <div className="report-print-sheet">
+            <div className="print-header">
+              {logoUrl && isSafeImageSrc(logoUrl) ? (
+                <img className="print-header-logo" src={logoUrl} alt="" />
+              ) : null}
+              <div className="print-header-firm-text">
+                <strong>{firmName}</strong>
+              </div>
             </div>
+            <h1>{report.title}</h1>
+            {report.subtitle ? <p className="report-print-subtitle">{report.subtitle}</p> : null}
+            {sections}
           </div>
-          <h1>{report.title}</h1>
-          {report.subtitle ? <p className="report-print-subtitle">{report.subtitle}</p> : null}
-          {sections}
-        </div>
-      </div>
+        </div>,
+        document.body,
+      )}
     </>
   )
 }

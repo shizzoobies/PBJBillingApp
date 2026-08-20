@@ -142,6 +142,30 @@ snapshot first, single transaction, re-verify after.
   `docs/plans/client-assignment-single-source-2026-08.md`. Owners may appear on
   an assigned team — it grants nothing, they see everything.
 
+### Printing — run the print check, `npm run verify` cannot see it
+
+Printing (invoices, and the assistant's "Save as PDF") works by hiding the app
+and showing a hidden sheet. **jsdom is structurally blind to both ways that
+breaks**, so vitest passes while the printout is blank or doubled:
+
+- A sheet rendered inside `#root` can never be shown while the print CSS hides
+  `#root`. Both sheets are therefore `createPortal`ed to `<body>` — if you ever
+  "tidy" one back inline, it prints blank.
+- `#root { min-height: 100vh }`, and in **paged** media `vh` is the PAGE box —
+  so hiding only `#root`'s contents still costs a full blank leading page. Only
+  a page count catches this.
+
+```
+npm i -g playwright && npx playwright install chromium
+PLAYWRIGHT_MODULE="$(npm root -g)/playwright/index.mjs" node scripts/check-print-pdf.mjs
+```
+
+It renders the real `src/App.css` in Chromium, takes a `page.pdf()` for each
+mode, and asserts one page with only that mode's sheet on it. Playwright is
+deliberately **not** a dependency and this is **not** wired into
+`npm run verify` (which stays jsdom-fast); without Playwright the script skips
+with instructions rather than failing. Run it by hand after any print change.
+
 ---
 
 ## 5. Where things stand (newest first)

@@ -1910,7 +1910,30 @@ Clients page meanwhile. Owner-only.
   first, and the invoice must be past Draft (mark it reviewed in the month run),
   otherwise the button explains what is missing instead of sending. Asks for
   confirmation first, and reports who it went to and when.
-- Print invoice (print-formatted sheet with firm branding).
+- Print invoice: opens the browser's own print dialog on a clean, print-formatted
+  invoice sheet with firm branding — the app's sidebar, billing queue and the
+  rest of the screen are not printed, only the invoice. From there the browser
+  can send it to a printer or "Save as PDF". Nothing is emailed and nothing is
+  saved to the invoice by printing.
+  - The SAME sheet is what every Print button in the app produces: the month-run
+    editor's Print, History's Print, and this page's Print invoice. There is one
+    printed invoice format, so what she prints matches what the client was
+    emailed — the emailed PDF mirrors this sheet. Three caveats worth knowing
+    before telling a client "it's identical":
+    - The PDF is built by a SEPARATE renderer on the server, not from this
+      sheet. They share the line calculation and the money formatter, so the
+      amounts and the lines always agree; the layout is a mirror maintained by
+      hand, so small presentation differences are possible.
+    - The PDF can carry things the printed sheet does not: a **PAID** banner
+      once the invoice is marked paid, and, on a card payment, the processing
+      fee line added at payment time. Printing an invoice never stamps it PAID.
+    - The PDF is attached best-effort. If it fails to render, the invoice email
+      still goes out — without the attachment — rather than not going out.
+  - The month run's and History's Print show the STORED invoice for that row.
+    This page's Print invoice shows the live per-client calculation for the
+    selected client and month, including any Customize edits.
+  - Print is disabled in the month-run editor while there are unsaved edits, so
+    she can never print something different from what is stored.
 - Billing queue: all clients with their month total, ready to review.
 - Estimated hours fields anywhere in the app are informational only and
   never change invoice amounts.

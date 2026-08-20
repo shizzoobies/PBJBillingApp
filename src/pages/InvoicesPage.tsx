@@ -1,5 +1,6 @@
 import { ExternalLink, FileText, Mail, Plus, Printer, RotateCcw, Sliders, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useAppContext } from '../AppContext'
 import { InvoiceHistory } from '../components/InvoiceHistory'
 import { InvoiceMonthRun, type InvoiceMonthRunHandle } from '../components/InvoiceMonthRun'
@@ -484,11 +485,31 @@ export function InvoicesPage() {
     setView('month')
   }
 
-  const printStored = (stored: PersistedInvoice) => {
-    setStoredPrint(stored)
-    // One tick so the document renders before the print dialog opens.
-    window.setTimeout(printInvoice, 60)
-  }
+  const printStored = (stored: PersistedInvoice) => setStoredPrint(stored)
+
+  // Print AFTER the sheet holding this invoice has actually been committed —
+  // an effect, not a timeout racing the render. A 60ms guess is the difference
+  // between printing the invoice she clicked and printing the previous one.
+  //
+  // Then clear it, so the sheet falls back to the live per-client calculation:
+  // a plain Ctrl+P on this page later has to print what the page is showing,
+  // not whichever archived row she last hit Print on.
+  useEffect(() => {
+    if (!storedPrint) return
+    printInvoice()
+    const done = () => setStoredPrint(null)
+    window.addEventListener('afterprint', done)
+    // Not every browser fires afterprint, and cancelling the dialog may not
+    // either — without this the page would stay stuck on the stored invoice.
+    const fallback = window.setTimeout(done, 2000)
+    return () => {
+      window.removeEventListener('afterprint', done)
+      window.clearTimeout(fallback)
+    }
+    // printInvoice is re-created every render; depending on it would re-fire
+    // this effect — and re-open the print dialog — on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storedPrint])
 
   const storedPrintDisplay = useMemo(() => {
     if (!storedPrint) return null
@@ -851,13 +872,32 @@ export function InvoicesPage() {
         />
       ) : null}
 
-      <div className="print-document" aria-hidden="true">
-        {storedPrintDisplay ? (
-          <InvoiceDocument display={storedPrintDisplay} custom={null} />
-        ) : (
-          <InvoiceDocument display={effectiveDisplay} custom={customMeta} />
-        )}
-      </div>
+      {/* PORTALED TO <body> ON PURPOSE, and the print path breaks if it is not.
+          The invoice print works by hiding everything and showing only this
+          sheet (`body.printing-invoice #root { display: none }` plus
+          `… .invoice-print { display: block }`). A page renders inside #root
+          via the router Outlet, so leaving this sheet in place makes it a
+          DESCENDANT of the element being hidden — and no descendant rule can
+          undo an ancestor's `display: none`. The printout comes out blank.
+
+          It has to clear #root, not just `.app-shell`: #root carries
+          `min-height: 100vh`, and in paged media `vh` is the PAGE box, so an
+          emptied #root still prints as a full blank sheet ahead of the
+          invoice. Being a sibling of #root is what makes hiding #root safe.
+
+          `invoice-print` scopes it: the assistant's report modal renders a
+          `.print-document` too, and this sheet is on the page whenever the
+          Invoices page is. */}
+      {createPortal(
+        <div className="print-document invoice-print" aria-hidden="true">
+          {storedPrintDisplay ? (
+            <InvoiceDocument display={storedPrintDisplay} custom={null} />
+          ) : (
+            <InvoiceDocument display={effectiveDisplay} custom={customMeta} />
+          )}
+        </div>,
+        document.body,
+      )}
     </>
   )
 }

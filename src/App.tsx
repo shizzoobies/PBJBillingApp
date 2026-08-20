@@ -848,14 +848,27 @@ function App() {
   // which would otherwise leak the entire Invoices screen (billing queue +
   // every client) into the printout next to the formatted invoice sheet. Tag
   // <body> while an invoice print is in flight so the invoice-only print rules
-  // (hide app shell, show just .print-document) win by specificity. Detecting
-  // the mounted .print-sheet means this also covers a plain Ctrl+P on the
-  // Invoices page, while Reports/Productivity printing is left untouched.
+  // (hide #root, show just the invoice sheet) win by specificity. Detecting
+  // the mounted .invoice-print sheet means this also covers a plain Ctrl+P on
+  // the Invoices page, while Reports/Productivity printing is left untouched.
   useEffect(() => {
     const onBeforePrint = () => {
-      if (document.querySelector('.print-document .print-sheet')) {
-        document.body.classList.add('printing-invoice')
+      // A report print owns the page: it hides #root and shows its own sheet.
+      // Stacking the invoice rules on top would print BOTH sheets, so the
+      // report always wins — including clearing a class left over from an
+      // earlier invoice print.
+      if (document.body.classList.contains('printing-report')) {
+        document.body.classList.remove('printing-invoice')
+        return
       }
+      // TOGGLE, never add. `printing-invoice` now blanks the page it is set on
+      // (it hides #root), so a class stranded by a print that never fired
+      // `afterprint` would silently ruin the NEXT print from anywhere in the
+      // app. Recomputing it from what is actually mounted is self-correcting.
+      document.body.classList.toggle(
+        'printing-invoice',
+        Boolean(document.querySelector('.invoice-print .print-sheet')),
+      )
     }
     const onAfterPrint = () => {
       document.body.classList.remove('printing-invoice')
@@ -3656,11 +3669,17 @@ function App() {
   const printInvoice = () => {
     // Tag the body up front so the invoice-only print rules apply even on
     // browsers that don't fire `beforeprint` (the listener above also sets
-    // this for a plain Ctrl+P, and `afterprint` clears it). The class only
-    // does anything inside @media print, so a lingering class can't affect
-    // the on-screen layout.
+    // this for a plain Ctrl+P, and `afterprint` clears it).
+    //
+    // Clearing it again is NOT optional housekeeping. The class hides #root,
+    // so if it outlives this print — `afterprint` is not fired by every
+    // browser, nor on every cancel path — the next print of ANY page in the
+    // app comes out blank. Same 2000ms backstop the report print uses.
     document.body.classList.add('printing-invoice')
-    window.setTimeout(() => window.print(), 50)
+    window.setTimeout(() => {
+      window.print()
+      window.setTimeout(() => document.body.classList.remove('printing-invoice'), 2000)
+    }, 50)
   }
 
   const startTimer = (nextTimer: TimerState) => {
