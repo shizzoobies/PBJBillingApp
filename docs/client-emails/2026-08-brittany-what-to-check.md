@@ -23,7 +23,7 @@ underneath you — these are both waiting for you to start using them.
 
 ---
 
-## 1. Covered dates on reimbursed expenses (the QBO date range)
+## 1. Auto-advance date ranges within saved reimbursed-expense invoice verbiage
 
 **What it does:** you write the wording once, enter the first date window once,
 and from then on every invoice moves the window forward on its own and writes
@@ -71,7 +71,7 @@ it stays on the 15th.
 
 ---
 
-## 2. Retainer invoicing
+## 2. Add retainer invoicing with initial retainer and final-invoice credit
 
 **What it does:** bills the retainer at the start of an engagement, and gives
 that money back as a credit on the final invoice — without you doing the math by
