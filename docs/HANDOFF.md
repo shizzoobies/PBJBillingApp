@@ -170,6 +170,88 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-08-21 — PICKING THIS UP NOW: state, and what's actually left.** Written
+after a full re-read of the tree, the tracker, the deploy list and production.
+
+**Where things are.** `main` is `3dc6ab9`, deployed SUCCESS, `/health` 200, tree
+clean. Suite **2137 tests / 128 files**, all passing. **The build queue is
+empty**: three items are open and every one of them is parked behind a gate
+(below), and four items sit in Shipped waiting on Brittany. So the next session
+is most likely *responding to her review*, not starting a build — check the
+tracker first, because she reviews live and it moves while you work.
+
+**THE BIGGEST CHANGE: this app now moves real money.** Stripe went live on
+2026-08-18 (`dba2ff2`), and it has been exercised for real — Alex paid two live
+invoices himself, one ACH and one card, and both settled correctly.
+`INV-2026-08-002` ($10.00) and `INV-2026-08-003` ($10.61) are in `processing`;
+`INV-2026-08-001` ($15.00) is void. What that changes for you:
+- **A send is irreversible.** There is no sandbox left to practise in. Anything
+  that generates, sends, voids or credits an invoice is a production money
+  action — treat it like a prod write: Alex's explicit yes, and know the undo.
+- **Test on the `Test` client**, never a real one, and say so in any instruction
+  you give Brittany.
+- The `/health` endpoint now names the Stripe mode (`6768b1b`) — use it rather
+  than assuming.
+
+**What's actually left (all three are gated, none is "just start it"):**
+1. `featreq-79b6d974` **engagement-to-billing** (in_progress, low). Needs a
+   PLANNING SESSION with Alex — it reshapes navigation for everyone. Plan of
+   record: `docs/plans/billing-and-engagements-2026-08.md`, but note its Track B
+   ("prep packet") was **superseded** by the real invoicing that shipped —
+   read `docs/plans/invoicing-in-app-2026-08.md` and
+   `docs/plans/invoicing-handoff.md` first so you don't re-plan a solved
+   problem.
+2. `featreq-15ff79f7` **Brittany pushes her own update** (planned_not_eom). Tier
+   0 shipped (`3b0c154`); Tiers 1–5 remain in the decided order. Policy is
+   locked — build only, do not re-open the questions.
+3. `featreq-ef7f4e35` **TOTP encryption at rest** (planned_not_eom). Blocked on
+   ALEX generating and durably storing `TOTP_ENC_KEY`, then BOTH owners
+   re-enrolling. **Claude must never handle that key.** Setting the Railway var
+   redeploys — treat it as a push, and not during a Railway incident.
+
+**Waiting on Brittany (do not chase, but be ready):** the four Shipped items —
+retainer invoicing (`951595c2`), reimbursed-expense auto-advance (`fe3f8b0f`),
+the Recap rework (`926862e2`) and the payroll-rounding rework (`7c8f64d7`).
+Alex has a what-to-check email for the first two at
+`docs/client-emails/2026-08-brittany-what-to-check.md`. **Open questions she
+owes an answer on:** whether a retainer credit should FREEZE at the amount paid
+or keep re-sizing with the invoice total (raised in that email); the
+recurring-pile picker question; the step-deletion wait warning; and the card
+fee / surcharge decision.
+
+**Known residuals — real, documented, none blocking:**
+- **`time_entries` still takes `created_at` from the client payload** — the same
+  stale-tab-rewrites-history hole that was closed for nine other tables in
+  `420c823`. The one remaining payload-trusting timestamp in the bulk save.
+- **Batch 2 of the client-assignment unification is not started** (archive +
+  drop `client_assignments`, remove the cascade and the orphan cleanup in
+  `db/store.js`). Batch 1 is live; `assigned_bookkeeper_ids` is the single
+  source that gates visibility. See the client-assignment memory before touching
+  it — the divergence evidence is probably already gone; ask Alex rather than
+  re-running the report.
+- **Preview mode still leaks endpoint-managed lists** — previewing a staff
+  member shows the OWNER's "Waiting on you" card, because `/api/waiting-on-me`
+  scopes to the session caller. `itemDeletionRequests` / `pendingTaskEdits`
+  share the pattern.
+- **Materializer write-back guard has two documented gaps** — file-backend
+  slices outside the fingerprint, and the GET-side version/data ordering.
+  Production is Postgres, so neither bites today.
+- **A structural one worth a deliberate pass:** three separate data-loss bugs
+  (minutes precision, invoice drafts, creation dates across nine tables) were
+  all the same shape — the bulk save's wipe-and-reinsert dropping a column
+  nobody checked. A test that asserts every wiped table round-trips EVERY column
+  would end that family instead of discovering them one client complaint at a
+  time.
+
+**Housekeeping worth ten minutes:** four stale worktrees under
+`.claude/worktrees/` (two detached at old commits) still hold built `dist/`
+output — it pollutes repo-wide greps with tens of KB of minified noise; prune
+them. `hold/july-security-p3` is the only unmerged branch and is now
+superseded — its security half was cherry-picked into main (`82a9929`) and the
+useful polish salvaged; confirm and delete it. The
+`railway-backlog-2026-08-18` memory's exit condition is met (SUCCESS on
+`3dc6ab9` supersedes the whole stuck queue) — it has been deleted.
+
 **2026-08-18/19 — the sent-back queue run + Brittany's review night.** Two days,
 ten feature deploys, suite 1834 → **2130 tests / 126 files**. Brittany reviewed
 LIVE through this run — moving items Shipped→Done, sending items back with
