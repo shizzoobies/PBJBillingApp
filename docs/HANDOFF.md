@@ -170,6 +170,52 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-08-22 — AI confidence ratings on invoice review, and the learning corpus
+that makes them improvable.** Plan of record:
+`docs/plans/invoice-confidence-2026-08.md` — read it before touching any of
+this; the four product decisions at the top (advisory-only, skippable
+at-approve questions, auto-rate + re-rate, shipped live) were made by Alex via
+structured questions and are settled.
+
+What it is: after Generate, `claude-opus-5` (env `INVOICE_AI_MODEL`) reviews
+each monthly draft — arithmetic against the month's tracked hours,
+plan-vs-hourly consistency, coverage windows, adhoc dispositions, month naming,
+month-over-month anomalies — and stores a verdict: band + score, ≤4 concerns,
+≤3 questions for Brittany. A badge sits beside the scope-flag chips; the
+expanded editor shows the card; Mark reviewed surfaces unanswered questions
+once, skippably (Answer & approve / Skip & approve — approval is NEVER
+blockable). Her answers persist and feed future ratings; her edit diffs are
+captured automatically. The trust-ladder framing matters: this is the
+measurement that the plans' "bulk-send once trusted" gate was missing. No
+automation of any kind ships here — the rating is a read-only annotation that
+never touches `lib/invoice-lines.js`, statuses, or sends.
+
+New persistence (both backends, endpoint-managed, NO FK to invoices, out of
+the bulk save and the staleness fingerprint): `invoice_review_events` (her
+edit/status diffs, captured inside `updateInvoice`'s transaction with
+`opts.actorUserId` from the session) and `invoice_ai_reviews` (rating history,
+supersede-on-insert under a per-invoice `pg_advisory_xact_lock`). Plus
+`invoices.original_line_items` — write-once snapshot at insert, all six touch
+points including the bulk-save round-trip. DDL was validated against
+production with the rolled-back probe before ship.
+
+Build shape worth knowing: four parallel agents (store / lib / server / UI) on
+disjoint files against contracts pinned in the plan doc, then an adversarial
+review pass — which found the feature's learning half silently inert (the
+corrections corpus collapsed to bare month strings before reaching the model),
+a supersede race, an unguarded answer write, and a non-monotonic poll merge.
+All fixed and tripwire-tested. The residual accepted trade-offs are recorded
+in the plan doc and the review: double `broadcastDataChanged` on the two POST
+routes (house pattern), and "Rating…" showing ~3 min in a keyless local dev.
+
+Where the pieces live: `lib/invoice-confidence.js` (the call + schema + prompt;
+`modelFallback: false` deliberately), `server.js` `rateInvoiceAndPersist` /
+`scheduleInvoiceRatings` (one workspace read per batch — `read()` is NOT pure,
+it can enter the materializer's bulk-save write-back), the three
+`/api/invoices/*ai-review*` routes (above the `/api/` catch-all, pinned by
+tests), `src/components/InvoiceMonthRun.tsx` (badge, card, at-approve panel,
+bounded 5s/3min poll). Suite 2139 → **2260 tests / 132 files**.
+
 **2026-08-21 — an unmatched `/api/` path now 404s instead of returning the SPA.**
 Salvaged out of the `festive-hermann` worktree during the housekeeping pass
 below, where it had been sitting uncommitted and unshipped.

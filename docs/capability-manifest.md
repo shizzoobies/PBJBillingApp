@@ -1495,6 +1495,30 @@ Clients page meanwhile. Owner-only.
 > tab — a small amber dot on a tab means some of the flagged ones are in there.
 > If you switch tabs with unsaved edits in an open invoice, it asks before
 > discarding them.
+>
+> **AI confidence rating (advisory).** After Generate, an AI reviewer reads each
+> monthly draft and rates its accuracy — a small badge on the row says **high
+> confidence**, **check N things**, or **low confidence**. It checks the
+> arithmetic (printed hours times each person's bill rate, reconciled against
+> the month's tracked time), plan-vs-hourly consistency, covered-date windows,
+> ad hoc dispositions, whether descriptions name the right month, and how the
+> invoice compares to last month's. Open the invoice to see the reviewer's
+> summary, its specific concerns, and up to three questions it would ask you.
+> THE RATING IS ADVISORY ONLY — IT NEVER BLOCKS, CHANGES, OR SENDS ANYTHING,
+> AND IT NEVER TOUCHES THE NUMBERS. An unrated or low-confidence invoice can
+> be reviewed and sent exactly as before. Ratings land a little after
+> generation (each takes a few seconds and fills in on its own); a **Re-rate**
+> button refreshes one after edits, and if you edited since it was rated the
+> card says so. Retainer invoices are not rated — one manual line, nothing to
+> check. Invoices from before this feature simply have no badge.
+>
+> **The AI's questions (skippable).** When you click **Mark reviewed** on an
+> invoice whose rating still has unanswered questions, they appear once more
+> with answer boxes — **Answer & approve** or **Skip & approve**, your choice,
+> and approval is never held up. Answers are remembered and make future
+> ratings smarter about how you like invoices done; skipping costs nothing.
+> Questions can also be answered any time from the open invoice.
+>
 > Click any row to edit it: change a line's wording or amount, add or remove
 > lines, write the note to the client, then **Print** it or **Mark reviewed**.
 > Print produces the SAME printed invoice the per-client view has always
@@ -1576,10 +1600,12 @@ Clients page meanwhile. Owner-only.
 > point at a different document later. Voided invoices are also left out of
 > **Download for QBO**, so the export has no gap in it at all.
 >
-> **Stripe is connected in TEST (sandbox) mode.** Payment links and the payment
-> flow work end-to-end, but no real money can move until live Stripe keys are
-> set. If asked whether a client can actually pay from the app: the plumbing is
-> live, but it is still running on test keys — real payments are not taken yet.
+> **Stripe is LIVE — real money moves.** Payment links and card payments run on
+> the live Stripe account, and real payments have settled through it. If asked
+> whether a client can actually pay from the app: yes — by bank transfer (ACH)
+> from a payment link, or by card. Because every send and payment link is real
+> now, any practicing or testing belongs on the **Test** client, never a real
+> one.
 >
 > **Payment link (bank transfer).** On an invoice with an amount owed there is a
 > **Payment link** button. It does NOT open a payment page - Brittany is not the
@@ -2289,9 +2315,8 @@ Clients page meanwhile. Owner-only.
 ## NOT supported (yet) — common asks
 
 The app currently has NO:
-- Client-facing portal (clients cannot log in or see anything)
-- Online payment collection (invoices are sent/printed; payment happens
-  outside the app)
+- Client-facing portal (clients cannot log in or see anything — they can pay
+  an invoice from its emailed link, but there is nothing to sign into)
 - QuickBooks / Xero / bank-feed integration of any kind
 - Automatic invoice sending on a schedule (sending is manual, per month)
 - Document/file storage for client paperwork

@@ -8,6 +8,7 @@
   type ChecklistTemplateItem,
   type Client,
   type NewClientInput,
+  type InvoiceAiReview,
   type PersistedInvoice,
   type PersistedInvoiceLine,
   type ClientNote,
@@ -3375,4 +3376,90 @@ export async function sendInvoiceRequest(invoiceId: string, to?: string[]) {
     throw new ApiError(response.status, message || `Could not send the invoice (${response.status})`)
   }
   return (await response.json()) as { invoice: PersistedInvoice }
+}
+
+/**
+ * Every current AI confidence rating for one month — the latest per invoice,
+ * superseded ones left behind.
+ *
+ * Asked for the whole period in one go rather than per row: ratings land in the
+ * background after Generate, and forty rows each asking for their own would be
+ * forty requests to say "not rated yet" the first time she opens the month.
+ *
+ * A month with no ratings answers with an empty list, which is also what a
+ * pre-feature month answers — the caller cannot tell them apart and does not
+ * need to: both mean no badges.
+ */
+export async function listInvoiceAiReviewsRequest(period: string) {
+  const response = await apiFetch(
+    `/api/invoices/ai-reviews?period=${encodeURIComponent(period)}`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to load AI reviews (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { reviews: InvoiceAiReview[] }).reviews
+}
+
+/**
+ * Rate (or re-rate) one invoice now. SYNCHRONOUS and slow — the model reads the
+ * whole draft, so this can sit for half a minute; the caller is expected to show
+ * that rather than look broken.
+ *
+ * Answers 503 when there is no API key configured, which is a real state in
+ * local development and would otherwise arrive as an opaque failure.
+ */
+export async function rateInvoiceRequest(invoiceId: string) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/ai-review`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not rate this invoice (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { review: InvoiceAiReview }).review
+}
+
+/**
+ * Answer — or deliberately skip — one of the rating's questions.
+ *
+ * Skipping is stored rather than ignored: "she looked at this and decided it
+ * did not need answering" is the fact the learning corpus needs, and it is not
+ * the same fact as silence. Returns the whole review back, so the card and the
+ * badge move together.
+ */
+export async function answerInvoiceAiReviewQuestionRequest(
+  invoiceId: string,
+  body: { questionId: string; answer?: string; skipped?: boolean },
+) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/ai-review/answer`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not save that answer (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { review: InvoiceAiReview }).review
 }

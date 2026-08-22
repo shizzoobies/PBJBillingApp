@@ -20,11 +20,14 @@ import {
   type Ref,
 } from 'react'
 import {
+  answerInvoiceAiReviewQuestionRequest,
   confirmInvoiceCoverageRequest,
   createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
+  listInvoiceAiReviewsRequest,
   listInvoicesRequest,
   listUnappliedRetainersRequest,
+  rateInvoiceRequest,
   regenerateInvoicesRequest,
   sendInvoiceRequest,
   updateInvoiceRequest,
@@ -45,6 +48,8 @@ import {
   type AdhocMode,
   type Client,
   type Contact,
+  type InvoiceAiReview,
+  type InvoiceAiReviewQuestion,
   type PersistedInvoice,
   type PersistedInvoiceLine,
 } from '../lib/types'
@@ -164,10 +169,110 @@ const RETAINER_CREDITABLE_STATUSES: ReadonlySet<PersistedInvoice['status']> = ne
   'reviewed',
 ])
 
+/**
+ * How the run waits for ratings it did not ask for directly.
+ *
+ * Generate hands back invoices and the server rates them afterwards, one at a
+ * time, out of band. There is no ping that says "rating N landed" — the SSE
+ * `data-changed` refresh reloads the workspace, not this month's list — so the
+ * run asks again on a timer, and stops asking the moment there is nothing left
+ * to wait for.
+ *
+ * Bounded on BOTH ends deliberately. A rating that never arrives (no API key,
+ * a model outage, a client the rater choked on) must not leave a tab quietly
+ * polling until the laptop closes; three minutes is longer than a full month
+ * run of ratings takes and short enough to be forgotten about.
+ */
+const RATING_POLL_EVERY_MS = 5000
+const RATING_POLL_LIMIT_MS = 3 * 60 * 1000
+
 /** The current month as YYYY-MM, in local time. */
 function currentPeriod() {
   const now = new Date()
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+}
+
+/**
+ * What a rating answers with. The message is handed back rather than raised to
+ * the run's banner: everything the rater says belongs beside the invoice it is
+ * about, and "the AI is not configured" over the whole month would be shouting
+ * about something she was not doing.
+ */
+type AiResult =
+  | { ok: true; review: InvoiceAiReview }
+  | { ok: false; message: string }
+
+/**
+ * Fold server-returned ratings into the ones on screen, NEWEST WINS.
+ *
+ * The rule matters because two things ask for ratings at once: a five-second
+ * poll for the whole month, and her own Re-rate button for one invoice. A poll
+ * tick that read the list before she pressed it can land after the answer to
+ * her press, and a plain overwrite would put the superseded rating back — with
+ * its old questions, whose ids the server has already retired, so answering one
+ * would 404. Comparing `createdAt` costs nothing and makes the merge
+ * order-independent.
+ *
+ * Equal timestamps take the incoming row: same rating, no difference.
+ */
+function mergedReviews(
+  current: Record<string, InvoiceAiReview>,
+  incoming: InvoiceAiReview[],
+) {
+  const next = { ...current }
+  for (const review of incoming) {
+    const held = next[review.invoiceId]
+    if (!held || review.createdAt >= held.createdAt) next[review.invoiceId] = review
+  }
+  return next
+}
+
+/**
+ * The badge wording. Medium says WHAT to look at rather than "medium
+ * confidence", because a number between two others is not an instruction — the
+ * concern count is. It floors at one: a medium rating with nothing listed still
+ * means "give this a second look", and "check 0 things" would read as a bug.
+ */
+function confidenceLabel(review: InvoiceAiReview) {
+  if (review.confidence === 'high') return 'AI: high confidence'
+  if (review.confidence === 'low') return 'AI: low confidence'
+  const count = Math.max(1, review.concerns.length)
+  return `AI: check ${count} thing${count === 1 ? '' : 's'}`
+}
+
+/**
+ * Whether the rating predates the invoice it is describing.
+ *
+ * The stored `linesFingerprint` is the exact answer, but checking it here would
+ * mean sha256 of the canonical lines in the browser on every render, to decide
+ * whether to show one quiet sentence. Timestamps are cruder — a save that
+ * changed only the note to the client also ages the rating — and crude in the
+ * safe direction: it offers a re-rate she does not need rather than staying
+ * quiet about one she does.
+ */
+function reviewIsStale(invoice: PersistedInvoice, review: InvoiceAiReview | null) {
+  if (!review || !invoice.updatedAt) return false
+  return invoice.updatedAt > review.createdAt
+}
+
+/** The rating's verdict, in the row and again at the top of its card. */
+function AiConfidenceBadge({
+  review,
+  rating,
+}: {
+  review: InvoiceAiReview | null
+  /** A re-rate is in the air — this badge is about to be replaced. */
+  rating: boolean
+}) {
+  if (rating) {
+    return <span className="invoice-run-ai-badge is-rating">Rating…</span>
+  }
+  if (!review) return null
+  return (
+    <span className={`invoice-run-ai-badge is-${review.confidence}`}>
+      {confidenceLabel(review)}
+    </span>
+  )
 }
 
 function formatDue(due: string | null) {
@@ -213,6 +318,18 @@ export function InvoiceMonthRun({
   // a callback so the fetch stays inside its effect, with the same cancellation
   // guard the invoice load has.
   const [retainerToken, setRetainerToken] = useState(0)
+  // The month's AI confidence ratings, keyed by invoice id. Kept apart from
+  // `invoices` because they arrive on their own schedule: a rating is written
+  // minutes after the invoice it describes, and the invoice never carries it.
+  const [reviews, setReviews] = useState<Record<string, InvoiceAiReview>>({})
+  // The one invoice being re-rated right now, if any. Held here rather than in
+  // the editor so the ROW's badge can say "Rating…" too — the card that started
+  // it is one click away from being closed.
+  const [ratingId, setRatingId] = useState<string | null>(null)
+  // When the run started waiting for background ratings, or null if it is not.
+  // Set by Generate and Void & regenerate — the two things that create invoices
+  // the server then rates on its own.
+  const [ratingPollStartedAt, setRatingPollStartedAt] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -288,6 +405,10 @@ export function InvoiceMonthRun({
         return false
       }
       setPeriod(next)
+      // Whatever ratings August was still waiting for, they are not September's
+      // business. The effect would re-target itself at the new month anyway;
+      // this stops it waiting for a month nobody is looking at.
+      setRatingPollStartedAt(null)
       // A different month is a different pile of work — she has no position in
       // it to protect, so start at the drafts again.
       setActiveTabId('to-review')
@@ -337,6 +458,81 @@ export function InvoiceMonthRun({
       cancelled = true
     }
   }, [period, refreshToken])
+
+  /**
+   * The month's ratings, on exactly the path the invoice list takes — same
+   * period, same refresh token. Ratings are written in the background after
+   * Generate, so the refresh that follows a `data-changed` ping is what fills
+   * the badges in without her pressing anything.
+   *
+   * A failure here is SILENT, like the retainers above: this decides whether an
+   * advisory badge appears, and an error banner over the month run would be
+   * making the AI's absence her problem. No badges is the same thing the
+   * pre-feature months show.
+   */
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const rows = await listInvoiceAiReviewsRequest(period)
+        if (cancelled) return
+        // Merged rather than assigned, by the same newest-wins rule the poll
+        // uses: this can be a slow first load landing after a re-rate.
+        setReviews((current) => mergedReviews(current, rows))
+      } catch {
+        /* no badges; the invoices themselves are unaffected */
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [period, refreshToken])
+
+  /** Take a server-returned rating as the current one for its invoice. */
+  const mergeReview = (review: InvoiceAiReview) =>
+    setReviews((current) => mergedReviews(current, [review]))
+
+  /**
+   * Rate this invoice again. Slow — the model reads the whole draft — so the
+   * badge says so while it runs, in the row as well as the card.
+   */
+  const rate = async (invoiceId: string): Promise<AiResult> => {
+    setRatingId(invoiceId)
+    try {
+      const review = await rateInvoiceRequest(invoiceId)
+      mergeReview(review)
+      return { ok: true, review }
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : 'Could not rate this invoice.',
+      }
+    } finally {
+      setRatingId(null)
+    }
+  }
+
+  /**
+   * Store one answer, or one deliberate skip. Never throws: this is called in a
+   * loop on the way to approving an invoice, and an answer that would not save
+   * must not be able to stop the approval behind it.
+   */
+  const answerQuestion = async (
+    invoiceId: string,
+    body: { questionId: string; answer?: string; skipped?: boolean },
+  ): Promise<AiResult> => {
+    try {
+      const review = await answerInvoiceAiReviewQuestionRequest(invoiceId, body)
+      mergeReview(review)
+      return { ok: true, review }
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : 'Could not save that answer.',
+      }
+    }
+  }
 
   /**
    * Re-read the retainers on hand — on mount, and again after every save,
@@ -428,6 +624,63 @@ export function InvoiceMonthRun({
   const needALook = live.filter((invoice) => invoice.scopeFlags.length > 0).length
   const monthTotal = live.reduce((sum, invoice) => sum + invoice.total, 0)
 
+  // What a poll is waiting for: a live monthly invoice with no rating yet.
+  // Retainers are never rated — one manual line, nothing to check — so a month
+  // of nothing but retainers is already finished waiting.
+  const awaitingRatings = live.some(
+    (invoice) => invoice.kind !== 'retainer' && !reviews[invoice.id],
+  )
+  const pollingRatings = ratingPollStartedAt !== null && awaitingRatings
+
+  /**
+   * Ask again for the ratings that Generate set going, until they have all
+   * landed or the wait runs out.
+   *
+   * This merges REVIEW state only, never invoice state. That is what makes it
+   * safe to run under an open editor: she can be halfway through retyping a
+   * line when a tick lands, and the worst it can do is fill in a badge.
+   *
+   * Restarts cleanly whenever `awaitingRatings` flips or the month changes,
+   * because both are in the deps — and stops on unmount, so a tab left on the
+   * invoices page is not still asking an hour later.
+   */
+  useEffect(() => {
+    if (ratingPollStartedAt === null || !awaitingRatings) return
+    let cancelled = false
+    let timer = 0
+    // One request at a time. A tick slower than the interval would otherwise
+    // stack a second, a third, and so on behind it — turning a stalled server
+    // into a pile-on from the one tab that is waiting on it.
+    let running = false
+    const tick = async () => {
+      // Give up rather than wait forever: a rating that has not arrived in
+      // three minutes is not coming, and the Re-rate button is the answer.
+      if (Date.now() - ratingPollStartedAt >= RATING_POLL_LIMIT_MS) {
+        window.clearInterval(timer)
+        setRatingPollStartedAt(null)
+        return
+      }
+      if (running) return
+      running = true
+      try {
+        const rows = await listInvoiceAiReviewsRequest(period)
+        if (cancelled) return
+        // Newest wins — see `mergedReviews`. This list may have been read
+        // BEFORE a re-rate she asked for herself, and must not undo it.
+        setReviews((current) => mergedReviews(current, rows))
+      } catch {
+        /* the next tick tries again; the badges simply stay empty */
+      } finally {
+        running = false
+      }
+    }
+    timer = window.setInterval(() => void tick(), RATING_POLL_EVERY_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [period, ratingPollStartedAt, awaitingRatings])
+
   const generate = async () => {
     const target = period
     setBusy(true)
@@ -440,6 +693,14 @@ export function InvoiceMonthRun({
       // saying so over September's list would be describing the wrong month.
       if (shownPeriod.current !== target) return
       setInvoices(rows)
+      // The server rates what it just built, in the background and one at a
+      // time. Start watching for them: nothing else will say when they land.
+      //
+      // Only when it built something. Generate is idempotent — pressing it on a
+      // month that is already built creates nothing and schedules no ratings,
+      // and waiting for those would put "Rating…" on every unrated row in the
+      // month for three minutes, promising work that is not happening.
+      if (result.created.length > 0) setRatingPollStartedAt(Date.now())
       // Say what happened, including the nothing-case: running this and seeing
       // the list unchanged otherwise looks like a broken button.
       setNote(
@@ -504,6 +765,10 @@ export function InvoiceMonthRun({
       const rows = await listInvoicesRequest(target)
       if (shownPeriod.current !== target) return
       setInvoices(rows)
+      // Rebuilt invoices are new invoices, and the ratings of the ones they
+      // replaced went void with them. Watch for the replacements — but only if
+      // there are any: a regenerate can void a month and rebuild nothing.
+      if (result.created.length > 0) setRatingPollStartedAt(Date.now())
       // 'already-generated' after a regenerate means the client's live invoice
       // was one of the ones we deliberately left alone.
       const leftAlone = result.skipped.filter((row) => row.reason === 'already-generated').length
@@ -741,6 +1006,17 @@ export function InvoiceMonthRun({
                         ? null
                         : (retainers.find((held) => held.clientId === invoice.clientId) ?? null)
                     }
+                    review={reviews[invoice.id] ?? null}
+                    // Either she asked for this one, or the run is still
+                    // waiting on the rating the server owes it.
+                    rating={
+                      ratingId === invoice.id ||
+                      (pollingRatings &&
+                        invoice.kind !== 'retainer' &&
+                        !reviews[invoice.id])
+                    }
+                    onRate={() => rate(invoice.id)}
+                    onAnswer={(body) => answerQuestion(invoice.id, body)}
                     open={openId === invoice.id}
                     busy={busy}
                     onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
@@ -765,6 +1041,10 @@ function InvoiceRow({
   cardEnabled,
   recipients,
   retainer,
+  review,
+  rating,
+  onRate,
+  onAnswer,
   open,
   busy,
   onToggle,
@@ -781,6 +1061,16 @@ function InvoiceRow({
   recipients: ResolvedInvoiceRecipients
   /** A paid retainer of this client's that has not been given back yet, if any. */
   retainer: PersistedInvoice | null
+  /** The AI's current read on this draft, if it has been rated. Advisory only. */
+  review: InvoiceAiReview | null
+  /** A re-rate of THIS invoice is in the air. */
+  rating: boolean
+  onRate: () => Promise<AiResult>
+  onAnswer: (body: {
+    questionId: string
+    answer?: string
+    skipped?: boolean
+  }) => Promise<AiResult>
   open: boolean
   busy: boolean
   onToggle: () => void
@@ -859,6 +1149,15 @@ function InvoiceRow({
               ))}
             </span>
           ) : null}
+          {/* The AI's read, beside the flags it sits with — advisory, and it
+              never moves this row or disables anything on it. A voided invoice
+              drops it along with its scope flags: there is nothing left to
+              decide about an invoice that is not going out. */}
+          {!isVoid && (rating || review) ? (
+            <span className="invoice-run-flags">
+              <AiConfidenceBadge review={review} rating={rating} />
+            </span>
+          ) : null}
         </span>
         <span className="invoice-run-amount">
           <strong>{currency.format(invoice.total)}</strong>
@@ -876,6 +1175,10 @@ function InvoiceRow({
           clientName={clientName}
           recipients={recipients}
           retainer={retainer}
+          review={review}
+          rating={rating}
+          onRate={onRate}
+          onAnswer={onAnswer}
           busy={busy}
           onPatch={onPatch}
           onPrint={onPrint}
@@ -1056,6 +1359,10 @@ function InvoiceEditor({
   clientName,
   recipients,
   retainer,
+  review,
+  rating,
+  onRate,
+  onAnswer,
   busy,
   onPatch,
   onPrint,
@@ -1068,6 +1375,16 @@ function InvoiceEditor({
   recipients: ResolvedInvoiceRecipients
   /** A paid retainer of this client's with nothing spent against it yet. */
   retainer: PersistedInvoice | null
+  /** The AI's current read on this draft, if it has one. */
+  review: InvoiceAiReview | null
+  /** A re-rate of this invoice is in the air. */
+  rating: boolean
+  onRate: () => Promise<AiResult>
+  onAnswer: (body: {
+    questionId: string
+    answer?: string
+    skipped?: boolean
+  }) => Promise<AiResult>
   busy: boolean
   onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PatchResult>
   onPrint: () => void
@@ -1109,6 +1426,121 @@ function InvoiceEditor({
   >({})
   const [coverageBusyId, setCoverageBusyId] = useState<string | null>(null)
   const [coverageError, setCoverageError] = useState<string | null>(null)
+
+  /**
+   * Answers being typed to the rating's questions, keyed by question id. Held
+   * apart from `lines` for the same reason the covered dates are: answering the
+   * AI is not an edit to the invoice, and it must not gate Print, Send or the
+   * payment link behind "Save your changes first".
+   */
+  const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({})
+  /** Which question is being posted right now, so its buttons can say so. */
+  const [answerBusyId, setAnswerBusyId] = useState<string | null>(null)
+  /** Whatever the last rate-or-answer call refused with. Lives in the card. */
+  const [aiError, setAiError] = useState<string | null>(null)
+  /**
+   * The at-approve panel is up: she pressed Mark reviewed with questions still
+   * unanswered. This is CAPTURE, not a gate — both buttons on it approve.
+   */
+  const [approving, setApproving] = useState(false)
+  const [approveBusy, setApproveBusy] = useState(false)
+
+  /** Questions nobody has reached yet — neither answered nor deliberately skipped. */
+  const unansweredQuestions: InvoiceAiReviewQuestion[] =
+    review?.questions.filter((question) => question.answer === null && !question.skipped) ?? []
+
+  const setAnswerDraft = (questionId: string, value: string) =>
+    setAnswerDrafts((current) => ({ ...current, [questionId]: value }))
+
+  /** Answer one question from the card, or record that she skipped it. */
+  const submitAnswer = async (questionId: string, skipped: boolean) => {
+    const typed = (answerDrafts[questionId] ?? '').trim()
+    setAnswerBusyId(questionId)
+    setAiError(null)
+    const result = await onAnswer(
+      skipped ? { questionId, skipped: true } : { questionId, answer: typed },
+    )
+    setAnswerBusyId(null)
+    if (!result.ok) {
+      setAiError(result.message)
+      return
+    }
+    // The stored answer is what renders from here on; the draft has served its
+    // purpose and would otherwise reappear if the review came back unanswered.
+    setAnswerDrafts((current) => {
+      const next = { ...current }
+      delete next[questionId]
+      return next
+    })
+  }
+
+  const reRate = async () => {
+    setAiError(null)
+    const result = await onRate()
+    if (!result.ok) setAiError(result.message)
+  }
+
+  /**
+   * Offer to rate an invoice nobody has rated.
+   *
+   * Ratings normally arrive behind Generate, which means the feature would be
+   * invisible until the next month turned over — on drafts that already exist,
+   * including the ones she would want to try it on first. This is the way in.
+   *
+   * Only while the invoice is still hers to change: rating something already
+   * sent would be asking the model to second-guess a document the client is
+   * holding. Retainers are never rated at all — one manual line, nothing to
+   * check — so they do not get the offer either.
+   */
+  const canRate =
+    !review &&
+    invoice.kind !== 'retainer' &&
+    (invoice.status === 'draft' || invoice.status === 'reviewed')
+
+  /**
+   * Finish the at-approve panel — the ONE place both of its buttons lead.
+   *
+   * `useAnswers` is the difference between them: Answer & approve posts what she
+   * typed and skips the boxes she left empty, Skip & approve skips them all.
+   * Either way the status patch happens. A refused answer is REPORTED, never
+   * fatal: the questions exist to build a corpus, and a corpus is not worth
+   * standing between her and approving an invoice she has already read.
+   */
+  const finishApprove = async (useAnswers: boolean) => {
+    setApproveBusy(true)
+    setAiError(null)
+    let refused: string | null = null
+    for (const question of unansweredQuestions) {
+      const typed = useAnswers ? (answerDrafts[question.id] ?? '').trim() : ''
+      const result = await onAnswer(
+        typed
+          ? { questionId: question.id, answer: typed }
+          : { questionId: question.id, skipped: true },
+      )
+      if (!result.ok) refused = result.message
+    }
+    // Said before the patch, because a successful patch moves this invoice into
+    // another tab and takes this editor with it.
+    if (refused) setAiError(refused)
+    setApproveBusy(false)
+    setApproving(false)
+    await onPatch({ status: 'reviewed' })
+  }
+
+  /**
+   * What Mark reviewed does. With questions outstanding it opens the panel
+   * instead of approving — the one moment she is certain to be looking at this
+   * invoice is the moment before she signs it off, which is why the questions
+   * are asked here rather than hoping she opened the card.
+   */
+  const markReviewed = () => {
+    if (unansweredQuestions.length > 0) {
+      setAiError(null)
+      setApproving(true)
+      return
+    }
+    void onPatch({ status: 'reviewed' })
+  }
 
   const confirmCoverage = async (recurringId: string, range: { start: string; end: string }) => {
     setCoverageBusyId(recurringId)
@@ -1440,6 +1872,139 @@ function InvoiceEditor({
         </p>
       ) : null}
 
+      {/* What the AI made of this draft. A NOTE beside the lines: it changes no
+          amount, moves no status and disables nothing — see the badge in the
+          row, which is the same verdict at a glance. Absent entirely on an
+          unrated invoice, which is every invoice from before this shipped. */}
+      {review ? (
+        <div className="invoice-run-ai" role="group" aria-label="AI review">
+          <div className="invoice-run-ai-head">
+            <AiConfidenceBadge review={review} rating={rating} />
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={rating}
+              title="Read this invoice again and rate it now"
+              onClick={() => void reRate()}
+            >
+              <RefreshCw size={15} />
+              {rating ? 'Rating…' : 'Re-rate'}
+            </button>
+          </div>
+          <p className="invoice-run-ai-summary">{review.summary}</p>
+          {/* Quiet on purpose. It is a note about the note, and the invoice is
+              perfectly approvable without acting on it. */}
+          {reviewIsStale(invoice, review) ? (
+            <p className="invoice-run-ai-stale">
+              Rated before your latest edits — re-rate to refresh.
+            </p>
+          ) : null}
+          {review.concerns.length > 0 ? (
+            <ul className="invoice-run-ai-concerns">
+              {review.concerns.map((concern, index) => (
+                <li
+                  key={`${concern.line}-${index}`}
+                  className={concern.severity === 'warn' ? 'is-warn' : 'is-info'}
+                >
+                  <span className="invoice-run-ai-concern-line">{concern.line}</span>
+                  <span className="invoice-run-ai-concern-issue">{concern.issue}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {review.questions.length > 0 ? (
+            <div className="invoice-run-ai-questions">
+              {review.questions.map((question) => {
+                // An answered question stops being a question: it stays on the
+                // card as the RECORD of what was decided, in the same Q — A
+                // shape the Updates board uses for an answered clarification.
+                if (question.answer !== null) {
+                  return (
+                    <p className="invoice-run-ai-answered" key={question.id}>
+                      {`Q: ${question.question} — A: ${question.answer}`}
+                    </p>
+                  )
+                }
+                if (question.skipped) {
+                  return (
+                    <p className="invoice-run-ai-answered" key={question.id}>
+                      {`Q: ${question.question} — skipped`}
+                    </p>
+                  )
+                }
+                // The at-approve panel is asking this one right now. Two boxes
+                // for the same question, on the same screen, is one box too
+                // many — and the panel is the one she is looking at.
+                if (approving) return null
+                const posting = answerBusyId === question.id
+                return (
+                  <div className="invoice-run-ai-question" key={question.id}>
+                    <label className="field">
+                      <span>{question.question}</span>
+                      <textarea
+                        className="input"
+                        rows={2}
+                        aria-label={question.question}
+                        placeholder="A sentence is plenty — or skip it."
+                        value={answerDrafts[question.id] ?? ''}
+                        onChange={(event) => setAnswerDraft(question.id, event.target.value)}
+                      />
+                    </label>
+                    <div className="invoice-run-ai-question-actions">
+                      <button
+                        type="button"
+                        className="secondary-action"
+                        disabled={posting || !(answerDrafts[question.id] ?? '').trim()}
+                        onClick={() => void submitAnswer(question.id, false)}
+                      >
+                        {posting ? 'Saving…' : 'Answer'}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-action"
+                        disabled={posting}
+                        onClick={() => void submitAnswer(question.id, true)}
+                      >
+                        Skip
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : null}
+          {aiError ? (
+            <p className="invoice-run-error" role="alert">
+              {aiError}
+            </p>
+          ) : null}
+        </div>
+      ) : canRate ? (
+        // The same card with nothing in it yet. Deliberately not a badge on the
+        // row: "not rated" is the state of every invoice built before this
+        // shipped, and forty rows announcing it would be noise.
+        <div className="invoice-run-ai" role="group" aria-label="AI review">
+          <div className="invoice-run-ai-head">
+            <p className="invoice-run-ai-summary">This invoice hasn’t been rated.</p>
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={rating}
+              title="Have the AI read this invoice and rate it"
+              onClick={() => void reRate()}
+            >
+              <RefreshCw size={15} />
+              {rating ? 'Rating…' : 'Rate with AI'}
+            </button>
+          </div>
+          {aiError ? (
+            <p className="invoice-run-error" role="alert">
+              {aiError}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
       <label className="field invoice-run-blurb">
         <span>Note to the client</span>
         <textarea
@@ -1536,6 +2101,57 @@ function InvoiceEditor({
         />
       ) : null}
 
+      {/* The one moment she is certainly looking at this invoice is the moment
+          before she approves it, so that is where the AI's questions are put.
+          Both buttons approve — this captures an answer if she has one and gets
+          out of the way if she does not. */}
+      {approving ? (
+        <div className="invoice-run-ai-approve" role="group" aria-label="Before you approve">
+          <p className="invoice-run-ai-approve-prompt">
+            Before you approve — answering is optional, and either button marks this reviewed.
+          </p>
+          {unansweredQuestions.map((question) => (
+            <label className="field" key={question.id}>
+              <span>{question.question}</span>
+              <textarea
+                className="input"
+                rows={2}
+                aria-label={question.question}
+                placeholder="A sentence is plenty — or leave it blank."
+                value={answerDrafts[question.id] ?? ''}
+                onChange={(event) => setAnswerDraft(question.id, event.target.value)}
+              />
+            </label>
+          ))}
+          <div className="invoice-run-ai-approve-actions">
+            <button
+              type="button"
+              className="primary-action"
+              disabled={busy || approveBusy}
+              onClick={() => void finishApprove(true)}
+            >
+              {approveBusy ? 'Approving…' : 'Answer & approve'}
+            </button>
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy || approveBusy}
+              onClick={() => void finishApprove(false)}
+            >
+              Skip &amp; approve
+            </button>
+            <button
+              type="button"
+              className="ghost-action"
+              disabled={approveBusy}
+              onClick={() => setApproving(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="invoice-run-editor-footer">
         <span className="invoice-run-running-total">
           Total {currency.format(localTotal)}
@@ -1557,7 +2173,10 @@ function InvoiceEditor({
           <button type="button" className="secondary-action" disabled={busy || !dirty} onClick={save}>
             {saved && !dirty ? 'Saved' : 'Save changes'}
           </button>
-          {invoice.status === 'draft' ? (
+          {/* While the panel above is up, this button IS that panel — leaving
+              it here too would offer two ways to approve, one of which throws
+              away the answers she is in the middle of typing. */}
+          {invoice.status === 'draft' && !approving ? (
             <button
               type="button"
               className="primary-action"
@@ -1571,7 +2190,7 @@ function InvoiceEditor({
                       'Confirm the covered dates above first'
                     : 'Mark this invoice reviewed'
               }
-              onClick={() => void onPatch({ status: 'reviewed' })}
+              onClick={markReviewed}
             >
               Mark reviewed
             </button>

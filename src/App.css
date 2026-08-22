@@ -11886,6 +11886,143 @@ tr.is-inactive-client .client-name-link {
   margin: 0;
 }
 
+/* The AI's read on a draft. Advisory throughout: it earns a pill in the row and
+   a bordered note in the editor, and nothing else on the screen answers to it.
+   Sized and shaped like the scope-flag chip beside it so it reads as one more
+   thing worth knowing rather than as a verdict. */
+.invoice-run-ai-badge {
+  align-items: center;
+  border-radius: 8px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+  padding: 4px 9px;
+  width: fit-content;
+}
+
+.invoice-run-ai-badge.is-high {
+  background: rgba(38, 132, 74, 0.14);
+  color: #1f6b3b;
+}
+
+.invoice-run-ai-badge.is-medium {
+  background: rgba(211, 155, 42, 0.14);
+  color: #7a4f06;
+}
+
+.invoice-run-ai-badge.is-low {
+  background: color-mix(in srgb, var(--danger, #c0392b) 12%, transparent);
+  color: var(--danger, #c0392b);
+}
+
+/* Mid-re-rate. Deliberately colorless: the old verdict is gone and the new one
+   is not in yet, so this must not look like an answer. */
+.invoice-run-ai-badge.is-rating {
+  background: var(--surface-muted, #f1efe8);
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* The card in the expanded editor. Set off with a rule down its left the same
+   way the covered-dates group is, in a neutral color — that group is a question
+   standing between the invoice and review; this one is a note that never is. */
+.invoice-run-ai {
+  border-left: 2px solid var(--line);
+  display: grid;
+  gap: 8px;
+  padding-left: 10px;
+}
+
+.invoice-run-ai-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.invoice-run-ai-summary {
+  font-size: 13px;
+  margin: 0;
+}
+
+.invoice-run-ai-stale {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+  margin: 0;
+}
+
+.invoice-run-ai-concerns {
+  display: grid;
+  gap: 5px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.invoice-run-ai-concerns li {
+  border-radius: 8px;
+  display: grid;
+  font-size: 12.5px;
+  gap: 1px;
+  padding: 5px 9px;
+}
+
+.invoice-run-ai-concerns li.is-warn {
+  background: rgba(211, 155, 42, 0.12);
+}
+
+.invoice-run-ai-concerns li.is-info {
+  background: var(--surface-muted, #f6f6f7);
+}
+
+.invoice-run-ai-concern-line {
+  font-weight: 600;
+}
+
+.invoice-run-ai-concern-issue {
+  color: var(--muted);
+}
+
+.invoice-run-ai-questions,
+.invoice-run-ai-question {
+  display: grid;
+  gap: 8px;
+}
+
+.invoice-run-ai-question-actions,
+.invoice-run-ai-approve-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* An answered — or deliberately skipped — question, kept as the record of what
+   was decided. Same Q — A shape the Updates board uses. */
+.invoice-run-ai-answered {
+  color: var(--muted);
+  font-size: 12.5px;
+  margin: 0;
+}
+
+/* The at-approve panel. Borrowed wholesale from the covered-dates group: it is
+   the same kind of moment — a question asked right where the answer matters —
+   even though this one never blocks the button. */
+.invoice-run-ai-approve {
+  border-left: 2px solid color-mix(in srgb, var(--gold, #d39b2a) 55%, transparent);
+  display: grid;
+  gap: 8px;
+  padding-left: 10px;
+}
+
+.invoice-run-ai-approve-prompt {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
 .invoice-run-editor-footer {
   align-items: center;
   display: flex;

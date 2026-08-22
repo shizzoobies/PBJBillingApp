@@ -8,6 +8,7 @@ import {
   AppDataStore,
   coerceEntryMinutes,
   CoverageConfirmationError,
+  InvoiceAiReviewError,
   RetainerCreditError,
   TimeEntrySplitError,
 } from './db/store.js'
@@ -53,7 +54,13 @@ import {
 } from './lib/invoice-email.js'
 import { chooseInvoiceRecipients } from './lib/invoice-recipients.js'
 import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
-import { cardProcessingFeeLine } from './lib/invoice-lines.js'
+import {
+  cardProcessingFeeLine,
+  isInBillingPeriod,
+  PER_EMPLOYEE_BILLING_START,
+} from './lib/invoice-lines.js'
+import { previousPeriod } from './lib/invoice-draft.js'
+import { rateInvoiceDraft } from './lib/invoice-confidence.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
 import {
   listBlockingWeeks,
@@ -1010,6 +1017,198 @@ function broadcastDataChanged() {
       sseClients.delete(client)
     }
   }
+}
+
+// ---- Invoice confidence ratings -------------------------------------------
+// docs/plans/invoice-confidence-2026-08.md. The rating is an ADVISORY
+// annotation and nothing else: it never feeds lib/invoice-lines.js, never
+// changes a status, never blocks a send. Everything below is read-only apart
+// from the one `invoice_ai_reviews` row it stores.
+
+/**
+ * The statuses worth spending a model call on. A sent, paid or voided invoice
+ * has left review, and a verdict on it could only ever arrive too late.
+ */
+const RATEABLE_INVOICE_STATUSES = new Set(['draft', 'reviewed'])
+
+/**
+ * What she is told when the model is overloaded.
+ *
+ * The lib throws `SPITBALL_CAPACITY_MESSAGE`, which ends "Your notes are safe."
+ * — true of the brainstorm feature it was written for and meaningless next to
+ * an invoice. Same fact, said about the thing she is actually looking at.
+ */
+const INVOICE_RATING_CAPACITY_MESSAGE =
+  'The AI reviewer is at capacity right now — try again in a minute. ' +
+  'The invoice itself is untouched.'
+
+/**
+ * The month's billable hours per employee for one client — the numbers the
+ * hourly lines were derived from, so the model can check the arithmetic on the
+ * lines against their source.
+ *
+ * READ-ONLY SUMMARY. No money is computed here: hours and bill rates only, the
+ * two inputs `buildInvoiceLines` multiplies. Its entry filter and its bill-rate
+ * fallback are mirrored exactly (billable, in-period, this client; the
+ * employee's own `billRate` or the client's hourly rate) so a mismatch the
+ * model reports is a real one rather than two different definitions of "hours".
+ */
+function buildInvoiceHoursSummary(data, client, period) {
+  if (!client) return null
+  const employees = data.employees ?? []
+  const employeeById = new Map(employees.map((employee) => [employee.id, employee]))
+  const defaultHourlyRate = Number(client.hourlyRate) || 0
+  const rateFor = (employeeId) => {
+    const employee = employeeById.get(employeeId)
+    return employee && typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
+      ? employee.billRate
+      : defaultHourlyRate
+  }
+
+  const byEmployee = new Map()
+  for (const entry of data.timeEntries ?? []) {
+    if (entry.clientId !== client.id || !entry.billable) continue
+    if (!isInBillingPeriod(entry, period)) continue
+    const bucket = byEmployee.get(entry.employeeId) ?? { scoped: 0, adhoc: 0 }
+    // The same partition the lines use: ad hoc time becomes its own per-entry
+    // line and is NOT inside the "Billable hours — <name>" total.
+    if (entry.isAdhoc) bucket.adhoc += entry.minutes
+    else bucket.scoped += entry.minutes
+    byEmployee.set(entry.employeeId, bucket)
+  }
+
+  const hours = (minutes) => Math.round((minutes / 60) * 100) / 100
+  return {
+    period,
+    // Before the cutover there are no per-employee lines at all — one aggregate
+    // at the client's own rate. Said out loud so the model does not report a
+    // legacy invoice as missing everybody's name.
+    perEmployeeBilling: String(period) >= PER_EMPLOYEE_BILLING_START,
+    employees: [...byEmployee.entries()]
+      .map(([employeeId, bucket]) => ({
+        name: employeeById.get(employeeId)?.name ?? 'Unknown',
+        billRate: rateFor(employeeId),
+        scopedHours: hours(bucket.scoped),
+        adhocHours: hours(bucket.adhoc),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  }
+}
+
+/**
+ * Rate one invoice and store the verdict. The ONE place the rating inputs are
+ * assembled — the re-rate endpoint and the after-generate hook both come
+ * through here, so they can never drift into rating the same draft differently.
+ *
+ * Throws whatever the lib throws (503 unconfigured / overloaded, 502 unusable
+ * output); each caller decides what that means for its own reply.
+ */
+async function rateInvoiceAndPersist(invoice, preloaded = null) {
+  // `appDataStore.read()` is NOT a cheap pure read — it runs the recurring
+  // checklist materializer and can enter a guarded bulk-save write-back. One
+  // per invoice would mean forty full workspace reads and up to forty
+  // background write transactions while she works the month run, so a batch
+  // hands its own copy in and this only reads for a single re-rate.
+  const data = preloaded?.data ?? (await appDataStore.read())
+  const client = (data.clients ?? []).find((entry) => entry.id === invoice.clientId) ?? null
+
+  // Last month's invoices, on the same terms the generator's own true-up uses:
+  // monthly, not voided. A withdrawn invoice is not what the month before
+  // actually billed. Shared across a batch too — every invoice in one run
+  // wants the same period's list.
+  const prior = previousPeriod(invoice.period)
+  const priorList = !prior
+    ? []
+    : (preloaded?.priorInvoicesByPeriod?.get(prior) ??
+      (await appDataStore.listInvoices({ period: prior })))
+  const priorInvoice =
+    priorList.find(
+      (entry) =>
+        entry.clientId === invoice.clientId &&
+        entry.kind === 'monthly' &&
+        entry.status !== 'void',
+    ) ?? null
+
+  const verdict = await rateInvoiceDraft({
+    invoice,
+    client,
+    hoursSummary: buildInvoiceHoursSummary(data, client, invoice.period),
+    priorInvoice,
+    // Stays per-invoice: it is scoped to the client, and the firm-wide slice it
+    // adds deliberately EXCLUDES that client, so no two invoices want the same
+    // answer. It is also a plain query with no materializer behind it.
+    learningContext: await appDataStore.listInvoiceLearningContext(invoice.clientId, {}),
+  })
+
+  return appDataStore.createInvoiceAiReview({
+    invoiceId: invoice.id,
+    clientId: invoice.clientId,
+    period: invoice.period,
+    ...verdict,
+  })
+}
+
+/**
+ * Rate a freshly generated month in the background. NOT awaited by the routes
+ * that call it: Generate answers as soon as the drafts exist, and the badges
+ * fill in behind her over the following minute.
+ *
+ * Sequential rather than `Promise.all` on purpose — forty invoices are forty
+ * Opus calls, and a burst buys nothing here when nobody is waiting on it. Each
+ * one is its own try/catch: a client whose rating fails simply stays unrated
+ * and can be re-rated from the row, which is the whole reason the feature is
+ * advisory. `broadcastDataChanged()` as each lands, so the month run fills in
+ * row by row rather than all at once at the end.
+ *
+ * The shared context is loaded ONCE, above the loop, and handed to every
+ * rating. `appDataStore.read()` runs the recurring-checklist materializer and
+ * can enter a guarded bulk-save write-back, so a per-invoice read would put
+ * forty of those behind her while she works the month run. The snapshot going
+ * slightly stale across the batch is the right trade: these invoices were
+ * generated from it moments ago.
+ */
+function scheduleInvoiceRatings(invoices) {
+  // No key means no rating anywhere — including local development, where
+  // Generate must still work. Silent, because there is nobody to tell.
+  if (!process.env.ANTHROPIC_API_KEY) return
+  const queue = (Array.isArray(invoices) ? invoices : []).filter(
+    // Retainers are one agreed line with nothing to check (plan doc).
+    (invoice) => invoice && invoice.kind !== 'retainer',
+  )
+  if (queue.length === 0) return
+
+  void (async () => {
+    let preloaded
+    try {
+      const data = await appDataStore.read()
+      // One list per distinct prior period — normally exactly one, since a run
+      // is a single month.
+      const priorInvoicesByPeriod = new Map()
+      for (const prior of new Set(
+        queue.map((invoice) => previousPeriod(invoice.period)).filter(Boolean),
+      )) {
+        priorInvoicesByPeriod.set(prior, await appDataStore.listInvoices({ period: prior }))
+      }
+      preloaded = { data, priorInvoicesByPeriod }
+    } catch (error) {
+      // Nothing to rate against, and nobody is waiting on this. Say so once
+      // rather than failing the same way forty times below.
+      console.warn('[invoices] auto-rating context load failed:', error?.message || error)
+      return
+    }
+
+    for (const invoice of queue) {
+      try {
+        await rateInvoiceAndPersist(invoice, preloaded)
+        broadcastDataChanged()
+      } catch (error) {
+        console.warn(
+          `[invoices] auto-rating ${invoice.number ?? invoice.id} failed:`,
+          error?.message || error,
+        )
+      }
+    }
+  })()
 }
 
 const server = createServer(async (request, response) => {
@@ -3011,6 +3210,33 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // GET /api/invoices/ai-reviews?period=YYYY-MM — the month's CURRENT AI
+    // ratings, one per invoice (owner only). Superseded rows stay in the table
+    // and never come back out here.
+    //
+    // Declared before the /:id routes for the same reason export.csv and
+    // unapplied-retainers are: `ai-reviews` is a literal segment, and a
+    // /api/invoices/:id matcher below would otherwise read it as an invoice id.
+    // Asked for a whole month at once because ratings land in the background —
+    // per-row requests would be forty ways to be told "not rated yet".
+    if (normalizedPath === '/api/invoices/ai-reviews' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see invoices' })
+        return
+      }
+      const reviewPeriod = requestUrl.searchParams.get('period')
+      if (reviewPeriod && !/^\d{4}-\d{2}$/.test(reviewPeriod)) {
+        sendJson(response, 400, { error: 'period must look like 2026-08' })
+        return
+      }
+      sendJson(response, 200, {
+        reviews: await appDataStore.listInvoiceAiReviews({ period: reviewPeriod || null }),
+      })
+      return
+    }
+
     // POST /api/invoices/retainer — issue a retainer invoice for one client
     // (owner only). Manual by design: nothing in this app knows an engagement
     // letter came back signed, so this button IS the signing event.
@@ -3096,7 +3322,13 @@ const server = createServer(async (request, response) => {
 
       let updated
       try {
-        updated = await appDataStore.updateInvoice(invoiceId, payload ?? {})
+        // The actor comes from the SESSION, never from the body. `updateInvoice`
+        // records what changed in `invoice_review_events`, and that record is
+        // the trust corpus the ratings are measured against — an omitted actor
+        // here writes null into every row of it, silently and forever.
+        updated = await appDataStore.updateInvoice(invoiceId, payload ?? {}, {
+          actorUserId: session.user.id,
+        })
       } catch (error) {
         // A refused retainer credit is a FACT about the data, not a failure —
         // most often "that retainer has already been given back". She needs the
@@ -3202,6 +3434,166 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/invoices/:id/ai-review — rate, or re-rate, one invoice NOW
+    // (owner only).
+    //
+    // Synchronous and slow: the model reads the whole draft, so this can sit for
+    // half a minute. It is a button she presses, and the alternative — a job id
+    // to poll — is machinery for a queue of one.
+    const invoiceRateMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)\/ai-review$/)
+    if (invoiceRateMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can rate invoices' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const rateContentType = String(request.headers['content-type'] || '')
+      if (!rateContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      // Said before any model call, because "there is no API key on this server"
+      // is a configuration fact and would otherwise arrive as a generic failure
+      // half a minute later. It is a real state in local development.
+      if (!process.env.ANTHROPIC_API_KEY) {
+        sendJson(response, 503, {
+          error: 'ai_review_unconfigured',
+          message: 'The AI reviewer is not set up on this server, so nothing can be rated yet.',
+        })
+        return
+      }
+
+      const rateInvoiceId = decodeURIComponent(invoiceRateMatch[1])
+      const invoiceToRate = (await appDataStore.listInvoices()).find(
+        (entry) => entry.id === rateInvoiceId,
+      )
+      if (!invoiceToRate) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      // Both refusals happen BEFORE the model is asked anything — a rating that
+      // cost thirty seconds and then could not be stored is worse than a
+      // sentence. A retainer is one agreed amount with nothing to check.
+      if (invoiceToRate.kind === 'retainer') {
+        sendJson(response, 409, {
+          error: 'retainer_not_rated',
+          message:
+            'A retainer invoice is a single agreed amount, so there is nothing for the AI to check.',
+        })
+        return
+      }
+      if (!RATEABLE_INVOICE_STATUSES.has(invoiceToRate.status)) {
+        sendJson(response, 409, {
+          error: 'invoice_not_rateable',
+          message:
+            'This invoice has already left review, so rating it now would not change anything.',
+        })
+        return
+      }
+
+      let review
+      try {
+        review = await rateInvoiceAndPersist(invoiceToRate)
+      } catch (error) {
+        const status = error?.statusCode ?? error?.status ?? 502
+        console.error('[invoices] ai review failed:', error?.message || error)
+        if (status === 503) {
+          sendJson(response, 503, {
+            error: 'ai_review_unavailable',
+            message: INVOICE_RATING_CAPACITY_MESSAGE,
+          })
+          return
+        }
+        sendJson(response, 502, {
+          error: 'ai_review_failed',
+          message: 'The AI could not rate this invoice right now — please try again.',
+        })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { review })
+      return
+    }
+
+    // POST /api/invoices/:id/ai-review/answer — record her answer to one of the
+    // rating's questions, or that she chose to skip it (owner only).
+    //
+    // A SKIP is stored rather than ignored: "she read this and decided it did
+    // not need answering" is a different fact from silence, and the learning
+    // corpus wants both.
+    const invoiceAnswerMatch = normalizedPath.match(
+      /^\/api\/invoices\/([^/]+)\/ai-review\/answer$/,
+    )
+    if (invoiceAnswerMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can answer AI review questions' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const answerContentType = String(request.headers['content-type'] || '')
+      if (!answerContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const answerPayload = await readJsonBody(request)
+      const questionId =
+        typeof answerPayload?.questionId === 'string' ? answerPayload.questionId.trim() : ''
+      if (!questionId) {
+        sendJson(response, 400, { error: 'questionId is required' })
+        return
+      }
+      const skipped = answerPayload?.skipped === true
+      const answerText = String(answerPayload?.answer ?? '')
+        .trim()
+        .slice(0, 2000)
+      // An empty answer that is not a skip would mark the question answered and
+      // contribute nothing — the card would show it as done and the corpus would
+      // gain a blank. Refuse it rather than store it.
+      if (!skipped && !answerText) {
+        sendJson(response, 400, { error: 'An answer is required unless the question is skipped' })
+        return
+      }
+
+      let answeredReview
+      try {
+        answeredReview = await appDataStore.answerInvoiceAiReviewQuestion(
+          decodeURIComponent(invoiceAnswerMatch[1]),
+          questionId,
+          { answer: answerText, skipped },
+        )
+      } catch (error) {
+        // No current review, or no question by that id — both mean a re-rate
+        // landed under the page she is looking at. A fact about the data, said
+        // in a sentence, exactly like a refused retainer credit.
+        if (error instanceof InvoiceAiReviewError) {
+          sendJson(response, error.statusCode ?? 404, {
+            error: 'ai_review_stale',
+            message: error.message,
+          })
+          return
+        }
+        console.error('[invoices] ai review answer failed:', error)
+        sendJson(response, 500, {
+          error: 'ai_review_answer_failed',
+          message: 'Could not save that answer — please try again.',
+        })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { review: answeredReview })
+      return
+    }
+
     // POST /api/invoices/generate — build the month's drafts (owner only).
     // Idempotent: a client that already has a live invoice for the period is
     // skipped, never rewritten, so re-running cannot revert an edited draft.
@@ -3249,6 +3641,9 @@ const server = createServer(async (request, response) => {
         'invoices_generated',
         `${period}: ${result.created.length} created${onlyClientId ? ' (one client)' : ''}`,
       )
+      // Deliberately NOT awaited: rating is minutes of model time and Generate
+      // has to answer now. The badges arrive behind her over the next minute.
+      scheduleInvoiceRatings(result.created)
       sendJson(response, 200, result)
       return
     }
@@ -3319,6 +3714,9 @@ const server = createServer(async (request, response) => {
         'invoices_regenerated',
         `${regenPeriod}: ${voided.voided} voided, ${rebuilt.created.length} rebuilt`,
       )
+      // Same fire-and-forget as Generate. The voided drafts' ratings go with
+      // them: a rating is keyed to an invoice id, and these are new ones.
+      scheduleInvoiceRatings(rebuilt.created)
       sendJson(response, 200, {
         period: regenPeriod,
         voided: voided.voided,

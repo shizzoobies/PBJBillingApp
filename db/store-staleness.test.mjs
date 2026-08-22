@@ -70,6 +70,23 @@ function workspace(overrides = {}) {
   }
 }
 
+/**
+ * Empty the two endpoint-managed invoice-confidence tables.
+ *
+ * They live in `tmp/auth-state.json`, which the outer `beforeEach` never
+ * touches (it resets app-data only) — so without this every test in a run would
+ * inherit the previous one's events and ratings, and the counts below would be
+ * whatever order vitest happened to pick.
+ */
+async function clearInvoiceIntelligence() {
+  const authState = existsSync(localAuthPath)
+    ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+    : {}
+  authState.invoiceReviewEvents = []
+  authState.invoiceAiReviews = []
+  await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+}
+
 beforeAll(async () => {
   // DATABASE_URL must be absent or the store would construct a Pool and take
   // the Postgres branch.
@@ -954,6 +971,8 @@ function fakePostgres({
   templateItemRows = [],
   versionResponses = null,
   recurringRows = [],
+  aiReviewRows = [],
+  aiReviewUpdateRowCount = 1,
 } = {}) {
   const statements = []
   const record = (text, params) => {
@@ -1021,6 +1040,15 @@ function fakePostgres({
     }
     if (/^update recurring_reimbursements set[\s\S]*returning/i.test(trimmed)) {
       return { rows: recurringRows, rowCount: recurringRows.length }
+    }
+    // Invoice AI ratings. The answer path's guarded update needs a scriptable
+    // rowCount: matching NO row is the re-rate race, and the store turns that
+    // into a 409 rather than a silent success.
+    if (/^select\b[\s\S]*\bfrom invoice_ai_reviews\b/i.test(trimmed)) {
+      return { rows: aiReviewRows, rowCount: aiReviewRows.length }
+    }
+    if (/^update invoice_ai_reviews set questions/i.test(trimmed)) {
+      return { rows: [], rowCount: aiReviewUpdateRowCount }
     }
     return { rows: [] }
   }
@@ -5277,13 +5305,34 @@ describe('retainer writes on the postgres branch', () => {
     expect(fake.statements[applied].params).toEqual(['inv-ret', 'inv-final'])
   })
 
-  it('leaves an ordinary edit as one statement, with no transaction at all', async () => {
+  // An ordinary edit used to be a single statement outside any transaction.
+  // It is no longer, and the reason is the review-event capture: the record of
+  // what she changed has to land with the change or not at all. What still
+  // holds — and is what this test was really about — is that no RETAINER
+  // statement is issued for an edit that moves no credit.
+  it('moves no retainer on an ordinary edit, and records the edit with it', async () => {
     const fake = fakePostgres({ invoices: [finalRow] })
 
     await postgresStore(fake).updateInvoice('inv-final', { blurb: 'Thank you!' })
 
-    expect(fake.matching(/^BEGIN$/i)).toHaveLength(0)
     expect(fake.matching(/set applied_to_invoice_id/i)).toHaveLength(0)
+    const update = fake.indexOf(/^update invoices\s+set line_items/i)
+    const event = fake.indexOf(/^insert into invoice_review_events/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+    expect(update).toBeGreaterThan(fake.indexOf(/^BEGIN$/i))
+    expect(event).toBeGreaterThan(update)
+    expect(commit).toBeGreaterThan(event)
+  })
+
+  // A save that rewrites the same values is not an edit. No event, and
+  // therefore nothing needing a transaction — the single-statement path stays.
+  it('leaves a no-op save as one statement, with no transaction at all', async () => {
+    const fake = fakePostgres({ invoices: [finalRow] })
+
+    await postgresStore(fake).updateInvoice('inv-final', {})
+
+    expect(fake.matching(/^BEGIN$/i)).toHaveLength(0)
+    expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
   })
 
   it('carries kind and the applied fact through the bulk-save restore', async () => {
@@ -5303,7 +5352,9 @@ describe('retainer writes on the postgres branch', () => {
     const restores = fake.matching(/insert into invoices \(/i)
     expect(restores).toHaveLength(1)
     expect(restores[0].text).toMatch(/number, kind, status/i)
-    expect(restores[0].text).toMatch(/email_log, applied_to_invoice_id, created_at/i)
+    expect(restores[0].text).toMatch(
+      /email_log, applied_to_invoice_id, original_line_items, created_at/i,
+    )
     // A retainer that came back as 'monthly' would collide with that client's
     // real invoice on the very next generate; one that came back unapplied
     // would be spendable a second time.
@@ -7978,5 +8029,789 @@ describe('duplicate weekly submits (postgres branch)', () => {
     expect(insert.text).toMatch(
       /set status = case when weekly_submissions\.status = 'approved'[\s\S]*then weekly_submissions\.status/i,
     )
+  })
+})
+
+/**
+ * ===========================================================================
+ * Invoice confidence — the store layer
+ * (docs/plans/invoice-confidence-2026-08.md)
+ * ===========================================================================
+ *
+ * Three persisted things, all of them append-only records rather than state the
+ * app acts on: the lines an invoice was GENERATED with, the events describing
+ * what a human then did to it, and the ratings a model wrote about it.
+ *
+ * The failure this whole section guards against is the one that has happened
+ * three times in this file's history — a column that lives through the code
+ * path being tested and dies in the bulk save, or in a backend nobody ran.
+ */
+
+/**
+ * `invoices.original_line_items` — set once at insert, never written again.
+ *
+ * The value is only useful if it stays still. An `updateInvoice` that also
+ * refreshed the snapshot would produce a diff of every invoice against itself:
+ * always empty, always confident, and wrong.
+ */
+describe('original line items are frozen at generate (file backend)', () => {
+  const period = '2026-08'
+
+  async function seedBillableWorkspace() {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [
+          {
+            id: 't1',
+            clientId: 'c1',
+            employeeId: 'emp-1',
+            date: `${period}-04`,
+            minutes: 120,
+            billable: true,
+          },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('snapshots the generated lines onto the new invoice', async () => {
+    await seedBillableWorkspace()
+
+    const { created } = await store.generateInvoicesForPeriod(period)
+
+    expect(created).toHaveLength(1)
+    expect(created[0].originalLineItems).toEqual(created[0].lineItems)
+    // And it is on the PERSISTED row, not just the return value.
+    const stored = (await store.listInvoices({ period }))[0]
+    expect(stored.originalLineItems).toEqual(stored.lineItems)
+  })
+
+  it('leaves the snapshot alone when the lines are edited', async () => {
+    await seedBillableWorkspace()
+    const { created } = await store.generateInvoicesForPeriod(period)
+    const original = created[0].originalLineItems
+
+    const edited = await store.updateInvoice(created[0].id, {
+      lineItems: [{ kind: 'custom', label: 'Agreed flat fee', detail: '', amount: 150 }],
+    })
+
+    expect(edited.lineItems).toHaveLength(1)
+    expect(edited.lineItems[0].amount).toBe(150)
+    // The before-side is untouched — this is the whole point of the column.
+    expect(edited.originalLineItems).toEqual(original)
+    expect(edited.originalLineItems).not.toEqual(edited.lineItems)
+  })
+
+  it('snapshots the retainer’s one line too', async () => {
+    await seedBillableWorkspace()
+
+    const retainer = await store.createRetainerInvoice({ clientId: 'c1', amount: 2500, period })
+
+    expect(retainer.originalLineItems).toEqual(retainer.lineItems)
+  })
+
+  it('reads a pre-feature row as null, never as an empty list', async () => {
+    await seedBillableWorkspace()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-old',
+        clientId: 'c1',
+        period,
+        number: 'INV-2026-08-001',
+        status: 'draft',
+        lineItems: [{ kind: 'custom', label: 'Work', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-09-30',
+        blurb: '',
+        scopeFlags: [],
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    // `[]` would read as "she deleted every line"; null is "we never knew".
+    expect((await store.listInvoices({ period }))[0].originalLineItems).toBeNull()
+  })
+})
+
+/**
+ * The bulk save's snapshot/restore pair, for the new column.
+ *
+ * `invoices` is the one table `write()` wipes without re-inserting from the
+ * payload, so a column added to the DDL but not to BOTH halves of that pair is
+ * silently dropped on the next owner autosave. Three past data-loss bugs were
+ * exactly this. The select and the insert are asserted separately because
+ * getting one and missing the other is the actual failure mode.
+ */
+describe('bulk save round-trips original_line_items (postgres branch)', () => {
+  const generated = [{ kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 250 }]
+  const withOriginal = { ...existingInvoice, original_line_items: generated }
+
+  it('snapshots the column before the wipe', async () => {
+    const fake = fakePostgres({ invoices: [withOriginal] })
+    await postgresStore(fake).write(workspace())
+
+    const snapshot = fake.matching(/^select[\s\S]*from invoices$/i)[0]
+    expect(snapshot.text).toMatch(/original_line_items/)
+  })
+
+  it('puts the same value back', async () => {
+    const fake = fakePostgres({ invoices: [withOriginal] })
+    await postgresStore(fake).write(workspace())
+
+    const restore = fake.matching(/^insert into invoices \(/i)[0]
+    expect(restore.text).toMatch(/original_line_items/)
+    expect(restore.params).toContain(JSON.stringify(generated))
+  })
+
+  it('restores a pre-feature row’s NULL as NULL, not as []', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice, original_line_items: null }] })
+    await postgresStore(fake).write(workspace())
+
+    const restore = fake.matching(/^insert into invoices \(/i)[0]
+    // The column sits one before created_at in the parameter list. NULL, not
+    // the '[]' that `scope_flags` and `email_log` legitimately carry — an empty
+    // array here would read as "she deleted every line".
+    expect(restore.params[20]).toBeNull()
+    expect(restore.params[21]).toBe(existingInvoice.created_at)
+  })
+
+  it('writes the snapshot on insert and never on update', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    const pg = postgresStore(fake)
+
+    await pg._insertInvoice({
+      id: 'inv-new',
+      clientId: 'c1',
+      period: '2026-08',
+      number: 'INV-2026-08-009',
+      status: 'draft',
+      lineItems: generated,
+      subtotal: 250,
+      total: 250,
+      dueDate: '2026-09-30',
+      blurb: '',
+      scopeFlags: [],
+    })
+    await pg.updateInvoice('inv-1', { blurb: 'Thank you!' })
+
+    const insert = fake.matching(/^insert into invoices \(/i)[0]
+    expect(insert.text).toMatch(/original_line_items/)
+    expect(insert.params).toContain(JSON.stringify(generated))
+    // THE POINT: no update statement may name the column.
+    for (const statement of fake.matching(/^update invoices\b/i)) {
+      expect(statement.text).not.toMatch(/original_line_items/)
+    }
+  })
+})
+
+/**
+ * `invoice_review_events` — the record of what a human did.
+ *
+ * Two properties matter more than the rest. The diff is COMPACT: only fields
+ * that moved, because this feeds a prompt and a whole-invoice dump per edit
+ * would crowd out the draft being judged. And a save that changed nothing
+ * writes nothing — an event per autosave would fill the corpus with noise that
+ * looks exactly like a correction.
+ */
+describe('invoice review events (file backend)', () => {
+  async function seedInvoice(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-1',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-001',
+        status: 'draft',
+        lineItems: [{ kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 200 }],
+        originalLineItems: [
+          { kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 200 },
+        ],
+        subtotal: 200,
+        total: 200,
+        dueDate: '2026-09-30',
+        blurb: '',
+        scopeFlags: [],
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  beforeEach(async () => {
+    await clearInvoiceIntelligence()
+    await seedInvoice()
+  })
+
+  it('records only the fields that moved', async () => {
+    await store.updateInvoice('inv-1', { blurb: 'Thanks!' })
+
+    const [event] = await store.listInvoiceReviewEvents({ invoiceId: 'inv-1' })
+    expect(Object.keys(event.changes)).toEqual(['blurb'])
+    expect(event.changes.blurb).toEqual({ before: '', after: 'Thanks!' })
+    expect(event.event).toBe('edited')
+    expect(event.clientId).toBe('c1')
+    expect(event.period).toBe('2026-08')
+  })
+
+  it('carries the before and after of a line edit', async () => {
+    await store.updateInvoice('inv-1', {
+      lineItems: [{ kind: 'custom', label: 'Agreed flat fee', detail: '', amount: 150 }],
+    })
+
+    const [event] = await store.listInvoiceReviewEvents({ invoiceId: 'inv-1' })
+    expect(Object.keys(event.changes)).toEqual(['lineItems'])
+    expect(event.changes.lineItems.before[0].amount).toBe(200)
+    expect(event.changes.lineItems.after[0].label).toBe('Agreed flat fee')
+  })
+
+  it('writes NOTHING when the save changed nothing', async () => {
+    await store.updateInvoice('inv-1', {})
+    await store.updateInvoice('inv-1', { blurb: '' })
+
+    expect(await store.listInvoiceReviewEvents({ invoiceId: 'inv-1' })).toEqual([])
+  })
+
+  it('names the approval rather than the edit that rode along with it', async () => {
+    await store.updateInvoice('inv-1', {
+      status: 'reviewed',
+      lineItems: [{ kind: 'custom', label: 'Agreed flat fee', detail: '', amount: 150 }],
+    })
+
+    const [event] = await store.listInvoiceReviewEvents({ invoiceId: 'inv-1' })
+    expect(event.event).toBe('reviewed')
+    // …and the lines she fixed on the way are still in the payload.
+    expect(event.changes.lineItems).toBeDefined()
+    expect(event.changes.status).toEqual({ before: 'draft', after: 'reviewed' })
+  })
+
+  it('names an un-approval and a void', async () => {
+    await store.updateInvoice('inv-1', { status: 'reviewed' })
+    await store.updateInvoice('inv-1', { status: 'draft' })
+    await store.updateInvoice('inv-1', { status: 'void' })
+
+    const events = await store.listInvoiceReviewEvents({ invoiceId: 'inv-1' })
+    expect(events.map((event) => event.event)).toEqual(['voided', 'unreviewed', 'reviewed'])
+  })
+
+  it('takes the actor from the caller, never from the patch body', async () => {
+    await store.updateInvoice(
+      'inv-1',
+      { blurb: 'Thanks!', actorUserId: 'emp-impostor' },
+      { actorUserId: 'emp-patrice' },
+    )
+
+    const [event] = await store.listInvoiceReviewEvents({ invoiceId: 'inv-1' })
+    expect(event.actorUserId).toBe('emp-patrice')
+  })
+
+  it('defaults the actor to null when no session user is passed', async () => {
+    await store.updateInvoice('inv-1', { blurb: 'Thanks!' })
+
+    const [event] = await store.listInvoiceReviewEvents({ invoiceId: 'inv-1' })
+    expect(event.actorUserId).toBeNull()
+  })
+
+  it('filters by client and caps the list', async () => {
+    await store.updateInvoice('inv-1', { blurb: 'One' })
+    await store.updateInvoice('inv-1', { blurb: 'Two' })
+    await store.updateInvoice('inv-1', { blurb: 'Three' })
+
+    expect(await store.listInvoiceReviewEvents({ clientId: 'c1' })).toHaveLength(3)
+    expect(await store.listInvoiceReviewEvents({ clientId: 'nobody' })).toEqual([])
+    expect(await store.listInvoiceReviewEvents({ invoiceId: 'inv-1', limit: 2 })).toHaveLength(2)
+  })
+
+  it('leaves original_line_items alone through every one of those saves', async () => {
+    await store.updateInvoice('inv-1', {
+      lineItems: [{ kind: 'custom', label: 'Agreed flat fee', detail: '', amount: 150 }],
+    })
+    await store.updateInvoice('inv-1', { status: 'reviewed' })
+
+    const stored = (await store.listInvoices({ period: '2026-08' }))[0]
+    expect(stored.originalLineItems[0].amount).toBe(200)
+  })
+})
+
+/**
+ * `invoice_ai_reviews` — what the model said, and what Brittany answered back.
+ *
+ * The supersede rule is the load-bearing part: history is kept, but exactly one
+ * row per invoice is CURRENT. Two current rows would put two verdicts on one
+ * badge, decided by whichever the sort reached first.
+ */
+describe('invoice AI reviews (file backend)', () => {
+  const rating = (overrides = {}) => ({
+    invoiceId: 'inv-1',
+    clientId: 'c1',
+    period: '2026-08',
+    model: 'claude-opus-5',
+    confidence: 'high',
+    score: 92,
+    summary: 'Lines match the month’s billable hours.',
+    concerns: [{ line: 'Billable hours — Lisa', issue: 'Rounded up', severity: 'info' }],
+    questions: [
+      { id: 'q1', question: 'Should the rush job be billed?', answer: null, skipped: false },
+    ],
+    linesFingerprint: 'sha-a',
+    ...overrides,
+  })
+
+  beforeEach(clearInvoiceIntelligence)
+
+  it('stores a rating and hands it back as the current one', async () => {
+    const saved = await store.createInvoiceAiReview(rating())
+
+    expect(saved.id).toMatch(/^airev-/)
+    expect(saved.superseded).toBe(false)
+    expect(await store.getInvoiceAiReview('inv-1')).toMatchObject({
+      id: saved.id,
+      confidence: 'high',
+      score: 92,
+    })
+  })
+
+  it('sanitizes a band and a score the model got wrong', async () => {
+    const saved = await store.createInvoiceAiReview(
+      rating({ confidence: 'extremely high', score: 4200 }),
+    )
+
+    expect(saved.confidence).toBe('medium')
+    expect(saved.score).toBe(100)
+    expect((await store.createInvoiceAiReview(rating({ score: -5 }))).score).toBe(0)
+  })
+
+  it('refuses a rating with no invoice to be about', async () => {
+    expect(await store.createInvoiceAiReview({ confidence: 'high' })).toBeNull()
+  })
+
+  it('supersedes the prior rating rather than replacing it', async () => {
+    const first = await store.createInvoiceAiReview(rating())
+    const second = await store.createInvoiceAiReview(rating({ score: 55, confidence: 'low' }))
+
+    expect((await store.getInvoiceAiReview('inv-1')).id).toBe(second.id)
+    // History kept: the old row is still on file, marked.
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    const stored = authState.invoiceAiReviews.find((entry) => entry.id === first.id)
+    expect(stored.superseded).toBe(true)
+  })
+
+  it('lists only the current rating for the period, one per invoice', async () => {
+    await store.createInvoiceAiReview(rating())
+    const current = await store.createInvoiceAiReview(rating({ score: 55 }))
+    await store.createInvoiceAiReview(rating({ invoiceId: 'inv-2', score: 70 }))
+    await store.createInvoiceAiReview(rating({ invoiceId: 'inv-3', period: '2026-07' }))
+
+    const listed = await store.listInvoiceAiReviews({ period: '2026-08' })
+
+    expect(listed.map((entry) => entry.invoiceId).sort()).toEqual(['inv-1', 'inv-2'])
+    expect(listed.find((entry) => entry.invoiceId === 'inv-1').id).toBe(current.id)
+  })
+
+  it('answers the question that was asked, and only that one', async () => {
+    await store.createInvoiceAiReview(
+      rating({
+        questions: [
+          { id: 'q1', question: 'Bill the rush job?', answer: null, skipped: false },
+          { id: 'q2', question: 'Is the March true-up still owed?', answer: null, skipped: false },
+        ],
+      }),
+    )
+
+    const updated = await store.answerInvoiceAiReviewQuestion('inv-1', 'q2', {
+      answer: 'No — she paid it in April.',
+    })
+
+    expect(updated.questions[1]).toMatchObject({
+      id: 'q2',
+      answer: 'No — she paid it in April.',
+      skipped: false,
+    })
+    expect(updated.questions[1].answeredAt).toBeTruthy()
+    // The other question is untouched, including its null answer.
+    expect(updated.questions[0]).toMatchObject({ id: 'q1', answer: null, skipped: false })
+    // And it persisted, rather than only being returned.
+    expect((await store.getInvoiceAiReview('inv-1')).questions[1].answer).toBe(
+      'No — she paid it in April.',
+    )
+  })
+
+  it('records a skip as a skip', async () => {
+    await store.createInvoiceAiReview(rating())
+
+    const updated = await store.answerInvoiceAiReviewQuestion('inv-1', 'q1', { skipped: true })
+
+    expect(updated.questions[0]).toMatchObject({ skipped: true, answer: null })
+    expect(updated.questions[0].answeredAt).toBeTruthy()
+  })
+
+  it('throws on a question id that isn’t there', async () => {
+    await store.createInvoiceAiReview(rating())
+
+    await expect(
+      store.answerInvoiceAiReviewQuestion('inv-1', 'q99', { answer: 'Yes' }),
+    ).rejects.toThrow(/no question by that id/i)
+  })
+
+  it('throws when the invoice has no current rating at all', async () => {
+    await expect(
+      store.answerInvoiceAiReviewQuestion('inv-nope', 'q1', { answer: 'Yes' }),
+    ).rejects.toThrow(/no current AI review/i)
+  })
+
+  it('fills in a missing question id so the answer has something to name', async () => {
+    const saved = await store.createInvoiceAiReview(
+      rating({ questions: [{ question: 'Bill the rush job?' }] }),
+    )
+
+    expect(saved.questions[0].id).toBe('q1')
+    await expect(
+      store.answerInvoiceAiReviewQuestion('inv-1', 'q1', { answer: 'Yes' }),
+    ).resolves.toBeTruthy()
+  })
+})
+
+/**
+ * The learning context — the corpus the rating prompt reads before judging the
+ * next draft.
+ *
+ * It is a SUMMARY on purpose. Two full line arrays per correction would crowd
+ * out the invoice being rated, so corrections arrive as removed/added/changed
+ * label lists and answers arrive as question-and-answer pairs. The client's own
+ * history leads; a few firm-wide entries follow, and never the same client
+ * twice.
+ */
+describe('invoice learning context (file backend)', () => {
+  async function seedTwoClientInvoices() {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-1',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-001',
+        status: 'draft',
+        lineItems: [
+          { kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 200 },
+          { kind: 'custom', label: 'Cleanup', detail: '', amount: 75 },
+        ],
+        subtotal: 275,
+        total: 275,
+        dueDate: '2026-09-30',
+        blurb: '',
+        scopeFlags: [],
+      },
+      {
+        id: 'inv-2',
+        clientId: 'c2',
+        period: '2026-08',
+        number: 'INV-2026-08-002',
+        status: 'draft',
+        lineItems: [{ kind: 'custom', label: 'Monthly service', detail: '', amount: 500 }],
+        subtotal: 500,
+        total: 500,
+        dueDate: '2026-09-30',
+        blurb: '',
+        scopeFlags: [],
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  beforeEach(async () => {
+    await clearInvoiceIntelligence()
+    await seedTwoClientInvoices()
+  })
+
+  it('returns this client’s answered questions and her corrections', async () => {
+    await store.createInvoiceAiReview({
+      invoiceId: 'inv-1',
+      clientId: 'c1',
+      period: '2026-08',
+      confidence: 'medium',
+      score: 70,
+      questions: [
+        { id: 'q1', question: 'Bill the cleanup?' },
+        { id: 'q2', question: 'Is the rate still $100?' },
+      ],
+    })
+    await store.answerInvoiceAiReviewQuestion('inv-1', 'q1', { answer: 'No — it was quoted flat.' })
+    await store.answerInvoiceAiReviewQuestion('inv-1', 'q2', { skipped: true })
+    // …and the correction itself: the cleanup line goes, the hours are re-priced.
+    await store.updateInvoice('inv-1', {
+      lineItems: [{ kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 180 }],
+    })
+
+    const context = await store.listInvoiceLearningContext('c1')
+
+    expect(context.answeredQuestions).toHaveLength(1)
+    expect(context.answeredQuestions[0]).toMatchObject({
+      scope: 'client',
+      period: '2026-08',
+      answer: 'No — it was quoted flat.',
+    })
+    expect(context.corrections).toHaveLength(1)
+    expect(context.corrections[0]).toMatchObject({ scope: 'client', invoiceId: 'inv-1' })
+    expect(context.corrections[0].removed).toEqual(['Cleanup ($75)'])
+    expect(context.corrections[0].changed).toEqual(['Billable hours — Lisa: $200 → $180'])
+    expect(context.corrections[0].added).toEqual([])
+  })
+
+  it('does not count a skipped question as an answer', async () => {
+    await store.createInvoiceAiReview({
+      invoiceId: 'inv-1',
+      clientId: 'c1',
+      period: '2026-08',
+      questions: [{ id: 'q1', question: 'Bill the cleanup?' }],
+    })
+    await store.answerInvoiceAiReviewQuestion('inv-1', 'q1', { skipped: true })
+
+    expect((await store.listInvoiceLearningContext('c1')).answeredQuestions).toEqual([])
+  })
+
+  it('does not count an approval as a correction', async () => {
+    await store.updateInvoice('inv-1', { status: 'reviewed' })
+
+    expect((await store.listInvoiceLearningContext('c1')).corrections).toEqual([])
+  })
+
+  it('adds a few firm-wide entries, and never this client twice', async () => {
+    await store.createInvoiceAiReview({
+      invoiceId: 'inv-2',
+      clientId: 'c2',
+      period: '2026-08',
+      questions: [{ id: 'q1', question: 'Does Globex still get the discount?' }],
+    })
+    await store.answerInvoiceAiReviewQuestion('inv-2', 'q1', { answer: 'Yes, through December.' })
+    await store.updateInvoice('inv-2', {
+      lineItems: [{ kind: 'custom', label: 'Monthly service', detail: '', amount: 450 }],
+    })
+
+    const context = await store.listInvoiceLearningContext('c1')
+
+    expect(context.answeredQuestions).toHaveLength(1)
+    expect(context.answeredQuestions[0].scope).toBe('firm')
+    expect(context.corrections).toHaveLength(1)
+    expect(context.corrections[0]).toMatchObject({ scope: 'firm', clientId: 'c2' })
+    // The firm slice EXCLUDES this client, so nothing is said twice.
+    expect(context.corrections.filter((entry) => entry.clientId === 'c1')).toEqual([])
+  })
+
+  it('caps both scopes', async () => {
+    for (let round = 0; round < 6; round += 1) {
+      await store.updateInvoice('inv-1', {
+        lineItems: [
+          { kind: 'hourly', label: 'Billable hours — Lisa', detail: '', amount: 200 - round },
+        ],
+      })
+      await store.updateInvoice('inv-2', {
+        lineItems: [{ kind: 'custom', label: 'Monthly service', detail: '', amount: 500 - round }],
+      })
+    }
+
+    const context = await store.listInvoiceLearningContext('c1', { limit: 2, firmLimit: 1 })
+
+    expect(context.corrections.filter((entry) => entry.scope === 'client')).toHaveLength(2)
+    expect(context.corrections.filter((entry) => entry.scope === 'firm')).toHaveLength(1)
+  })
+
+  it('keeps an answer that a later re-rate superseded', async () => {
+    await store.createInvoiceAiReview({
+      invoiceId: 'inv-1',
+      clientId: 'c1',
+      period: '2026-08',
+      questions: [{ id: 'q1', question: 'Bill the cleanup?' }],
+    })
+    await store.answerInvoiceAiReviewQuestion('inv-1', 'q1', { answer: 'No — quoted flat.' })
+    // Re-rated after her edits; the row holding her answer is now superseded.
+    await store.createInvoiceAiReview({
+      invoiceId: 'inv-1',
+      clientId: 'c1',
+      period: '2026-08',
+      questions: [{ id: 'q1', question: 'Bill the cleanup?' }],
+    })
+
+    const context = await store.listInvoiceLearningContext('c1')
+
+    // Her answer is still her answer — it is not a property of the verdict.
+    expect(context.answeredQuestions.map((entry) => entry.answer)).toEqual(['No — quoted flat.'])
+  })
+})
+
+/**
+ * The two ways a second rating landing at the wrong moment corrupts the first.
+ *
+ * Both are real here rather than theoretical: the generate hook rates a whole
+ * month in the background while the owner can press Re-rate on any row of it,
+ * so a background write and a manual one racing on ONE invoice is the ordinary
+ * case, not the edge.
+ */
+describe('invoice AI reviews under concurrency (postgres branch)', () => {
+  const aiReviewRow = {
+    id: 'airev-1',
+    invoice_id: 'inv-1',
+    client_id: 'c1',
+    period: '2026-08',
+    model: 'claude-opus-5',
+    confidence: 'high',
+    score: 92,
+    summary: 'Lines match the month’s billable hours.',
+    concerns: [],
+    questions: [
+      { id: 'q1', question: 'Bill the rush job?', answer: null, skipped: false, answeredAt: null },
+    ],
+    lines_fingerprint: 'sha-a',
+    superseded: false,
+    created_at: new Date('2026-08-20T00:00:00.000Z'),
+  }
+
+  /**
+   * `update … where superseded = false` re-checks only the rows the statement's
+   * own snapshot can see, so under READ COMMITTED two interleaved ratings each
+   * supersede what they saw and then insert — leaving TWO current rows and a
+   * badge that changes between page loads. The per-invoice advisory lock is
+   * what makes the existing order correct, and it is only correct if it is
+   * taken FIRST.
+   */
+  it('takes a per-invoice advisory lock before superseding anything', async () => {
+    const fake = fakePostgres()
+
+    await postgresStore(fake).createInvoiceAiReview({
+      invoiceId: 'inv-1',
+      clientId: 'c1',
+      period: '2026-08',
+      confidence: 'high',
+      score: 92,
+    })
+
+    const begin = fake.indexOf(/^BEGIN$/i)
+    const lock = fake.indexOf(/pg_advisory_xact_lock/i)
+    const supersede = fake.indexOf(/^update invoice_ai_reviews set superseded = true/i)
+    const insert = fake.indexOf(/^insert into invoice_ai_reviews/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+
+    expect(begin).toBeGreaterThan(-1)
+    expect(lock).toBeGreaterThan(begin)
+    expect(supersede).toBeGreaterThan(lock)
+    expect(insert).toBeGreaterThan(supersede)
+    expect(commit).toBeGreaterThan(insert)
+    // Keyed on the invoice, so two DIFFERENT invoices still rate in parallel —
+    // the generate hook rates a whole month at once.
+    expect(fake.statements[lock].params).toEqual(['inv-1'])
+  })
+
+  it('guards the answer write on the row still being current', async () => {
+    const fake = fakePostgres({ aiReviewRows: [aiReviewRow] })
+
+    await postgresStore(fake).answerInvoiceAiReviewQuestion('inv-1', 'q1', { answer: 'Yes' })
+
+    const update = fake.matching(/^update invoice_ai_reviews set questions/i)[0]
+    expect(update.text).toMatch(/where id = \$1 and superseded = false/i)
+    expect(update.params[0]).toBe('airev-1')
+  })
+
+  it('refuses the answer, 409, when a re-rate got there first', async () => {
+    // The read saw a current review; by the time the update ran, a newer rating
+    // had superseded it — so the guarded statement matches no row.
+    const fake = fakePostgres({ aiReviewRows: [aiReviewRow], aiReviewUpdateRowCount: 0 })
+
+    const failure = await postgresStore(fake)
+      .answerInvoiceAiReviewQuestion('inv-1', 'q1', { answer: 'Yes' })
+      .catch((error) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure.name).toBe('InvoiceAiReviewError')
+    expect(failure.message).toMatch(/replaced by a newer rating/i)
+    // The route answers `error.statusCode ?? 404`; this one is not "gone", it
+    // is "you are looking at an old copy", and refreshing fixes it.
+    expect(failure.statusCode).toBe(409)
+  })
+})
+
+/**
+ * Cardinal rule 1 for the same guard: the file backend has no WHERE clause, so
+ * it re-checks the stored row itself. The race is staged by making the read
+ * return a review that is superseded on disk — which is exactly what a re-rate
+ * landing between the read and the write produces.
+ */
+describe('answering a superseded review (file backend)', () => {
+  beforeEach(clearInvoiceIntelligence)
+
+  it('refuses with the same 409 rather than writing into a dead row', async () => {
+    const first = await store.createInvoiceAiReview({
+      invoiceId: 'inv-1',
+      clientId: 'c1',
+      period: '2026-08',
+      questions: [{ id: 'q1', question: 'Bill the rush job?' }],
+    })
+    // The re-rate lands, superseding the row the page is holding.
+    await store.createInvoiceAiReview({
+      invoiceId: 'inv-1',
+      clientId: 'c1',
+      period: '2026-08',
+      questions: [{ id: 'q1', question: 'Bill the rush job?' }],
+    })
+    // …and her answer arrives naming the old one.
+    vi.spyOn(store, 'getInvoiceAiReview').mockResolvedValue(first)
+
+    const failure = await store
+      .answerInvoiceAiReviewQuestion('inv-1', 'q1', { answer: 'Yes' })
+      .catch((error) => error)
+
+    expect(failure.name).toBe('InvoiceAiReviewError')
+    expect(failure.statusCode).toBe(409)
+    vi.restoreAllMocks()
+
+    // Nothing was written: the superseded row still holds an unanswered question.
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    const stale = authState.invoiceAiReviews.find((entry) => entry.id === first.id)
+    expect(stale.questions[0].answer).toBeNull()
+  })
+
+  it('still answers normally when the row is the current one', async () => {
+    await store.createInvoiceAiReview({
+      invoiceId: 'inv-1',
+      clientId: 'c1',
+      period: '2026-08',
+      questions: [{ id: 'q1', question: 'Bill the rush job?' }],
+    })
+
+    const updated = await store.answerInvoiceAiReviewQuestion('inv-1', 'q1', { answer: 'Yes' })
+
+    expect(updated.questions[0].answer).toBe('Yes')
+  })
+
+  it('keeps 404 on the two not-found refusals — only the race is a 409', async () => {
+    await store.createInvoiceAiReview({
+      invoiceId: 'inv-1',
+      clientId: 'c1',
+      period: '2026-08',
+      questions: [{ id: 'q1', question: 'Bill the rush job?' }],
+    })
+
+    const noQuestion = await store
+      .answerInvoiceAiReviewQuestion('inv-1', 'q99', { answer: 'Yes' })
+      .catch((error) => error)
+    const noReview = await store
+      .answerInvoiceAiReviewQuestion('inv-nope', 'q1', { answer: 'Yes' })
+      .catch((error) => error)
+
+    expect(noQuestion.statusCode).toBe(404)
+    expect(noReview.statusCode).toBe(404)
   })
 })

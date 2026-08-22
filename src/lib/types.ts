@@ -348,6 +348,13 @@ export type PersistedInvoice = {
   kind: 'monthly' | 'retainer'
   status: 'draft' | 'reviewed' | 'sent' | 'processing' | 'paid' | 'overdue' | 'void'
   lineItems: PersistedInvoiceLine[]
+  /**
+   * The lines as GENERATED, written once at insert and never updated — the
+   * before-side of every correction she makes. Null on invoices built before
+   * this was recorded, and optional because the file backend only grows the
+   * field on invoices created since.
+   */
+  originalLineItems?: PersistedInvoiceLine[] | null
   /** This month's work, excluding any prior-month adjustment. */
   subtotal: number
   /** What is owed: the subtotal plus any adjustment. */
@@ -383,6 +390,68 @@ export type PersistedInvoice = {
   appliedToInvoiceId: string | null
   createdAt: string | null
   updatedAt: string | null
+}
+
+/**
+ * One thing the rater wants a second look at. `warn` is "this could be wrong";
+ * `info` is "this is unusual but probably fine" — the difference is whether it
+ * is worth interrupting her for, not whether it blocks anything, because
+ * nothing here blocks anything.
+ */
+export type InvoiceAiReviewConcern = {
+  /** The line it is about, by its label — the rating never addresses an index. */
+  line: string
+  issue: string
+  severity: 'info' | 'warn'
+}
+
+/**
+ * Something only the owner can answer, asked of the draft she is about to
+ * approve. `answer` and `skipped` are both stored: a skipped question is a
+ * decision ("not worth answering"), which is different from one nobody has
+ * reached yet, and the learning corpus needs to tell the two apart.
+ */
+export type InvoiceAiReviewQuestion = {
+  id: string
+  question: string
+  answer: string | null
+  skipped: boolean
+  answeredAt: string | null
+}
+
+/**
+ * What the rater made of one draft invoice — ADVISORY, always. It is an
+ * annotation beside the invoice, never an input to it: no status moves on it,
+ * no button is disabled by it, and the money is calculated as if it did not
+ * exist. Its job is to be right often enough, over months, to earn the
+ * automation the invoicing plans keep gating on "trust earned".
+ *
+ * Absent on every invoice generated before the feature shipped, and on
+ * retainers, which have one manual line and nothing to check.
+ */
+export type InvoiceAiReview = {
+  id: string
+  invoiceId: string
+  clientId: string
+  /** 'YYYY-MM' — the invoice's month, carried so a period can be fetched at once. */
+  period: string
+  /** Which model said this, so a later calibration can tell the eras apart. */
+  model: string
+  confidence: 'high' | 'medium' | 'low'
+  /** 0-100. The band is derived from it server-side; both are stored. */
+  score: number
+  summary: string
+  concerns: InvoiceAiReviewConcern[]
+  questions: InvoiceAiReviewQuestion[]
+  /**
+   * sha256 of the lines as they stood when this was rated. STORED, not yet
+   * consulted: nothing compares it today. It is what an exact "has this invoice
+   * changed since?" test would be built on later. The UI answers that question
+   * with the cruder `invoice.updatedAt > review.createdAt`, because hashing the
+   * lines in the browser is more machinery than one advisory sentence is worth.
+   */
+  linesFingerprint: string
+  createdAt: string
 }
 
 export type TimeApprovalStatus = 'pending' | 'approved' | 'rejected'

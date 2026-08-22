@@ -854,6 +854,102 @@ export class CoverageConfirmationError extends Error {
   }
 }
 
+/**
+ * An answer aimed at a rating or a question that isn't there — a re-rate landed
+ * between the page loading and the owner typing, or the id is simply wrong.
+ * Same shape and same reason as the two above: a fact about the data, said in a
+ * sentence, so the API can answer 404 rather than 500.
+ */
+export class InvoiceAiReviewError extends Error {
+  constructor(message, statusCode = 404) {
+    super(message)
+    this.name = 'InvoiceAiReviewError'
+    // The route answers `error.statusCode ?? 404`, so the default matches what
+    // it would have said anyway. 409 is for the one case that is NOT "gone":
+    // the rating was replaced while she was typing, and refreshing fixes it.
+    this.statusCode = statusCode
+  }
+}
+
+/** The three bands the rating may claim. Anything else is not a verdict. */
+const AI_CONFIDENCE_BANDS = new Set(['high', 'medium', 'low'])
+
+/**
+ * The compact diff `invoice_review_events.changes` carries — only the fields
+ * that actually moved, each as `{ before, after }`.
+ *
+ * Four fields, because those are the four a human edits: the lines, the blurb,
+ * the due date and the review status. Everything else on the row is written by
+ * the machinery (money is recomputed, Stripe ids arrive from webhooks) and
+ * recording it would bury the signal this table exists to collect.
+ *
+ * Returns null when nothing changed — a save that rewrote an invoice with the
+ * same values is not an edit, and an event for it would be noise in the corpus
+ * the rating prompt learns from.
+ */
+function buildInvoiceChangeDiff(current, next) {
+  const changes = {}
+  if (JSON.stringify(current.lineItems ?? []) !== JSON.stringify(next.lineItems ?? [])) {
+    changes.lineItems = { before: current.lineItems ?? [], after: next.lineItems ?? [] }
+  }
+  if ((current.blurb ?? '') !== (next.blurb ?? '')) {
+    changes.blurb = { before: current.blurb ?? '', after: next.blurb ?? '' }
+  }
+  if ((current.dueDate ?? null) !== (next.dueDate ?? null)) {
+    changes.dueDate = { before: current.dueDate ?? null, after: next.dueDate ?? null }
+  }
+  if (current.status !== next.status) {
+    changes.status = { before: current.status, after: next.status }
+  }
+  return Object.keys(changes).length > 0 ? changes : null
+}
+
+/**
+ * Name what the human just did, from the status move alone.
+ *
+ * The status transition wins over the edit, because "she approved it" and "she
+ * approved it and fixed a line on the way" are the same act as far as the trust
+ * record is concerned — and the `changes` payload still says which lines moved.
+ */
+function classifyInvoiceReviewEvent(current, next) {
+  if (current.status === 'draft' && next.status === 'reviewed') return 'reviewed'
+  if (current.status === 'reviewed' && next.status === 'draft') return 'unreviewed'
+  if (next.status === 'void' && current.status !== 'void') return 'voided'
+  return 'edited'
+}
+
+/**
+ * One line list against another, said in a sentence rather than shipped whole.
+ *
+ * This feeds a PROMPT, so size is the constraint: two full line arrays per
+ * correction would crowd out the draft being rated. Lines are matched by label,
+ * which is how a person reads an invoice — a re-priced line is a change, not a
+ * delete plus an add.
+ */
+function summarizeLineItemChange(before, after) {
+  const byLabel = (lines) => {
+    const map = new Map()
+    for (const line of Array.isArray(lines) ? lines : []) {
+      map.set(String(line?.label ?? ''), Number(line?.amount) || 0)
+    }
+    return map
+  }
+  const from = byLabel(before)
+  const to = byLabel(after)
+  const removed = []
+  const added = []
+  const changed = []
+  for (const [label, amount] of from) {
+    if (!to.has(label)) removed.push(`${label} ($${amount})`)
+    else if (to.get(label) !== amount) changed.push(`${label}: $${amount} → $${to.get(label)}`)
+  }
+  for (const [label] of to) {
+    if (!from.has(label)) added.push(`${label} ($${to.get(label)})`)
+  }
+  const cap = (list) => list.slice(0, 4)
+  return { removed: cap(removed), added: cap(added), changed: cap(changed) }
+}
+
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
 
 /**
@@ -1020,7 +1116,7 @@ export const INVOICE_SELECT_COLUMNS = `id, client_id, period, number, kind, stat
           due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
           stripe_checkout_session_id, stripe_card_session_id,
           stripe_payment_intent_id, email_log, applied_to_invoice_id,
-          created_at, updated_at`
+          original_line_items, created_at, updated_at`
 
 /**
  * One invoices row -> the camelCase shape the app and the API speak. jsonb
@@ -1059,8 +1155,52 @@ export function mapInvoiceRow(row) {
     // Non-null is what makes "already applied" a fact on the row rather than a
     // scan of every other invoice's lines — see `updateInvoice`.
     appliedToInvoiceId: row.applied_to_invoice_id ?? null,
+    // The lines as GENERATED, frozen at insert and never written again — the
+    // before-side of every correction diff. Null (not `[]`) on a row created
+    // before the column existed: an empty array here would read as "she deleted
+    // every line", which is the opposite of "we never knew".
+    originalLineItems: Array.isArray(row.original_line_items) ? row.original_line_items : null,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  }
+}
+
+/**
+ * One `invoice_review_events` row -> the camelCase shape the app speaks.
+ * Exported for the same reason `mapInvoiceRow` is: so a test can watch which
+ * columns it reads.
+ */
+export function mapInvoiceReviewEventRow(row) {
+  return {
+    id: row.id,
+    invoiceId: row.invoice_id,
+    clientId: row.client_id ?? null,
+    period: row.period ?? null,
+    actorUserId: row.actor_user_id ?? null,
+    event: row.event ?? 'edited',
+    changes: row.changes && typeof row.changes === 'object' ? row.changes : {},
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+  }
+}
+
+/** One `invoice_ai_reviews` row -> the shape the month run and the prompt read. */
+export function mapInvoiceAiReviewRow(row) {
+  return {
+    id: row.id,
+    invoiceId: row.invoice_id,
+    clientId: row.client_id ?? null,
+    period: row.period ?? null,
+    model: row.model ?? null,
+    confidence: row.confidence ?? 'medium',
+    // pg hands back `integer` as a number, but the file backend's value came
+    // from a model — coerce either into the same thing.
+    score: Number(row.score) || 0,
+    summary: row.summary ?? '',
+    concerns: Array.isArray(row.concerns) ? row.concerns : [],
+    questions: Array.isArray(row.questions) ? row.questions : [],
+    linesFingerprint: row.lines_fingerprint ?? null,
+    superseded: Boolean(row.superseded),
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
   }
 }
 
@@ -3762,6 +3902,7 @@ export class AppDataStore {
           stripe_payment_intent_id text,
           payment_method text,
           email_log jsonb not null default '[]'::jsonb,
+          original_line_items jsonb,
           created_at timestamptz not null default now(),
           updated_at timestamptz not null default now()
         )
@@ -3784,6 +3925,14 @@ export class AppDataStore {
       // — see `updateInvoice`, which only ever sets it from null.
       await this.pool.query(
         `alter table invoices add column if not exists applied_to_invoice_id text`,
+      )
+      // The generated lines, snapshotted once at insert. NULLABLE with no
+      // default on purpose: every row that already exists in production was
+      // generated before this existed, and there is no honest value to invent
+      // for it — `null` is "unknown", and the diff simply has no before-side.
+      // Nothing but `_insertInvoice` ever writes it; `updateInvoice` must not.
+      await this.pool.query(
+        `alter table invoices add column if not exists original_line_items jsonb`,
       )
       // PARTIAL unique — one live invoice per client per month, but a VOIDED
       // one must not block re-generating. Same lesson as the checklist
@@ -3855,6 +4004,66 @@ export class AppDataStore {
       // supersedes it; keeping both would mean two tables carrying the same
       // bulk-save hazard, one of them dead.
       await this.pool.query(`drop table if exists invoice_drafts`)
+
+      // ---- The invoice-confidence pair (docs/plans/invoice-confidence-2026-08.md) ----
+      //
+      // NEITHER of these carries a foreign key to `invoices`, and that is
+      // deliberate rather than sloppy. The bulk save DELETES every invoice row
+      // and puts it back (see `write()`); a restricting child FK would refuse
+      // that delete and wedge every owner autosave, and a cascading one would
+      // silently take the audit trail with it. Plain text `invoice_id`, exactly
+      // like `client_notes` / `item_deletion_requests`.
+      //
+      // Both are also endpoint-managed: they are NOT in the bulk-save payload
+      // and NOT in the staleness fingerprint, so an autosave can neither write
+      // nor destroy them.
+
+      // What a HUMAN did to an invoice. Append-only; one row per save that
+      // actually changed something. This is the audit surface for the ratings
+      // feature — `activity_log` deliberately is not (it is trimmed to 200 rows
+      // per user, and invoice edits would evict real activity).
+      await this.pool.query(`
+        create table if not exists invoice_review_events (
+          id text primary key,
+          invoice_id text not null,
+          client_id text,
+          period text,
+          actor_user_id text,
+          event text not null default 'edited',
+          changes jsonb not null default '{}'::jsonb,
+          created_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists invoice_review_events_invoice_idx
+           on invoice_review_events (invoice_id)`,
+      )
+
+      // What the MODEL said about a draft. History is kept rather than
+      // overwritten — a re-rate marks the prior rows `superseded` — because the
+      // whole point of the feature is the record of confidence-vs-corrections
+      // over months, and an overwriting table would have no record at all.
+      await this.pool.query(`
+        create table if not exists invoice_ai_reviews (
+          id text primary key,
+          invoice_id text not null,
+          client_id text,
+          period text,
+          model text,
+          confidence text not null default 'medium',
+          score integer not null default 0,
+          summary text not null default '',
+          concerns jsonb not null default '[]'::jsonb,
+          questions jsonb not null default '[]'::jsonb,
+          lines_fingerprint text,
+          superseded boolean not null default false,
+          created_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists invoice_ai_reviews_invoice_idx
+           on invoice_ai_reviews (invoice_id)`,
+      )
 
       await this.cleanupSeedEmployeesInPostgres()
       await this.seedUsersInPostgres()
@@ -5147,7 +5356,7 @@ export class AppDataStore {
                     due_date, blurb, scope_flags, sent_at, paid_at,
                     stripe_checkout_session_id, stripe_card_session_id,
                     stripe_payment_intent_id, payment_method,
-                    email_log, applied_to_invoice_id, created_at
+                    email_log, applied_to_invoice_id, original_line_items, created_at
                from invoices`,
           )
         ).rows
@@ -5483,9 +5692,9 @@ export class AppDataStore {
                 due_date, blurb, scope_flags, sent_at, paid_at,
                 stripe_checkout_session_id, stripe_card_session_id,
                 stripe_payment_intent_id, payment_method,
-                email_log, applied_to_invoice_id, created_at, updated_at
+                email_log, applied_to_invoice_id, original_line_items, created_at, updated_at
               )
-              values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21, now())
+              values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21::jsonb,$22, now())
             `,
             [
               invoice.id,
@@ -5512,6 +5721,11 @@ export class AppDataStore {
               invoice.payment_method,
               JSON.stringify(invoice.email_log ?? []),
               invoice.applied_to_invoice_id ?? null,
+              // Rides the restore like every other column, and keeps its NULL
+              // rather than being coerced to `[]` — see the migration above.
+              // A snapshot column added to one half of this pair and not the
+              // other is the exact shape of the three past data-loss bugs.
+              invoice.original_line_items ? JSON.stringify(invoice.original_line_items) : null,
               invoice.created_at,
             ],
           )
@@ -8191,6 +8405,10 @@ export class AppDataStore {
         ...invoice,
         kind: invoice.kind ?? 'monthly',
         appliedToInvoiceId: invoice.appliedToInvoiceId ?? null,
+        // Null, never `[]` — the same distinction `mapInvoiceRow` draws.
+        originalLineItems: Array.isArray(invoice.originalLineItems)
+          ? invoice.originalLineItems
+          : null,
       }))
       .sort((a, b) => String(a.number ?? '').localeCompare(String(b.number ?? '')))
   }
@@ -8305,6 +8523,9 @@ export class AppDataStore {
         kind: 'monthly',
         status: 'draft',
         lineItems: draft.lineItems,
+        // What the generator produced, kept beside what it becomes. Every edit
+        // Brittany makes from here is measured against this.
+        originalLineItems: draft.lineItems,
         subtotal: draft.subtotal,
         total: draft.total,
         dueDate: draft.dueDate,
@@ -8388,6 +8609,10 @@ export class AppDataStore {
       kind: 'retainer',
       status: 'draft',
       lineItems: [{ kind: 'retainer', label: RETAINER_LABEL, detail, amount: value }],
+      // The one line as issued. A retainer is rated by nobody (see the plan
+      // doc), but the snapshot costs nothing and keeps every invoice row
+      // answering the same question.
+      originalLineItems: [{ kind: 'retainer', label: RETAINER_LABEL, detail, amount: value }],
       subtotal: value,
       total: value,
       // From TODAY, not from the end of the month. A retainer is due on the
@@ -8701,8 +8926,15 @@ export class AppDataStore {
    * inseparable: there is no window in which an invoice carries a credit no
    * retainer is marked against, or a retainer is spent on lines that were never
    * stored. Throws `RetainerCreditError` when the credit cannot be honored.
+   *
+   * WHAT SHE CHANGED IS RECORDED HERE, in `invoice_review_events` — this is the
+   * only place in the app where an invoice's before and after both exist. The
+   * actor comes from `opts.actorUserId` (the session user, passed by the route)
+   * and NEVER from the patch body: a field the caller supplies is a claim about
+   * who acted, not a fact. `original_line_items` is deliberately NOT written
+   * here — it is the as-generated snapshot and only `_insertInvoice` sets it.
    */
-  async updateInvoice(id, patch = {}) {
+  async updateInvoice(id, patch = {}, opts = {}) {
     const all = await this.listInvoices()
     const current = all.find((invoice) => invoice.id === id)
     if (!current) return null
@@ -8751,10 +8983,33 @@ export class AppDataStore {
     Object.assign(next, recomputeInvoiceMoney(next.lineItems))
     next.updatedAt = nowIso()
 
+    // Built BEFORE the write, from the two versions that only exist together
+    // here. Null when the save changed nothing at all.
+    const changes = buildInvoiceChangeDiff(current, next)
+    const reviewEvent = changes
+      ? {
+          id: `invev-${randomUUID().slice(0, 8)}`,
+          invoiceId: id,
+          clientId: current.clientId,
+          period: current.period,
+          actorUserId: opts.actorUserId ?? null,
+          event: classifyInvoiceReviewEvent(current, next),
+          changes,
+          createdAt: nowIso(),
+        }
+      : null
+
     if (this.pool) {
-      // No retainer moved and no window released, so no second row to keep in
-      // step — the single statement is still the whole write.
-      if (!retainerWork.apply && !retainerWork.clear && coverageToRelease.length === 0) {
+      // No retainer moved, no window released and nothing to record, so no
+      // second row to keep in step — the single statement is still the whole
+      // write. An event DOES need the transaction: the record of what she
+      // changed and the change itself must land together or not at all.
+      if (
+        !retainerWork.apply &&
+        !retainerWork.clear &&
+        coverageToRelease.length === 0 &&
+        !reviewEvent
+      ) {
         const { rowCount } = await this.pool.query(
           `update invoices
               set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
@@ -8836,6 +9091,10 @@ export class AppDataStore {
           await this._clearCoverageLedgerForPeriod(current.period, coverageToRelease, { dbClient })
         }
 
+        if (reviewEvent) {
+          await this._insertInvoiceReviewEvent(reviewEvent, { dbClient })
+        }
+
         await dbClient.query('COMMIT')
       } catch (error) {
         // A rollback after a rollback is a no-op; what matters is that a thrown
@@ -8888,9 +9147,438 @@ export class AppDataStore {
       }
     }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    // After the invoice write, not before: an event describing a save that
+    // threw would be a record of something that never happened. This backend
+    // has no transaction to put them in together, which is the same trade every
+    // other endpoint-managed table here makes.
+    if (reviewEvent) {
+      await this._insertInvoiceReviewEvent(reviewEvent)
+    }
     return next
   }
 
+  // ---- Invoice review events: what a human did to an invoice ----
+  //
+  // Endpoint-managed (NOT part of the bulk /api/app-data write and NOT in the
+  // staleness fingerprint), like client notes — so an owner autosave can
+  // neither write nor destroy the audit trail. Stored in auth-state on the file
+  // backend, `invoice_review_events` on pg. Always returned newest-first.
+
+  /**
+   * Append one event. Runs inside the caller's transaction when one is open, so
+   * on Postgres the record and the change it describes commit together.
+   */
+  async _insertInvoiceReviewEvent(event, { dbClient = null } = {}) {
+    if (this.pool) {
+      await (dbClient ?? this.pool).query(
+        `insert into invoice_review_events (
+           id, invoice_id, client_id, period, actor_user_id, event, changes, created_at
+         )
+         values ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
+        [
+          event.id,
+          event.invoiceId,
+          event.clientId ?? null,
+          event.period ?? null,
+          event.actorUserId ?? null,
+          event.event,
+          JSON.stringify(event.changes ?? {}),
+        ],
+      )
+      return event
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.invoiceReviewEvents)) authState.invoiceReviewEvents = []
+    authState.invoiceReviewEvents.push(event)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return event
+  }
+
+  /**
+   * The event log, newest first. Filter by invoice, by client, or neither.
+   *
+   * `limit` is capped rather than optional: this table only grows, and every
+   * caller either renders a short history or feeds a prompt.
+   */
+  async listInvoiceReviewEvents({ invoiceId = null, clientId = null, limit = 50 } = {}) {
+    const cap = Math.min(Math.max(Number(limit) || 0, 1), 500)
+    if (this.pool) {
+      const filters = []
+      const params = []
+      if (invoiceId) {
+        params.push(invoiceId)
+        filters.push(`invoice_id = $${params.length}`)
+      }
+      if (clientId) {
+        params.push(clientId)
+        filters.push(`client_id = $${params.length}`)
+      }
+      params.push(cap)
+      const { rows } = await this.pool.query(
+        `select id, invoice_id, client_id, period, actor_user_id, event, changes, created_at
+           from invoice_review_events
+          ${filters.length ? `where ${filters.join(' and ')}` : ''}
+          order by created_at desc
+          limit $${params.length}`,
+        params,
+      )
+      return rows.map(mapInvoiceReviewEventRow)
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.invoiceReviewEvents) ? authState.invoiceReviewEvents : []
+    return list
+      .filter((event) => (!invoiceId || event.invoiceId === invoiceId))
+      .filter((event) => (!clientId || event.clientId === clientId))
+      .slice()
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, cap)
+  }
+
+  // ---- Invoice AI reviews: what the model said about a draft ----
+  //
+  // Same storage rules as the events above. History is kept: a re-rate marks
+  // the invoice's prior rows superseded rather than replacing them, because the
+  // point of the feature is the record over months.
+
+  /**
+   * Store one rating and retire the invoice's previous one.
+   *
+   * The supersede and the insert are ONE transaction on Postgres. Two ratings
+   * landing at once would otherwise both survive as current, and every reader
+   * here assumes at most one — the badge would then be whichever row the sort
+   * happened to reach first.
+   *
+   * Inputs are sanitized rather than trusted: this row is written from a model's
+   * output, so the band is checked against the three that exist and the score is
+   * coerced into 0-100. Returns the stored review, or null without an invoice id.
+   */
+  async createInvoiceAiReview(review = {}) {
+    const invoiceId = String(review.invoiceId ?? '').trim()
+    if (!invoiceId) return null
+
+    const row = {
+      id: `airev-${randomUUID().slice(0, 8)}`,
+      invoiceId,
+      clientId: review.clientId ?? null,
+      period: review.period ?? null,
+      model: review.model ?? null,
+      confidence: AI_CONFIDENCE_BANDS.has(review.confidence) ? review.confidence : 'medium',
+      score: Math.min(Math.max(Math.round(Number(review.score) || 0), 0), 100),
+      summary: String(review.summary ?? '').trim().slice(0, 2000),
+      concerns: Array.isArray(review.concerns) ? review.concerns : [],
+      // Questions come through as the model wrote them, with one exception: an
+      // id is filled in when it is missing, because `answerInvoiceAiReviewQuestion`
+      // has no other way to name the entry it is answering.
+      questions: (Array.isArray(review.questions) ? review.questions : []).map(
+        (question, index) => ({
+          ...question,
+          id: question?.id ?? `q${index + 1}`,
+          answer: question?.answer ?? null,
+          skipped: Boolean(question?.skipped),
+          answeredAt: question?.answeredAt ?? null,
+        }),
+      ),
+      linesFingerprint: review.linesFingerprint ?? null,
+      superseded: false,
+      createdAt: nowIso(),
+    }
+
+    if (this.pool) {
+      await this._withTransaction(async (dbClient) => {
+        // SERIALIZE RATING WRITES PER INVOICE, before anything reads or writes.
+        //
+        // The supersede below is a `where superseded = false` over the rows this
+        // transaction can SEE, and under READ COMMITTED that is its own snapshot:
+        // the background auto-rate and a manual Re-rate can interleave so that
+        // each supersedes what it saw and then inserts, leaving TWO current rows.
+        // Nothing downstream would report that — `getInvoiceAiReview` takes the
+        // newest and the badge simply becomes whichever row the sort reached
+        // first, changing between page loads.
+        //
+        // The lock is transaction-scoped (released at commit or rollback) and
+        // keyed on the invoice, so two DIFFERENT invoices still rate in parallel
+        // — which matters, because the generate hook rates a whole month at once.
+        await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [invoiceId])
+        await dbClient.query(
+          `update invoice_ai_reviews set superseded = true
+            where invoice_id = $1 and superseded = false`,
+          [invoiceId],
+        )
+        await dbClient.query(
+          `insert into invoice_ai_reviews (
+             id, invoice_id, client_id, period, model, confidence, score, summary,
+             concerns, questions, lines_fingerprint, superseded, created_at
+           )
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,false, now())`,
+          [
+            row.id,
+            row.invoiceId,
+            row.clientId,
+            row.period,
+            row.model,
+            row.confidence,
+            row.score,
+            row.summary,
+            JSON.stringify(row.concerns),
+            JSON.stringify(row.questions),
+            row.linesFingerprint,
+          ],
+        )
+      })
+      return row
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.invoiceAiReviews)) authState.invoiceAiReviews = []
+    // One read-modify-write covers both halves, which is this backend's version
+    // of the transaction above.
+    for (const prior of authState.invoiceAiReviews) {
+      if (prior.invoiceId === invoiceId) prior.superseded = true
+    }
+    authState.invoiceAiReviews.push(row)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return row
+  }
+
+  /**
+   * The current rating for every invoice in a period — one row each, ready to
+   * key by `invoiceId` in the month run.
+   *
+   * De-duplicated by invoice even though the supersede rule should make that
+   * impossible: a row written before a failed supersede would otherwise put two
+   * verdicts on one invoice, and newest-wins is the answer either way.
+   */
+  async listInvoiceAiReviews({ period = null } = {}) {
+    let rows
+    if (this.pool) {
+      const { rows: found } = await this.pool.query(
+        `select id, invoice_id, client_id, period, model, confidence, score, summary,
+                concerns, questions, lines_fingerprint, superseded, created_at
+           from invoice_ai_reviews
+          where superseded = false ${period ? 'and period = $1' : ''}
+          order by created_at desc`,
+        period ? [period] : [],
+      )
+      rows = found.map(mapInvoiceAiReviewRow)
+    } else {
+      const authState = await readJson(localAuthPath)
+      const list = Array.isArray(authState.invoiceAiReviews) ? authState.invoiceAiReviews : []
+      rows = list
+        .filter((entry) => !entry.superseded)
+        .filter((entry) => !period || entry.period === period)
+        .slice()
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    }
+    const byInvoice = new Map()
+    for (const row of rows) {
+      if (!byInvoice.has(row.invoiceId)) byInvoice.set(row.invoiceId, row)
+    }
+    return [...byInvoice.values()]
+  }
+
+  /** The current (non-superseded) rating for one invoice, or null. */
+  async getInvoiceAiReview(invoiceId) {
+    if (!invoiceId) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select id, invoice_id, client_id, period, model, confidence, score, summary,
+                concerns, questions, lines_fingerprint, superseded, created_at
+           from invoice_ai_reviews
+          where invoice_id = $1 and superseded = false
+          order by created_at desc
+          limit 1`,
+        [invoiceId],
+      )
+      return rows.length ? mapInvoiceAiReviewRow(rows[0]) : null
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.invoiceAiReviews) ? authState.invoiceAiReviews : []
+    return (
+      list
+        .filter((entry) => entry.invoiceId === invoiceId && !entry.superseded)
+        .slice()
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] ?? null
+    )
+  }
+
+  /**
+   * Record Brittany's answer to one of the rating's questions — or her decision
+   * to skip it. Returns the updated review.
+   *
+   * Answers land on the CURRENT review only. A rating that has been superseded
+   * is a verdict on lines that have since moved, and writing an answer onto it
+   * would file the answer somewhere nothing reads. Throws `InvoiceAiReviewError`
+   * when there is no current review or no question by that id — both mean the
+   * page she is looking at is out of date, which she needs told.
+   */
+  async answerInvoiceAiReviewQuestion(invoiceId, questionId, { answer = null, skipped = false } = {}) {
+    const current = await this.getInvoiceAiReview(invoiceId)
+    if (!current) {
+      throw new InvoiceAiReviewError('That invoice has no current AI review to answer.')
+    }
+    const questions = Array.isArray(current.questions) ? current.questions : []
+    const index = questions.findIndex((question) => question?.id === questionId)
+    if (index === -1) {
+      throw new InvoiceAiReviewError('That review has no question by that id.')
+    }
+
+    const nextQuestions = questions.map((question, position) =>
+      position === index
+        ? {
+            ...question,
+            answer: skipped ? (question.answer ?? null) : String(answer ?? '').trim(),
+            skipped: Boolean(skipped),
+            answeredAt: nowIso(),
+          }
+        : question,
+    )
+
+    // THE RE-RATE RACE, and it is this WHERE clause rather than the read above:
+    // a rating that arrived while she was typing superseded the row she is
+    // answering, and an unguarded update would file her answer onto it. Nothing
+    // reads a superseded row, so the page would show the question answered and
+    // the next fetch would show it unanswered again — her words simply gone.
+    // Matching no row is the honest outcome, and 409 says so.
+    if (this.pool) {
+      const { rowCount } = await this.pool.query(
+        `update invoice_ai_reviews set questions = $2::jsonb
+          where id = $1 and superseded = false`,
+        [current.id, JSON.stringify(nextQuestions)],
+      )
+      if (rowCount === 0) {
+        throw new InvoiceAiReviewError(
+          'That review was replaced by a newer rating — refresh and answer there.',
+          409,
+        )
+      }
+      return { ...current, questions: nextQuestions }
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.invoiceAiReviews)) authState.invoiceAiReviews = []
+    const stored = authState.invoiceAiReviews.find((entry) => entry.id === current.id)
+    if (!stored) {
+      throw new InvoiceAiReviewError('That invoice has no current AI review to answer.')
+    }
+    // The same guard, re-checked against what is on disk NOW — this backend's
+    // version of the WHERE clause above.
+    if (stored.superseded) {
+      throw new InvoiceAiReviewError(
+        'That review was replaced by a newer rating — refresh and answer there.',
+        409,
+      )
+    }
+    stored.questions = nextQuestions
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return stored
+  }
+
+  /**
+   * The corpus the rating prompt learns from: what Brittany has already told the
+   * model, and what she has actually corrected.
+   *
+   * Two scopes, both newest-first and both capped. This client's history is what
+   * matters most — her rules for one client rarely generalize — but a few
+   * firm-wide entries carry the habits that do (how she words a description,
+   * which months she trues up). The firm slice deliberately EXCLUDES this client
+   * so the two lists never say the same thing twice.
+   *
+   * Entries are summaries, not records. This goes into a prompt beside the draft
+   * being rated, and two full line arrays per correction would crowd out the
+   * thing being judged.
+   */
+  async listInvoiceLearningContext(clientId, { limit = 8, firmLimit = 4 } = {}) {
+    const clientCap = Math.min(Math.max(Number(limit) || 0, 0), 50)
+    const firmCap = Math.min(Math.max(Number(firmLimit) || 0, 0), 50)
+
+    const reviews = await this._listAllInvoiceAiReviews()
+    const answeredFrom = (rows, scope) => {
+      const out = []
+      for (const review of rows) {
+        for (const question of Array.isArray(review.questions) ? review.questions : []) {
+          if (!question || question.skipped) continue
+          const answer = String(question.answer ?? '').trim()
+          if (!answer) continue
+          out.push({
+            scope,
+            period: review.period ?? null,
+            clientId: review.clientId ?? null,
+            question: String(question.question ?? '').slice(0, 300),
+            answer: answer.slice(0, 500),
+            answeredAt: question.answeredAt ?? review.createdAt ?? null,
+          })
+        }
+      }
+      return out
+    }
+
+    const answeredQuestions = [
+      ...answeredFrom(
+        reviews.filter((review) => review.clientId === clientId),
+        'client',
+      ).slice(0, clientCap),
+      ...answeredFrom(
+        reviews.filter((review) => review.clientId !== clientId),
+        'firm',
+      ).slice(0, firmCap),
+    ]
+
+    // Only 'edited' events with a lineItems change are corrections. A status
+    // move is her workflow, not a fix, and feeding it back as one would teach
+    // the model that approving an invoice means something was wrong with it.
+    const events = await this.listInvoiceReviewEvents({ limit: 500 })
+    const correctionsFrom = (rows, scope) =>
+      rows
+        .filter((event) => event.event === 'edited' && event.changes?.lineItems)
+        .map((event) => ({
+          scope,
+          period: event.period ?? null,
+          clientId: event.clientId ?? null,
+          invoiceId: event.invoiceId,
+          at: event.createdAt ?? null,
+          ...summarizeLineItemChange(
+            event.changes.lineItems.before,
+            event.changes.lineItems.after,
+          ),
+        }))
+
+    const corrections = [
+      ...correctionsFrom(
+        events.filter((event) => event.clientId === clientId),
+        'client',
+      ).slice(0, clientCap),
+      ...correctionsFrom(
+        events.filter((event) => event.clientId !== clientId),
+        'firm',
+      ).slice(0, firmCap),
+    ]
+
+    return { answeredQuestions, corrections }
+  }
+
+  /**
+   * Every rating ever written, newest first — superseded ones included.
+   *
+   * The learning context wants ALL of them: an answer Brittany gave in June is
+   * still her answer after a July re-rate superseded the row it lives on.
+   */
+  async _listAllInvoiceAiReviews() {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select id, invoice_id, client_id, period, model, confidence, score, summary,
+                concerns, questions, lines_fingerprint, superseded, created_at
+           from invoice_ai_reviews
+          order by created_at desc
+          limit 500`,
+      )
+      return rows.map(mapInvoiceAiReviewRow)
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.invoiceAiReviews) ? authState.invoiceAiReviews : []
+    return list
+      .slice()
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, 500)
+  }
 
   /**
    * Remember a Stripe customer id on a client, so a second invoice reuses the
@@ -9178,6 +9866,11 @@ export class AppDataStore {
    */
   async _insertInvoice(record, { dbClient = null } = {}) {
     const kind = record.kind ?? 'monthly'
+    // The as-generated snapshot, set HERE so it cannot depend on a caller
+    // remembering. It is written once, on this statement, and by nothing else
+    // ever after — `updateInvoice` deliberately leaves the column alone, which
+    // is the whole point of having it.
+    const originalLineItems = record.originalLineItems ?? record.lineItems ?? null
     if (this.pool) {
       // Runs inside the caller's transaction when one is open, so the invoice
       // and the covered-date ledger it moves commit together — see
@@ -9185,9 +9878,9 @@ export class AppDataStore {
       const { rows } = await (dbClient ?? this.pool).query(
         `insert into invoices (
            id, client_id, period, number, kind, status, line_items, subtotal, total,
-           due_date, blurb, scope_flags, created_at, updated_at
+           due_date, blurb, scope_flags, original_line_items, created_at, updated_at
          )
-         values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb, now(), now())
+         values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13::jsonb, now(), now())
          on conflict (client_id, period) where kind = 'monthly' and status <> 'void' do nothing
          returning id`,
         [
@@ -9203,9 +9896,10 @@ export class AppDataStore {
           record.dueDate,
           record.blurb,
           JSON.stringify(record.scopeFlags),
+          originalLineItems ? JSON.stringify(originalLineItems) : null,
         ],
       )
-      return rows.length > 0 ? record : null
+      return rows.length > 0 ? { ...record, originalLineItems } : null
     }
 
     const data = await readJson(localDataPath)
@@ -9224,9 +9918,13 @@ export class AppDataStore {
           invoice.status !== 'void',
       )
     if (clash) return null
-    data.invoices.push(record)
+    // Same snapshot the Postgres branch writes — cardinal rule 1. Spreading the
+    // record rather than mutating the caller's object keeps the two branches
+    // returning the same shape.
+    const stored = { ...record, originalLineItems }
+    data.invoices.push(stored)
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return record
+    return stored
   }
 
   async createClient(client) {
