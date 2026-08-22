@@ -170,6 +170,29 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-08-21 — an unmatched `/api/` path now 404s instead of returning the SPA.**
+Salvaged out of the `festive-hermann` worktree during the housekeeping pass
+below, where it had been sitting uncommitted and unshipped.
+
+The bug it closes is a quiet one. Every `/api/` route is matched on path AND
+method and returns; anything unmatched fell through to the static handler and
+was answered with the SPA shell — **200 + HTML**. `response.ok` is `true` for
+that, so a typo'd or renamed endpoint did not fail at the call site. It failed
+later and somewhere else, when something tried to parse HTML as JSON. Nine
+lines at the end of the router turn it into an honest 404.
+
+The test that came with it (`src/__tests__/api-404-fallthrough.test.ts`) pins
+the thing that will actually rot: **position**. A catch-all is only as correct
+as its placement, and a route added below it would answer 404 forever while
+every unit test still passed. The second assertion scans for any `/api/` route
+matcher below the guard and names it. Verified as a real tripwire — both
+assertions fail against the pre-fix source, not just pass against the new one.
+
+Note the routing style here: `server.js` listens at module scope and exports
+nothing, so there is no HTTP harness. These are source-reading tests, same
+shape as `waiting-lock-routes.test.ts`. Don't delete one as "not a real test" —
+it is the only thing guarding the glue.
+
 **2026-08-21 — PICKING THIS UP NOW: state, and what's actually left.** Written
 after a full re-read of the tree, the tracker, the deploy list and production.
 
@@ -243,13 +266,30 @@ fee / surcharge decision.
   would end that family instead of discovering them one client complaint at a
   time.
 
-**Housekeeping worth ten minutes:** four stale worktrees under
-`.claude/worktrees/` (two detached at old commits) still hold built `dist/`
-output — it pollutes repo-wide greps with tens of KB of minified noise; prune
-them. `hold/july-security-p3` is the only unmerged branch and is now
-superseded — its security half was cherry-picked into main (`82a9929`) and the
-useful polish salvaged; confirm and delete it. The
-`railway-backlog-2026-08-18` memory's exit condition is met (SUCCESS on
+**Housekeeping — DONE 2026-08-21, and it was not what this section predicted.**
+Three of the four worktrees were removed (~291 MB; `intelligent-kowalevski`
+alone was 273 MB). Two of the four turned out to be holding UNCOMMITTED work,
+not stale build output, so read before you delete:
+
+- `relaxed-jang-4dd8ba` — an earlier draft of the print fix. Genuinely
+  superseded: main's shipped test asserts the identical thing
+  (`assistant-report-print.test.tsx` → `parentElement).toBe(document.body)`).
+  Removed.
+- `festive-hermann-c3c7e5` — held a real, unshipped `/api/*` 404 guard. It has
+  now been salvaged onto main (below); the worktree can go.
+
+**Correction — do NOT delete `hold/july-security-p3`.** The claim above that it
+was fully superseded is wrong, and acting on it would have destroyed work. Its
+security half DID land (TOTP encryption-at-rest, `useDocumentTitle`, the
+favicon, `totp-encryption.test.mjs` are all in main), but
+**`src/components/Skeleton.tsx` and `src/hooks/useToast.tsx` are not** — main
+has no general toast primitive, only two purpose-built ones
+(`NewVersionToast`, `StaleWorkspaceNotice`). That branch is the only copy of
+the skeleton loaders and the toast primitive. Alex's call (2026-08-21): leave
+it. Note the polish is also UI Brittany never asked for and has not reviewed,
+so adopting it is a product decision, not a cleanup.
+
+The `railway-backlog-2026-08-18` memory's exit condition is met (SUCCESS on
 `3dc6ab9` supersedes the whole stuck queue) — it has been deleted.
 
 **2026-08-18/19 — the sent-back queue run + Brittany's review night.** Two days,

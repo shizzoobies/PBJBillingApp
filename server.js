@@ -9076,6 +9076,15 @@ const server = createServer(async (request, response) => {
     // RESEND_API_KEY and EMAIL_FROM are set in Railway. No cron implementation
     // yet — leave this hook visible for the next milestone.
 
+    // Nothing above matched. `/api/*` must fail loudly — falling through to the
+    // SPA shell below would answer a typo'd or renamed endpoint with 200 + HTML,
+    // which `response.ok` callers read as success and only notice when the JSON
+    // parse blows up somewhere else. Everything else falls through to the SPA.
+    if (normalizedPath.startsWith('/api/')) {
+      sendJson(response, 404, { error: 'Not found' })
+      return
+    }
+
     const requestedFile = path.join(distDir, normalizedPath)
     const safePath = path.normalize(requestedFile)
 
