@@ -1,0 +1,124 @@
+{
+ "takenAt": "pre-write",
+ "rows": [
+  {
+   "id": "client-wdmb88x",
+   "name": "1969 Beach, LLC",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-rryq1yn",
+   "name": "51 Beach, LLC",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-j1kaxr2",
+   "name": "5 Sunset, LLC",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-1bk7piv",
+   "name": "Dobco Properties, LLC",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-2drk4li",
+   "name": "FHS Partnership Group",
+   "estimated_bookkeeper_hours": "1",
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": "0"
+  },
+  {
+   "id": "client-uusfsaa",
+   "name": "Flourish Restaurants, LLC",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-9as12jy",
+   "name": "Fore Motion Golf, LLC",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-o4zfkfz",
+   "name": "Let's Fish, LLC",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-yqkey3m",
+   "name": "N568RT, LLC",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-mv4vrwv",
+   "name": "Robin O. Sorensen Family Trust",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-j17sdts",
+   "name": "Robin O. Sorensen Living Trust",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-fc88ygp",
+   "name": "Robin & Tabitha Sorensen",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-xmozesp",
+   "name": "Robin & Tabitha Sorensen Family Foundation, Inc.",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-p483k7v",
+   "name": "SAS Collections",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-tjfzeqv",
+   "name": "Tabitha Leigh Sorensen 2021 Trust",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-5dxovmv",
+   "name": "Tabitha L. Sorensen Family Trust",
+   "estimated_bookkeeper_hours": null,
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": null
+  },
+  {
+   "id": "client-nn18dtd",
+   "name": "Westview Signature, LLC",
+   "estimated_bookkeeper_hours": "0.5",
+   "estimated_accountant_hours": null,
+   "estimated_cfo_hours": "0.4"
+  }
+ ]
+}
