@@ -20,6 +20,8 @@ export {
   duplicateFullSliceIds,
   internalMinutes,
   laborCost,
+  periodDisplayHours,
+  periodMoney,
   personPeriodCost,
   roundToCent,
   sumDisplayHours,

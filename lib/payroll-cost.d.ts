@@ -43,6 +43,13 @@ export declare function sumDisplayHours(hours: readonly (number | null | undefin
 
 export declare function sumPersonCosts(costs: readonly (number | null | undefined)[]): number
 
+export declare function periodDisplayHours(minutesPerRow: readonly number[]): number
+
+export declare function periodMoney(
+  minutesPerRow: readonly number[],
+  rate: number | null | undefined,
+): number | null
+
 export declare function allocatePersonCost(
   minutesPerRow: readonly number[],
   rate: number | null | undefined,

@@ -11,7 +11,8 @@ import {
   duplicateFullSliceIds,
   internalMinutes as sumInternalMinutes,
   laborCost,
-  personPeriodCost,
+  periodDisplayHours,
+  periodMoney,
   sumDisplayHours,
   sumPersonCosts,
   trackedMinutes as sumTrackedMinutes,
@@ -155,15 +156,29 @@ export function ReportsPage() {
       // not deduped, so tracked is no longer billable + internal by definition.
       const totalMinutes = sumTrackedMinutes(entries)
       const billRate = typeof employee.billRate === 'number' ? employee.billRate : 0
+      // THE ROWS, kept. Hours and money are both built from these — the sum of
+      // the rows' two-decimal hours — so the printed Hours cell multiplies
+      // straight into the money beside it (featreq-7c8f64d7).
+      const duplicates = duplicateFullSliceIds(entries)
+      const trackedRowMinutes = entries
+        .filter((entry) => !duplicates.has(entry.id))
+        .map((entry) => entry.minutes)
+      const billableRowMinutes = entries
+        .filter((entry) => entry.billable)
+        .map((entry) => entry.minutes)
 
       return {
         employeeId: employee.id,
         minutes: totalMinutes,
         billableMinutes: billableEntryMinutes,
+        trackedRowMinutes,
+        billableRowMinutes,
+        hours: periodDisplayHours(trackedRowMinutes),
+        billableHours: periodDisplayHours(billableRowMinutes),
         internalMinutes: sumInternalMinutes(entries),
         entryCount: entries.length,
         clientCount: new Set(entries.map((entry) => entry.clientId)).size,
-        billableAmount: (billableEntryMinutes / 60) * billRate,
+        billableAmount: periodMoney(billableRowMinutes, billRate) ?? 0,
       }
     })
     .sort((left, right) => right.minutes - left.minutes)
@@ -399,13 +414,27 @@ function PayrollHoursReport({
             typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
               ? employee.billRate
               : null
+          // Row minutes, not just their sum: the costing hours are the sum of
+          // the ROWS' two-decimal hours (featreq-7c8f64d7), which is also the
+          // figure this table prints.
+          const duplicates = duplicateFullSliceIds(entries)
+          const trackedRowMinutes = entries
+            .filter((entry) => !duplicates.has(entry.id))
+            .map((entry) => entry.minutes)
+          const billableRowMinutes = entries
+            .filter((entry) => entry.billable)
+            .map((entry) => entry.minutes)
           return {
             id: employee.id,
             name: employee.name,
             minutes: sumTrackedMinutes(entries),
             billable,
             internal,
-            amount: rate === null ? null : (billable / 60) * rate,
+            trackedRowMinutes,
+            billableRowMinutes,
+            hours: periodDisplayHours(trackedRowMinutes),
+            billableHours: periodDisplayHours(billableRowMinutes),
+            amount: periodMoney(billableRowMinutes, rate),
             count: entries.length,
           }
         })
@@ -423,8 +452,8 @@ function PayrollHoursReport({
    * column. Hours is now the costing figure and the only time column on the
    * report, so a total that contradicts its own column is not tolerable.
    */
-  const totalHours = sumDisplayHours(rows.map((row) => displayHours(row.minutes)))
-  const totalBillableHours = sumDisplayHours(rows.map((row) => displayHours(row.billable)))
+  const totalHours = sumDisplayHours(rows.map((row) => row.hours))
+  const totalBillableHours = sumDisplayHours(rows.map((row) => row.billableHours))
   const totalAmount = rows.reduce((sum, row) => sum + (row.amount ?? 0), 0)
   const fmtDay = (iso: string) => shortDate.format(new Date(`${iso}T12:00:00`))
   const rangeLabel = `${fmtDay(start)} – ${fmtDay(end)}`
@@ -569,10 +598,7 @@ function PayrollHoursReport({
    * set in production, so rendering those as zero would put a wrong number on a
    * payroll document. They render as "—" instead.
    */
-  const amountFor = (employeeId: string, billableMinutes: number) => {
-    const rate = billRateOf(employeeId)
-    return rate === null ? null : (billableMinutes / 60) * rate
-  }
+
   const money = (amount: number | null) => (amount === null ? '—' : currency.format(amount))
 
   /**
@@ -591,12 +617,12 @@ function PayrollHoursReport({
    * labor cost. Never render it as $0.00, and never treat the blank as
    * something to be filled in.
    */
-  const costFor = (employeeId: string, minutesWorked: number) =>
-    personPeriodCost(minutesWorked, costRates[employeeId])
+  const costFor = (employeeId: string, minutesPerRow: number[]) =>
+    periodMoney(minutesPerRow, costRates[employeeId])
 
   // Every cost total is the SUM OF THE PER-PERSON CENTS, never a float sum of
   // the parts — that is what lets the owner add the Cost column up by hand.
-  const totalCost = sumPersonCosts(rows.map((row) => costFor(row.id, row.minutes)))
+  const totalCost = sumPersonCosts(rows.map((row) => costFor(row.id, row.trackedRowMinutes)))
 
   // Cost counts a full-mode group's wall time once — the firm pays for the
   // block, not for each client it was billed to — and `laborCost` groups by
@@ -639,8 +665,37 @@ function PayrollHoursReport({
   const detailBillableHours = sumDisplayHours(
     detailRows.map((row) => displayHours(row.billableMinutes)),
   )
+
+  /**
+   * Per-ENTRY Billable $ cells, by row id — the same treatment Cost gets above,
+   * and for the same reason.
+   *
+   * Pricing each row off its own raw minutes is what put $1,631.69 under a
+   * billable-hours column reading 14.16 (14.16 x 115 = $1,628.40). The person's
+   * period total is the half that has to be right, so it is `periodMoney` off
+   * the displayed hours, and the rows are a largest-remainder split of it.
+   */
+  const detailAmountByRowId = (() => {
+    const rowsByEmployee = new Map<string, { id: string; minutes: number }[]>()
+    for (const row of detailRows) {
+      const mine = rowsByEmployee.get(row.employeeId) ?? []
+      mine.push({ id: row.id, minutes: row.billableMinutes })
+      rowsByEmployee.set(row.employeeId, mine)
+    }
+    const byRowId = new Map<string, number | null>()
+    for (const [employeeId, mine] of rowsByEmployee) {
+      const amounts = allocatePersonCost(
+        mine.map((row) => row.minutes),
+        billRateOf(employeeId),
+      )
+      mine.forEach((row, index) => byRowId.set(row.id, amounts[index]))
+    }
+    return byRowId
+  })()
+  const rowAmountOf = (rowId: string) => detailAmountByRowId.get(rowId) ?? null
+
   const detailAmount = detailRows.reduce(
-    (sum, row) => sum + (amountFor(row.employeeId, row.billableMinutes) ?? 0),
+    (sum, row) => sum + (rowAmountOf(row.id) ?? 0),
     0,
   )
 
@@ -656,12 +711,12 @@ function PayrollHoursReport({
       [
         ...rows.map((row) => [
           row.name,
-          decimalHours(row.minutes),
-          decimalHours(row.billable),
+          row.hours.toFixed(2),
+          row.billableHours.toFixed(2),
           decimalHours(row.internal),
           row.count,
           // Blank, not 0.00, when the person has no cost rate.
-          costFor(row.id, row.minutes)?.toFixed(2) ?? '',
+          costFor(row.id, row.trackedRowMinutes)?.toFixed(2) ?? '',
         ]),
         // Same summed-rows total the on-screen footer shows, so the CSV and the
         // printout can never hand her two different numbers.
@@ -728,7 +783,7 @@ function PayrollHoursReport({
             entry.billable ? decimalHours(entry.minutes) : '0.00',
             // Blank, not 0.00, when the person has no bill rate configured —
             // a spreadsheet should not be told they billed nothing.
-            amountFor(entry.employeeId, entry.billable ? entry.minutes : 0)?.toFixed(2) ?? '',
+            rowAmountOf(entry.id)?.toFixed(2) ?? '',
             // The SAME allocated cent the on-screen detail row shows, so the
             // export and the printout agree and the column sums to the report's
             // total. Blank when there is no cost rate — and blank on a
@@ -836,12 +891,15 @@ function PayrollHoursReport({
                   <td>
                     <strong>{row.name}</strong>
                   </td>
-                  <td>{formatDecimalHours(row.minutes)}</td>
-                  <td>{formatDecimalHours(row.billable)}</td>
+                  {/* Hours and the money beside them come from the SAME
+                      figure — the sum of this person's rows' two-decimal
+                      hours — so each cell is hours x rate by hand. */}
+                  <td>{row.hours.toFixed(2)}h</td>
+                  <td>{row.billableHours.toFixed(2)}h</td>
                   <td>{money(row.amount)}</td>
                   {/* Cost is on HOURS WORKED, not billable hours — the firm
                       pays for internal time too. "—" for the owner. */}
-                  <td>{money(costFor(row.id, row.minutes))}</td>
+                  <td>{money(costFor(row.id, row.trackedRowMinutes))}</td>
                   <td className="no-print">{formatDecimalHours(row.internal)}</td>
                   <td className="no-print">{row.count}</td>
                 </tr>
@@ -961,7 +1019,7 @@ function PayrollHoursReport({
                         ) : null}
                       </td>
                       <td>{formatDecimalHours(row.billableMinutes)}</td>
-                      <td>{money(amountFor(row.employeeId, row.billableMinutes))}</td>
+                      <td>{money(rowAmountOf(row.id))}</td>
                       {/* Deduped rows show no cost: the firm pays for the block
                           once, and the first row of the group carries it. */}
                       <td>{row.countedElsewhere ? '—' : money(rowCostOf(row.id))}</td>
@@ -1052,8 +1110,8 @@ function ReportsOverview({
    * "Cent-rounded once per person" now means off that person's two-decimal
    * hours, so the Tracked hours cell beside it multiplies straight into Cost.
    */
-  const overviewCostFor = (employeeId: string, minutesWorked: number) =>
-    personPeriodCost(minutesWorked, costRates[employeeId])
+  const overviewCostFor = (employeeId: string, minutesPerRow: number[]) =>
+    periodMoney(minutesPerRow, costRates[employeeId])
 
   const periodSlug = billingPeriod || 'period'
   const exportEmployees = () =>
@@ -1071,13 +1129,13 @@ function ReportsOverview({
       ],
       employeeRows.map((row) => [
         employeeName(employees, row.employeeId),
-        // `decimalHours`, not a bare toFixed: this is the figure Cost is built
-        // from, so the two must round the same way.
-        decimalHours(row.minutes),
-        decimalHours(row.billableMinutes),
+        // The summed-rows hours — literally the figure Cost and Billable $ are
+        // built from, so multiplying either by the rate reproduces the cell.
+        row.hours.toFixed(2),
+        row.billableHours.toFixed(2),
         row.billableAmount.toFixed(2),
         // Blank, not 0.00, when the person has no cost rate.
-        overviewCostFor(row.employeeId, row.minutes)?.toFixed(2) ?? '',
+        overviewCostFor(row.employeeId, row.trackedRowMinutes)?.toFixed(2) ?? '',
         decimalHours(row.internalMinutes),
         row.entryCount,
         row.clientCount,
@@ -1233,11 +1291,11 @@ function ReportsOverview({
             'Clients',
           ]}
           rows={employeeRows.map((row) => {
-            const cost = overviewCostFor(row.employeeId, row.minutes)
+            const cost = overviewCostFor(row.employeeId, row.trackedRowMinutes)
             return [
               employeeName(employees, row.employeeId),
-              formatDecimalHours(row.minutes),
-              formatDecimalHours(row.billableMinutes),
+              `${row.hours.toFixed(2)}h`,
+              `${row.billableHours.toFixed(2)}h`,
               currency.format(row.billableAmount),
               // "—" (never $0.00) when there's no cost rate — see overviewCostFor.
               cost === null ? '—' : currency.format(cost),

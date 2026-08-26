@@ -6,6 +6,8 @@ import {
   duplicateFullSliceIds,
   internalMinutes,
   laborCost,
+  periodDisplayHours,
+  periodMoney,
   personPeriodCost,
   roundToCent,
   sumDisplayHours,
@@ -304,15 +306,30 @@ describe('personPeriodCost / sumPersonCosts — the canonical cost rule', () => 
 })
 
 describe('laborCost follows the canonical rule', () => {
-  it('groups by person BEFORE rounding, so two people can’t round into a third answer', () => {
+  /**
+   * REWRITTEN for featreq-7c8f64d7's fourth round. This test used to assert
+   * $12.58 — the person's minutes summed and rounded ONCE — and that is the
+   * defect she reopened it for.
+   *
+   * The report prints a row per entry and a total underneath that is the sum of
+   * those rows. emp-1's two five-minute rows print 0.08h each and total 0.16h;
+   * the owner multiplies what she sees, so the firm owes 0.16 × 37 = $5.92 and
+   * not the $6.29 that re-rounding her 10 raw minutes produces. emp-2's single
+   * ten-minute row prints 0.17h and stays $6.29.
+   *
+   * The two people are still grouped separately — that part was never wrong,
+   * and this pins it: emp-1's rows are summed among themselves before pricing.
+   */
+  it('prices each person off the rows the report prints', () => {
     const entries = [
       slice({ id: 'a', employeeId: 'emp-1', minutes: 5 }),
       slice({ id: 'b', employeeId: 'emp-1', minutes: 5 }),
       slice({ id: 'c', employeeId: 'emp-2', minutes: 10 }),
     ]
-    // emp-1: 10 min → 0.17h → $6.29. emp-2 the same. Total $12.58.
-    // Rounding each of the three ENTRIES first would give 2.96+2.96+6.29=12.21.
-    expect(laborCost(entries, () => 37)).toBe(12.58)
+    expect(periodDisplayHours([5, 5])).toBe(0.16)
+    expect(periodMoney([5, 5], 37)).toBe(5.92)
+    expect(periodMoney([10], 37)).toBe(6.29)
+    expect(laborCost(entries, () => 37)).toBe(12.21)
   })
 
   it('still counts a full-mode block once — dedup happens before the grouping', () => {
@@ -400,11 +417,12 @@ describe('sumDisplayHours', () => {
 describe('allocatePersonCost', () => {
   const rate = 37
 
-  it('sums EXACTLY to the person’s period cost, however the rows fall', () => {
+  it('sums EXACTLY to the person’s period money, however the rows fall', () => {
     const rows = [10, 10, 45, 3.4, 118.6, 7, 22.5, 61.2]
     const costs = allocatePersonCost(rows, rate) as number[]
-    const total = rows.reduce((sum, m) => sum + m, 0)
-    expect(sumPersonCosts(costs)).toBe(personPeriodCost(total, rate))
+    // The target is the DISPLAYED hours × rate — the figure under the column —
+    // not the re-rounded raw total, which is what this asserted before.
+    expect(sumPersonCosts(costs)).toBe(periodMoney(rows, rate))
   })
 
   it('SPREADS the residual evenly — no row absorbs the whole gap', () => {
@@ -438,19 +456,48 @@ describe('allocatePersonCost', () => {
     expect(allocatePersonCost([613.4], 22.5)).toEqual([personPeriodCost(613.4, 22.5)])
   })
 
-  it('takes pennies BACK when the rows overshoot, not just hands them out', () => {
-    // Eight ten-minute rows: each reads 0.17h and would price at $6.29, for
-    // $50.32 — but 80 minutes is 1.33h and pays $49.21. Eleven pennies come off.
+  /**
+   * The old version of this test is the clearest statement of the bug that
+   * existed: "eight ten-minute rows each read 0.17h and would price at $6.29,
+   * for $50.32 — but 80 minutes is 1.33h and pays $49.21. Eleven pennies come
+   * off." Eleven pennies coming off a column that reads 0.17 eight times is
+   * exactly what made the report un-multipliable.
+   *
+   * Now each row IS its own displayed hours × rate and they already sum to the
+   * target, so nothing is taken back and nothing is handed out.
+   */
+  it('leaves identical rows alone — they already add up', () => {
     const costs = allocatePersonCost(Array(8).fill(10), rate) as number[]
-    expect(sumPersonCosts(costs)).toBe(49.21)
-    expect(Math.max(...costs)).toBeLessThanOrEqual(6.29)
+    expect(costs).toEqual(Array(8).fill(6.29))
+    expect(sumPersonCosts(costs)).toBe(50.32)
+    expect(sumPersonCosts(costs)).toBe(periodMoney(Array(8).fill(10), rate))
   })
 
   it('still reconciles when the gap exceeds one penny per row', () => {
     // Two rows only, so a multi-penny residual has nowhere to spread but back
     // onto the same rows — the distribution has to wrap around.
     const costs = allocatePersonCost([10, 10], rate) as number[]
-    expect(sumPersonCosts(costs)).toBe(personPeriodCost(20, rate))
+    expect(sumPersonCosts(costs)).toBe(periodMoney([10, 10], rate))
+  })
+
+  /**
+   * THE INVARIANT, over shapes rather than one lucky example: whatever the rows
+   * are, the column adds up to the hours printed under it times the rate. This
+   * is the property she checks by hand, so it is the property under test.
+   */
+  it('reconciles for every row shape, not just the tidy ones', () => {
+    const shapes = [
+      [1],
+      [1, 1, 1],
+      [3.4, 118.6, 7],
+      [10, 10, 45, 3.4, 118.6, 7, 22.5, 61.2],
+      Array.from({ length: 63 }, (_, i) => 2 + ((i * 13.7) % 97)),
+      Array.from({ length: 31 }, (_, i) => 0.5 + ((i * 7.3) % 45)),
+    ]
+    for (const rows of shapes) {
+      const costs = allocatePersonCost(rows, rate) as number[]
+      expect(sumPersonCosts(costs), `rows=${rows.length}`).toBe(periodMoney(rows, rate))
+    }
   })
 
   it('is null per row — never $0.00 — for someone with no cost rate', () => {

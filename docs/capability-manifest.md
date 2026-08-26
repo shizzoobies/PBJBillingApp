@@ -1366,11 +1366,18 @@ Clients page meanwhile. Owner-only.
   if someone works 20 hours and 13.4 minutes rounded to the 2nd decimal then I
   would pay 20.22 times her cost and that time because the staple for all
   comparisons"*. So 20h 13.4m at a $16 cost rate is 20.22 × 16 = **$323.52**.
-  - **Per person, per period, at the grain the report prints.** Add up one
-    person's minutes for the period (seconds included — nothing is rounded to
-    the minute along the way), round those to two-decimal hours, multiply by
-    their cost rate, and settle the cent. A cost TOTAL is the sum of those
+  - **Per person, per period, off the ROWS the report prints.** Take that
+    person's entries for the period, round EACH ONE to two-decimal hours, add
+    those up — that sum is the Hours figure on the report — then multiply by
+    their cost rate and settle the cent. A cost TOTAL is the sum of those
     per-person amounts.
+  - **Why each row and not the period's raw minutes:** those two are not the
+    same number, and the report prints the first while the money used to be
+    built from the second. On the 8/8–8/22 run, Allison's 31 rows added to
+    14.75h where her raw minutes rounded to 14.78h, and Lisa's 63 rows added to
+    22.61h where hers rounded to 22.59h — so one person's cost read HIGH and the
+    other's read LOW against the column above it. The figure on the page is the
+    one that gets multiplied.
   - The two consequences that matter, and the whole reason for the rule:
     **multiplying a visible Hours cell by the pay rate gives the Cost cell
     beside it**, and **adding up the visible Cost column lands exactly on the
@@ -1380,6 +1387,19 @@ Clients page meanwhile. Owner-only.
     margin, estimated-vs-actual cost, and the assistant's client profitability
     and margin answers. They all call the same calculator, so no two surfaces
     can disagree.
+  - **BILLABLE $ follows the identical rule**, with the bill rate in place of
+    the cost rate: the billable-hours figure shown × that person's bill rate.
+    Multiply the Billable hours cell by hand and you get the Billable $ cell.
+    Per-entry Billable $ cells are that period total split across the person's
+    own rows, exactly as the Cost cells are, so that column adds up too.
+  - **It was corrected again on 2026-08-26.** The rule below was right and the
+    call sites were not: the money was priced off the period's re-rounded raw
+    minutes while the Hours column showed the sum of the rows. Cost, Billable $
+    and the hours beside them now all come from the same figure, on the payroll
+    summary, the day-and-job detail, the Employee report and every export.
+    Figures move by a few cents to a couple of dimes per person per period, in
+    either direction — measured across the whole firm for August 2026 the total
+    labor cost moved by $1.52. Nothing stored changed; reports recompute.
   - **It changed on 2026-08-19.** Cost used to be computed from exact seconds
     and rounded once at the end — a defensible rule, and not the one the firm
     pays by: it made the printed Hours column un-multipliable, so reports had to

@@ -1520,7 +1520,18 @@ export type EmployeeReportRow = {
   internalMinutes: number
   entryCount: number
   clientCount: number
-  /** Billable $ = (billableMinutes / 60) * (employee.billRate ?? 0). */
+  /**
+   * This person's row minutes, kept so hours and money are built from the
+   * SAME figure — the sum of the rows' two-decimal hours. Collapsing them to
+   * a total and rounding that is the featreq-7c8f64d7 defect.
+   */
+  trackedRowMinutes: number[]
+  billableRowMinutes: number[]
+  /** Sum of the tracked rows' two-decimal hours — what the report prints. */
+  hours: number
+  /** Sum of the billable rows' two-decimal hours. */
+  billableHours: number
+  /** Billable $ = `billableHours` x the bill rate, settled to the cent. */
   billableAmount: number
 }
 
