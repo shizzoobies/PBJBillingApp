@@ -59,8 +59,12 @@ import {
   type Contact,
   type Employee,
   type SubscriptionPlan,
+  type TimeBreakdownMode,
   type TimeEntry,
 } from '../lib/types'
+// The one place 'off' is decided, shared with the generator and the invoice
+// preview so all three agree about what an unset client means.
+import { normalizeTimeBreakdownMode } from '../../lib/invoice-lines.js'
 import {
   addDays,
   clientName,
@@ -1295,12 +1299,32 @@ function InvoiceSettingsSectionBody({
         onCommit={(value) => onCommit({ footerNote: value })}
         value={client.footerNote ?? ''}
       />
-      <SaveToggleField
-        checked={client.invoiceShowTimeBreakdown ?? true}
-        description="Show each time entry on the invoice. When off, the invoice shows a single bookkeeping services line."
-        label="Show time breakdown"
-        onChange={(value) => onCommit({ invoiceShowTimeBreakdown: value })}
+      {/* Her control, and the whole of featreq-…: off unless she turns it on,
+          and then at the level of detail she picks. The lines this adds are
+          informational — they never change what the client owes — so there is
+          no confirm and no warning here; the worst it can do is say too much. */}
+      <SaveSelectField
+        label="Time breakdown on the invoice"
+        value={normalizeTimeBreakdownMode(client.invoiceTimeBreakdownMode)}
+        onCommit={(value) =>
+          onCommit({ invoiceTimeBreakdownMode: value as TimeBreakdownMode })
+        }
+        options={[
+          { value: 'off', label: 'Off — no time on the invoice' },
+          { value: 'person', label: 'One line per person (total hours)' },
+          { value: 'day', label: 'Per person, per day' },
+          { value: 'week', label: 'Per person, per week' },
+          { value: 'entry', label: 'Every entry for the month' },
+        ]}
       />
+      {normalizeTimeBreakdownMode(client.invoiceTimeBreakdownMode) !== 'off' ? (
+        <SaveToggleField
+          checked={client.invoiceTimeBreakdownAmounts ?? false}
+          description="Add what each line of time was worth. It is shown for information only — the invoice total does not change."
+          label="Show amounts on the breakdown"
+          onChange={(value) => onCommit({ invoiceTimeBreakdownAmounts: value })}
+        />
+      ) : null}
       <SaveToggleField
         checked={client.invoiceHideInternalHours ?? true}
         description="Hide non-billable rows from the invoice."

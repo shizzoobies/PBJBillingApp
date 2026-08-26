@@ -165,6 +165,24 @@ export type Client = {
   footerNote?: string
   quickbooksPayUrl?: string
   invoiceShowTimeBreakdown?: boolean
+  /**
+   * How much of the month's time appears on this client's invoice.
+   *
+   * Brittany, 2026-08-25: "Time breakdown should be an auto off ... and then
+   * for the clients I choose I can click the time breakdown." OFF is the
+   * default and every level is opt-in, per client.
+   *
+   * The lines it produces are INFORMATIONAL — always `amount: 0` — so changing
+   * this never moves an invoice total. On an hourly client 'person' is a no-op,
+   * because that invoice's charge lines are already one per person.
+   */
+  invoiceTimeBreakdownMode?: TimeBreakdownMode
+  /**
+   * Whether each breakdown line also says what that time was worth. Her
+   * "option to turn on billing amount for that person too" — written into the
+   * line's detail text, never its amount.
+   */
+  invoiceTimeBreakdownAmounts?: boolean
   invoiceHideInternalHours?: boolean
   invoiceGroupByCategory?: boolean
   /**
@@ -1115,6 +1133,13 @@ export type ServiceCategory = {
   name: string
   sortOrder: number
 }
+
+/**
+ * Detail levels for the optional invoice time breakdown, in the order Brittany
+ * described them: none, one line per person, per person per day, per person per
+ * week, then one line per entry.
+ */
+export type TimeBreakdownMode = 'off' | 'person' | 'day' | 'week' | 'entry'
 
 /** Kind of update tracked on the owner-only "Updates" page. */
 export type FeatureRequestType = 'feature' | 'bug' | 'improvement'

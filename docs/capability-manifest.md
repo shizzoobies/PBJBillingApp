@@ -1908,6 +1908,33 @@ Clients page meanwhile. Owner-only.
   This per-employee billing applies from June 2026 onward; invoices for earlier
   months keep computing at the client's prior per-client hourly rate, so already
   -sent historical invoices stay exact and never change retroactively.
+- **TIME BREAKDOWN ON THE INVOICE — OFF UNLESS YOU TURN IT ON, PER CLIENT.**
+  By default an invoice says what the client is paying and nothing about the
+  hours behind it: a monthly client sees the subscription line and its price
+  plus any expense reimbursement line and its price, and that is all. On the
+  client page, **Time breakdown on the invoice** offers four levels of detail
+  when you want them:
+  - **One line per person (total hours)** — each person and their total for the
+    month. Three people on a client means three lines.
+  - **Per person, per day** — a line for each day someone worked.
+  - **Per person, per week** — a line for each week someone worked.
+  - **Every entry for the month** — one line per entry, with what was done.
+
+  With any level switched on, a second control appears — **Show amounts on the
+  breakdown** — which adds what each line of time was worth.
+
+  **The breakdown never changes what the client owes.** Every line it adds is
+  $0.00 and carries no charge; it explains the invoice, it does not price it. So
+  switching it on, off, or between levels is always safe, on any invoice, and
+  the total does not move.
+
+  Hours are always shown as a total — "4.00 hours" — never as clock-in and
+  clock-out times.
+
+  On an **Hourly** client, "one line per person" adds nothing, because that
+  invoice already bills one "Billable hours — <name>" line per person with the
+  hours and money on it. Per day, per week and every entry still add detail
+  there. An hourly client's charges are unaffected by this setting either way.
 - This invoice's reimbursements: add out-of-pocket expenses (date,
   description, amount) — each becomes a line on the invoice. Recurring
   reimbursements supported.

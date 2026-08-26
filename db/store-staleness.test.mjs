@@ -8975,3 +8975,91 @@ describe('the paid lock (file backend)', () => {
     expect(guard).toBeLessThan(split)
   })
 })
+
+/**
+ * The time-breakdown settings survive a bulk save.
+ *
+ * This is the test the last three data-loss bugs did not have. Minutes
+ * precision, invoice drafts and creation dates were all the same shape: the
+ * bulk save wipes `clients` and re-inserts every row from the payload, and a
+ * column missing from that INSERT is gone with no error anywhere — green tests,
+ * green deploy, and a client complaint weeks later.
+ *
+ * Two new columns went into that statement for featreq-… , so they get pinned
+ * here on the way in rather than discovered on the way out.
+ */
+describe('invoice time-breakdown settings round-trip the bulk save (file backend)', () => {
+  const settings = { invoiceTimeBreakdownMode: 'week', invoiceTimeBreakdownAmounts: true }
+
+  it('keeps the mode and the amounts flag across write -> read', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', ...settings }],
+      }),
+    )
+
+    const back = await store.read()
+    const client = back.clients.find((entry) => entry.id === 'c1')
+    expect(client).toMatchObject(settings)
+  })
+
+  it('defaults to off for a client that has never been given one', async () => {
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme' }] }))
+
+    const client = (await store.read()).clients.find((entry) => entry.id === 'c1')
+    expect(client.invoiceTimeBreakdownMode).toBe('off')
+    expect(client.invoiceTimeBreakdownAmounts).toBe(false)
+  })
+
+  // A payload is not a promise. Off is the safe direction, so anything the
+  // store does not recognize lands there instead of starting to print hours.
+  it('refuses an unrecognized mode rather than storing it', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', invoiceTimeBreakdownMode: 'everything' }],
+      }),
+    )
+
+    const client = (await store.read()).clients.find((entry) => entry.id === 'c1')
+    expect(client.invoiceTimeBreakdownMode).toBe('off')
+  })
+
+  it('carries them through createClient too', async () => {
+    const created = await store.createClient({
+      name: 'Northwind',
+      contact: '',
+      billingMode: 'subscription',
+      hourlyRate: 0,
+      ...settings,
+    })
+    expect(created).toMatchObject(settings)
+
+    const client = (await store.read()).clients.find((entry) => entry.id === created.id)
+    expect(client).toMatchObject(settings)
+  })
+
+  /**
+   * POSITION, the same way the paid lock pins its guard: both `clients` INSERTs
+   * are positional, so a column added to one list and not the other silently
+   * writes the wrong value into the wrong column. Counting them is what catches
+   * an edit that looks right and is off by one.
+   */
+  it('keeps both clients INSERT statements balanced', async () => {
+    const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+    const re = /insert into clients\s*\(([\s\S]*?)\)\s*\n?\s*values\s*\(([\s\S]*?)\)/g
+    let match
+    let statements = 0
+    while ((match = re.exec(source))) {
+      statements += 1
+      const columns = match[1]
+        .split(',')
+        .map((column) => column.replace(/\/\/[^\n]*/g, '').trim())
+        .filter(Boolean)
+      const values = match[2].split(',').map((value) => value.trim()).filter(Boolean)
+      expect(values.length, `statement ${statements} columns vs values`).toBe(columns.length)
+      expect(columns).toContain('invoice_time_breakdown_mode')
+      expect(columns).toContain('invoice_time_breakdown_amounts')
+    }
+    expect(statements).toBeGreaterThan(0)
+  })
+})

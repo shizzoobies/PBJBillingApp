@@ -124,6 +124,17 @@ export function cardProcessingFeeLine(invoice: { total?: number }): {
   amount: number
 }
 
+export const TIME_BREAKDOWN_MODES: readonly string[]
+export function normalizeTimeBreakdownMode(value: unknown): 'off' | 'person' | 'day' | 'week' | 'entry'
+export function breakdownHoursLabel(minutes: number): string
+export function timeBreakdownLines(args?: {
+  entries?: Array<{ employeeId?: string; minutes: number; date?: string; description?: string }>
+  employees?: Array<{ id: string; name: string }>
+  mode?: string
+  showAmounts?: boolean
+  rateFor?: (employeeId?: string) => number
+}): Array<{ kind: 'time_detail'; label: string; detail: string; amount: number }>
+
 export const RETAINER_LABEL: string
 export const RETAINER_CREDIT_LABEL: string
 export function retainerCreditAmount(

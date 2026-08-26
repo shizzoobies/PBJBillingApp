@@ -29,7 +29,10 @@ import {
   resolveInvoiceRecipients,
   type InvoiceRecipientDetail,
 } from '../lib/utils'
-import { renderedInvoiceLines } from '../../lib/invoice-lines.js'
+import {
+  normalizeTimeBreakdownMode,
+  renderedInvoiceLines,
+} from '../../lib/invoice-lines.js'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
 import { generateInvoicesRequest, listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
 import { selectableClients } from '../lib/clientLifecycle'
@@ -198,7 +201,10 @@ function buildDisplayInvoice(
 ): DisplayInvoice {
   const client = invoice.client
   const hideInternal = client.invoiceHideInternalHours ?? true
-  const showBreakdown = client.invoiceShowTimeBreakdown ?? true
+  // Derived from the ONE setting the owner edits (featreq-…), not from the
+  // older boolean beside it — two sources here meant this preview and the
+  // generated invoice could disagree about whether a client shows time.
+  const showBreakdown = normalizeTimeBreakdownMode(client.invoiceTimeBreakdownMode) !== 'off'
   const groupByCategory = client.invoiceGroupByCategory ?? false
 
   const clientEntries = entries.filter(

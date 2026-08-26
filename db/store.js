@@ -28,6 +28,7 @@ import {
   RETAINER_LABEL,
   invoiceLockRefusal,
   normalizeAdhocMode,
+  normalizeTimeBreakdownMode,
   retainerCreditAmount,
 } from '../lib/invoice-lines.js'
 import {
@@ -226,6 +227,12 @@ function sanitizeClientDefaults(raw) {
   if (typeof src.footerNote === 'string') out.footerNote = src.footerNote.slice(0, 2000)
   if (typeof src.invoiceShowTimeBreakdown === 'boolean') {
     out.invoiceShowTimeBreakdown = src.invoiceShowTimeBreakdown
+  }
+  if (typeof src.invoiceTimeBreakdownMode === 'string') {
+    out.invoiceTimeBreakdownMode = normalizeTimeBreakdownMode(src.invoiceTimeBreakdownMode)
+  }
+  if (typeof src.invoiceTimeBreakdownAmounts === 'boolean') {
+    out.invoiceTimeBreakdownAmounts = src.invoiceTimeBreakdownAmounts
   }
   if (typeof src.invoiceHideInternalHours === 'boolean') {
     out.invoiceHideInternalHours = src.invoiceHideInternalHours
@@ -493,6 +500,10 @@ export function normalizeClientProfile(client) {
     quickbooksPayUrl: isSafeHttpUrl(client.quickbooksPayUrl) ? client.quickbooksPayUrl : '',
     invoiceShowTimeBreakdown:
       typeof client.invoiceShowTimeBreakdown === 'boolean' ? client.invoiceShowTimeBreakdown : true,
+    // Off unless chosen — an unrecognized value is off too, so a bad payload
+    // can never start printing a client's hours.
+    invoiceTimeBreakdownMode: normalizeTimeBreakdownMode(client.invoiceTimeBreakdownMode),
+    invoiceTimeBreakdownAmounts: client.invoiceTimeBreakdownAmounts === true,
     invoiceHideInternalHours:
       typeof client.invoiceHideInternalHours === 'boolean' ? client.invoiceHideInternalHours : true,
     invoiceGroupByCategory:
@@ -827,6 +838,11 @@ const INVOICE_LINE_KINDS = new Set([
   // left to recognize.
   'retainer',
   'retainer_credit',
+  // The optional time breakdown. Listed for the same reason as the rest:
+  // falling back to 'custom' would turn a $0.00 informational line into an
+  // ordinary hand-typed one, and the round trip through the editor would lose
+  // what it is. It carries no amount by construction — see `timeBreakdownLines`.
+  'time_detail',
 ])
 
 /**
@@ -3201,6 +3217,17 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists invoice_show_time_breakdown boolean not null default true`,
       )
+      // The time breakdown, as Brittany asked for it on 2026-08-25: OFF for
+      // everyone until she turns it on, and then at a detail level she picks per
+      // client. Defaulting 'off' is what makes this need no data migration —
+      // every existing row is already where she wants it, and the older boolean
+      // above is left alone rather than rewritten under 48 live clients.
+      await this.pool.query(
+        `alter table clients add column if not exists invoice_time_breakdown_mode text not null default 'off'`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists invoice_time_breakdown_amounts boolean not null default false`,
+      )
       await this.pool.query(
         `alter table clients add column if not exists invoice_hide_internal_hours boolean not null default true`,
       )
@@ -4591,6 +4618,7 @@ export class AppDataStore {
                    email, contact_name, phone, address_line1, address_line2,
                    city, state, postal_code, logo_url, payment_terms,
                    footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
+                   invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
                    invoice_hide_internal_hours, invoice_group_by_category,
                    card_payments_enabled,
                    assigned_bookkeeper_ids, monthly_service_tier,
@@ -4874,6 +4902,8 @@ export class AppDataStore {
           footerNote: row.footer_note ?? '',
           quickbooksPayUrl: row.quickbooks_pay_url ?? '',
             invoiceShowTimeBreakdown: row.invoice_show_time_breakdown ?? true,
+            invoiceTimeBreakdownMode: normalizeTimeBreakdownMode(row.invoice_time_breakdown_mode),
+            invoiceTimeBreakdownAmounts: row.invoice_time_breakdown_amounts ?? false,
             invoiceHideInternalHours: row.invoice_hide_internal_hours ?? true,
             invoiceGroupByCategory: row.invoice_group_by_category ?? false,
             cardPaymentsEnabled: row.card_payments_enabled ?? false,
@@ -5608,9 +5638,11 @@ export class AppDataStore {
                 estimated_bookkeeper_hours, estimated_accountant_hours,
                 estimated_cfo_hours, monthly_service_tier,
                 annual_rate, annual_billing_month, lifecycle_stage,
-                card_payments_enabled, created_at, updated_at
+                card_payments_enabled,
+                invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
+                created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, now())
             `,
             [
               clientRecord.id,
@@ -5680,6 +5712,8 @@ export class AppDataStore {
                 : Number(clientRecord.annualBillingMonth),
               coerceLifecycleStage(clientRecord.lifecycleStage),
               clientRecord.cardPaymentsEnabled ?? false,
+              normalizeTimeBreakdownMode(clientRecord.invoiceTimeBreakdownMode),
+              clientRecord.invoiceTimeBreakdownAmounts === true,
               createdAtFor('clients', clientRecord.id),
             ],
           )
@@ -10046,9 +10080,10 @@ export class AppDataStore {
              estimated_bookkeeper_hours, estimated_accountant_hours,
              estimated_cfo_hours, monthly_service_tier,
              annual_rate, annual_billing_month, lifecycle_stage,
-             card_payments_enabled, updated_at
+             card_payments_enabled,
+             invoice_time_breakdown_mode, invoice_time_breakdown_amounts, updated_at
            )
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34, now())`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36, now())`,
           [
             record.id,
             record.name,
@@ -10091,6 +10126,8 @@ export class AppDataStore {
               : null,
             record.lifecycleStage,
             record.cardPaymentsEnabled ?? false,
+            normalizeTimeBreakdownMode(record.invoiceTimeBreakdownMode),
+            record.invoiceTimeBreakdownAmounts === true,
           ],
         )
         await dbClient.query('commit')
