@@ -9,6 +9,7 @@ import {
   CHECKLIST_ITEM_SELECT_COLUMNS,
   CREATED_AT_PRESERVED_TABLES,
   INVOICE_SELECT_COLUMNS,
+  InvoiceLockedError,
   mapChecklistItemRow,
   mapInvoiceRow,
   mapRecurringReimbursementRow,
@@ -5583,14 +5584,41 @@ describe('retainer credits at the lifecycle edges (file backend)', () => {
     expect(updated.lineItems[0]).toMatchObject({ kind: 'custom', amount: 2500 })
   })
 
+  // Seeded as a DRAFT deliberately. What this pins is the line-kind sanitizer —
+  // that 'retainer' survives on a retainer invoice where a monthly one demotes
+  // it — and `retainerRow()` merely happens to default to paid because that is
+  // the realistic state to find one in. Since the paid lock (featreq-ead3a215)
+  // that default would refuse the save before the sanitizer ever ran, and the
+  // test would be passing for the wrong reason. The paid case is its own test
+  // below.
   it('keeps the retainer line on an actual retainer invoice', async () => {
-    await seed([retainerRow({ appliedToInvoiceId: null })])
+    await seed([retainerRow({ appliedToInvoiceId: null, status: 'draft' })])
 
     const updated = await store.updateInvoice('inv-ret', {
       lineItems: [{ kind: 'retainer', label: 'Retainer', detail: 'Signed', amount: 2500 }],
     })
 
     expect(updated.lineItems[0].kind).toBe('retainer')
+  })
+
+  /**
+   * The retainer half of Brittany's rule, and the reason it needed no separate
+   * calculation. A retainer must be PAID before it can be credited anywhere
+   * (`listUnappliedRetainers`), and this is what stops its total moving after
+   * that — so the credit on the final invoice can never drift away from the
+   * money that actually came in.
+   */
+  it('refuses to re-price a retainer once it has been paid', async () => {
+    await seed([retainerRow({ appliedToInvoiceId: null })])
+
+    await expect(
+      store.updateInvoice('inv-ret', {
+        lineItems: [{ kind: 'retainer', label: 'Retainer', detail: '', amount: 2000 }],
+      }),
+    ).rejects.toBeInstanceOf(InvoiceLockedError)
+
+    // The figure a future credit would be sized from is untouched.
+    expect((await byId('inv-ret')).total).toBe(500)
   })
 
   it('refuses to credit a retainer against another retainer', async () => {
@@ -8813,5 +8841,137 @@ describe('answering a superseded review (file backend)', () => {
 
     expect(noQuestion.statusCode).toBe(404)
     expect(noReview.statusCode).toBe(404)
+  })
+})
+
+/**
+ * THE PAID LOCK — `updateInvoice` refuses to rewrite an invoice the client has
+ * paid, or is in the middle of paying.
+ *
+ * Brittany's rule verbatim (featreq-ead3a215): "invoices should not be editable
+ * once paid all invoices should lock after paid." She wrote it answering a
+ * narrower question about retainer credits and gave the general rule instead.
+ *
+ * File backend, same reasoning as the two blocks above: production is Postgres
+ * and is validated separately with a rolled-back transaction (HANDOFF §4). What
+ * is pinned here is the contract BOTH branches implement — and they implement
+ * one guard, not two, which the source assertion at the end is what protects.
+ */
+describe('the paid lock (file backend)', () => {
+  function invoice(id, status, overrides = {}) {
+    return {
+      id,
+      clientId: 'c1',
+      period: '2026-08',
+      kind: 'monthly',
+      number: `INV-2026-08-${id.slice(-3)}`,
+      status,
+      lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+      subtotal: 400,
+      total: 400,
+      dueDate: '2026-09-15',
+      blurb: 'Thanks for your business.',
+      scopeFlags: [],
+      sentAt: null,
+      paidAt: status === 'paid' ? '2026-08-20T00:00:00.000Z' : null,
+      paymentMethod: null,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      invoice('inv-paid', 'paid'),
+      invoice('inv-processing', 'processing'),
+      invoice('inv-sent', 'sent'),
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  })
+
+  async function stored(id) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.invoices.find((entry) => entry.id === id)
+  }
+
+  it('refuses a line edit on a paid invoice and writes NOTHING', async () => {
+    await expect(
+      store.updateInvoice('inv-paid', {
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 1 }],
+      }),
+    ).rejects.toBeInstanceOf(InvoiceLockedError)
+
+    // The refusal is only half of it — a guard that threw AFTER writing would
+    // pass an assertion on the error alone.
+    const after = await stored('inv-paid')
+    expect(after.total).toBe(400)
+    expect(after.lineItems[0].amount).toBe(400)
+    expect(after.updatedAt).toBe('2026-08-01T00:00:00.000Z')
+  })
+
+  it('refuses the note to the client on a paid invoice', async () => {
+    await expect(store.updateInvoice('inv-paid', { blurb: 'rewritten' })).rejects.toBeInstanceOf(
+      InvoiceLockedError,
+    )
+    expect((await stored('inv-paid')).blurb).toBe('Thanks for your business.')
+  })
+
+  // Money in flight. Days can pass in this state, and the row locks afterwards
+  // anyway — with whatever was typed into it baked in.
+  it('refuses an edit while a payment is still settling', async () => {
+    await expect(
+      store.updateInvoice('inv-processing', { blurb: 'rewritten' }),
+    ).rejects.toBeInstanceOf(InvoiceLockedError)
+    expect((await stored('inv-processing')).blurb).toBe('Thanks for your business.')
+  })
+
+  it('refuses being walked back to draft', async () => {
+    await expect(store.updateInvoice('inv-paid', { status: 'draft' })).rejects.toBeInstanceOf(
+      InvoiceLockedError,
+    )
+    expect((await stored('inv-paid')).status).toBe('paid')
+  })
+
+  // THE ESCAPE HATCH. Without this a wrong paid invoice would be permanent, and
+  // the lock would be a trap rather than a record.
+  it('still allows voiding a paid invoice', async () => {
+    const result = await store.updateInvoice('inv-paid', { status: 'void' })
+    expect(result).not.toBeNull()
+    expect((await stored('inv-paid')).status).toBe('void')
+  })
+
+  // THE DELIBERATE BOUNDARY. Nobody has paid a sent invoice yet, and correcting
+  // one before they do is ordinary bookkeeping she never asked to lose.
+  it('still allows editing a sent invoice', async () => {
+    const result = await store.updateInvoice('inv-sent', { blurb: 'corrected' })
+    expect(result).not.toBeNull()
+    expect((await stored('inv-sent')).blurb).toBe('corrected')
+  })
+
+  /**
+   * POSITION, not behavior — the thing this feature will actually rot on.
+   *
+   * Cardinal rule 1: any persisted change must touch both backends. The guard
+   * satisfies that by sitting ABOVE the `if (this.pool)` split, so one check
+   * covers Postgres and the file alike. Move it inside either branch and every
+   * test above still passes while production loses the lock, silently — which is
+   * exactly the shape of bug that rule exists to catch.
+   */
+  it('guards above the backend split, so one check covers both', async () => {
+    const source = await readFile(
+      path.join(projectRoot, 'db', 'store.js'),
+      'utf8',
+    )
+    const start = source.indexOf('async updateInvoice(')
+    expect(start).toBeGreaterThan(-1)
+    const body = source.slice(start, source.indexOf('async ', start + 40))
+
+    const guard = body.indexOf('invoiceLockRefusal(')
+    const split = body.indexOf('if (this.pool)')
+    expect(guard).toBeGreaterThan(-1)
+    expect(split).toBeGreaterThan(-1)
+    expect(guard).toBeLessThan(split)
   })
 })

@@ -9,6 +9,7 @@ import {
   coerceEntryMinutes,
   CoverageConfirmationError,
   InvoiceAiReviewError,
+  InvoiceLockedError,
   RetainerCreditError,
   TimeEntrySplitError,
 } from './db/store.js'
@@ -3341,6 +3342,14 @@ const server = createServer(async (request, response) => {
         // Same treatment as a refused credit: a sentence, not "try again".
         if (error instanceof CoverageConfirmationError) {
           sendJson(response, 409, { error: 'coverage_unconfirmed', message: error.message })
+          return
+        }
+        // An edit aimed at an invoice that has been paid, or is being paid. The
+        // editor does not offer the fields, so reaching here means a tab that
+        // was open across the payment — she needs to be told the invoice moved
+        // under her, not that something went wrong.
+        if (error instanceof InvoiceLockedError) {
+          sendJson(response, 409, { error: 'invoice_locked', message: error.message })
           return
         }
         console.error('[invoices] update failed:', error)

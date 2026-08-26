@@ -118,3 +118,52 @@ describe('the recurring-reimbursement routes never accept a ledger from the wire
     expect(fn).not.toContain('coverageResumePending')
   })
 })
+
+/**
+ * The paid lock's glue — featreq-ead3a215.
+ *
+ * The refusal itself is exercised properly, both backends, in
+ * db/store-staleness.test.mjs. What can rot HERE is the translation: the store
+ * throws `InvoiceLockedError`, and if the route stops catching it the owner gets
+ * a 500 and "Could not save that change — please try again" for something that
+ * will never succeed no matter how many times she tries.
+ *
+ * Same caveat as the block at the top of this file: this proves wiring, not
+ * behavior.
+ */
+describe('the invoice PATCH route answers a locked invoice with a sentence', () => {
+  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 3000)
+
+  it('catches the locked error rather than letting it fall to the 500', () => {
+    expect(block).toContain('error instanceof InvoiceLockedError')
+  })
+
+  it('answers 409 with the code the page branches on', () => {
+    const at = block.indexOf('error instanceof InvoiceLockedError')
+    expect(at).toBeGreaterThan(-1)
+    const branch = block.slice(at, at + 260)
+    expect(branch).toContain('409')
+    expect(branch).toContain("error: 'invoice_locked'")
+    // The store's sentence, not a rewrite of it here — one wording, one place.
+    expect(branch).toContain('message: error.message')
+  })
+
+  /**
+   * POSITION. The generic `console.error` + 500 sits at the bottom of the same
+   * catch, so a locked branch added BELOW it would never run while still
+   * reading correctly to someone scanning the file.
+   */
+  it('branches before the catch-all 500', () => {
+    const locked = block.indexOf('error instanceof InvoiceLockedError')
+    const fallback = block.indexOf("error: 'invoice_update_failed'")
+    expect(locked).toBeGreaterThan(-1)
+    expect(fallback).toBeGreaterThan(-1)
+    expect(locked).toBeLessThan(fallback)
+  })
+
+  it('imports the error class it branches on', () => {
+    expect(serverSource).toMatch(
+      /import \{[\s\S]*?InvoiceLockedError,[\s\S]*?\} from '\.\/db\/store\.js'/,
+    )
+  })
+})

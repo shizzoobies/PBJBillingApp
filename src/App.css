@@ -11568,6 +11568,24 @@ tr.is-inactive-client .client-name-link {
   color: #8a5a06;
 }
 
+/* A paid invoice, stated once at the top of its editor. Deliberately calm
+   rather than red: nothing has gone wrong, the record is simply closed. */
+.invoice-run-locked {
+  align-items: center;
+  background: rgba(120, 120, 128, 0.1);
+  border-radius: 8px;
+  color: var(--muted);
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+}
+
+.invoice-run-locked svg {
+  flex: 0 0 auto;
+}
+
 .invoice-run-error {
   background: rgba(197, 48, 48, 0.08);
   border-radius: 8px;

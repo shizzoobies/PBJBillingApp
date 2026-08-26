@@ -26,6 +26,7 @@ import {
 } from '../lib/workspace-version.js'
 import {
   RETAINER_LABEL,
+  invoiceLockRefusal,
   normalizeAdhocMode,
   retainerCreditAmount,
 } from '../lib/invoice-lines.js'
@@ -839,6 +840,18 @@ export class RetainerCreditError extends Error {
   constructor(message) {
     super(message)
     this.name = 'RetainerCreditError'
+  }
+}
+
+/**
+ * An edit aimed at an invoice whose content is frozen — see
+ * `LOCKED_INVOICE_STATUSES` in lib/invoice-lines.js. Same shape and same reason
+ * as the two around it: a fact about the data, said in a sentence she can act on.
+ */
+export class InvoiceLockedError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'InvoiceLockedError'
   }
 }
 
@@ -8938,6 +8951,17 @@ export class AppDataStore {
     const all = await this.listInvoices()
     const current = all.find((invoice) => invoice.id === id)
     if (!current) return null
+
+    // THE PAID LOCK. Above every field assignment and above the backend split,
+    // because it is a fact about the invoice rather than about how it is stored
+    // — the file backend has to refuse the same edit Postgres refuses, and a
+    // guard sitting inside one branch is a guard the tests cannot see missing.
+    //
+    // This is the whole of the enforcement. The editor greys itself out from the
+    // same predicate, but a greyed-out field is a courtesy, not a rule: the
+    // PATCH route is reachable with a stale tab, a replayed request, or curl.
+    const lockRefusal = invoiceLockRefusal(current, patch)
+    if (lockRefusal) throw new InvoiceLockedError(lockRefusal)
 
     const next = { ...current }
     if (Array.isArray(patch.lineItems)) {

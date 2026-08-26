@@ -1529,6 +1529,27 @@ Clients page meanwhile. Owner-only.
 > **Back to draft**. **Void** keeps the invoice on the record, struck through,
 > and frees that client to be generated again.
 >
+> **ONCE AN INVOICE IS PAID IT IS LOCKED.** A paid invoice has to keep matching
+> what the client actually paid, so it stops being editable: the lines and the
+> note go read-only, and **Save changes**, **Add a line** and the remove buttons
+> are gone. A grey line at the top of the invoice says why. The same lock applies
+> while a payment is still **going through** (an ACH debit can take a few days to
+> settle) — the invoice the client authorized must not move underneath them
+> mid-payment. It lifts for nothing: a paid invoice cannot be walked **Back to
+> draft** either.
+>
+> **Void is the way out.** If a paid invoice turns out to be wrong, void it and
+> issue a new one. That is deliberate — a void stays on the record where you and
+> the client can both see it happened, and a silent edit would not.
+>
+> Invoices that have been **sent but not paid** are still fully editable. Nobody
+> has paid those yet, and fixing one before they do is ordinary work.
+>
+> This is also what keeps a **retainer credit** honest. A retainer has to be paid
+> before it can be credited to a final invoice, and a paid invoice's total can no
+> longer change — so the credit can never drift away from the money that actually
+> came in.
+>
 > **AD HOC WORK IS SHOWN SEPARATELY, AND YOU DECIDE WHAT TO DO WITH EACH
 > PIECE.** Time flagged "Ad hoc" on the Time page (one-off work outside what the
 > client is scoped for — see Time tracking) does not disappear into "Billable

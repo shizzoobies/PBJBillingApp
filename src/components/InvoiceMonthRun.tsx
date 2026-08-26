@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   Download,
   Link as LinkIcon,
+  Lock,
   Mail,
   Plus,
   Printer,
@@ -35,6 +36,7 @@ import {
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
 import {
   adhocLineForMode,
+  invoiceLockMessage,
   normalizeAdhocMode,
   renderedInvoiceLines,
   retainerCreditLine,
@@ -157,7 +159,7 @@ const ADHOC_CHOICES: ReadonlyArray<{ value: AdhocMode; label: string }> = [
  */
 type PatchResult =
   | { ok: true; invoice: PersistedInvoice }
-  | { ok: false; message: string; retainer: boolean }
+  | { ok: false; message: string; retainer: boolean; locked: boolean }
 
 /**
  * The statuses in which a retainer credit may be ADDED. Mirrors
@@ -830,15 +832,20 @@ export function InvoiceMonthRun({
       // banner: it is about the lines she is looking at, the sentence names the
       // other invoice involved, and it comes with the credit line being taken
       // back out — none of which reads as a message about the month.
-      const refusedRetainer = err instanceof ApiError && err.status === 409
-      if (refusedRetainer) {
+      // Two different 409s reach here now, and only one is about a retainer.
+      // Keyed on the CODE rather than the status, because the wrong branch would
+      // take a credit back out of an invoice that never had one refused.
+      const code = err instanceof ApiError ? err.code : undefined
+      const locked = code === 'invoice_locked'
+      const refusedRetainer = err instanceof ApiError && err.status === 409 && !locked
+      if (refusedRetainer || locked) {
         // Whatever the server knows about that retainer, we now do not. Re-ask
         // before offering it to anybody else.
         setRetainerToken((token) => token + 1)
       } else {
         setError(message)
       }
-      return { ok: false, message, retainer: refusedRetainer }
+      return { ok: false, message, retainer: refusedRetainer, locked }
     } finally {
       setBusy(false)
     }
@@ -1202,6 +1209,7 @@ function InvoiceLineRow({
   onRemove,
   onModeChange,
   coverage,
+  locked = false,
 }: {
   line: PersistedInvoiceLine
   /** Position in the SAVED array — every edit addresses a line by this. */
@@ -1218,6 +1226,8 @@ function InvoiceLineRow({
     onEdit: (range: { start: string; end: string }) => void
     onConfirm: () => void
   }
+  /** The invoice has been paid: every field here is a record, not a draft. */
+  locked?: boolean
 }) {
   const mode = normalizeAdhocMode(line.adhocMode)
   return (
@@ -1227,6 +1237,7 @@ function InvoiceLineRow({
           className="input"
           value={line.label}
           aria-label="Line description"
+          readOnly={locked}
           onChange={(event) => onChange(index, { label: event.target.value })}
         />
         <input
@@ -1234,6 +1245,7 @@ function InvoiceLineRow({
           value={line.detail}
           aria-label="Line detail"
           placeholder="Detail (optional)"
+          readOnly={locked}
           onChange={(event) => onChange(index, { detail: event.target.value })}
         />
         {/* THE ASK. A skipped cycle or a resumed pause means the app worked out
@@ -1293,6 +1305,7 @@ function InvoiceLineRow({
               <select
                 className="compact-input"
                 value={mode}
+                disabled={locked}
                 onChange={(event) => onModeChange(index, event.target.value as AdhocMode)}
               >
                 {ADHOC_CHOICES.map((choice) => (
@@ -1330,20 +1343,27 @@ function InvoiceLineRow({
           value={line.amount}
           aria-label="Amount"
           readOnly={
-            (Boolean(onModeChange) && mode !== 'billed') || line.kind === 'retainer_credit'
+            locked ||
+            (Boolean(onModeChange) && mode !== 'billed') ||
+            line.kind === 'retainer_credit'
           }
           onChange={(event) => onChange(index, { amount: Number(event.target.value) })}
         />
       </td>
       <td>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label={`Remove ${line.label || 'line'}`}
-          onClick={() => onRemove(index)}
-        >
-          <Trash2 size={15} />
-        </button>
+        {/* Not merely disabled: there is no version of this invoice in which a
+            line comes off, so a greyed-out control would be a door that never
+            unlocks. */}
+        {locked ? null : (
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={`Remove ${line.label || 'line'}`}
+            onClick={() => onRemove(index)}
+          >
+            <Trash2 size={15} />
+          </button>
+        )}
       </td>
     </tr>
   )
@@ -1716,6 +1736,16 @@ function InvoiceEditor({
    * A credit already applied is untouched by that — it travels with the invoice
    * through sent and paid like any other line.
    */
+  /**
+   * Set when this invoice's content is frozen — see `LOCKED_INVOICE_STATUSES`.
+   *
+   * The editor still RENDERS for a locked invoice rather than being replaced by
+   * a read-only twin: this is the screen she knows, the tabs land her on it, and
+   * a second component showing the same lines is the kind of duplicate that
+   * drifts. The fields go read-only and the writing controls go away.
+   */
+  const lockMessage = invoiceLockMessage(invoice)
+
   const creditLine = lines.find((line) => line.kind === 'retainer_credit') ?? null
   const offeredCredit =
     retainer && !creditLine && RETAINER_CREDITABLE_STATUSES.has(invoice.status)
@@ -1741,6 +1771,14 @@ function InvoiceEditor({
       setSaved(true)
       return
     }
+    // A locked invoice refused the save outright. Say so where she is looking
+    // and change NOTHING: unlike a refused credit there is no line to take back
+    // out, and quietly editing the table under a message about a frozen invoice
+    // would be the exact contradiction it is warning about.
+    if (result.locked) {
+      setRetainerError(result.message)
+      return
+    }
     if (!result.retainer) return
     // The server would not honor the credit — most often because that retainer
     // was given back somewhere else while this tab sat open. Say so HERE, beside
@@ -1753,6 +1791,14 @@ function InvoiceEditor({
 
   return (
     <div className="invoice-run-editor">
+      {/* Said once, at the top, before she types into fields that will not take
+          it — not as an error after a click that never had a chance. */}
+      {lockMessage ? (
+        <p className="invoice-run-locked" role="status">
+          <Lock size={14} aria-hidden="true" />
+          {lockMessage}
+        </p>
+      ) : null}
       <table className="invoice-run-lines">
         <tbody>
           {scopedRows.map(({ line, index }) => (
@@ -1762,6 +1808,7 @@ function InvoiceEditor({
               index={index}
               onChange={setLine}
               onRemove={removeLine}
+              locked={Boolean(lockMessage)}
               coverage={
                 line.needsCoverageConfirmation && line.recurringId
                   ? {
@@ -1797,6 +1844,7 @@ function InvoiceEditor({
                 index={index}
                 onChange={setLine}
                 onRemove={removeLine}
+                locked={Boolean(lockMessage)}
                 onModeChange={setAdhocMode}
               />
             ))}
@@ -1804,49 +1852,53 @@ function InvoiceEditor({
         ) : null}
       </table>
 
-      <div className="invoice-run-line-actions">
-        <button
-          type="button"
-          className="secondary-action"
-          onClick={() => {
-            setLines((current) => [
-              ...current,
-              { kind: 'custom', label: '', detail: '', amount: 0 },
-            ])
-            setSaved(false)
-          }}
-        >
-          <Plus size={15} />
-          Add a line
-        </button>
-        {/* The credit, offered and never taken. Disabled rather than hidden when
-            there is nothing left to credit, so a $0 invoice explains itself
-            instead of quietly dropping the button she was looking for.
-
-            The retainer is NAMED, not just priced. A client can hold more than
-            one, and "Apply retainer credit ($500.00)" would not say which — this
-            offers the oldest one, and she should be able to see that before
-            pressing it rather than after saving. Picking between several is
-            deferred; naming the one on offer is what makes that deferral safe. */}
-        {offeredCredit ? (
+      {/* Adding a line to a paid invoice would strand it: nothing here saves,
+          and the remove control beside it is gone too. */}
+      {lockMessage ? null : (
+        <div className="invoice-run-line-actions">
           <button
             type="button"
             className="secondary-action"
-            disabled={offeredCredit.amount === 0}
-            title={
-              offeredCredit.amount === 0
-                ? 'There is nothing on this invoice left to credit'
-                : `Give back the retainer ${retainer?.number ?? ''} held for this client`.trim()
-            }
-            onClick={applyRetainerCredit}
+            onClick={() => {
+              setLines((current) => [
+                ...current,
+                { kind: 'custom', label: '', detail: '', amount: 0 },
+              ])
+              setSaved(false)
+            }}
           >
-            <Undo2 size={15} />
-            {retainer?.number
-              ? `Apply retainer ${retainer.number} credit (${currency.format(Math.abs(offeredCredit.amount))})`
-              : `Apply retainer credit (${currency.format(Math.abs(offeredCredit.amount))})`}
+            <Plus size={15} />
+            Add a line
           </button>
-        ) : null}
-      </div>
+          {/* The credit, offered and never taken. Disabled rather than hidden when
+              there is nothing left to credit, so a $0 invoice explains itself
+              instead of quietly dropping the button she was looking for.
+
+              The retainer is NAMED, not just priced. A client can hold more than
+              one, and "Apply retainer credit ($500.00)" would not say which — this
+              offers the oldest one, and she should be able to see that before
+              pressing it rather than after saving. Picking between several is
+              deferred; naming the one on offer is what makes that deferral safe. */}
+          {offeredCredit ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={offeredCredit.amount === 0}
+              title={
+                offeredCredit.amount === 0
+                  ? 'There is nothing on this invoice left to credit'
+                  : `Give back the retainer ${retainer?.number ?? ''} held for this client`.trim()
+              }
+              onClick={applyRetainerCredit}
+            >
+              <Undo2 size={15} />
+              {retainer?.number
+                ? `Apply retainer ${retainer.number} credit (${currency.format(Math.abs(offeredCredit.amount))})`
+                : `Apply retainer credit (${currency.format(Math.abs(offeredCredit.amount))})`}
+            </button>
+          ) : null}
+        </div>
+      )}
       {/* The whole retainer does not always fit. Saying so beside the button is
           what stops the remainder looking like a rounding error later. */}
       {offeredCredit && retainer && Math.abs(offeredCredit.amount) < retainer.total ? (
@@ -2011,6 +2063,7 @@ function InvoiceEditor({
           className="input"
           rows={2}
           value={blurb}
+          readOnly={Boolean(lockMessage)}
           placeholder="Carried over from last month once you've written one."
           onChange={(event) => {
             setBlurb(event.target.value)
@@ -2170,9 +2223,16 @@ function InvoiceEditor({
             <Printer size={15} />
             Print
           </button>
-          <button type="button" className="secondary-action" disabled={busy || !dirty} onClick={save}>
-            {saved && !dirty ? 'Saved' : 'Save changes'}
-          </button>
+          {lockMessage ? null : (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy || !dirty}
+              onClick={save}
+            >
+              {saved && !dirty ? 'Saved' : 'Save changes'}
+            </button>
+          )}
           {/* While the panel above is up, this button IS that panel — leaving
               it here too would offer two ways to approve, one of which throws
               away the answers she is in the middle of typing. */}

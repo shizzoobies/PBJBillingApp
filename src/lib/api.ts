@@ -1744,6 +1744,26 @@ export async function recordClientProfileActivity(clientId: string) {
   }
 }
 
+/**
+ * The error body as BOTH halves — the sentence for the person and the code for
+ * the caller. Separate from `safeErrorMessage` because a Response body can only
+ * be read once: a helper that returned the sentence and left the code behind
+ * would have to be called twice to get both.
+ */
+async function safeError(response: Response): Promise<{ message: string; code?: string }> {
+  try {
+    const body = await response.json()
+    const code = body && typeof body.error === 'string' ? body.error : undefined
+    if (body && typeof body.message === 'string' && body.message.trim()) {
+      return { message: body.message, code }
+    }
+    if (code) return { message: code, code }
+  } catch {
+    // ignore
+  }
+  return { message: '' }
+}
+
 async function safeErrorMessage(response: Response): Promise<string> {
   try {
     const body = await response.json()
@@ -3288,8 +3308,8 @@ export async function updateInvoiceRequest(
     body: JSON.stringify(patch),
   })
   if (!response.ok) {
-    const message = await safeErrorMessage(response)
-    throw new ApiError(response.status, message || `Failed to save (${response.status})`)
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Failed to save (${response.status})`, code)
   }
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }

@@ -142,3 +142,20 @@ export function retainerCreditLine(args: {
   amount: number
   retainerInvoiceId: string | null
 }
+
+/** Statuses in which an invoice's content is frozen — see the JS for why. */
+export const LOCKED_INVOICE_STATUSES: readonly string[]
+export const LOCKED_INVOICE_FIELDS: readonly string[]
+export const INVOICE_LOCKED_MESSAGE: string
+export const INVOICE_PROCESSING_LOCKED_MESSAGE: string
+export function isInvoiceLocked(invoice: { status?: string } | null | undefined): boolean
+export function invoiceLockMessage(
+  invoice: { status?: string } | null | undefined,
+): string | null
+export function invoiceLockRefusal(
+  invoice: { status?: string } | null | undefined,
+  patch:
+    | { lineItems?: unknown; blurb?: unknown; dueDate?: unknown; status?: unknown }
+    | null
+    | undefined,
+): string | null

@@ -1647,8 +1647,20 @@ export type NotificationEntry = {
 export class ApiError extends Error {
   status: number
 
-  constructor(status: number, message: string) {
+  /**
+   * The endpoint's machine-readable `error` code, when it sent one.
+   *
+   * The status alone stopped being enough at the point where one route answered
+   * 409 for two different facts — a refused retainer credit and an edit aimed at
+   * a paid invoice. The caller has to do different things about those, and
+   * matching on the human sentence to tell them apart would break the first time
+   * the sentence was reworded.
+   */
+  code?: string
+
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
