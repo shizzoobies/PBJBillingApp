@@ -1,10 +1,30 @@
-# Desktop shell (phase 2) — plan of record, NOT started
+# Desktop shell (phase 2) — BUILT 2026-08-27
 
-Written 2026-08-27. Phase 1 (PWA installability: manifest + icons, no service
-worker) shipped separately and stands on its own. This document is the phase-2
-decision package for a real Windows executable, to be built ONLY if Alex asks
-for it after living with the PWA. If the PWA turns out to be enough, delete
-this plan guilt-free.
+Written 2026-08-27 as a decision package; Alex approved same day ("full .exe,
+push all the way through") and it was built to this plan. What exists now:
+
+- `desktop/` — Tauri v2 shell. Window → `https://app.pbjsa.com`, custom
+  user-agent marker `PBJDesktopShell`, off-origin navigation opens the real
+  browser, `pbjsa://` deep link registered (installer + runtime), single-
+  instance so a second launch focuses the window.
+- Server side: `buildLoginLinkEmail` in `lib/notify.js` grows an "Open in the
+  desktop app" button ONLY when `/api/auth/request-link` saw the shell's
+  user-agent (`server.js`, source-pinned by `lib/login-link-email.test.mjs`).
+  The pbjsa:// destination is rebuilt onto the app origin in the shell, so a
+  hostile link can only steer to app.pbjsa.com pages.
+- Build: `cd desktop && npx tauri build` → NSIS installer under
+  `desktop/src-tauri/target/release/bundle/nsis/`. Per-user install (no
+  admin). UNSIGNED for now — SmartScreen will warn; see OWNER-TODO.
+- Deliberately NOT built yet: CI release workflow, signing, tray icon,
+  native notifications, auto-start. Waiting on Alex's verdict after using it.
+
+The original decision package follows, kept for the reasoning.
+
+---
+
+Phase 1 (PWA installability: manifest + icons, no service
+worker) shipped separately and stands on its own. This document was the
+phase-2 decision package for a real Windows executable.
 
 ## The decision that was already made
 

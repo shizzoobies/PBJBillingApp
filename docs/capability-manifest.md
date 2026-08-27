@@ -2130,7 +2130,11 @@ Clients page meanwhile. Owner-only.
 ## Security & sign-in
 
 - Email magic-link sign-in (15-minute, single-use links) and password
-  sign-in; owner can also use a password recovery path.
+  sign-in; owner can also use a password recovery path. When the sign-in
+  request comes from the Windows desktop app, the email carries a second
+  button ("Open in the desktop app") that signs in the app itself — the
+  regular button signs in the browser. Browser sign-ins never see the
+  second button.
 - Optional two-factor authentication (TOTP authenticator app + backup codes).
 - Sessions, login history, and an activity log of actions in the app.
 - Per-user revocation (revoke sign-in link / access).

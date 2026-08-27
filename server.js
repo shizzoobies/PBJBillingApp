@@ -2131,12 +2131,24 @@ const server = createServer(async (request, response) => {
             // Activity log (only when email is real & role-matched, to keep
             // the audit log free of injection noise).
             await appDataStore.recordActivity(user.id, 'login_link_requested', email)
+            // The desktop shell marks itself in the user-agent. Only then
+            // does the email carry the second, pbjsa:// sign-in button —
+            // a magic link clicked in a mail client opens the BROWSER, so
+            // the shell needs its own scheme to receive the token. Browser
+            // sign-ins never see the extra button.
+            const fromDesktopShell = String(request.headers['user-agent'] || '').includes(
+              'PBJDesktopShell',
+            )
+            const desktopUrl = fromDesktopShell
+              ? `pbjsa://verify/${encodeURIComponent(token)}`
+              : null
             // Best-effort send. Failures are logged inside notify.js and
             // never surfaced (same response either way).
             await sendLoginLinkEmail({
               to: user.email,
               firmName: firmSettings?.name,
               signInUrl,
+              desktopUrl,
             })
           }
         } catch (error) {

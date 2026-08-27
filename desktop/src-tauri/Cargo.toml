@@ -1,0 +1,27 @@
+[package]
+name = "pbj-desktop"
+version = "0.1.0"
+description = "Desktop shell for app.pbjsa.com"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# single-instance MUST be the first plugin registered; its deep-link feature
+# forwards a second launch's pbjsa:// argv into the deep-link plugin.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-opener = "2"
+url = "2"
+# generate_context! expands to code that names serde/serde_json from the
+# crate root — they must be direct dependencies even though we never
+# import them ourselves.
+serde = "1"
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

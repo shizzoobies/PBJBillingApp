@@ -1,0 +1,12 @@
+{
+  "name": "pbj-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Windows desktop shell for app.pbjsa.com — a Tauri window around the live app. Nothing is bundled; the shell is always exactly as current as the site.",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

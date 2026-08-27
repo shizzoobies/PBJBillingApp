@@ -35,3 +35,7 @@ package-lock.json
 # Keep out of the repo so it can't be committed/deployed by accident.
 scripts/rescue-login.mjs
 .playwright-mcp/
+
+# desktop shell (Tauri)
+desktop/node_modules/
+desktop/src-tauri/target/
