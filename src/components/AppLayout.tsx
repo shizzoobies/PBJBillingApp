@@ -18,6 +18,7 @@ import {
 } from '../lib/utils'
 import { ConversationProvider } from '@elevenlabs/react'
 import { AssistantPanel } from './AssistantPanel'
+import { DesktopAppButton } from './DesktopAppButton'
 import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
 import { navItems, navSections, type NavItem } from './navItems'
@@ -235,6 +236,7 @@ export function AppLayout() {
                 value={billingPeriod}
               />
             </label>
+            <DesktopAppButton />
             <NotificationBell />
             <div className="account-pill" aria-label="Current account">
               <strong>{sessionUser.name}</strong>

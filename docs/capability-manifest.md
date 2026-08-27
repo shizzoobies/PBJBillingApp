@@ -2132,11 +2132,12 @@ Clients page meanwhile. Owner-only.
 - Email magic-link sign-in (15-minute, single-use links) and password
   sign-in; owner can also use a password recovery path.
 - **Signing in the Windows desktop app:** sign into the web app first, then
-  Settings → Sign-in → **Open in the desktop app**. The browser asks to open
-  "PBJ Accounting" and the installed app opens signed in. (The sign-in email
-  itself cannot do this — email programs block app-opening links — so the
-  button lives in Settings.) If nothing happens, the desktop app is not
-  installed, or it is already open and signed in.
+  click **Open in desktop** at the top of the screen (next to the bell). The
+  browser asks to open "PBJ Accounting" and the installed app opens signed
+  in. (The sign-in email itself cannot do this — email programs block
+  app-opening links.) The button does not appear inside the desktop app
+  itself or on phone-sized screens. If nothing happens, the desktop app is
+  not installed, or it is already open and signed in.
 - Optional two-factor authentication (TOTP authenticator app + backup codes).
 - Sessions, login history, and an activity log of actions in the app.
 - Per-user revocation (revoke sign-in link / access).

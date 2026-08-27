@@ -824,6 +824,15 @@ h2 {
   justify-content: flex-end;
 }
 
+/* The desktop-app handoff only means something in a Windows browser — on a
+   phone-width screen there is no installed app to open, so it steps aside
+   rather than crowding the bar. */
+@media (max-width: 900px) {
+  .desktop-open-button {
+    display: none;
+  }
+}
+
 .period-control {
   align-items: center;
   background: var(--surface);
