@@ -1,4 +1,24 @@
-# Desktop shell (phase 2) — BUILT 2026-08-27
+# Desktop shell — phases 2 AND 3 BUILT 2026-08-27
+
+**Phase 3 (same day, Alex: "it feels good let's build next phase"):** shell
+v0.2.0 adds — close-to-tray (X hides; tray Quit exits), tray menu (Open /
+Start with Windows toggle / Check for shell updates / Quit), auto-start ON by
+default but forced only on first run (a marker file in the app config dir
+records the default was applied; the user's later toggle is never fought),
+and **self-update**: signed updater artifacts published by
+`.github/workflows/desktop-release.yml` to GitHub Releases on a
+`desktop-vX.Y.Z` tag push; installed shells check at launch + every 6h +
+on demand from the tray. The updater keypair lives in repo Actions secrets
+(`TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD`); **Alex's backup copy is at
+`D:\PBJ Accounting Work\desktop-updater-key\` — losing BOTH means no shell
+can ever be updated again (a new key won't verify against installed
+pubkeys); back it up somewhere durable.** Release ritual: bump version in
+`tauri.conf.json` + `Cargo.toml`, tag `desktop-vX.Y.Z`, push the tag. Tags
+are inert to Railway.
+
+**Still deliberately unbuilt:** Windows Authenticode signing (Azure Trusted
+Signing — Alex chose "stay unsigned for now"; the workflow has the seam for
+it) and native notification bridging (needs remote-domain IPC design).
 
 Written 2026-08-27 as a decision package; Alex approved same day ("full .exe,
 push all the way through") and it was built to this plan. What exists now:

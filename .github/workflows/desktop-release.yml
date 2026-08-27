@@ -1,0 +1,61 @@
+# Desktop shell release — builds the Windows installer and publishes it (plus
+# the updater's latest.json) to a GitHub Release. Installed shells poll that
+# latest.json and self-update.
+#
+# To ship a shell update:
+#   1. bump `version` in desktop/src-tauri/tauri.conf.json AND Cargo.toml
+#   2. git tag desktop-vX.Y.Z && git push origin desktop-vX.Y.Z
+# The tag push triggers this; nothing here touches the web app or Railway
+# (Railway deploys the main BRANCH; tags are inert to it).
+#
+# Updater artifacts are signed with the Tauri updater key
+# (TAURI_SIGNING_PRIVATE_KEY / _PASSWORD in repo secrets; Alex holds the
+# backup). Windows Authenticode signing is NOT wired yet — when Alex sets up
+# Azure Trusted Signing, its credentials join the secrets and this job gains
+# a signing step; until then installers are unsigned (SmartScreen warns).
+
+name: desktop-release
+
+on:
+  push:
+    tags: ['desktop-v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install desktop deps
+        run: npm install
+        working-directory: desktop
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: 'PBJ Accounting Desktop __VERSION__'
+          releaseBody: >-
+            Windows desktop shell. Installed copies update themselves; for a
+            first install, download the -setup.exe below. The app's features
+            live on app.pbjsa.com and are always current regardless of shell
+            version.
+          releaseDraft: false
+          prerelease: false
