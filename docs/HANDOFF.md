@@ -170,15 +170,27 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
-**2026-08-27 (later) — the real Windows .exe exists.** Alex approved phase 2
-same-day; `docs/plans/desktop-shell-2026-08.md` now records what was built and
-what deliberately wasn't (CI, signing, tray — pending his verdict after
-using it). The one server-side piece: sign-in emails grow an "Open in the
-desktop app" pbjsa:// button ONLY when the request came from the shell's
-user-agent — `buildLoginLinkEmail` is now exported and pure, pinned by
-`lib/login-link-email.test.mjs` including the never-for-browsers rule. The
-installer is UNSIGNED (SmartScreen will warn once); build it with
-`cd desktop && npx tauri build`. Suite 2325 → **2329 / 138 files**.
+**2026-08-27 (later) — the real Windows .exe exists, WORKS (Alex confirmed on
+his machine), and its sign-in went through one field-tested redesign.** Alex
+approved phase 2 same-day; `docs/plans/desktop-shell-2026-08.md` records what
+was built and what deliberately wasn't (CI, signing, tray — pending his
+verdict after using it). Installer is UNSIGNED (SmartScreen warns once);
+build with `cd desktop && npx tauri build`.
+
+**The sign-in lesson, so nobody rebuilds the dead version:** v1 put an
+"Open in the desktop app" pbjsa:// button in the sign-in email, gated on the
+shell's user-agent. It rendered perfectly and did NOTHING — web mail clients
+(Gmail) strip non-http link schemes. The protocol registration was fine (the
+registry had pbjsa:// → pbj-desktop.exe); the mail client was the wall.
+v2 is Alex's design and shipped the same hour: sign into the WEB app, then
+the **"Open in desktop" button in the topbar** (next to the bell; his call —
+"let's not bury it" — after v2 started in Settings). It mints a one-time
+login token via `POST /api/auth/desktop-handoff` (session-gated, token minted
+for the session user only) and the browser opens pbjsa://verify/<token>,
+riding the normal /verify flow, TOTP included. The email is back to one
+button, and `lib/login-link-email.test.mjs` pins it scheme-free so the dead
+button cannot quietly return. The topbar button hides inside the shell and
+on phone widths. Suite 2325 → **2329 / 138 files**.
 
 **2026-08-27 — the app is installable as a desktop/phone app (PWA), and the
 "real .exe" question is parked as a plan.** Alex's side project while waiting
