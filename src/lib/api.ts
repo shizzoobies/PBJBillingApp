@@ -248,6 +248,32 @@ export async function signInWithPasswordRequest(email: string, password: string)
 }
 
 /**
+ * Mint a one-time desktop-app sign-in handoff. The server returns a
+ * pbjsa:// URL carrying a fresh single-use login token for THIS session's
+ * user; navigating to it launches the installed Windows app signed in.
+ * (The shell keeps its own cookie jar, so the browser session can't just
+ * be shared — the token rides the normal /verify flow, TOTP included.)
+ */
+export async function desktopHandoffRequest() {
+  const response = await apiFetch('/api/auth/desktop-handoff', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not prepare the desktop sign-in (${response.status})`,
+    )
+  }
+
+  return (await response.json()) as { url: string }
+}
+
+/**
  * Set or change the caller's own password. Session cookie is the
  * authorization. SECURITY (M4): once the user has set their own password the
  * server requires `currentPassword` and verifies it before allowing the

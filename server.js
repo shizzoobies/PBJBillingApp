@@ -2131,24 +2131,12 @@ const server = createServer(async (request, response) => {
             // Activity log (only when email is real & role-matched, to keep
             // the audit log free of injection noise).
             await appDataStore.recordActivity(user.id, 'login_link_requested', email)
-            // The desktop shell marks itself in the user-agent. Only then
-            // does the email carry the second, pbjsa:// sign-in button —
-            // a magic link clicked in a mail client opens the BROWSER, so
-            // the shell needs its own scheme to receive the token. Browser
-            // sign-ins never see the extra button.
-            const fromDesktopShell = String(request.headers['user-agent'] || '').includes(
-              'PBJDesktopShell',
-            )
-            const desktopUrl = fromDesktopShell
-              ? `pbjsa://verify/${encodeURIComponent(token)}`
-              : null
             // Best-effort send. Failures are logged inside notify.js and
             // never surfaced (same response either way).
             await sendLoginLinkEmail({
               to: user.email,
               firmName: firmSettings?.name,
               signInUrl,
-              desktopUrl,
             })
           }
         } catch (error) {
@@ -2157,6 +2145,42 @@ const server = createServer(async (request, response) => {
       }
 
       sendJson(response, 200, genericOk)
+      return
+    }
+
+    // One-click handoff INTO the desktop shell. The shell keeps its own
+    // cookie jar, so a signed-in browser cannot share its session — instead a
+    // signed-in user mints a fresh single-use login token here, and the
+    // browser opens pbjsa://verify/<token>, which Windows routes to the
+    // installed app. (The email's own pbjsa:// button died in web mail —
+    // Gmail strips non-http schemes — which is why the handoff lives in the
+    // signed-in app, where a real user click may launch the protocol.) The
+    // token goes through the normal /verify flow, TOTP challenge included.
+    if (normalizedPath === '/api/auth/desktop-handoff' && request.method === 'POST') {
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const session = await requireSession(request, response)
+      if (!session) return
+      try {
+        const ip = getClientIp(request)
+        const { token } = await appDataStore.createLoginToken(session.user.id, ip)
+        await appDataStore.recordActivity(
+          session.user.id,
+          'desktop_handoff_requested',
+          session.user.email || '',
+        )
+        sendJson(response, 200, { url: `pbjsa://verify/${encodeURIComponent(token)}` })
+      } catch (error) {
+        console.error('[auth] desktop-handoff error:', error?.message || error)
+        sendJson(response, 502, { error: 'Could not prepare the desktop sign-in.' })
+      }
       return
     }
 

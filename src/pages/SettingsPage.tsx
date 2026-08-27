@@ -10,6 +10,7 @@ import {
   SavingTextInput,
 } from '../components/SectionKit'
 import {
+  desktopHandoffRequest,
   fetchAuthStatus,
   fetchFirmSettings,
   fetchTotpStatus,
@@ -375,6 +376,7 @@ function AuthenticationSection() {
         <p className="muted-text">
           <strong>App URL:</strong> {appUrl}
         </p>
+        <DesktopAppHandoff />
       </div>
     </section>
   )
@@ -825,5 +827,61 @@ function ColorInput({
         }
       }}
     />
+  )
+}
+
+/**
+ * The one-click handoff into the Windows desktop app. Hidden inside the
+ * shell itself (its user agent carries PBJDesktopShell — offering "open the
+ * desktop app" from within the desktop app is noise). The button mints a
+ * one-time token server-side and navigates to the returned pbjsa:// URL;
+ * the browser asks "Open PBJ Accounting?" and the installed app opens
+ * signed in. Custom-scheme links die in web mail (Gmail strips them), which
+ * is why this lives here and not in the sign-in email.
+ */
+function DesktopAppHandoff() {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (navigator.userAgent.includes('PBJDesktopShell')) return null
+
+  const openDesktop = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const { url } = await desktopHandoffRequest()
+      window.location.assign(url)
+    } catch (requestError) {
+      setError(
+        requestError instanceof ApiError
+          ? requestError.message
+          : 'Could not prepare the desktop sign-in.',
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="primary-action"
+        onClick={() => void openDesktop()}
+        disabled={busy}
+      >
+        {busy ? 'Opening…' : 'Open in the desktop app'}
+      </button>
+      <p className="muted-text" style={{ marginTop: 8 }}>
+        Signs the installed Windows app into your account — your browser will ask to open
+        &ldquo;PBJ Accounting&rdquo;. Nothing happens? Install the desktop app first, or it may
+        already be open and signed in.
+      </p>
+      {error && (
+        <p className="muted-text" style={{ color: 'var(--color-warning, #b45309)' }}>
+          {error}
+        </p>
+      )}
+    </div>
   )
 }
