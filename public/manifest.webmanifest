@@ -1,0 +1,16 @@
+{
+  "name": "PB&J Strategic Accounting",
+  "short_name": "PB&J",
+  "description": "Time tracking, checklists, and billing for PB&J Strategic Accounting.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f2ef",
+  "theme_color": "#ff43a4",
+  "icons": [
+    { "src": "/icons/pwa-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/pwa-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/pwa-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Installable-app wiring. Deliberately NO service worker: this app has a
+         history of stale-tab bugs and a refresh-toast system built to defeat
+         them; a caching layer would fight both. Installability needs only the
+         manifest. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#ff43a4" />
+    <link rel="apple-touch-icon" href="/icons/pwa-192.png" />
     <title>PB&amp;J Strategic Accounting</title>
   </head>
   <body>

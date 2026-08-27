@@ -2135,6 +2135,24 @@ Clients page meanwhile. Owner-only.
 - Sessions, login history, and an activity log of actions in the app.
 - Per-user revocation (revoke sign-in link / access).
 
+## Install as an app (computer and phone)
+
+> The app can be installed so it opens in its own window with its own taskbar
+> or home-screen icon — no browser tabs, no address bar. Nothing changes about
+> how it works: it is the same live app, always current, same sign-in.
+>
+> **On Windows (Edge):** open the app, click the ⋯ menu → **Apps** →
+> **Install this site as an app** (Chrome: ⋮ menu → **Cast, save, and share**
+> → **Install page as app**, or the install icon in the address bar). It then
+> lives in the Start menu and taskbar like any program.
+>
+> **On iPhone (Safari):** Share button → **Add to Home Screen**. On Android
+> (Chrome): ⋮ menu → **Add to home screen** / **Install app**.
+>
+> There is nothing to update or uninstall-to-upgrade — the installed app loads
+> the live site, so every new feature is just there, and the same refresh
+> notice appears when a new version ships.
+
 ## Notifications
 
 - In-app bell with unread count + email (when email service is configured):
@@ -2390,7 +2408,9 @@ The app currently has NO:
 - Document/file storage for client paperwork
 - Payroll features
 - Calendar sync (Google/Outlook)
-- Native mobile app (the web app is responsive and works on phones)
+- Native mobile app in an app store (but the web app is responsive AND
+  installable — see "Install as an app": own window, own icon, phone home
+  screen)
 - Custom report builder (Reports/Productivity CSVs are the export surface)
 - Multi-firm / multi-workspace support
 - Public API or webhooks

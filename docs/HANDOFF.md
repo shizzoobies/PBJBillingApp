@@ -170,6 +170,28 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-08-27 — the app is installable as a desktop/phone app (PWA), and the
+"real .exe" question is parked as a plan.** Alex's side project while waiting
+on Brittany. Phase 1 shipped: `public/manifest.webmanifest` + three PNG icons
+rendered from the brand favicon (Chromium-rendered; the maskable variant keeps
+the mark inside the 80% safe zone), manifest/theme-color/touch-icon links in
+`index.html`, and `.webmanifest` in `server.js`'s mime map. Windows Edge/Chrome
+now offer "Install this site as an app" — own window, taskbar icon, same live
+app, same sign-in, nothing bundled so nothing can go stale.
+
+**Deliberately NO service worker** — this app's stale-tab history (the
+bulk-save staleness guard, the refresh toast) makes an offline cache a second
+place for a stale bundle to hide, and installability doesn't need one.
+`src/__tests__/pwa-install.test.ts` pins the wiring AND that absence — if you
+add a service worker on purpose, update that test and the index.html comment
+together.
+
+Phase 2 (a real Windows executable) is a decision package, not work:
+`docs/plans/desktop-shell-2026-08.md` — Tauri shell around the prod URL, the
+magic-link-opens-the-browser problem and its `pbjsa://` protocol answer, and
+the signing/distribution costs. Build only if Alex asks after living with the
+PWA.
+
 **2026-08-26 — PICK UP HERE. Four ships in one day, one production data write,
 and three questions sitting with Brittany.**
 
