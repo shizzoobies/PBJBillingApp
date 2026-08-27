@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-07-25. Everything below is live on `main`;
+Written 2026-07-21, last updated 2026-08-26. Everything below is live on `main`;
 the working tree was clean at handoff. Read this top to bottom before your first
 change — several rules here are non-obvious and breaking them has caused a
 production outage before. **If you do only one extra thing, read §7's
@@ -43,7 +43,7 @@ already and the problem is interpretation, not code.** See §7.
    do, **re-provision the voice agent after deploying** (§3).
 
 3. **`npm run verify`** = `eslint` + `tsc -b && vite build` + `vitest`. Green
-   before every push. Currently **542 tests / 53 files**.
+   before every push. Currently **2320 tests / 136 files** (2026-08-26).
 
 4. Prefer targeted endpoints over the bulk save. `PUT /api/app-data` (the bulk
    workspace save) is **owner-only (403 for staff)** — anything staff must do
@@ -169,6 +169,132 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-08-26 — PICK UP HERE. Four ships in one day, one production data write,
+and three questions sitting with Brittany.**
+
+`main` is `49e28b2`, pushed, tree clean, deploy SUCCESS, `/health` 200
+(`{postgres, stripe: live, stripeWebhook: configured}`). Suite **2320 tests /
+136 files**. The voice agent has been re-provisioned twice today — the manifest
+changed both times.
+
+**The queue right now:** 1 needs-answer, 1 planned-but-blocked, 2
+planned_not_eom (both parked, unchanged), 1 in_progress (the parked
+engagement-to-billing), 6 shipped awaiting her review. **Brittany approved
+retainer invoicing (`951595c2`) and reimbursed-expense auto-advance
+(`fe3f8b0f') while this session ran** — they are Done now, which is why the
+Shipped list looks different from the last handoff.
+
+### What shipped today
+
+| Commit | What |
+|---|---|
+| `c93a643` | **The paid lock** (featreq-ead3a215). Her rule, wider than the question asked: "invoices should not be editable once paid all invoices should lock after paid." Content edits refused on `paid` AND `processing`; `sent`/`overdue` stay editable; Void is the only way out and stays open. Guard sits ABOVE `updateInvoice`'s `if (this.pool)` split so one check covers both backends, pinned by a source-position test. Route maps `InvoiceLockedError` → 409 `invoice_locked`; `ApiError` gained `code` because one route now answers 409 for two different facts. |
+| `6362521` | **Invoice time breakdown, off by default** (featreq-f1aadccc). Four opt-in levels per client (person / day / week / entry) + an amounts toggle. **Every line is `amount: 0`** — the breakdown explains an invoice, it never prices one, so no setting can move a total. Both new columns default `off`, so no data migration: confirmed live as off/false on all 51 clients. |
+| `dea7ba0` | **Payroll rounding, round FOUR** (featreq-7c8f64d7). See below — this one has a lesson. |
+| `6ef764f` | The consolidated-billing plan (docs only). |
+| `49e28b2` | The undo snapshot for the role-hours backfill (docs only). |
+
+### The payroll fix, and why three earlier passes missed it
+
+`displayHours` and `personPeriodCost` were **never wrong**. The defect was at the
+CALL SITES: the report printed one hours figure and multiplied a different one.
+The Hours column is the sum of each row's two-decimal hours (Allison, 31 entries
+→ 14.75h); the money multiplied `displayHours` of the RAW period total (14.78h),
+and Billable $ multiplied raw minutes outright.
+
+Summing rounded rows lands ABOVE the rounded total for one person and BELOW for
+another — Allison 14.75 vs 14.78, Lisa (63 entries) 22.61 vs 22.59. That is why
+it read as a rounding bug for three rounds and never was. **Brittany found it**,
+in one sentence on the tracker: "Note Allison's cost/billable are HIGHER than
+hand math while Lisa's are LOWER, so it's not a simple rounding-up bug."
+
+The rule now: `periodDisplayHours(rows)` is the costing figure, and
+`periodMoney(rows, rate)` prices both sides off it — cost rate and bill rate
+alike. `personPeriodCost` survives for the one thing it is right for, pricing a
+FORECAST (the Recap's estimated hours, one typed number with no rows), and says
+so in its own doc comment.
+
+**Four existing tests asserted the old target and were rewritten, not deleted.**
+One of them stated the defect as intent: *"eight ten-minute rows each read 0.17h
+and would price at $6.29, for $50.32 — but 80 minutes is 1.33h and pays $49.21.
+Eleven pennies come off."* Eleven pennies coming off a column that reads 0.17
+eight times is exactly what made the report un-multipliable. If you find yourself
+about to "fix" a test here, read that comment first.
+
+The guard is `src/__tests__/payroll-round-four.test.ts` — Allison's 31 and Lisa's
+63 REAL entry minutes as a fixture, pinning all four figures. Verified as a
+tripwire: reverting the rule fails it with **$561.64**, the number she was shown.
+Minutes only, no names or clients.
+
+Firm-wide August impact, measured read-only before pushing: **$1.52**.
+
+### The one production data write (approved, applied, reversible)
+
+**43 blank role-hour fields filled across 17 clients** from her 2026-08-25
+contact list, per her exact rule: *"Do not change any that are already in but if
+there are blanks in the program add in these numbers."* Clients with any estimate
+went 24 → 39.
+
+The `is null` guard is **in the UPDATE statement**, not just the plan, and the
+committed snapshot was re-verified against live rows inside the write
+transaction. 21 of her sheet values were skipped because the app already had a
+number there.
+
+**Undo: `docs/prod-snapshots/2026-08-26-role-hours-pre-backfill.json`**, committed
+BEFORE the write. (Contrast the 2026-07-21 177-row backfill, which is not
+reversible today because its snapshot went to a temp directory.)
+
+### Waiting on Brittany — do not start these
+
+1. **`featreq-bcee7e31`** (needs_input) — three questions about the KLC combined
+   invoice. **Q3 is irreversible once an invoice is sent**: may KLC see Bright
+   Tower, Chemtrex and XACT named on the document? Do not guess it.
+2. **`featreq-65f5eac1`** (planned, BLOCKED on the above) — she chose option A,
+   one invoice to KLC, "But I would like to be able to evaluate each company
+   separate and see what each paid". Plan of record:
+   `docs/plans/consolidated-billing-2026-08.md`. **Not started on purpose** — the
+   generator is one-invoice-per-client behind the
+   `invoices_client_period_monthly_live` unique index, and consolidation ripples
+   into the never-generates detector, each company's own reimbursement coverage
+   ledger, Invoice History/client page, and single-client generate. The plan
+   names each. Read it before writing a line.
+3. The six Shipped items are awaiting her approval. She reviews live — assume the
+   tracker moves while you work.
+
+### Still open from her spreadsheet (all need Alex's explicit yes)
+
+Her contact list is at `D:\PBJ Accounting\PB&J Strategic Accounting_Customer
+Contact List.xlsx`. **It is a hand-annotated QuickBooks export and 11 of its 42
+client rows are column-SHIFTED** (payment terms landed in L, not P) — rows 10,
+11, 12, 13, 16, 24, 43, 44, 45, 50, 52. A blind import writes the wrong column.
+Full column decode is in the `contact-list-intake-2026-08` memory.
+
+- the two merges she flagged: Dobco and Sophie Paris, both `client-seed-*`
+  artifacts of the Jan–May import, holding 6 and 1 time entries that must move
+  before the seed row goes;
+- the retainer amounts (column S ≈ **1.5× the monthly fee** — Cooper 2100/1400,
+  FHS 172.5/115, Westview 112.5/75 all exactly 1.5);
+- the covered windows (**2026-09-13 → 2026-10-13** on 31 rows);
+- four second-reimbursement lines (Associated Enterprise, Four Leaf, Reflect &
+  Renew, Ride Right).
+
+**Flagged and unresolved:** "Relentless Training LLC" is on her list but has NO
+client in the app under any spelling. Raised in her tracker notes.
+
+### Two traps this session hit, so you don't
+
+- **Do not run `npx prettier` on this repo.** There is no prettier config and no
+  prettier dependency; running it reformatted an entire 1400-line file. The house
+  style is what eslint enforces and nothing else. (Caught and reverted.)
+- **The repo is CRLF.** Heredoc/`Write` edits land as LF and produce whole-file
+  diffs. The patch scripts in this session all read the file, normalize to \n,
+  match, then write back with the original line endings — copy that shape.
+- `.omc/project-memory.json` had captured two throwaway patch scripts as the
+  project's `buildCommand` and `testCommand`, and a fresh session gets that
+  injected as project memory. Repaired to `npm run build` / `npm test`. If you
+  see a giant `node -e` string presented as "the build command", it is that bug
+  again — the real commands are in `package.json`.
 
 **2026-08-22 — AI confidence ratings on invoice review, and the learning corpus
 that makes them improvable.** Plan of record:
