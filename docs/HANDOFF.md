@@ -173,7 +173,7 @@ with instructions rather than failing. Run it by hand after any print change.
 **2026-08-26 — PICK UP HERE. Four ships in one day, one production data write,
 and three questions sitting with Brittany.**
 
-`main` is `49e28b2`, pushed, tree clean, deploy SUCCESS, `/health` 200
+`main` is `096c279` (this entry), pushed, tree clean, deploy SUCCESS, `/health` 200
 (`{postgres, stripe: live, stripeWebhook: configured}`). Suite **2320 tests /
 136 files**. The voice agent has been re-provisioned twice today — the manifest
 changed both times.
@@ -182,7 +182,7 @@ changed both times.
 planned_not_eom (both parked, unchanged), 1 in_progress (the parked
 engagement-to-billing), 6 shipped awaiting her review. **Brittany approved
 retainer invoicing (`951595c2`) and reimbursed-expense auto-advance
-(`fe3f8b0f') while this session ran** — they are Done now, which is why the
+(`fe3f8b0f`) while this session ran** — they are Done now, which is why the
 Shipped list looks different from the last handoff.
 
 ### What shipped today
