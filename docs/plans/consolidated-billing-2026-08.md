@@ -1,6 +1,81 @@
 # Consolidated billing — one invoice to KLC, four companies on it
 
 **Tracker:** `featreq-65f5eac1` · **Status:** planned, not started · **Written** 2026-08-26
+**Revised 2026-08-28** after Brittany's architecture answer (below). Awaiting
+Alex's approval of the revised shape AND her answer to the re-asked Q3 before
+any build.
+
+---
+
+## 0. REVISION 2026-08-28 — her answer reshapes the payer
+
+Brittany's answer on `featreq-bcee7e31`, verbatim:
+
+> I think it should look like this
+> KLC Master Client - no data enterered or collected but shows data for the 4
+> combined sends invoice to sub client you choose
+> KLC sub client - all data collected and recapped for profitability
+> Chemtrex sub client
+> Bright Tower - sub client
+> XAct - sub client
+>
+> Where I able to recap at each sub and then master level
+
+That implicitly answers old Q1 (KLC's own work IS on the combined invoice — as
+a sub, a peer of the other three) and old Q2 (one number — the master's). It
+does NOT answer old Q3 (what the printed document shows KLC) — re-asked
+2026-08-28 with a concrete mock of both options; the item is back in
+needs-answer.
+
+**What changes vs. §2 below:** the payer is no longer KLC-the-client wearing
+two hats. It is a new, fifth client row — a **billing master** — that:
+
+- holds NO time entries, checklists, estimates, or recurring reimbursements of
+  its own (nothing is "entered or collected" on it; the app refuses rather than
+  allows-and-ignores);
+- is the `bill_to_client_id` target for all four subs, INCLUDING the existing
+  KLC client row, which becomes an ordinary sub with clean per-company
+  profitability;
+- issues the one monthly invoice, built entirely from its subs' lines, each as
+  a named section (pending Q3, see below) with `sourceClientId` per line
+  exactly as §2 designed;
+- **has no contacts of its own** — "sends invoice to sub client you choose":
+  a `invoiceRecipientClientId` setting on the master names which sub's
+  recipients get the email (default: the KLC sub). Changeable any month;
+- shows a **combined Recap** — the roll-up of its subs' recaps (billed, labor
+  cost, estimates), while each sub's Recap stays exactly as today. The Recap
+  work is additive: one aggregate view keyed off the master, zero change to
+  per-sub math (the ONE money calculator rule stands — the roll-up SUMS sub
+  results, it never recomputes them).
+
+**Data model delta:** §2's `clients.bill_to_client_id` survives unchanged
+(same sanitization rules, same no-chains constraint — the master cannot itself
+bill elsewhere). Add `clients.is_billing_master boolean default false`. A
+master must have no billable machinery: guard writes of time/checklists/
+recurring-reimbursements/estimates against master clients server-side, and
+hide those surfaces in the UI for a master. The never-generates detector
+treats a master with zero subs as misconfigured, not silent.
+
+**Q3 branch (build-proof either way):** line data carries `sourceClientId`
+regardless of her answer; only RENDERING branches. Option 1 prints named
+per-company sections with subtotals; option 2 prints one combined line while
+the editor, recaps, history and "what each paid" keep the split app-side. The
+branch is a rendering flag on the master, so a later change of heart is a
+setting, not a migration — but the FIRST send locks what that document showed,
+which is why the question must be answered before v1 ships.
+
+**Migration (one approved prod write, snapshot-first per house rules):**
+create the master row; set `bill_to_client_id` on the four subs; set the
+recipient default to the KLC sub. Existing invoices are untouched — the
+2026-08 month has already been billed per-company; the master starts at the
+first unbilled month Alex chooses.
+
+**Still open before build:** Brittany's Q3 answer (asked), Alex's approval of
+this shape, and old §3 item 4 (retainer/ad hoc routing for subs) which her
+answer does not touch.
+
+The original 2026-08-26 analysis follows; its §1 impact table and §2 line
+mechanics remain correct, with "the payer" now meaning the master row.
 
 Brittany's answer, verbatim:
 
