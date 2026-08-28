@@ -1,9 +1,13 @@
 # Consolidated billing — one invoice to KLC, four companies on it
 
 **Tracker:** `featreq-65f5eac1` · **Status:** planned, not started · **Written** 2026-08-26
-**Revised 2026-08-28** after Brittany's architecture answer (below). Awaiting
-Alex's approval of the revised shape AND her answer to the re-asked Q3 before
-any build.
+**Revised 2026-08-28** after Brittany's architecture answer (below).
+**ALEX APPROVED THE SHAPE 2026-08-28** (structured question): the build starts
+as soon as Brittany answers the re-asked Q3 ("1 or 2") — no further approval
+needed for the code, but the MIGRATION prod write still needs its own explicit
+yes with a committed snapshot first. Retainers and ad hoc for subs stay
+engagement-level (per-sub, NOT merged onto the master) in v1 — the
+conservative reading of old §3 item 4; revisit only if she asks.
 
 ---
 
