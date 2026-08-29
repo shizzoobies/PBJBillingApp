@@ -5,9 +5,22 @@
 **ALEX APPROVED THE SHAPE 2026-08-28** (structured question): the build starts
 as soon as Brittany answers the re-asked Q3 ("1 or 2") — no further approval
 needed for the code, but the MIGRATION prod write still needs its own explicit
-yes with a committed snapshot first. Retainers and ad hoc for subs stay
-engagement-level (per-sub, NOT merged onto the master) in v1 — the
-conservative reading of old §3 item 4; revisit only if she asks.
+yes with a committed snapshot first.
+
+**Q3 ANSWERED 2026-08-28 20:47, her exact reply: "2".** The printed/emailed
+document shows ONE combined line ("Bookkeeping services — {month}") with no
+company names; the per-company split lives only app-side (editor, recaps,
+history, what-each-paid). Implemented as a rendering mode on the master,
+defaulting to combined — option 1 stays a flag flip, but what a sent document
+showed is locked at send. BUILD IS GO.
+
+**Retainer/ad hoc scoping (corrected while building):** RETAINERS stay
+per-sub engagement-level documents in v1 (old §3 item 4's conservative
+reading). AD HOC time, however, RIDES THE MERGE like every other line — the
+earlier note lumping it with retainers would have left sub ad hoc unbillable
+(a sub no longer gets its own monthly invoice), and "billed exactly once"
+means once, not zero. Ad hoc keeps its per-line disposition control on the
+master's editor.
 
 ---
 

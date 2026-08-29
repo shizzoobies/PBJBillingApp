@@ -13,6 +13,7 @@ import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import { isWaitingOnOpen, waitingOnStage } from '../lib/waiting-on-state.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
+  buildConsolidatedInvoiceDraft,
   buildInvoiceDraft,
   dueDateFromTerms,
   nextInvoiceNumber,
@@ -513,6 +514,22 @@ export function normalizeClientProfile(client) {
     // processing fee must never be offered one by accident.
     cardPaymentsEnabled:
       typeof client.cardPaymentsEnabled === 'boolean' ? client.cardPaymentsEnabled : false,
+    // Consolidated billing (featreq-65f5eac1). `billToClientId` names the
+    // BILLING MASTER this client's work is invoiced on; `isBillingMaster` marks
+    // that payer row itself; `invoiceRecipientClientId` is the sub whose
+    // contacts receive the master's invoice ("sends invoice to sub client you
+    // choose"). Null on all three is the ordinary client: its own invoice, its
+    // own contacts. Read here as well as on the Postgres row map so the two
+    // backends hand back the same shape — cardinal rule 1.
+    billToClientId:
+      typeof client.billToClientId === 'string' && client.billToClientId
+        ? client.billToClientId
+        : null,
+    isBillingMaster: client.isBillingMaster === true,
+    invoiceRecipientClientId:
+      typeof client.invoiceRecipientClientId === 'string' && client.invoiceRecipientClientId
+        ? client.invoiceRecipientClientId
+        : null,
   }
 }
 
@@ -884,6 +901,23 @@ export class CoverageConfirmationError extends Error {
 }
 
 /**
+ * A write a BILLING MASTER refuses, or a bill-to link that does not hold.
+ *
+ * Same shape and same reason as the three above: a fact about the data, said in
+ * a sentence the caller can act on rather than a 500. A master is the payer row
+ * for a group of companies — "no data enterered or collected but shows data for
+ * the 4 combined" (Brittany, featreq-bcee7e31) — so the app REFUSES the writes
+ * that would give it data of its own rather than accepting them and ignoring
+ * them later, where the difference would surface as a number nobody can find.
+ */
+export class BillingMasterError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'BillingMasterError'
+  }
+}
+
+/**
  * An answer aimed at a rating or a question that isn't there — a re-rate landed
  * between the page loading and the owner typing, or the id is simply wrong.
  * Same shape and same reason as the two above: a fact about the data, said in a
@@ -1007,6 +1041,17 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
         label: String(line?.label ?? '').trim().slice(0, 300),
         detail: String(line?.detail ?? '').trim().slice(0, 300),
         amount: roundMoney(line?.amount),
+      }
+      // WHOSE WORK IS THIS LINE? Absent means the invoice's own client, which is
+      // every line of every ordinary invoice. On a billing master's consolidated
+      // invoice it names the SUB the line was built from, and it is the only
+      // record of that: "see what each paid" is read off this field, never
+      // recomputed. This sanitizer is the one chokepoint every line passes
+      // through and it drops props it does not name — so without this, one round
+      // trip through the editor would silently un-attribute a merged invoice.
+      // Set on `base`, so all four branches below carry it.
+      if (typeof line?.sourceClientId === 'string' && line.sourceClientId) {
+        base.sourceClientId = line.sourceClientId
       }
       // A retainer credit carries the id of the retainer it came out of. That
       // is what lets a save know WHICH retainer to mark applied, and what lets
@@ -2114,6 +2159,57 @@ export function sanitizeAppData(data) {
     }
   }
 
+  // Consolidated billing, resolved against this very payload. This is the one
+  // place both backends pass through, and the file backend has no column to
+  // resolve against at all — same reasoning as the lifecycle stage above.
+  //
+  // It CLEANS rather than refuses, deliberately: `write()` is the owner tab's
+  // autosave, and a save that throws because a stale tab still remembers a
+  // deleted master is the plan-refs outage wearing a new column. The create path
+  // says the refusal out loud instead (see `billingLinkRefusal`).
+  const billingLinks = sanitizeClientBillingLinks(data.clients)
+  const dissolvedLinks = []
+  for (const client of data.clients) {
+    const links = billingLinks.get(client.id)
+    if (!links) continue
+    // THE GROUP-DISSOLVING AUTOSAVE. A payload that clears `isBillingMaster` on
+    // the payer while its subs still point at it silently un-groups every one of
+    // them — each link resolves to null and four companies quietly go back to
+    // invoicing separately. Warned, not refused: the bulk save must never throw
+    // (see below), and Railway's log is where the last outage was reconstructed
+    // from. Same idiom as `filterBulkSaveOrphans`.
+    const claimedBillTo =
+      typeof client.billToClientId === 'string' && client.billToClientId
+        ? client.billToClientId
+        : null
+    if (claimedBillTo && !links.billToClientId) {
+      dissolvedLinks.push({ id: client.id, billToClientId: claimedBillTo })
+    }
+    // Guarded on PRESENCE, like the lifecycle stage above: this function's
+    // contract is that a clean save passes through UNCHANGED, so a client that
+    // never mentioned a bill-to must not come out of here having grown one.
+    // Absence is given its meaning on the way back out, by the read mappers.
+    if ('billToClientId' in client) client.billToClientId = links.billToClientId
+    if ('isBillingMaster' in client) client.isBillingMaster = links.isBillingMaster
+    if ('invoiceRecipientClientId' in client) {
+      client.invoiceRecipientClientId = links.invoiceRecipientClientId
+    }
+    // "No data enterered or collected" — a master's estimates are not refused
+    // here (see above), they are simply not kept. The Recap rolls its subs' own
+    // estimates up; a number of its own would be double-counted in that sum.
+    if (links.isBillingMaster) {
+      for (const field of MASTER_ESTIMATE_FIELDS) {
+        if (field in client) client[field] = undefined
+      }
+    }
+  }
+  if (dissolvedLinks.length > 0) {
+    console.warn(
+      `[bulk-save] dropped ${dissolvedLinks.length} bill-to link(s) — target missing or no longer a billing master:`,
+      dissolvedLinks,
+    )
+  }
+
   for (const reimbursement of data.reimbursements) {
     reimbursement.amount = clampMoney(reimbursement.amount)
     dropInvalidDateField(reimbursement, 'date')
@@ -2238,6 +2334,154 @@ export function sanitizeClientPlanRefs(client, validPlanIds) {
   const planId = typeof legacy === 'string' && validPlanIds.has(legacy) ? legacy : null
   return { planId, planIds }
 }
+
+/**
+ * Resolve every client's consolidated-billing links against the roster they are
+ * written with, dropping any that do not hold.
+ *
+ * SAME DANGER AS `plan_ids`, and guarded the same way. `bill_to_client_id` and
+ * `invoice_recipient_client_id` are plain text columns with NO foreign key, so a
+ * dangling id sits there quietly until something reads it — and the last time an
+ * FK-free client column held a reference to a row that no longer existed it
+ * crashed every bulk write and took the whole app offline (2026-06-17; see
+ * `sanitizeClientPlanRefs` above). Resolving on write means a stale tab that
+ * still remembers a deleted master saves a null instead of a landmine.
+ *
+ * The rules, all of them one level deep by design (docs/plans/
+ * consolidated-billing-2026-08.md §2, "Not in v1: more than one level of
+ * bill-to"):
+ *
+ *   - `billToClientId` must name a client that EXISTS, is not this client, and
+ *     is itself a billing master. Anything else resolves to null.
+ *   - a MASTER may not be billed elsewhere — no chains, so a master's own
+ *     `billToClientId` always resolves to null.
+ *   - `invoiceRecipientClientId` is meaningful only on a master, and only when
+ *     it names one of that master's own subs. It is which sub's contacts get the
+ *     email, so a recipient that is not on the invoice is not a recipient.
+ *
+ * Pure, and roster-wide rather than per-client, because two of the three rules
+ * are about OTHER rows. Returns a Map keyed by client id — apply, don't mutate.
+ *
+ * @param {Array<{id?: unknown, billToClientId?: unknown, isBillingMaster?: unknown, invoiceRecipientClientId?: unknown}>} clients
+ * @returns {Map<string, {billToClientId: string|null, isBillingMaster: boolean, invoiceRecipientClientId: string|null}>}
+ */
+export function sanitizeClientBillingLinks(clients) {
+  const rows = (Array.isArray(clients) ? clients : []).filter(
+    (client) => client && typeof client.id === 'string' && client.id,
+  )
+  const masters = new Set(rows.filter((client) => client.isBillingMaster === true).map((c) => c.id))
+
+  // Pass one: the bill-to link. A master's own link is dropped here, which is
+  // what makes "no chains" a fact rather than a hope.
+  const billTo = new Map()
+  for (const client of rows) {
+    const claimed =
+      typeof client.billToClientId === 'string' && client.billToClientId
+        ? client.billToClientId
+        : null
+    const resolved =
+      claimed && claimed !== client.id && masters.has(claimed) && !masters.has(client.id)
+        ? claimed
+        : null
+    billTo.set(client.id, resolved)
+  }
+
+  // Pass two: the recipient, which can only be judged once pass one has settled
+  // who each master's subs actually are.
+  const subsOf = new Map()
+  for (const [id, target] of billTo) {
+    if (!target) continue
+    if (!subsOf.has(target)) subsOf.set(target, new Set())
+    subsOf.get(target).add(id)
+  }
+
+  const out = new Map()
+  for (const client of rows) {
+    const isBillingMaster = masters.has(client.id)
+    const claimedRecipient =
+      typeof client.invoiceRecipientClientId === 'string' && client.invoiceRecipientClientId
+        ? client.invoiceRecipientClientId
+        : null
+    const recipient =
+      isBillingMaster && claimedRecipient && subsOf.get(client.id)?.has(claimedRecipient)
+        ? claimedRecipient
+        : null
+    out.set(client.id, {
+      billToClientId: billTo.get(client.id) ?? null,
+      isBillingMaster,
+      invoiceRecipientClientId: recipient,
+    })
+  }
+  return out
+}
+
+/**
+ * The same rules said out loud, for the paths where a PERSON is waiting on the
+ * answer — `createClient` and the endpoints above it.
+ *
+ * The bulk save cannot throw (it re-inserts the whole workspace on every owner
+ * autosave, and a save that 500s during month close is the outage this app has
+ * already had once), so there it resolves a bad link to null instead. A single
+ * deliberate create is the opposite case: silence there would leave someone
+ * looking at a "Bills to KLC Master" field they set and the app did not keep.
+ *
+ * @returns {string|null} the sentence to refuse with, or null when it holds.
+ */
+export function billingLinkRefusal(client, roster) {
+  const others = new Map(
+    (Array.isArray(roster) ? roster : [])
+      .filter((entry) => entry && typeof entry.id === 'string' && entry.id !== client?.id)
+      .map((entry) => [entry.id, entry]),
+  )
+  const isMaster = client?.isBillingMaster === true
+  const billTo =
+    typeof client?.billToClientId === 'string' && client.billToClientId
+      ? client.billToClientId
+      : null
+  const recipient =
+    typeof client?.invoiceRecipientClientId === 'string' && client.invoiceRecipientClientId
+      ? client.invoiceRecipientClientId
+      : null
+
+  if (billTo) {
+    if (isMaster) {
+      return 'A billing master issues the invoice, so it cannot itself be billed to another client.'
+    }
+    if (billTo === client?.id) return 'A client cannot be billed to itself.'
+    const target = others.get(billTo)
+    if (!target) return 'The client this one bills to is no longer on file.'
+    if (target.isBillingMaster !== true) {
+      return `${target.name ?? 'That client'} is not a billing master, so nothing can be billed to it.`
+    }
+  }
+
+  if (recipient) {
+    if (!isMaster) {
+      return 'Only a billing master chooses which client its invoice is sent to.'
+    }
+    const sub = others.get(recipient)
+    if (!sub || sub.billToClientId !== client?.id) {
+      return 'The invoice recipient has to be one of this master\'s own sub clients.'
+    }
+  }
+
+  if (isMaster && MASTER_ESTIMATE_FIELDS.some((field) => Number(client?.[field]) > 0)) {
+    return 'A billing master holds no work of its own, so it cannot carry estimated hours.'
+  }
+
+  return null
+}
+
+/**
+ * The estimate fields a billing master may not carry. Named once so the bulk
+ * save's strip and `billingLinkRefusal`'s refusal can never drift apart.
+ */
+const MASTER_ESTIMATE_FIELDS = [
+  'estimatedMonthlyHours',
+  'estimatedBookkeeperHours',
+  'estimatedAccountantHours',
+  'estimatedCfoHours',
+]
 
 export function materializeRecurringChecklists(data) {
   const templates = Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []
@@ -3297,6 +3541,24 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists annual_billing_month integer`,
       )
+      // Consolidated billing (featreq-65f5eac1): one invoice to a BILLING
+      // MASTER carrying several companies' work. All three additive and
+      // nullable/defaulted, so every existing row is already correct — an
+      // ordinary client bills itself, is not a master, and names no recipient.
+      // NO foreign key on either id column, by the same reasoning as
+      // `plan_ids`: they are resolved on write (`sanitizeClientBillingLinks`)
+      // rather than enforced by the database, because an FK violation inside the
+      // bulk save aborts the whole transaction and takes every read down with it.
+      await this.pool.query(
+        `alter table clients add column if not exists bill_to_client_id text`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists is_billing_master boolean not null default false`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists invoice_recipient_client_id text`,
+      )
+
       // Onboarding lifecycle stage (Proposal → Onboarding → Active). NOT NULL
       // default 'active' so the firm's existing clients stay active — no client
       // silently becomes a prospect. Additive + idempotent.
@@ -4622,7 +4884,8 @@ export class AppDataStore {
                    invoice_hide_internal_hours, invoice_group_by_category,
                    card_payments_enabled,
                    assigned_bookkeeper_ids, monthly_service_tier,
-                   annual_rate, annual_billing_month, lifecycle_stage
+                   annual_rate, annual_billing_month, lifecycle_stage,
+                   bill_to_client_id, is_billing_master, invoice_recipient_client_id
             from clients
             order by name asc
           `),
@@ -4910,6 +5173,13 @@ export class AppDataStore {
             // Default 'active' when null so legacy/absent rows are never treated
             // as prospects.
             lifecycleStage: row.lifecycle_stage ?? 'active',
+            // Consolidated billing. Null is the ordinary client on both id
+            // columns; the boolean answers false for every row written before
+            // the column existed. Same shape `normalizeClientProfile` produces
+            // for the file backend — cardinal rule 1.
+            billToClientId: row.bill_to_client_id ?? null,
+            isBillingMaster: row.is_billing_master === true,
+            invoiceRecipientClientId: row.invoice_recipient_client_id ?? null,
           }
         }),
         timeEntries: timeEntriesResult.rows.map((row) => ({
@@ -5640,9 +5910,10 @@ export class AppDataStore {
                 annual_rate, annual_billing_month, lifecycle_stage,
                 card_payments_enabled,
                 invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
+                bill_to_client_id, is_billing_master, invoice_recipient_client_id,
                 created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, now())
             `,
             [
               clientRecord.id,
@@ -5714,6 +5985,11 @@ export class AppDataStore {
               clientRecord.cardPaymentsEnabled ?? false,
               normalizeTimeBreakdownMode(clientRecord.invoiceTimeBreakdownMode),
               clientRecord.invoiceTimeBreakdownAmounts === true,
+              // Already resolved against this payload by `sanitizeAppData` at
+              // the top of write() — a dangling id never reaches the column.
+              clientRecord.billToClientId ?? null,
+              clientRecord.isBillingMaster === true,
+              clientRecord.invoiceRecipientClientId ?? null,
               createdAtFor('clients', clientRecord.id),
             ],
           )
@@ -6311,7 +6587,68 @@ export class AppDataStore {
     return fileWorkspaceVersion(raw)
   }
 
+  /**
+   * Refuse a write aimed at a BILLING MASTER.
+   *
+   * "KLC Master Client - no data enterered or collected but shows data for the 4
+   * combined" (Brittany, featreq-bcee7e31). The app REFUSES rather than
+   * allows-and-ignores, because a master that quietly accepted an hour would
+   * show it nowhere: it has no Recap of its own beyond the roll-up of its subs,
+   * and its invoice is built entirely from their drafts. The hour would simply
+   * stop existing, which is the failure mode this codebase has paid for before.
+   *
+   * Four write paths call this — time entries, checklists, recurring recipes
+   * copied onto a client, and recurring reimbursements. Deliberately no wider:
+   * a guard on a path nobody uses is a guard nobody maintains.
+   *
+   * Silent no-op for an absent or unknown client id: those paths have their own
+   * answers for that, and this one must not start speaking for them.
+   *
+   * @throws {BillingMasterError}
+   */
+  async _refuseBillingMasterWrite(clientId, what) {
+    if (typeof clientId !== 'string' || !clientId) return
+    let row = null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select name, is_billing_master from clients where id = $1`,
+        [clientId],
+      )
+      if (rows.length === 0) return
+      row = { name: rows[0].name, isBillingMaster: rows[0].is_billing_master === true }
+    } else {
+      const data = await readJson(localDataPath)
+      const stored = (Array.isArray(data.clients) ? data.clients : []).find(
+        (client) => client && client.id === clientId,
+      )
+      if (!stored) return
+      row = { name: stored.name, isBillingMaster: stored.isBillingMaster === true }
+    }
+    if (!row.isBillingMaster) return
+    throw new BillingMasterError(
+      `${row.name || 'That client'} is a billing master — it holds no ${what} of its own. Use one of its sub clients instead.`,
+    )
+  }
+
+  /**
+   * The same refusal across a LIST of targets — the split paths hand out time to
+   * several clients at once, and one master among them must stop the whole
+   * thing before any slice is written. Deduplicated, so a split across three
+   * clients costs three lookups rather than one per allocation row.
+   */
+  async _refuseBillingMasterWrites(clientIds, what) {
+    const wanted = new Set(
+      (Array.isArray(clientIds) ? clientIds : []).filter((id) => typeof id === 'string' && id),
+    )
+    for (const clientId of wanted) {
+      await this._refuseBillingMasterWrite(clientId, what)
+    }
+  }
+
   async createTimeEntry(entry) {
+    // A master collects nothing. Checked before anything is built, so the
+    // refusal is the whole of what happened.
+    await this._refuseBillingMasterWrite(entry?.clientId, 'time')
     // The capture method defaults to 'timer'; only an explicit 'manual' entry
     // carries a reason — any non-manual entry drops manualReason entirely.
     const entryMethod = entry.entryMethod === 'manual' ? 'manual' : 'timer'
@@ -6440,6 +6777,11 @@ export class AppDataStore {
     if (!sharedGroupId) {
       throw new TimeEntrySplitError('invalid_allocation', 'A split needs a group id.')
     }
+    // A split is a time WRITE onto every client it names, so it is held to the
+    // same rule `createTimeEntry` is. Checked before a single slice is built:
+    // the endpoint validates that a target exists and is visible, which a
+    // billing master both is.
+    await this._refuseBillingMasterWrites(rows.map((row) => row.clientId), 'time')
 
     // The one gate both backends run, so a Postgres-only or file-only rule can
     // never drift. Returns the error to throw, or null when the split may
@@ -6695,6 +7037,8 @@ export class AppDataStore {
         'An adjustment needs at least one client with time on it.',
       )
     }
+    // Re-dividing a group is the same write as making one — same rule.
+    await this._refuseBillingMasterWrites(rows.map((row) => row.clientId), 'time')
     const mode = normalizeGroupAllocation(allocationMode)
 
     // Every field but the client and the minutes comes from the slices already
@@ -6925,6 +7269,13 @@ export class AppDataStore {
    * app-shaped entry or null when the entry doesn't exist.
    */
   async updateTimeEntry(entryId, patch) {
+    // Moving an entry ONTO a billing master is the same write as creating one
+    // there, and the hour would vanish just as completely. Above the backend
+    // split, so one check covers both — the shape the paid lock uses.
+    if (patch && Object.prototype.hasOwnProperty.call(patch, 'clientId')) {
+      await this._refuseBillingMasterWrite(patch.clientId, 'time')
+    }
+
     if (this.pool) {
       const setClauses = []
       const params = [entryId]
@@ -7496,6 +7847,10 @@ export class AppDataStore {
    */
   async addReimbursement({ clientId, date, description, amount }) {
     if (!clientId || typeof clientId !== 'string') return null
+    // Same refusal as `addRecurringReimbursement`: a master's invoice is built
+    // entirely from its subs' drafts, so an expense parked here is billed to
+    // nobody and shows up nowhere.
+    await this._refuseBillingMasterWrite(clientId, 'reimbursed expenses')
     if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
     const trimmedDescription = typeof description === 'string' ? description.trim() : ''
     if (!trimmedDescription) return null
@@ -7716,6 +8071,7 @@ export class AppDataStore {
     ...coverage
   }) {
     if (!clientId || typeof clientId !== 'string') return null
+    await this._refuseBillingMasterWrite(clientId, 'reimbursed expenses')
     const trimmedDescription = typeof description === 'string' ? description.trim() : ''
     if (!trimmedDescription) return null
     const numericAmount = Number(amount)
@@ -8461,6 +8817,74 @@ export class AppDataStore {
   }
 
   /**
+   * The master invoices a SUB's work appears on — that sub's billing history.
+   *
+   * A sub gets no invoice of its own, so its client page would otherwise show
+   * an empty month and read as "we forgot to bill them" (plan §1). This answers
+   * with the document that DID bill it: the master's invoice, its number and
+   * status, and the slice of it that is this client's.
+   *
+   * The subtotal is DERIVED — the sum of the lines carrying this client's
+   * `sourceClientId` — never a second money record. One payment lands on one
+   * invoice, so a company is paid when the invoice is; there is no partial
+   * apportionment because the rail only ever takes an invoice in full.
+   *
+   * Both backends, and the summing itself is shared between them so the two
+   * cannot answer different numbers. Postgres narrows with a jsonb containment
+   * match rather than reading every invoice back.
+   *
+   * @param {string} clientId - the SUB.
+   * @param {{period?: string|null}} [options]
+   */
+  async listBilledOnInvoices(clientId, { period = null } = {}) {
+    if (typeof clientId !== 'string' || !clientId) return []
+
+    const summarize = (invoice, masterClientName) => {
+      // A VOIDED invoice billed nobody. It stays in the master's own History as
+      // the withdrawal it is, but on a sub's page it would read as money owed.
+      if (invoice.status === 'void') return null
+      const lines = (invoice.lineItems ?? []).filter((line) => line?.sourceClientId === clientId)
+      if (lines.length === 0) return null
+      return {
+        invoiceId: invoice.id,
+        number: invoice.number,
+        period: invoice.period,
+        status: invoice.status,
+        masterClientId: invoice.clientId,
+        masterClientName: masterClientName ?? null,
+        subtotal: roundMoney(lines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0)),
+        paidAt: invoice.paidAt ?? null,
+      }
+    }
+
+    if (this.pool) {
+      const params = [JSON.stringify([{ sourceClientId: clientId }])]
+      if (period) params.push(period)
+      const { rows } = await this.pool.query(
+        `select ${INVOICE_SELECT_COLUMNS},
+                (select c.name from clients c where c.id = i.client_id) as master_client_name
+           from invoices i
+          where i.line_items @> $1::jsonb
+            and i.status <> 'void'
+            ${period ? 'and i.period = $2' : ''}
+          order by i.number nulls last, i.created_at`,
+        params,
+      )
+      return rows
+        .map((row) => summarize(mapInvoiceRow(row), row.master_client_name ?? null))
+        .filter(Boolean)
+    }
+
+    const data = await readJson(localDataPath)
+    const nameById = new Map(
+      (Array.isArray(data.clients) ? data.clients : []).map((entry) => [entry?.id, entry?.name]),
+    )
+    return (await this.listInvoices({ period }))
+      .map((invoice) => summarize(invoice, nameById.get(invoice.clientId) ?? null))
+      .filter(Boolean)
+  }
+
+  /**
    * Generate the month's drafts — one per client, idempotently.
    *
    * Re-running is safe and is expected: Brittany will run it, log a missed
@@ -8506,6 +8930,20 @@ export class AppDataStore {
         .map((invoice) => [invoice.clientId, invoice]),
     )
 
+    // Who bills to whom, resolved once for the whole run. Each master's subs
+    // are held in CLIENT-NAME order so the merged document reads the same way
+    // every month rather than in whatever order the roster came back in.
+    const subsByMaster = new Map()
+    for (const entry of data.clients ?? []) {
+      const target = entry?.billToClientId
+      if (typeof target !== 'string' || !target) continue
+      if (!subsByMaster.has(target)) subsByMaster.set(target, [])
+      subsByMaster.get(target).push(entry)
+    }
+    for (const subs of subsByMaster.values()) {
+      subs.sort((left, right) => String(left.name ?? '').localeCompare(String(right.name ?? '')))
+    }
+
     const created = []
     const skipped = []
     const scoped = clientId
@@ -8538,23 +8976,114 @@ export class AppDataStore {
         continue
       }
 
-      const draft = buildInvoiceDraft({
-        client,
-        period,
-        entries: data.timeEntries ?? [],
-        plans: data.plans ?? [],
-        reimbursements: data.reimbursements ?? [],
-        // Normalized through the shared definition, exactly as the Postgres
-        // mapper does — the resolver must not see `coverageHistory: undefined`
-        // on one backend and `{}` on the other.
-        recurringReimbursements: (data.recurringReimbursements ?? []).map(
-          normalizeRecurringReimbursement,
-        ),
-        employees: data.employees ?? [],
-        defaultHourlyRate: Number(client.hourlyRate) || 0,
-        priorInvoice: priorByClient.get(client.id) ?? null,
-        defaultNetDays,
-      })
+      // A SUB's work is billed on its master's invoice, so it gets none of its
+      // own — and this is REPORTED, on a month-wide run as well as a single
+      // one. The never-generates detector reads these reasons: "billed on KLC
+      // Master's invoice" is a real answer, where silence would have it name
+      // three companies as unbilled every month forever (plan §1). The master's
+      // id rides along so nothing downstream has to re-derive the link.
+      //
+      // BELOW the lifecycle checks deliberately. A RETIRED sub is on no
+      // invoice at all — the merge leaves it out for exactly the same reason
+      // this loop does — so claiming it was "billed on the master's invoice"
+      // would be a false answer, and a confident one.
+      if (typeof client.billToClientId === 'string' && client.billToClientId) {
+        skipped.push({
+          clientId: client.id,
+          reason: 'billed-to-other',
+          billedToClientId: client.billToClientId,
+        })
+        continue
+      }
+
+      // One client's inputs, gathered identically whether the result becomes
+      // its own invoice or a section of its master's. AD HOC time rides the
+      // merge like every other line: a sub no longer gets a monthly invoice of
+      // its own, so leaving its ad hoc work behind would bill it ZERO times
+      // rather than exactly once (plan §0, corrected while building). Its
+      // billed/courtesy/omitted control travels with the line to the master's
+      // editor. RETAINERS are untouched here — they stay per-sub
+      // engagement-level documents in v1.
+      const draftFor = (target, prior) =>
+        buildInvoiceDraft({
+          client: target,
+          period,
+          entries: data.timeEntries ?? [],
+          plans: data.plans ?? [],
+          reimbursements: data.reimbursements ?? [],
+          // Normalized through the shared definition, exactly as the Postgres
+          // mapper does — the resolver must not see `coverageHistory: undefined`
+          // on one backend and `{}` on the other.
+          recurringReimbursements: (data.recurringReimbursements ?? []).map(
+            normalizeRecurringReimbursement,
+          ),
+          employees: data.employees ?? [],
+          defaultHourlyRate: Number(target.hourlyRate) || 0,
+          priorInvoice: prior ?? null,
+          defaultNetDays,
+        })
+
+      let draft
+      if (client.isBillingMaster === true) {
+        const subs = subsByMaster.get(client.id) ?? []
+        // A master nobody points at can never produce anything, ever. Its own
+        // reason, because that is a MISCONFIGURATION someone has to fix —
+        // 'nothing-to-bill' would read as a quiet month and be waited out.
+        if (subs.length === 0) {
+          skipped.push({ clientId: client.id, reason: 'master-without-subs' })
+          continue
+        }
+        // The same lifecycle rule every other client in this loop is held to. A
+        // retired sub stops being billed, and must not start again merely
+        // because somebody else pays for it.
+        const eligibleSubs = []
+        for (const sub of subs) {
+          if (
+            isInactiveClientStage(sub.lifecycleStage) ||
+            (sub.lifecycleStage ?? 'active') !== 'active'
+          ) {
+            continue
+          }
+          // THE MIGRATION MONTH. 2026-08 was billed per-company before the
+          // master row existed, and those invoices are deliberately left alone
+          // (plan §0). Merging a sub that still holds a LIVE invoice for this
+          // period would issue a second payable document for the same work and
+          // re-advance its covered-date window against it — the double-bill this
+          // whole feature exists to prevent, arriving on its first run.
+          //
+          // Said out loud rather than passed over. The sub's own iteration says
+          // 'already-generated' (a fact about the sub); this says why it is
+          // missing from the master's invoice (a fact about the merge). Two
+          // different questions, so two rows.
+          if (liveClientIds.has(sub.id)) {
+            skipped.push({ clientId: sub.id, reason: 'already-billed-on-own-invoice' })
+            continue
+          }
+          eligibleSubs.push(sub)
+        }
+        const subDrafts = eligibleSubs
+          // The sub's OWN prior invoice, not the master's. A true-up Brittany
+          // made on a sub's last per-company invoice is real money that has to
+          // land somewhere, and after the migration the only invoice it can land
+          // on is the master's. `buildConsolidatedInvoiceDraft` keeps the line
+          // as that sub's and raises its `sub-adjustment` flag, which is how
+          // she is told a pre-migration correction carried across.
+          .map((sub) => ({ client: sub, draft: draftFor(sub, priorByClient.get(sub.id) ?? null) }))
+          .filter((entry) => entry.draft.lineItems.length > 0)
+        // Assembly — the lines, their `sourceClientId`, the aggregated scope
+        // flags and the due date — belongs to lib/invoice-draft.js, which owns
+        // every other money shape in this app. The prior-month true-up is the
+        // MASTER's own invoice, unchanged: the subs' drafts are built with none.
+        draft = buildConsolidatedInvoiceDraft({
+          master: client,
+          period,
+          defaultNetDays,
+          subDrafts,
+          priorInvoice: priorByClient.get(client.id) ?? null,
+        })
+      } else {
+        draft = draftFor(client, priorByClient.get(client.id) ?? null)
+      }
       if (draft.lineItems.length === 0) {
         skipped.push({ clientId: client.id, reason: 'nothing-to-bill' })
         continue
@@ -10024,6 +10553,26 @@ export class AppDataStore {
       lifecycleStage: coerceLifecycleStage(client.lifecycleStage),
     })
 
+    // Consolidated billing, checked OUT LOUD. A create is one deliberate act
+    // with a person waiting on the answer, so a link that does not hold is a
+    // sentence rather than a silently-nulled field — the opposite call from the
+    // bulk save, and for the opposite reason (see `billingLinkRefusal`). The
+    // roster read is skipped entirely for the ordinary create, which sets none
+    // of the three.
+    if (record.billToClientId || record.isBillingMaster || record.invoiceRecipientClientId) {
+      const roster = this.pool
+        ? (
+            await this.pool.query(
+              `select id, name, is_billing_master as "isBillingMaster",
+                      bill_to_client_id as "billToClientId"
+                 from clients`,
+            )
+          ).rows
+        : (await readJson(localDataPath)).clients ?? []
+      const refusal = billingLinkRefusal(record, roster)
+      if (refusal) throw new BillingMasterError(refusal)
+    }
+
     if (this.pool) {
       // Optional numeric column: null when absent, clamped otherwise — the
       // treatment sanitizeAppData + write() give these on a bulk save.
@@ -10081,9 +10630,10 @@ export class AppDataStore {
              estimated_cfo_hours, monthly_service_tier,
              annual_rate, annual_billing_month, lifecycle_stage,
              card_payments_enabled,
-             invoice_time_breakdown_mode, invoice_time_breakdown_amounts, updated_at
+             invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
+             bill_to_client_id, is_billing_master, invoice_recipient_client_id, updated_at
            )
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36, now())`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39, now())`,
           [
             record.id,
             record.name,
@@ -10128,6 +10678,9 @@ export class AppDataStore {
             record.cardPaymentsEnabled ?? false,
             normalizeTimeBreakdownMode(record.invoiceTimeBreakdownMode),
             record.invoiceTimeBreakdownAmounts === true,
+            record.billToClientId ?? null,
+            record.isBillingMaster === true,
+            record.invoiceRecipientClientId ?? null,
           ],
         )
         await dbClient.query('commit')
@@ -10168,6 +10721,7 @@ export class AppDataStore {
   }
 
   async createChecklist(checklist) {
+    await this._refuseBillingMasterWrite(checklist?.clientId, 'tasks')
     const nextChecklist = {
       ...checklist,
       id: checklist.id ?? `check-${randomUUID().slice(0, 8)}`,
@@ -15164,6 +15718,9 @@ export class AppDataStore {
    * Owner-only — caller enforces auth.
    */
   async copyTemplateToClient(sourceTemplateId, { clientId, firstDueDate, frequency } = {}) {
+    // A recurring recipe on a master would spawn tasks on a client that collects
+    // nothing — the same refusal the one-off checklist path makes.
+    await this._refuseBillingMasterWrite(clientId, 'recurring task recipes')
     const data = await this.read()
     const source = (data.checklistTemplates ?? []).find((t) => t.id === sourceTemplateId)
     if (!source) return null

@@ -63,6 +63,7 @@ import {
   getBillingPeriodLabel,
   recipientCountLabel,
   resolveInvoiceRecipients,
+  toCents,
   type ResolvedInvoiceRecipients,
 } from '../lib/utils'
 
@@ -185,6 +186,23 @@ const RETAINER_CREDITABLE_STATUSES: ReadonlySet<PersistedInvoice['status']> = ne
  * polling until the laptop closes; three minutes is longer than a full month
  * run of ratings takes and short enough to be forgotten about.
  */
+/**
+ * Said once, at the top of a billing master's editor, before she reads a table
+ * broken out by company and concludes the client is being shown all of it.
+ *
+ * Brittany answered "2": the printed and emailed document is ONE combined line
+ * with no company names (`clientFacingInvoiceLines`, lib/invoice-lines.js). The
+ * split below exists so the firm can see who is being billed for what — it is
+ * not what KLC receives, and a send-back saying "the invoice shows too much
+ * detail" is exactly what this sentence is here to prevent.
+ *
+ * KLC is named rather than templated because KLC is the only billing master
+ * there is. If a second one is ever set up, take the client's name as a
+ * parameter here — nothing else about this needs to change.
+ */
+const MASTER_BREAKDOWN_NOTE =
+  'KLC sees ONE combined line — this breakdown is only visible here.'
+
 const RATING_POLL_EVERY_MS = 5000
 const RATING_POLL_LIMIT_MS = 3 * 60 * 1000
 
@@ -347,6 +365,17 @@ export function InvoiceMonthRun({
 
   const clientName = useCallback(
     (clientId: string) => clients.find((c) => c.id === clientId)?.name ?? 'Unknown client',
+    [clients],
+  )
+
+  /**
+   * Whether this invoice belongs to a BILLING MASTER — a client that holds no
+   * work of its own and whose invoice is the merged lines of the companies
+   * pointing at it. Its editor groups those lines by company; every other
+   * client's editor is untouched.
+   */
+  const isBillingMaster = useCallback(
+    (clientId: string) => clients.find((c) => c.id === clientId)?.isBillingMaster ?? false,
     [clients],
   )
 
@@ -1004,6 +1033,8 @@ export function InvoiceMonthRun({
                     key={invoice.id}
                     invoice={invoice}
                     clientName={clientName(invoice.clientId)}
+                    isBillingMaster={isBillingMaster(invoice.clientId)}
+                    sourceClientName={clientName}
                     cardEnabled={cardEnabled(invoice.clientId)}
                     recipients={recipientsFor(invoice.clientId)}
                     // A retainer invoice is not itself a thing you credit —
@@ -1045,6 +1076,8 @@ export function InvoiceMonthRun({
 function InvoiceRow({
   invoice,
   clientName,
+  isBillingMaster,
+  sourceClientName,
   cardEnabled,
   recipients,
   retainer,
@@ -1062,6 +1095,10 @@ function InvoiceRow({
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** This invoice's client is a billing master — its editor groups by company. */
+  isBillingMaster: boolean
+  /** A line's `sourceClientId` to that company's name, for the group headings. */
+  sourceClientName: (clientId: string) => string
   /** This client is offered a card option, so its invoices go out with two ways to pay. */
   cardEnabled: boolean
   /** Every address this invoice would be emailed to, resolved before any click. */
@@ -1180,6 +1217,8 @@ function InvoiceRow({
           key={invoice.updatedAt ?? invoice.id}
           invoice={invoice}
           clientName={clientName}
+          isBillingMaster={isBillingMaster}
+          sourceClientName={sourceClientName}
           recipients={recipients}
           retainer={retainer}
           review={review}
@@ -1377,6 +1416,8 @@ function InvoiceLineRow({
 function InvoiceEditor({
   invoice,
   clientName,
+  isBillingMaster,
+  sourceClientName,
   recipients,
   retainer,
   review,
@@ -1391,6 +1432,10 @@ function InvoiceEditor({
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** This invoice's client is a billing master — group the lines by company. */
+  isBillingMaster: boolean
+  /** A line's `sourceClientId` to that company's name, for the group headings. */
+  sourceClientName: (clientId: string) => string
   /** Who this would go to, resolved by the same code the send endpoint uses. */
   recipients: ResolvedInvoiceRecipients
   /** A paid retainer of this client's with nothing spent against it yet. */
@@ -1712,6 +1757,70 @@ function InvoiceEditor({
   const scopedRows = numbered.filter((row) => row.line.kind !== 'adhoc')
   const adhocRows = numbered.filter((row) => row.line.kind === 'adhoc')
 
+  /**
+   * A BILLING MASTER's lines, grouped by the company whose work they are.
+   *
+   * This replaces the scoped/ad hoc split for a master, rather than nesting
+   * inside it: on this invoice the question "whose is this?" comes before "was
+   * it in scope?", and a company's subtotal that excluded its ad hoc work would
+   * not be that company's share of what the client is paying. Ad hoc lines keep
+   * their three-way decision inside their group, unchanged.
+   *
+   * Group ORDER is first appearance, which is the order generation merged them
+   * in (client-name order), and lines keep their order within a group. Nothing
+   * is re-sorted: the original index travels with every row, because every edit
+   * addresses a line by its position in the SAVED array.
+   *
+   * A line with no `sourceClientId` is the master's own — there should be none,
+   * a master holds no work, but if one is ever added by hand it groups under
+   * the master rather than disappearing.
+   */
+  type SourceGroup = {
+    key: string
+    name: string
+    rows: Array<{ line: PersistedInvoiceLine; index: number }>
+    subtotal: number
+  }
+  const sourceGroups: SourceGroup[] = []
+  if (isBillingMaster) {
+    const byKey = new Map<string, SourceGroup>()
+    for (const row of numbered) {
+      const key = row.line.sourceClientId ?? ''
+      let group = byKey.get(key)
+      if (!group) {
+        group = { key, name: key ? sourceClientName(key) : clientName, rows: [], subtotal: 0 }
+        byKey.set(key, group)
+        sourceGroups.push(group)
+      }
+      group.rows.push(row)
+      // Rounded to cents on every step, the same way `summarizeInvoiceMonth`
+      // does: summing floats leaves residue, and a company's share landing on
+      // $549.9999999 would print as $550.00 while failing to add up against the
+      // other groups. This figure is read as "what this company is paying".
+      group.subtotal = toCents(group.subtotal + (Number(row.line.amount) || 0))
+    }
+  }
+
+  /**
+   * The covered-dates question for one line, or nothing. Shared by the ordinary
+   * table and the per-company one so a master's recurring lines ask it exactly
+   * the same way — this is a gate on marking the invoice reviewed, and a block
+   * that quietly skipped it would let an unconfirmed window through.
+   */
+  const coverageFor = (line: PersistedInvoiceLine) =>
+    line.needsCoverageConfirmation && line.recurringId
+      ? {
+          ...coverageValue(line),
+          busy: coverageBusyId === line.recurringId,
+          onEdit: (range: { start: string; end: string }) =>
+            setCoverageEdits((current) => ({
+              ...current,
+              [line.recurringId as string]: range,
+            })),
+          onConfirm: () => void confirmCoverage(line.recurringId as string, coverageValue(line)),
+        }
+      : undefined
+
   const removeLine = (index: number) => {
     setLines((current) => current.filter((_, i) => i !== index))
     setSaved(false)
@@ -1799,38 +1908,66 @@ function InvoiceEditor({
           {lockMessage}
         </p>
       ) : null}
+      {/* The one thing someone reading a four-company table needs to know
+          before they read it. Quiet on purpose — it is context, not a warning. */}
+      {isBillingMaster ? (
+        <p className="invoice-run-master-note" role="note">
+          {MASTER_BREAKDOWN_NOTE}
+        </p>
+      ) : null}
       <table className="invoice-run-lines">
-        <tbody>
-          {scopedRows.map(({ line, index }) => (
-            <InvoiceLineRow
-              key={`${line.kind}-${index}`}
-              line={line}
-              index={index}
-              onChange={setLine}
-              onRemove={removeLine}
-              locked={Boolean(lockMessage)}
-              coverage={
-                line.needsCoverageConfirmation && line.recurringId
-                  ? {
-                      ...coverageValue(line),
-                      busy: coverageBusyId === line.recurringId,
-                      onEdit: (range) =>
-                        setCoverageEdits((current) => ({
-                          ...current,
-                          [line.recurringId as string]: range,
-                        })),
-                      onConfirm: () =>
-                        void confirmCoverage(line.recurringId as string, coverageValue(line)),
-                    }
-                  : undefined
-              }
-            />
-          ))}
-        </tbody>
+        {/* A master's invoice is grouped by COMPANY instead of by scope — see
+            `sourceGroups`. Everything about editing a row is the same either
+            way; only which block it sits in changes. */}
+        {sourceGroups.length > 0
+          ? sourceGroups.map((group) => (
+              <tbody className="invoice-run-source" key={group.key || '__own'}>
+                <tr className="invoice-run-source-heading">
+                  <th scope="colgroup">{group.name}</th>
+                  {/* Over the amount column, so a company's share reads down
+                      the same line its charges do. */}
+                  <th className="invoice-run-source-subtotal">
+                    {currency.format(group.subtotal)}
+                  </th>
+                  <td aria-hidden="true" />
+                </tr>
+                {group.rows.map(({ line, index }) => (
+                  <InvoiceLineRow
+                    key={`${line.kind}-${index}`}
+                    line={line}
+                    index={index}
+                    onChange={setLine}
+                    onRemove={removeLine}
+                    locked={Boolean(lockMessage)}
+                    coverage={coverageFor(line)}
+                    // Ad hoc work keeps its three-way decision inside its
+                    // company's block; a scoped line has none, and that absence
+                    // is what makes the row scoped.
+                    onModeChange={line.kind === 'adhoc' ? setAdhocMode : undefined}
+                  />
+                ))}
+              </tbody>
+            ))
+          : null}
+        {sourceGroups.length > 0 ? null : (
+          <tbody>
+            {scopedRows.map(({ line, index }) => (
+              <InvoiceLineRow
+                key={`${line.kind}-${index}`}
+                line={line}
+                index={index}
+                onChange={setLine}
+                onRemove={removeLine}
+                locked={Boolean(lockMessage)}
+                coverage={coverageFor(line)}
+              />
+            ))}
+          </tbody>
+        )}
         {/* Out-of-scope work, set off in its own block so it can be reviewed as
             a group. Each line carries its own decision: bill it, show it for
             nothing, or leave it off entirely. */}
-        {adhocRows.length > 0 ? (
+        {sourceGroups.length === 0 && adhocRows.length > 0 ? (
           <tbody className="invoice-run-adhoc">
             <tr className="invoice-run-adhoc-heading">
               <th colSpan={3} scope="colgroup">

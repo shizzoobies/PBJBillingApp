@@ -68,7 +68,7 @@ import { completedTaskRows } from '../lib/completedTasks'
 import { filterInProgressChecklists } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
-import { selectableClients } from '../lib/clientLifecycle'
+import { workableClients } from '../lib/clientLifecycle'
 import { waitForTaskOptions } from '../lib/waitForTaskOptions'
 import {
   addDays,
@@ -4088,8 +4088,10 @@ export function NewTaskForm({
 
   // Smart defaults. Retired clients are out: this form only ever creates NEW
   // work, and a task or recipe aimed at a former client would never be worked.
+  // Billing masters are out for the same reason from the other direction — a
+  // master holds no work at all, and the server refuses checklists against one.
   const sortedClients = useMemo(
-    () => selectableClients(clients).sort((a, b) => a.name.localeCompare(b.name)),
+    () => workableClients(clients).sort((a, b) => a.name.localeCompare(b.name)),
     [clients],
   )
   const defaultAssigneeId =
@@ -4540,9 +4542,10 @@ function ApplyToClientControl({
   onApply: (clientId: string) => Promise<void>
 }) {
   // Copy targets exclude retired clients — copying a template onto a former
-  // client produces a recipe the materializer will refuse to run.
+  // client produces a recipe the materializer will refuse to run. Billing
+  // masters are excluded on the same grounds: nothing is ever worked on one.
   const sortedClients = useMemo(
-    () => selectableClients(clients).sort((a, b) => a.name.localeCompare(b.name)),
+    () => workableClients(clients).sort((a, b) => a.name.localeCompare(b.name)),
     [clients],
   )
   const [open, setOpen] = useState(false)
@@ -5062,7 +5065,7 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
                   recipe — except the one it is already bound to, which has to
                   stay listed or the select would render blank and silently
                   re-point the template on the next edit. */}
-              {selectableClients(props.clients, [template.clientId]).map((client) => (
+              {workableClients(props.clients, [template.clientId]).map((client) => (
                 <option key={client.id} value={client.id}>
                   {client.name}
                 </option>

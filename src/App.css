@@ -8705,6 +8705,25 @@ button.repeating-task-toggle-pill {
   padding: 6px 0;
 }
 
+/* The companies behind a billing master's roll-up. Each row is a name and the
+   way into that company's own recap — where the figures on this page came
+   from, one company at a time. */
+.recap-subs .recap-sub-open {
+  background: transparent;
+  border: 0;
+  color: var(--brand, #7d2a4d);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.recap-subs .recap-sub-open:hover {
+  text-decoration-thickness: 2px;
+}
+
 /* The fixed role tier beside a name — CFO / Accountant / Bookkeeper. Quiet on
    purpose: it explains the order rather than competing with the name. */
 .recap-staff-tier {
@@ -11746,6 +11765,38 @@ tr.is-inactive-client .client-name-link {
   font-weight: 600;
 }
 
+/* ---- "Billed on": the invoices a sub appears on but does not own ----------
+   Read-only by design, so this is a list rather than a table with actions. */
+.billed-on-note {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.billed-on-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.billed-on-row {
+  align-items: center;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 6px 0;
+}
+
+.billed-on-line {
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
 .invoice-status {
   border-radius: 999px;
   font-size: 11px;
@@ -11829,6 +11880,44 @@ tr.is-inactive-client .client-name-link {
   color: var(--muted);
   font-size: 12px;
   font-style: italic;
+}
+
+/* ---- A billing master's editor: one block per company ---------------------
+   Brittany's answer was "2" — the client's document is ONE combined line, and
+   this breakdown exists only here. The note says so before the table is read;
+   it is deliberately quieter than `.invoice-run-locked`, because nothing is
+   wrong and nothing is blocked. */
+.invoice-run-master-note {
+  background: color-mix(in srgb, var(--brand, #7d2a4d) 5%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--brand, #7d2a4d) 45%, transparent);
+  border-radius: 0 6px 6px 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  margin: 0 0 10px;
+  padding: 7px 10px;
+}
+
+/* The company heading and its share. Same shape as the ad hoc block's heading
+   (that is the grouping idiom this reuses) in the brand color rather than the
+   gold, so "whose work" and "in or out of scope" never read as the same kind
+   of divider. */
+.invoice-run-source-heading th {
+  border-top: 1px solid color-mix(in srgb, var(--brand, #7d2a4d) 35%, var(--line));
+  color: var(--brand, #7d2a4d);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  padding: 10px 6px 4px 0;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+/* Sits over the amount column so a company's share reads down the same line
+   its charges do. */
+.invoice-run-source-subtotal {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
 }
 
 /* A reimbursed expense whose covered dates are still a PROPOSAL — a cycle was

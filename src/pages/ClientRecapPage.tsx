@@ -9,6 +9,7 @@ import {
   type ClientRecapPeriodType,
   type ClientRecapProjection,
 } from '../lib/api'
+import { ApiError } from '../lib/types'
 import { currentReviewPeriod, formatDecimalHours, shiftReviewPeriod } from '../lib/utils'
 
 const money = (n: number | null | undefined) =>
@@ -71,6 +72,50 @@ const varianceText = (
 const scaledEstimateNote = (monthsInPeriod: number) =>
   monthsInPeriod > 1 ? ` (monthly estimates × ${monthsInPeriod} months)` : ''
 
+/**
+ * What a billing master's roll-up will NOT add up, and why — one line each.
+ *
+ * These are the two figures `buildMasterRecap` returns as null on purpose. They
+ * render as em dashes WITH the reason rather than being left out: a missing
+ * card reads as a page that failed to load, and a zero would be a lie. The
+ * wording matches the reasoning recorded beside the nulls in lib/client-recap.js
+ * — if that ever changes, change it in both places.
+ */
+/**
+ * Refusals from the recap route that are STATES, not failures — each shown as a
+ * quiet notice carrying the server's own sentence, never in the alarm styling.
+ *
+ *   `master_without_subs`     (409) a billing master with nothing pointed at it.
+ *                             Misconfigured; the fix is to point a company at it.
+ *   `master_subs_not_visible` (403) a bookkeeper who is assigned some of the
+ *                             group but not all of it. A partial roll-up would
+ *                             be a worse answer than none — it would look like
+ *                             the whole group's numbers. Partial assignment is a
+ *                             normal way for a workspace to be arranged, so this
+ *                             is not that person doing anything wrong.
+ *
+ * Matched on the CODE, never on the sentence: the wording is the server's to
+ * reword, and matching on it would break silently the first time it changed.
+ * Anything not listed here is a real error and is styled like one.
+ */
+const RECAP_NOTICE_CODES: ReadonlySet<string> = new Set([
+  'master_without_subs',
+  'master_subs_not_visible',
+])
+
+const MASTER_NOT_ROLLED_UP: ReadonlyArray<{ label: string; reason: string }> = [
+  {
+    label: 'Sales tax',
+    reason:
+      'A filing per company, each with its own status and due date — four of them do not add into one. Each company’s own recap carries theirs.',
+  },
+  {
+    label: 'Projected end-of-month invoice',
+    reason:
+      'A projection carries a basis — actual, hourly, plan — and the companies can be on different ones, so a single figure would need a method sentence describing a mixture. Each company’s own recap carries theirs.',
+  },
+]
+
 export function ClientRecapPage() {
   const { visibleClients } = useAppContext()
   const [clientId, setClientId] = useState(visibleClients[0]?.id ?? '')
@@ -79,6 +124,14 @@ export function ClientRecapPage() {
   const [recap, setRecap] = useState<ClientRecap | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  /**
+   * Not a failure — a legitimate state the page can name. Held apart from
+   * `error` so it renders as a quiet notice rather than in the alarm styling
+   * something that actually broke gets. Neither of these is fixed by retrying.
+   *
+   * See {@link RECAP_NOTICE_CODES}.
+   */
+  const [notice, setNotice] = useState('')
 
   // Derived so we never sync state in an effect: falls back to the first
   // visible client until the user picks one (handles visibleClients arriving
@@ -91,11 +144,20 @@ export function ClientRecapPage() {
     const load = async () => {
       setLoading(true)
       setError('')
+      setNotice('')
       try {
         const result = await fetchClientRecap(effectiveClientId, periodType, period)
         if (!cancelled) setRecap(result)
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load recap')
+        if (cancelled) return
+        // The old recap must not stay on screen under a message about a
+        // different client — it would read as that client's numbers.
+        setRecap(null)
+        if (err instanceof ApiError && err.code && RECAP_NOTICE_CODES.has(err.code)) {
+          setNotice(err.message)
+          return
+        }
+        setError(err instanceof Error ? err.message : 'Failed to load recap')
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -129,7 +191,11 @@ export function ClientRecapPage() {
           <div>
             <h2>Client Recap</h2>
             <p className="muted-text" style={{ margin: '4px 0 0' }}>
-              A {PERIOD_ADJECTIVE[periodType]} review of one client.
+              {recap?.isBillingMaster
+                ? `A ${PERIOD_ADJECTIVE[periodType]} roll-up of ${
+                    recap.subs?.length ?? 0
+                  } companies.`
+                : `A ${PERIOD_ADJECTIVE[periodType]} review of one client.`}
             </p>
           </div>
         </div>
@@ -198,6 +264,11 @@ export function ClientRecapPage() {
 
       {loading ? <section className="panel">Loading…</section> : null}
       {error ? <section className="panel auth-error">{error}</section> : null}
+      {notice ? (
+        <section className="panel recap-card">
+          <p className="empty-state">{notice}</p>
+        </section>
+      ) : null}
 
       {recap && !loading ? (
         <>
@@ -205,6 +276,14 @@ export function ClientRecapPage() {
               then the money, then the workflow. Tasks & workflow sits LAST —
               it used to be second, above Billing, and she moved it to the
               bottom because a recap is read for the numbers first. */}
+          {/* A billing master's page opens by saying WHOSE numbers these are.
+              Every figure below is these companies' figures added — the roll-up
+              never re-derives anything from rows — so the list belongs above
+              them, not in a footnote under them. */}
+          {recap.isBillingMaster ? (
+            <MasterSubsCard subs={recap.subs ?? []} onOpenSub={setClientId} />
+          ) : null}
+
           <TimeAndHoursCard time={recap.time} monthsInPeriod={recap.monthsInPeriod} />
 
           {/* Billing (owner only) */}
@@ -216,14 +295,23 @@ export function ClientRecapPage() {
                   <span className="recap-stat-value">{money(recap.billing.revenue)}</span>
                   <span className="recap-stat-label">Revenue this period</span>
                 </div>
+                {/* A billing master has no rate of its own, and a rate averaged
+                    across four companies would be a fifth number nobody pays —
+                    so it reads as an em dash, not as $0.00/mo. */}
                 <div className="recap-stat">
                   <span className="recap-stat-value">
-                    {recap.billing.billingMode === 'hourly'
-                      ? `${money(recap.billing.hourlyRate)}/h`
-                      : `${money(recap.billing.monthlyRate)}/mo`}
+                    {recap.billing.billingMode == null
+                      ? '—'
+                      : recap.billing.billingMode === 'hourly'
+                        ? `${money(recap.billing.hourlyRate)}/h`
+                        : `${money(recap.billing.monthlyRate)}/mo`}
                   </span>
                   <span className="recap-stat-label">
-                    {recap.billing.billingMode === 'hourly' ? 'Hourly rate' : 'Monthly rate'}
+                    {recap.billing.billingMode == null
+                      ? 'Rate — set per company'
+                      : recap.billing.billingMode === 'hourly'
+                        ? 'Hourly rate'
+                        : 'Monthly rate'}
                   </span>
                 </div>
                 <div className="recap-stat">
@@ -275,6 +363,10 @@ export function ClientRecapPage() {
           {/* Projected invoice (owner only, monthly only) */}
           {recap.projection ? <ProjectionCard projection={recap.projection} /> : null}
 
+          {/* What the roll-up declines to add, said out loud. Only on a master:
+              on an ordinary client these figures are simply present. */}
+          {recap.isBillingMaster ? <MasterNotRolledUpCard /> : null}
+
           {/* Tasks & workflow — last on the page, by request. */}
           <section className="panel recap-card">
             <h3>Tasks &amp; workflow</h3>
@@ -320,6 +412,91 @@ export function ClientRecapPage() {
           </section>
         </>
       ) : null}
+    </section>
+  )
+}
+
+/**
+ * The companies behind a billing master's roll-up, each a way into its own
+ * recap.
+ *
+ * Every figure on this page is these companies' figures ADDED — nothing here is
+ * computed from their rows a second time — so "how did we get this number?" is
+ * answered by opening the company, not by a formula. That is what the buttons
+ * are for: they move the picker at the top of the page, which is the only
+ * client selector this page has.
+ *
+ * A sub with no id cannot be opened (a company deleted while its recap stood);
+ * it stays listed, because the roll-up above it still counted its work.
+ */
+export function MasterSubsCard({
+  subs,
+  onOpenSub,
+}: {
+  subs: NonNullable<ClientRecap['subs']>
+  onOpenSub: (clientId: string) => void
+}) {
+  return (
+    <section className="panel recap-card">
+      <h3>Companies in this roll-up</h3>
+      {subs.length === 0 ? (
+        // A master with no companies pointed at it is misconfigured, not empty.
+        <p className="muted-text">
+          No companies point at this billing master yet, so there is nothing to add up.
+        </p>
+      ) : (
+        <ul className="recap-list recap-subs">
+          {subs.map((sub, index) => (
+            <li key={sub.id ?? `sub-${index}`}>
+              <span>{sub.name}</span>
+              {sub.id ? (
+                <button
+                  type="button"
+                  className="recap-sub-open"
+                  onClick={() => onOpenSub(sub.id as string)}
+                >
+                  Open {sub.name}&rsquo;s recap
+                </button>
+              ) : (
+                <span className="muted-text">No longer on file</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+/**
+ * The two figures a roll-up will not add, each with the reason it will not.
+ *
+ * An em dash and a sentence, never a zero and never an omission — see
+ * {@link MASTER_NOT_ROLLED_UP}. Both are real per-company facts that live on
+ * the companies' own recaps, which the card above links to.
+ */
+export function MasterNotRolledUpCard() {
+  return (
+    <section className="panel recap-card">
+      <h3>Not rolled up</h3>
+      <table className="report-table">
+        <thead>
+          <tr>
+            <th>Figure</th>
+            <th>Combined</th>
+            <th>Why</th>
+          </tr>
+        </thead>
+        <tbody>
+          {MASTER_NOT_ROLLED_UP.map((row) => (
+            <tr key={row.label}>
+              <td>{row.label}</td>
+              <td>—</td>
+              <td className="muted-text">{row.reason}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </section>
   )
 }

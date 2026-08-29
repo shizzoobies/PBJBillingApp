@@ -144,7 +144,7 @@ import {
   makeId,
   sortChecklists,
 } from './lib/utils'
-import { selectableClients } from './lib/clientLifecycle'
+import { workableClients } from './lib/clientLifecycle'
 import { checklistsVisibleTo } from './lib/checklistVisibility'
 import { isChecklistSkipped } from '../lib/checklist-skip.js'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
@@ -3724,9 +3724,15 @@ function App() {
   // may be logged against a former client. Entries ALREADY logged against them
   // still render everywhere (reports, timesheets, approvals, their Time tab) —
   // this list only decides what may be picked.
+  //
+  // `workableClients` drops BILLING MASTERS on the same list, for a different
+  // reason: a master is a payer that holds no work, and the server refuses time
+  // written against one. This memo is the single source for the timer dropdown,
+  // the manual-entry dropdown and the split/allocation picker (which derives
+  // from it), so filtering here covers all three.
   const timeTrackingClients = useMemo(
     () =>
-      selectableClients(
+      workableClients(
         effectiveRole === 'owner'
           ? data.clients
           : data.clients.filter((client) =>

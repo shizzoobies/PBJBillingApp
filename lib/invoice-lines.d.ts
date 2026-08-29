@@ -106,6 +106,60 @@ export function adhocLineForMode<T extends { adhocAmount?: number; amount: numbe
 export function renderedInvoiceLines<T extends { kind?: string; adhocMode?: string }>(
   lines: T[] | null | undefined,
 ): T[]
+
+/* -- the rendering mode: what a client-facing document shows ---------------- */
+
+/** A billing master, or any client, as far as the rendering mode is concerned. */
+export type InvoiceRenderClient = {
+  isBillingMaster?: boolean
+  invoiceRenderMode?: string
+} | null | undefined
+
+/**
+ * 'standard' prints every stored line; 'combined' prints one line for the whole
+ * month, with no company names. A billing master defaults to 'combined'.
+ */
+export type InvoiceRenderMode = 'standard' | 'combined'
+
+/** The single line a 'combined' document prints. */
+export type CombinedInvoiceLine = {
+  kind: 'combined'
+  label: string
+  detail: string
+  amount: number
+}
+
+export const INVOICE_RENDER_MODES: readonly InvoiceRenderMode[]
+/** The CLIENT's setting. Renderers usually want `invoiceDocumentRenderMode`. */
+export function invoiceRenderMode(client: InvoiceRenderClient): InvoiceRenderMode
+/**
+ * What THIS document renders in: the client's setting, except that a retainer
+ * invoice (`kind: 'retainer'`) is always standard.
+ */
+export function invoiceDocumentRenderMode(
+  invoice: { kind?: string } | null | undefined,
+  client: InvoiceRenderClient,
+): InvoiceRenderMode
+export const COMBINED_INVOICE_COPY: { label(periodLabel: string): string }
+/** Line kinds a combined document keeps beside its one line: they explain the
+ *  CHARGE rather than describe the work, so they name no company. */
+export const COMBINED_KEPT_KINDS: ReadonlySet<string>
+/**
+ * The lines the CLIENT reads. In 'combined' mode the stored lines are REPLACED
+ * by one line — which is why the return type is the union rather than `T[]` —
+ * except for `COMBINED_KEPT_KINDS` lines, which follow it. The combined line
+ * carries `invoice.total` LESS those kept lines, so the array always sums to
+ * `invoice.total`.
+ */
+export function clientFacingInvoiceLines<
+  T extends { kind?: string; adhocMode?: string; label: string; detail: string; amount: number },
+>(
+  invoice:
+    | { kind?: string; period?: string; total?: number; lineItems?: T[] | null }
+    | null
+    | undefined,
+  client: InvoiceRenderClient,
+): Array<T | CombinedInvoiceLine>
 export function recurringReimbursementAppliesToPeriod(
   recurring: { startDate?: string; frequency?: string },
   period: string,

@@ -1918,6 +1918,26 @@ Clients page meanwhile. Owner-only.
 > Crediting the final invoice therefore does not dent the revenue the recap
 > reports for that month — the work was still worth what it was worth.
 >
+> **Combined billing (billing masters).** A client can be set up as a
+> **billing master**: a client that does no work of its own but bills for a
+> group of companies (its "subs"). Each sub's time, checklists, reimbursements
+> and recap stay on the sub exactly as normal — the sub just stops getting its
+> own monthly invoice ("Billed on the master's invoice" appears where its
+> invoice would be), and the master's monthly invoice carries every sub's
+> charges. Inside the month run, the owner sees the master's invoice broken
+> out by company with per-company subtotals — but THE CLIENT SEES ONE
+> COMBINED LINE ("Bookkeeping services — the month") with one total: no
+> company names, no per-company amounts, on the printed invoice, the PDF, and
+> the emailed invoice alike. That is deliberate and was the client's own
+> choice. The invoice email goes to whichever sub's contacts the owner picked
+> for that master; if none is picked yet, sending refuses with a sentence
+> saying so. Retainers are still issued per company, never combined. The
+> master's Client Recap shows each company's numbers rolled up (and each sub
+> keeps its own recap); a couple of recap figures (sales tax status,
+> projection) do not roll up and say why with a dash. A billing master cannot
+> have time logged to it, checklists on it, or recurring reimbursements of
+> its own — the app refuses, because the master's job is billing, not work.
+>
 > The per-client section BELOW the run is the older live-calculation view, kept
 > for its preview and print.
 

@@ -2562,7 +2562,21 @@ export type SalesTaxFigures = {
   updatedAt: string | null
 }
 export type ClientRecap = {
-  client: { id: string; name: string; billingMode: string }
+  /** `billingMode` is null on a billing master — it has no billing machinery
+   *  of its own, and a copy of some sub's would be an invented fact. */
+  client: { id: string; name: string; billingMode: string | null }
+  /**
+   * This payload is the ROLL-UP of a billing master's subs, not a fifth
+   * company's own recap. Absent/false on every ordinary client.
+   *
+   * The figures below are the subs' figures ADDED — `buildMasterRecap` never
+   * re-derives them from rows (the one-money-calculator rule at this level).
+   * The fields that cannot honestly be added are null, each for a stated
+   * reason; render an em dash and the reason, never a zero.
+   */
+  isBillingMaster?: boolean
+  /** Masters only: the companies behind every figure, in reading order. */
+  subs?: Array<{ id: string | null; name: string }>
   periodType: ClientRecapPeriodType
   period: string
   periodLabel: string
@@ -2611,14 +2625,20 @@ export type ClientRecap = {
     overdueCount: number
     openCount: number
   }
+  /**
+   * Null on a billing master: sales tax is a filing per company, with its own
+   * status and its own due date. Four of them do not add into one and there is
+   * no honest single status to print, so the roll-up declines to.
+   */
   salesTax: {
     status: 'not_started' | 'open' | 'overdue' | 'done'
     taskTitle: string | null
     dueDate: string | null
     figures: SalesTaxFigures | null
-  }
+  } | null
   billing: {
-    billingMode: string
+    /** Null on a billing master — see {@link ClientRecap.client}. */
+    billingMode: string | null
     hourlyRate: number | null
     monthlyRate: number | null
     monthsInPeriod: number
@@ -2744,8 +2764,17 @@ export async function fetchClientRecap(
     credentials: 'same-origin',
   })
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null
-    throw new ApiError(response.status, body?.error ?? `Failed to load recap (${response.status})`)
+    // Through the shared helper rather than reading `error` directly: this route
+    // now answers 409 { error: 'master_without_subs', message: '…' } for a
+    // billing master with nothing pointed at it, and the old code showed the
+    // machine-readable half. The page needs BOTH — the sentence to print, and
+    // the code to tell a misconfiguration apart from a failure.
+    const { message, code } = await safeError(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to load recap (${response.status})`,
+      code,
+    )
   }
   return (await response.json()) as ClientRecap
 }
@@ -3212,6 +3241,54 @@ export async function listInvoicesRequest(period?: string) {
 }
 
 /**
+ * One row of "this company's work was billed on somebody else's invoice".
+ *
+ * Deliberately NOT a `PersistedInvoice`: the sub is not the client on that
+ * document and has no business editing, sending or printing it. What it needs
+ * is the pointer — which invoice, whose, for how much, and whether it is paid.
+ * `subtotal` is THIS company's share of the master's invoice, not the master's
+ * total; one payment settles the whole document, so a company is paid when the
+ * invoice is (`paidAt`), and there is no pro-rata apportionment to make.
+ */
+export type BilledOnInvoice = {
+  invoiceId: string
+  number: string | null
+  /** 'YYYY-MM'. */
+  period: string
+  status: PersistedInvoice['status']
+  masterClientId: string
+  masterClientName: string
+  /** This company's share of that invoice — its lines added up. */
+  subtotal: number
+  paidAt: string | null
+}
+
+/**
+ * The invoices a billed-to company appears on, newest first.
+ *
+ * Answers the question a sub's client page would otherwise leave hanging: a
+ * company pointed at a billing master generates no invoice of its own, and a
+ * page showing nothing for the month reads as "we forgot to bill them".
+ *
+ * `period` narrows to one 'YYYY-MM'; omit it for the whole history.
+ */
+export async function listBilledOnInvoicesRequest(clientId: string, period?: string) {
+  const query = period ? `?period=${encodeURIComponent(period)}` : ''
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/billed-on-invoices${query}`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to load billed-on invoices (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { invoices: BilledOnInvoice[] }).invoices
+}
+
+/**
  * Build the month's drafts. Idempotent — an existing invoice is never rewritten.
  *
  * `clientId` narrows it to one client (the per-client "Email invoice" button
@@ -3232,7 +3309,12 @@ export async function generateInvoicesRequest(period: string, clientId?: string)
   return (await response.json()) as {
     period: string
     created: PersistedInvoice[]
-    skipped: Array<{ clientId: string; reason: string }>
+    /**
+     * `billedToClientId` rides along with the `billed-to-other` reason: the
+     * client was skipped because its work goes on that billing master's
+     * invoice. Absent on every other reason.
+     */
+    skipped: Array<{ clientId: string; reason: string; billedToClientId?: string | null }>
   }
 }
 
@@ -3259,7 +3341,12 @@ export async function regenerateInvoicesRequest(period: string) {
     period: string
     voided: number
     created: PersistedInvoice[]
-    skipped: Array<{ clientId: string; reason: string }>
+    /**
+     * `billedToClientId` rides along with the `billed-to-other` reason: the
+     * client was skipped because its work goes on that billing master's
+     * invoice. Absent on every other reason.
+     */
+    skipped: Array<{ clientId: string; reason: string; billedToClientId?: string | null }>
   }
 }
 

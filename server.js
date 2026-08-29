@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import {
   AppDataStore,
+  BillingMasterError,
   coerceEntryMinutes,
   CoverageConfirmationError,
   InvoiceAiReviewError,
@@ -36,7 +37,7 @@ import {
 import { createPendingActionStore } from './lib/pending-actions.js'
 import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
 import { buildMemoryDigest, safeEqual, verifyElevenLabsSignature } from './lib/voice.js'
-import { buildClientRecap } from './lib/client-recap.js'
+import { buildClientRecap, buildMasterRecap } from './lib/client-recap.js'
 import { currentPeriod, isValidPeriod, isValidPeriodType } from './lib/periods.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
 import {
@@ -1021,6 +1022,78 @@ function broadcastDataChanged() {
   }
 }
 
+// ---- Consolidated billing (featreq-65f5eac1) ------------------------------
+// docs/plans/consolidated-billing-2026-08.md. A BILLING MASTER holds nothing of
+// its own — no time, no checklists, no contacts. Everything it shows and
+// everything it bills comes from its subs, so the two questions this section
+// answers are always the same one: WHICH subs, and WHO reads the email.
+
+/**
+ * The master's subs, in the same order and under the same lifecycle rule the
+ * generator uses (db/store.js `generateInvoicesForPeriod`): client-name order,
+ * ACTIVE only. A retired sub stops being billed and stops being recapped, and
+ * must not start again merely because somebody else pays for it.
+ *
+ * Written once because the recap roll-up and the AI rating's hours summary must
+ * agree with the invoice about which four companies are on it — three lists
+ * that could drift apart is exactly the kind of number nobody can find later.
+ */
+function activeSubsOfMaster(clients, masterId) {
+  return (Array.isArray(clients) ? clients : [])
+    .filter(
+      (entry) =>
+        entry?.billToClientId === masterId && (entry.lifecycleStage ?? 'active') === 'active',
+    )
+    .sort((left, right) => String(left.name ?? '').localeCompare(String(right.name ?? '')))
+}
+
+/**
+ * Said once, because the send route and the payment-email path must refuse in
+ * the same words.
+ *
+ * The sentence names a person rather than a screen ON PURPOSE: nothing in the
+ * app writes `invoiceRecipientClientId` yet — the picker is a filed follow-up —
+ * so "set it in Settings" would send whoever read it hunting for a control that
+ * is not there. A remedy that does not exist is worse than no remedy.
+ */
+const MASTER_RECIPIENT_UNSET = Object.freeze({
+  error: 'master_recipient_unset',
+  message:
+    'This master has no receiving company set for its invoices yet — ask Alex to set one.',
+})
+
+/**
+ * WHOSE contacts an invoice email is addressed to.
+ *
+ * An ordinary client answers itself. A billing master has no contacts of its
+ * own — "sends invoice to sub client you choose" (Brittany, featreq-bcee7e31) —
+ * so the addressee is the ONE sub named by `invoiceRecipientClientId`, and
+ * nothing else. There is deliberately no fallback: emailing every sub's
+ * contacts because the field is unset would send four companies each other's
+ * consolidated invoice, which is unrecoverable. Unset, or naming a client that
+ * is no longer this master's sub, is a refusal.
+ *
+ * The returned record carries the SUB's `contactIds` and address under the
+ * MASTER's name: the resolver keys per-client addresses off the client id, so
+ * it has to be the sub's own record, while every place the name is printed is
+ * naming the party the invoice is for. Rendering is untouched — the send route
+ * and the PDF keep the master itself.
+ *
+ * @returns {{addressee: object|null, refusal: object|null}}
+ */
+function invoiceEmailAddressee(client, clients) {
+  if (client?.isBillingMaster !== true) return { addressee: client ?? null, refusal: null }
+  const chosen =
+    typeof client.invoiceRecipientClientId === 'string' ? client.invoiceRecipientClientId : ''
+  const sub = chosen
+    ? (Array.isArray(clients) ? clients : []).find(
+        (entry) => entry?.id === chosen && entry?.billToClientId === client.id,
+      )
+    : null
+  if (!sub) return { addressee: null, refusal: MASTER_RECIPIENT_UNSET }
+  return { addressee: { ...sub, name: client.name }, refusal: null }
+}
+
 // ---- Invoice confidence ratings -------------------------------------------
 // docs/plans/invoice-confidence-2026-08.md. The rating is an ADVISORY
 // annotation and nothing else: it never feeds lib/invoice-lines.js, never
@@ -1057,6 +1130,14 @@ const INVOICE_RATING_CAPACITY_MESSAGE =
  */
 function buildInvoiceHoursSummary(data, client, period) {
   if (!client) return null
+  // A BILLING MASTER holds no time of its own, so asking for ITS rows would
+  // return an empty list and have every hourly line on the consolidated invoice
+  // reported as unsupported. Its invoice is built from its subs' lines, so the
+  // hours it is checked against are theirs. Branching HERE rather than at the
+  // one call site keeps a single entry point for "this invoice's hours".
+  if (client.isBillingMaster === true) {
+    return buildMasterInvoiceHoursSummary(data, client, period)
+  }
   const employees = data.employees ?? []
   const employeeById = new Map(employees.map((employee) => [employee.id, employee]))
   const defaultHourlyRate = Number(client.hourlyRate) || 0
@@ -1094,6 +1175,82 @@ function buildInvoiceHoursSummary(data, client, period) {
         adhocHours: hours(bucket.adhoc),
       }))
       .sort((a, b) => a.name.localeCompare(b.name)),
+  }
+}
+
+/**
+ * The same summary for a BILLING MASTER's invoice — whose hours are its subs'.
+ *
+ * A master holds no time of its own, so asking `buildInvoiceHoursSummary` for
+ * its rows returns an empty list and the model would report every hourly line
+ * on the consolidated invoice as unsupported. The arithmetic check needs the
+ * SUBS' hours, so this runs the same helper once per active sub and merges.
+ *
+ * NO NEW MONEY MATH. Bill rates are whatever the helper already resolved for
+ * each sub — this only adds hours together. Which is why a person billing two
+ * companies at two different rates stays TWO rows, labeled with the company:
+ * merging those would invent a blended rate that priced nothing, and the model
+ * would then "correct" a line that was right.
+ *
+ * Master invoices are not retainers, so they are rated like any other draft.
+ *
+ * No recursion risk in calling back into the per-client helper: a master may
+ * not itself be billed elsewhere (the store refuses the link), so nothing
+ * `activeSubsOfMaster` returns is ever a master.
+ */
+function buildMasterInvoiceHoursSummary(data, master, period) {
+  if (!master) return null
+  const subs = activeSubsOfMaster(data.clients ?? [], master.id)
+
+  // Every sub's rows, grouped by PERSON. One name, one or more rate/company
+  // pairs behind it.
+  const byName = new Map()
+  for (const sub of subs) {
+    for (const row of buildInvoiceHoursSummary(data, sub, period)?.employees ?? []) {
+      if (!byName.has(row.name)) byName.set(row.name, [])
+      byName.get(row.name).push({ ...row, subName: String(sub.name ?? '') })
+    }
+  }
+
+  // Hours are added as whole hundredths — the rows are already rounded to two
+  // places, so the total is literally the rows added up, the same contract the
+  // per-client summary and the Recap tables carry.
+  const addHours = (values) => Math.round(values.reduce((sum, value) => sum + value * 100, 0)) / 100
+
+  const employees = []
+  for (const [name, rows] of byName) {
+    if (new Set(rows.map((row) => row.billRate)).size <= 1) {
+      employees.push({
+        name,
+        billRate: rows[0].billRate,
+        scopedHours: addHours(rows.map((row) => row.scopedHours)),
+        adhocHours: addHours(rows.map((row) => row.adhocHours)),
+        // Which companies the merged hours came from, so the model can see that
+        // one row spans several and does not read it as one company's month.
+        sourceClients: rows.map((row) => row.subName),
+      })
+      continue
+    }
+    for (const row of rows) {
+      employees.push({
+        name,
+        billRate: row.billRate,
+        scopedHours: row.scopedHours,
+        adhocHours: row.adhocHours,
+        sourceClients: [row.subName],
+      })
+    }
+  }
+
+  return {
+    period,
+    perEmployeeBilling: String(period) >= PER_EMPLOYEE_BILLING_START,
+    /** Says out loud that this is a consolidated invoice, and of what. */
+    isBillingMaster: true,
+    subClients: subs.map((sub) => String(sub.name ?? '')),
+    employees: employees.sort(
+      (a, b) => a.name.localeCompare(b.name) || a.billRate - b.billRate,
+    ),
   }
 }
 
@@ -2530,6 +2687,63 @@ const server = createServer(async (request, response) => {
       const salesTaxRecord = includeFinancials
         ? await appDataStore.getSalesTaxRecord(clientId, period)
         : null
+      // A BILLING MASTER holds no time, no checklists and no estimates of its
+      // own, so there is nothing here to compute from: its Recap is its subs'
+      // recaps added up (plan §0, "able to recap at each sub and then master
+      // level"). Each sub goes through the ordinary path above, unchanged and
+      // untouched — the roll-up SUMS those results, it never re-derives them.
+      // A non-master answers exactly as it did before this branch existed.
+      const recapClient = (data.clients ?? []).find((entry) => entry.id === clientId)
+      if (recapClient?.isBillingMaster === true) {
+        // ACCESS IS PER COMPANY, not per group. Being assigned to the master is
+        // not access to Bright Tower's hours, its staff roster or its task
+        // list, and this route hands all three back — so every sub is held to
+        // the same visible-set check the master was held to above.
+        //
+        // And it is all-or-nothing: dropping the subs this caller cannot see
+        // would answer with a roll-up that presents itself as the whole group
+        // while silently summing three companies out of four. A number that is
+        // wrong and looks right is worse than a refusal, so the refusal is what
+        // this is. Owners see every client, so this never fires for them.
+        const masterSubs = activeSubsOfMaster(data.clients ?? [], clientId)
+        if (!masterSubs.every((sub) => allowed.has(sub.id))) {
+          sendJson(response, 403, {
+            error: 'master_subs_not_visible',
+            message: 'The combined view needs access to every company in the group.',
+          })
+          return
+        }
+        const subRecaps = []
+        for (const sub of masterSubs) {
+          const subRecap = buildClientRecap(data, {
+            clientId: sub.id,
+            periodType,
+            period,
+            today: todayIso(),
+            includeFinancials,
+            costRates,
+            salesTaxRecord: includeFinancials
+              ? await appDataStore.getSalesTaxRecord(sub.id, period)
+              : null,
+          })
+          if (subRecap) subRecaps.push(subRecap)
+        }
+        const masterRecap = buildMasterRecap({ master: recapClient, subRecaps })
+        if (!masterRecap) {
+          // Zero subs is a MISCONFIGURATION someone has to fix, not a quiet
+          // month — the same call the generator makes with 'master-without-subs'
+          // rather than printing a page of zeros and being waited out.
+          sendJson(response, 409, {
+            error: 'master_without_subs',
+            message:
+              'This billing master has no active sub clients yet, so there is nothing to roll up.',
+          })
+          return
+        }
+        sendJson(response, 200, masterRecap)
+        return
+      }
+
       const recap = buildClientRecap(data, {
         clientId,
         periodType,
@@ -2785,11 +2999,17 @@ const server = createServer(async (request, response) => {
           const paidClient = (paidData.clients ?? []).find(
             (entry) => entry.id === settledInvoice.clientId,
           )
-          if (paidClient) {
+          // Same addressing rule as Send: a billing master's receipt goes to the
+          // sub it names. Unset means nobody is told rather than everybody —
+          // said out loud in the log, because a webhook has no one to answer to.
+          const paidAddressee = invoiceEmailAddressee(paidClient, paidData.clients ?? [])
+          if (paidClient && paidAddressee.refusal) {
+            console.warn('[stripe] payment email skipped:', paidAddressee.refusal.message)
+          } else if (paidClient) {
             const paidFirmSettings = await appDataStore.getFirmSettings().catch(() => null)
             await sendInvoicePaymentEmail({
               invoice: settledInvoice,
-              client: paidClient,
+              client: paidAddressee.addressee,
               contacts: paidData.contacts ?? [],
               firmName: paidFirmSettings?.name || undefined,
               statusChanged: settledInvoice.statusChanged,
@@ -2999,8 +3219,16 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // A billing master has no contacts of its own: the email goes to the ONE
+      // sub it names, and an unnamed one is refused BEFORE anything is sent
+      // rather than quietly addressed to every company on the invoice.
+      const sendAddressee = invoiceEmailAddressee(sendClient, sendAppData.clients ?? [])
+      if (sendAddressee.refusal) {
+        sendJson(response, 409, sendAddressee.refusal)
+        return
+      }
       const recipients = resolveInvoiceRecipients({
-        client: sendClient,
+        client: sendAddressee.addressee,
         contacts: sendAppData.contacts ?? [],
       })
       if (recipients.to.length === 0) {
@@ -3786,8 +4014,18 @@ const server = createServer(async (request, response) => {
       const payload = await readJsonBody(request)
       let created
       try {
+        // The three consolidated-billing fields ride the ordinary payload —
+        // `createClient` normalizes them with every other client field, so
+        // there is no second admin endpoint to keep in step.
         created = await appDataStore.createClient(payload ?? {})
       } catch (error) {
+        // A billing link that does not hold is a fact about the roster said in
+        // a sentence, not a server fault: the target is gone, is not a master,
+        // or the chosen recipient is not one of this master's own subs.
+        if (error instanceof BillingMasterError) {
+          sendJson(response, 409, { error: 'billing_master_refused', message: error.message })
+          return
+        }
         console.error('[clients] createClient failed:', error)
         sendJson(response, 500, {
           error: 'client_create_failed',
@@ -8995,6 +9233,40 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // GET /api/clients/:id/billed-on-invoices — owner-only: the invoices this
+    // client's work was billed ON, which for a SUB of a billing master is its
+    // master's consolidated invoice rather than one of its own.
+    //
+    // Without this, Chemtrex's page shows no invoice for the month, which reads
+    // as "we forgot to bill them" (plan §1). The figure is DERIVED — the sub's
+    // subtotal of that invoice's lines — never a second money record, so it can
+    // never disagree with the invoice it is quoted from. Owner-only because it
+    // is money, on the same terms as every other invoice read.
+    const billedOnMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/billed-on-invoices$/,
+    )
+    if (billedOnMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see invoices' })
+        return
+      }
+      const billedOnClientId = decodeURIComponent(billedOnMatch[1])
+      // The period is a FILTER, and an absent one means "all of them" — the
+      // client page asks for one month, History asks for the lot.
+      const billedOnPeriod = requestUrl.searchParams.get('period') || ''
+      if (billedOnPeriod && !/^\d{4}-\d{2}$/.test(billedOnPeriod)) {
+        sendJson(response, 400, { error: 'period must look like 2026-08' })
+        return
+      }
+      const billedOnInvoices = await appDataStore.listBilledOnInvoices(billedOnClientId, {
+        period: billedOnPeriod || null,
+      })
+      sendJson(response, 200, { invoices: billedOnInvoices })
+      return
+    }
+
     // POST /api/clients/:id/start-onboarding — owner-only: open a client's
     // 3-stage onboarding case (Proposal → Onboarding → Client) and move the
     // client to 'proposal'. Mirrors the checklist-create endpoints' guards
@@ -9548,6 +9820,17 @@ const server = createServer(async (request, response) => {
 
     sendFile(response, indexFile)
   } catch (error) {
+    // A BILLING MASTER refusing a write is a fact about the data, not a server
+    // fault. Four store guards throw it — time entries, checklists, template
+    // applies and recurring reimbursements — and none of those handlers has a
+    // catch of its own, so the mapping lives HERE rather than being copied into
+    // four places that would each have to be remembered when a fifth is added.
+    // The store's sentence is the whole answer: it names the client and the
+    // thing it does not hold.
+    if (error instanceof BillingMasterError) {
+      sendJson(response, 409, { error: 'billing_master_refused', message: error.message })
+      return
+    }
     console.error(error)
     sendJson(response, 500, { error: 'Server error' })
   }

@@ -19,7 +19,7 @@ import {
   type TimeEntryRequiredField,
 } from '../../lib/time-entry.js'
 import { isInReportPeriod } from '../lib/reportPeriod'
-import { selectableClients } from '../lib/clientLifecycle'
+import { workableClients } from '../lib/clientLifecycle'
 import { submitTimesheetButtonState } from '../lib/timesheetSubmitPlan'
 import {
   buildTimeTaskOptions,
@@ -3009,7 +3009,7 @@ function TimeEntryRow({
                       are not offered — but the entry's CURRENT client stays
                       listed even if retired, or an old entry would open showing
                       "Select a client…" and lose its attribution on save. */}
-                  {selectableClients(clients, [entry.clientId]).map((client) => (
+                  {workableClients(clients, [entry.clientId]).map((client) => (
                     <option key={client.id} value={client.id}>
                       {client.name}
                     </option>

@@ -16,6 +16,7 @@ import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
 import { SectionScopeContext } from '../components/sectionScope'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
+import { BilledOnCard } from '../components/BilledOnCard'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { ClientTimeModal } from '../components/ClientTimeModal'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
@@ -375,6 +376,31 @@ export function ClientDetailPage() {
           it is one they could not see before either. */}
       {activeSection === 'billing' && ownerMode ? (
         <div className="client-tab-panel" id={CLIENT_SECTION_ANCHORS.billing} role="tabpanel">
+          {/* FIRST in the tab, and only for a company whose work is billed
+              elsewhere: everything under it — rate, plans, reimbursements —
+              feeds someone else's document, and reading those panels without
+              knowing that is how "why has this client never been invoiced?"
+              starts. */}
+          {client.billToClientId ? (
+            <CollapsibleSection
+              id="client-section-billed-on"
+              kicker="Billing"
+              title="Billed on"
+              lockable
+            >
+              {/* Keyed by client: navigating from one company to another is a
+                  fresh card, never last company's invoices under this one's
+                  heading while the new fetch is in the air. */}
+              <BilledOnCard
+                key={client.id}
+                clientId={client.id}
+                masterName={
+                  data.clients.find((entry) => entry.id === client.billToClientId)?.name ?? null
+                }
+              />
+            </CollapsibleSection>
+          ) : null}
+
           <CollapsibleSection id="client-section-billing" kicker="Billing" title="Rate and services" lockable>
             <BillingSectionBody client={client} plans={data.plans} onCommit={commit} />
           </CollapsibleSection>
@@ -383,13 +409,23 @@ export function ClientDetailPage() {
             <PlanChecklistsBody client={client} data={data} />
           </CollapsibleSection>
 
-          <CollapsibleSection id="client-section-expenses" kicker="Expenses" title="Recurring reimbursements" lockable>
-            <RecurringReimbursementsCard clientId={client.id} bare />
-          </CollapsibleSection>
+          {/* A billing master collects nothing of its own — "no data entered or
+              collected but shows data for the 4 combined". The server refuses
+              reimbursement writes against one, so these two add-forms would be
+              a pair of doors that only ever answer no. They are the surfaces
+              the plan meant by "hide those surfaces in the UI for a master";
+              each company's own page keeps both, unchanged. */}
+          {client.isBillingMaster ? null : (
+            <>
+              <CollapsibleSection id="client-section-expenses" kicker="Expenses" title="Recurring reimbursements" lockable>
+                <RecurringReimbursementsCard clientId={client.id} bare />
+              </CollapsibleSection>
 
-          <CollapsibleSection kicker="Expenses" title="Expenses & reimbursements" lockable>
-            <ReimbursementsCard clientId={client.id} bare />
-          </CollapsibleSection>
+              <CollapsibleSection kicker="Expenses" title="Expenses & reimbursements" lockable>
+                <ReimbursementsCard clientId={client.id} bare />
+              </CollapsibleSection>
+            </>
+          )}
 
           <CollapsibleSection id="client-section-invoice" kicker="Invoice settings" title="Invoice customization" lockable>
             <InvoiceSettingsSectionBody client={client} onCommit={commit} />

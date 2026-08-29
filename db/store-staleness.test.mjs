@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import {
   AppDataStore,
+  BillingMasterError,
   CHECKLIST_ITEM_SELECT_COLUMNS,
   CREATED_AT_PRESERVED_TABLES,
   INVOICE_SELECT_COLUMNS,
@@ -14,6 +15,7 @@ import {
   mapInvoiceRow,
   mapRecurringReimbursementRow,
   sanitizeAppData,
+  sanitizeClientBillingLinks,
 } from './store.js'
 import {
   BULK_SAVE_TABLES,
@@ -1018,6 +1020,27 @@ function fakePostgres({
     // preservation, of what waiting state each row already carried.
     if (/^select id, done, completed_at[\s\S]*from checklist_items$/i.test(trimmed)) {
       return { rows: priorItemRows }
+    }
+    // `_refuseBillingMasterWrite`'s single-row lookup, and `createClient`'s
+    // roster read for the bill-to rules. Both answer out of `clientRows` so one
+    // fixture drives the read mapper and the guards alike. Anchored on their
+    // exact column lists: without these two branches the Postgres half of every
+    // master guard falls through to the empty default and is never exercised,
+    // which is precisely the "passes CI, wrong in production" shape cardinal
+    // rule 1 exists for.
+    if (/^select name, is_billing_master from clients where id = \$1$/i.test(trimmed)) {
+      const found = clientRows.find((row) => row.id === params?.[0])
+      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
+    }
+    if (/^select id, name, is_billing_master as "isBillingMaster"/i.test(trimmed)) {
+      return {
+        rows: clientRows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          isBillingMaster: row.is_billing_master === true,
+          billToClientId: row.bill_to_client_id ?? null,
+        })),
+      }
     }
     // The clients read inside read() — lets a test exercise the row mapper.
     if (/^select\b[\s\S]*\bfrom clients\b[\s\S]*order by name asc/i.test(trimmed)) {
@@ -9059,7 +9082,1138 @@ describe('invoice time-breakdown settings round-trip the bulk save (file backend
       expect(values.length, `statement ${statements} columns vs values`).toBe(columns.length)
       expect(columns).toContain('invoice_time_breakdown_mode')
       expect(columns).toContain('invoice_time_breakdown_amounts')
+      // Consolidated billing (featreq-65f5eac1) — same reason, same test. A
+      // client's bill-to link surviving one statement and not the other would
+      // silently un-group four companies on the next owner autosave.
+      expect(columns).toContain('bill_to_client_id')
+      expect(columns).toContain('is_billing_master')
+      expect(columns).toContain('invoice_recipient_client_id')
     }
     expect(statements).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * CONSOLIDATED BILLING — one invoice to a BILLING MASTER carrying several
+ * companies' work. featreq-65f5eac1, plan of record
+ * `docs/plans/consolidated-billing-2026-08.md`.
+ *
+ * Brittany's shape, verbatim: "KLC Master Client - no data enterered or
+ * collected but shows data for the 4 combined sends invoice to sub client you
+ * choose". So there are three new client columns, a `sourceClientId` on every
+ * line, a merge in the generator, and four write paths that now REFUSE a master
+ * rather than accepting work it could never show anywhere.
+ *
+ * The bulk save's `clients` INSERT is POSITIONAL and three past data-loss bugs
+ * were all the same shape — a column added to one of the two statements and not
+ * the other. That is why the round-trips below come first and why the
+ * column-count test above names these columns too.
+ */
+describe('consolidated billing: the three client columns (file backend)', () => {
+  const roster = () => [
+    {
+      id: 'klc-master',
+      name: 'KLC Master',
+      isBillingMaster: true,
+      invoiceRecipientClientId: 'sub-klc',
+    },
+    { id: 'sub-klc', name: 'KLC Floors & More', billToClientId: 'klc-master' },
+    { id: 'sub-x', name: 'XAct', billToClientId: 'klc-master' },
+  ]
+
+  const storedClient = async (id) =>
+    (await store.read()).clients.find((client) => client.id === id)
+
+  it('round-trips all three across the bulk save', async () => {
+    await store.write(workspace({ clients: roster(), timeEntries: [] }))
+
+    expect(await storedClient('klc-master')).toMatchObject({
+      isBillingMaster: true,
+      billToClientId: null,
+      invoiceRecipientClientId: 'sub-klc',
+    })
+    expect(await storedClient('sub-x')).toMatchObject({
+      isBillingMaster: false,
+      billToClientId: 'klc-master',
+      invoiceRecipientClientId: null,
+    })
+  })
+
+  it('answers null/false for a client that has never had one', async () => {
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme' }], timeEntries: [] }))
+
+    expect(await storedClient('c1')).toMatchObject({
+      billToClientId: null,
+      isBillingMaster: false,
+      invoiceRecipientClientId: null,
+    })
+  })
+
+  it('carries them through createClient too', async () => {
+    await store.write(workspace({ clients: roster(), timeEntries: [] }))
+
+    const created = await store.createClient({
+      name: 'Chemtrex',
+      contact: '',
+      billingMode: 'hourly',
+      hourlyRate: 100,
+      billToClientId: 'klc-master',
+    })
+
+    expect(created.billToClientId).toBe('klc-master')
+    expect((await storedClient(created.id)).billToClientId).toBe('klc-master')
+  })
+})
+
+/**
+ * The sanitizer, which is `sanitizeClientPlanRefs`'s twin and exists for the
+ * same reason: neither id column has a foreign key, and the last time an FK-free
+ * client column held a reference to a row that was gone it crashed every bulk
+ * write and took the app offline for a day (2026-06-17).
+ */
+describe('consolidated billing: bill-to links are resolved on write', () => {
+  const links = (clients) => sanitizeClientBillingLinks(clients)
+
+  const master = { id: 'm', name: 'KLC Master', isBillingMaster: true }
+
+  it('drops a bill-to pointing at a client that is not there', () => {
+    const out = links([master, { id: 's', billToClientId: 'ghost' }])
+    expect(out.get('s').billToClientId).toBeNull()
+  })
+
+  it('drops a bill-to pointing at itself', () => {
+    const out = links([master, { id: 's', billToClientId: 's' }])
+    expect(out.get('s').billToClientId).toBeNull()
+  })
+
+  it('drops a bill-to pointing at a client that is not a master', () => {
+    const out = links([master, { id: 's', billToClientId: 'other' }, { id: 'other' }])
+    expect(out.get('s').billToClientId).toBeNull()
+  })
+
+  // ONE LEVEL ONLY. A master that could itself be billed elsewhere is a chain,
+  // and a chain is a loop waiting to happen.
+  it('drops a master’s own bill-to, so there are no chains', () => {
+    const out = links([
+      master,
+      { id: 'm2', name: 'Second master', isBillingMaster: true, billToClientId: 'm' },
+    ])
+    expect(out.get('m2').billToClientId).toBeNull()
+    expect(out.get('m2').isBillingMaster).toBe(true)
+  })
+
+  it('drops a recipient that is not one of the master’s own subs', () => {
+    const out = links([
+      { ...master, invoiceRecipientClientId: 'stranger' },
+      { id: 's', billToClientId: 'm' },
+      { id: 'stranger' },
+    ])
+    expect(out.get('m').invoiceRecipientClientId).toBeNull()
+  })
+
+  it('drops a recipient named on a client that is not a master', () => {
+    const out = links([master, { id: 's', billToClientId: 'm', invoiceRecipientClientId: 's2' }])
+    expect(out.get('s').invoiceRecipientClientId).toBeNull()
+  })
+
+  it('keeps the links that hold', () => {
+    const out = links([
+      { ...master, invoiceRecipientClientId: 's' },
+      { id: 's', billToClientId: 'm' },
+    ])
+    expect(out.get('m').invoiceRecipientClientId).toBe('s')
+    expect(out.get('s').billToClientId).toBe('m')
+  })
+
+  /**
+   * The bulk save CLEANS rather than refuses. It is the owner tab's autosave and
+   * it re-inserts the whole workspace; a save that throws because a stale tab
+   * still remembers a deleted master is the plan-refs outage in a new column.
+   */
+  it('nulls a dangling link on the bulk save without refusing the save', async () => {
+    await expect(
+      store.write(
+        workspace({
+          clients: [{ id: 'c1', name: 'Acme', billToClientId: 'deleted-master' }],
+          timeEntries: [],
+        }),
+      ),
+    ).resolves.toBeUndefined()
+
+    const stored = (await store.read()).clients.find((client) => client.id === 'c1')
+    expect(stored.billToClientId).toBeNull()
+    // And the rest of the client survived — cleaning one field must not cost a row.
+    expect(stored.name).toBe('Acme')
+  })
+
+  // `sanitizeAppData`'s standing contract: a clean save passes through
+  // UNCHANGED. A client that never mentioned a bill-to must not come out of it
+  // having grown one — absence is given its meaning by the read mappers, and
+  // three fields quietly added to fifty clients on every autosave is churn the
+  // staleness fingerprint would feel.
+  it('does not grow the fields on a client that never had them', () => {
+    const client = { id: 'c1', name: 'Acme' }
+    sanitizeAppData({ clients: [client] })
+    expect('billToClientId' in client).toBe(false)
+    expect('isBillingMaster' in client).toBe(false)
+    expect('invoiceRecipientClientId' in client).toBe(false)
+  })
+
+  it('strips a master’s estimated hours on the bulk save', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'klc-master',
+            name: 'KLC Master',
+            isBillingMaster: true,
+            estimatedBookkeeperHours: 12,
+            estimatedAccountantHours: 3,
+          },
+        ],
+        timeEntries: [],
+      }),
+    )
+
+    const stored = (await store.read()).clients.find((client) => client.id === 'klc-master')
+    expect(stored.estimatedBookkeeperHours).toBeUndefined()
+    expect(stored.estimatedAccountantHours).toBeUndefined()
+  })
+})
+
+/**
+ * The create path says the SAME rules out loud. One deliberate create has a
+ * person waiting on the answer, and a silently-nulled field would leave her
+ * looking at a "Bills to" she set and the app did not keep.
+ */
+describe('consolidated billing: createClient refuses a link that does not hold', () => {
+  beforeEach(async () => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'klc-master', name: 'KLC Master', isBillingMaster: true },
+          { id: 'sub-x', name: 'XAct', billToClientId: 'klc-master' },
+          { id: 'plain', name: 'Acme' },
+        ],
+        timeEntries: [],
+      }),
+    )
+  })
+
+  const create = (overrides) =>
+    store.createClient({
+      name: 'Chemtrex',
+      contact: '',
+      billingMode: 'hourly',
+      hourlyRate: 100,
+      ...overrides,
+    })
+
+  it('refuses a bill-to that is not on file', async () => {
+    await expect(create({ billToClientId: 'ghost' })).rejects.toBeInstanceOf(BillingMasterError)
+    await expect(create({ billToClientId: 'ghost' })).rejects.toThrow(/no longer on file/i)
+  })
+
+  it('refuses a bill-to pointing at an ordinary client', async () => {
+    await expect(create({ billToClientId: 'plain' })).rejects.toThrow(/not a billing master/i)
+  })
+
+  it('refuses a master that is itself billed elsewhere', async () => {
+    await expect(
+      create({ isBillingMaster: true, billToClientId: 'klc-master' }),
+    ).rejects.toThrow(/cannot itself be billed/i)
+  })
+
+  it('refuses a recipient that is not one of this master’s subs', async () => {
+    await expect(
+      create({ isBillingMaster: true, invoiceRecipientClientId: 'sub-x' }),
+    ).rejects.toThrow(/own sub clients/i)
+  })
+
+  it('refuses estimated hours on a master', async () => {
+    await expect(
+      create({ isBillingMaster: true, estimatedBookkeeperHours: 8 }),
+    ).rejects.toThrow(/holds no work of its own/i)
+  })
+
+  it('allows the link that holds', async () => {
+    const created = await create({ billToClientId: 'klc-master' })
+    expect(created.billToClientId).toBe('klc-master')
+  })
+})
+
+/**
+ * "No data enterered or collected." The app REFUSES rather than
+ * allows-and-ignores: a master has no Recap of its own beyond the roll-up of its
+ * subs and its invoice is built entirely from their drafts, so an hour logged
+ * against it would simply stop existing.
+ *
+ * Four paths, deliberately. A guard on a path nobody uses is a guard nobody
+ * maintains.
+ */
+describe('consolidated billing: a billing master refuses work of its own', () => {
+  beforeEach(async () => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'klc-master', name: 'KLC Master', isBillingMaster: true },
+          { id: 'sub-x', name: 'XAct', billToClientId: 'klc-master' },
+        ],
+        timeEntries: [],
+        checklistTemplates: [
+          {
+            id: 'tpl-1',
+            title: 'Monthly close',
+            clientId: '',
+            isStandard: true,
+            frequency: 'monthly',
+            nextDueDate: '2026-09-01',
+            stages: [{ id: 'stage-1', name: 'Stage 1', assigneeId: 'emp-1', offsetDays: 0, items: [] }],
+          },
+        ],
+      }),
+    )
+  })
+
+  it('refuses a time entry', async () => {
+    await expect(
+      store.createTimeEntry({ clientId: 'klc-master', employeeId: 'emp-1', minutes: 30 }),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+    await expect(
+      store.createTimeEntry({ clientId: 'klc-master', employeeId: 'emp-1', minutes: 30 }),
+    ).rejects.toThrow(/KLC Master is a billing master/)
+  })
+
+  it('refuses a checklist', async () => {
+    await expect(
+      store.createChecklist({ title: 'Close', clientId: 'klc-master', assigneeId: 'emp-1', items: [] }),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+  })
+
+  it('refuses a recurring recipe copied onto it', async () => {
+    await expect(
+      store.copyTemplateToClient('tpl-1', { clientId: 'klc-master' }),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+  })
+
+  it('refuses a recurring reimbursement', async () => {
+    await expect(
+      store.addRecurringReimbursement({
+        clientId: 'klc-master',
+        description: 'QuickBooks Online',
+        amount: 90,
+        frequency: 'monthly',
+        startDate: '2026-08-01',
+      }),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+  })
+
+  // Re-targeting is the same write as creating. The endpoint validates that a
+  // target exists and is visible, which a billing master both is.
+  it('refuses a time entry moved onto it', async () => {
+    const entry = await store.createTimeEntry({
+      clientId: 'sub-x',
+      employeeId: 'emp-1',
+      minutes: 30,
+    })
+    await expect(
+      store.updateTimeEntry(entry.id, { clientId: 'klc-master' }),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+    // Nothing moved.
+    expect((await store.getTimeEntry(entry.id)).clientId).toBe('sub-x')
+  })
+
+  it('refuses a split that allocates any time to it', async () => {
+    const entry = await store.createTimeEntry({
+      clientId: 'sub-x',
+      employeeId: 'emp-1',
+      date: '2026-08-04',
+      minutes: 60,
+      billable: true,
+      description: 'Bank rec',
+      sessions: [],
+    })
+    await expect(
+      store.splitTimeEntry(
+        entry.id,
+        [
+          { clientId: 'sub-x', minutes: 30 },
+          { clientId: 'klc-master', minutes: 30 },
+        ],
+        'emp-1',
+        'grp-1',
+        'custom',
+      ),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+    // Refused before a single slice was written — the source is untouched.
+    expect((await store.getTimeEntry(entry.id)).minutes).toBe(60)
+  })
+
+  it('refuses a split ADJUSTMENT that allocates any time to it', async () => {
+    await expect(
+      store.adjustSplitGroup(
+        'grp-1',
+        [
+          { clientId: 'sub-x', minutes: 30 },
+          { clientId: 'klc-master', minutes: 30 },
+        ],
+        'emp-1',
+        'custom',
+      ),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+    // The control: the same call naming only subs gets the ordinary answer for
+    // a group that is not there, which is what proves the guard did not fire.
+    await expect(
+      store.adjustSplitGroup('grp-1', [{ clientId: 'sub-x', minutes: 30 }], 'emp-1', 'custom'),
+    ).rejects.not.toBeInstanceOf(BillingMasterError)
+  })
+
+  it('refuses a one-off reimbursement', async () => {
+    await expect(
+      store.addReimbursement({
+        clientId: 'klc-master',
+        date: '2026-08-04',
+        description: 'Courier',
+        amount: 40,
+      }),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+  })
+
+  // The control. All of them still work on the SUB — the guard is about the payer
+  // row, not about being part of a group.
+  it('leaves the subs alone', async () => {
+    expect(
+      await store.createTimeEntry({ clientId: 'sub-x', employeeId: 'emp-1', minutes: 30 }),
+    ).toMatchObject({ clientId: 'sub-x' })
+    expect(
+      await store.addRecurringReimbursement({
+        clientId: 'sub-x',
+        description: 'QuickBooks Online',
+        amount: 90,
+        frequency: 'monthly',
+        startDate: '2026-08-01',
+      }),
+    ).toMatchObject({ clientId: 'sub-x' })
+    expect(
+      await store.addReimbursement({
+        clientId: 'sub-x',
+        date: '2026-08-04',
+        description: 'Courier',
+        amount: 40,
+      }),
+    ).toMatchObject({ clientId: 'sub-x' })
+    // A missing source template is the ordinary null, not a refusal — proof the
+    // guard did not fire on the way past.
+    expect(await store.copyTemplateToClient('nope', { clientId: 'sub-x' })).toBeNull()
+  })
+})
+
+/**
+ * The merge. One invoice, the master's number, every line stamped with the sub
+ * it came from.
+ */
+describe('consolidated billing: generateInvoicesForPeriod merges the subs', () => {
+  const period = '2026-08'
+
+  async function seedGroup(overrides = {}) {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'plain', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 },
+          { id: 'sub-b', name: 'Bright Tower', billingMode: 'hourly', hourlyRate: 100 },
+          { id: 'sub-x', name: 'XAct', billingMode: 'hourly', hourlyRate: 100 },
+          { id: 'klc-master', name: 'KLC Master', isBillingMaster: true, billingMode: 'hourly', hourlyRate: 0 },
+        ].map((client) =>
+          client.id === 'sub-b' || client.id === 'sub-x'
+            ? { ...client, billToClientId: 'klc-master' }
+            : client,
+        ),
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [
+          { id: 't-plain', clientId: 'plain', employeeId: 'emp-1', date: `${period}-02`, minutes: 60, billable: true },
+          { id: 't-b', clientId: 'sub-b', employeeId: 'emp-1', date: `${period}-04`, minutes: 120, billable: true },
+          { id: 't-x', clientId: 'sub-x', employeeId: 'emp-1', date: `${period}-05`, minutes: 60, billable: true },
+        ],
+        ...overrides,
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('skips each sub with a reason that names its master', async () => {
+    await seedGroup()
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    expect(result.skipped).toEqual(
+      expect.arrayContaining([
+        { clientId: 'sub-b', reason: 'billed-to-other', billedToClientId: 'klc-master' },
+        { clientId: 'sub-x', reason: 'billed-to-other', billedToClientId: 'klc-master' },
+      ]),
+    )
+    // And nothing was generated FOR them — the whole point.
+    expect(result.created.map((invoice) => invoice.clientId).sort()).toEqual([
+      'klc-master',
+      'plain',
+    ])
+  })
+
+  it('says so when a master has nobody pointing at it', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'klc-master', name: 'KLC Master', isBillingMaster: true }],
+        timeEntries: [],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    expect(result.skipped).toEqual([{ clientId: 'klc-master', reason: 'master-without-subs' }])
+  })
+
+  it('builds ONE invoice for the master, sharing the month’s number sequence', async () => {
+    await seedGroup()
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    const merged = result.created.filter((invoice) => invoice.clientId === 'klc-master')
+    expect(merged).toHaveLength(1)
+    // Acme is first in the roster, so the master takes the second number of the
+    // month. One sequence, no special case.
+    expect(result.created.map((invoice) => invoice.number)).toEqual([
+      'INV-2026-08-001',
+      'INV-2026-08-002',
+    ])
+    expect(merged[0].number).toBe('INV-2026-08-002')
+  })
+
+  it('stamps every line with the sub it came from, in client-name order', async () => {
+    await seedGroup()
+
+    const result = await store.generateInvoicesForPeriod(period)
+    const merged = result.created.find((invoice) => invoice.clientId === 'klc-master')
+
+    // Bright Tower before XAct — name order, so the document reads the same way
+    // every month.
+    expect(merged.lineItems.map((line) => line.sourceClientId)).toEqual(['sub-b', 'sub-x'])
+    // Two hours and one hour at $100.
+    expect(merged.subtotal).toBe(300)
+    expect(merged.total).toBe(300)
+  })
+
+  it('carries a sub’s AD HOC line onto the merge', async () => {
+    // A sub no longer gets an invoice of its own, so ad hoc work left behind
+    // would be billed ZERO times rather than exactly once.
+    await seedGroup({
+      timeEntries: [
+        { id: 't-b', clientId: 'sub-b', employeeId: 'emp-1', date: `${period}-04`, minutes: 120, billable: true },
+        {
+          id: 't-x-adhoc',
+          clientId: 'sub-x',
+          employeeId: 'emp-1',
+          date: `${period}-05`,
+          minutes: 60,
+          billable: true,
+          isAdhoc: true,
+        },
+      ],
+    })
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'klc-master' })
+    const merged = result.created[0]
+
+    const adhoc = merged.lineItems.filter((line) => line.kind === 'adhoc')
+    expect(adhoc.length).toBeGreaterThan(0)
+    expect(adhoc.every((line) => line.sourceClientId === 'sub-x')).toBe(true)
+  })
+
+  /**
+   * A sub's own billing history, derived from the lines rather than kept as a
+   * second money record. "One payment lands on one invoice, so a company is paid
+   * when the invoice is" (plan §2).
+   */
+  it('reports each sub’s own subtotal off the master’s invoice', async () => {
+    await seedGroup()
+    await store.generateInvoicesForPeriod(period)
+
+    const brightTower = await store.listBilledOnInvoices('sub-b', { period })
+    const xact = await store.listBilledOnInvoices('sub-x')
+
+    expect(brightTower).toEqual([
+      {
+        invoiceId: expect.any(String),
+        number: 'INV-2026-08-002',
+        period,
+        status: 'draft',
+        masterClientId: 'klc-master',
+        masterClientName: 'KLC Master',
+        subtotal: 200,
+        paidAt: null,
+      },
+    ])
+    expect(xact[0].subtotal).toBe(100)
+    // An ordinary client is on nobody else's invoice.
+    expect(await store.listBilledOnInvoices('plain')).toEqual([])
+  })
+
+  /** Put an invoice on a sub directly — the generator will no longer make one. */
+  async function giveOwnInvoice(clientId, overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      ...(data.invoices ?? []),
+      {
+        id: `inv-${clientId}`,
+        clientId,
+        period,
+        number: `INV-${period}-050`,
+        kind: 'monthly',
+        status: 'sent',
+        lineItems: [{ kind: 'hourly', label: 'August', amount: 200 }],
+        subtotal: 200,
+        total: 200,
+        dueDate: '2026-09-30',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: null,
+        paidAt: null,
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  /**
+   * THE MIGRATION MONTH. August is already billed per-company; the master starts
+   * at the first unbilled month Alex chooses (plan §0). A first run against an
+   * already-billed month must not issue a second payable document for work a
+   * client has already been invoiced for.
+   */
+  it('leaves a sub that already holds its own live invoice off the merge', async () => {
+    await seedGroup()
+    await giveOwnInvoice('sub-b')
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'klc-master' })
+
+    expect(result.skipped).toContainEqual({
+      clientId: 'sub-b',
+      reason: 'already-billed-on-own-invoice',
+    })
+    const merged = result.created[0]
+    // XAct alone. Bright Tower's two hours are on the invoice it already has.
+    expect(merged.lineItems.map((line) => line.sourceClientId)).toEqual(['sub-x'])
+    expect(merged.subtotal).toBe(100)
+  })
+
+  it('does not double-bill a VOIDED sub invoice — that one merges', async () => {
+    await seedGroup()
+    await giveOwnInvoice('sub-b', { status: 'void' })
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'klc-master' })
+
+    // A withdrawn invoice bills nobody, so the work is still owed and belongs on
+    // the merge — the same rule `liveClientIds` applies everywhere else.
+    expect(result.created[0].lineItems.map((line) => line.sourceClientId)).toEqual([
+      'sub-b',
+      'sub-x',
+    ])
+  })
+
+  /**
+   * A true-up on a sub's last per-company invoice is real money. After the
+   * migration the master's invoice is the only place left for it to land, so the
+   * sub's draft is built with the SUB's own prior invoice.
+   */
+  it('carries a sub’s own prior-month true-up onto the master’s invoice', async () => {
+    await seedGroup()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-prior-b',
+        clientId: 'sub-b',
+        period: '2026-07',
+        number: 'INV-2026-07-001',
+        kind: 'monthly',
+        status: 'paid',
+        lineItems: [],
+        subtotal: 0,
+        total: 0,
+        scopeFlags: [],
+        adjustmentForNextPeriod: 25,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const merged = (await store.generateInvoicesForPeriod(period, { clientId: 'klc-master' }))
+      .created[0]
+
+    expect(merged.lineItems.find((line) => line.kind === 'adjustment')).toMatchObject({
+      amount: 25,
+      sourceClientId: 'sub-b',
+    })
+    // And she is TOLD: a sub-level true-up on a merged invoice means the sub was
+    // still invoicing on its own when it should not have been.
+    expect(merged.scopeFlags.map((flag) => flag.kind)).toContain('sub-adjustment')
+    // Outside the subtotal, inside the total — an adjustment's ordinary place.
+    expect(merged.subtotal).toBe(300)
+    expect(merged.total).toBe(325)
+  })
+
+  /** Move a seeded client's lifecycle without disturbing anything else. */
+  async function setStage(clientId, lifecycleStage) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients.find((entry) => entry.id === clientId).lifecycleStage = lifecycleStage
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  // A retired sub is on NO invoice — the merge leaves it out for the same reason
+  // this loop does — so "billed on the master's invoice" would be a false
+  // answer, and a confident one.
+  it('reports a retired sub as retired, not as billed on the master', async () => {
+    await seedGroup()
+    await setStage('sub-b', 'inactive')
+
+    expect(
+      (await store.generateInvoicesForPeriod(period, { clientId: 'sub-b' })).skipped,
+    ).toEqual([{ clientId: 'sub-b', reason: 'client-inactive' }])
+  })
+
+  it('reports a prospect sub as not billable yet', async () => {
+    await seedGroup()
+    await setStage('sub-b', 'proposal')
+
+    expect(
+      (await store.generateInvoicesForPeriod(period, { clientId: 'sub-b' })).skipped,
+    ).toEqual([{ clientId: 'sub-b', reason: 'not-billable-yet' }])
+  })
+
+  it('stays silent about a retired sub on the month run', async () => {
+    await seedGroup()
+    await setStage('sub-b', 'inactive')
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    expect(result.skipped.filter((row) => row.clientId === 'sub-b')).toEqual([])
+    // And its hours are off the merge.
+    const merged = result.created.find((invoice) => invoice.clientId === 'klc-master')
+    expect(merged.lineItems.map((line) => line.sourceClientId)).toEqual(['sub-x'])
+  })
+
+  it('leaves a VOIDED master invoice off the sub’s history', async () => {
+    await seedGroup()
+    await store.generateInvoicesForPeriod(period)
+    const [billed] = await store.listBilledOnInvoices('sub-b')
+
+    await store.updateInvoice(billed.invoiceId, { status: 'void' })
+
+    // A withdrawn invoice billed nobody; on a sub's page it would read as money
+    // owed. It stays in the master's own History as the withdrawal it is.
+    expect(await store.listBilledOnInvoices('sub-b')).toEqual([])
+  })
+})
+
+/**
+ * The GROUP-DISSOLVING AUTOSAVE. A payload that clears `isBillingMaster` on the
+ * payer while its subs still point at it silently un-groups every one of them.
+ * Warned, never refused — the bulk save must not throw — and Railway's log is
+ * where the last outage was reconstructed from.
+ */
+describe('consolidated billing: a dissolved group is logged, not refused', () => {
+  it('warns and names every link it dropped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await store.write(
+        workspace({
+          clients: [
+            { id: 'klc-master', name: 'KLC Master', isBillingMaster: false },
+            { id: 'sub-x', name: 'XAct', billToClientId: 'klc-master' },
+          ],
+          timeEntries: [],
+        }),
+      )
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('dropped 1 bill-to link'),
+        [{ id: 'sub-x', billToClientId: 'klc-master' }],
+      )
+    } finally {
+      warn.mockRestore()
+    }
+    // And the save landed: the group is gone, the clients are not.
+    const clients = (await store.read()).clients
+    expect(clients.map((client) => client.id).sort()).toEqual(['klc-master', 'sub-x'])
+  })
+
+  it('says nothing when every link holds', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await store.write(
+        workspace({
+          clients: [
+            { id: 'klc-master', name: 'KLC Master', isBillingMaster: true },
+            { id: 'sub-x', name: 'XAct', billToClientId: 'klc-master' },
+          ],
+          timeEntries: [],
+        }),
+      )
+      expect(
+        warn.mock.calls.filter(([message]) => String(message).includes('bill-to link')),
+      ).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
+/**
+ * COVERAGE ACROSS THE MERGE. Each company has its own QBO recurring charge with
+ * its own covered-date ledger; the line must still be generated and the window
+ * still advanced — on somebody else's invoice (plan §1).
+ *
+ * `_commitCoverageForInvoice` and `_deriveCoverageFlags` both key off the LINE's
+ * `recurringId` rather than the invoice's client, which is what makes this work.
+ * These pin that, because a "scope it to the invoice's client" tidy-up would
+ * look reasonable and would silently stop four cycles.
+ */
+describe('consolidated billing: a sub’s covered-date ledger rides the master’s invoice', () => {
+  const period = '2026-08'
+
+  async function seedGroupWithCoverage() {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'sub-b', name: 'Bright Tower', billingMode: 'subscription', monthlyRate: 500, billToClientId: 'klc-master' },
+          { id: 'klc-master', name: 'KLC Master', isBillingMaster: true },
+        ],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [],
+        recurringReimbursements: [
+          {
+            id: 'recur-qbo',
+            clientId: 'sub-b',
+            description: 'QuickBooks Online',
+            amount: 90,
+            frequency: 'monthly',
+            startDate: '2026-07-01',
+            coverageEnabled: true,
+            coverageTemplate: '{description} — {range}',
+            coverageStart: '2026-07-13',
+            coverageEnd: '2026-08-13',
+            coveragePaused: false,
+            coverageResumePending: false,
+            coverageHistory: {},
+          },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const readExpense = async () =>
+    (await store.read()).recurringReimbursements.find((entry) => entry.id === 'recur-qbo')
+
+  it('commits the sub’s window when the MASTER’s invoice is generated', async () => {
+    await seedGroupWithCoverage()
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'klc-master' })
+
+    const line = result.created[0].lineItems.find((entry) => entry.recurringId === 'recur-qbo')
+    expect(line).toBeTruthy()
+    expect(line.sourceClientId).toBe('sub-b')
+    // The first window is the one she typed on the expense; the ledger entry is
+    // written against the MASTER's invoice all the same, which is the point.
+    expect((await readExpense()).coverageHistory[period]).toMatchObject({
+      start: '2026-07-13',
+      end: '2026-08-13',
+    })
+  })
+
+  it('still refuses to mark the MASTER’s invoice reviewed while dates are unanswered', async () => {
+    await seedGroupWithCoverage()
+    await store.generateInvoicesForPeriod(period, { clientId: 'klc-master' })
+    // September and October never billed — November must not stride across them.
+    const november = await store.generateInvoicesForPeriod('2026-11', { clientId: 'klc-master' })
+
+    expect(
+      november.created[0].lineItems.find((line) => line.recurringId === 'recur-qbo'),
+    ).toMatchObject({ needsCoverageConfirmation: true, sourceClientId: 'sub-b' })
+    await expect(
+      store.updateInvoice(november.created[0].id, { status: 'reviewed' }),
+    ).rejects.toThrow(/confirm the covered dates/i)
+  })
+
+  it('keeps sourceClientId through an editor save', async () => {
+    // `sanitizeInvoiceLines` strips props it does not name, so one round trip
+    // through the editor would un-attribute the whole merged invoice.
+    await seedGroupWithCoverage()
+    const [invoice] = (await store.generateInvoicesForPeriod(period, { clientId: 'klc-master' }))
+      .created
+
+    const saved = await store.updateInvoice(invoice.id, { lineItems: invoice.lineItems })
+
+    expect(saved.lineItems.every((line) => line.sourceClientId === 'sub-b')).toBe(true)
+  })
+})
+
+/**
+ * The POSTGRES statements. Production is Postgres and these tests run the file
+ * backend, so a column that reaches one and not the other passes CI in silence —
+ * cardinal rule 1. Driven through the fake pool, which pins the SQL rather than
+ * the database.
+ */
+describe('consolidated billing: the Postgres statements', () => {
+  const boundClientColumns = (statement) => {
+    const match = /insert into clients\s*\(([\s\S]*?)\)\s*\n?\s*values/i.exec(statement.text)
+    const columns = match[1]
+      .split(',')
+      .map((column) => column.replace(/\/\/[^\n]*/g, '').trim())
+      .filter(Boolean)
+    const bound = {}
+    statement.params.forEach((value, index) => {
+      bound[columns[index]] = value
+    })
+    return bound
+  }
+
+  it('creates the three columns on boot', async () => {
+    const fake = fakePostgres()
+    // The fake cannot answer every probe `initialize()` makes (it returns no
+    // rows for the migration counts), so it is run for the DDL it ISSUES — which
+    // all lands before the first of those.
+    await postgresStore(fake).initialize().catch(() => {})
+
+    expect(
+      fake.matching(/^alter table clients add column if not exists bill_to_client_id text$/i),
+    ).toHaveLength(1)
+    expect(
+      fake.matching(
+        /^alter table clients add column if not exists is_billing_master boolean not null default false$/i,
+      ),
+    ).toHaveLength(1)
+    expect(
+      fake.matching(
+        /^alter table clients add column if not exists invoice_recipient_client_id text$/i,
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('binds them on the bulk save’s positional insert', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [
+          { id: 'klc-master', name: 'KLC Master', isBillingMaster: true, invoiceRecipientClientId: 'sub-x' },
+          { id: 'sub-x', name: 'XAct', billToClientId: 'klc-master' },
+        ],
+        timeEntries: [],
+      }),
+    )
+
+    const inserts = fake.matching(/^insert into clients/i)
+    expect(inserts).toHaveLength(2)
+    expect(boundClientColumns(inserts[0])).toMatchObject({
+      id: 'klc-master',
+      is_billing_master: true,
+      bill_to_client_id: null,
+      invoice_recipient_client_id: 'sub-x',
+    })
+    expect(boundClientColumns(inserts[1])).toMatchObject({
+      id: 'sub-x',
+      is_billing_master: false,
+      bill_to_client_id: 'klc-master',
+      invoice_recipient_client_id: null,
+    })
+  })
+
+  it('binds them on createClient', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createClient({
+      name: 'Chemtrex',
+      contact: '',
+      billingMode: 'hourly',
+      hourlyRate: 100,
+    })
+
+    const [insert] = fake.matching(/^insert into clients/i)
+    expect(boundClientColumns(insert)).toMatchObject({
+      bill_to_client_id: null,
+      is_billing_master: false,
+      invoice_recipient_client_id: null,
+    })
+  })
+
+  it('reads them back in read()', async () => {
+    const fake = fakePostgres({
+      clientRows: [
+        {
+          id: 'sub-x',
+          name: 'XAct',
+          contact: '',
+          billing_mode: 'hourly',
+          hourly_rate: 100,
+          bill_to_client_id: 'klc-master',
+          is_billing_master: false,
+          invoice_recipient_client_id: null,
+        },
+      ],
+    })
+    const data = await postgresStore(fake).read()
+
+    expect(data.clients[0]).toMatchObject({
+      billToClientId: 'klc-master',
+      isBillingMaster: false,
+      invoiceRecipientClientId: null,
+    })
+    // And the select actually asks for them.
+    const [select] = fake.matching(/^select[\s\S]*from clients[\s\S]*order by name asc/i)
+    expect(select.text).toMatch(/bill_to_client_id/)
+    expect(select.text).toMatch(/is_billing_master/)
+    expect(select.text).toMatch(/invoice_recipient_client_id/)
+  })
+
+  it('narrows listBilledOnInvoices with a jsonb containment match', async () => {
+    const fake = fakePostgres({
+      invoices: [
+        {
+          id: 'inv-1',
+          client_id: 'klc-master',
+          period: '2026-08',
+          number: 'INV-2026-08-002',
+          kind: 'monthly',
+          status: 'sent',
+          line_items: [
+            { kind: 'hourly', label: 'Bright Tower', amount: 200, sourceClientId: 'sub-b' },
+            { kind: 'hourly', label: 'XAct', amount: 100, sourceClientId: 'sub-x' },
+          ],
+          subtotal: 300,
+          total: 300,
+          master_client_name: 'KLC Master',
+        },
+      ],
+    })
+
+    const rows = await postgresStore(fake).listBilledOnInvoices('sub-b', { period: '2026-08' })
+
+    expect(rows).toEqual([
+      {
+        invoiceId: 'inv-1',
+        number: 'INV-2026-08-002',
+        period: '2026-08',
+        status: 'sent',
+        masterClientId: 'klc-master',
+        masterClientName: 'KLC Master',
+        subtotal: 200,
+        paidAt: null,
+      },
+    ])
+    const [select] = fake.matching(/from invoices i/i)
+    expect(select.text).toMatch(/line_items @> \$1::jsonb/)
+    // A voided invoice billed nobody — filtered in the statement, not after it.
+    expect(select.text).toMatch(/status <> 'void'/)
+    expect(select.params[0]).toBe('[{"sourceClientId":"sub-b"}]')
+    expect(select.params[1]).toBe('2026-08')
+  })
+
+  it('refuses a time entry on a master through the Postgres branch', async () => {
+    const fake = fakePostgres({
+      clientRows: [{ id: 'klc-master', name: 'KLC Master', is_billing_master: true }],
+    })
+
+    await expect(
+      postgresStore(fake).createTimeEntry({
+        clientId: 'klc-master',
+        employeeId: 'emp-1',
+        minutes: 30,
+      }),
+    ).rejects.toThrow(/KLC Master is a billing master/)
+    // Refused BEFORE the insert — the refusal is the whole of what happened.
+    expect(fake.matching(/^\s*insert into time_entries/i)).toHaveLength(0)
+  })
+
+  it('lets an ordinary client through the same Postgres guard', async () => {
+    const fake = fakePostgres({
+      clientRows: [{ id: 'plain', name: 'Acme', is_billing_master: false }],
+    })
+
+    await postgresStore(fake).createTimeEntry({
+      clientId: 'plain',
+      employeeId: 'emp-1',
+      minutes: 30,
+    })
+
+    expect(fake.matching(/^\s*insert into time_entries/i)).toHaveLength(1)
+  })
+
+  it('refuses a bad bill-to on createClient through the Postgres branch', async () => {
+    const fake = fakePostgres({
+      clientRows: [{ id: 'plain', name: 'Acme', is_billing_master: false }],
+    })
+
+    await expect(
+      postgresStore(fake).createClient({
+        name: 'Chemtrex',
+        contact: '',
+        billingMode: 'hourly',
+        hourlyRate: 100,
+        billToClientId: 'plain',
+      }),
+    ).rejects.toThrow(/not a billing master/i)
+    expect(fake.matching(/^insert into clients/i)).toHaveLength(0)
+  })
+
+  it('accepts a bill-to naming a real master through the Postgres branch', async () => {
+    const fake = fakePostgres({
+      clientRows: [{ id: 'klc-master', name: 'KLC Master', is_billing_master: true }],
+    })
+
+    const created = await postgresStore(fake).createClient({
+      name: 'Chemtrex',
+      contact: '',
+      billingMode: 'hourly',
+      hourlyRate: 100,
+      billToClientId: 'klc-master',
+    })
+
+    expect(created.billToClientId).toBe('klc-master')
+    expect(boundClientColumns(fake.matching(/^insert into clients/i)[0])).toMatchObject({
+      bill_to_client_id: 'klc-master',
+    })
+  })
+
+  /**
+   * The bulk save's invoice SNAPSHOT/RESTORE. Lines are jsonb, so they ride the
+   * pair whole — but "whole" is a claim, and the three past data-loss bugs were
+   * all a column that rode nothing. This pins that a merged invoice comes back
+   * with its attribution intact.
+   */
+  it('restores sourceClientId through the bulk save’s invoice snapshot', async () => {
+    const fake = fakePostgres({
+      invoices: [
+        {
+          id: 'inv-1',
+          client_id: 'klc-master',
+          period: '2026-08',
+          number: 'INV-2026-08-002',
+          kind: 'monthly',
+          status: 'sent',
+          line_items: [{ kind: 'hourly', label: 'Bright Tower', amount: 200, sourceClientId: 'sub-b' }],
+          subtotal: 200,
+          total: 200,
+        },
+      ],
+    })
+    await postgresStore(fake).write(
+      workspace({ clients: [{ id: 'klc-master', name: 'KLC Master', isBillingMaster: true }], timeEntries: [] }),
+    )
+
+    const [restore] = fake.matching(/^insert into invoices/i)
+    const lineItems = JSON.parse(restore.params[6])
+    expect(lineItems[0].sourceClientId).toBe('sub-b')
   })
 })

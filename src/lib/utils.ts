@@ -218,7 +218,7 @@ export type InvoiceMonthSummary = {
  * `Intl.NumberFormat` renders as "-$0.00". A month that is square has to read
  * as square.
  */
-function toCents(amount: number) {
+export function toCents(amount: number) {
   return Math.round(amount * 100) / 100
 }
 

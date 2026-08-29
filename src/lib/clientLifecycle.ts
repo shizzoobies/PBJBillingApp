@@ -9,11 +9,17 @@
  * retired client would have kept showing up in whichever picker was missed.
  *
  * The rule of thumb for callers:
- *   - a picker that CREATES something (timer, manual entry, split, new task,
- *     template copy, team assignment, invoice run) → `selectableClients`;
+ *   - a picker that offers a client for WORK (timer, manual entry, split, new
+ *     task, template copy) → `workableClients`;
+ *   - a picker that CREATES something else about a client (team assignment,
+ *     invoice run) → `selectableClients`;
  *   - a filter/label over data that already exists (reports, timesheets,
  *     approvals, invoice history, board filters, Client Recap) → the raw list,
  *     because history must never lose its subject.
+ *
+ * The work/not-work split is the second reason a client can be unofferable, and
+ * it arrived with consolidated billing: a BILLING MASTER is a payer, not a
+ * company anyone works for. See {@link workableClients}.
  */
 import type { Client, LifecycleStage } from './types'
 
@@ -45,6 +51,41 @@ export function selectableClients<T extends Pick<Client, 'id' | 'lifecycleStage'
 ): T[] {
   const keep = new Set(keepIds.filter((id): id is string => Boolean(id)))
   return clients.filter((client) => !isInactiveClient(client) || keep.has(client.id))
+}
+
+/** Is this client a billing master — a payer that holds no work of its own? */
+export function isBillingMasterClient(client: Pick<Client, 'isBillingMaster'>): boolean {
+  return client.isBillingMaster === true
+}
+
+/**
+ * The clients a picker may offer to be WORKED — `selectableClients`, minus the
+ * billing masters.
+ *
+ * A billing master exists to be invoiced, not to be worked: it holds no time
+ * entries, checklists, estimates or recurring reimbursements, and the server
+ * refuses writes of any of them against it. Offering "KLC Master" in the timer
+ * dropdown is therefore an invitation to a refusal — the app should not present
+ * a choice it will not honor. This is the UI half of the plan's "hide those
+ * surfaces in the UI for a master"; the server-side guard is the half that
+ * makes it safe rather than merely tidy.
+ *
+ * `keepIds` re-admits for the same reason it does above, and it matters MORE
+ * here: a record already pointed at a master (data written before the guard, or
+ * before a client became one) must keep its own name in its own dropdown, or
+ * the select renders blank and the next save silently re-points it.
+ *
+ * Masters are still offered wherever they are legitimately addressed — the
+ * invoice month run, the client list and detail pages, and the Client Recap
+ * picker, which is where their roll-up lives.
+ */
+export function workableClients<
+  T extends Pick<Client, 'id' | 'lifecycleStage' | 'isBillingMaster'>,
+>(clients: readonly T[], keepIds: readonly (string | null | undefined)[] = []): T[] {
+  const keep = new Set(keepIds.filter((id): id is string => Boolean(id)))
+  return selectableClients(clients, keepIds).filter(
+    (client) => !isBillingMasterClient(client) || keep.has(client.id),
+  )
 }
 
 /**

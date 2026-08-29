@@ -170,6 +170,43 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-08-28 (late) — KLC consolidated billing is BUILT and shipped; the
+MIGRATION is the remaining step and needs Alex's explicit yes.** Brittany
+answered Q3 ("2" — the paper shows one combined line, no company names; the
+split lives app-side only) and the pre-approved build ran: four parallel
+agents (store/lib/server/UI) against `docs/plans/consolidated-billing-2026-08.md`,
+then an adversarial review that found **2 blockers** — the Stripe hosted
+checkout page still rendered the per-company breakdown (the one client-facing
+surface outside our own renderers; now routed through
+`clientFacingInvoiceLines` with negative-match tests), and a migration-month
+double-bill (a sub with a live invoice re-billed on the master; now filtered
+with skip reason `already-billed-on-own-invoice`, tripwire-tested). Also
+fixed from review: three vanishing-hour paths (updateTimeEntry re-target,
+split, adjust) + one-off reimbursements now refuse masters; subs' prior-month
+true-ups carry onto the master (`sub-adjustment` flag); skip-reason lifecycle
+ordering; master recap gated on per-sub visibility (403
+`master_subs_not_visible`); card-fee/retainer-credit lines survive combined
+rendering (`COMBINED_KEPT_KINDS` — the fee's kind is `card-fee`); masters
+hidden from every WORK picker via `workableClients` (three-tier rule in
+`src/lib/clientLifecycle.ts`); fakePostgres harness now exercises the PG
+guard branches. Suite 2332 → **2524 / 146 files**; print check PASSED via
+the wrapper (`scratchpad playwright wrapper — cached Chromium`); merged-draft
+dry run over REAL prod rows: $55+$185+$295+$185 = $720 exact, one combined
+line, name-leak clean.
+
+Known and deliberate: `invoiceRenderMode` (the future option-1 flip) is
+UNPERSISTED — combined derives from `is_billing_master`; a column comes with
+any option-1 ask. The recipient PICKER is a filed follow-up chip
+(`invoiceRecipientClientId` is migration-set; sends refuse with a sentence
+naming Alex until then). Team-assignment picker still offers masters
+(admin action, not work — deliberate). History's per-company rows under a
+master invoice: not built, noted in the plan.
+
+**The migration** (create the KLC Master row, point the four subs at it, set
+the recipient sub) is a PROD WRITE awaiting Alex's per-write yes with a
+committed snapshot — see the plan §0. Until it runs, nothing user-visible
+changes: no master exists.
+
 **2026-08-27 (later) — the real Windows .exe exists, WORKS (Alex confirmed on
 his machine), and its sign-in went through one field-tested redesign.** Alex
 approved phase 2 same-day; `docs/plans/desktop-shell-2026-08.md` records what

@@ -197,6 +197,38 @@ export type Client = {
    * never silently become a prospect). See {@link LifecycleStage}.
    */
   lifecycleStage?: LifecycleStage
+  /* -- Consolidated billing (KLC): one invoice, four companies -------------- */
+  /**
+   * The BILLING MASTER this client's work is billed on. Absent/null — which is
+   * every client but the KLC companies — means it is billed on its own invoice.
+   *
+   * ONE LEVEL ONLY: a master may not itself point elsewhere, and the id is
+   * sanitized on write exactly like `planIds`. A dangling id in a field with no
+   * foreign key is the 2026-06-17 outage again.
+   *
+   * A client with this set is skipped by the monthly run with the reason
+   * `billed-to-other` — a real answer, so the never-generates detector can say
+   * "billed on KLC's invoice" instead of reporting it unbilled forever.
+   */
+  billToClientId?: string | null
+  /**
+   * This client IS a billing master. It holds no time, checklists, estimates or
+   * recurring reimbursements of its own — "no data entered or collected but
+   * shows data for the 4 combined" — and its invoice is built entirely from the
+   * lines of the clients pointing at it through `billToClientId`.
+   *
+   * The per-company split is visible ONLY inside the app (editor, recaps,
+   * history). The document the client reads is one combined line: Brittany's
+   * answer to "does KLC see the other companies' names" was "2".
+   */
+  isBillingMaster?: boolean
+  /**
+   * Billing masters only: WHICH sub's contacts the invoice email goes to. A
+   * master has no contacts of its own — "sends invoice to sub client you
+   * choose" — so this names the sub whose recipients are used. Absent leaves it
+   * to the server's resolver default.
+   */
+  invoiceRecipientClientId?: string | null
 }
 
 export type SubscriptionPlan = {
@@ -334,6 +366,17 @@ export type PersistedInvoiceLine = {
    * having been deleted — to put the money back on account.
    */
   retainerInvoiceId?: string | null
+  /**
+   * WHICH company's work this line is, on a billing master's merged invoice.
+   * Absent/null means the invoice's own client, which is every line on every
+   * ordinary invoice.
+   *
+   * Written at generation and never derived afterwards: it is what answers
+   * "what did each company pay" on the recaps and the sub's client page. The
+   * CLIENT never sees it — the printed and emailed document renders one
+   * combined line (`clientFacingInvoiceLines`, lib/invoice-email.js).
+   */
+  sourceClientId?: string | null
 }
 
 /** Something on the draft worth a decision before sending — never a charge. */
@@ -1414,6 +1457,9 @@ export type InvoiceLine = {
   label: string
   detail: string
   amount: number
+  /** See {@link PersistedInvoiceLine.sourceClientId}. Absent = the invoice's
+   *  own client, which is every line the live per-client calculation builds. */
+  sourceClientId?: string | null
 }
 
 /**

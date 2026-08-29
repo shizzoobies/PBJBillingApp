@@ -30,17 +30,29 @@ import {
   type InvoiceRecipientDetail,
 } from '../lib/utils'
 import {
+  clientFacingInvoiceLines,
+  invoiceDocumentRenderMode,
   normalizeTimeBreakdownMode,
   renderedInvoiceLines,
 } from '../../lib/invoice-lines.js'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
 import { generateInvoicesRequest, listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
 import { selectableClients } from '../lib/clientLifecycle'
+import { generateSkipMessage } from '../lib/invoiceSkipMessage'
 
 type DisplayLine = InvoiceLine & { groupKey?: string }
 
 type DisplayInvoice = {
   invoice: Invoice
+  /**
+   * What KIND of document this is — carried because the client-facing renderer
+   * asks. `Invoice` is the ephemeral per-client calculation and has no `kind`
+   * of its own, and a retainer is exempt from combined rendering: rendered
+   * combined it would print "Bookkeeping services — August 2026" over money
+   * that is not a month's bookkeeping. Only a stored invoice can be a retainer,
+   * so every other builder here says 'monthly'.
+   */
+  kind: PersistedInvoice['kind']
   lines: DisplayLine[]
   groupSubtotals: Array<{ label: string; total: number }>
   hideTimeBreakdown: boolean
@@ -118,30 +130,6 @@ function getServiceLabel(client: Client) {
   return 'Billable hours'
 }
 
-/**
- * Why a single-client generate produced nothing. A month-wide run can pass
- * these over in silence — one prospect among forty clients is not news — but
- * someone who just asked for ONE invoice and got none is owed the reason.
- */
-function generateSkipMessage(
-  reason: string | undefined,
-  clientName: string,
-  periodLabel: string,
-) {
-  switch (reason) {
-    case 'nothing-to-bill':
-      return `${clientName} has nothing to bill for ${periodLabel} — no hours, plan, or reimbursements — so no invoice was created.`
-    case 'already-generated':
-      return `${clientName} already has an invoice for ${periodLabel}. Reload the page and try again.`
-    case 'not-billable-yet':
-      return `${clientName} is not an active client yet, so there is nothing to bill.`
-    case 'no-such-client':
-      return `${clientName} is no longer on file.`
-    default:
-      return `No invoice was created for ${clientName} for ${periodLabel}.`
-  }
-}
-
 function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean): InvoiceDraft {
   return {
     include: {
@@ -178,6 +166,7 @@ function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoi
   )
   return {
     invoice: { ...baseInvoice, lines, total },
+    kind: 'monthly',
     lines,
     groupSubtotals: [],
     hideTimeBreakdown: false,
@@ -224,6 +213,7 @@ function buildDisplayInvoice(
           amount: invoice.total,
         },
       ],
+      kind: 'monthly',
       groupSubtotals: [],
       hideTimeBreakdown: true,
       hideInternal,
@@ -297,6 +287,7 @@ function buildDisplayInvoice(
 
   return {
     invoice,
+    kind: 'monthly',
     lines,
     groupSubtotals,
     hideTimeBreakdown: false,
@@ -324,7 +315,14 @@ function persistedToDisplay(
   client: Client,
   periodLabel: string,
 ): DisplayInvoice {
+  // `kind` is carried through, not dropped as it was: the client-facing
+  // renderer keeps a `card-fee` and a `retainer_credit` line even in combined
+  // mode — they explain the CHARGE rather than describe the work — and it can
+  // only recognize them by kind. Mapping to label/detail/amount alone erased a
+  // card fee from the printed sheet while the PDF and the email still showed
+  // it, which is the one place those three documents may not disagree.
   const lines: DisplayLine[] = renderedInvoiceLines(stored.lineItems).map((line) => ({
+    kind: line.kind,
     label: line.label,
     detail: line.detail,
     amount: line.amount,
@@ -340,6 +338,7 @@ function persistedToDisplay(
       lines,
       total: stored.total,
     },
+    kind: stored.kind,
     lines,
     groupSubtotals: [],
     hideTimeBreakdown: true,
@@ -605,9 +604,10 @@ export function InvoicesPage() {
         if (!made) {
           fail(
             generateSkipMessage(
-              built.skipped[0]?.reason,
+              built.skipped[0],
               selectedClient.name,
               billingPeriodLabel,
+              (id) => data.clients.find((entry) => entry.id === id)?.name ?? null,
             ),
           )
           return
@@ -1271,6 +1271,36 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
       : ''
     : billingClient.footerNote ?? ''
 
+  /*
+   * WHAT THE CLIENT ACTUALLY READS.
+   *
+   * A billing master's document shows ONE line — "Bookkeeping services —
+   * {month}" carrying the invoice total — and no company names anywhere.
+   * Brittany's answer to "does KLC see the other companies' names" was "2": the
+   * per-company split lives app-side only (the month-run editor, the recaps,
+   * history), never on the page the client is handed.
+   *
+   * The rule is NOT restated here. This is the same `clientFacingInvoiceLines`
+   * the emailed body and the generated PDF ask, so the three documents cannot
+   * drift apart — and a sent invoice's copy of record cannot end up showing
+   * something the printed one did not. For every other client it returns the
+   * stored lines unchanged, which is what this sheet has always printed.
+   */
+  // `invoiceDocumentRenderMode`, not `invoiceRenderMode`: the latter is the
+  // CLIENT's setting, this is what THIS document does with it, and a retainer
+  // is exempt — combined it would print "Bookkeeping services — {month}" over
+  // money that is not a month's bookkeeping. Both this and the line call below
+  // must be asked about the same document, or the subtotal rows and the lines
+  // would answer to different rules.
+  const printDocument = {
+    kind: display.kind,
+    period: invoice.period,
+    total: invoice.total,
+    lineItems: display.lines,
+  }
+  const combined = invoiceDocumentRenderMode(printDocument, billingClient) === 'combined'
+  const printLines = clientFacingInvoiceLines(printDocument, billingClient)
+
   return (
     <section className="print-sheet">
       <header>
@@ -1317,19 +1347,26 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
           </tr>
         </thead>
         <tbody>
-          {display.lines.map((line, index) => (
+          {printLines.map((line, index) => (
             <tr key={`${line.label}-${line.detail}-${index}`}>
               <td>{line.label}</td>
               <td>{line.detail}</td>
               <td>{currency.format(line.amount)}</td>
             </tr>
           ))}
-          {display.groupSubtotals.map((subtotal) => (
-            <tr className="print-subtotal-row" key={`subtotal-${subtotal.label}`}>
-              <td colSpan={2}>{subtotal.label} subtotal</td>
-              <td>{currency.format(subtotal.total)}</td>
-            </tr>
-          ))}
+          {/* Subtotals are per-CATEGORY groupings of the live preview's lines,
+              which the combined document does not have — its one line already
+              states the total, so a subtotal row could only repeat it or, once
+              a prior-month adjustment is in play, contradict it in front of the
+              client. The generated PDF suppresses the row for the same reason. */}
+          {combined
+            ? null
+            : display.groupSubtotals.map((subtotal) => (
+                <tr className="print-subtotal-row" key={`subtotal-${subtotal.label}`}>
+                  <td colSpan={2}>{subtotal.label} subtotal</td>
+                  <td>{currency.format(subtotal.total)}</td>
+                </tr>
+              ))}
         </tbody>
       </table>
       {showField('paymentTerms') && billingClient.paymentTerms ? (
