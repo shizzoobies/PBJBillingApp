@@ -202,10 +202,7 @@ naming Alex until then). Team-assignment picker still offers masters
 (admin action, not work — deliberate). History's per-company rows under a
 master invoice: not built, noted in the plan.
 
-**The migration** (create the KLC Master row, point the four subs at it, set
-the recipient sub) is a PROD WRITE awaiting Alex's per-write yes with a
-committed snapshot — see the plan §0. Until it runs, nothing user-visible
-changes: no master exists.
+**The migration RAN 2026-08-29** with Alex's explicit yes: master `client-lamjjjc` ("KLC Floors & More"), four subs linked, recipient = the KLC sub (renamed "KLC Floors & More — Bookkeeping"). September's generate produces the first combined invoice. Undo snapshot: `docs/prod-snapshots/2026-08-28-klc-master-pre-migration.json`.
 
 **2026-08-27 (later) — the real Windows .exe exists, WORKS (Alex confirmed on
 his machine), and its sign-in went through one field-tested redesign.** Alex
