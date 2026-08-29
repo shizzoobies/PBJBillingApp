@@ -1,0 +1,54 @@
+{
+  "takenAt": "2026-08-29T02:36:39.324Z",
+  "purpose": "Pre-migration state of the four KLC-group clients (featreq-65f5eac1). The three billing-master columns did NOT yet exist in prod at snapshot time (the a047283 deploy adds them at boot; they arrive null/false for every row — that IS the pre-state). Undo = delete the master row and null bill_to_client_id + invoice_recipient_client_id on these four ids.",
+  "billingMasterColumnsExisted": false,
+  "requiredInsertColumns": [
+    "id",
+    "name",
+    "contact",
+    "billing_mode",
+    "hourly_rate"
+  ],
+  "clients": [
+    {
+      "id": "client-5eqylk0",
+      "name": "Bright Tower Development, LLC",
+      "billing_mode": "subscription",
+      "monthly_rate": "55.00",
+      "hourly_rate": "125.00",
+      "payment_terms": "Due on receipt",
+      "email": "",
+      "contact_name": ""
+    },
+    {
+      "id": "client-w9sznjy",
+      "name": "Chemtrex, Inc.",
+      "billing_mode": "subscription",
+      "monthly_rate": "185.00",
+      "hourly_rate": "125.00",
+      "payment_terms": "Due on receipt",
+      "email": "",
+      "contact_name": ""
+    },
+    {
+      "id": "client-6t9crg6",
+      "name": "KLC Floors & More",
+      "billing_mode": "subscription",
+      "monthly_rate": "295.00",
+      "hourly_rate": "125.00",
+      "payment_terms": "Due on receipt",
+      "email": "",
+      "contact_name": ""
+    },
+    {
+      "id": "client-yw0a4eo",
+      "name": "XAct Administrative Solutions, LLC",
+      "billing_mode": "subscription",
+      "monthly_rate": "185.00",
+      "hourly_rate": "125.00",
+      "payment_terms": "Due on receipt",
+      "email": "",
+      "contact_name": ""
+    }
+  ]
+}
