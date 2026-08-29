@@ -376,6 +376,25 @@ export function ClientDetailPage() {
           it is one they could not see before either. */}
       {activeSection === 'billing' && ownerMode ? (
         <div className="client-tab-panel" id={CLIENT_SECTION_ANCHORS.billing} role="tabpanel">
+          {/* The master's counterpart to the "Billed on" card below, and first
+              for the same reason: nothing else in this tab matters while the
+              combined invoice has nowhere to go — the server refuses the send
+              outright until a receiving company is picked here. */}
+          {client.isBillingMaster ? (
+            <CollapsibleSection
+              id="client-section-invoice-recipient"
+              kicker="Billing"
+              title="Combined invoice recipient"
+              lockable
+            >
+              <MasterInvoiceRecipientBody
+                client={client}
+                clients={data.clients}
+                onCommit={commit}
+              />
+            </CollapsibleSection>
+          ) : null}
+
           {/* FIRST in the tab, and only for a company whose work is billed
               elsewhere: everything under it — rate, plans, reimbursements —
               feeds someone else's document, and reading those panels without
@@ -974,6 +993,76 @@ function BillingSectionBody({
         addLabel="+ Add plan / service"
         emptyHelper="No plans/services selected yet."
       />
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Combined invoice recipient (billing masters)                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Billing masters only: WHICH sub's contacts the combined invoice email goes
+ * to. A master has no contacts of its own — "sends invoice to sub client you
+ * choose" — and the server refuses a send outright while nothing is picked
+ * (409 `master_recipient_unset`), so this select is the difference between
+ * the master's invoice being emailable and not.
+ *
+ * Offered: the master's active subs, plus the current pick even if that sub
+ * has since been retired — dropping it would render the select blank and
+ * silently re-point the master on the next save, the same rule the client
+ * pickers follow (`workableClients`' keepIds). The value rides the ordinary
+ * client write, where `sanitizeClientBillingLinks` keeps it only while it
+ * names one of this master's own subs, so a company moved out from under the
+ * master clears itself rather than lingering as a stale target.
+ */
+export function MasterInvoiceRecipientBody({
+  client,
+  clients,
+  onCommit,
+}: {
+  client: Client
+  clients: Client[]
+  onCommit: (patch: Partial<Client>) => void
+}) {
+  const current = client.invoiceRecipientClientId ?? ''
+  const subs = clients
+    .filter(
+      (entry) =>
+        entry.billToClientId === client.id && (entry.id === current || !isInactiveClient(entry)),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name))
+
+  if (subs.length === 0) {
+    return (
+      <p className="muted-text">
+        No companies bill to this master yet, so there is no one whose contacts could receive
+        its invoice. Point a company at this master first, then pick the recipient here.
+      </p>
+    )
+  }
+
+  return (
+    <div className="form-grid two-col">
+      <SaveSelectField
+        label="Send the combined invoice to"
+        // A stale value naming a non-sub shows as Not set — which is exactly
+        // how the server will treat it at send time.
+        value={subs.some((sub) => sub.id === current) ? current : ''}
+        onCommit={(value) => onCommit({ invoiceRecipientClientId: value || null })}
+        options={[
+          { value: '', label: 'Not set — sending is refused' },
+          ...subs.map((sub) => ({
+            value: sub.id,
+            label: isInactiveClient(sub) ? `${sub.name} (inactive)` : sub.name,
+          })),
+        ]}
+      />
+      <p className="muted-text">
+        The combined invoice is emailed to this company&apos;s contacts, under the
+        master&apos;s name. It can be changed any month — the next send uses whatever is
+        picked then.
+      </p>
     </div>
   )
 }

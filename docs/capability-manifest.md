@@ -1930,8 +1930,10 @@ Clients page meanwhile. Owner-only.
 > company names, no per-company amounts, on the printed invoice, the PDF, and
 > the emailed invoice alike. That is deliberate and was the client's own
 > choice. The invoice email goes to whichever sub's contacts the owner picked
-> for that master; if none is picked yet, sending refuses with a sentence
-> saying so. Retainers are still issued per company, never combined. The
+> for that master — set in the "Combined invoice recipient" section on the
+> master's client page, under Billing; if none is picked yet, sending refuses
+> with a sentence pointing there. Retainers are still issued per company,
+> never combined. The
 > master's Client Recap shows each company's numbers rolled up (and each sub
 > keeps its own recap); a couple of recap figures (sales tax status,
 > projection) do not roll up and say why with a dash. A billing master cannot

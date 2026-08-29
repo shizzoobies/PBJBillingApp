@@ -1059,7 +1059,7 @@ function activeSubsOfMaster(clients, masterId) {
 const MASTER_RECIPIENT_UNSET = Object.freeze({
   error: 'master_recipient_unset',
   message:
-    'This master has no receiving company set for its invoices yet — ask Alex to set one.',
+    'This master has no receiving company set for its invoices yet — pick one on its client page, under Billing.',
 })
 
 /**

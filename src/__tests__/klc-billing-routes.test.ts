@@ -97,13 +97,13 @@ describe('who a billing master’s invoice is emailed to', () => {
     expect(afterEarlyReturn).not.toContain('flatMap')
   })
 
-  // The remedy has to be one that EXISTS. Nothing in src/ writes
-  // `invoiceRecipientClientId` — the picker is a filed follow-up — so naming a
-  // Settings control would send whoever read it hunting for something that is
-  // not there. When the picker ships, this sentence changes with it.
+  // The remedy has to be one that EXISTS. The picker is the "Combined invoice
+  // recipient" section under Billing on the master's client page
+  // (`MasterInvoiceRecipientBody`) — this sentence points there, and pointed
+  // at Alex before that section shipped.
   it('says the same sentence everywhere, and points at a remedy that exists', () => {
     expect(serverSource).toMatch(
-      /const MASTER_RECIPIENT_UNSET = Object\.freeze\(\{\s*error: 'master_recipient_unset',\s*message:\s*'This master has no receiving company set for its invoices yet — ask Alex to set one\.',\s*\}\)/,
+      /const MASTER_RECIPIENT_UNSET = Object\.freeze\(\{\s*error: 'master_recipient_unset',\s*message:\s*'This master has no receiving company set for its invoices yet — pick one on its client page, under Billing\.',\s*\}\)/,
     )
     expect(serverSource).not.toContain('Settings on the master client')
   })
