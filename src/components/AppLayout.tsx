@@ -21,6 +21,7 @@ import { AssistantPanel } from './AssistantPanel'
 import { DesktopAppButton } from './DesktopAppButton'
 import { NotificationBell } from './NotificationBell'
 import { SummaryItem } from './SummaryItem'
+import { TopbarTimer } from './TopbarTimer'
 import { navItems, navSections, type NavItem } from './navItems'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 
@@ -226,6 +227,10 @@ export function AppLayout() {
             <p className={`sync-banner sync-${displayedSyncState}`}>{displayedSyncMessage}</p>
           </div>
           <div className="topbar-actions">
+            {/* First in the bar because it is the only control here that is
+                time-critical: a running clock has to be seen without hunting
+                for it, from whatever page the user happens to be on. */}
+            <TopbarTimer />
             <label className="period-control">
               <CalendarDays size={16} />
               <span>Billing month</span>

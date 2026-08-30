@@ -115,8 +115,12 @@ Clients page meanwhile. Owner-only.
   auto-filled any more: the description box starts empty and the app never
   invents a "standard" note, so what's saved is only what a person typed.
   - **Starting a timer is still instant** — start the clock with nothing filled
-    in and fill the fields in while it runs (from the Time page, or the Track
-    time button on a client).
+    in and fill the fields in while it runs (from the Time page, the Track
+    time button on a client, or the **timer control in the top bar, which is
+    on every screen**). Once started, the running clock stays in the top bar
+    and keeps ticking as you move around the app; click it to go to the Time
+    page to stop and log. The top-bar control can also start administrative
+    (non-client) time; group time still starts from the Time page.
   - The rule bites at **Stop & log**. If something is missing the save is
     blocked and a prompt appears under each field that needs it ("Add a detail
     to log this time."). **The timer keeps running and no tracked time is lost**

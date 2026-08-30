@@ -833,6 +833,70 @@ h2 {
   }
 }
 
+/* The global time-tracking control. Idle it reads as one more quiet pill in the
+   bar; running it borrows the Time page's `.timer-pill.running` green so the
+   two surfaces state the same fact in the same color. */
+.topbar-timer {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-weight: 760;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 12px;
+}
+
+.topbar-timer:hover:not(:disabled) {
+  border-color: var(--bluegray);
+  color: var(--ink);
+}
+
+.topbar-timer:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.topbar-timer.running {
+  background: rgba(35, 116, 90, 0.1);
+  border-color: rgba(35, 116, 90, 0.28);
+  color: var(--green);
+}
+
+/* Tabular figures so a ticking H:MM:SS doesn't jitter the whole bar every
+   second as the glyph widths change. */
+.topbar-timer-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+.topbar-timer-label {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Same reasoning as `.desktop-open-button` above, one step softer: the bar is
+   too crowded at phone width for a client name, but the RUNNING CLOCK is the
+   whole point of the feature and must survive. So the words go and the digits
+   stay — idle, that leaves a bare timer icon, which is the affordance. */
+@media (max-width: 900px) {
+  .topbar-timer-label {
+    display: none;
+  }
+}
+
+/* One-off note under the start form, quieter than the fields above it. */
+.start-timer-note {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
 .period-control {
   align-items: center;
   background: var(--surface);
