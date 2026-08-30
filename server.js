@@ -308,6 +308,48 @@ function isJsonContentType(request) {
     .includes('application/json')
 }
 
+// The fields `PUT /api/firm-settings` accepts (audit L2). The store whitelists
+// too — `FIRM_SETTINGS_FIELDS` + `clientDefaults` in db/store.js — but the
+// handler must not DEPEND on that: passing the raw body through leaves the only
+// guard one refactor away from persisting whatever a caller sends.
+//
+// Unknown keys are DROPPED, never an error. The Settings page sends the whole
+// settings object back, and an older tab can legitimately carry a field this
+// build no longer knows about; refusing those would break a save over a
+// cosmetic mismatch.
+//
+// Keep this in sync with the store's list — `audit-backlog-hardening.test.ts`
+// reads both files and fails if the two drift apart.
+const FIRM_SETTINGS_PATCH_FIELDS = [
+  'name',
+  'tagline',
+  'logoUrl',
+  'brandColor',
+  'sidebarTextColor',
+  'sidebarActiveTextColor',
+  'addressLine1',
+  'addressLine2',
+  'city',
+  'state',
+  'postalCode',
+  'phone',
+  'email',
+  'website',
+  'ein',
+  'clientDefaults',
+]
+
+function pickFirmSettingsPatch(payload) {
+  const patch = {}
+  if (!payload || typeof payload !== 'object') return patch
+  for (const field of FIRM_SETTINGS_PATCH_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) {
+      patch[field] = payload[field]
+    }
+  }
+  return patch
+}
+
 async function readJsonBody(request) {
   const chunks = []
   let total = 0
@@ -614,6 +656,29 @@ function visibleClientIdSet(session, clients) {
   return new Set(
     clients.filter((client) => isClientVisibleToUser(client, me)).map((client) => client.id),
   )
+}
+
+/**
+ * True when a checklist belongs to a client outside the caller's visible set
+ * (audit L3). The item and sub-item mutation routes call this and answer
+ * **404, not 403** — a checklist for a client you are not on has to be
+ * indistinguishable from one that does not exist, or the id space can be
+ * enumerated one refusal at a time. That is the same answer `GET
+ * /api/cases/:id` gives (the audit's H3 fix); the wording matches too, so the
+ * two refusals are not tellable apart either.
+ *
+ * OWNERS ARE UNAFFECTED. `visibleClientIdSet` hands an owner every client id,
+ * so this is always false for them.
+ *
+ * For every route that also runs `checklistWriteDenial`, this changes only the
+ * STATUS of a refusal that already happened — client visibility is an AND
+ * inside that gate. The toggle route is the one place it refuses something new:
+ * that route authorizes on the step's responsible person alone, so a stale
+ * assignment on a client the user is no longer on used to be enough to check a
+ * step off.
+ */
+function checklistOutOfScope(checklist, visibleClientIds) {
+  return !visibleClientIds.has(checklist?.clientId)
 }
 
 /**
@@ -2645,10 +2710,11 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        // The store already whitelists firm-settings keys (FIRM_SETTINGS_FIELDS
-        // + clientDefaults) and validates colors, so unknown fields are ignored.
+        // Whitelisted HERE as well as in the store (which validates the colors
+        // and keeps the prior value for anything malformed). Two layers on
+        // purpose: see FIRM_SETTINGS_PATCH_FIELDS.
         const payload = await readJsonBody(request)
-        const updated = await appDataStore.updateFirmSettings(payload || {})
+        const updated = await appDataStore.updateFirmSettings(pickFirmSettingsPatch(payload))
         await appDataStore.recordActivity(session.user.id, 'firm_settings_updated', 'branding')
         sendJson(response, 200, updated)
         return
@@ -7148,6 +7214,14 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // L3 — a client outside your visible set is a checklist that does not
+      // exist. Runs BEFORE the responsible-person check below so the refusal
+      // says nothing about who the step belongs to.
+      if (checklistOutOfScope(checklist, visibleClientIdSet(session, data.clients ?? []))) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
       const targetItem = checklist.items.find((item) => item.id === itemId)
       if (!targetItem) {
         sendJson(response, 404, { error: 'Checklist item not found' })
@@ -7382,13 +7456,22 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+      // L3 — 404, not 403, for a client outside the visible set. The denial
+      // below would refuse this anyway (visibility is an AND inside it); this
+      // only stops the 403 from confirming the id is real.
+      if (checklistOutOfScope(checklist, visibleClientIds)) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
       // Owner / the task's assignee / an editor / the step's own assignee.
       // Sharing the client is NOT enough — that's read scope.
       const nestedDenial = checklistWriteDenial({
         user: session.user,
         checklist,
         item: targetItem,
-        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        visibleClientIds,
         error: 'You can only update your assigned checklists',
       })
       if (nestedDenial) {
@@ -7496,13 +7579,22 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+      // L3 — 404, not 403, for a client outside the visible set. The denial
+      // below would refuse this anyway (visibility is an AND inside it); this
+      // only stops the 403 from confirming the id is real.
+      if (checklistOutOfScope(checklist, visibleClientIds)) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
       // Owner / the task's assignee / an editor / the step's own assignee.
       // Sharing the client is NOT enough — that's read scope.
       const nestedDenial = checklistWriteDenial({
         user: session.user,
         checklist,
         item: targetItem,
-        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        visibleClientIds,
         error: 'You can only update your assigned checklists',
       })
       if (nestedDenial) {
@@ -8123,10 +8215,19 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+      // L3 — 404, not 403, for a client outside the visible set. The denial
+      // below would refuse this anyway (visibility is an AND inside it); this
+      // only stops the 403 from confirming the id is real.
+      if (checklistOutOfScope(checklist, visibleClientIds)) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
       const reorderDenial = checklistWriteDenial({
         user: session.user,
         checklist,
-        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        visibleClientIds,
         error: 'You do not have permission to reorder items',
       })
       if (reorderDenial) {
@@ -8171,6 +8272,14 @@ const server = createServer(async (request, response) => {
       // Owner / the task's assignee / an editor. Sharing the client is read
       // scope, not write access — see lib/checklist-write-permission.js.
       const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+
+      // L3 — 404, not 403, for a client outside the visible set. Each denial
+      // below would refuse this anyway (visibility is an AND inside them); this
+      // only stops the 403 from confirming the id is real.
+      if (checklistOutOfScope(checklist, visibleClientIds)) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
 
       // --- POST /api/checklists/:id/items (bulk append) ---
       if (!itemId && request.method === 'POST') {

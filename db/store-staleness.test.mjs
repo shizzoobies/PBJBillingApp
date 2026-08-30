@@ -1511,6 +1511,16 @@ describe('applyInvoicePayment statement shape (postgres branch)', () => {
  * branches implement: nothing the form sends is dropped.
  */
 describe('createClient keeps every field the Add-client form sends (file backend)', () => {
+  // `plan-1` has to EXIST for this suite to be about `createClient` at all.
+  // A read materializes and can write back through the bulk save, which
+  // resolves every client's plan references against the plans in the payload
+  // and drops the ones that do not resolve — on BOTH backends since Store-7.
+  // Without this the suite would be asserting that a reference to a plan
+  // nobody has survives, which is the outage of 2026-06-17 asked for by name.
+  beforeEach(async () => {
+    await store.write(workspace({ plans: [{ id: 'plan-1', name: 'Monthly bookkeeping' }] }))
+  })
+
   // Exactly what the ClientBuilder onCreate call emits with every input filled
   // in. The monthly and annual fields are mutually exclusive on the form
   // itself, but the store must not drop either one.
@@ -10215,5 +10225,359 @@ describe('consolidated billing: the Postgres statements', () => {
     const [restore] = fake.matching(/^insert into invoices/i)
     const lineItems = JSON.parse(restore.params[6])
     expect(lineItems[0].sourceClientId).toBe('sub-b')
+  })
+})
+
+
+/**
+ * Store-7 — the file backend strips what the Postgres backend strips.
+ *
+ * `write()` runs `sanitizeAppData` for both backends, but two of its guards
+ * used to live inside the `if (this.pool)` branch only: `filterBulkSaveOrphans`
+ * (rows whose client or template is not in the payload) and
+ * `sanitizeClientPlanRefs` (plan references pointing at plans the payload does
+ * not carry). So the dev backend PERSISTED the exact shape production strips.
+ *
+ * That is not a cosmetic difference. It is the reason the 2026-06-17 plan-refs
+ * outage — a dangling id in `clients.plan_ids[]`, a column with no foreign key
+ * to catch it — could not be reproduced locally: on disk the reference simply
+ * stayed, and nothing here ever behaved like the database that fell over.
+ *
+ * Cardinal rule 1 in its other direction: usually the Postgres branch is the
+ * one at risk of drifting unseen. Here the file branch was the one that had
+ * drifted, and the cost was landing on the dev side.
+ */
+describe('write() sanitizes the file backend the way it sanitizes Postgres (Store-7)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  it('strips a plan reference to a plan the payload does not carry', async () => {
+    await store.write(
+      workspace({
+        plans: [{ id: 'plan-live', name: 'Monthly bookkeeping' }],
+        clients: [
+          { id: 'c1', name: 'Acme', planIds: ['plan-live', 'plan-deleted'], planId: 'plan-live' },
+        ],
+        timeEntries: [],
+      }),
+    )
+
+    const [client] = (await persisted()).clients
+    expect(client.planIds).toEqual(['plan-live'])
+    // The scalar is re-derived from the surviving list, exactly as the insert
+    // derives it — it is the FK-bearing half and must never name a missing plan.
+    expect(client.planId).toBe('plan-live')
+  })
+
+  it('clears the scalar plan id when nothing in the list survives', async () => {
+    await store.write(
+      workspace({
+        plans: [],
+        clients: [{ id: 'c1', name: 'Acme', planIds: ['plan-deleted'], planId: 'plan-deleted' }],
+        timeEntries: [],
+      }),
+    )
+
+    const [client] = (await persisted()).clients
+    expect(client.planIds).toEqual([])
+    expect(client.planId).toBeNull()
+  })
+
+  // The contract `sanitizeAppData` holds for the billing links, held here too:
+  // a client that never mentioned a plan must not come out of the save having
+  // grown the fields.
+  it('does not invent plan fields on a client that never mentioned one', async () => {
+    await store.write(
+      workspace({ plans: [], clients: [{ id: 'c1', name: 'Acme' }], timeEntries: [] }),
+    )
+
+    const [client] = (await persisted()).clients
+    expect('planIds' in client).toBe(false)
+    expect('planId' in client).toBe(false)
+  })
+
+  it('drops rows whose client is not in the payload', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        timeEntries: [
+          { id: 't-keep', minutes: 30, clientId: 'c1' },
+          { id: 't-orphan', minutes: 30, clientId: 'c-gone' },
+        ],
+        checklists: [
+          { id: 'cl-keep', title: 'Keep', clientId: 'c1', items: [] },
+          { id: 'cl-orphan', title: 'Orphan', clientId: 'c-gone', items: [] },
+        ],
+        recycledChecklists: [
+          { id: 'cl-bin-orphan', title: 'Binned orphan', clientId: 'c-gone', items: [], deletedAt: '2026-08-01T00:00:00.000Z' },
+        ],
+        reimbursements: [
+          { id: 'r-keep', clientId: 'c1', amount: 10, date: '2026-08-01' },
+          { id: 'r-orphan', clientId: 'c-gone', amount: 10, date: '2026-08-01' },
+        ],
+        recurringReimbursements: [
+          { id: 'rr-orphan', clientId: 'c-gone', amount: 10, label: 'Software' },
+        ],
+      }),
+    )
+
+    const stored = await persisted()
+    expect(stored.timeEntries.map((e) => e.id)).toEqual(['t-keep'])
+    expect(stored.checklists.map((c) => c.id)).toEqual(['cl-keep'])
+    expect(stored.recycledChecklists).toEqual([])
+    expect(stored.reimbursements.map((r) => r.id)).toEqual(['r-keep'])
+    expect(stored.recurringReimbursements).toEqual([])
+  })
+
+  // Administrative time has no client at all. `filterBulkSaveOrphans` judges
+  // only refs that are actually SET, and the file branch must inherit that or
+  // every internal entry would vanish on the next autosave.
+  it('keeps a time entry that carries no client', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        timeEntries: [{ id: 't-admin', minutes: 30, clientId: null }],
+      }),
+    )
+
+    expect((await persisted()).timeEntries.map((e) => e.id)).toEqual(['t-admin'])
+  })
+
+  // A standard (firm-wide) template legitimately has no client. Dropping those
+  // would take every checklist they spawn with them.
+  it('keeps a client-less template and drops a template whose client is gone', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        timeEntries: [],
+        checklistTemplates: [
+          { id: 'tpl-standard', title: 'Standard', clientId: null, stages: [] },
+          { id: 'tpl-orphan', title: 'Orphan', clientId: 'c-gone', stages: [] },
+        ],
+      }),
+    )
+
+    expect((await persisted()).checklistTemplates.map((t) => t.id)).toEqual(['tpl-standard'])
+  })
+})
+
+/**
+ * Store-8 — `cleanupOrphanedClientData` reports the same numbers whichever
+ * backend answers.
+ *
+ * Both branches always returned the same nine KEYS, so nothing downstream ever
+ * broke; the file branch simply computed two of them and left the other seven
+ * at 0. A diagnostic that says "nothing was orphaned" when eight rows were just
+ * removed is worse than no diagnostic, and this is the one call a developer
+ * reaches for when they suspect exactly that.
+ *
+ * The fixture is written to disk directly rather than through `write()`, which
+ * since Store-7 above strips these very rows on the way in.
+ */
+describe('cleanupOrphanedClientData counts every table on both backends (Store-8)', () => {
+  // c1 survives; c-gone was deleted, so everything pointing at it is an orphan.
+  const fixture = {
+    employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper' }],
+    clients: [{ id: 'c1', name: 'Acme' }],
+    plans: [],
+    contacts: [],
+    timeEntries: [
+      { id: 't-keep', minutes: 30, clientId: 'c1' },
+      { id: 't-1', minutes: 30, clientId: 'c-gone' },
+      { id: 't-2', minutes: 45, clientId: 'c-gone' },
+    ],
+    reimbursements: [{ id: 'r-1', clientId: 'c-gone', amount: 10, date: '2026-08-01' }],
+    recurringReimbursements: [
+      { id: 'rr-1', clientId: 'c-gone', amount: 10, label: 'Software' },
+      { id: 'rr-2', clientId: 'c-gone', amount: 20, label: 'Payroll app' },
+    ],
+    checklists: [
+      { id: 'cl-keep', title: 'Keep', clientId: 'c1', items: [{ id: 'i-keep', label: 'Keep' }] },
+      {
+        id: 'cl-1',
+        title: 'Orphan',
+        clientId: 'c-gone',
+        items: [
+          { id: 'i-1', label: 'One' },
+          { id: 'i-2', label: 'Two' },
+          { id: 'i-3', label: 'Three' },
+        ],
+      },
+    ],
+    // The recycle bin is rows in `checklists` carrying a `deleted_at` on
+    // Postgres, so its orphans count under `checklists` there. Same here.
+    recycledChecklists: [
+      {
+        id: 'cl-bin',
+        title: 'Binned orphan',
+        clientId: 'c-gone',
+        deletedAt: '2026-08-01T00:00:00.000Z',
+        items: [{ id: 'i-bin', label: 'Binned' }],
+      },
+    ],
+    checklistTemplates: [
+      { id: 'tpl-keep', title: 'Keep', clientId: 'c1', stages: [] },
+      {
+        id: 'tpl-1',
+        title: 'Orphan',
+        clientId: 'c-gone',
+        stages: [
+          { id: 'st-1', name: 'Stage one', items: [{ id: 'ti-1', label: 'One' }] },
+          {
+            id: 'st-2',
+            name: 'Stage two',
+            items: [
+              { id: 'ti-2', label: 'Two' },
+              { id: 'ti-3', label: 'Three' },
+            ],
+          },
+        ],
+      },
+    ],
+    timesheetLocks: [],
+    weeklySubmissions: [],
+  }
+
+  it('returns the real per-table numbers on the file backend', async () => {
+    await writeFile(localDataPath, JSON.stringify(fixture, null, 2))
+
+    expect(await store.cleanupOrphanedClientData()).toEqual({
+      // Two orphaned checklists: one active, one in the bin.
+      checklists: 2,
+      // Three steps on the active one, one on the binned one.
+      checklistItems: 4,
+      checklistTemplates: 1,
+      checklistTemplateItems: 3,
+      checklistTemplateStages: 2,
+      reimbursements: 1,
+      recurringReimbursements: 2,
+      timeEntries: 2,
+      // No such array on this backend — nothing to delete, so 0 is the honest
+      // answer rather than a placeholder.
+      clientAssignments: 0,
+    })
+  })
+
+  it('leaves the rows that are not orphans', async () => {
+    await writeFile(localDataPath, JSON.stringify(fixture, null, 2))
+    await store.cleanupOrphanedClientData()
+
+    const stored = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(stored.timeEntries.map((e) => e.id)).toEqual(['t-keep'])
+    expect(stored.checklists.map((c) => c.id)).toEqual(['cl-keep'])
+    expect(stored.recycledChecklists).toEqual([])
+    expect(stored.checklistTemplates.map((t) => t.id)).toEqual(['tpl-keep'])
+  })
+
+  // A template written in the legacy flat shape (`items`, no `stages`) is
+  // stored on Postgres as a synthetic stage 1 holding those items — that is
+  // what `ensureTemplateStages` does on the way into the insert. The count has
+  // to see it the same way, or the same template reports differently depending
+  // on which shape it happens to be in.
+  it('counts a legacy flat template as one stage holding its items', async () => {
+    await writeFile(
+      localDataPath,
+      JSON.stringify(
+        {
+          ...fixture,
+          checklistTemplates: [
+            {
+              id: 'tpl-flat',
+              title: 'Legacy',
+              clientId: 'c-gone',
+              items: [
+                { id: 'ti-a', label: 'A' },
+                { id: 'ti-b', label: 'B' },
+              ],
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    )
+
+    const counts = await store.cleanupOrphanedClientData()
+    expect(counts.checklistTemplates).toBe(1)
+    expect(counts.checklistTemplateStages).toBe(1)
+    expect(counts.checklistTemplateItems).toBe(2)
+  })
+
+  /**
+   * The Postgres half. `cleanupOrphanedClientData` deletes and reads
+   * `rowCount` back, so a fake that answers a scripted count per table is
+   * enough to pin which statement fills which key — the wiring that a rename
+   * would silently break. Distinct numbers, so a crossed pair shows up.
+   */
+  function fakeCleanupPool(rowCounts) {
+    const statements = []
+    const query = async (text) => {
+      const trimmed = String(text).trim()
+      statements.push(trimmed)
+      const table = /delete from (\w+)/i.exec(trimmed)
+      if (table) return { rows: [], rowCount: rowCounts[table[1]] ?? 0 }
+      return { rows: [] }
+    }
+    return {
+      statements,
+      pool: {
+        async connect() {
+          return { query, release() {} }
+        },
+        query,
+      },
+    }
+  }
+
+  it('fills each key from its own delete on the Postgres backend', async () => {
+    const fake = fakeCleanupPool({
+      checklist_items: 4,
+      checklists: 2,
+      checklist_template_items: 3,
+      checklist_template_stages: 2,
+      checklist_templates: 1,
+      reimbursements: 1,
+      recurring_reimbursements: 6,
+      time_entries: 7,
+      client_assignments: 8,
+    })
+
+    expect(await postgresStore(fake).cleanupOrphanedClientData()).toEqual({
+      checklists: 2,
+      checklistItems: 4,
+      checklistTemplates: 1,
+      checklistTemplateItems: 3,
+      checklistTemplateStages: 2,
+      reimbursements: 1,
+      recurringReimbursements: 6,
+      timeEntries: 7,
+      clientAssignments: 8,
+    })
+  })
+
+  // The point of the pair: one fixture, one answer. Every key the Postgres
+  // branch reports a number for, the file branch reports the SAME number for —
+  // it used to report 0 for seven of the nine.
+  it('agrees with the file backend over the same fixture', async () => {
+    await writeFile(localDataPath, JSON.stringify(fixture, null, 2))
+    const fileCounts = await store.cleanupOrphanedClientData()
+
+    // The rowCounts a real database would return for this fixture. The one
+    // deliberate difference is `client_assignments`: the table is inert (batch
+    // 2 drops it) and the file backend has no equivalent at all.
+    const fake = fakeCleanupPool({
+      checklist_items: 4,
+      checklists: 2,
+      checklist_template_items: 3,
+      checklist_template_stages: 2,
+      checklist_templates: 1,
+      reimbursements: 1,
+      recurring_reimbursements: 2,
+      time_entries: 2,
+      client_assignments: 0,
+    })
+    const pgCounts = await postgresStore(fake).cleanupOrphanedClientData()
+
+    expect(Object.keys(fileCounts).sort()).toEqual(Object.keys(pgCounts).sort())
+    expect(fileCounts).toEqual(pgCounts)
   })
 })

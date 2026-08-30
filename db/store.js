@@ -6391,6 +6391,93 @@ export class AppDataStore {
       return
     }
 
+    // ---- Store-7: FILE-BACKEND SANITIZE PARITY ----
+    //
+    // Everything above this line is Postgres-only, and two of the things it
+    // does are not Postgres details at all — they are decisions about what a
+    // bulk save is allowed to persist:
+    //
+    //   `filterBulkSaveOrphans`  drops rows whose client / template is not in
+    //                            this payload (an in-memory delete that left
+    //                            references behind used to wedge every later
+    //                            save on an FK violation), and
+    //   `sanitizeClientPlanRefs` strips plan references pointing at plans this
+    //                            payload does not carry (a dangling one 500-ed
+    //                            every read and took the app offline on
+    //                            2026-06-17 — `plan_ids` has no FK to catch it).
+    //
+    // The file branch ran neither, so the dev backend cheerfully persisted the
+    // exact shape production strips. That divergence is why the outage could
+    // not be reproduced locally. Same sanitizers, same order as the branch
+    // above, so what a developer sees on disk is what prod would have kept.
+    //
+    // Like the Postgres branch this CLEANS, it never refuses: the bulk save is
+    // the owner tab's autosave and must not throw.
+    const fileValidClientIds = new Set(
+      Array.isArray(data.clients) ? data.clients.map((c) => c.id) : [],
+    )
+    // Filled in after the templates are filtered, so checklists validate their
+    // template refs against the post-filter set — same two-step as above.
+    const fileValidTemplateIds = new Set()
+    const filterFileOrphans = (rows, label, getRefs) =>
+      filterBulkSaveOrphans(rows, {
+        validClientIds: fileValidClientIds,
+        validTemplateIds: fileValidTemplateIds,
+        label,
+        getRefs,
+      })
+
+    // Templates first. Standard templates legitimately have no client — leave
+    // those alone (the `? ... : null` is what does it).
+    data.checklistTemplates = filterFileOrphans(
+      data.checklistTemplates,
+      'checklist_templates',
+      (t) => ({ clientId: t && t.clientId ? t.clientId : null }),
+    )
+    for (const t of data.checklistTemplates) fileValidTemplateIds.add(t.id)
+
+    // Only `clientId` is checked on checklists, deliberately — see the long
+    // comment on the Postgres side about recycled-bin tombstones. Filtering on
+    // `templateId` there silently respawned deleted checklists.
+    data.checklists = filterFileOrphans(data.checklists, 'checklists', (c) => ({
+      clientId: c?.clientId,
+    }))
+    data.recycledChecklists = filterFileOrphans(
+      data.recycledChecklists,
+      'recycledChecklists',
+      (c) => ({ clientId: c?.clientId }),
+    )
+    data.reimbursements = filterFileOrphans(data.reimbursements, 'reimbursements', (r) => ({
+      clientId: r?.clientId,
+    }))
+    data.recurringReimbursements = filterFileOrphans(
+      data.recurringReimbursements,
+      'recurring_reimbursements',
+      (r) => ({ clientId: r?.clientId }),
+    )
+    // Administrative time carries no client at all (`clientId` null) and is
+    // kept: `filterBulkSaveOrphans` only judges refs that are actually set.
+    data.timeEntries = filterFileOrphans(data.timeEntries, 'time_entries', (e) => ({
+      clientId: e?.clientId,
+    }))
+
+    // Plan references, resolved against this payload's plans exactly as the
+    // insert above resolves them. Guarded on PRESENCE so a client that never
+    // mentioned a plan does not come out of here having grown the fields —
+    // same convention `sanitizeAppData` uses for the billing links.
+    const fileValidPlanIds = new Set(
+      (Array.isArray(data.plans) ? data.plans : [])
+        .map((plan) => plan?.id)
+        .filter((id) => typeof id === 'string' && id),
+    )
+    for (const clientRecord of Array.isArray(data.clients) ? data.clients : []) {
+      if (!clientRecord || typeof clientRecord !== 'object') continue
+      if (!('planIds' in clientRecord) && !('planId' in clientRecord)) continue
+      const planRefs = sanitizeClientPlanRefs(clientRecord, fileValidPlanIds)
+      clientRecord.planIds = planRefs.planIds
+      clientRecord.planId = planRefs.planId
+    }
+
     // Staleness guard, file backend. Same contract as the Postgres branch
     // above: refuse the save outright when the caller's snapshot no longer
     // matches what is on disk. The file equivalent of "the check runs INSIDE
@@ -11790,31 +11877,61 @@ export class AppDataStore {
     )
     const isOrphan = (row) => row && row.clientId && !validClientIds.has(row.clientId)
     const orphanFilter = (rows) => (Array.isArray(rows) ? rows.filter((r) => !isOrphan(r)) : [])
+    const asArray = (rows) => (Array.isArray(rows) ? rows : [])
+
+    // Store-8: COUNT THE SAME TABLES THE POSTGRES BRANCH COUNTS. This used to
+    // report 0 for seven of the nine keys — the return shape matched, the
+    // numbers did not, so the same fixture told two different stories depending
+    // on which backend answered. Telemetry only (nothing branches on these),
+    // but a diagnostic that quietly says "nothing was orphaned" is worse than
+    // no diagnostic.
+    //
+    // The mapping from tables to the file shape:
+    //   checklist_items            → items nested on each dropped checklist
+    //   checklist_template_items   → items nested on each dropped template's
+    //   checklist_template_stages    stages (`ensureTemplateStages` migrates a
+    //                                legacy flat `items` list into a synthetic
+    //                                stage 1, exactly as the insert does — so a
+    //                                template written either way counts the same)
+    //   client_assignments         → no such array on this backend. It stays 0,
+    //                                and that is the honest answer: the file
+    //                                backend has nothing to delete. (The pg
+    //                                table is inert too — batch 2 removes it.)
+    //
+    // Recycled checklists count under `checklists`, matching Postgres, where
+    // the bin is rows in `checklists` carrying a `deleted_at` rather than a
+    // table of its own.
+    const droppedChecklists = asArray(data.checklists).filter(isOrphan)
+    const droppedRecycled = asArray(data.recycledChecklists).filter(isOrphan)
+    const droppedTemplates = asArray(data.checklistTemplates).filter(
+      (t) => t && t.clientId && !validClientIds.has(t.clientId),
+    )
+    const countNested = (rows, get) =>
+      rows.reduce((total, row) => total + asArray(get(row)).length, 0)
+    const droppedTemplateStages = droppedTemplates.flatMap(
+      (t) => ensureTemplateStages(t).stages ?? [],
+    )
+
     const counts = {
-      checklists: 0,
-      checklistItems: 0,
-      checklistTemplates: 0,
-      checklistTemplateItems: 0,
-      checklistTemplateStages: 0,
-      reimbursements: 0,
-      recurringReimbursements: 0,
-      timeEntries: 0,
+      checklists: droppedChecklists.length + droppedRecycled.length,
+      checklistItems: countNested([...droppedChecklists, ...droppedRecycled], (c) => c.items),
+      checklistTemplates: droppedTemplates.length,
+      checklistTemplateItems: countNested(droppedTemplateStages, (stage) => stage.items),
+      checklistTemplateStages: droppedTemplateStages.length,
+      reimbursements: asArray(data.reimbursements).filter(isOrphan).length,
+      recurringReimbursements: asArray(data.recurringReimbursements).filter(isOrphan).length,
+      timeEntries: asArray(data.timeEntries).filter(isOrphan).length,
       clientAssignments: 0,
     }
-    const beforeChecklists = Array.isArray(data.checklists) ? data.checklists.length : 0
-    const beforeTemplates = Array.isArray(data.checklistTemplates)
-      ? data.checklistTemplates.length
-      : 0
+
     data.checklists = orphanFilter(data.checklists)
     data.recycledChecklists = orphanFilter(data.recycledChecklists)
-    data.checklistTemplates = (
-      Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []
-    ).filter((t) => !t || !t.clientId || validClientIds.has(t.clientId))
+    data.checklistTemplates = asArray(data.checklistTemplates).filter(
+      (t) => !t || !t.clientId || validClientIds.has(t.clientId),
+    )
     data.reimbursements = orphanFilter(data.reimbursements)
     data.recurringReimbursements = orphanFilter(data.recurringReimbursements)
     data.timeEntries = orphanFilter(data.timeEntries)
-    counts.checklists = beforeChecklists - data.checklists.length
-    counts.checklistTemplates = beforeTemplates - data.checklistTemplates.length
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return counts
   }
