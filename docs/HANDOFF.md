@@ -170,6 +170,115 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-08-30 — PICK UP HERE. The queue has real work in it again: Brittany
+answered the period-label question, and it is the top item.**
+
+`main` is `a93b2a0`, deployed SUCCESS, `/health` 200
+(`{postgres, stripe: live, stripeWebhook: configured}`), tree clean and in
+sync. Suite **2571 tests / 149 files**. Nine features shipped 2026-08-22 → 30;
+each has its own entry below this one.
+
+### The queue, in the order to work it
+
+**1. `featreq-81429ad1` — "Checklist /task" (planned, HIGH, ANSWERED, ready).**
+Her one-liner was genuinely ambiguous — *"I need a time period area - like the
+period the task is due for so you can keep it straight, but not all
+checklist/task would have it and then the next would spring forward"* — so it
+went back with ONE concrete reading rather than a guess. She confirmed it
+2026-08-30, verbatim:
+
+> 1. - next to the title
+> 2. purely a label not to change anything we have already done
+
+So: an OPTIONAL per-task label naming the period the work COVERS ("July
+books"), distinct from the due date, rendered **next to the task title**, and
+**purely cosmetic — it must not feed any report, filter, billing month, or
+existing number.** Her "the next would spring forward" means the label advances
+when the recurring materializer creates the next cycle's instance. Not every
+task carries one. Re-read her exact words in the tracker before building, and
+do not widen the scope — "not to change anything we have already done" is the
+whole constraint.
+
+**2. `featreq-68638ed2` — Skip and Push buttons (planned, medium).** Out of her
+own Brain session and well-formed: two distinct buttons, where *push* keeps a
+task alive with a new due date (defaults to the next cycle, editable) instead of
+killing it like *skip*. Both carry the existing skip requirements — the
+who's-responsible dropdown and a written explanation — and both surface on the
+review dashboard. **Her draft truncates mid-sentence** at "there'd be a toggle
+for wh…": ASK what that toggle governed rather than guessing. Everything before
+it is safe to build.
+
+**3. Twelve items sit in Shipped awaiting her review.** She reviews live, so the
+board moves while you work — re-read it at session start, not just at the end.
+
+**Parked; do not start unprompted:** `featreq-79b6d974` engagement-to-billing
+(in_progress, needs a PLANNING SESSION with Alex — it reshapes navigation for
+everyone, and its Track B was superseded by the invoicing that shipped);
+`featreq-ef7f4e35` TOTP encryption (blocked on ALEX generating and storing
+`TOTP_ENC_KEY` — Claude must never handle that key); `featreq-15ff79f7`
+Brittany-pushes-her-own-update (policy locked, Tier 0 shipped, Tiers 1–5 remain,
+build-only, do not re-open the questions).
+
+### What is live now that was not a week ago
+
+- **KLC consolidated billing — MIGRATED and armed.** Master `client-lamjjjc`
+  ("KLC Floors & More") with four subs, including the existing KLC client
+  renamed "KLC Floors & More — Bookkeeping". **September's generate produces the
+  first combined invoice** — that is the moment to watch, and the first send is
+  irreversible. Dry run over real rows: $720.00 exact, one combined line, no
+  company names. Design + the two review blockers: the 2026-08-28 entry.
+- **AI confidence ratings** on every generated draft — advisory, never blocks —
+  plus the correction corpus that records what she changes. That corpus is the
+  trust-ladder measurement the plans' "bulk-send once trusted" gate was missing;
+  it needs months of data before automation tiers are a real conversation.
+- **Desktop app v0.2.0** — self-updating from `desktop-v*` tags, tray,
+  close-to-tray, auto-start. Sign-in is the topbar "Open in desktop" handoff;
+  an email `pbjsa://` button is DEAD ON ARRIVAL (web mail strips custom
+  schemes — tested and confirmed). Do not rebuild that.
+- **PWA install**, the **global topbar timer**, the **master recipient picker**,
+  the **audit backlog's remainder**, and the assistant's **transient-400 retry**
+  (Britt's Brain outage 2026-08-28: the provider intermittently rejects valid
+  requests; identical requests succeeded 7/8 on replay).
+
+### Traps this stretch added
+
+- **`.omc/project-memory.json` keeps capturing throwaway patch scripts as the
+  project's build/test commands** — repaired three times now. If a session opens
+  with a giant `node -e` string presented as "the build command", that is this
+  bug. The real commands are in `package.json`.
+- **`scripts/check-print-pdf.mjs` SKIPS when playwright is missing** (it is,
+  here) and prints a skip message rather than failing — so a "clean" run proves
+  nothing. It runs against the cached Chromium via a tiny wrapper module passed
+  as `PLAYWRIGHT_MODULE` (executablePath →
+  `%LOCALAPPDATA%/ms-playwright/chromium-1234/chrome-win64/chrome.exe`). Do
+  that after ANY print-path change; jsdom cannot see paged media.
+- **A stale worktree** sits at `.claude/worktrees/laughing-raman-651691`
+  (`a6ff061`, merged) from the recipient-picker session. Safe to prune — but
+  per the 2026-08-27 lesson, run `git status` INSIDE a worktree before removing
+  it: two of the last four held real uncommitted work that looked stale.
+- CRLF everywhere and no prettier config — both described in the 2026-08-26
+  entry, both still bite.
+
+### Open decisions that need ALEX, not Brittany
+
+- **Desktop code signing.** Unsigned installers trip SmartScreen once per user;
+  Azure Trusted Signing (~$10/mo) is the fix and the CI workflow already has the
+  seam. Separately: **back up `D:\PBJ Accounting Work\desktop-updater-key\`** —
+  if that and the GitHub Actions secret are both lost, no installed shell can
+  ever be updated again.
+- **The contact-list remainder**: the Dobco and Sophie Paris merges (both hold
+  time entries that must move first), retainer amounts (column S ≈ 1.5× the
+  monthly fee), the 2026-09-13 → 10-13 covered windows on 31 rows, four second
+  reimbursement lines, and "Relentless Training LLC" which matches no client
+  under any spelling. Several are prod writes; all need his explicit yes.
+- **M3 (CSRF uniformity)** is now the audit backlog's ONLY open item, still
+  deferred by its own warning label — its own focused task, never part of a
+  batch (the Vite dev proxy rewrites Host, so verify against `node server.js`).
+- **`invoiceRenderMode` is unpersisted** — combined rendering derives from the
+  billing-master flag. If she ever asks for company names ON the paper invoice
+  (option 1), that needs a column before it is a flag flip.
+
+
 **2026-08-28 (late) — KLC consolidated billing is BUILT and shipped; the
 MIGRATION is the remaining step and needs Alex's explicit yes.** Brittany
 answered Q3 ("2" — the paper shows one combined line, no company names; the
