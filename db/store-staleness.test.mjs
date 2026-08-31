@@ -4480,9 +4480,33 @@ describe('quiet skip (postgres branch)', () => {
     const inserts = fake.matching(/insert into checklist_templates/i)
     expect(inserts).toHaveLength(2)
     expect(inserts[0].text).toMatch(/skip_allowed/i)
+
+    /**
+     * Read a parameter by its COLUMN NAME rather than by counting from the end.
+     *
+     * This used to be `params.at(-2)`, which quietly meant "skip_allowed is the
+     * second-to-last column" — true until featreq-81429ad1 added two columns
+     * after it, at which point the assertion silently started reading the
+     * period-label offset instead. Naming the column makes the next addition a
+     * non-event.
+     */
+    const paramFor = (insert, column) => {
+      const columns = insert.text
+        .slice(insert.text.indexOf('(') + 1, insert.text.indexOf(')'))
+        .split(',')
+        .map((name) => name.trim())
+      const index = columns.indexOf(column)
+      expect(index, `column ${column} not in the statement`).toBeGreaterThan(-1)
+      return insert.params[index]
+    }
+
     // Anything other than an explicit true is off — skipping is opt-in.
-    expect(inserts[0].params.at(-2)).toBe(true)
-    expect(inserts[1].params.at(-2)).toBe(false)
+    expect(paramFor(inserts[0], 'skip_allowed')).toBe(true)
+    expect(paramFor(inserts[1], 'skip_allowed')).toBe(false)
+    // The period label is opt-in the same way, and carries the bookkeeping
+    // default offset of 1 (July's books are done in August).
+    expect(paramFor(inserts[0], 'period_label_enabled')).toBe(false)
+    expect(paramFor(inserts[0], 'period_label_offset')).toBe(1)
   })
 })
 
@@ -10579,5 +10603,116 @@ describe('cleanupOrphanedClientData counts every table on both backends (Store-8
 
     expect(Object.keys(fileCounts).sort()).toEqual(Object.keys(pgCounts).sort())
     expect(fileCounts).toEqual(pgCounts)
+  })
+})
+
+/**
+ * The period label survives a bulk save — featreq-81429ad1.
+ *
+ * Same reasoning as the invoice time-breakdown block above, and the same family
+ * of bug it guards: the bulk save WIPES `checklists` and `checklist_templates`
+ * and re-inserts every row from the payload, so a column missing from those
+ * positional INSERTs is a label that disappears on the next autosave with no
+ * error anywhere. Three data-loss bugs in this app were exactly that shape.
+ */
+describe('the checklist period label round-trips the bulk save (file backend)', () => {
+  it('keeps a stamped label on the instance', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'Monthly Reconciliations',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            dueDate: '2026-08-15',
+            periodLabel: 'July 2026',
+            items: [],
+          },
+        ],
+      }),
+    )
+
+    const back = await store.read()
+    expect(back.checklists.find((c) => c.id === 'cl-1').periodLabel).toBe('July 2026')
+  })
+
+  it('keeps the recipe’s switch and its offset', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [
+          {
+            id: 'tpl-1',
+            title: 'Monthly Reconciliations',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            frequency: 'monthly',
+            nextDueDate: '2026-09-15',
+            active: true,
+            viewerIds: [],
+            editorIds: [],
+            periodLabelEnabled: true,
+            periodLabelOffset: 2,
+            stages: [],
+            items: [],
+          },
+        ],
+      }),
+    )
+
+    const tpl = (await store.read()).checklistTemplates.find((t) => t.id === 'tpl-1')
+    expect(tpl.periodLabelEnabled).toBe(true)
+    expect(tpl.periodLabelOffset).toBe(2)
+  })
+
+  // Most tasks carry none, and the default recipe carries none — an untouched
+  // workspace must come back exactly as untouched.
+  it('leaves a task with no label alone', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          {
+            id: 'cl-2',
+            title: 'Ad hoc',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            dueDate: '2026-08-15',
+            items: [],
+          },
+        ],
+      }),
+    )
+
+    const back = (await store.read()).checklists.find((c) => c.id === 'cl-2')
+    expect(back.periodLabel ?? null).toBeNull()
+  })
+
+  /**
+   * POSITION, the same guard the clients INSERTs carry. All three checklist
+   * INSERTs are positional; a column added to one list and not the other writes
+   * the wrong value into the wrong column, and the file backend cannot see it
+   * because it stores objects rather than rows.
+   */
+  it('keeps every checklist INSERT balanced and carrying the new columns', async () => {
+    const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+    const re =
+      /insert into (checklists|checklist_templates)\s*\(([\s\S]*?)\)\s*\n?\s*values\s*\(([\s\S]*?)\)/g
+    let match
+    let statements = 0
+    while ((match = re.exec(source))) {
+      statements += 1
+      const columns = match[2]
+        .split(',')
+        .map((column) => column.replace(/\/\/[^\n]*/g, '').trim())
+        .filter(Boolean)
+      const values = match[3].split(',').map((value) => value.trim()).filter(Boolean)
+      expect(values.length, `${match[1]} statement ${statements}`).toBe(columns.length)
+      if (match[1] === 'checklists') expect(columns).toContain('period_label')
+      else {
+        expect(columns).toContain('period_label_enabled')
+        expect(columns).toContain('period_label_offset')
+      }
+    }
+    expect(statements).toBe(3)
   })
 })

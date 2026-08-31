@@ -570,6 +570,28 @@ Clients page meanwhile. Owner-only.
     saying why. Everything completed from now on carries a real timestamp.
     Setting a date range hides the dashed rows, since an unknown date can't be
     said to fall inside a window; the tab says so when a range is set.
+- **THE PERIOD A TASK'S WORK COVERS, shown next to its title.** A recurring task
+  can carry a small label naming the period it is FOR — "July 2026" on a task
+  due in August — so a stack of similar-looking monthly tasks can be told apart
+  at a glance. It sits beside the task title on the checklist card.
+  - **Off unless it was turned on for that repeating task.** Like skipping, it
+    is a setting on the repeating setup itself ("Show the period it covers"),
+    chosen when the task is created and changeable afterwards on the Repeating
+    tasks list. Most tasks do not have one, and a task without one shows
+    nothing at all — no empty space, no dash.
+  - **Which period it names** is set beside the switch: by default the one
+    BEFORE the task is due, because July's books are done in August. It can be
+    set to the period the task is due in instead, or two or three back.
+  - **It advances on its own.** Each new occurrence names its own period — the
+    August task says "July 2026", September's says "August 2026" — with nothing
+    to reset or roll over.
+  - **How wide the period is comes from the task's own schedule**: a monthly
+    task names a month, a quarterly one names a quarter ("Q2 2026"), a yearly
+    one names a year ("2025"). Daily and weekly tasks name the month.
+  - **IT IS ONLY A LABEL.** It does not change anything: not the due date, not
+    which month work is billed in, not any report, total, filter or sort. It is
+    there to be read. Turning it on for a repeating task changes nothing about
+    the tasks it creates except that they now carry the label.
 - **Skipping a recurring task (a "quiet skip").** When someone won't complete a
   recurring task this cycle but will catch it on the next occurrence, they can
   step past this one instead of letting it sit there flagged as overdue.

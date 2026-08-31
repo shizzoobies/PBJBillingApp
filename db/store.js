@@ -26,6 +26,11 @@ import {
   postgresWorkspaceVersion,
 } from '../lib/workspace-version.js'
 import {
+  periodLabelForInstance,
+  normalizePeriodLabelOffset,
+  sanitizePeriodLabel,
+} from '../lib/checklist-period-label.js'
+import {
   RETAINER_LABEL,
   invoiceLockRefusal,
   normalizeAdhocMode,
@@ -1773,6 +1778,10 @@ function buildChecklistFromStage({
     stageCount,
     // Inherit the template's board column so generated instances sort correctly.
     categoryId: template.categoryId ?? null,
+    // "and then the next would spring forward" — derived from THIS instance's
+    // due date, so next cycle's instance names the next period without any
+    // counter to keep in step. Null when the template does not carry one.
+    periodLabel: periodLabelForInstance(template, dueDate),
     // Onboarding link: every stage checklist of an onboarding case inherits the
     // template's `onboardingForClientId`, so completing/advancing any stage can
     // sync the client's lifecycle stage. Absent on ordinary templates.
@@ -3683,6 +3692,18 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_templates add column if not exists skip_allowed boolean not null default false`,
       )
+      // The period a recurring task's work COVERS — featreq-81429ad1. Opt-in
+      // per template ("not all checklist/task would have it"), and the offset is
+      // how many periods back the covered one sits: 1 because July's books are
+      // done in August. The instance stores the resolved STRING, so the label a
+      // task was born with never moves under it.
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists period_label_enabled boolean not null default false`,
+      )
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists period_label_offset integer not null default 1`,
+      )
+      await this.pool.query(`alter table checklists add column if not exists period_label text`)
 
       // The instance's own skip marker. Deliberately NOT a soft-delete: the row
       // must stay out of the recycle bin and stay visible to the materializer's
@@ -4901,7 +4922,7 @@ export class AppDataStore {
             select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
                    case_id, stage_id, stage_index, stage_count, category_id, deleted_at,
                    deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by,
-                   skipped_at, skipped_by
+                   skipped_at, skipped_by, period_label
             from checklists
             order by due_date asc, id asc
           `),
@@ -4913,7 +4934,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
                    scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id,
-                   onboarding_for_client_id, skip_allowed
+                   onboarding_for_client_id, skip_allowed, period_label_enabled, period_label_offset
             from checklist_templates
             order by title asc
           `),
@@ -5053,6 +5074,10 @@ export class AppDataStore {
         // view layer is what drops it from the active surfaces.
         skippedAt: row.skipped_at ? row.skipped_at.toISOString() : null,
         skippedBy: row.skipped_by ?? null,
+        // COSMETIC ONLY — see lib/checklist-period-label.js. Nothing may read
+        // this to decide anything; it is rendered beside the title and that is
+        // the whole of it.
+        periodLabel: row.period_label ?? null,
       }))
 
       const data = {
@@ -5226,6 +5251,8 @@ export class AppDataStore {
           // Off unless an owner turned it on — a task whose template has this
           // false must not even show the skip affordance.
           skipAllowed: Boolean(row.skip_allowed),
+          periodLabelEnabled: Boolean(row.period_label_enabled),
+          periodLabelOffset: normalizePeriodLabelOffset(row.period_label_offset),
           ...(row.onboarding_for_client_id
             ? { onboardingForClientId: row.onboarding_for_client_id }
             : {}),
@@ -6182,8 +6209,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, skip_allowed, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, skip_allowed, period_label_enabled, period_label_offset, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, now())
             `,
             [
               template.id,
@@ -6220,6 +6247,8 @@ export class AppDataStore {
                 : null,
               // Skipping is opt-in: anything other than an explicit true is off.
               template.skipAllowed === true,
+              template.periodLabelEnabled === true,
+              normalizePeriodLabelOffset(template.periodLabelOffset),
               createdAtFor('checklist_templates', template.id),
             ],
           )
@@ -6294,8 +6323,8 @@ export class AppDataStore {
           // we already have.
           const insertResult = await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, skipped_at, skipped_by, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, skipped_at, skipped_by, period_label, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, now())
               on conflict do nothing
             `,
             [
@@ -6324,6 +6353,10 @@ export class AppDataStore {
               // them here is what stops an autosave silently un-skipping a task.
               checklist.skippedAt ?? null,
               checklist.skippedBy ?? null,
+              // Preserved like the skip stamps above: the bulk save wipes and
+              // reinserts, and a column missing here is a label that vanishes on
+              // the next autosave with no error anywhere.
+              sanitizePeriodLabel(checklist.periodLabel),
               createdAtFor('checklists', checklist.id),
             ],
           )
@@ -10846,8 +10879,8 @@ export class AppDataStore {
         await client.query('begin')
         await client.query(
           `
-            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, onboarding_for_client_id, created_by, updated_at)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, onboarding_for_client_id, created_by, period_label, updated_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
           `,
           [
             nextChecklist.id,
@@ -10866,6 +10899,7 @@ export class AppDataStore {
             nextChecklist.categoryId ? nextChecklist.categoryId : null,
             nextChecklist.onboardingForClientId ?? null,
             nextChecklist.createdBy ?? null,
+            sanitizePeriodLabel(nextChecklist.periodLabel),
           ],
         )
 

@@ -4620,6 +4620,23 @@ td strong {
 }
 
 /* ---- Phase 3: stages + case timeline ---- */
+/* The period a task's work covers, beside its title (featreq-81429ad1).
+   Quieter than .stage-badge on purpose: it is a memory aid, not a status, and
+   it must not compete with the title it sits next to. */
+.period-label-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--muted);
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
 .stage-badge {
   display: inline-flex;
   align-items: center;

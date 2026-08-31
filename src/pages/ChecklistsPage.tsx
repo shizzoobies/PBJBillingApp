@@ -35,6 +35,7 @@ import {
 } from '../../lib/checklist-skip.js'
 import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
+import { PeriodLabelChip } from '../components/PeriodLabelChip'
 import { CompletedTasksSection } from '../components/CompletedTasksSection'
 import { CompletedWaits } from '../components/CompletedWaits'
 import { WaitApprovalActions } from '../components/WaitApprovalActions'
@@ -2200,8 +2201,15 @@ export function ChecklistCard({
             </div>
           ) : (
             <>
+              {/* The period this task's work COVERS, beside the title — her
+                  answer was "next to the title". Renders nothing at all when the
+                  task has no label, which is most of them. It is a label and
+                  only a label: nothing keys off it. */}
               {hideClientName ? (
-                <strong className="checklist-card-title">{checklist.title}</strong>
+                <strong className="checklist-card-title">
+                  {checklist.title}
+                  <PeriodLabelChip label={checklist.periodLabel} />
+                </strong>
               ) : (
                 <>
                   {/* Client name leads (bold + larger) so a long list is easy to
@@ -2209,7 +2217,10 @@ export function ChecklistCard({
                   <strong className="checklist-card-client">
                     {clientName(clients, checklist.clientId)}
                   </strong>
-                  <span className="checklist-card-title-sub">{checklist.title}</span>
+                  <span className="checklist-card-title-sub">
+                    {checklist.title}
+                    <PeriodLabelChip label={checklist.periodLabel} />
+                  </span>
                 </>
               )}
               {showStageBadge ? (
@@ -4136,6 +4147,7 @@ export function NewTaskForm({
   // Quiet skip: OFF by default, deliberately. Skipping is an exception the owner
   // grants per recipe, not a capability every recurring task carries.
   const [skipAllowed, setSkipAllowed] = useState(false)
+  const [periodLabelEnabled, setPeriodLabelEnabled] = useState(false)
 
   // Hand-off (multi-stage) toggle. Only available in repeating mode.
   // When enabled, we render an editor for additional stages.
@@ -4251,6 +4263,10 @@ export function NewTaskForm({
         editorIds: [],
         categoryId: categoryId || null,
         skipAllowed,
+        periodLabelEnabled,
+        // The bookkeeping default: July's books are done in August. Changeable
+        // on the recipe afterwards.
+        periodLabelOffset: 1,
         stages: [firstStage, ...extraStages],
         ...(isSpecificMonths
           ? {
@@ -4499,6 +4515,20 @@ export function NewTaskForm({
           />
           <span>
             Allow skipping an occurrence (with a reason) when it will be caught next cycle.
+          </span>
+        </label>
+      ) : null}
+
+      {mode === 'repeating' ? (
+        <label className="start-first-now-row">
+          <input
+            type="checkbox"
+            checked={periodLabelEnabled}
+            onChange={(event) => setPeriodLabelEnabled(event.target.checked)}
+          />
+          <span>
+            Show the period the work covers next to the title (“July 2026” on a task due in
+            August).
           </span>
         </label>
       ) : null}
@@ -5191,6 +5221,44 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
           />
           <span>Skipping allowed</span>
         </label>
+        {/* The period label. Set on the RECIPE like skipping is, never per
+            instance: every occurrence this template makes from now on is born
+            with the period it covers, and the next one springs forward on its
+            own because the label is derived from that instance's own due date. */}
+        <label className="repeating-task-on-off-row">
+          <input
+            checked={template.periodLabelEnabled === true}
+            onChange={(event) =>
+              props.onUpdateTemplate(template.id, (current) => ({
+                ...current,
+                periodLabelEnabled: event.target.checked,
+              }))
+            }
+            type="checkbox"
+            title="Show the period this task's work covers — like “July 2026” — next to its title."
+          />
+          <span>Show the period it covers</span>
+        </label>
+        {template.periodLabelEnabled === true ? (
+          <label className="repeating-task-lead-row">
+            <span>Period covered</span>
+            <select
+              className="compact-input"
+              value={String(template.periodLabelOffset ?? 1)}
+              onChange={(event) =>
+                props.onUpdateTemplate(template.id, (current) => ({
+                  ...current,
+                  periodLabelOffset: Number(event.target.value),
+                }))
+              }
+            >
+              <option value="1">The one before it is due (July books, due in August)</option>
+              <option value="0">The one it is due in (August books, due in August)</option>
+              <option value="2">Two before it is due</option>
+              <option value="3">Three before it is due</option>
+            </select>
+          </label>
+        ) : null}
         <label className="repeating-task-on-off-row">
           <input
             checked={template.active}

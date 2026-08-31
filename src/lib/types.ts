@@ -990,6 +990,18 @@ export type ChecklistTemplate = {
    * to some rows and not others. See lib/checklist-skip.js.
    */
   skipAllowed?: boolean
+  /**
+   * Whether instances of this template are born with a PERIOD LABEL — the
+   * period the work covers, e.g. "July 2026" on a task due in August
+   * (featreq-81429ad1). Off unless switched on: not every task has one.
+   */
+  periodLabelEnabled?: boolean
+  /**
+   * How many whole periods BACK from the due date the covered period sits.
+   * 1 by default — July's books are done in August. The width of a period
+   * comes from `frequency`, not from a second setting.
+   */
+  periodLabelOffset?: number
 }
 
 export type Checklist = {
@@ -1012,6 +1024,16 @@ export type Checklist = {
    * Existing pre-feature rows are null.
    */
   createdBy?: string | null
+  /**
+   * The period this task's work COVERS — "July 2026" — shown beside the title.
+   * featreq-81429ad1.
+   *
+   * PURELY COSMETIC, in her words: "purely a label not to change anything we
+   * have already done". It is never a filter, a billing month, a sort key or an
+   * input to any total. Absent (null) on most tasks and on everything that
+   * predates the feature.
+   */
+  periodLabel?: string | null
   items: ChecklistItem[]
   caseId?: string
   stageId?: string
