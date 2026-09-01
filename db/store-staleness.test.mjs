@@ -11,6 +11,7 @@ import {
   CREATED_AT_PRESERVED_TABLES,
   INVOICE_SELECT_COLUMNS,
   InvoiceLockedError,
+  ManualPaymentError,
   mapChecklistItemRow,
   mapInvoiceRow,
   mapRecurringReimbursementRow,
@@ -10807,5 +10808,123 @@ describe('hourly lines re-derive amount from hours × rate (file backend)', () =
     // Falls back to the legacy path: amount as sent, no hours stored.
     expect(updated.lineItems[0].amount).toBe(42)
     expect(updated.lineItems[0].hours).toBeUndefined()
+  })
+})
+
+/**
+ * Manual "Mark as Paid" — featreq-602d2c6e, for money that arrived outside the
+ * app. The transitions ARE the design: what may be marked, what refuses, and
+ * that only a manual mark can ever be taken back.
+ */
+describe('markInvoicePaidManually / unmark (file backend)', () => {
+  const invoice = (id, status, over = {}) => ({
+    id,
+    clientId: 'c1',
+    period: '2026-08',
+    kind: 'monthly',
+    number: `INV-2026-08-${id.slice(-3)}`,
+    status,
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: null,
+    blurb: '',
+    scopeFlags: [],
+    sentAt: null,
+    paidAt: null,
+    paymentMethod: null,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+    ...over,
+  })
+
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      invoice('inv-s01', 'sent', { sentAt: '2026-08-20T00:00:00.000Z' }),
+      invoice('inv-d02', 'draft'),
+      invoice('inv-p03', 'processing'),
+      invoice('inv-v04', 'void'),
+      invoice('inv-w05', 'paid', { paymentMethod: 'us_bank_account', stripePaymentIntentId: 'pi_1' }),
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    // The event log lives in auth-state; start each test clean.
+    const authState = existsSync(localAuthPath)
+      ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+      : {}
+    authState.invoiceReviewEvents = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  })
+
+  it('marks a sent invoice paid: status, method, paidAt, and the audit event', async () => {
+    const updated = await store.markInvoicePaidManually('inv-s01', { actorUserId: 'emp-patrice' })
+    expect(updated.status).toBe('paid')
+    expect(updated.paymentMethod).toBe('manual')
+    expect(updated.paidAt).toBeTruthy()
+
+    const events = await store.listInvoiceReviewEvents({ invoiceId: 'inv-s01' })
+    expect(events).toHaveLength(1)
+    expect(events[0].event).toBe('marked_paid_manually')
+    expect(events[0].actorUserId).toBe('emp-patrice')
+  })
+
+  it('marks a DRAFT paid too — an invoice handled entirely outside the system', async () => {
+    const updated = await store.markInvoicePaidManually('inv-d02', { actorUserId: 'emp-patrice' })
+    expect(updated.status).toBe('paid')
+  })
+
+  // A real ACH debit is settling; the webhook owns the answer.
+  it('refuses while a bank payment is processing', async () => {
+    await expect(store.markInvoicePaidManually('inv-p03', {})).rejects.toBeInstanceOf(
+      ManualPaymentError,
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.invoices.find((i) => i.id === 'inv-p03').status).toBe('processing')
+  })
+
+  it('refuses void and already-paid, each with its own sentence', async () => {
+    await expect(store.markInvoicePaidManually('inv-v04', {})).rejects.toThrow(/voided/)
+    await expect(store.markInvoicePaidManually('inv-w05', {})).rejects.toThrow(/already paid/)
+  })
+
+  it('unmark returns a manual mark to sent (or reviewed when never sent)', async () => {
+    await store.markInvoicePaidManually('inv-s01', {})
+    const restoredSent = await store.unmarkManualInvoicePayment('inv-s01', {})
+    expect(restoredSent.status).toBe('sent')
+    expect(restoredSent.paidAt).toBeNull()
+    expect(restoredSent.paymentMethod).toBeNull()
+
+    await store.markInvoicePaidManually('inv-d02', {})
+    const restoredDraft = await store.unmarkManualInvoicePayment('inv-d02', {})
+    expect(restoredDraft.status).toBe('reviewed')
+  })
+
+  // A webhook-paid invoice is a record of real money moving.
+  it('unmark refuses an invoice a real payment settled', async () => {
+    await expect(store.unmarkManualInvoicePayment('inv-w05', {})).rejects.toThrow(
+      /Only an invoice marked paid by hand/,
+    )
+  })
+
+  it('unmark writes its own audit event', async () => {
+    await store.markInvoicePaidManually('inv-s01', { actorUserId: 'emp-patrice' })
+    await store.unmarkManualInvoicePayment('inv-s01', { actorUserId: 'emp-patrice' })
+    const events = await store.listInvoiceReviewEvents({ invoiceId: 'inv-s01' })
+    expect(events.map((e) => e.event).sort()).toEqual([
+      'manual_payment_undone',
+      'marked_paid_manually',
+    ])
+  })
+
+  /**
+   * The lock closes behind the mark: a manually-paid invoice refuses content
+   * edits exactly as a webhook-paid one does. The undo button, not the PATCH
+   * route, is the way back.
+   */
+  it('a manual mark engages the paid lock', async () => {
+    await store.markInvoicePaidManually('inv-s01', {})
+    await expect(
+      store.updateInvoice('inv-s01', { blurb: 'rewritten' }),
+    ).rejects.toBeInstanceOf(InvoiceLockedError)
   })
 })

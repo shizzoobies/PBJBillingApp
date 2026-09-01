@@ -882,6 +882,19 @@ export class RetainerCreditError extends Error {
 }
 
 /**
+ * A manual payment action the invoice's state cannot honor — marking paid what
+ * is already settling, un-marking what a real webhook settled. Same shape and
+ * same reason as the classes around it: a fact about the data, said in a
+ * sentence the owner can act on.
+ */
+export class ManualPaymentError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'ManualPaymentError'
+  }
+}
+
+/**
  * An edit aimed at an invoice whose content is frozen — see
  * `LOCKED_INVOICE_STATUSES` in lib/invoice-lines.js. Same shape and same reason
  * as the two around it: a fact about the data, said in a sentence she can act on.
@@ -10497,6 +10510,178 @@ export class AppDataStore {
     data.invoices[index] = next
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return withStatusChanged(next, statusChanged)
+  }
+
+  /**
+   * Mark an invoice paid BY HAND — featreq-602d2c6e, for money that arrived
+   * outside the app (a paper check, a bank transfer nobody linked, an invoice
+   * that was never sent through the system at all).
+   *
+   * Allowed from `draft`, `reviewed`, `sent` and `overdue`. The refusals are
+   * the design:
+   *
+   *   - `processing` is REFUSED: a real ACH debit is settling against this
+   *     invoice, tracked by webhook. Marking it paid by hand mid-flight would
+   *     have the webhook's answer and hers racing for the same row — let the
+   *     bank finish.
+   *   - `void` is refused — a withdrawn document cannot be paid; `paid` is
+   *     refused because it already is.
+   *
+   * `paymentMethod: 'manual'` is the durable mark that a HUMAN said this, not
+   * Stripe — it is what makes the undo below safe to offer, and what the UI
+   * reads to say "marked paid by hand". The actor lands in
+   * `invoice_review_events`, because "who said this was paid" is an audit
+   * question with a months-later shelf life.
+   *
+   * The caller (the route) expires any open checkout sessions AFTER this
+   * commits — an emailed pay button that still charges a client who already
+   * paid by check is the one disaster this feature could cause.
+   */
+  async markInvoicePaidManually(invoiceId, { actorUserId = null } = {}) {
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+    if (current.status === 'void') {
+      throw new ManualPaymentError('This invoice was voided — a withdrawn invoice cannot be paid.')
+    }
+    if (current.status === 'paid') {
+      throw new ManualPaymentError('This invoice is already paid.')
+    }
+    if (current.status === 'processing') {
+      throw new ManualPaymentError(
+        'A bank payment is already going through against this invoice — let it settle instead of marking it by hand.',
+      )
+    }
+
+    const paidAt = nowIso()
+    const reviewEvent = {
+      id: `invev-${randomUUID().slice(0, 8)}`,
+      invoiceId,
+      clientId: current.clientId,
+      period: current.period,
+      actorUserId,
+      event: 'marked_paid_manually',
+      changes: { status: { before: current.status, after: 'paid' } },
+      createdAt: paidAt,
+    }
+
+    if (this.pool) {
+      const dbClient = await this.pool.connect()
+      try {
+        await dbClient.query('begin')
+        const { rowCount } = await dbClient.query(
+          `update invoices
+              set status = 'paid', payment_method = 'manual', paid_at = $2, updated_at = now()
+            where id = $1`,
+          [invoiceId, paidAt],
+        )
+        if (rowCount === 0) {
+          await dbClient.query('rollback')
+          return null
+        }
+        await this._insertInvoiceReviewEvent(reviewEvent, { dbClient })
+        await dbClient.query('commit')
+      } catch (error) {
+        await dbClient.query('rollback')
+        throw error
+      } finally {
+        dbClient.release()
+      }
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    const next = {
+      ...data.invoices[index],
+      status: 'paid',
+      paymentMethod: 'manual',
+      paidAt,
+      updatedAt: paidAt,
+    }
+    data.invoices[index] = next
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await this._insertInvoiceReviewEvent(reviewEvent)
+    return next
+  }
+
+  /**
+   * Take back a MANUAL payment mark — the mis-click escape, so a wrong "mark
+   * paid" does not leave void-and-regenerate as the only way out of the paid
+   * lock.
+   *
+   * Deliberately narrow: only an invoice whose `paymentMethod` is `'manual'`
+   * and which carries NO Stripe payment intent may be un-marked. A webhook-paid
+   * invoice is a record of real money moving and stays exactly what it is.
+   * The invoice returns to `sent` if it had ever been sent, else `reviewed` —
+   * the state it most plausibly left.
+   */
+  async unmarkManualInvoicePayment(invoiceId, { actorUserId = null } = {}) {
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+    if (current.status !== 'paid' || current.paymentMethod !== 'manual') {
+      throw new ManualPaymentError('Only an invoice marked paid by hand can be un-marked.')
+    }
+    if (current.stripePaymentIntentId) {
+      throw new ManualPaymentError(
+        'A real payment is recorded against this invoice — it cannot be un-marked.',
+      )
+    }
+
+    const restored = current.sentAt ? 'sent' : 'reviewed'
+    const now = nowIso()
+    const reviewEvent = {
+      id: `invev-${randomUUID().slice(0, 8)}`,
+      invoiceId,
+      clientId: current.clientId,
+      period: current.period,
+      actorUserId,
+      event: 'manual_payment_undone',
+      changes: { status: { before: 'paid', after: restored } },
+      createdAt: now,
+    }
+
+    if (this.pool) {
+      const dbClient = await this.pool.connect()
+      try {
+        await dbClient.query('begin')
+        const { rowCount } = await dbClient.query(
+          `update invoices
+              set status = $2, payment_method = null, paid_at = null, updated_at = now()
+            where id = $1 and status = 'paid' and payment_method = 'manual'`,
+          [invoiceId, restored],
+        )
+        if (rowCount === 0) {
+          await dbClient.query('rollback')
+          return null
+        }
+        await this._insertInvoiceReviewEvent(reviewEvent, { dbClient })
+        await dbClient.query('commit')
+      } catch (error) {
+        await dbClient.query('rollback')
+        throw error
+      } finally {
+        dbClient.release()
+      }
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    const next = {
+      ...data.invoices[index],
+      status: restored,
+      paymentMethod: null,
+      paidAt: null,
+      updatedAt: now,
+    }
+    data.invoices[index] = next
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await this._insertInvoiceReviewEvent(reviewEvent)
+    return next
   }
 
 

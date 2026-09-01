@@ -167,3 +167,45 @@ describe('the invoice PATCH route answers a locked invoice with a sentence', () 
     )
   })
 })
+
+/**
+ * The manual mark-paid glue — featreq-602d2c6e. Behavior is exercised on the
+ * store (db/store-staleness.test.mjs); what can rot here is the wiring: owner
+ * gate, the 409 sentence, and above all the SESSION EXPIRY — the one step that
+ * keeps an emailed pay button from charging a client who already paid by check.
+ */
+describe('the mark-paid route', () => {
+  const block = routeBlock(/const markPaidMatch = normalizedPath\.match\(/, 3500)
+
+  it('is owner-gated and origin-checked like every invoice write', () => {
+    expect(block).toContain("session.user.role !== 'owner'")
+    expect(block).toContain('isCrossSiteOrigin(request)')
+  })
+
+  it('answers a refused mark with the store sentence, not a 500', () => {
+    const at = block.indexOf('error instanceof ManualPaymentError')
+    expect(at).toBeGreaterThan(-1)
+    const branch = block.slice(at, at + 260)
+    expect(branch).toContain('409')
+    expect(branch).toContain("error: 'manual_payment_refused'")
+    expect(branch).toContain('message: error.message')
+  })
+
+  it('expires BOTH open checkout sessions after the mark commits', () => {
+    expect(block).toContain('updated.stripeCheckoutSessionId')
+    expect(block).toContain('updated.stripeCardSessionId')
+    expect(block).toContain('expireCheckoutSession(sessionId)')
+  })
+
+  it('has the unmark route beside it, with the same guards', () => {
+    const unmark = routeBlock(/const unmarkPaidMatch = normalizedPath\.match\(/, 2500)
+    expect(unmark).toContain("session.user.role !== 'owner'")
+    expect(unmark).toContain('unmarkManualInvoicePayment')
+  })
+
+  it('imports the error class it branches on', () => {
+    expect(serverSource).toMatch(
+      /import \{[\s\S]*?ManualPaymentError,[\s\S]*?\} from '\.\/db\/store\.js'/,
+    )
+  })
+})

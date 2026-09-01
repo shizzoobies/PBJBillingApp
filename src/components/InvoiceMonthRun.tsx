@@ -28,6 +28,8 @@ import {
   listInvoiceAiReviewsRequest,
   listInvoicesRequest,
   listUnappliedRetainersRequest,
+  markInvoicePaidRequest,
+  unmarkInvoicePaidRequest,
   rateInvoiceRequest,
   regenerateInvoicesRequest,
   sendInvoiceRequest,
@@ -1916,6 +1918,41 @@ function InvoiceEditor({
     setSaved(false)
   }
 
+  /**
+   * Payment recorded outside the app — a check, an unlinked transfer. The
+   * confirm names the two consequences worth pausing on: the invoice locks
+   * (paid is a record), and any pay links already in the client's inbox stop
+   * working. Refusals (processing, already paid) arrive as sentences from the
+   * server and land in the same slot the retainer refusals use.
+   */
+  const markPaid = async () => {
+    const confirmed = window.confirm(
+      `Mark ${invoice.number} as paid outside the app?\n\nThis records the payment as received by hand, locks the invoice like any paid invoice, and disables any payment links already sent for it.`,
+    )
+    if (!confirmed) return
+    setRetainerError(null)
+    try {
+      const updated = await markInvoicePaidRequest(invoice.id)
+      onInvoiceChanged(updated)
+    } catch (error) {
+      setRetainerError(error instanceof Error ? error.message : 'Could not mark that paid.')
+    }
+  }
+
+  const unmarkPaid = async () => {
+    const confirmed = window.confirm(
+      `Undo the manual payment mark on ${invoice.number}?\n\nIt goes back to ${invoice.sentAt ? 'Sent' : 'Reviewed'} and can be edited and collected again.`,
+    )
+    if (!confirmed) return
+    setRetainerError(null)
+    try {
+      const updated = await unmarkInvoicePaidRequest(invoice.id)
+      onInvoiceChanged(updated)
+    } catch (error) {
+      setRetainerError(error instanceof Error ? error.message : 'Could not undo that.')
+    }
+  }
+
   const save = async () => {
     setRetainerError(null)
     const result = await onPatch({ lineItems: lines, blurb })
@@ -2493,6 +2530,36 @@ function InvoiceEditor({
             >
               <Mail size={15} />
               {sendBusy ? 'Sending…' : lastSent ? 'Send again' : 'Send'}
+            </button>
+          ) : null}
+          {/* Money that arrived outside the app. Offered exactly where the
+              server allows it — draft, reviewed, sent, overdue — and not on
+              processing, where a real debit is mid-flight and the webhook owns
+              the answer. */}
+          {['draft', 'reviewed', 'sent', 'overdue'].includes(invoice.status) ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy || dirty}
+              title={
+                dirty
+                  ? 'Save your changes first'
+                  : 'Record that this invoice was paid outside the app (check, direct transfer)'
+              }
+              onClick={() => void markPaid()}
+            >
+              Mark paid
+            </button>
+          ) : null}
+          {invoice.status === 'paid' && invoice.paymentMethod === 'manual' ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy}
+              title="This invoice was marked paid by hand — undo returns it to be collected"
+              onClick={() => void unmarkPaid()}
+            >
+              Undo manual payment
             </button>
           ) : null}
           {invoice.status !== 'void' ? (

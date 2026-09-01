@@ -3510,6 +3510,32 @@ export async function createInvoicePaymentLinkRequest(invoiceId: string) {
  * invoice's own client resolves to and drops anything else. Omit it to send to
  * every address on file, which is what a single-recipient send does.
  */
+/** Record a payment that happened outside the app (featreq-602d2c6e). */
+export async function markInvoicePaidRequest(invoiceId: string) {
+  const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/mark-paid`, {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Failed to mark paid (${response.status})`, code)
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
+}
+
+/** Take back a MANUAL payment mark — refused for webhook-settled invoices. */
+export async function unmarkInvoicePaidRequest(invoiceId: string) {
+  const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/unmark-paid`, {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Failed to undo (${response.status})`, code)
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
+}
+
 export async function sendInvoiceRequest(invoiceId: string, to?: string[]) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/send`, {
     credentials: 'same-origin',

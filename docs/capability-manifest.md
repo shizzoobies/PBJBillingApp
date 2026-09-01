@@ -1614,6 +1614,21 @@ Clients page meanwhile. Owner-only.
 > **Back to draft**. **Void** keeps the invoice on the record, struck through,
 > and frees that client to be generated again.
 >
+> **MARK PAID — for money that arrived outside the app.** A check, a direct
+> transfer nobody linked, an invoice that was never sent through the system:
+> open the invoice in the month run and press **Mark paid**. It works on Draft,
+> Reviewed, Sent and Overdue invoices; it is NOT offered while a bank payment
+> is **going through** (a real debit is settling — let it finish, or the two
+> answers would race). Marking paid records the date, locks the invoice like
+> any paid invoice, and **kills any payment links already emailed for it** so a
+> client cannot pay a second time with an old button. Who marked it and when is
+> kept on the record.
+>
+> **Undo manual payment** appears only on invoices marked paid BY HAND — press
+> it and the invoice returns to Sent (or Reviewed if it was never sent),
+> editable and collectible again. An invoice a real payment settled has no such
+> button: money that actually moved stays recorded exactly as it moved.
+>
 > **ONCE AN INVOICE IS PAID IT IS LOCKED.** A paid invoice has to keep matching
 > what the client actually paid, so it stops being editable: the lines and the
 > note go read-only, and **Save changes**, **Add a line** and the remove buttons

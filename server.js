@@ -11,6 +11,7 @@ import {
   CoverageConfirmationError,
   InvoiceAiReviewError,
   InvoiceLockedError,
+  ManualPaymentError,
   RetainerCreditError,
   TimeEntrySplitError,
 } from './db/store.js'
@@ -3218,6 +3219,105 @@ const server = createServer(async (request, response) => {
         `${invoice.number ?? invoice.id}`,
       )
       sendJson(response, 200, { url: result.session.url, invoice: updated })
+      return
+    }
+
+    // POST /api/invoices/:id/mark-paid — record a payment that happened
+    // OUTSIDE the app (featreq-602d2c6e): a check, an unlinked bank transfer,
+    // an invoice that never went through the system. Owner-only, like every
+    // invoice write. The store refuses processing/void/paid with a sentence.
+    const markPaidMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)\/mark-paid$/)
+    if (markPaidMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can mark invoices paid' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const invoiceId = decodeURIComponent(markPaidMatch[1])
+      let updated
+      try {
+        updated = await appDataStore.markInvoicePaidManually(invoiceId, {
+          actorUserId: session.user.id,
+        })
+      } catch (error) {
+        if (error instanceof ManualPaymentError) {
+          sendJson(response, 409, { error: 'manual_payment_refused', message: error.message })
+          return
+        }
+        console.error('[invoices] mark-paid failed:', error)
+        sendJson(response, 500, {
+          error: 'mark_paid_failed',
+          message: 'Could not mark that invoice paid — please try again.',
+        })
+        return
+      }
+      if (!updated) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      // THE ONE DISASTER THIS FEATURE COULD CAUSE: a pay button still live in
+      // the client's inbox after she recorded their check. Both open checkout
+      // sessions are expired AFTER the mark commits — best-effort, because the
+      // mark is the truth either way and a Stripe hiccup must not unrecord it;
+      // a failure is logged loudly instead.
+      for (const sessionId of [updated.stripeCheckoutSessionId, updated.stripeCardSessionId]) {
+        if (!sessionId) continue
+        try {
+          await expireCheckoutSession(sessionId)
+        } catch (error) {
+          console.error(
+            `[invoices] mark-paid: could not expire checkout session ${sessionId} for ${invoiceId} — a live pay link may remain:`,
+            error,
+          )
+        }
+      }
+      sendJson(response, 200, { invoice: updated })
+      return
+    }
+
+    // POST /api/invoices/:id/unmark-paid — the mis-click escape. Only a MANUAL
+    // mark can be taken back (the store enforces it); a webhook-paid invoice is
+    // a record of real money and stays what it is.
+    const unmarkPaidMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)\/unmark-paid$/)
+    if (unmarkPaidMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can unmark invoices' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const invoiceId = decodeURIComponent(unmarkPaidMatch[1])
+      let updated
+      try {
+        updated = await appDataStore.unmarkManualInvoicePayment(invoiceId, {
+          actorUserId: session.user.id,
+        })
+      } catch (error) {
+        if (error instanceof ManualPaymentError) {
+          sendJson(response, 409, { error: 'manual_payment_refused', message: error.message })
+          return
+        }
+        console.error('[invoices] unmark-paid failed:', error)
+        sendJson(response, 500, {
+          error: 'unmark_paid_failed',
+          message: 'Could not undo that — please try again.',
+        })
+        return
+      }
+      if (!updated) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      sendJson(response, 200, { invoice: updated })
       return
     }
 
