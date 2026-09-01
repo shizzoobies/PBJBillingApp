@@ -105,6 +105,7 @@ import {
   createInvoiceCardCheckoutSession,
   createInvoiceCheckoutSession,
   expireCheckoutSession,
+  retrievePaymentIntentStatus,
   isStripeConfigured,
   isStripeTestMode,
   isStripeWebhookConfigured,
@@ -3275,6 +3276,83 @@ const server = createServer(async (request, response) => {
             error,
           )
         }
+      }
+      sendJson(response, 200, { invoice: updated })
+      return
+    }
+
+    // POST /api/invoices/:id/verify-payment — ask STRIPE whether a
+    // 'processing' payment actually settled, and record its answer. The fix
+    // for a lost or out-of-order settle webhook; unlike mark-paid this never
+    // trusts the human — Stripe still shows it settling, the invoice stays.
+    const verifyPaymentMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)\/verify-payment$/)
+    if (verifyPaymentMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can verify payments' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const invoiceId = decodeURIComponent(verifyPaymentMatch[1])
+      const invoice = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
+      if (!invoice) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      if (invoice.status !== 'processing') {
+        sendJson(response, 409, {
+          error: 'verify_not_applicable',
+          message: 'Only an invoice with a payment going through can be checked against Stripe.',
+        })
+        return
+      }
+      if (!invoice.stripePaymentIntentId) {
+        sendJson(response, 409, {
+          error: 'verify_no_intent',
+          message: 'This invoice has no Stripe payment to check.',
+        })
+        return
+      }
+      const intent = await retrievePaymentIntentStatus(invoice.stripePaymentIntentId)
+      if (!intent) {
+        sendJson(response, 502, {
+          error: 'stripe_unreachable',
+          message: 'Could not reach Stripe to check — try again in a moment.',
+        })
+        return
+      }
+      if (intent.status !== 'succeeded') {
+        sendJson(response, 409, {
+          error: 'verify_still_settling',
+          message: `Stripe still shows this payment as "${intent.status}" — nothing to fix yet.`,
+        })
+        return
+      }
+      let updated
+      try {
+        updated = await appDataStore.reconcileProcessingInvoicePaid(invoiceId, {
+          paidAt: intent.chargedAt,
+          actorUserId: session.user.id,
+        })
+      } catch (error) {
+        if (error instanceof ManualPaymentError) {
+          sendJson(response, 409, { error: 'manual_payment_refused', message: error.message })
+          return
+        }
+        console.error('[invoices] verify-payment failed:', error)
+        sendJson(response, 500, {
+          error: 'verify_failed',
+          message: 'Could not record that — please try again.',
+        })
+        return
+      }
+      if (!updated) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
       }
       sendJson(response, 200, { invoice: updated })
       return

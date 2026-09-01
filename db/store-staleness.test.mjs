@@ -10928,3 +10928,134 @@ describe('markInvoicePaidManually / unmark (file backend)', () => {
     ).rejects.toBeInstanceOf(InvoiceLockedError)
   })
 })
+
+/**
+ * The webhook ordering race that stuck INV-2026-08-003 in 'processing' for
+ * twelve days. A card payment fires `payment_intent.succeeded` and
+ * `checkout.session.completed` nearly at once with no promised order; when
+ * succeeded lands first, the late completed used to write 'processing' over
+ * 'paid'. Paid is sticky now — and the late event's OTHER facts still apply.
+ */
+describe('applyInvoicePayment: paid is sticky (file backend)', () => {
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-race',
+        clientId: 'c1',
+        period: '2026-08',
+        kind: 'monthly',
+        number: 'INV-2026-08-900',
+        status: 'sent',
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 10 }],
+        subtotal: 10,
+        total: 10,
+        dueDate: null,
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-19T00:00:00.000Z',
+        paidAt: null,
+        paymentMethod: null,
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  })
+
+  it('a late checkout.session.completed cannot downgrade a settled invoice', async () => {
+    // succeeded first — the out-of-order case.
+    await store.applyInvoicePayment('inv-race', {
+      status: 'paid',
+      paidAt: '2026-08-20T13:58:13.000Z',
+      paymentIntentId: 'pi_race',
+      paymentMethod: 'card',
+    })
+    // completed second, exactly as the webhook sends it.
+    const after = await store.applyInvoicePayment('inv-race', {
+      status: 'processing',
+      cardCheckoutSessionId: 'cs_card_race',
+      paymentIntentId: 'pi_race',
+      appendLines: [{ kind: 'card-fee', label: 'Card processing fee', detail: 'Paid by card', amount: 0.61 }],
+    })
+
+    expect(after.status).toBe('paid')
+    expect(after.paidAt).toBe('2026-08-20T13:58:13.000Z')
+    expect(after.paymentMethod).toBe('card')
+    // The late event's other facts still landed.
+    expect(after.stripeCardSessionId).toBe('cs_card_race')
+    expect(after.lineItems.some((line) => line.kind === 'card-fee')).toBe(true)
+  })
+
+  it('the in-order case still passes through processing normally', async () => {
+    const processing = await store.applyInvoicePayment('inv-race', { status: 'processing' })
+    expect(processing.status).toBe('processing')
+    const paid = await store.applyInvoicePayment('inv-race', {
+      status: 'paid',
+      paidAt: '2026-08-24T00:00:00.000Z',
+    })
+    expect(paid.status).toBe('paid')
+  })
+})
+
+/**
+ * Reconciling a stuck 'processing' invoice — the store half. The ROUTE asks
+ * Stripe first and only calls this when Stripe answered "succeeded"; what is
+ * pinned here is that the method records exactly that and nothing else.
+ */
+describe('reconcileProcessingInvoicePaid (file backend)', () => {
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-stuck',
+        clientId: 'c1',
+        period: '2026-08',
+        kind: 'monthly',
+        number: 'INV-2026-08-901',
+        status: 'processing',
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 10 }],
+        subtotal: 10,
+        total: 10,
+        dueDate: null,
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-19T00:00:00.000Z',
+        paidAt: '2026-08-20T13:58:13.000Z',
+        paymentMethod: 'card',
+        stripePaymentIntentId: 'pi_stuck',
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const authState = existsSync(localAuthPath)
+      ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+      : {}
+    authState.invoiceReviewEvents = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  })
+
+  it('flips processing to paid with the charge time, keeping the real method', async () => {
+    const updated = await store.reconcileProcessingInvoicePaid('inv-stuck', {
+      paidAt: '2026-08-20T13:58:12.000Z',
+      actorUserId: 'emp-alex-anderson',
+    })
+    expect(updated.status).toBe('paid')
+    expect(updated.paidAt).toBe('2026-08-20T13:58:12.000Z')
+    // The webhook already recorded HOW the money moved; reconciling keeps it.
+    expect(updated.paymentMethod).toBe('card')
+
+    const events = await store.listInvoiceReviewEvents({ invoiceId: 'inv-stuck' })
+    expect(events).toHaveLength(1)
+    expect(events[0].event).toBe('payment_verified_with_stripe')
+    expect(events[0].actorUserId).toBe('emp-alex-anderson')
+  })
+
+  it('refuses anything that is not processing', async () => {
+    await store.reconcileProcessingInvoicePaid('inv-stuck', {})
+    await expect(store.reconcileProcessingInvoicePaid('inv-stuck', {})).rejects.toThrow(
+      /already paid/,
+    )
+  })
+})

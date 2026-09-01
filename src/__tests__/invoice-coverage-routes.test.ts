@@ -209,3 +209,34 @@ describe('the mark-paid route', () => {
     )
   })
 })
+
+/**
+ * verify-payment glue: the route must ask STRIPE before it writes anything —
+ * the whole point over mark-paid is that it records Stripe's answer, not a
+ * human's. Behavior is on the store; this pins the order of operations.
+ */
+describe('the verify-payment route', () => {
+  const block = routeBlock(/const verifyPaymentMatch = normalizedPath\.match\(/, 3500)
+
+  it('queries the intent BEFORE calling the store', () => {
+    const ask = block.indexOf('retrievePaymentIntentStatus(')
+    const record = block.indexOf('reconcileProcessingInvoicePaid(')
+    expect(ask).toBeGreaterThan(-1)
+    expect(record).toBeGreaterThan(-1)
+    expect(ask).toBeLessThan(record)
+  })
+
+  it('records nothing unless Stripe says succeeded', () => {
+    expect(block).toContain("intent.status !== 'succeeded'")
+    expect(block).toContain("error: 'verify_still_settling'")
+  })
+
+  it('says so when Stripe is unreachable rather than guessing', () => {
+    expect(block).toContain("error: 'stripe_unreachable'")
+  })
+
+  it('is owner-gated and origin-checked like every invoice write', () => {
+    expect(block).toContain("session.user.role !== 'owner'")
+    expect(block).toContain('isCrossSiteOrigin(request)')
+  })
+})

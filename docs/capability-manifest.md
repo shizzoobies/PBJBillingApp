@@ -1624,6 +1624,14 @@ Clients page meanwhile. Owner-only.
 > client cannot pay a second time with an old button. Who marked it and when is
 > kept on the record.
 >
+> **Verify with Stripe** appears on invoices whose payment is still shown as
+> going through. It asks Stripe directly whether the payment settled, and only
+> records Stripe's answer: settled means the invoice moves to Paid with the
+> real charge time, still-settling means nothing changes and the button says
+> so. This is the fix for a payment that completed on Stripe but never flipped
+> here (a lost or out-of-order webhook) — no guessing, no manual override on a
+> live payment.
+>
 > **Undo manual payment** appears only on invoices marked paid BY HAND — press
 > it and the invoice returns to Sent (or Reviewed if it was never sent),
 > editable and collectible again. An invoice a real payment settled has no such

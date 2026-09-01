@@ -3523,6 +3523,22 @@ export async function markInvoicePaidRequest(invoiceId: string) {
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }
 
+/**
+ * Ask Stripe whether a 'processing' payment actually settled, and record its
+ * answer. 409 with a sentence when Stripe still shows it settling.
+ */
+export async function verifyInvoicePaymentRequest(invoiceId: string) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/verify-payment`,
+    { credentials: 'same-origin', method: 'POST' },
+  )
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Failed to verify (${response.status})`, code)
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
+}
+
 /** Take back a MANUAL payment mark — refused for webhook-settled invoices. */
 export async function unmarkInvoicePaidRequest(invoiceId: string) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/unmark-paid`, {

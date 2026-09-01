@@ -10438,6 +10438,18 @@ export class AppDataStore {
 
     const next = { ...current }
     if (PAYMENT_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
+    /**
+     * PAID IS STICKY against payment-side writes. A card payment fires two
+     * webhook events nearly at once, and Stripe does not promise their order:
+     * when `payment_intent.succeeded` lands first (status -> 'paid') and
+     * `checkout.session.completed` lands second, the second used to write its
+     * 'processing' over the settled truth — INV-2026-08-003 sat that way for
+     * twelve days with paid_at and the card method already on the row. The
+     * late event's OTHER facts (session ids, the fee line) still apply below;
+     * only the status cannot go backwards. Nothing here touches void — that
+     * is updateInvoice's machinery, deliberately.
+     */
+    if (current.status === 'paid' && next.status !== 'paid') next.status = 'paid'
     // Surfaced to the caller (never persisted) so the webhook can tell a real
     // transition from a replay before it emails the client about it.
     const statusChanged = next.status !== current.status
@@ -10600,6 +10612,74 @@ export class AppDataStore {
       paidAt,
       updatedAt: paidAt,
     }
+    data.invoices[index] = next
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await this._insertInvoiceReviewEvent(reviewEvent)
+    return next
+  }
+
+  /**
+   * Confirm with Stripe that a 'processing' invoice actually settled, and say
+   * so — the stuck-invoice fix, driven by STRIPE'S answer rather than a
+   * human's memory of it. The route queries the payment intent first; this
+   * method only records what Stripe confirmed, stamps paidAt from the charge,
+   * and writes the audit event. paymentMethod is deliberately untouched: the
+   * webhook already recorded how the money moved.
+   */
+  async reconcileProcessingInvoicePaid(invoiceId, { paidAt = null, actorUserId = null } = {}) {
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+    if (current.status === 'paid') {
+      throw new ManualPaymentError('This invoice is already paid.')
+    }
+    if (current.status !== 'processing') {
+      throw new ManualPaymentError(
+        'Only an invoice with a payment going through can be reconciled with Stripe.',
+      )
+    }
+
+    const settledAt = paidAt ?? current.paidAt ?? nowIso()
+    const reviewEvent = {
+      id: `invev-${randomUUID().slice(0, 8)}`,
+      invoiceId,
+      clientId: current.clientId,
+      period: current.period,
+      actorUserId,
+      event: 'payment_verified_with_stripe',
+      changes: { status: { before: 'processing', after: 'paid' } },
+      createdAt: nowIso(),
+    }
+
+    if (this.pool) {
+      const dbClient = await this.pool.connect()
+      try {
+        await dbClient.query('begin')
+        const { rowCount } = await dbClient.query(
+          `update invoices
+              set status = 'paid', paid_at = $2, updated_at = now()
+            where id = $1 and status = 'processing'`,
+          [invoiceId, settledAt],
+        )
+        if (rowCount === 0) {
+          await dbClient.query('rollback')
+          return null
+        }
+        await this._insertInvoiceReviewEvent(reviewEvent, { dbClient })
+        await dbClient.query('commit')
+      } catch (error) {
+        await dbClient.query('rollback')
+        throw error
+      } finally {
+        dbClient.release()
+      }
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    const next = { ...data.invoices[index], status: 'paid', paidAt: settledAt, updatedAt: nowIso() }
     data.invoices[index] = next
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     await this._insertInvoiceReviewEvent(reviewEvent)

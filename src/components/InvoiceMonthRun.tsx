@@ -30,6 +30,7 @@ import {
   listUnappliedRetainersRequest,
   markInvoicePaidRequest,
   unmarkInvoicePaidRequest,
+  verifyInvoicePaymentRequest,
   rateInvoiceRequest,
   regenerateInvoicesRequest,
   sendInvoiceRequest,
@@ -1939,6 +1940,21 @@ function InvoiceEditor({
     }
   }
 
+  /**
+   * The stuck-payment fix: ask Stripe, record its answer. No confirm — this
+   * writes nothing unless Stripe says the money settled, and "check with
+   * Stripe" is not a decision she needs to be warned about.
+   */
+  const verifyPayment = async () => {
+    setRetainerError(null)
+    try {
+      const updated = await verifyInvoicePaymentRequest(invoice.id)
+      onInvoiceChanged(updated)
+    } catch (error) {
+      setRetainerError(error instanceof Error ? error.message : 'Could not check with Stripe.')
+    }
+  }
+
   const unmarkPaid = async () => {
     const confirmed = window.confirm(
       `Undo the manual payment mark on ${invoice.number}?\n\nIt goes back to ${invoice.sentAt ? 'Sent' : 'Reviewed'} and can be edited and collected again.`,
@@ -2549,6 +2565,21 @@ function InvoiceEditor({
               onClick={() => void markPaid()}
             >
               Mark paid
+            </button>
+          ) : null}
+          {/* A processing invoice that Stripe may have already settled — the
+              webhook can be lost or arrive out of order. This asks Stripe and
+              records only its answer, which is why it sits where Mark paid
+              deliberately does not. */}
+          {invoice.status === 'processing' ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy}
+              title="Ask Stripe whether this payment has settled, and mark the invoice paid if it has"
+              onClick={() => void verifyPayment()}
+            >
+              Verify with Stripe
             </button>
           ) : null}
           {invoice.status === 'paid' && invoice.paymentMethod === 'manual' ? (
