@@ -997,11 +997,18 @@ export type ChecklistTemplate = {
    */
   periodLabelEnabled?: boolean
   /**
-   * How many whole periods BACK from the due date the covered period sits.
-   * 1 by default — July's books are done in August. The width of a period
-   * comes from `frequency`, not from a second setting.
+   * The FIRST covered window, picked as dates — her rework of
+   * featreq-81429ad1: "The period covers should allow me to pick dates and
+   * then the how often should determine the next period". Later cycles are
+   * DERIVED from these by the task's own recurrence, never stored.
+   *
+   * Same interaction, and the same functions, as a reimbursed expense's
+   * covered dates (featreq-fe3f8b0f).
    */
-  periodLabelOffset?: number
+  periodCoverageStart?: string | null
+  periodCoverageEnd?: string | null
+  /** The due date the entered window belongs to; the anchor cycles step from. */
+  periodCoverageAnchorDue?: string | null
 }
 
 export type Checklist = {

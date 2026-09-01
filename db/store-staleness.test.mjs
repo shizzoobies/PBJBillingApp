@@ -4503,10 +4503,11 @@ describe('quiet skip (postgres branch)', () => {
     // Anything other than an explicit true is off — skipping is opt-in.
     expect(paramFor(inserts[0], 'skip_allowed')).toBe(true)
     expect(paramFor(inserts[1], 'skip_allowed')).toBe(false)
-    // The period label is opt-in the same way, and carries the bookkeeping
-    // default offset of 1 (July's books are done in August).
+    // The period label is opt-in the same way, and its window is null until
+    // she picks the dates.
     expect(paramFor(inserts[0], 'period_label_enabled')).toBe(false)
-    expect(paramFor(inserts[0], 'period_label_offset')).toBe(1)
+    expect(paramFor(inserts[0], 'period_coverage_start')).toBeNull()
+    expect(paramFor(inserts[0], 'period_coverage_end')).toBeNull()
   })
 })
 
@@ -10637,7 +10638,7 @@ describe('the checklist period label round-trips the bulk save (file backend)', 
     expect(back.checklists.find((c) => c.id === 'cl-1').periodLabel).toBe('July 2026')
   })
 
-  it('keeps the recipe’s switch and its offset', async () => {
+  it('keeps the recipe’s switch and its window', async () => {
     await store.write(
       workspace({
         checklistTemplates: [
@@ -10652,7 +10653,9 @@ describe('the checklist period label round-trips the bulk save (file backend)', 
             viewerIds: [],
             editorIds: [],
             periodLabelEnabled: true,
-            periodLabelOffset: 2,
+            periodCoverageStart: '2026-07-13',
+            periodCoverageEnd: '2026-08-13',
+            periodCoverageAnchorDue: '2026-08-31',
             stages: [],
             items: [],
           },
@@ -10662,7 +10665,9 @@ describe('the checklist period label round-trips the bulk save (file backend)', 
 
     const tpl = (await store.read()).checklistTemplates.find((t) => t.id === 'tpl-1')
     expect(tpl.periodLabelEnabled).toBe(true)
-    expect(tpl.periodLabelOffset).toBe(2)
+    expect(tpl.periodCoverageStart).toBe('2026-07-13')
+    expect(tpl.periodCoverageEnd).toBe('2026-08-13')
+    expect(tpl.periodCoverageAnchorDue).toBe('2026-08-31')
   })
 
   // Most tasks carry none, and the default recipe carries none — an untouched
@@ -10710,7 +10715,9 @@ describe('the checklist period label round-trips the bulk save (file backend)', 
       if (match[1] === 'checklists') expect(columns).toContain('period_label')
       else {
         expect(columns).toContain('period_label_enabled')
-        expect(columns).toContain('period_label_offset')
+        expect(columns).toContain('period_coverage_start')
+        expect(columns).toContain('period_coverage_end')
+        expect(columns).toContain('period_coverage_anchor_due')
       }
     }
     expect(statements).toBe(3)

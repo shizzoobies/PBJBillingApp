@@ -27,7 +27,7 @@ import {
 } from '../lib/workspace-version.js'
 import {
   periodLabelForInstance,
-  normalizePeriodLabelOffset,
+  sanitizeCoverageDate,
   sanitizePeriodLabel,
 } from '../lib/checklist-period-label.js'
 import {
@@ -3700,8 +3700,21 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_templates add column if not exists period_label_enabled boolean not null default false`,
       )
+      // The FIRST covered window, picked as dates — her rework of
+      // featreq-81429ad1: "The period covers should allow me to pick dates and
+      // then the how often should determine the next period". Every later cycle
+      // is DERIVED from these three, never stored, so nothing can drift.
+      // `period_label_offset` above is retired by this and left in place rather
+      // than dropped: nothing reads it, and dropping a live column earns a
+      // destructive migration for no gain.
       await this.pool.query(
-        `alter table checklist_templates add column if not exists period_label_offset integer not null default 1`,
+        `alter table checklist_templates add column if not exists period_coverage_start date`,
+      )
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists period_coverage_end date`,
+      )
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists period_coverage_anchor_due date`,
       )
       await this.pool.query(`alter table checklists add column if not exists period_label text`)
 
@@ -4934,7 +4947,8 @@ export class AppDataStore {
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
                    scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id,
-                   onboarding_for_client_id, skip_allowed, period_label_enabled, period_label_offset
+                   onboarding_for_client_id, skip_allowed, period_label_enabled,
+                   period_coverage_start, period_coverage_end, period_coverage_anchor_due
             from checklist_templates
             order by title asc
           `),
@@ -5252,7 +5266,15 @@ export class AppDataStore {
           // false must not even show the skip affordance.
           skipAllowed: Boolean(row.skip_allowed),
           periodLabelEnabled: Boolean(row.period_label_enabled),
-          periodLabelOffset: normalizePeriodLabelOffset(row.period_label_offset),
+          periodCoverageStart: row.period_coverage_start
+            ? row.period_coverage_start.toISOString().slice(0, 10)
+            : null,
+          periodCoverageEnd: row.period_coverage_end
+            ? row.period_coverage_end.toISOString().slice(0, 10)
+            : null,
+          periodCoverageAnchorDue: row.period_coverage_anchor_due
+            ? row.period_coverage_anchor_due.toISOString().slice(0, 10)
+            : null,
           ...(row.onboarding_for_client_id
             ? { onboardingForClientId: row.onboarding_for_client_id }
             : {}),
@@ -6209,8 +6231,8 @@ export class AppDataStore {
         for (const template of safeTemplates) {
           await client.query(
             `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, skip_allowed, period_label_enabled, period_label_offset, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, now())
+              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, skip_allowed, period_label_enabled, period_coverage_start, period_coverage_end, period_coverage_anchor_due, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, now())
             `,
             [
               template.id,
@@ -6248,7 +6270,9 @@ export class AppDataStore {
               // Skipping is opt-in: anything other than an explicit true is off.
               template.skipAllowed === true,
               template.periodLabelEnabled === true,
-              normalizePeriodLabelOffset(template.periodLabelOffset),
+              sanitizeCoverageDate(template.periodCoverageStart),
+              sanitizeCoverageDate(template.periodCoverageEnd),
+              sanitizeCoverageDate(template.periodCoverageAnchorDue),
               createdAtFor('checklist_templates', template.id),
             ],
           )

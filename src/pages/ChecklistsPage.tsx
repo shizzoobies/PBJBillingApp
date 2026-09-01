@@ -36,6 +36,7 @@ import {
 import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { PeriodLabelChip } from '../components/PeriodLabelChip'
+import { periodLabelForInstance } from '../../lib/checklist-period-label.js'
 import { CompletedTasksSection } from '../components/CompletedTasksSection'
 import { CompletedWaits } from '../components/CompletedWaits'
 import { WaitApprovalActions } from '../components/WaitApprovalActions'
@@ -4148,6 +4149,8 @@ export function NewTaskForm({
   // grants per recipe, not a capability every recurring task carries.
   const [skipAllowed, setSkipAllowed] = useState(false)
   const [periodLabelEnabled, setPeriodLabelEnabled] = useState(false)
+  const [periodCoverageStart, setPeriodCoverageStart] = useState('')
+  const [periodCoverageEnd, setPeriodCoverageEnd] = useState('')
 
   // Hand-off (multi-stage) toggle. Only available in repeating mode.
   // When enabled, we render an editor for additional stages.
@@ -4264,9 +4267,11 @@ export function NewTaskForm({
         categoryId: categoryId || null,
         skipAllowed,
         periodLabelEnabled,
-        // The bookkeeping default: July's books are done in August. Changeable
-        // on the recipe afterwards.
-        periodLabelOffset: 1,
+        // The first covered window. Anchored to this recipe's first due date, so
+        // every occurrence after it steps forward by the recurrence.
+        periodCoverageStart: periodLabelEnabled && periodCoverageStart ? periodCoverageStart : null,
+        periodCoverageEnd: periodLabelEnabled && periodCoverageEnd ? periodCoverageEnd : null,
+        periodCoverageAnchorDue: periodLabelEnabled && periodCoverageStart ? dueDate : null,
         stages: [firstStage, ...extraStages],
         ...(isSpecificMonths
           ? {
@@ -4527,10 +4532,32 @@ export function NewTaskForm({
             onChange={(event) => setPeriodLabelEnabled(event.target.checked)}
           />
           <span>
-            Show the period the work covers next to the title (“July 2026” on a task due in
-            August).
+            Show the period the work covers next to the title, and move it forward each time.
           </span>
         </label>
+      ) : null}
+
+      {mode === 'repeating' && periodLabelEnabled ? (
+        <div className="repeating-task-coverage-row">
+          <label>
+            <span>First period covered — from</span>
+            <input
+              className="compact-input"
+              type="date"
+              value={periodCoverageStart}
+              onChange={(event) => setPeriodCoverageStart(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>to</span>
+            <input
+              className="compact-input"
+              type="date"
+              value={periodCoverageEnd}
+              onChange={(event) => setPeriodCoverageEnd(event.target.value)}
+            />
+          </label>
+        </div>
       ) : null}
 
       {error ? <p className="auth-error">{error}</p> : null}
@@ -5240,24 +5267,63 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
           <span>Show the period it covers</span>
         </label>
         {template.periodLabelEnabled === true ? (
-          <label className="repeating-task-lead-row">
-            <span>Period covered</span>
-            <select
-              className="compact-input"
-              value={String(template.periodLabelOffset ?? 1)}
-              onChange={(event) =>
-                props.onUpdateTemplate(template.id, (current) => ({
-                  ...current,
-                  periodLabelOffset: Number(event.target.value),
-                }))
-              }
-            >
-              <option value="1">The one before it is due (July books, due in August)</option>
-              <option value="0">The one it is due in (August books, due in August)</option>
-              <option value="2">Two before it is due</option>
-              <option value="3">Three before it is due</option>
-            </select>
-          </label>
+          <div className="repeating-task-coverage">
+            {/* Her words on the rework: "The period covers should allow me to
+                pick dates and then the how often should determine the next
+                period." So she sets the FIRST window here and nothing else —
+                every later occurrence steps forward by this task's own
+                schedule, exactly the way a reimbursed expense's covered dates
+                already do. Setting the dates re-anchors the cycle to the next
+                occurrence, so a correction takes effect from here on. */}
+            <p className="repeating-task-coverage-hint">
+              Set the first period this task covers. After that each occurrence moves it
+              forward on its own, by however often the task repeats.
+            </p>
+            <div className="repeating-task-coverage-row">
+              <label>
+                <span>From</span>
+                <input
+                  className="compact-input"
+                  type="date"
+                  value={template.periodCoverageStart ?? ''}
+                  onChange={(event) =>
+                    props.onUpdateTemplate(template.id, (current) => ({
+                      ...current,
+                      periodCoverageStart: event.target.value || null,
+                      periodCoverageAnchorDue: current.nextDueDate ?? null,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                <span>To</span>
+                <input
+                  className="compact-input"
+                  type="date"
+                  value={template.periodCoverageEnd ?? ''}
+                  onChange={(event) =>
+                    props.onUpdateTemplate(template.id, (current) => ({
+                      ...current,
+                      periodCoverageEnd: event.target.value || null,
+                      periodCoverageAnchorDue: current.nextDueDate ?? null,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            {template.periodCoverageStart && template.periodCoverageEnd ? (
+              <p className="repeating-task-coverage-preview">
+                Next one reads{' '}
+                <strong>
+                  {periodLabelForInstance(template, template.nextDueDate) ?? '—'}
+                </strong>
+              </p>
+            ) : (
+              <p className="repeating-task-coverage-preview muted-text">
+                Pick both dates and the label appears on new occurrences.
+              </p>
+            )}
+          </div>
         ) : null}
         <label className="repeating-task-on-off-row">
           <input

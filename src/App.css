@@ -4623,6 +4623,39 @@ td strong {
 /* The period a task's work covers, beside its title (featreq-81429ad1).
    Quieter than .stage-badge on purpose: it is a memory aid, not a status, and
    it must not compete with the title it sits next to. */
+/* The first covered window on a repeating task (featreq-81429ad1). Laid out
+   like the reimbursement coverage row it mirrors, so the two read the same. */
+.repeating-task-coverage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  background: rgba(120, 120, 128, 0.07);
+  border-radius: 8px;
+}
+
+.repeating-task-coverage-hint,
+.repeating-task-coverage-preview {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.repeating-task-coverage-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.repeating-task-coverage-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
 .period-label-chip {
   display: inline-flex;
   align-items: center;
