@@ -99,6 +99,7 @@ const ESTIMATES: ClientRecapEstimates = {
   monthsInPeriod: 1,
   whereToSet: 'Client page → Estimated monthly hours',
   byTier: [],
+  cost: { estimated: null, actual: 0, delta: null, direction: null },
   hours: { estimated: 18, actual: 18.35, delta: 0.35, direction: 'over' },
   profit: {
     estimatedRevenue: 1200,
@@ -109,6 +110,8 @@ const ESTIMATES: ClientRecapEstimates = {
     actualProfit: 960,
     delta: 160,
     direction: 'over',
+    revenueDelta: 240,
+    revenueDirection: 'over',
   },
 }
 
@@ -122,6 +125,8 @@ const NO_ESTIMATE: ClientRecapEstimates = {
     estimatedProfit: null,
     delta: null,
     direction: null,
+    revenueDelta: null,
+    revenueDirection: null,
   },
 }
 
@@ -322,5 +327,87 @@ describe('Projected invoice card', () => {
     expect(screen.getByRole('heading', { name: 'End-of-month invoice' })).toBeInTheDocument()
     expect(screen.getByText(/Invoice total/)).toBeInTheDocument()
     expect(screen.queryByText('Estimate')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Round two: the cost columns on the same table — her sent-back markup wrote
+ * "Cost Estimate | Actual | Over/Under" beside the hours columns. Money is
+ * owner-side, so the columns exist exactly when an estimates payload does; a
+ * staff render is byte-identical to what it was before this feature.
+ */
+const ESTIMATES_WITH_COST: ClientRecapEstimates = {
+  ...ESTIMATES,
+  byTier: [
+    {
+      ...TIME.byRole[0],
+      costRate: 35,
+      costRateBasis: 'assigned',
+      costRatePeopleCount: 1,
+      estimatedCost: 280,
+      actualCost: 284.55,
+      costDelta: 4.55,
+      costDirection: 'over',
+    },
+    {
+      ...TIME.byRole[1],
+      costRate: 16,
+      costRateBasis: 'assigned',
+      costRatePeopleCount: 1,
+      estimatedCost: null,
+      actualCost: 163.52,
+      costDelta: null,
+      costDirection: null,
+    },
+  ],
+  cost: { estimated: 280, actual: 448.07, delta: 168.07, direction: 'over' },
+}
+
+describe('Time & hours — the cost columns (owner only)', () => {
+  it('adds Cost estimate | Cost actual | Cost over/under to the same rows', () => {
+    render(
+      <TimeAndHoursCard time={TIME} monthsInPeriod={1} estimates={ESTIMATES_WITH_COST} />,
+    )
+    expect(screen.getByText('Cost estimate')).toBeInTheDocument()
+    const cells = within(roleRow('Accountant')).getAllByRole('cell')
+    expect(cells[4]).toHaveTextContent('$280.00')
+    expect(cells[5]).toHaveTextContent('$284.55')
+    // Over on cost is the bad direction — spent more than planned.
+    expect(cells[6]).toHaveTextContent('+$4.55 over')
+    expect(cells[6].className).toContain('recap-variance-bad')
+  })
+
+  it('the Total row carries the payload totals, not a page-side sum', () => {
+    render(
+      <TimeAndHoursCard time={TIME} monthsInPeriod={1} estimates={ESTIMATES_WITH_COST} />,
+    )
+    const cells = within(totalRow()).getAllByRole('cell')
+    expect(cells[4]).toHaveTextContent('$280.00')
+    expect(cells[5]).toHaveTextContent('$448.07')
+    expect(cells[6]).toHaveTextContent('+$168.07 over')
+  })
+
+  it('a role with no estimated cost gets a dash, never a variance against zero', () => {
+    render(
+      <TimeAndHoursCard time={TIME} monthsInPeriod={1} estimates={ESTIMATES_WITH_COST} />,
+    )
+    const cells = within(roleRow('Bookkeeper')).getAllByRole('cell')
+    expect(cells[4]).toHaveTextContent('—')
+    expect(cells[5]).toHaveTextContent('$163.52')
+    expect(cells[6]).toHaveTextContent('—')
+  })
+
+  it('prints the labor-cost basis note when the money columns are up', () => {
+    render(
+      <TimeAndHoursCard time={TIME} monthsInPeriod={1} estimates={ESTIMATES_WITH_COST} />,
+    )
+    expect(screen.getByText(/owner time carries no hourly cost/)).toBeInTheDocument()
+  })
+
+  it('renders NO cost columns without an estimates payload — a staff table is unchanged', () => {
+    render(<TimeAndHoursCard time={TIME_STAFF} monthsInPeriod={1} />)
+    expect(screen.queryByText('Cost estimate')).not.toBeInTheDocument()
+    expect(within(roleRow('Bookkeeper')).getAllByRole('cell')).toHaveLength(4)
+    expect(screen.queryByText(/owner time carries no hourly cost/)).not.toBeInTheDocument()
   })
 })

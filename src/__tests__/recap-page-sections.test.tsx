@@ -95,6 +95,7 @@ const RECAP: ClientRecap = {
     monthsInPeriod: 3,
     whereToSet: 'Client page → Estimated monthly hours',
     byTier: [],
+    cost: { estimated: 360, actual: 480, delta: 120, direction: 'over' },
     hours: { estimated: 18, actual: 18.35, delta: 0.35, direction: 'over' },
     profit: {
       estimatedRevenue: 2160,
@@ -105,6 +106,8 @@ const RECAP: ClientRecap = {
       actualProfit: 1722,
       delta: -78,
       direction: 'under',
+      revenueDelta: 42,
+      revenueDirection: 'over',
     },
   },
   projection: null,
@@ -145,8 +148,10 @@ describe('Client Recap page layout', () => {
     expect(screen.queryByText('Administrative')).not.toBeInTheDocument()
     expect(screen.queryByText(/Realized rate/)).not.toBeInTheDocument()
     expect(screen.queryByText('Margin')).not.toBeInTheDocument()
-    // Billing is unchanged and still uses tiles.
-    expect(screen.getByText('Revenue this period')).toBeInTheDocument()
+    // Billing still uses tiles — now her three: Estimated | Actual | Over/Under
+    // (round two of this feature renamed them off the sent-back printout).
+    expect(screen.getByText('Estimated invoice')).toBeInTheDocument()
+    expect(screen.getByText('Actual invoice')).toBeInTheDocument()
   })
 })
 
@@ -195,7 +200,7 @@ describe('Client Recap page — Billing says when it is a restatement', () => {
       monthsInPeriod: 1,
     })
     render(<ClientRecapPage />)
-    await waitFor(() => expect(screen.getByText('Revenue this period')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Actual invoice')).toBeInTheDocument())
     expect(
       screen.queryByText(/Priced at the client's current rates and plans/),
     ).not.toBeInTheDocument()

@@ -2705,6 +2705,9 @@ export type ClientRecapEstimateTier = ClientRecapRoleRow & {
   /** Null = no estimate, or no cost rate for the role — either way, zero cost. */
   estimatedCost: number | null
   actualCost: number
+  /** actualCost − estimatedCost; null when no estimated cost exists. */
+  costDelta: number | null
+  costDirection: ClientRecapDirection
 }
 
 export type ClientRecapEstimates = {
@@ -2712,6 +2715,13 @@ export type ClientRecapEstimates = {
   monthsInPeriod: number
   whereToSet: string
   byTier: ClientRecapEstimateTier[]
+  /** The roles table's cost Total row — what the tiers' cost columns add to. */
+  cost: {
+    estimated: number | null
+    actual: number
+    delta: number | null
+    direction: ClientRecapDirection
+  }
   hours: {
     estimated: number | null
     actual: number
@@ -2732,6 +2742,9 @@ export type ClientRecapEstimates = {
     actualProfit: number
     delta: number | null
     direction: ClientRecapDirection
+    /** Actual invoice − estimated invoice (service revenue, both sides). */
+    revenueDelta: number | null
+    revenueDirection: ClientRecapDirection
   }
 }
 

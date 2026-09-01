@@ -1192,8 +1192,17 @@ Clients page meanwhile. Owner-only.
   hours, Billing, Profitability, the projected invoice, and **Tasks & workflow
   last**. Tasks used to sit second, above the money; it moved to the bottom
   because the recap is opened for the numbers.
-- **Time & hours is a table: ESTIMATE | ACTUAL | OVER/UNDER, one row per role,
-  with a Total row.** It replaced four stat tiles (total hours, billable,
+- **The header names the client's billing type** — "Billing type: Hourly" /
+  "Monthly subscription" / "Annual" — right under the page title, per her
+  margin note. A billing master shows none: it has no mode of its own.
+- **Time & hours is a table: ESTIMATE | ACTUAL | OVER/UNDER for hours, then
+  COST ESTIMATE | COST ACTUAL | COST OVER/UNDER in dollars, one row per role,
+  with a Total row.** The cost columns price the same rows: a role's estimated
+  hours at its people's pay rate against the actual labor cost, with the
+  variance colored the same way as hours (under plan is green — less was spent).
+  A role with no estimate, or no pay rate (the owner), shows an em dash rather
+  than a variance against zero; the labor-cost basis line prints under the
+  table. It replaced four stat tiles (total hours, billable,
   administrative, vs. the prior period). Each row is named for the people who
   filled that role and tagged with the role, so it reads one person per line in
   the normal case. Rows are per ROLE because that is the grain the estimate is
@@ -1213,8 +1222,14 @@ Clients page meanwhile. Owner-only.
   now the Actual column** — the same revenue − labor cost figure it always was,
   standing next to the plan it is judged against. The definitions and the
   labor-cost basis print underneath.
-- **Billing is unchanged:** revenue for the period, the rate or plan, and
-  reimbursements.
+- **Billing is three tiles: Estimated Invoice | Actual Invoice | Over/Under** —
+  her relabel of the old revenue/rate/reimbursements tiles. Estimated Invoice
+  is the expected service revenue (a monthly client's plan fee; an hourly
+  client's estimated hours at bill rates); Actual Invoice is the same service
+  revenue the Profitability panel measures against; Over/Under subtracts them,
+  green when over (billed more than planned). Reimbursements are excluded from
+  both sides and keep their own line and list under the tiles; the rate tile's
+  job moved to the billing-type line in the header.
 - **Ad hoc work counts toward the period's revenue at its default value** —
   what invoicing it would charge. The recap is computed from the time itself,
   not from a particular draft invoice, so it can't see a "show detail only" or

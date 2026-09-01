@@ -128,9 +128,10 @@ describe('ClientRecapPage — a billing master', () => {
     mockRecap.mockResolvedValue(masterRecap)
     render(<ClientRecapPage />)
 
-    // Billing and profitability read exactly as they do for one company.
+    // Billing and profitability read exactly as they do for one company —
+    // the tiles are her round-two set: Estimated | Actual | Over/Under.
     expect(await screen.findByText('$1,250.00')).toBeInTheDocument()
-    expect(screen.getByText('Revenue this period')).toBeInTheDocument()
+    expect(screen.getByText('Actual invoice')).toBeInTheDocument()
     expect(screen.getByText('$850.00')).toBeInTheDocument()
     // …and the time table is the same ESTIMATE | ACTUAL | OVER/UNDER one.
     expect(screen.getByText('Time & hours')).toBeInTheDocument()
@@ -155,12 +156,16 @@ describe('ClientRecapPage — a billing master', () => {
   })
 
   // A rate averaged across four companies would be a fifth number nobody pays.
-  it('em-dashes the rate rather than printing $0.00/mo', async () => {
+  // Round two removed the rate TILE entirely (the header names the billing
+  // type instead) — so what is pinned now is that a master, which has no
+  // billing mode of its own, invents neither a rate nor a type.
+  it('invents neither a rate nor a billing type', async () => {
     mockRecap.mockResolvedValue(masterRecap)
     render(<ClientRecapPage />)
 
-    expect(await screen.findByText('Rate — set per company')).toBeInTheDocument()
+    await screen.findByText('Actual invoice')
     expect(screen.queryByText('$0.00/mo')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Billing type:/)).not.toBeInTheDocument()
   })
 
   it('em-dashes sales tax and the projection, each with its reason', async () => {
@@ -237,8 +242,8 @@ describe('ClientRecapPage — an ordinary client is unchanged', () => {
     expect(await screen.findByText('A monthly review of one client.')).toBeInTheDocument()
     expect(screen.queryByText('Companies in this roll-up')).not.toBeInTheDocument()
     expect(screen.queryByText('Not rolled up')).not.toBeInTheDocument()
-    expect(screen.getByText('Monthly rate')).toBeInTheDocument()
-    expect(screen.getByText('$300.00/mo')).toBeInTheDocument()
+    // The rate tile became the header's billing-type line in round two.
+    expect(screen.getByText('Billing type: Monthly subscription')).toBeInTheDocument()
     expect(screen.getByText('Projected total')).toBeInTheDocument()
   })
 })

@@ -97,6 +97,22 @@ const navTo = (name: string) => {
   fireEvent.click(screen.getByRole('link', { name }))
 }
 
+/**
+ * Open the pinned Overdue panel if it is on the page (it mounts COLLAPSED —
+ * one slim bar, titles on demand).
+ *
+ * Why the tests need this: the In-progress list is scoped to the report period
+ * (the current month by default), so a task due `localOffset(-1)` is in the
+ * LIST on 27-30 days of the month and ONLY in the pin on the 1st — yesterday
+ * was last month. These tests are about preview scoping, not about which
+ * surface carries the title that day, so they read the one surface that is
+ * period-independent. This file failed every month boundary until it did.
+ */
+const expandOverduePin = () => {
+  const bar = document.querySelector('.overdue-pin-heading')
+  if (bar) fireEvent.click(bar)
+}
+
 describe('owner previewing a staff member: checklist surfaces scope to them', () => {
   beforeEach(() => {
     window.history.pushState({}, '', '/')
@@ -118,9 +134,12 @@ describe('owner previewing a staff member: checklist surfaces scope to them', ()
     // as" picker only renders once the dashboard is actually on screen.
     await screen.findByLabelText(/viewing as/i)
 
-    // Sanity: outside preview the owner sees everything — both tasks in the
-    // In-progress list and her overdue task pinned.
+    // Sanity: outside preview the owner sees everything — Jordan's task in
+    // the In-progress list and her overdue task in the pin (expanded, because
+    // on the 1st of a month the pin is the only surface that shows it).
     navTo('Checklists')
+    await screen.findAllByText('Jordan monthly close')
+    expandOverduePin()
     expect(await screen.findAllByText('Owner overdue payroll')).not.toHaveLength(0)
     expect(await screen.findAllByText('Jordan monthly close')).not.toHaveLength(0)
     expect(document.querySelector('.overdue-pin')).not.toBeNull()
@@ -137,8 +156,11 @@ describe('owner previewing a staff member: checklist surfaces scope to them', ()
 
     navTo('Checklists')
 
-    // Jordan's task is there; the owner's is gone from every surface.
+    // Jordan's task is there; the owner's is gone from every surface — the
+    // pin included, which in preview holds the previewed person's overdue
+    // work (none) and so is not even mounted to expand.
     expect(await screen.findAllByText('Jordan monthly close')).not.toHaveLength(0)
+    expandOverduePin()
     expect(screen.queryAllByText('Owner overdue payroll')).toHaveLength(0)
 
     // Jordan has nothing overdue, so the pinned Overdue panel must be absent —
@@ -179,8 +201,9 @@ describe('owner previewing a staff member: checklist surfaces scope to them', ()
     expect(screen.queryByText(/Viewing as Jordan Ellis/)).not.toBeInTheDocument()
 
     navTo('Checklists')
+    await screen.findAllByText('Jordan monthly close')
+    expandOverduePin()
     expect(await screen.findAllByText('Owner overdue payroll')).not.toHaveLength(0)
-    expect(await screen.findAllByText('Jordan monthly close')).not.toHaveLength(0)
     expect(document.querySelector('.overdue-pin')).not.toBeNull()
   })
 })
