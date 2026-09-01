@@ -571,23 +571,27 @@ Clients page meanwhile. Owner-only.
     Setting a date range hides the dashed rows, since an unknown date can't be
     said to fall inside a window; the tab says so when a range is set.
 - **THE PERIOD A TASK'S WORK COVERS, shown next to its title.** A recurring task
-  can carry a small label naming the period it is FOR — "July 2026" on a task
-  due in August — so a stack of similar-looking monthly tasks can be told apart
-  at a glance. It sits beside the task title on the checklist card.
+  can carry a small label naming the period it is FOR — "July 13 – August 13,
+  2026" on a task due at the end of August — so a stack of similar-looking
+  monthly tasks can be told apart at a glance. It sits beside the task title on
+  the checklist card.
   - **Off unless it was turned on for that repeating task.** Like skipping, it
     is a setting on the repeating setup itself ("Show the period it covers"),
     chosen when the task is created and changeable afterwards on the Repeating
     tasks list. Most tasks do not have one, and a task without one shows
     nothing at all — no empty space, no dash.
-  - **Which period it names** is set beside the switch: by default the one
-    BEFORE the task is due, because July's books are done in August. It can be
-    set to the period the task is due in instead, or two or three back.
-  - **It advances on its own.** Each new occurrence names its own period — the
-    August task says "July 2026", September's says "August 2026" — with nothing
-    to reset or roll over.
-  - **How wide the period is comes from the task's own schedule**: a monthly
-    task names a month, a quarterly one names a quarter ("Q2 2026"), a yearly
-    one names a year ("2025"). Daily and weekly tasks name the month.
+  - **You pick the dates.** Beside the switch you set the FIRST period the task
+    covers — a From and a To, for example July 13 to August 13. That is the only
+    thing to fill in.
+  - **It advances on its own, by however often the task repeats.** The next
+    occurrence reads "August 13 – September 13, 2026", the one after that
+    "September 13 – October 13, 2026", with nothing to reset or roll over. A
+    quarterly task steps a quarter, a yearly one steps a year.
+  - **It is the same behavior as covered dates on a reimbursed expense** — set
+    the first window once and every cycle after it moves itself — and it is
+    worded the same way on screen, so the two read alike.
+  - **Changing the dates re-anchors from the next occurrence on.** Occurrences
+    already created keep the label they were born with.
   - **IT IS ONLY A LABEL.** It does not change anything: not the due date, not
     which month work is billed in, not any report, total, filter or sort. It is
     there to be read. Turning it on for a repeating task changes nothing about
