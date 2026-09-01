@@ -1337,6 +1337,43 @@ function InvoiceLineRow({
             </div>
           </div>
         ) : null}
+        {/* HER CONTROL (featreq-cfb1536a, answer revised in person): the
+            hours are their own field, and the amount follows. Type 1.4 over a
+            1.31 and the line bills 1.4 × the rate — "the amount just auto
+            calculates". The detail text is rewritten with it so the printed
+            document says the same hours she typed, and the server re-derives
+            the amount from these fields again on save. Only lines the
+            generator stamped with hours+rate get this; legacy lines keep
+            their editable amount. */}
+        {line.kind === 'hourly' &&
+        typeof line.hours === 'number' &&
+        typeof line.rate === 'number' ? (
+          <div className="invoice-run-hours-row">
+            <label>
+              <span>Hours</span>
+              <input
+                className="compact-input"
+                type="number"
+                step="0.01"
+                min="0"
+                value={line.hours}
+                aria-label="Billed hours"
+                readOnly={locked}
+                onChange={(event) => {
+                  const typed = Number(event.target.value)
+                  const hours = Number.isFinite(typed) && typed >= 0 ? typed : 0
+                  const rate = line.rate as number
+                  onChange(index, {
+                    hours,
+                    amount: Math.round(hours * rate * 100) / 100,
+                    detail: `${hours.toFixed(2)}h at ${currency.format(rate)}/hr`,
+                  })
+                }}
+              />
+            </label>
+            <span className="invoice-run-hours-rate">× {currency.format(line.rate)}/hr</span>
+          </div>
+        ) : null}
         {onModeChange ? (
           <div className="invoice-run-adhoc-choice">
             <label>
@@ -1384,7 +1421,13 @@ function InvoiceLineRow({
           readOnly={
             locked ||
             (Boolean(onModeChange) && mode !== 'billed') ||
-            line.kind === 'retainer_credit'
+            line.kind === 'retainer_credit' ||
+            // Derived from the hours field beside it — typing here would be
+            // overwritten by hours × rate on the next save anyway, so the box
+            // says so by not accepting the keystrokes.
+            (line.kind === 'hourly' &&
+              typeof line.hours === 'number' &&
+              typeof line.rate === 'number')
           }
           onChange={(event) => onChange(index, { amount: Number(event.target.value) })}
         />

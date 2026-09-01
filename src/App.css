@@ -11728,6 +11728,32 @@ tr.is-inactive-client .client-name-link {
   flex: 0 0 auto;
 }
 
+/* The billed-hours control on an hourly line (featreq-cfb1536a): hours are
+   hers to type, the rate stands beside them, the amount follows. */
+.invoice-run-hours-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.invoice-run-hours-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.invoice-run-hours-row .compact-input {
+  width: 90px;
+}
+
+.invoice-run-hours-rate {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .invoice-run-error {
   background: rgba(197, 48, 48, 0.08);
   border-radius: 8px;

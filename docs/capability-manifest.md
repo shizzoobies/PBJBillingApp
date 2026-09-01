@@ -1405,6 +1405,26 @@ Clients page meanwhile. Owner-only.
     total is therefore the firm's real STAFF labor cost.
   - Anyone with no rate configured shows "—" rather than "$0.00", so an unset
     rate never reads as "billed nothing" or "cost nothing".
+- **HOW BILLABLE HOURS ARE PRICED ON INVOICES — changed 2026-09-01, her call.**
+  An hourly line charges exactly the two-decimal hours it prints, times the
+  rate: "0.05h at $125.00/hr" is $6.25, to the penny, every time. A person's
+  billed hours are the sum of their entries' two-decimal hours — the same
+  figure the Client Recap's roles table and the payroll report show — so the
+  recap's Actual Invoice now matches its own hours table. (Invoices used to
+  charge the exact raw clock time underneath while printing rounded hours,
+  which is why hand-multiplying a line never quite landed; that is the "math
+  is not mathing" she reported, and it is gone.) Ad hoc lines follow the same
+  rule. Already-issued invoices are untouched: only newly generated ones
+  price this way, and lines from before the change keep their stored amounts
+  even when edited.
+- **THE HOURS ON AN HOURLY LINE ARE EDITABLE, AND THE AMOUNT FOLLOWS.** In the
+  month run's editor each hourly line shows its hours in a small "Hours" box
+  with the rate beside it. Change the hours — round 1.31 up to 1.5 if you want
+  a rounder bill — and the amount recalculates as hours × rate on its own; the
+  amount box itself does not accept typing on these lines, because it is
+  always the product of the two numbers next to it. The printed invoice shows
+  the hours you chose. There is NO automatic rounding: nothing rounds unless
+  you round it.
 - **HOW LABOR COST IS CALCULATED — the rule, on every surface. Labor cost = the
   two-decimal hours shown × the cost rate: round the hours FIRST, then
   multiply.** In the firm owner's own words, verbatim: *"I pay by the minute so

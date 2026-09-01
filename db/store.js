@@ -1091,6 +1091,42 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
         return covered
       }
 
+      /**
+       * An hourly line that carries its own hours and rate — every one the
+       * generator has produced since featreq-cfb1536a — has its AMOUNT
+       * RE-DERIVED HERE, from those two, on every save.
+       *
+       * This is her rule made structural: the hours printed on the line times
+       * the rate IS the charge, and the editor's hours field is the one thing
+       * she edits (round a line up by hand and "the amount just auto
+       * calculates"). A payload whose amount disagrees with its own hours —
+       * a stale tab, a hand-built request — loses: the hours are the record.
+       *
+       * Legacy hourly lines without the fields keep their amount as sent, so
+       * an old invoice edited today is not silently repriced.
+       */
+      if (kind === 'hourly') {
+        const hours = Number(line?.hours)
+        const rate = Number(line?.rate)
+        if (
+          Number.isFinite(hours) &&
+          hours >= 0 &&
+          hours <= 100000 &&
+          Number.isFinite(rate) &&
+          rate >= 0
+        ) {
+          const cleanHours = Math.round(hours * 100) / 100
+          const cleanRate = Math.round(rate * 100) / 100
+          return {
+            ...base,
+            hours: cleanHours,
+            rate: cleanRate,
+            amount: roundMoney(cleanHours * cleanRate),
+          }
+        }
+        return base
+      }
+
       if (kind !== 'adhoc') return base
 
       // The owner's three-way choice, made money. While a line is BILLED its

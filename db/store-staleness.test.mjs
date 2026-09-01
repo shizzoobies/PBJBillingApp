@@ -10723,3 +10723,89 @@ describe('the checklist period label round-trips the bulk save (file backend)', 
     expect(statements).toBe(3)
   })
 })
+
+/**
+ * The hours field is the record — featreq-cfb1536a.
+ *
+ * An hourly line carrying hours+rate has its amount RE-DERIVED on every save:
+ * she edits the hours, "the amount just auto calculates", and a payload whose
+ * amount disagrees with its own hours loses. Pinned at the store because the
+ * PATCH route is reachable with a stale tab or curl — the editor's derivation
+ * is a courtesy, this is the rule.
+ */
+describe('hourly lines re-derive amount from hours × rate (file backend)', () => {
+  const invoice = (lineItems) => ({
+    id: 'inv-hours',
+    clientId: 'c1',
+    period: '2026-08',
+    kind: 'monthly',
+    number: 'INV-2026-08-777',
+    status: 'draft',
+    lineItems,
+    subtotal: 0,
+    total: 0,
+    dueDate: null,
+    blurb: '',
+    scopeFlags: [],
+    sentAt: null,
+    paidAt: null,
+    paymentMethod: null,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  })
+
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      invoice([
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '1.31h at $75.00/hr', hours: 1.31, rate: 75, amount: 98.25 },
+      ]),
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  })
+
+  it('a stale amount loses to the hours it rode in with', async () => {
+    const updated = await store.updateInvoice('inv-hours', {
+      lineItems: [
+        // Hours say 1.4; the amount claims the OLD price. The hours win.
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '1.40h at $75.00/hr', hours: 1.4, rate: 75, amount: 98.25 },
+      ],
+    })
+    expect(updated.lineItems[0].amount).toBe(105)
+    expect(updated.lineItems[0].hours).toBe(1.4)
+    expect(updated.total).toBe(105)
+  })
+
+  it('hours and rate survive the round trip', async () => {
+    const updated = await store.updateInvoice('inv-hours', {
+      lineItems: [
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '1.31h at $75.00/hr', hours: 1.31, rate: 75, amount: 98.25 },
+      ],
+    })
+    expect(updated.lineItems[0].hours).toBe(1.31)
+    expect(updated.lineItems[0].rate).toBe(75)
+  })
+
+  // An old invoice's lines have no hours field, and editing one today must not
+  // silently reprice money that was computed under the old rule.
+  it('a legacy hourly line without the fields keeps its amount as sent', async () => {
+    const updated = await store.updateInvoice('inv-hours', {
+      lineItems: [
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '1.31h at $75.00/hr', amount: 97.88 },
+      ],
+    })
+    expect(updated.lineItems[0].amount).toBe(97.88)
+    expect(updated.lineItems[0].hours).toBeUndefined()
+  })
+
+  it('junk hours are dropped rather than priced', async () => {
+    const updated = await store.updateInvoice('inv-hours', {
+      lineItems: [
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: 'x', hours: 'a lot', rate: 75, amount: 42 },
+      ],
+    })
+    // Falls back to the legacy path: amount as sent, no hours stored.
+    expect(updated.lineItems[0].amount).toBe(42)
+    expect(updated.lineItems[0].hours).toBeUndefined()
+  })
+})

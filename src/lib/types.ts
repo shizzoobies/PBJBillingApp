@@ -334,6 +334,16 @@ export type PersistedInvoiceLine = {
   label: string
   detail: string
   amount: number
+  /**
+   * `hourly` lines only, on every one generated since featreq-cfb1536a: the
+   * billed hours (the sum of that person's rows' two-decimal hours) and the
+   * bill rate. The editor shows hours as their own field; the amount is
+   * DERIVED — hours × rate, by the editor on change and again by the server on
+   * save — so the printed hours always multiply into the printed amount.
+   * Absent on legacy lines, whose amounts are left exactly as stored.
+   */
+  hours?: number
+  rate?: number
   /** `adhoc` lines only. Absent is read as 'billed'. */
   adhocMode?: AdhocMode
   /**
