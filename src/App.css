@@ -923,6 +923,25 @@ h2 {
   outline: none;
 }
 
+/* The month-step arrows flanking the picker (featreq-1947e574). Quiet inside
+   the pill — the pill is the control; these are its nudges. */
+.period-step {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--bluegray);
+  cursor: pointer;
+  display: inline-flex;
+  justify-content: center;
+  padding: 4px;
+}
+
+.period-step:hover {
+  background: var(--surface-2, rgba(0, 0, 0, 0.05));
+  color: var(--ink);
+}
+
 /* Shared "Report period" range control (Time / Timesheet / Board / Checklists).
    Mirrors the .period-control pill + .group-by-toggle visual language: an inline
    premium pill that wraps gracefully on narrow screens. */

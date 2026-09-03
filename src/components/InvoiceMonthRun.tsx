@@ -1,5 +1,7 @@
 import {
   AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
   Download,
   Link as LinkIcon,
   Lock,
@@ -68,6 +70,7 @@ import {
   getBillingPeriodLabel,
   recipientCountLabel,
   resolveInvoiceRecipients,
+  shiftReviewPeriod,
   toCents,
   type ResolvedInvoiceRecipients,
 } from '../lib/utils'
@@ -941,19 +944,44 @@ export function InvoiceMonthRun({
           <h2>Invoices</h2>
         </div>
         <div className="invoice-run-actions">
-          <label className="period-control">
-            {/* `.sr-only` is not a class this app defines — the label was
-                rendering as stray visible text next to the picker. */}
-            <span className="visually-hidden">Billing month</span>
-            <input
-              type="month"
-              className="input"
-              value={period}
-              // Controlled, so a refused change simply re-renders the old month
-              // back into the input — there is no stray value left behind.
-              onChange={(event) => changePeriod(event.target.value || currentPeriod())}
-            />
-          </label>
+          {/* A div, not the label: a button inside a label forwards its click
+              to the labeled input in some browsers, which would pop the month
+              picker on every arrow press. */}
+          <div className="period-control">
+            {/* One month at a time, without opening the picker
+                (featreq-1947e574). Both arrows go through changePeriod, so
+                the unsaved-edits guard asks the same question a picker change
+                would — a refused step leaves the month exactly where it was. */}
+            <button
+              type="button"
+              className="period-step"
+              aria-label="Previous month"
+              onClick={() => changePeriod(shiftReviewPeriod('month', period, -1))}
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <label>
+              {/* `.sr-only` is not a class this app defines — the label was
+                  rendering as stray visible text next to the picker. */}
+              <span className="visually-hidden">Billing month</span>
+              <input
+                type="month"
+                className="input"
+                value={period}
+                // Controlled, so a refused change simply re-renders the old
+                // month back into the input — no stray value left behind.
+                onChange={(event) => changePeriod(event.target.value || currentPeriod())}
+              />
+            </label>
+            <button
+              type="button"
+              className="period-step"
+              aria-label="Next month"
+              onClick={() => changePeriod(shiftReviewPeriod('month', period, 1))}
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
           <button type="button" className="secondary-action" disabled={busy} onClick={generate}>
             <RefreshCw size={15} />
             {busy ? 'Working…' : 'Generate'}

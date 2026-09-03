@@ -1563,6 +1563,12 @@ Clients page meanwhile. Owner-only.
 > with something to bill — lines, a due date from that client's payment terms,
 > any prior-month adjustment carried forward, and out-of-scope flags.
 >
+> **Moving between months:** the month picker has a back arrow and a forward
+> arrow flanking it — one press steps the run one month and the list reloads to
+> match, no calendar popup needed. The picker itself still works for jumping
+> straight to a distant month. If an open invoice has unsaved edits, stepping
+> months asks before discarding them, same as the picker.
+>
 > **The month's invoices are grouped into status tabs** — **To review**,
 > **Reviewed**, **Sent**, **Paid**, **Voided** — so you work one group at a time
 > instead of scrolling a single list of every client. Sent, Processing and
