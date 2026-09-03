@@ -8,6 +8,7 @@ import {
   Printer,
   RefreshCw,
   RotateCcw,
+  ShieldCheck,
   Trash2,
   Undo2,
 } from 'lucide-react'
@@ -30,6 +31,7 @@ import {
   listUnappliedRetainersRequest,
   markInvoicePaidRequest,
   unmarkInvoicePaidRequest,
+  verifyAllInvoicePaymentsRequest,
   verifyInvoicePaymentRequest,
   rateInvoiceRequest,
   regenerateInvoicesRequest,
@@ -836,6 +838,54 @@ export function InvoiceMonthRun({
     }
   }
 
+  /**
+   * Check EVERY invoice still mid-payment — any month, not just this one —
+   * against Stripe, and record only Stripe's answers. No confirm, same as the
+   * single Verify button: this writes nothing unless Stripe says the money
+   * settled, so there is no decision to warn her about. The list re-fetches
+   * afterwards because the sweep can settle invoices in the month on screen.
+   */
+  const verifyAll = async () => {
+    const target = period
+    setBusy(true)
+    setError(null)
+    setNote(null)
+    try {
+      const result = await verifyAllInvoicePaymentsRequest()
+      const rows = await listInvoicesRequest(target)
+      if (shownPeriod.current !== target) return
+      setInvoices(rows)
+      if (result.checked === 0) {
+        setNote('Nothing is holding — no invoices are mid-payment.')
+        return
+      }
+      const parts: string[] = []
+      if (result.verified.length > 0) {
+        parts.push(
+          `${result.verified.length} confirmed paid (${result.verified
+            .map((row) => row.number)
+            .join(', ')})`,
+        )
+      }
+      if (result.stillSettling.length > 0) {
+        parts.push(`${result.stillSettling.length} still settling with Stripe`)
+      }
+      if (result.unverifiable.length > 0) {
+        parts.push(
+          `${result.unverifiable.length} could not be checked (${result.unverifiable
+            .map((row) => row.number)
+            .join(', ')})`,
+        )
+      }
+      setNote(`Checked ${result.checked} with Stripe: ${parts.join(' · ')}.`)
+    } catch (err) {
+      if (shownPeriod.current !== target) return
+      setError(err instanceof Error ? err.message : 'Could not check with Stripe.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   /** Replace one invoice in the list with a server-returned version. */
   const mergeInvoice = (updated: PersistedInvoice) =>
     setInvoices((current) =>
@@ -924,6 +974,20 @@ export function InvoiceMonthRun({
           >
             <RotateCcw size={15} />
             Void &amp; regenerate
+          </button>
+          {/* The sweep: every mid-payment invoice, any month, checked against
+              Stripe at once. Always offered — whether anything is holding is
+              exactly what it answers, and the months holding one may not be
+              the month on screen. */}
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={busy}
+            title="Check every invoice with a payment going through against Stripe and record what actually settled"
+            onClick={() => void verifyAll()}
+          >
+            <ShieldCheck size={15} />
+            Verify all with Stripe
           </button>
           <a
             className="secondary-action"

@@ -3281,6 +3281,99 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/invoices/verify-all-payments — the sweep form of
+    // verify-payment: every invoice still 'processing', whatever its month,
+    // checked against Stripe in one press. Same contract as the single button —
+    // Stripe is asked BEFORE anything is written and only its answer is
+    // recorded — and each invoice is handled independently, so one that cannot
+    // be checked becomes a line in the summary rather than the end of the
+    // sweep.
+    if (normalizedPath === '/api/invoices/verify-all-payments' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can verify payments' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const holding = (await appDataStore.listInvoices()).filter(
+        (invoice) => invoice.status === 'processing',
+      )
+      const verified = []
+      const stillSettling = []
+      const unverifiable = []
+      const invoices = []
+      for (const invoice of holding) {
+        if (!invoice.stripePaymentIntentId) {
+          unverifiable.push({ id: invoice.id, number: invoice.number, reason: 'no_intent' })
+          continue
+        }
+        const intent = await retrievePaymentIntentStatus(invoice.stripePaymentIntentId)
+        if (!intent) {
+          unverifiable.push({
+            id: invoice.id,
+            number: invoice.number,
+            reason: 'stripe_unreachable',
+          })
+          continue
+        }
+        if (intent.status !== 'succeeded') {
+          stillSettling.push({
+            id: invoice.id,
+            number: invoice.number,
+            stripeStatus: intent.status,
+          })
+          continue
+        }
+        try {
+          const updated = await appDataStore.reconcileProcessingInvoicePaid(invoice.id, {
+            paidAt: intent.chargedAt,
+            actorUserId: session.user.id,
+          })
+          if (updated) {
+            verified.push({ id: invoice.id, number: invoice.number })
+            invoices.push(updated)
+          } else {
+            unverifiable.push({ id: invoice.id, number: invoice.number, reason: 'not_found' })
+          }
+        } catch (error) {
+          if (error instanceof ManualPaymentError) {
+            // The invoice left 'processing' between the list read and the
+            // write — most plausibly the webhook landing mid-sweep. Re-read and
+            // report what it actually is now: paid is the outcome she pressed
+            // the button for, whoever recorded it first.
+            const now = (await appDataStore.listInvoices()).find(
+              (entry) => entry.id === invoice.id,
+            )
+            if (now?.status === 'paid') {
+              verified.push({ id: invoice.id, number: invoice.number })
+              invoices.push(now)
+            } else {
+              unverifiable.push({
+                id: invoice.id,
+                number: invoice.number,
+                reason: 'changed_during_sweep',
+              })
+            }
+            continue
+          }
+          console.error('[invoices] verify-all failed on', invoice.id, error)
+          unverifiable.push({ id: invoice.id, number: invoice.number, reason: 'error' })
+        }
+      }
+      sendJson(response, 200, {
+        checked: holding.length,
+        verified,
+        stillSettling,
+        unverifiable,
+        invoices,
+      })
+      return
+    }
+
     // POST /api/invoices/:id/verify-payment — ask STRIPE whether a
     // 'processing' payment actually settled, and record its answer. The fix
     // for a lost or out-of-order settle webhook; unlike mark-paid this never

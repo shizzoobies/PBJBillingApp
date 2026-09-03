@@ -215,6 +215,66 @@ describe('the mark-paid route', () => {
  * the whole point over mark-paid is that it records Stripe's answer, not a
  * human's. Behavior is on the store; this pins the order of operations.
  */
+/**
+ * verify-all glue: the sweep must keep the single button's contract on EVERY
+ * invoice it touches — Stripe asked before the store writes, nothing recorded
+ * on any answer but 'succeeded' — and one invoice's failure must not end the
+ * sweep for the rest.
+ */
+describe('the verify-all-payments route', () => {
+  const block = routeBlock(
+    /normalizedPath === '\/api\/invoices\/verify-all-payments'/,
+    4200,
+  )
+
+  it('is owner-gated and origin-checked like every invoice write', () => {
+    expect(block).toContain("session.user.role !== 'owner'")
+    expect(block).toContain('isCrossSiteOrigin(request)')
+  })
+
+  it('sweeps only invoices that are mid-payment', () => {
+    expect(block).toContain("invoice.status === 'processing'")
+  })
+
+  it('queries the intent BEFORE calling the store, per invoice', () => {
+    const ask = block.indexOf('retrievePaymentIntentStatus(')
+    const record = block.indexOf('reconcileProcessingInvoicePaid(')
+    expect(ask).toBeGreaterThan(-1)
+    expect(record).toBeGreaterThan(-1)
+    expect(ask).toBeLessThan(record)
+  })
+
+  it('records nothing unless Stripe says succeeded', () => {
+    expect(block).toContain("intent.status !== 'succeeded'")
+    expect(block).toContain('stillSettling.push(')
+  })
+
+  it('reports an unreachable or intent-less invoice instead of guessing', () => {
+    expect(block).toContain("reason: 'no_intent'")
+    expect(block).toContain("reason: 'stripe_unreachable'")
+  })
+
+  // The loop-continues shape: every non-success path `continue`s or falls
+  // through to the next invoice, and the store error is caught INSIDE the loop
+  // so the response is a summary, never a 500 halfway through.
+  it('handles each invoice independently — a store error becomes a summary line', () => {
+    expect(block).toContain('error instanceof ManualPaymentError')
+    expect(block).toContain("reason: 'error'")
+    // The catch sits before the response is sent, inside the for-loop body.
+    const catchAt = block.indexOf('error instanceof ManualPaymentError')
+    const respondAt = block.indexOf('sendJson(response, 200, {')
+    expect(catchAt).toBeGreaterThan(-1)
+    expect(respondAt).toBeGreaterThan(-1)
+    expect(catchAt).toBeLessThan(respondAt)
+  })
+
+  it('sits ABOVE the single verify-payment route', () => {
+    expect(
+      serverSource.indexOf("normalizedPath === '/api/invoices/verify-all-payments'"),
+    ).toBeLessThan(serverSource.search(/const verifyPaymentMatch = normalizedPath\.match\(/))
+  })
+})
+
 describe('the verify-payment route', () => {
   const block = routeBlock(/const verifyPaymentMatch = normalizedPath\.match\(/, 3500)
 

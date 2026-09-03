@@ -3539,6 +3539,31 @@ export async function verifyInvoicePaymentRequest(invoiceId: string) {
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }
 
+/**
+ * The sweep form of verify: every invoice still 'processing', any month,
+ * checked against Stripe in one press. The server records only Stripe's
+ * answers; the summary says what each stuck invoice turned out to be.
+ */
+export type VerifyAllPaymentsResult = {
+  checked: number
+  verified: Array<{ id: string; number: string }>
+  stillSettling: Array<{ id: string; number: string; stripeStatus: string }>
+  unverifiable: Array<{ id: string; number: string; reason: string }>
+  invoices: PersistedInvoice[]
+}
+
+export async function verifyAllInvoicePaymentsRequest() {
+  const response = await apiFetch('/api/invoices/verify-all-payments', {
+    credentials: 'same-origin',
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Failed to verify (${response.status})`, code)
+  }
+  return (await response.json()) as VerifyAllPaymentsResult
+}
+
 /** Take back a MANUAL payment mark — refused for webhook-settled invoices. */
 export async function unmarkInvoicePaidRequest(invoiceId: string) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/unmark-paid`, {

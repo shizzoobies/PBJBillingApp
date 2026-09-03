@@ -1632,6 +1632,16 @@ Clients page meanwhile. Owner-only.
 > here (a lost or out-of-order webhook) — no guessing, no manual override on a
 > live payment.
 >
+> **Verify all with Stripe** — the same check as one sweep. The button sits in
+> the month run's action row (always there, next to Download for QBO) and
+> checks EVERY invoice whose payment is still shown as going through, in any
+> month, against Stripe in one press. Each invoice is checked independently and
+> only Stripe's answers are recorded; the result is a plain sentence — how many
+> were confirmed paid (named by invoice number), how many are genuinely still
+> settling, and how many could not be checked. Pressing it when nothing is
+> holding just says so. Use it when payments look stuck rather than checking
+> invoices one at a time.
+>
 > **Undo manual payment** appears only on invoices marked paid BY HAND — press
 > it and the invoice returns to Sent (or Reviewed if it was never sent),
 > editable and collectible again. An invoice a real payment settled has no such
