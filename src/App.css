@@ -942,6 +942,129 @@ h2 {
   color: var(--ink);
 }
 
+/* Search + sort over the month run (featreq-a1e61913). */
+.invoice-run-tools {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin: 0 0 12px;
+}
+
+.invoice-run-tools .list-search {
+  flex: 1 1 260px;
+}
+
+.invoice-run-sort {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.invoice-run-sort select {
+  min-height: 34px;
+}
+
+/* The staff invoice recap (featreq-0c2d4ce5): one card per sent bill — the
+   totals strip up top, the reimbursed expenses listed one per row below. */
+.invoice-recap-hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 14px;
+  max-width: 720px;
+}
+
+.invoice-recap-list {
+  display: grid;
+  gap: 12px;
+}
+
+.invoice-recap-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.invoice-recap-head {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  justify-content: space-between;
+}
+
+.invoice-recap-head h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.invoice-recap-meta {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 2px 0 0;
+}
+
+.invoice-recap-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+}
+
+.invoice-recap-total span {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.invoice-recap-total strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.invoice-recap-lines {
+  border-top: 1px solid var(--line);
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 8px 0 0;
+}
+
+.invoice-recap-lines li {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 4px 0;
+}
+
+.invoice-recap-line-label {
+  flex: 1 1 auto;
+  min-width: 200px;
+}
+
+.invoice-recap-line-company {
+  color: var(--muted);
+}
+
+.invoice-recap-line-detail {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.invoice-recap-line-amount {
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.invoice-recap-none {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 10px 0 0;
+}
+
 /* Shared "Report period" range control (Time / Timesheet / Board / Checklists).
    Mirrors the .period-control pill + .group-by-toggle visual language: an inline
    premium pill that wraps gracefully on narrow screens. */

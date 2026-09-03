@@ -39,6 +39,7 @@ import { createPendingActionStore } from './lib/pending-actions.js'
 import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
 import { buildMemoryDigest, safeEqual, verifyElevenLabsSignature } from './lib/voice.js'
 import { buildClientRecap, buildMasterRecap } from './lib/client-recap.js'
+import { buildInvoiceRecap } from './lib/invoice-recap.js'
 import { currentPeriod, isValidPeriod, isValidPeriodType } from './lib/periods.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
 import {
@@ -2919,6 +2920,34 @@ const server = createServer(async (request, response) => {
       }
       const invoices = await appDataStore.listInvoices({ period: period || null })
       sendJson(response, 200, { invoices })
+      return
+    }
+
+    // GET /api/invoice-recap?period=YYYY-MM — the STAFF-FACING monthly recap
+    // (featreq-0c2d4ce5): for each sent bill the viewer may see, the company's
+    // total, the accounting remainder, and every reimbursed expense as its own
+    // line, so the deposit can be recorded correctly. NOT owner-only — that is
+    // the point — but scoped: staff get exactly their assigned clients'
+    // invoices, through the same visibleClientIdSet gate the Client Recap
+    // uses. All the shaping lives in lib/invoice-recap.js.
+    if (normalizedPath === '/api/invoice-recap' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const periodParam = requestUrl.searchParams.get('period') || ''
+      if (periodParam && !/^\d{4}-\d{2}$/.test(periodParam)) {
+        sendJson(response, 400, { error: 'period must look like 2026-08' })
+        return
+      }
+      const period = periodParam || currentPeriod('month', todayIso())
+      const data = await appDataStore.read()
+      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+      const invoices = await appDataStore.listInvoices({ period })
+      const rows = buildInvoiceRecap({
+        invoices,
+        clients: data.clients ?? [],
+        visibleClientIds,
+      })
+      sendJson(response, 200, { period, rows })
       return
     }
 

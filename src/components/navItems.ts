@@ -15,6 +15,7 @@ import {
   LayoutDashboard,
   ListChecks,
   Megaphone,
+  Receipt,
   ReceiptText,
   Settings,
   Users,
@@ -68,6 +69,10 @@ const CLIENT_RECAP: NavItem = {
 }
 const CONTACTS: NavItem = { to: '/contacts', label: 'Contacts', icon: BookUser, ownerOnly: true }
 const INVOICES: NavItem = { to: '/invoices', label: 'Invoices', icon: ReceiptText, ownerOnly: true }
+// NOT ownerOnly — the one invoicing surface staff can see (featreq-0c2d4ce5):
+// the monthly totals + reimbursed-expense breakout they record transactions
+// from, server-scoped to each viewer's assigned clients.
+const INVOICE_RECAP: NavItem = { to: '/invoice-recap', label: 'Invoice Recap', icon: Receipt }
 const PLANS: NavItem = { to: '/plans', label: 'Plans', icon: WalletCards, ownerOnly: true }
 const REPORTS: NavItem = { to: '/reports', label: 'Reports', icon: FolderKanban, ownerOnly: true }
 const PRODUCTIVITY: NavItem = {
@@ -105,6 +110,7 @@ export const navItems: NavItem[] = [
   PRODUCTIVITY,
   GANTT,
   INVOICES,
+  INVOICE_RECAP,
   PLANS,
   TEAM,
   SETUP,
@@ -128,7 +134,7 @@ export const navSections: NavSection[] = [
   // surprise appearing later.
   { items: [ENGAGEMENTS] },
   { label: 'Clients', items: [CLIENTS, CONTACTS, CLIENT_RECAP] },
-  { label: 'Billing', items: [INVOICES, PLANS] },
+  { label: 'Billing', items: [INVOICES, INVOICE_RECAP, PLANS] },
   {
     label: 'Operations',
     items: [TIME, TIMESHEET, TIME_APPROVALS, CHECKLISTS, BOARD, DELAYED, GANTT],

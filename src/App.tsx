@@ -166,6 +166,7 @@ import { UpdatesPage } from './pages/UpdatesPage'
 import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
 import { EngagementsPage } from './pages/EngagementsPage'
+import { InvoiceRecapPage } from './pages/InvoiceRecapPage'
 import { InvoicesPage } from './pages/InvoicesPage'
 import { NotificationsPage } from './pages/NotificationsPage'
 import { PlansPage } from './pages/PlansPage'
@@ -4096,6 +4097,10 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
             </OwnerOnly>
           }
         />
+        {/* NOT owner-only (featreq-0c2d4ce5): the staff-facing monthly recap.
+            The server scopes it — staff receive only their assigned clients'
+            sent invoices. */}
+        <Route path="/invoice-recap" element={<InvoiceRecapPage />} />
         <Route
           path="/plans"
           element={

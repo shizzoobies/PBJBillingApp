@@ -216,6 +216,44 @@ describe('the mark-paid route', () => {
  * human's. Behavior is on the store; this pins the order of operations.
  */
 /**
+ * invoice-recap glue (featreq-0c2d4ce5): the ONE invoice route that is
+ * deliberately NOT owner-only — staff read it to record deposits — so what
+ * must hold is the SCOPING: the visible-client set is computed and handed to
+ * the builder, which drops everything outside it. The builder's behavior
+ * (statuses, scoping, line kinds) is exercised properly in
+ * lib/invoice-recap.test.mjs; this pins the wiring.
+ */
+describe('the invoice-recap route', () => {
+  const block = routeBlock(/normalizedPath === '\/api\/invoice-recap'/, 2200)
+
+  it('requires a session but NOT the owner role', () => {
+    expect(block).toContain('requireSession(request, response)')
+    // The staff-facing point of the feature: no owner gate in this block.
+    expect(block.slice(0, block.indexOf('sendJson(response, 200'))).not.toContain(
+      "session.user.role !== 'owner'",
+    )
+  })
+
+  it('scopes through visibleClientIdSet and shapes through the lib builder', () => {
+    const scope = block.indexOf('visibleClientIdSet(session,')
+    const build = block.indexOf('buildInvoiceRecap(')
+    expect(scope).toBeGreaterThan(-1)
+    expect(build).toBeGreaterThan(-1)
+    expect(scope).toBeLessThan(build)
+  })
+
+  it('validates the period shape before reading anything', () => {
+    expect(block).toContain("period must look like 2026-08")
+  })
+
+  it('imports the builder it hands the data to', () => {
+    expect(serverSource).toMatch(
+      /import \{ buildInvoiceRecap \} from '\.\/lib\/invoice-recap\.js'/,
+    )
+  })
+})
+
+/**
  * verify-all glue: the sweep must keep the single button's contract on EVERY
  * invoice it touches — Stripe asked before the store writes, nothing recorded
  * on any answer but 'succeeded' — and one invoice's failure must not end the

@@ -3540,6 +3540,49 @@ export async function verifyInvoicePaymentRequest(invoiceId: string) {
 }
 
 /**
+ * The staff-facing monthly invoice recap (featreq-0c2d4ce5): one row per sent
+ * bill the viewer may see — the company's total, the accounting remainder,
+ * and every reimbursed expense as its own labeled line. Scoped server-side:
+ * staff receive exactly their assigned clients' invoices.
+ */
+export type InvoiceRecapLine = {
+  label: string
+  detail: string
+  amount: number
+  /** The company the expense belongs to, on a billing master's merged bill. */
+  company: string | null
+}
+
+export type InvoiceRecapRow = {
+  invoiceId: string
+  clientId: string
+  clientName: string
+  number: string | null
+  status: PersistedInvoice['status']
+  total: number
+  sentAt: string | null
+  paidAt: string | null
+  reimbursedTotal: number
+  accountingTotal: number
+  reimbursedLines: InvoiceRecapLine[]
+}
+
+export async function invoiceRecapRequest(period: string) {
+  const response = await apiFetch(
+    `/api/invoice-recap?period=${encodeURIComponent(period)}`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const { message } = await safeError(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to load the recap (${response.status})`,
+    )
+  }
+  return (await response.json()) as { period: string; rows: InvoiceRecapRow[] }
+}
+
+/**
  * The sweep form of verify: every invoice still 'processing', any month,
  * checked against Stripe in one press. The server records only Stripe's
  * answers; the summary says what each stuck invoice turned out to be.
