@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-08-26. Everything below is live on `main`;
+Written 2026-07-21, last updated 2026-09-02. Everything below is live on `main`;
 the working tree was clean at handoff. Read this top to bottom before your first
 change — several rules here are non-obvious and breaking them has caused a
 production outage before. **If you do only one extra thing, read §7's
@@ -43,7 +43,7 @@ already and the problem is interpretation, not code.** See §7.
    do, **re-provision the voice agent after deploying** (§3).
 
 3. **`npm run verify`** = `eslint` + `tsc -b && vite build` + `vitest`. Green
-   before every push. Currently **2320 tests / 136 files** (2026-08-26).
+   before every push. Currently **2646 tests / 154 files** (2026-09-02).
 
 4. Prefer targeted endpoints over the bulk save. `PUT /api/app-data` (the bulk
    workspace save) is **owner-only (403 for staff)** — anything staff must do
@@ -169,6 +169,121 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-02 — PICK UP HERE. Five ships since the last entry, the "math still
+is not mathing" thread is CLOSED, and there is ONE immediate action: Alex (or
+you, with him watching) presses "Verify with Stripe" on INV-2026-08-003.**
+
+`main` is `2498fe2`, deployed SUCCESS, `/health` 200, tree clean and in sync.
+Suite **2646 tests / 154 files**. The voice agent was re-provisioned after every
+manifest change (once through an ElevenLabs 500 — a single retry cleared it).
+
+### The one immediate action
+
+**INV-2026-08-003** (Mind Body & Spirit, $10.61, card) sat in `processing` for
+12 days after the money settled. The month run now shows a **Verify with
+Stripe** button on it. Stripe was pre-confirmed read-only: payment intent
+`succeeded`, charged **2026-08-20T13:58:12Z** — so one press moves it to Paid
+with the real charge time and writes a `payment_verified_with_stripe` audit
+event naming who asked. If Alex already pressed it, just confirm it sits in
+Paid and move on.
+
+Root cause — worth knowing because it shaped two safeguards: **not a lost
+webhook, an event-order race.** A card payment fires
+`payment_intent.succeeded` and `checkout.session.completed` near-simultaneously
+with no promised order. `succeeded` landed first and marked the invoice paid;
+the late `completed` wrote its `processing` over the settled truth (the row
+already carried `paid_at`, `payment_method='card'` and the intent id — only the
+status was wrong). Any card payment could hit this. The fixes in `2498fe2`:
+
+- **Paid is sticky** (`applyInvoicePayment` in `db/store.js`): no payment-side
+  event can move a paid invoice backwards; the late event's OTHER facts
+  (session ids, the card-fee line) still apply. Pinned by a test that replays
+  this invoice's exact out-of-order sequence.
+- **Verify with Stripe** (`POST /api/invoices/:id/verify-payment`): offered on
+  `processing` only. It asks Stripe (`retrievePaymentIntentStatus` in
+  `lib/stripe-rail.js`) BEFORE writing anything — the route order is pinned by
+  a test — and records only Stripe's answer. Still settling → 409, nothing
+  changes; Stripe unreachable → 502, never a guess. This is deliberately NOT
+  the raw override Alex asked for, and **Mark paid still refuses `processing`**
+  for the same reason: on an invoice with a live Stripe payment, Stripe's
+  answer beats anyone's memory of it.
+
+### What shipped (2026-08-31 → 09-01)
+
+| Commit | What |
+|---|---|
+| `bf86622` `aa2ea92` `2703769` | **Period label v2** (featreq-81429ad1) — the v1 OFFSET picker went back ("The period covers should allow me to pick dates and then the how often should determine the next period"), so the recipe now carries a first date WINDOW she types and the task's own recurrence steps it forward — the exact machinery a reimbursed expense's covered dates use (`nextCoverageRange`; `lib/checklist-period-label.js`), and the tests pin the two features together so they cannot drift. Her original constraint holds and is tested by field-for-field comparison: turning the label on changes NOTHING else about a generated instance. **She approved this version — the item is Done.** |
+| `e57c158` | **Recap round two** (featreq-926862e2), from her two emailed markups: billing type in the header line, three COST columns on the roles table (estimated / actual / over-under, with the labor-cost-basis note), and the Billing tiles reshaped to Estimated invoice / Actual invoice / Over-Under. All variances derived in `lib/client-recap.js` (master roll-ups SUMMED, never recomputed); staff payloads structurally lack the cost columns. Alex's scope ruling on the tiles: "as long as the number is right the bucket doesn't matter." |
+| `876f2ab` | **Invoice pricing** (featreq-cfb1536a) — invoices now charge the hours they PRINT. This was the last raw-clock-priced surface and the true end of "math still is not mathing": an hourly line's amount is `periodMoney(rows, rate)` off the rows-rule hours (`periodDisplayHours`), the same figure the recap's roles table and payroll print, so the recap's Actual Invoice now matches its own hours table (her $103.75-over-$103.54 case). Plus her editable **Billed hours** field in the month-run editor: she types the hours, the amount auto-recalculates and refuses typing, the detail text rewrites to what she chose, and the server re-derives the amount again on save (`sanitizeInvoiceLines`). Legacy lines without an `hours` field keep their editable amount. |
+| `ce542c6` | **Manual Mark as Paid** (featreq-602d2c6e, Alex's own item) — for money that never touched the app (a check, Zelle). Offered on draft/reviewed/sent/overdue with a confirm; refuses `processing` (a real debit is settling — the webhook owns it); expires BOTH open checkout sessions after commit so the emailed pay link dies (double-pay prevention); audit event in the same transaction. **Undo manual payment** exists ONLY on a manual mark with no payment intent — a mis-click escape, not a money tool; webhook-paid invoices stay what they are. |
+| `2498fe2` | **Sticky paid + Verify with Stripe** — above. |
+
+### Facts settled this stretch — do not re-derive, do not re-ask
+
+- **The pricing rule is A — no automatic rounding — plus the editable hours
+  field.** She first wrote B on the tracker, then REVISED in person with Alex
+  mid-build (before any pricing code was written). The revision is recorded
+  verbatim on the tracker as an appended `clarification_answer` block marked
+  "[REVISED 2026-09-01 …] — this supersedes the B above". If a future reading
+  of the item stops at the B, that is the interpretation trap §1 warns about.
+- `periodDisplayHours` / `periodMoney` now price BOTH sides of the money —
+  payroll cost AND invoice billing. `personPeriodCost` remains forecast-only.
+- Mark-paid's refusal of `processing` and the narrow undo are DELIBERATE — the
+  reasoning is in the table above and in the tests' comments. Do not widen
+  either because someone hits a wall; the wall is the feature.
+
+### The queue
+
+1. **`featreq-97ae3214` — invoice redesign (planned, UNGATED, ready to build).**
+   Her spec: three sections with per-section totals, hours grouped **by role**
+   (Alex ruled the bucket doesn't matter as long as the number is right —
+   senior_bookkeeper lands under "Accounting Services"), invoice number/date,
+   "Billing Period: Month Year", Due on Demand, the time breakdown as page 2,
+   footer "Spread success, not stress...". Hard constraint: section totals must
+   sum EXACTLY to what the per-person lines would bill — group the lines, never
+   re-derive the money. Role rows must carry `hours`+`rate` like per-person
+   lines do (the billed-hours editor and `sanitizeInvoiceLines` key off them).
+   **Run `scripts/check-print-pdf.mjs` after any layout change** — jsdom is
+   blind to paged media (§4).
+2. **`featreq-68638ed2` — Skip vs Push (planned).** Buildable except ONE open
+   question for Brittany: when someone skips/pushes their own task in a
+   sequence, does that trigger the next step or block it? (The "toggle"
+   question in the dev notes is ALREADY answered inside her own text — whole
+   phase vs single subtask, chosen at initiation — don't re-ask that half.)
+
+She reviews live; re-read the board at session start, not just at the end.
+
+### Traps this stretch added
+
+- **A test failing at the turn of a month may be the CLOCK, not your change.**
+  Two suites failed at ~21:00 EDT on Aug 31 (= Sep 1 UTC); a speculative fix
+  was written and had to be reverted. The method that settled it: `git stash`
+  and run the suite on clean HEAD — both failures pre-existed. Root cause: the
+  In-progress list is report-period(month)-scoped, so on the 1st a task due
+  yesterday exists only inside the COLLAPSED Overdue pin. The fix is the
+  `expandOverduePin()` helper (`preview-effective-checklist-scope.test.tsx`);
+  green local AND under `TZ=UTC` now.
+- **`tmp/` is NOT eslint-ignored.** A leftover `.cjs` patch script broke
+  `npm run verify`. Delete scratch scripts before verifying, or keep them in
+  the session scratchpad outside the repo.
+- **Month-run UI tests:** tabs never auto-follow a status change (pinned since
+  `3362519`) — after a merge that moves an invoice, CLICK the destination tab;
+  and the editor's `openId` survives the tab switch, so clicking the row again
+  TOGGLES it closed. Both cost real debugging time.
+- happy-dom has no `window.confirm` — `vi.stubGlobal('confirm', fn)` with
+  `vi.unstubAllGlobals()` teardown (pattern in the dirty-guard and mark-paid
+  suites).
+- The positional-INSERT column-count tests (invoices gained `hours`/`rate` on
+  lines, plus payment columns) did their job twice this stretch — when they
+  fail after you add a column, EXTEND the placeholders, never the other way.
+
+### Unchanged, still watching
+
+- **September's KLC generate is the first combined invoice** (~$720, master
+  `client-lamjjjc`). The first send is irreversible — eyes on it when it runs.
+- The contact-list remainder, desktop signing + the updater-key backup, and the
+  three parked items are exactly as the 2026-08-30 entry lists them.
 
 **2026-08-30 — PICK UP HERE. The queue has real work in it again: Brittany
 answered the period-label question, and it is the top item.**
