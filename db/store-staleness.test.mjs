@@ -10777,6 +10777,32 @@ describe('hourly lines re-derive amount from hours × rate (file backend)', () =
     expect(updated.total).toBe(105)
   })
 
+  // The redesigned invoice groups the hours by role (featreq-97ae3214). The
+  // tier rides the LINE, and this sanitizer drops every prop it does not name
+  // — so without an explicit branch one save through the editor would strip a
+  // row out of its heading. Presentational only: no money moves with it.
+  it('the role tier survives the round trip, and never touches the money', async () => {
+    const updated = await store.updateInvoice('inv-hours', {
+      lineItems: [
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '1.31h at $75.00/hr', hours: 1.31, rate: 75, amount: 98.25, roleTier: 'Bookkeeper' },
+      ],
+    })
+    expect(updated.lineItems[0].roleTier).toBe('Bookkeeper')
+    expect(updated.lineItems[0].amount).toBe(98.25)
+    expect(updated.total).toBe(98.25)
+  })
+
+  // A typo in a payload must not be able to invent a heading on her invoice.
+  it('drops a role tier it does not recognize rather than storing it', async () => {
+    const updated = await store.updateInvoice('inv-hours', {
+      lineItems: [
+        { kind: 'hourly', label: 'Billable hours — Lisa', detail: '1.31h at $75.00/hr', hours: 1.31, rate: 75, amount: 98.25, roleTier: 'Chief Vibes Officer' },
+      ],
+    })
+    expect(updated.lineItems[0].roleTier).toBeUndefined()
+    expect(updated.lineItems[0].amount).toBe(98.25)
+  })
+
   it('hours and rate survive the round trip', async () => {
     const updated = await store.updateInvoice('inv-hours', {
       lineItems: [

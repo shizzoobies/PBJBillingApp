@@ -1049,6 +1049,13 @@ const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
  * the same treatment any other kind that does not belong gets — so the charge
  * survives as an ordinary line rather than the save failing on her.
  */
+/**
+ * The role tiers an invoice line may claim — the four `recapStaffTier`
+ * returns (lib/staff-tiers.js). Anything else is dropped rather than stored,
+ * so a typo in a payload cannot invent a heading.
+ */
+const INVOICE_LINE_ROLE_TIERS = new Set(['CFO', 'Accountant', 'Bookkeeper', 'Other'])
+
 function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
   return (Array.isArray(raw) ? raw : [])
     .map((line) => {
@@ -1070,6 +1077,16 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
       // Set on `base`, so all four branches below carry it.
       if (typeof line?.sourceClientId === 'string' && line.sourceClientId) {
         base.sourceClientId = line.sourceClientId
+      }
+      // WHICH SECTION THIS ROW PRINTS UNDER on the redesigned invoice
+      // (featreq-97ae3214). Presentational only — no money is derived from it,
+      // and the hours/rate rule below is untouched by it. It rides here for the
+      // same reason sourceClientId does: this sanitizer drops what it does not
+      // name, so without this one round trip through the editor would strip a
+      // line's role and drop it out of its heading. An unknown value is omitted
+      // rather than stored, and a line with none renders ungrouped by design.
+      if (INVOICE_LINE_ROLE_TIERS.has(line?.roleTier)) {
+        base.roleTier = line.roleTier
       }
       // A retainer credit carries the id of the retainer it came out of. That
       // is what lets a save know WHICH retainer to mark applied, and what lets

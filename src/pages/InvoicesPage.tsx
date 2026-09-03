@@ -1,5 +1,5 @@
 import { ExternalLink, FileText, Mail, Plus, Printer, RotateCcw, Sliders, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useAppContext } from '../AppContext'
 import { InvoiceHistory } from '../components/InvoiceHistory'
@@ -10,6 +10,7 @@ import type {
   Employee,
   Invoice,
   PersistedInvoice,
+  PersistedInvoiceLine,
   InvoiceLine,
   RecurringReimbursement,
   Reimbursement,
@@ -30,17 +31,28 @@ import {
   type InvoiceRecipientDetail,
 } from '../lib/utils'
 import {
+  DETAIL_SECTION_TITLE,
+  INVOICE_FOOTER_DEFAULT,
   clientFacingInvoiceLines,
+  invoiceDetailRows,
   invoiceDocumentRenderMode,
+  invoiceSections,
   normalizeTimeBreakdownMode,
   renderedInvoiceLines,
 } from '../../lib/invoice-lines.js'
+import type { InvoiceLineOut, InvoiceRoleTier } from '../../lib/invoice-lines.js'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
 import { generateInvoicesRequest, listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
 import { selectableClients } from '../lib/clientLifecycle'
 import { generateSkipMessage } from '../lib/invoiceSkipMessage'
 
-type DisplayLine = InvoiceLine & { groupKey?: string }
+/**
+ * `roleTier` is declared here rather than on `InvoiceLine`: it is presentational
+ * only, and this page is the one place that reads it. Carrying it (and `kind`)
+ * through EVERY builder below is load-bearing — a display row that loses either
+ * lands ungrouped, or vanishes from the sheet entirely.
+ */
+type DisplayLine = InvoiceLine & { groupKey?: string; roleTier?: InvoiceRoleTier }
 
 type DisplayInvoice = {
   invoice: Invoice
@@ -53,6 +65,15 @@ type DisplayInvoice = {
    * so every other builder here says 'monthly'.
    */
   kind: PersistedInvoice['kind']
+  /** The stored invoice's number. Null for the live preview, which has none. */
+  number: string | null
+  /**
+   * The invoice's OWN date — sent, else created. Null for the live preview,
+   * which is a calculation rather than a document and so has no date; the sheet
+   * falls back to today only for that case. Printing `new Date()` for a stored
+   * invoice was a real bug: an August invoice reprinted in October said October.
+   */
+  invoiceDate: string | null
   lines: DisplayLine[]
   groupSubtotals: Array<{ label: string; total: number }>
   hideTimeBreakdown: boolean
@@ -77,7 +98,7 @@ type IncludeFlags = {
   payLink: boolean
 }
 
-type DraftLine = InvoiceLine & { id: string }
+type DraftLine = DisplayLine & { id: string }
 
 type InvoiceDraft = {
   include: IncludeFlags
@@ -143,8 +164,14 @@ function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean
       footerNote: hasText(client.footerNote),
       payLink: hasText(client.quickbooksPayUrl),
     },
+    // `kind` and `roleTier` ride along even though the editor never shows them:
+    // the sheet groups on them, so a draft that dropped them would print every
+    // row under no heading — or, for a kind the section layer does not name, not
+    // print it at all.
     lines: display.lines.map((line) => ({
       id: makeLineId(),
+      kind: line.kind,
+      roleTier: line.roleTier,
       label: line.label,
       detail: line.detail,
       amount: line.amount,
@@ -155,7 +182,9 @@ function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean
 }
 
 function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoice {
-  const lines: InvoiceLine[] = draft.lines.map((line) => ({
+  const lines: DisplayLine[] = draft.lines.map((line) => ({
+    kind: line.kind,
+    roleTier: line.roleTier,
     label: line.label,
     detail: line.detail,
     amount: line.amount,
@@ -167,12 +196,47 @@ function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoi
   return {
     invoice: { ...baseInvoice, lines, total },
     kind: 'monthly',
+    number: null,
+    invoiceDate: null,
     lines,
     groupSubtotals: [],
     hideTimeBreakdown: false,
     hideInternal: true,
     groupByCategory: false,
   }
+}
+
+const invoiceDateFormat = new Intl.DateTimeFormat('en-US', {
+  month: 'long',
+  day: 'numeric',
+  year: 'numeric',
+})
+
+/**
+ * The printed "Invoice Date". `value` is the invoice's stored timestamp; null
+ * (the live preview, which is not yet an invoice) falls back to today.
+ *
+ * Reads the UTC calendar day out of the timestamp — `raw.slice(0, 10)` — and
+ * formats THAT day at noon, exactly as the generated PDF's `stampDate` does
+ * (`lib/invoice-pdf.js`). Falling through to `new Date(isoTimestamp)` instead
+ * parses the FULL timestamp in the LOCAL timezone, so a `createdAt` stamped
+ * just after midnight UTC (a 9pm ET generate) prints the day before on this
+ * sheet while the PDF — which only ever looks at the UTC calendar day — prints
+ * the day after: two client-facing copies of the same invoice disagreeing on
+ * their own date. A bare `yyyy-mm-dd` value is read the same way, for the same
+ * reason `formatEntryDate` reads noon a few lines down: a plain UTC-midnight
+ * parse would print the day BEFORE in every US timezone.
+ */
+function formatInvoiceDate(value: string | null | undefined) {
+  const raw = value?.trim()
+  if (raw) {
+    const day = raw.slice(0, 10)
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+      const parsed = new Date(`${day}T12:00:00`)
+      if (!Number.isNaN(parsed.getTime())) return invoiceDateFormat.format(parsed)
+    }
+  }
+  return invoiceDateFormat.format(new Date())
 }
 
 function formatEntryDate(date: string) {
@@ -208,12 +272,19 @@ function buildDisplayInvoice(
       invoice,
       lines: [
         {
+          // Not a `plan`/`hourly` row — it is the whole month collapsed into one
+          // summary line. `custom` puts it in the untitled block, which prints it
+          // plainly with no heading and no section total. A row with no `kind` at
+          // all would be dropped by the section layer and take its money with it.
+          kind: 'custom',
           label: `Bookkeeping services - ${invoice.periodLabel}`,
           detail: `${formatDecimalHours(invoice.billableMinutes)} this period`,
           amount: invoice.total,
         },
       ],
       kind: 'monthly',
+      number: null,
+      invoiceDate: null,
       groupSubtotals: [],
       hideTimeBreakdown: true,
       hideInternal,
@@ -223,17 +294,20 @@ function buildDisplayInvoice(
 
   // Build per-entry rate-based lines, then merge with subscription/plan lines
   // from the base invoice so subscription clients still see their plan fee.
-  // Ad hoc lines are dropped here because `entryLines` below re-lists EVERY
-  // client entry, ad hoc ones included — keeping both would show the same work
-  // twice on this preview. (The label test is a pre-existing weakness: since the
-  // June 2026 cutover the scoped line reads "Billable hours — <name>" and no
-  // longer matches either, so hourly work is already listed twice here. That is
-  // older than this feature and is left alone rather than quietly changed.)
+  // Ad hoc and hourly lines are dropped here because `entryLines` below
+  // re-lists EVERY client entry, ad hoc and hourly ones included — keeping
+  // both would show the same work twice on this preview.
+  //
+  // Filtered by KIND, not by label. It used to filter on the exact labels
+  // 'Billable hours' / 'Hourly overage', which stopped matching once the June
+  // 2026 cutover made hourly labels per-person ("Billable hours — <name>"), so
+  // hourly work was listed twice here — invisible while nothing printed a
+  // section total next to it, but wrong now that "Total Ad-Hoc/Billable
+  // Hours" prints beside a correct Total due: the section total would read
+  // roughly double the actual charge. `kind !== 'hourly'` matches regardless
+  // of label wording, the same way `invoiceSections` already groups by kind.
   const subscriptionLines = invoice.lines.filter(
-    (line) =>
-      line.kind !== 'adhoc' &&
-      line.label !== 'Billable hours' &&
-      line.label !== 'Hourly overage',
+    (line) => line.kind !== 'adhoc' && line.kind !== 'hourly',
   )
 
   // Work-type categorization is retired; fall back to a generic label so
@@ -253,6 +327,11 @@ function buildDisplayInvoice(
         ? `${formatDecimalHours(entry.minutes)} at ${currency.format(client.hourlyRate)}/hr · ${formatEntryDate(entry.date)}`
         : `${formatDecimalHours(entry.minutes)} · ${formatEntryDate(entry.date)} · internal`
       return {
+        // These rows ARE the hours, so they belong to the hours section. They
+        // carry no `roleTier` — this preview lists raw time entries rather than
+        // the generator's per-person lines — so they print ungrouped at the top
+        // of that section, which is exactly what a row with no tier is for.
+        kind: 'hourly' as const,
         label: entryCategory(entry),
         detail: entry.description ? `${detail} · ${entry.description}` : detail,
         amount,
@@ -288,6 +367,8 @@ function buildDisplayInvoice(
   return {
     invoice,
     kind: 'monthly',
+    number: null,
+    invoiceDate: null,
     lines,
     groupSubtotals,
     hideTimeBreakdown: false,
@@ -321,8 +402,16 @@ function persistedToDisplay(
   // only recognize them by kind. Mapping to label/detail/amount alone erased a
   // card fee from the printed sheet while the PDF and the email still showed
   // it, which is the one place those three documents may not disagree.
-  const lines: DisplayLine[] = renderedInvoiceLines(stored.lineItems).map((line) => ({
+  //
+  // `roleTier` is carried for the same reason and it is the same class of bug:
+  // the sheet groups the hours section by it, so dropping it here would print
+  // every person's row ungrouped while the PDF and the email showed the role
+  // headings. Both fields must survive this mapping.
+  const lines: DisplayLine[] = renderedInvoiceLines<
+    PersistedInvoiceLine & { roleTier?: InvoiceRoleTier }
+  >(stored.lineItems).map((line) => ({
     kind: line.kind,
+    roleTier: line.roleTier,
     label: line.label,
     detail: line.detail,
     amount: line.amount,
@@ -339,6 +428,10 @@ function persistedToDisplay(
       total: stored.total,
     },
     kind: stored.kind,
+    number: stored.number,
+    // Sent, else created. NOT today: this sheet is a copy of a document that
+    // already has a date, and reprinting it may not re-date it.
+    invoiceDate: stored.sentAt ?? stored.createdAt ?? null,
     lines,
     groupSubtotals: [],
     hideTimeBreakdown: true,
@@ -543,7 +636,18 @@ export function InvoicesPage() {
   const addLine = () =>
     setDraft((prev) =>
       prev
-        ? { ...prev, lines: [...prev.lines, { id: makeLineId(), label: '', detail: '', amount: 0 }] }
+        ? {
+            ...prev,
+            // `kind: 'custom'` — what `sanitizeInvoiceLines` would coerce a
+            // kind-less line to on save anyway. Without it here, this row has
+            // no `kind` the section layer recognizes, so it vanishes from the
+            // printed sheet while its amount still counts toward Total due: a
+            // printed document whose rows do not add to its own total.
+            lines: [
+              ...prev.lines,
+              { id: makeLineId(), kind: 'custom', label: '', detail: '', amount: 0 },
+            ],
+          }
         : prev,
     )
   const removeLine = (id: string) =>
@@ -1084,6 +1188,12 @@ function PayButton({ client, variant }: { client: Client; variant: 'screen' | 'p
   )
 }
 
+// Intentionally flat: this is the OWNER's on-screen review copy, not the
+// client-facing document. `InvoiceDocument` below is what the redesign (§1b)
+// sectioned into Subscription Plan / Ad-Hoc / Reimbursed Expenses with role
+// sub-headings — that is the client's view. Leave this one flat unless a
+// deliberate decision says the owner's review should be sectioned too; do not
+// "fix" it to match the print sheet without making that call on purpose.
 function InvoicePreview({ display, custom }: { display: DisplayInvoice; custom?: CustomMeta | null }) {
   const { invoice } = display
   const showTerms = custom ? custom.include.paymentTerms : true
@@ -1225,11 +1335,18 @@ function BillingQueue({
 function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?: CustomMeta | null }) {
   const { invoice } = display
   const { firmSettings } = useAppContext()
-  const issuedDate = new Intl.DateTimeFormat('en-US', {
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-  }).format(new Date())
+  /*
+   * THE INVOICE'S OWN DATE, not today's.
+   *
+   * This used to format `new Date()`, so an August invoice reprinted in October
+   * was stamped October — the sheet contradicted the PDF the client already had.
+   * Renaming the field to "Invoice Date" is what made that unignorable.
+   *
+   * Today is the right answer for exactly one caller: the live per-client
+   * preview, which is a calculation and not yet an invoice, so it carries no
+   * date of its own.
+   */
+  const invoiceDate = formatInvoiceDate(display.invoiceDate)
 
   const billingClient = invoice.client
   const showField = (key: keyof IncludeFlags) => (custom ? custom.include[key] : true)
@@ -1245,7 +1362,9 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
     : []
 
   const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
-  const firmTagline = firmSettings?.tagline || 'Strategic bookkeeping, payroll, and advisory support'
+  // No tagline: she struck it off the letterhead on the marked-up sample. The
+  // firm setting still exists and still prints elsewhere; this sheet just does
+  // not use it.
   const firmAddressLines = [
     firmSettings?.addressLine1,
     firmSettings?.addressLine2,
@@ -1300,13 +1419,30 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
   }
   const combined = invoiceDocumentRenderMode(printDocument, billingClient) === 'combined'
   const printLines = clientFacingInvoiceLines(printDocument, billingClient)
+  /*
+   * The three sections she asked for, and the detailed-hours appendix.
+   *
+   * Both are fed the RESOLVED client-facing lines, never `display.lines` — on a
+   * billing master's invoice the company names live in the labels and the
+   * coverage windows in the details, and combined mode exists to replace all of
+   * that with one line. Grouping upstream of it would print the very breakdown
+   * the client chose not to see.
+   *
+   * Titles, total labels and totals come off these objects. Nothing here words
+   * a heading of its own: the sheet, the PDF and the email have to say the same
+   * thing, and the only way to guarantee that is to have one source. A null
+   * title or total means "print no heading / no total" — which is how a
+   * master's sheet keeps its per-company split off the page.
+   */
+  const sections = invoiceSections(printLines as unknown as InvoiceLineOut[], { combined })
+  const detailRows = invoiceDetailRows(printLines as unknown as InvoiceLineOut[])
 
   return (
+    <>
     <section className="print-sheet">
       <header>
         <div>
           <strong>{firmName}</strong>
-          {firmTagline ? <span>{firmTagline}</span> : null}
           {firmAddressLines.map((line) => (
             <span key={line}>{line}</span>
           ))}
@@ -1331,10 +1467,18 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
           ))}
         </div>
         <div>
-          <span>Issued</span>
-          <strong>{issuedDate}</strong>
+          {/* The number used to appear only inside the 20pt title. She wants it
+              as a labeled field, beside the date the invoice actually carries. */}
+          {display.number ? (
+            <>
+              <span>Invoice no.</span>
+              <strong>{display.number}</strong>
+            </>
+          ) : null}
+          <span>Invoice Date</span>
+          <strong>{invoiceDate}</strong>
           {serviceLabel ? <small>{serviceLabel}</small> : null}
-          <small>{invoice.periodLabel}</small>
+          <small>Billing Period: {invoice.periodLabel}</small>
         </div>
       </div>
       {custom && custom.intro.trim() ? <p className="print-intro-note">{custom.intro}</p> : null}
@@ -1347,12 +1491,46 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
           </tr>
         </thead>
         <tbody>
-          {printLines.map((line, index) => (
-            <tr key={`${line.label}-${line.detail}-${index}`}>
-              <td>{line.label}</td>
-              <td>{line.detail}</td>
-              <td>{currency.format(line.amount)}</td>
-            </tr>
+          {sections.map((section) => (
+            <Fragment key={section.key}>
+              {section.title ? (
+                <tr className="print-section-row">
+                  <th colSpan={3} scope="colgroup">
+                    {section.title}
+                  </th>
+                </tr>
+              ) : null}
+              {/* Only the hours section has role groups; every other section
+                  renders its rows straight through as one untitled group. */}
+              {(section.groups ?? [{ key: section.key, title: null, rows: section.rows }]).map(
+                (group) => (
+                  <Fragment key={group.key}>
+                    {group.title ? (
+                      <tr className="print-role-row">
+                        <td colSpan={3}>{group.title}</td>
+                      </tr>
+                    ) : null}
+                    {group.rows.map((line, index) => (
+                      <tr key={`${group.key}-${line.label}-${line.detail}-${index}`}>
+                        <td>{line.label}</td>
+                        <td>{line.detail}</td>
+                        <td>{currency.format(line.amount)}</td>
+                      </tr>
+                    ))}
+                  </Fragment>
+                ),
+              )}
+              {/* A null total label is not a missing one: the untitled charges
+                  block has no total by design, and neither does a combined
+                  document — a per-section total there would state the split the
+                  client chose to hide. */}
+              {section.totalLabel ? (
+                <tr className="print-section-total-row">
+                  <td colSpan={2}>{section.totalLabel}</td>
+                  <td>{currency.format(section.total ?? 0)}</td>
+                </tr>
+              ) : null}
+            </Fragment>
           ))}
           {/* Subtotals are per-CATEGORY groupings of the live preview's lines,
               which the combined document does not have — its one line already
@@ -1380,11 +1558,52 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
         <strong>{currency.format(invoice.total)}</strong>
       </footer>
       {showField('payLink') ? <PayButton client={billingClient} variant="print" /> : null}
+      {/* Her wording, verbatim, and NOT interpolated with the firm name — it is
+          the firm's line, not a template. A per-client `footerNote` still wins. */}
       {footerText.trim() ? (
         <p className="print-footer-note">{footerText}</p>
       ) : (
-        <p>Thank you for trusting {firmName}.</p>
+        <p>{INVOICE_FOOTER_DEFAULT}</p>
       )}
     </section>
+    {/*
+      PAGE 2 — the detailed hours.
+      Its own <section>, after the sheet's footer, with `break-before: page` in
+      the print CSS. Safe to move because every `time_detail` row is $0.00 by
+      invariant, so lifting the block out of the table cannot shift a total.
+      Empty when the client's breakdown is off (the default for all 51 clients,
+      so most invoices stay one page) and empty in combined mode, where
+      `time_detail` is not among the kept kinds — a master's page 2 is therefore
+      suppressed rather than printed blank.
+    */}
+    {detailRows.length > 0 ? (
+      <section className="print-sheet print-detail-sheet">
+        {/* The SAME constant the PDF and the email print over this block. It
+            could not come off the section object — `time_detail` rows are
+            excluded from `invoiceSections` by design — so it is shared as its
+            own export rather than typed out three times. */}
+        <h2>{DETAIL_SECTION_TITLE}</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {/* NO amount column, matching the PDF and the email: every
+                `time_detail` row is $0.00 by invariant, and a column of zeroes
+                under this heading reads as a bug rather than as information. */}
+            {detailRows.map((line, index) => (
+              <tr key={`detail-${line.label}-${line.detail}-${index}`}>
+                <td>{line.label}</td>
+                <td>{line.detail}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    ) : null}
+    </>
   )
 }

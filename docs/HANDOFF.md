@@ -23,13 +23,12 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-03):** `main` = `dd8b883`, deployed SUCCESS,
+**State right now (2026-09-03, evening):** `main` = the redesign commit, deployed SUCCESS,
 `/health` 200, tree clean, suite **2691 tests / 160 files**. The 2026-09-02
 evening entry in §5 is the latest digest. The queue:
 
-1. `featreq-97ae3214` — **invoice redesign** (planned, ungated, ready to
-   build; spec in §5's 2026-09-02 entry; run `scripts/check-print-pdf.mjs`
-   after any layout change).
+1. `featreq-97ae3214` — **invoice redesign** — SHIPPED 2026-09-03 (awaiting
+   her review; §5 entry).
 2. `featreq-68638ed2` — **Skip vs Push** (planned; ONE open question for
    Brittany, see §5).
 3. `featreq-8cec48db` — hours-per-client tagging panel sits in `needs_input`
@@ -238,6 +237,60 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-03 — the invoice redesign (featreq-97ae3214) is BUILT and shipped.
+It is a RENDERING change, not a money-calculator change — read that sentence
+twice before touching `lib/invoice-lines.js`.**
+
+Plan of record: `docs/plans/invoice-redesign-2026-09.md` (§0 is the decision,
+§2a is what the build and review found). Her marked-up sample became: three
+titled sections with their own totals (Subscription Plan / Ad-Hoc & Billable
+Hours grouped by role / Client Reimbursed Expenses), `Invoice no.` +
+`Invoice Date` + `Billing Period: Month Year` in the header, tagline gone,
+her closing line as the footer default, and the client's time breakdown (when
+on) as a titled page 2. Same layout on the PDF, both email parts, and the
+in-app print sheet; Stripe's checkout is untouched (it never sees sections).
+
+**Why it is a rendering change.** Her columns are Description | Hours | Rate |
+Amount — one rate per row — so merging people into one role row is
+unrepresentable when rates differ, and `sanitizeInvoiceLines` would silently
+re-derive `amount = hours × rate` on the next save. Stored lines stay
+per-person; `roleTier` (presentational, allowlisted in the sanitizer) says
+which heading a row prints under; `invoiceSections()` groups the RESOLVED
+client-facing lines — strictly downstream of `clientFacingInvoiceLines`, so a
+billing master's combined document still shows one line and no headings.
+Alex's constraint — section totals must sum to what per-person lines bill —
+holds by construction and was proven over all 59 real invoices, twice.
+
+**Things this build found that tests could not (all fixed, all pinned):**
+- `INV-2026-08-044` (Dobco, SENT) carries its whole $256.25 on three
+  hand-built `time_detail` rows — the $0.00 invariant is the generator's, not
+  the store's. A money-carrying `time_detail` row stays in the body.
+- Kind-less display rows (live preview, Customize's seed/draft mapping, and
+  Customize's "Add line" — the review's blocker) would vanish from the sheet
+  with their money still in Total due. All stamped, AND `invoiceSections`
+  now has a residual bucket so the class cannot recur; a test iterates every
+  `INVOICE_LINE_KINDS` entry plus a kind-less row.
+- The sheet's new Invoice Date used the LOCAL day while the PDF used the UTC
+  day — two client copies could disagree after a 9pm ET generate. Both UTC now.
+- The live preview's June-cutover double-listing (filter by label) would have
+  printed a doubled section total; filters by kind now.
+
+**Traps for the next session:** `scripts/check-print-pdf.mjs` now has THREE
+modes (invoice+appendix = 2 pages, invoice alone = 1, report = 1) and its
+fixture mirrors the shipped markup with staleness needles for the section
+class names — rename a class in `InvoicesPage.tsx` and the check fails on
+purpose. Run it via the cached-Chromium `PLAYWRIGHT_MODULE` wrapper; playwright
+is not installed here and the script SKIPS (exit 0) without it. Charge rows
+(card fee, adjustment, credits, hand-typed customs) now always print after the
+three sections regardless of stored order — deliberate. The owner's on-screen
+`InvoicePreview` is intentionally flat (her review copy); the sectioned
+`InvoiceDocument` is the client's view. Payment terms still print from each
+client's record ("Due on receipt") — her markup said "Due on Demand"; Alex
+chose to leave the data alone and let her raise it if she means it.
+
+Suite 2691 → **2759 tests / 162 files**. Manifest updated — re-provision voice.
+
 
 **2026-09-02 (evening) — PICK UP HERE. The stuck payment is CLEARED, six ships
 in one session, and the queue is back to the two big planned items.**

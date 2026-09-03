@@ -3547,6 +3547,61 @@ td strong {
     color: #5a5360;
     margin: 0;
   }
+
+  /* --- The three sections (featreq-97ae3214) -------------------------------
+     Both the section heading and the role sub-heading span all three columns,
+     which makes each of them a :last-child — and `.print-sheet td:last-child`
+     right-aligns those. Headings are labels, not amounts: they read left. */
+
+  .print-sheet .print-section-row th {
+    font-size: 15px;
+    letter-spacing: 0.04em;
+    padding-top: 20px;
+    text-align: left;
+    text-transform: uppercase;
+  }
+
+  .print-sheet .print-role-row td {
+    color: #5a5360;
+    font-style: italic;
+    padding-bottom: 4px;
+    padding-left: 20px;
+    text-align: left;
+  }
+
+  .print-sheet .print-section-total-row td {
+    border-bottom: 2px solid #1b1720;
+    font-weight: 700;
+  }
+
+  /* --- Page 2: the detailed hours -----------------------------------------
+     The ONLY page-break rule on the invoice sheet, and it is scoped to this
+     section on purpose: the sheet itself must keep flowing as one page for
+     every client whose breakdown is off (all 51 today), which is why the
+     appendix carries the break rather than the table above it.
+
+     `page-break-before` is kept beside `break-before` because Chromium's PDF
+     writer still honors the legacy property and some print paths only read it;
+     they say the same thing, so there is no conflict. */
+
+  .print-detail-sheet {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  .print-detail-sheet h2 {
+    font-size: 20px;
+    margin: 0;
+  }
+
+  /* The appendix table has no amount column — every row is $0.00 by invariant,
+     so the PDF and the email drop it and this sheet matches. Its last column is
+     therefore prose, and `.print-sheet td:last-child` would right-align it. */
+
+  .print-detail-sheet th:last-child,
+  .print-detail-sheet td:last-child {
+    text-align: left;
+  }
 }
 
 /* --- Sharing control (chip-based viewer/editor picker) ---------------- */

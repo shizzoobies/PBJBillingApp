@@ -331,6 +331,11 @@ export type PersistedInvoiceLine = {
     | 'adhoc'
     | 'retainer'
     | 'retainer_credit'
+    /** Informational hours detail. $0.00 on every GENERATED one — but the store
+     *  does not enforce that, and production has a sent invoice whose whole
+     *  total sits on hand-built time_detail rows (INV-2026-08-044). A row with
+     *  money is treated as a charge and stays in the invoice body. */
+    | 'time_detail'
   label: string
   detail: string
   amount: number
@@ -343,6 +348,12 @@ export type PersistedInvoiceLine = {
    * Absent on legacy lines, whose amounts are left exactly as stored.
    */
   hours?: number
+  /**
+   * Which role heading this row prints under on the redesigned invoice
+   * (featreq-97ae3214). PRESENTATIONAL ONLY: no money is derived from it, and
+   * a row without one prints ungrouped rather than under a guessed heading.
+   */
+  roleTier?: 'CFO' | 'Accountant' | 'Bookkeeper' | 'Other'
   rate?: number
   /** `adhoc` lines only. Absent is read as 'billed'. */
   adhocMode?: AdhocMode

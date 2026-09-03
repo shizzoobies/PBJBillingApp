@@ -15,6 +15,14 @@ export type InvoiceLineKind =
   | 'retainer'
   /** A paid retainer given back on a later invoice. Always <= 0. */
   | 'retainer_credit'
+  /** Informational hours detail. ALWAYS $0.00 — see `timeBreakdownLines`. */
+  | 'time_detail'
+  /** The card-payment convenience fee, appended when a card payment settles. */
+  | 'card-fee'
+  /** A true-up carried from last month's invoice. Outside the subtotal. */
+  | 'adjustment'
+  /** Anything the owner typed, or a kind this build does not recognize. */
+  | 'custom'
 
 /** The owner's per-line decision about one piece of ad hoc work. */
 export type AdhocMode = 'billed' | 'courtesy' | 'omitted'
@@ -28,6 +36,17 @@ export type InvoiceLineOut = {
   adhocMode?: AdhocMode
   /** What billing this work WOULD charge, kept while the line sits at $0.00. */
   adhocAmount?: number
+  /* -- the hours rule (featreq-cfb1536a) ----------------------------------- */
+  /** Printed 2dp hours. `hours * rate === amount` by construction. */
+  hours?: number
+  /** The employee's bill rate this line was priced at. */
+  rate?: number
+  /* -- presentation -------------------------------------------------------- */
+  /** Which role heading this row prints under. Presentational ONLY: no money
+   *  is derived from it, and a line without one renders ungrouped. */
+  roleTier?: InvoiceRoleTier
+  /** On a billing master's invoice, the SUB this line was built from. */
+  sourceClientId?: string
   /* -- `recurring` lines with a covered-date window configured -------------- */
   /** The recurring reimbursement this line came from, for confirming its dates. */
   recurringId?: string
@@ -224,3 +243,45 @@ export function invoiceLockRefusal(
     | null
     | undefined,
 ): string | null
+
+/** The four staff tiers a line may print under (see lib/staff-tiers.js). */
+export type InvoiceRoleTier = 'CFO' | 'Accountant' | 'Bookkeeper' | 'Other'
+
+/** One role heading inside the hours section. `title: null` = ungrouped rows. */
+export type InvoiceSectionGroup = {
+  key: string
+  title: string | null
+  rows: InvoiceLineOut[]
+}
+
+/**
+ * A titled block of the redesigned invoice. `title`/`totalLabel`/`total`
+ * are null for the untitled charges block and in combined mode.
+ */
+export type InvoiceSection = {
+  key: 'plan' | 'work' | 'expenses' | 'charges' | 'combined'
+  title: string | null
+  totalLabel: string | null
+  rows: InvoiceLineOut[]
+  total: number | null
+  groups: InvoiceSectionGroup[] | null
+}
+
+/**
+ * Group RESOLVED client-facing lines into the invoice's sections.
+ * Feed this `clientFacingInvoiceLines(...)`, never `invoice.lineItems` —
+ * see the implementation's header for why.
+ */
+export function invoiceSections(
+  lines: InvoiceLineOut[],
+  opts?: { combined?: boolean },
+): InvoiceSection[]
+
+/** The `time_detail` rows — the detailed-hours appendix ("page 2"). */
+export function invoiceDetailRows(lines: InvoiceLineOut[]): InvoiceLineOut[]
+
+/** The detailed-hours appendix heading, shared by all three renderers. */
+export const DETAIL_SECTION_TITLE: string
+
+/** The default footer sentence, shared by the PDF, the email and the print sheet. */
+export const INVOICE_FOOTER_DEFAULT: string

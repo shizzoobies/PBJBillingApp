@@ -1638,6 +1638,33 @@ Clients page meanwhile. Owner-only.
 > **Back to draft**. **Void** keeps the invoice on the record, struck through,
 > and frees that client to be generated again.
 >
+> **What the client's invoice looks like (redesigned September 2026, to
+> Brittany's marked-up sample).** The printed invoice, the PDF attached to the
+> email, and the email body all show the SAME layout: the charges are split
+> into three titled sections, each with its own total —
+> **Subscription Plan** ("Total Subscription Plan"), **Ad-Hoc / Billable
+> Hours** ("Total Ad-Hoc/Billable Hours"), and **Client Reimbursed Expenses**
+> ("Total Client Reimbursed Expenses") — followed by the invoice's Total due.
+> A section that has nothing in it is simply left out, so an hourly client's
+> invoice has no Subscription Plan section. Inside the hours section the lines
+> are grouped under **CFO / Advisory Services**, **Accounting Services**, and
+> **Bookkeeping Services** by who did the work (the owner's hours are CFO /
+> Advisory; an accountant's are Accounting; a bookkeeper's are Bookkeeping);
+> each line still shows its own hours, rate and amount, so the math on the page
+> can be checked by hand. THE SECTION TOTALS ALWAYS ADD UP TO THE SAME AMOUNT
+> THE INVOICE BILLED BEFORE THE REDESIGN — the regrouping changed how charges
+> are arranged, never what they are. The header now reads **Invoice no.**,
+> **Invoice Date**, and **Billing Period: Month Year** (the old "Issued" label
+> is gone), the letterhead no longer carries the firm tagline, and the closing
+> line is "Spread success, not stress, thanks for choosing PB&J Strategic
+> Accounting." unless the client has its own footer note. If a client's
+> **time breakdown** is switched on, the detailed hours print as a separate
+> **page 2** headed "Detailed Hours" (the invoice itself stays one page when it
+> is off, which is the default). A billing master's combined invoice is
+> unaffected by all of this: it still shows one combined line and no sections,
+> headings or company names, exactly as the client chose. Payment terms print
+> from each client's own record.
+>
 > **MARK PAID — for money that arrived outside the app.** A check, a direct
 > transfer nobody linked, an invoice that was never sent through the system:
 > open the invoice in the month run and press **Mark paid**. It works on Draft,
