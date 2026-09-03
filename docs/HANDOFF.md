@@ -170,9 +170,47 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
-**2026-09-02 — PICK UP HERE. Five ships since the last entry, the "math still
-is not mathing" thread is CLOSED, and there is ONE immediate action: Alex (or
-you, with him watching) presses "Verify with Stripe" on INV-2026-08-003.**
+**2026-09-02 (evening) — PICK UP HERE. The stuck payment is CLEARED, six ships
+in one session, and the queue is back to the two big planned items.**
+
+`main` is `cf71d4a`, deployed SUCCESS, `/health` 200, tree clean. Suite **2691
+tests / 160 files**. Voice agent re-provisioned after each manifest change
+(three times).
+
+**INV-2026-08-003 is settled.** Alex pressed Verify with Stripe himself; prod
+confirms `paid`, `paid_at` = Stripe's real charge time (13:58:12Z — one second
+earlier than the webhook's stamp; Stripe's answer won, as designed), audit
+event `payment_verified_with_stripe` naming him. The §"one immediate action"
+below is history.
+
+### What shipped (all deployed, health-checked, tracker flipped)
+
+| Commit | What |
+|---|---|
+| `7f8d5ed` | **Verify all with Stripe** (Alex's direct ask; filed as featreq-6349d779). `POST /api/invoices/verify-all-payments` sweeps EVERY `processing` invoice, any month; per-invoice isolation; only Stripe's answers recorded; button always in the month run's action row, no confirm. |
+| `e10f6cc` | **Month arrows** (featreq-1947e574): back/forward flanking the run's month picker, guarded by the same dirty-edit confirm as the picker. |
+| `66eda3b` | **Invoice Recap page** (featreq-0c2d4ce5): the ONE invoicing surface staff can see — per sent invoice: total / accounting services / each reimbursed expense individually. `GET /api/invoice-recap`, session-gated NOT owner-only, scoped by `visibleClientIdSet`; masters all-or-nothing like Client Recap. Validated over real August rows: 37 rows, 0 reconciliation failures. |
+| `7e4063e` | **Sort + search in invoicing** (featreq-a1e61913): search box + sort control in the month run (client A–Z is now the DEFAULT order, superseding I2's number order — her explicit rule), search + client-A–Z default in History. The open editor's row is exempt from the search filter (unsaved-edit protection, pinned). |
+| `cf71d4a` | **Search skips inactive clients** (featreq-60f24838): a typed query never returns a retired client's rows across Checklists/Board/Gantt/Delayed/Contacts/recurring lists; empty query changes nothing (history keeps its subject); the Add-from-existing template picker excludes them unconditionally. Shared helper `inactiveClientIdSet` in `clientLifecycle.ts`. |
+
+### Worth knowing from this session
+
+- **The tracker's raw status `'sent'` is NOT a bug**: the assistant's
+  "send to Alex" flow creates rows with status `sent`, and `mapFeatureRequest`
+  (db/store.js) read-maps it to `new`. Only raw SQL ever sees `sent` — the app
+  never does. Don't "fix" it.
+- **featreq-8cec48db (hours-per-client tagging panel) sits in `needs_input`**
+  with one question for Brittany: does tagging update the invoice live or on
+  save, and does the panel show/override adhoc tags made earlier at time
+  review? Its own spec left both open — don't build past them.
+- The queue is now: `featreq-97ae3214` invoice redesign (planned, ungated) and
+  `featreq-68638ed2` Skip vs Push (planned, one open question) — unchanged
+  from the entry below.
+
+**2026-09-02 — Five ships since the last entry, the "math still
+is not mathing" thread is CLOSED, and there was ONE immediate action: Alex (or
+you, with him watching) presses "Verify with Stripe" on INV-2026-08-003
+(DONE — see the entry above).**
 
 `main` is `2498fe2`, deployed SUCCESS, `/health` 200, tree clean and in sync.
 Suite **2646 tests / 154 files**. The voice agent was re-provisioned after every
