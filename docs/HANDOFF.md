@@ -1,11 +1,77 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-09-02. Everything below is live on `main`;
+Written 2026-07-21, last updated 2026-09-03. Everything below is live on `main`;
 the working tree was clean at handoff. Read this top to bottom before your first
 change — several rules here are non-obvious and breaking them has caused a
 production outage before. **If you do only one extra thing, read §7's
 "queue-run contract": the Updates tracker is now the primary way work arrives,
 and it has rules.**
+
+---
+
+## 0. Quick start for a brand-new session
+
+This section exists so a Claude with NO machine-local memory (a different
+machine, a fresh account, claude.ai) can pick up cold. It is a summary — every
+claim here is expanded in the numbered sections, which still win on detail.
+
+**What this is:** the time-tracking / checklist / billing app for PB&J
+Strategic Accounting, live at app.pbjsa.com, deployed by pushing `main` to
+`github.com/shizzoobies/PBJBillingApp` (Railway auto-deploys). Alex is the
+developer you talk to; Brittany (user id `emp-patrice`!) is the client whose
+requests arrive through the Updates tracker. **This app moves real money**
+(live Stripe since 2026-08-18): sends, voids and payments are production
+actions — Alex's explicit yes, know the undo, test only on the `Test` client.
+
+**State right now (2026-09-03):** `main` = `dd8b883`, deployed SUCCESS,
+`/health` 200, tree clean, suite **2691 tests / 160 files**. The 2026-09-02
+evening entry in §5 is the latest digest. The queue:
+
+1. `featreq-97ae3214` — **invoice redesign** (planned, ungated, ready to
+   build; spec in §5's 2026-09-02 entry; run `scripts/check-print-pdf.mjs`
+   after any layout change).
+2. `featreq-68638ed2` — **Skip vs Push** (planned; ONE open question for
+   Brittany, see §5).
+3. `featreq-8cec48db` — hours-per-client tagging panel sits in `needs_input`
+   awaiting Brittany; do not build past her answer.
+4. Two parked `planned_not_eom` items (§5), thirteen Shipped items awaiting
+   her live review — re-read the board at session start, it moves.
+5. **Watch:** September's KLC generate is the first combined invoice
+   (~$720, master `client-lamjjjc`); the first send is irreversible.
+
+**The five rules that break things** (details §2–§4): (1) `db/store.js` has
+TWO backends — any persisted change touches both, tests only exercise the file
+backend; (2) `npm run verify` green before every push; (3) user-visible change
+⇒ update `docs/capability-manifest.md` AND re-provision the voice agent after
+deploy; (4) deploy is part of done — push, poll Railway, `/health` 200;
+(5) never write to prod without explicit approval + a durable undo snapshot
+(single-row `feature_requests` writes have standing approval, §7). Production
+read-only reproduction (§4) is the highest-value verification tool here — you
+cannot log into the live UI (TOTP, §8).
+
+**House norms:** American spellings everywhere (labor/color/labeled) — don't
+copy British ones out of old comments; the repo is CRLF (LF edits make
+whole-file diffs); there is NO prettier — eslint is the only style authority;
+commit messages open with a statement of behavior (no conventional-commit
+prefix) and end with the Co-Authored-By trailer your session specifies
+(history shows several Claude models); `package-lock.json` is deliberately
+gitignored — do not commit one; `tmp/` is NOT eslint-ignored, so scratch
+scripts go in the OS-temp scratchpad, never the repo.
+
+**Machine-local paths (this machine only — gone elsewhere):** the repo at
+`D:\PBJ Accounting Work\AP For Time Stuff`; the Jan–May re-import assets at
+`D:\PBJ Accounting\Old Time\`; the desktop updater signing key at
+`D:\PBJ Accounting Work\desktop-updater-key\` (if it AND the GitHub Actions
+secret are lost, installed desktop shells can never update again); Brittany's
+annotated contact list at `D:\PBJ Accounting\PB&J Strategic Accounting_Customer
+Contact List.xlsx` (11 of its rows are column-shifted — §5, 2026-08-26). One
+git quirk: pushes can suddenly 403 as the wrong account ("pmuf-code") — fix is
+`gh auth switch --user shizzoobies`, then re-push and match the polled deploy
+hash to the commit you pushed.
+
+**Tracker oddity that is NOT a bug:** rows filed through the assistant carry
+raw status `'sent'` in the database; `mapFeatureRequest` (db/store.js)
+read-maps it to `'new'`, so the app never shows it. Only raw SQL sees `sent`.
 
 ---
 
@@ -77,10 +143,13 @@ curl -s -o /dev/null -w "%{http_code}\n" "$APP/health"
 node scripts/provision-voice-agent.mjs
 ```
 
-Commit trailer:
+Commit trailer: end every commit with the `Co-Authored-By` trailer your own
+session specifies (the history holds several — e.g. `Claude Opus 4.8 (1M
+context)`, `Claude Fable 5` — and that is fine; what matters is that the
+trailer is present and truthful):
 
 ```
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Co-Authored-By: <your session's Claude attribution> <noreply@anthropic.com>
 ```
 
 ---

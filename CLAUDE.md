@@ -21,8 +21,11 @@ the open questions. The rules below are the ones that break things if missed.
 
 ## Commit trailer
 
+End every commit with the `Co-Authored-By` trailer your session specifies —
+the history holds several Claude models and that's fine:
+
 ```
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Co-Authored-By: <your session's Claude attribution> <noreply@anthropic.com>
 ```
 
 ## One habit that matters
