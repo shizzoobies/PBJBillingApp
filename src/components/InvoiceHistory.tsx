@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronRight, Printer } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { ListSearch } from './ListSearch'
 import { listInvoicesRequest } from '../lib/api'
 import type { Client, PersistedInvoice } from '../lib/types'
 import {
@@ -107,8 +108,13 @@ export function InvoiceHistory({
   // themselves always run newest first, because that is what makes this a
   // history rather than a list. Sorting per-month independently would mean the
   // header you clicked and the header you're looking at could disagree.
-  const [sortKey, setSortKey] = useState<SortKey>('number')
+  //
+  // Client A–Z is the DEFAULT (featreq-a1e61913): "when no sort is actively
+  // applied, keep the list ordered alphabetically." Clicking a column header
+  // is what applies a sort.
+  const [sortKey, setSortKey] = useState<SortKey>('client')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
+  const [query, setQuery] = useState('')
 
   // Fetched once, when the view opens. Nothing here writes, so there is no
   // reason to reload; and this component is mounted fresh each time History is
@@ -166,16 +172,20 @@ export function InvoiceHistory({
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [invoices, clientName])
 
-  const filtered = useMemo(
-    () =>
-      invoices.filter(
-        (invoice) =>
-          (!year || invoice.period.startsWith(year)) &&
-          (!clientId || invoice.clientId === clientId) &&
-          (!status || invoice.status === status),
-      ),
-    [invoices, year, clientId, status],
-  )
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return invoices.filter(
+      (invoice) =>
+        (!year || invoice.period.startsWith(year)) &&
+        (!clientId || invoice.clientId === clientId) &&
+        (!status || invoice.status === status) &&
+        // Search composes WITH the dropdowns (featreq-a1e61913): client name
+        // or invoice number, same fields the month run's search matches.
+        (!q ||
+          clientName(invoice.clientId).toLowerCase().includes(q) ||
+          String(invoice.number ?? '').toLowerCase().includes(q)),
+    )
+  }, [invoices, year, clientId, status, query, clientName])
 
   // Group, then summarize. Totals are computed from the FILTERED rows, so the
   // header always describes what is under it — filter to one client and the
@@ -274,6 +284,16 @@ export function InvoiceHistory({
       ) : null}
 
       {invoices.length > 0 ? (
+        <ListSearch
+          value={query}
+          onChange={setQuery}
+          placeholder="Search by client or invoice number…"
+          resultCount={filtered.length}
+          total={invoices.length}
+        />
+      ) : null}
+
+      {invoices.length > 0 ? (
         <div className="filter-bar">
           <label className="filter-field">
             <span>Year</span>
@@ -345,7 +365,9 @@ export function InvoiceHistory({
         </p>
       ) : null}
       {!loading && invoices.length > 0 && groups.length === 0 ? (
-        <p className="invoice-run-empty">No invoices match these filters.</p>
+        <p className="invoice-run-empty">
+          {query.trim() ? 'No invoices match this search.' : 'No invoices match these filters.'}
+        </p>
       ) : null}
 
       {groups.map((group) => {

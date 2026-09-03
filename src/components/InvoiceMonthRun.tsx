@@ -41,6 +41,7 @@ import {
   updateInvoiceRequest,
 } from '../lib/api'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
+import { ListSearch } from './ListSearch'
 import {
   adhocLineForMode,
   invoiceLockMessage,
@@ -599,22 +600,50 @@ export function InvoiceMonthRun({
     }
   }, [retainerToken, refreshToken])
 
-  // Number order. A voided invoice keeps its number and its place, so the run
-  // reads the same way before and after something is voided.
-  const ordered = useMemo(
-    () =>
-      [...invoices].sort((a, b) =>
-        String(a.number ?? '').localeCompare(String(b.number ?? '')),
-      ),
-    [invoices],
-  )
+  // Sort + search (featreq-a1e61913). Alphabetical by client is the DEFAULT —
+  // her rule: "when no sort is actively applied, keep the list ordered
+  // alphabetically" — which supersedes the invoice-number default this run
+  // launched with. The stable-while-you-work property that number order was
+  // protecting survives: a chosen sort never changes underneath you, rows
+  // still never move when their status does.
+  const [sortBy, setSortBy] = useState<'client' | 'number' | 'total'>('client')
+  const [query, setQuery] = useState('')
 
-  // The run split into its tabs. Each group keeps the number order above, so
+  const ordered = useMemo(() => {
+    const byNumber = (a: PersistedInvoice, b: PersistedInvoice) =>
+      String(a.number ?? '').localeCompare(String(b.number ?? ''))
+    const sorted = [...invoices]
+    if (sortBy === 'client') {
+      sorted.sort((a, b) => clientName(a.clientId).localeCompare(clientName(b.clientId)) || byNumber(a, b))
+    } else if (sortBy === 'total') {
+      sorted.sort((a, b) => b.total - a.total || byNumber(a, b))
+    } else {
+      sorted.sort(byNumber)
+    }
+    return sorted
+  }, [invoices, sortBy, clientName])
+
+  // The search filters what the tabs SHOW, never what the month holds — the
+  // stat strip above stays whole-month. The open editor's row is exempt from
+  // the filter: hiding it would unmount it and take unsaved edits with it,
+  // silently, which the tab and month guards exist to prevent.
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return ordered
+    return ordered.filter(
+      (invoice) =>
+        invoice.id === openId ||
+        clientName(invoice.clientId).toLowerCase().includes(q) ||
+        String(invoice.number ?? '').toLowerCase().includes(q),
+    )
+  }, [ordered, query, clientName, openId])
+
+  // The run split into its tabs. Each group keeps the sort order above, so
   // moving between tabs never re-sorts anything.
   const byTab = useMemo(() => {
     const map = new Map<RunTabId, PersistedInvoice[]>()
     for (const tab of RUN_TABS) map.set(tab.id, [])
-    for (const invoice of ordered) {
+    for (const invoice of visible) {
       // A money document must never vanish from the run. If the server ever
       // answers with a status this build does not know, it lands in To review
       // rather than nowhere — that tab forces eyes on it.
@@ -622,7 +651,7 @@ export function InvoiceMonthRun({
       map.get(tabId)?.push(invoice)
     }
     return map
-  }, [ordered])
+  }, [visible])
 
   // Derived at render rather than stored, so an unknown id can never strand the
   // panel on nothing. An EMPTY tab is still a valid place to stand: marking the
@@ -1045,6 +1074,34 @@ export function InvoiceMonthRun({
           <strong>{currency.format(monthTotal)}</strong>
         </div>
       </div>
+
+      {/* Search + sort over the month (featreq-a1e61913). The stat strip
+          above stays whole-month; only what the tabs list is filtered. */}
+      {ordered.length > 0 ? (
+        <div className="invoice-run-tools">
+          <ListSearch
+            value={query}
+            onChange={setQuery}
+            placeholder="Search by client or invoice number…"
+            resultCount={visible.length}
+            total={ordered.length}
+          />
+          <label className="invoice-run-sort">
+            <span>Sort</span>
+            <select
+              className="input"
+              value={sortBy}
+              onChange={(event) =>
+                setSortBy(event.target.value as 'client' | 'number' | 'total')
+              }
+            >
+              <option value="client">Client (A–Z)</option>
+              <option value="number">Invoice number</option>
+              <option value="total">Total (high to low)</option>
+            </select>
+          </label>
+        </div>
+      ) : null}
 
       {error ? (
         <p className="invoice-run-error" role="alert">
