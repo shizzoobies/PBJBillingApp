@@ -1,4 +1,5 @@
 import { clientName, effectiveChecklistDue } from './utils'
+import { inactiveClientIdSet } from './clientLifecycle'
 import { isInReportPeriod, type ReportPeriod } from './reportPeriod'
 import type { Checklist, Client } from './types'
 
@@ -67,6 +68,9 @@ export function filterInProgressChecklists(
 ): Checklist[] {
   const q = (scope.query ?? '').trim().toLowerCase()
   const clients = scope.clients ?? []
+  // featreq-60f24838: a typed search must not surface a retired client's
+  // checklists. Built once — the filter below runs per checklist.
+  const retired = q ? inactiveClientIdSet(clients) : null
 
   return checklists.filter((checklist) => {
     // Ahead of every other narrowing: see `focusId` above.
@@ -81,6 +85,7 @@ export function filterInProgressChecklists(
       const nameMatch = clientName(clients, checklist.clientId).toLowerCase().includes(q)
       const titleMatch = checklist.title.toLowerCase().includes(q)
       if (!nameMatch && !titleMatch) return false
+      if (retired?.has(checklist.clientId)) return false
     }
     return true
   })

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { FilterBar } from '../components/FilterBar'
+import { inactiveClientIdSet } from '../lib/clientLifecycle'
 import { ListSearch } from '../components/ListSearch'
 import { useFilters, type StatusFilter } from '../components/useFilters'
 import type { AppData, Checklist, Client, Employee } from '../lib/types'
@@ -106,6 +107,7 @@ function GanttView({
   }
 
   const q = query.trim().toLowerCase()
+  const inactiveIds = inactiveClientIdSet(clients)
   const filtered = [...checklists, ...projectedGhosts].filter((checklist) => {
     // Applied before the user-chosen filters (and to the projected ghosts too)
     // so no combination of URL params can widen it.
@@ -119,6 +121,8 @@ function GanttView({
       const titleMatch = checklist.title.toLowerCase().includes(q)
       const nameMatch = clientName(clients, checklist.clientId).toLowerCase().includes(q)
       if (!titleMatch && !nameMatch) return false
+      // featreq-60f24838: a typed search must not surface a retired client's checklists.
+      if (inactiveIds.has(checklist.clientId)) return false
     }
     return true
   })

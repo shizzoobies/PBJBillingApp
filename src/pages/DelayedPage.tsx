@@ -3,6 +3,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
+import { inactiveClientIdSet } from '../lib/clientLifecycle'
 import { WaitApprovalActions } from '../components/WaitApprovalActions'
 import { WaitQuestionAction } from '../components/WaitQuestionAction'
 import type { WaitingOn } from '../lib/types'
@@ -271,7 +272,10 @@ export function DelayedPage() {
   const visibleGroups = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return groups
+    // featreq-60f24838: a typed search must not surface a retired client's group.
+    const inactiveIds = inactiveClientIdSet(clients)
     return groups
+      .filter((group) => !inactiveIds.has(group.clientId))
       .map((group) => {
         const clientMatch = group.name.toLowerCase().includes(q)
         const filteredChecklists = group.checklists
@@ -297,7 +301,7 @@ export function DelayedPage() {
         }
       })
       .filter((group) => group.checklists.length > 0)
-  }, [groups, query])
+  }, [groups, query, clients])
 
   const totalDelayed = tabCounts.blocking + tabCounts.requesting
   const tabTotal = tabCounts[activeTab]

@@ -22,7 +22,7 @@ import { ClientTimeModal } from '../components/ClientTimeModal'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
-import { isInactiveClient, markInactiveConfirm } from '../lib/clientLifecycle'
+import { inactiveClientIdSet, isInactiveClient, markInactiveConfirm } from '../lib/clientLifecycle'
 import {
   activeChecklistsForClient,
   CLIENT_SECTION_ANCHORS,
@@ -1664,15 +1664,20 @@ function ApplyExistingTemplateModal({
   const [error, setError] = useState('')
 
   // Offer standard blueprints plus templates from OTHER clients. Templates
-  // already on this client are skipped (she already has them).
-  const pickable = useMemo(
-    () =>
-      templates
-        .filter((template) => template.isStandard || template.clientId !== client.id)
-        .slice()
-        .sort((a, b) => a.title.localeCompare(b.title)),
-    [templates, client.id],
-  )
+  // already on this client are skipped (she already has them). A retired
+  // client's templates are never offered for new work (featreq-60f24838) —
+  // standard blueprints aren't tied to a client, so they're untouched.
+  const pickable = useMemo(() => {
+    const inactiveIds = inactiveClientIdSet(clients)
+    return templates
+      .filter(
+        (template) =>
+          template.isStandard ||
+          (template.clientId !== client.id && !inactiveIds.has(template.clientId)),
+      )
+      .slice()
+      .sort((a, b) => a.title.localeCompare(b.title))
+  }, [templates, client.id, clients])
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return pickable

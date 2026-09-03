@@ -8,6 +8,7 @@ import {
   type BoardColumn,
 } from '../lib/activeBoard'
 import { useAppContext } from '../AppContext'
+import { inactiveClientIdSet } from '../lib/clientLifecycle'
 import { boardChecklistsFor, boardTeamMemberIds } from '../lib/checklistVisibility'
 import { isChecklistSkipped } from '../../lib/checklist-skip.js'
 import { ListSearch } from '../components/ListSearch'
@@ -201,8 +202,11 @@ export function ActiveChecklistsBoardPage() {
   const filteredColumns = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return board.columns
+    // featreq-60f24838: a typed search must not surface a retired client's row.
+    const inactiveIds = inactiveClientIdSet(data.clients)
     return board.columns.map((col) => {
       const filteredClients = col.clients.filter((clientRow) => {
+        if (inactiveIds.has(clientRow.clientId)) return false
         const nameMatch = clientRow.name.toLowerCase().includes(q)
         const titleMatch = clientRow.checklists.some((c) =>
           c.title.toLowerCase().includes(q),
@@ -224,7 +228,7 @@ export function ActiveChecklistsBoardPage() {
         openClientCount: filteredClients.length,
       }
     })
-  }, [board.columns, query])
+  }, [board.columns, query, data.clients])
 
   // Full-fidelity card, wired to the same context handlers the Checklists page
   // uses — so checking items off the board behaves identically (and completing

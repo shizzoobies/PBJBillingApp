@@ -3,6 +3,7 @@ import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'rea
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { AddModal } from '../components/AddModal'
+import { isInactiveClient } from '../lib/clientLifecycle'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { FloatingAddButton } from '../components/FloatingAddButton'
 import { ListSearch } from '../components/ListSearch'
@@ -230,10 +231,14 @@ function ContactLibrary({
   const unlinked = useMemo(() => unlinkedContacts(contacts, clients), [contacts, clients])
   const unlinkedIdSet = useMemo(() => new Set(unlinked.map((c) => c.id)), [unlinked])
 
-  // Build a set of client names indexed by contact id for search.
+  // Build a set of client names indexed by contact id for search. Retired
+  // clients are left out here (featreq-60f24838): a linked contact still
+  // renders under its client's name (history keeps its subject), but typing
+  // that name no longer returns the contact.
   const contactClientNames = useMemo(() => {
     const map = new Map<string, string[]>()
     for (const client of clients) {
+      if (isInactiveClient(client)) continue
       for (const cid of client.contactIds ?? []) {
         const existing = map.get(cid) ?? []
         existing.push(client.name)

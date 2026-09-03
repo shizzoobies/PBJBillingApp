@@ -53,6 +53,13 @@ export function selectableClients<T extends Pick<Client, 'id' | 'lifecycleStage'
   return clients.filter((client) => !isInactiveClient(client) || keep.has(client.id))
 }
 
+/** Ids of retired clients — for search filters that must stop matching them. */
+export function inactiveClientIdSet(
+  clients: readonly Pick<Client, 'id' | 'lifecycleStage'>[],
+): Set<string> {
+  return new Set(clients.filter(isInactiveClient).map((client) => client.id))
+}
+
 /** Is this client a billing master — a payer that holds no work of its own? */
 export function isBillingMasterClient(client: Pick<Client, 'isBillingMaster'>): boolean {
   return client.isBillingMaster === true

@@ -70,7 +70,7 @@ import { completedTaskRows } from '../lib/completedTasks'
 import { filterInProgressChecklists } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
-import { workableClients } from '../lib/clientLifecycle'
+import { inactiveClientIdSet, workableClients } from '../lib/clientLifecycle'
 import { waitForTaskOptions } from '../lib/waitForTaskOptions'
 import {
   addDays,
@@ -859,7 +859,10 @@ function StaffRecurringTemplatesView({ data }: { data: AppData }) {
   const q = query.trim().toLowerCase()
   const filtered = useMemo(() => {
     if (!q) return groups
+    // featreq-60f24838: a typed search must not surface a retired client's group.
+    const inactiveIds = inactiveClientIdSet(clients)
     return groups
+      .filter((group) => !inactiveIds.has(group.clientId))
       .map((group) => {
         if (group.clientName.toLowerCase().includes(q)) return group
         return {
@@ -870,7 +873,7 @@ function StaffRecurringTemplatesView({ data }: { data: AppData }) {
         }
       })
       .filter((group) => group.templates.length > 0)
-  }, [groups, q])
+  }, [groups, q, clients])
 
   if (groups.length === 0) return null
   const totalTemplates = groups.reduce((sum, group) => sum + group.templates.length, 0)
@@ -4819,11 +4822,14 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   // to one business was the only way in. Matching the client name first is the
   // point: "jump to a business" is the actual job.
   const q = query.trim().toLowerCase()
+  // featreq-60f24838: typing a search must not surface a retired client's tasks.
+  const inactiveIds = inactiveClientIdSet(props.clients)
   const regularTemplates = q
     ? allRegularTemplates.filter(
         (template) =>
-          clientName(props.clients, template.clientId).toLowerCase().includes(q) ||
-          template.title.toLowerCase().includes(q),
+          (clientName(props.clients, template.clientId).toLowerCase().includes(q) ||
+            template.title.toLowerCase().includes(q)) &&
+          !inactiveIds.has(template.clientId),
       )
     : allRegularTemplates
 

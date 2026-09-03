@@ -33,15 +33,15 @@ report below ("HOW LABOR COST IS CALCULATED").
 
 Sidebar pages: Dashboard, Engagements, Time, Timesheet, Time Approvals,
 Checklists, Board, Delayed, Clients, Client Recap, Contacts, Reports,
-Productivity, Gantt, Invoices, Plans, Team, To 100%, Updates (owner only),
-Settings. A billing-month picker, notification bell, and account menu sit in the
-top bar on every page.
+Productivity, Gantt, Invoices, Invoice Recap, Plans, Team, To 100%, Updates
+(owner only), Settings. A billing-month picker, notification bell, and account
+menu sit in the top bar on every page.
 
 **The owner's sidebar is grouped into sections** (nineteen flat links was too
 many to scan). In order: Dashboard, Engagements, **Clients** (Clients, Contacts,
-Client Recap), **Billing** (Invoices, Plans), **Operations** (Time, Timesheet,
-Time Approvals, Checklists, Board, Delayed, Gantt), Team, **Reports** (Reports,
-Productivity), Updates, **Settings** (Settings, To 100%). Dashboard,
+Client Recap), **Billing** (Invoices, Invoice Recap, Plans), **Operations**
+(Time, Timesheet, Time Approvals, Checklists, Board, Delayed, Gantt), Team,
+**Reports** (Reports, Productivity), Updates, **Settings** (Settings, To 100%). Dashboard,
 Engagements, Team and Updates stand on their own without a heading — a heading
 over a single link is more clutter than help. Updates is deliberately top-level
 rather than filed under Settings, since that is where feature requests are filed
@@ -77,6 +77,14 @@ Clients page meanwhile. Owner-only.
   the assignee/client/status filters), Delayed (task title/client/waiting note),
   and the Board (client/task title — composes with the Report period). Reports
   and Productivity remain aggregate views with their own filters.
+- **Search results skip inactive clients.** Typing a search never returns rows
+  belonging to a client marked inactive — their checklists, board rows, gantt
+  bars, delayed items, recurring templates and linked contacts stop matching, so
+  retired clients no longer clutter results. With no search typed, lists are
+  unchanged (existing history stays visible), and the Clients page still shows
+  inactive clients on its own Inactive / All tabs. The "Add from existing"
+  template picker on a client page no longer offers retired clients' templates
+  at all.
 - Report period (shared date range): a "Report period" control on the Time,
   Timesheet, Board, and Checklists pages lets you view a range longer than one
   week. Pick a preset — This week, This month, This quarter, This year to date —
@@ -1575,10 +1583,20 @@ Clients page meanwhile. Owner-only.
 > Overdue all live under **Sent** (each row still shows its own status). Every
 > tab carries its count, and all five counts stay visible at once, so you can
 > see the shape of the month without opening anything; a tab with nothing in it
-> is dimmed but still there. Within a tab the invoices are in INVOICE NUMBER
-> order (they do not rearrange while you work through them). When you mark one
-> reviewed, send it or void it, it simply leaves the tab you are on and its new
-> tab's count goes up — you are not dragged along after it.
+> is dimmed but still there. Within a tab the invoices are **alphabetical by
+> client by default**, with a Sort control to switch to invoice-number order or
+> total (high to low) — whichever is chosen, rows never rearrange while you
+> work through them. When you mark one reviewed, send it or void it, it simply
+> leaves the tab you are on and its new tab's count goes up — you are not
+> dragged along after it.
+>
+> **Search the month:** a search box above the tabs narrows every tab to
+> invoices matching a client name or invoice number, with an "N of M" count.
+> The stat strip above stays whole-month while you search, and an invoice you
+> have open for editing never disappears out from under you because of what
+> was typed. History has the same search box, composing with its Year / Client
+> / Status filters, and its month tables also open alphabetical by client
+> (click a column header to sort by anything else).
 >
 > Above the tabs are the counts for To review / Reviewed / Need a look and the
 > month total. Rows flagged for a second look get an amber rule down the left.
@@ -2157,6 +2175,29 @@ Clients page meanwhile. Owner-only.
 - Billing queue: all clients with their month total, ready to review.
 - Estimated hours fields anywhere in the app are informational only and
   never change invoice amounts.
+
+## Invoice Recap (owner + staff)
+
+> **The one invoicing page staff can see.** Built so the team can record each
+> month's deposits correctly: for every invoice that actually went out (sent,
+> processing, paid, or overdue — never drafts) for a month, one card shows the
+> **Invoice total** for the company, the **Accounting services** amount, and
+> the **Reimbursed expenses** total — and then every client-reimbursed expense
+> **listed individually with its description**, never combined, so it is clear
+> what each reimbursement was for. Accounting services + reimbursed expenses
+> always add up to the invoice total, because all three come from the same
+> stored lines.
+>
+> **Each team member sees only their assigned clients' invoices** — the same
+> visibility rule as everywhere else in the app; owners see every client. On a
+> combined (billing-master) invoice, each reimbursed expense names which
+> company it belongs to; the combined invoice itself appears only for people
+> who can see the master client.
+>
+> Navigate months with the back/forward arrows or the month picker at the top.
+> Retainer invoices are not in this recap — a retainer is money held on
+> account, not a monthly bill. Amounts here are read-only; editing invoices
+> stays on the owner-only Invoices page.
 
 ## Plans (owner only)
 
