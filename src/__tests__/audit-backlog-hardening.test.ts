@@ -186,4 +186,28 @@ describe('an invisible checklist is not found, not forbidden (L3)', () => {
       /if \(session\.user\.role === 'owner'\) \{\s*\n\s*return new Set\(clients\.map\(\(client\) => client\.id\)\)/,
     )
   })
+
+  // 2026-09-04 TEAM/VISIBILITY SPLIT. `visibleClientIdSet` takes the WHOLE
+  // workspace now, because the task half of visibility is computed from
+  // `checklists` and `checklistTemplates`. Handing it a bare `clients` array
+  // still "works" — it just silently narrows every caller back to the team, so
+  // a bookkeeper stops seeing the checklist she was given and starts 404-ing on
+  // her own work, with nothing failing anywhere. Nobody may call it with
+  // `.clients`. docs/plans/team-visibility-split-2026-09.md.
+  it('is never handed a bare clients array, only the whole workspace', () => {
+    const calls = serverSource.match(/visibleClientIdSet\([^)]*\)/g) ?? []
+    expect(calls.length).toBeGreaterThan(20)
+    expect(calls.filter((call) => call.includes('.clients'))).toEqual([])
+  })
+
+  // The other half of the split: money reads the narrow, owner-picked team,
+  // and `teamClientIdSet` must have no way to read a task — it is handed the
+  // client list precisely so there is nothing for a checklist to widen.
+  it('keeps teamClientIdSet unable to see a task at all', () => {
+    const fn = functionSource('function teamClientIdSet(', 500)
+    expect(fn).toContain('isClientVisibleToUser(client, me)')
+    // Named helpers, not the bare word "checklist": the window runs a little
+    // past the function and into the next one's doc comment.
+    expect(fn).not.toMatch(/taskClientIdsForUser|visibleClientIdsForUser|data\.checklists/)
+  })
 })

@@ -136,7 +136,6 @@ import {
   currentBillingPeriod,
   ensureRecurringChecklists,
   formatTimeFromMs,
-  getAssignedTeamIds,
   type GroupAllocationMode,
   itemDeletionKey,
   legibleSidebarText,
@@ -148,6 +147,7 @@ import { workableClients } from './lib/clientLifecycle'
 import { checklistsVisibleTo } from './lib/checklistVisibility'
 import { isChecklistSkipped } from '../lib/checklist-skip.js'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
+import { visibleClientIdsForUser } from '../lib/data-scope.js'
 import {
   defaultReportPeriod,
   normalizeReportPeriod,
@@ -1112,23 +1112,48 @@ function App() {
     [effectiveEmployeeId, data.checklists, effectiveRole],
   )
 
+  // Every client this user may SEE. For a non-owner that is the computed
+  // VISIBILITY — the Assigned Team lists an owner put them on, unioned with
+  // every client they hold a task on (a live checklist, a recurring template,
+  // or a template STAGE). `visibleClientIdsForUser` is the same rule the
+  // server scopes the workspace with, so the two cannot drift
+  // (lib/data-scope.js, docs/plans/team-visibility-split-2026-09.md).
+  //
+  // The union used to be spelled out here and covered only checklists, which
+  // left out recurring templates and template stages: a staffer whose work on
+  // a client arrived as a template stage saw that client on the server and
+  // nowhere in the SPA.
+  //
+  // Their OWN TIME ENTRIES' clients are unioned on top, deliberately — this
+  // set is WIDER than the server's. It keeps history legible: a client someone
+  // has logged time against keeps its name in their reports and timesheets
+  // after they come off the team and the task is gone.
   const visibleClientIds = useMemo(() => {
     if (effectiveRole === 'owner') {
       return new Set(data.clients.map((client) => client.id))
     }
 
     return new Set([
-      ...data.clients
-        .filter((client) => getAssignedTeamIds(client).includes(effectiveEmployeeId))
-        .map((client) => client.id),
-      ...data.checklists
-        .filter((checklist) => checklist.assigneeId === effectiveEmployeeId)
-        .map((checklist) => checklist.clientId),
+      ...visibleClientIdsForUser(
+        {
+          clients: data.clients,
+          checklists: data.checklists,
+          checklistTemplates: data.checklistTemplates,
+        },
+        effectiveEmployeeId,
+      ),
       ...data.timeEntries
         .filter((entry) => entry.employeeId === effectiveEmployeeId)
         .map((entry) => entry.clientId),
     ])
-  }, [effectiveEmployeeId, data.checklists, data.clients, data.timeEntries, effectiveRole])
+  }, [
+    effectiveEmployeeId,
+    data.checklists,
+    data.checklistTemplates,
+    data.clients,
+    data.timeEntries,
+    effectiveRole,
+  ])
 
   const visibleClients = useMemo(
     () => data.clients.filter((client) => visibleClientIds.has(client.id)),
@@ -3713,14 +3738,26 @@ function App() {
     }
   }
 
-  // Strict "what clients can this user log time against?" — drives the
-  // timer and manual-entry dropdowns on TimePage. A team member only ever
-  // sees clients on their formal Assigned Team list (Client → Assigned
-  // team UI, persisted to `assignedBookkeeperIds`). Owners outside preview
-  // mode see every client, matching how owners view the rest of the app.
-  // While an owner previews a bookkeeper `effectiveRole` is downgraded to
-  // 'employee' and `effectiveEmployeeId` is the bookkeeper's id, so the
-  // same rule naturally scopes the dropdown to the bookkeeper's view.
+  // "What clients can this user log time against?" — drives the timer and
+  // manual-entry dropdowns on TimePage. A team member is offered the clients
+  // they can SEE: the Assigned Team lists an owner put them on, PLUS any
+  // client they hold a task on (a live checklist, a recurring template, or a
+  // template stage). That union is `visibleClientIdsForUser`, the same rule
+  // the server scopes the workspace with.
+  //
+  // It used to be the team list alone (`assignedBookkeeperIds`), which was
+  // the same answer only because every task assignment silently WROTE the
+  // assignee into that list. Since the 2026-09 team/visibility split the team
+  // is owner-picked and nothing else writes it, so reading it here would empty
+  // the dropdown for anyone whose work arrived as a task — most of the staff
+  // (docs/plans/team-visibility-split-2026-09.md). Time follows visibility;
+  // only money follows the team.
+  //
+  // Owners outside preview mode see every client, matching how owners view the
+  // rest of the app. While an owner previews a bookkeeper `effectiveRole` is
+  // downgraded to 'employee' and `effectiveEmployeeId` is the bookkeeper's
+  // id, so the same rule naturally scopes the dropdown to the bookkeeper's
+  // view.
   // Retired clients are filtered out on top of the scoping rule: no new time
   // may be logged against a former client. Entries ALREADY logged against them
   // still render everywhere (reports, timesheets, approvals, their Time tab) —
@@ -3731,17 +3768,24 @@ function App() {
   // written against one. This memo is the single source for the timer dropdown,
   // the manual-entry dropdown and the split/allocation picker (which derives
   // from it), so filtering here covers all three.
-  const timeTrackingClients = useMemo(
-    () =>
-      workableClients(
-        effectiveRole === 'owner'
-          ? data.clients
-          : data.clients.filter((client) =>
-              (client.assignedBookkeeperIds ?? []).includes(effectiveEmployeeId),
-            ),
-      ),
-    [data.clients, effectiveRole, effectiveEmployeeId],
-  )
+  const timeTrackingClients = useMemo(() => {
+    if (effectiveRole === 'owner') return workableClients(data.clients)
+    const visible = visibleClientIdsForUser(
+      {
+        clients: data.clients,
+        checklists: data.checklists,
+        checklistTemplates: data.checklistTemplates,
+      },
+      effectiveEmployeeId,
+    )
+    return workableClients(data.clients.filter((client) => visible.has(client.id)))
+  }, [
+    data.checklists,
+    data.checklistTemplates,
+    data.clients,
+    effectiveRole,
+    effectiveEmployeeId,
+  ])
   const syncMessage =
     dataSyncState === 'loading'
       ? 'Loading…'

@@ -736,7 +736,7 @@ function ClientsTheyCanSeeSection({
 
   return (
     <div className="sharing-control">
-      <p className="sharing-helper">Clients they can see</p>
+      <p className="sharing-helper">Assigned clients</p>
       <div className="sharing-chips">
         {visibleClients.length === 0 ? (
           <span className="sharing-helper">No clients assigned yet.</span>

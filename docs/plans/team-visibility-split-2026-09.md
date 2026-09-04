@@ -71,8 +71,25 @@ Two concepts, two sources:
 existing caller keeps calling `visibleClientIdSet` and sees no change. The
 Invoice Recap calls `teamClientIdSet`. Owners bypass both, as today.
 
-The client-side union in `App.tsx` (own-checklist and own-time-entry clients)
-already does the visibility half for the SPA; it stays.
+The SPA has its own copies of the visibility rule, and review (2026-09-04)
+found two that would have broken at the reset: the time-logging picker
+(`timeTrackingClients` in `App.tsx`) read the team field directly — Lisa's
+picker would have gone EMPTY — and the `visibleClients` union had checklists
+and time entries but not templates or template stages. Both now call
+`visibleClientIdsForUser` from `lib/data-scope.js` (the own-time-entry
+widening stays, so history remains visible). The reset's "lost 0" proof is
+measured against the SERVER set; the SPA memos are what make it true on
+screen.
+
+Two visible side effects of the reset, by design, that Brittany should hear
+before it runs: (1) the Setup Checklist's "Assign a team member to X" item
+lights up for ~37 clients at once — that IS her re-pick worklist; (2) an
+accountant's "their bookkeepers" open-task badge shrinks to their own tasks
+until teams are re-picked (`src/lib/openTaskScope.ts` reads the team).
+
+The assistant's `assign_client` tool now writes the explicit team through
+`setClientAssignedTeam` (it used to call the implicit grant, which would
+have become a silent no-op that reported success).
 
 ## 3. Steps
 
@@ -97,9 +114,13 @@ already does the visibility half for the SPA; it stays.
 5. **Production reset** (needs Alex's explicit yes at the time; snapshot to
    `docs/prod-snapshots/` first, undo statement in the log): for every
    client, `assigned_bookkeeper_ids` := the ids with NO task on that client
-   (the provably explicit ones: Lisa on Fore Motion + Skyline, Allison on
-   Bright Tower + Skyline, the two test accounts everywhere they are now, the
-   two owner-only clients). Everything task-derived is dropped — it is
+   (owners always kept). Dry run 2026-09-04 (`scripts/prod/reset-team-lists-2026-09.mjs`,
+   snapshot in `docs/prod-snapshots/`): 37 of 52 clients change; counting
+   template stages properly, Lisa has a task on every one of her 35 clients
+   (zero provably-deliberate picks), Allison keeps only Skyline; the two test
+   accounts keep nearly everything (they have no tasks). Visibility proof:
+   every non-owner's computed visibility after equals their list before
+   (lost 0, gained 0, all four). Everything task-derived is dropped — it is
    recomputed as visibility from that moment. Then Brittany picks the real
    team per client on the Team page; the Invoice Recap reopens to staff on
    the deploy that ships step 2, which can land before or after her pass

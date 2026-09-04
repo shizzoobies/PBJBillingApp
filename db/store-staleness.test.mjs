@@ -1791,8 +1791,11 @@ describe('setChecklistTemplateActive (file backend)', () => {
  * An owner can appear on a client's assigned team. It grants nothing — owners
  * see every client regardless — but the Clients-page team column shows who
  * works the account, and dropping owners from it silently misreported the team.
- * Implicit grants (grantClientVisibility, the checklist backfill) still skip
- * owners: being handed one task should not add you to a client's team list.
+ * Implicit grants no longer exist at all: since the 2026-09-04 team/visibility
+ * split, `grantClientVisibility` writes nothing and the checklist backfill is
+ * off the read path, so ONLY an owner's explicit pick puts anyone on this list.
+ * Being handed a task still lets you see the client — that is computed at read
+ * time now (docs/plans/team-visibility-split-2026-09.md).
  */
 describe('setClientAssignedTeam (file backend)', () => {
   beforeEach(async () => {
@@ -3391,11 +3394,27 @@ describe('one source of truth for a client team (file backend)', () => {
     expect((await clientFromDisk()).assignedBookkeeperIds).toEqual(['emp-2'])
   })
 
-  it('holds after grantClientVisibility', async () => {
-    await store.grantClientVisibility('c1', 'emp-2')
+  // FLIPPED by the 2026-09-04 team/visibility split. This used to pin that a
+  // task assignment ADDED the person to the client's team; that write is what
+  // made "assigned team" mean "everyone who ever held work here" and put
+  // clients' invoices in front of staff who were never put on them. The method
+  // is now a deliberate no-op and the team must be exactly what an owner
+  // picked. docs/plans/team-visibility-split-2026-09.md.
+  it('is unmoved by grantClientVisibility, which no longer writes', async () => {
+    expect(await store.grantClientVisibility('c1', 'emp-2')).toBeNull()
     const client = await clientFromDisk()
     expectOneTeamSource(client)
-    expect(client.assignedBookkeeperIds).toContain('emp-2')
+    expect(client.assignedBookkeeperIds).toEqual(['emp-1'])
+  })
+
+  // CARDINAL RULE 1: the no-op has to be a no-op on the PRODUCTION backend
+  // too. A file-only no-op would go green in CI while Postgres kept widening
+  // real team lists — exactly the shape of bug this repo has been bitten by.
+  it('issues no SQL at all on the Postgres backend either', async () => {
+    const fake = fakePostgres()
+    expect(await postgresStore(fake).grantClientVisibility('c1', 'emp-2')).toBeNull()
+    expect(fake.matching(/update clients/i)).toEqual([])
+    expect(fake.matching(/from users/i)).toEqual([])
   })
 
   it('holds after a bulk save carrying a STALE alias', async () => {

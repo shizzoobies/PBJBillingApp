@@ -218,10 +218,13 @@ describe('the mark-paid route', () => {
 /**
  * invoice-recap glue (featreq-0c2d4ce5): built as the ONE invoice route that
  * was NOT owner-only — staff read it to record deposits. CONTAINED 2026-09-04:
- * owner-only until the team/visibility split ships, because the visible-client
- * set it scopes through is widened by task assignment and staff saw invoices
- * for clients they only had a checklist on. The scoping wiring stays pinned so
- * reopening it to staff is one gate removal, not a rebuild. The builder's
+ * owner-only after staff saw invoices for clients they only had a checklist on.
+ * The team/visibility split has since landed, so the scoping underneath is now
+ * the narrow, owner-picked team (`teamClientIdSet`) rather than the widened
+ * visible set — the containment gate stays on for one more commit, until the
+ * production team lists are reset to explicit picks, and comes off on its own.
+ * The scoping wiring stays pinned so that is one gate removal, not a rebuild.
+ * The builder's
  * behavior (statuses, scoping, line kinds) is exercised properly in
  * lib/invoice-recap.test.mjs.
  */
@@ -238,12 +241,21 @@ describe('the invoice-recap route', () => {
     expect(block).toContain("Only owners can see the invoice recap")
   })
 
-  it('scopes through visibleClientIdSet and shapes through the lib builder', () => {
-    const scope = block.indexOf('visibleClientIdSet(session,')
+  // FLIPPED by the 2026-09-04 team/visibility split: MONEY READS THE TEAM.
+  // `teamClientIdSet` is the owner-picked list, which no task assignment can
+  // widen. `visibleClientIdSet` is deliberately a SUPERSET (a checklist
+  // assignee sees that client's checklists and can log time to it) and is the
+  // gate that showed Lisa and Allison invoices for clients nobody had put them
+  // on. The negative assertion is the real regression guard — reverting to the
+  // wider set here is the bug, not a style choice.
+  // docs/plans/team-visibility-split-2026-09.md.
+  it('scopes through teamClientIdSet, never the wider visible set', () => {
+    const scope = block.indexOf('teamClientIdSet(session,')
     const build = block.indexOf('buildInvoiceRecap(')
     expect(scope).toBeGreaterThan(-1)
     expect(build).toBeGreaterThan(-1)
     expect(scope).toBeLessThan(build)
+    expect(block).not.toContain('visibleClientIdSet(')
   })
 
   it('validates the period shape before reading anything', () => {

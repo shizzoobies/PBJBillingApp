@@ -46,3 +46,45 @@ export declare function isClientVisibleToUser(
   client: { assignedBookkeeperIds?: string[] } | null | undefined,
   userId: string,
 ): boolean
+
+/**
+ * The client ids a user reaches through TASK ASSIGNMENT: live checklists,
+ * recurring templates, and template stages they are the assignee of. The
+ * visibility half of the old `assignedBookkeeperIds`, computed rather than
+ * stored (docs/plans/team-visibility-split-2026-09.md).
+ */
+export declare function taskClientIdsForUser(
+  data:
+    | {
+        checklists?: Array<{ clientId?: string; assigneeId?: string }>
+        checklistTemplates?: Array<{
+          clientId?: string
+          assigneeId?: string
+          stages?: Array<{ assigneeId?: string }>
+        }>
+      }
+    | null
+    | undefined,
+  userId: string,
+): Set<string>
+
+/**
+ * Every client id a non-owner may SEE: the owner-picked team they are on UNION
+ * the clients they hold a task on. A superset of the team; the team alone gates
+ * money. Empty for a falsy user id.
+ */
+export declare function visibleClientIdsForUser(
+  data:
+    | {
+        clients?: Array<{ id?: string; assignedBookkeeperIds?: string[] }>
+        checklists?: Array<{ clientId?: string; assigneeId?: string }>
+        checklistTemplates?: Array<{
+          clientId?: string
+          assigneeId?: string
+          stages?: Array<{ assigneeId?: string }>
+        }>
+      }
+    | null
+    | undefined,
+  userId: string,
+): Set<string>

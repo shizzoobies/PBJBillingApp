@@ -841,8 +841,10 @@ Clients page meanwhile. Owner-only.
   else's work; sub-steps follow their parent step's responsible person. Boxes you can't
   tick render disabled with a "assigned to someone else" tooltip, and the server
   enforces the same rule.
-- Sharing/visibility: a team member assigned to a client sees ALL of that
-  client's tasks on the shared board and can LOG TIME against any of them. But
+- Sharing/visibility: a team member assigned to a client — or anyone holding a
+  task on it, which grants the same seeing without joining the team — sees ALL
+  of that client's tasks on the shared board and can LOG TIME against any of
+  them. But
   SEEING is not EDITING. **Only the task's assignee, a named editor, or an owner
   can change a checklist** — rename it, change its due date or assignee, add,
   edit, reorder or delete steps, or flag a step as waiting. A colleague staffed
@@ -1184,10 +1186,18 @@ Clients page meanwhile. Owner-only.
     recurring checklist" buttons are hidden while they are inactive. Inactive
     clients are not counted as a To-100% setup problem — retiring a client is
     an intended state, not an unfinished step.
-- Assigned team controls which staff can see/log time for the client. An owner
-  can be listed on a client's assigned team too — it records who works the
-  account, but grants the owner nothing extra: owners already see and can act
-  on every client regardless of assignment.
+- Assigned team is the list an OWNER picks: who works this account. Only an
+  owner changes it, on the client's page or the Team page — being given a task
+  on a client no longer adds anyone to it (it used to, which is why team lists
+  had grown to include everyone who had ever held a checklist there). **This
+  list is what decides who sees the client's invoices.**
+- Seeing a client is wider than being on its team, on purpose: anyone assigned
+  a checklist, a recurring template, or a template stage on a client can see
+  that client's tasks and log time to it, whether or not they are on the team.
+  Money is the one thing that follows the team alone.
+- An owner can be listed on a client's assigned team too — it records who works
+  the account, but grants the owner nothing extra: owners already see and can
+  act on every client regardless of assignment.
 
 ## Client Recap (owner only)
 
@@ -2418,8 +2428,9 @@ Clients page meanwhile. Owner-only.
   Voice is owner-only. Typing still works alongside it.
 - Voice can set things up too — with the same guardrail as text: asking by
   voice only FILES A CONFIRMATION CARD in the panel (make a template
-  recurring, assign a client to a team member, generate a task list now,
-  turn a switched-off recurring checklist back on).
+  recurring, add a team member to a client's ASSIGNED TEAM — the owner-picked
+  list that also decides who sees that client's invoices, generate a task list
+  now, turn a switched-off recurring checklist back on).
   Nothing changes until the owner taps "Run it" on the card. The assistant
   never takes an action on its own, by voice or by text — every change
   requires the owner's explicit confirmation on a card.

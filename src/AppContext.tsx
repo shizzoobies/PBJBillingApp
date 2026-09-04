@@ -42,11 +42,16 @@ export type AppContextValue = {
   visibleClients: Client[]
   visibleClientIds: Set<string>
   /**
-   * Clients this user is allowed to log time against — strictly their
-   * Assigned Team list (`assignedBookkeeperIds`). Owners outside preview
-   * mode get every client; while an owner previews a bookkeeper this
-   * narrows to the bookkeeper's assignments so the time dropdowns match
-   * what the previewed user would actually see.
+   * Clients this user is allowed to log time against — the clients they can
+   * SEE: the Assigned Team lists an owner put them on, plus any client they
+   * hold a task on (a live checklist, a recurring template, or a template
+   * stage). That is `visibleClientIdsForUser` in lib/data-scope.js, the same
+   * rule the server scopes with; the team list ALONE is what gates money, not
+   * this (docs/plans/team-visibility-split-2026-09.md). Retired clients and
+   * billing masters are dropped on top — no new time may be logged against
+   * either. Owners outside preview mode get every client; while an owner
+   * previews a bookkeeper this narrows to that bookkeeper's visibility so the
+   * time dropdowns match what the previewed user would actually see.
    */
   timeTrackingClients: Client[]
   visibleEntries: TimeEntry[]

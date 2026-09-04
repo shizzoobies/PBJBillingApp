@@ -85,6 +85,7 @@ import {
   isClientVisibleToUser,
   isTemplateVisibleToScope,
   isTimeEntryVisibleToScope,
+  visibleClientIdsForUser,
 } from './lib/data-scope.js'
 import { StaleWorkspaceError } from './lib/workspace-version.js'
 import {
@@ -643,21 +644,57 @@ function isCrossSiteOrigin(request) {
 }
 
 /**
- * Compute the set of client ids visible to a session. Owners always see
- * everything. Non-owners see only clients whose assigned team includes their
- * user id — `assignedTeamIds` in lib/data-scope.js is the one definition of
- * that team, shared with the frontend so the two cannot drift.
+ * VISIBILITY: every client id a session may SEE. Owners always see everything.
+ * A non-owner sees the clients whose owner-picked team they are on PLUS every
+ * client they hold a task on (a live checklist, a recurring template, or a
+ * template stage assigned to them) — `visibleClientIdsForUser` in
+ * lib/data-scope.js is the one definition, shared with the frontend so the two
+ * cannot drift.
+ *
+ * This is what gates checklists, time logging, notes and the client dropdowns.
+ * It is a deliberate SUPERSET of the team, and it takes the whole workspace
+ * (not just `clients`) because the task half is computed from `checklists` and
+ * `checklistTemplates`. Handing it an object without those silently narrows
+ * every caller back to the team.
+ *
+ * MONEY DOES NOT READ THIS — see `teamClientIdSet` below.
+ * docs/plans/team-visibility-split-2026-09.md.
  */
 // `weekStartOf` (the Sun–Sat week anchor) now lives in lib/time-entry.js beside
 // the weekly gate that consumes it — imported above.
 
-function visibleClientIdSet(session, clients) {
+function visibleClientIdSet(session, data) {
+  const clients = data?.clients ?? []
   if (session.user.role === 'owner') {
     return new Set(clients.map((client) => client.id))
   }
+  return visibleClientIdsForUser(data, session.user.id)
+}
+
+/**
+ * TEAM: the client ids whose team an OWNER put this session's user on. Owners
+ * bypass it, exactly as they bypass visibility.
+ *
+ * This is the narrow set, and it GATES MONEY (the Invoice Recap today, any
+ * future staff-facing billing surface). No task ever widens it: being handed a
+ * checklist on a client shows you the checklist, never the client's invoices.
+ * That is the whole point of the split — the two meanings used to share one
+ * field, and the implicit task grants made "assigned team" mean "everyone who
+ * ever had work here".
+ *
+ * Takes `clients` (not the workspace) precisely because it must not be able to
+ * read a task: there is nothing here for a checklist to widen.
+ * docs/plans/team-visibility-split-2026-09.md.
+ */
+function teamClientIdSet(session, clients) {
+  if (session.user.role === 'owner') {
+    return new Set((clients ?? []).map((client) => client.id))
+  }
   const me = session.user.id
   return new Set(
-    clients.filter((client) => isClientVisibleToUser(client, me)).map((client) => client.id),
+    (clients ?? [])
+      .filter((client) => isClientVisibleToUser(client, me))
+      .map((client) => client.id),
   )
 }
 
@@ -865,7 +902,7 @@ function readCoverageFields(payload) {
  */
 function scopeAppDataForSession(session, data) {
   if (session.user.role === 'owner') return data
-  const allowedClientIds = visibleClientIdSet(session, data.clients ?? [])
+  const allowedClientIds = visibleClientIdSet(session, data)
   const me = session.user.id
 
   // Billing rates are between the owner and the client. Never expose what
@@ -947,9 +984,10 @@ function scopeAppDataForSession(session, data) {
  * Scrub activity entries when they reference a client name the session
  * cannot see. Best-effort substring match — we'd rather hide than leak.
  */
-function scopeActivityEntriesForSession(session, entries, allClients) {
+function scopeActivityEntriesForSession(session, entries, data) {
   if (session.user.role === 'owner') return entries
-  const visible = visibleClientIdSet(session, allClients)
+  const allClients = data?.clients ?? []
+  const visible = visibleClientIdSet(session, data)
   const hiddenClientNames = (allClients ?? [])
     .filter((client) => !visible.has(client.id))
     .map((client) => (client.name ?? '').toLowerCase())
@@ -2759,7 +2797,7 @@ const server = createServer(async (request, response) => {
         return
       }
       const data = await appDataStore.read()
-      const allowed = visibleClientIdSet(session, data.clients ?? [])
+      const allowed = visibleClientIdSet(session, data)
       if (!clientId || !allowed.has(clientId)) {
         sendJson(response, 403, { error: 'No access to that client' })
         return
@@ -2881,7 +2919,7 @@ const server = createServer(async (request, response) => {
         return
       }
       const data = await appDataStore.read()
-      const allowed = visibleClientIdSet(session, data.clients ?? [])
+      const allowed = visibleClientIdSet(session, data)
       if (!clientId || !allowed.has(clientId)) {
         sendJson(response, 403, { error: 'No access to that client' })
         return
@@ -2942,20 +2980,21 @@ const server = createServer(async (request, response) => {
     // GET /api/invoice-recap?period=YYYY-MM — the STAFF-FACING monthly recap
     // (featreq-0c2d4ce5): for each sent bill the viewer may see, the company's
     // total, the accounting remainder, and every reimbursed expense as its own
-    // line, so the deposit can be recorded correctly. NOT owner-only — that is
-    // the point — but scoped: staff get exactly their assigned clients'
-    // invoices, through the same visibleClientIdSet gate the Client Recap
-    // uses. All the shaping lives in lib/invoice-recap.js.
+    // line, so the deposit can be recorded correctly.
     //
-    // CONTAINED 2026-09-04 — OWNER-ONLY UNTIL THE TEAM/VISIBILITY SPLIT SHIPS.
-    // Brittany reported staff seeing invoices for clients they are not
-    // assigned to. Read-only reproduction: the gate is correct, but the
-    // `assignedBookkeeperIds` it reads is auto-widened by every task
-    // assignment (grantClientVisibility + backfillAssignedBookkeepers), so
-    // "assigned team" in production is "everyone who ever had a checklist on
-    // the client" — 33 of Lisa's 35, 13 of Allison's 15. Right for tasks,
-    // wrong for money. The recap stays owner-only until money reads an
-    // explicit team that no task can widen (docs/plans/team-visibility-split-2026-09.md).
+    // MONEY READS THE TEAM. This is the one route scoped through
+    // `teamClientIdSet` — the owner-picked list, which no task assignment can
+    // widen — and not through `visibleClientIdSet`, which is deliberately a
+    // superset (task assignees can see a client's checklists and log time to
+    // it without being on its team). That difference is exactly the bug
+    // Brittany reported on 2026-09-04: 33 of Lisa's 35 "assigned" clients and
+    // 13 of Allison's 15 came from a checklist, and the recap showed their
+    // invoices. See docs/plans/team-visibility-split-2026-09.md.
+    //
+    // STILL OWNER-ONLY (containment, 2026-09-04). The gate below comes off in
+    // its own commit, after the production team lists are reset to explicit
+    // picks — reopening it before the reset would hand staff the same widened
+    // lists this split stopped writing.
     if (normalizedPath === '/api/invoice-recap' && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
@@ -2970,12 +3009,14 @@ const server = createServer(async (request, response) => {
       }
       const period = periodParam || currentPeriod('month', todayIso())
       const data = await appDataStore.read()
-      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+      const teamClientIds = teamClientIdSet(session, data.clients ?? [])
       const invoices = await appDataStore.listInvoices({ period })
       const rows = buildInvoiceRecap({
         invoices,
         clients: data.clients ?? [],
-        visibleClientIds,
+        // The builder's parameter is still named for what it gates ("which of
+        // these may this viewer see"); what we hand it is the TEAM.
+        visibleClientIds: teamClientIds,
       })
       sendJson(response, 200, { period, rows })
       return
@@ -4909,7 +4950,7 @@ const server = createServer(async (request, response) => {
       if (!session) return
       const clientId = decodeURIComponent(clientNotesMatch[1])
       const data = await appDataStore.read()
-      const allowed = visibleClientIdSet(session, data.clients ?? [])
+      const allowed = visibleClientIdSet(session, data)
       if (!allowed.has(clientId)) {
         sendJson(response, 403, { error: 'No access to that client' })
         return
@@ -4933,7 +4974,7 @@ const server = createServer(async (request, response) => {
       }
       const clientId = decodeURIComponent(clientNotesMatch[1])
       const data = await appDataStore.read()
-      const allowed = visibleClientIdSet(session, data.clients ?? [])
+      const allowed = visibleClientIdSet(session, data)
       if (!allowed.has(clientId)) {
         sendJson(response, 403, { error: 'No access to that client' })
         return
@@ -5437,13 +5478,13 @@ const server = createServer(async (request, response) => {
 
         if (isGroupPending) {
           // Every member of a group holding entry must be visible to the user.
-          const allowed = visibleClientIdSet(session, allData.clients ?? [])
+          const allowed = visibleClientIdSet(session, allData)
           if (!groupClientIds.every((id) => allowed.has(id))) {
             sendJson(response, 403, { error: 'A group client is not visible to this user' })
             return
           }
         } else if (!isAdministrative) {
-          const allowed = visibleClientIdSet(session, allData.clients ?? [])
+          const allowed = visibleClientIdSet(session, allData)
           if (!allowed.has(clientId)) {
             sendJson(response, 403, { error: 'Client not visible to this user' })
             return
@@ -5668,7 +5709,7 @@ const server = createServer(async (request, response) => {
       // Same visibility rule the group-CREATE path enforces: every target client
       // has to be one this user may bill (owners see them all). This is also
       // what keeps an unknown client id out — it can't be in the allowed set.
-      const allowed = visibleClientIdSet(session, allData.clients ?? [])
+      const allowed = visibleClientIdSet(session, allData)
       if (!targetClientIds.every((id) => allowed.has(id))) {
         sendJson(response, 403, {
           error: isHolding
@@ -5867,7 +5908,7 @@ const server = createServer(async (request, response) => {
 
       // Same visibility rule as splitting — an unknown client id can't be in the
       // allowed set, so this covers that too.
-      const allowed = visibleClientIdSet(session, allData.clients ?? [])
+      const allowed = visibleClientIdSet(session, allData)
       if (!allocations.every((row) => allowed.has(row.clientId))) {
         sendJson(response, 403, { error: 'Client not visible to this user' })
         return
@@ -6027,7 +6068,7 @@ const server = createServer(async (request, response) => {
         let scopeData = null
         if (!isOwner && entry.clientId) {
           scopeData = await appDataStore.read()
-          if (!visibleClientIdSet(session, scopeData.clients ?? []).has(entry.clientId)) {
+          if (!visibleClientIdSet(session, scopeData).has(entry.clientId)) {
             sendJson(response, 403, { error: 'That client is not in your assigned list.' })
             return
           }
@@ -6094,7 +6135,7 @@ const server = createServer(async (request, response) => {
               sendJson(response, 400, { error: 'Unknown client.' })
               return
             }
-            if (!isOwner && !visibleClientIdSet(session, scopeData.clients ?? []).has(nextClientId)) {
+            if (!isOwner && !visibleClientIdSet(session, scopeData).has(nextClientId)) {
               sendJson(response, 403, { error: 'That client is not in your assigned list.' })
               return
             }
@@ -6255,7 +6296,7 @@ const server = createServer(async (request, response) => {
         // no client and are exempt).
         if (!isOwner && entry.clientId) {
           const delScopeData = await appDataStore.read()
-          if (!visibleClientIdSet(session, delScopeData.clients ?? []).has(entry.clientId)) {
+          if (!visibleClientIdSet(session, delScopeData).has(entry.clientId)) {
             sendJson(response, 403, { error: 'That client is not in your assigned list.' })
             return
           }
@@ -6711,7 +6752,7 @@ const server = createServer(async (request, response) => {
         // (owners can create for anyone). Mirrors the item-edit scoping.
         if (
           session.user.role !== 'owner' &&
-          !visibleClientIdSet(session, data.clients ?? []).has(clientId)
+          !visibleClientIdSet(session, data).has(clientId)
         ) {
           sendJson(response, 403, {
             error: 'You can only create checklists for your assigned clients',
@@ -6924,7 +6965,7 @@ const server = createServer(async (request, response) => {
         return
       }
       const data = await appDataStore.read()
-      const visible = visibleClientIdSet(session, data.clients ?? [])
+      const visible = visibleClientIdSet(session, data)
       sendJson(response, 200, {
         requests: all.filter((req) => visible.has(req.clientId)),
       })
@@ -7245,7 +7286,7 @@ const server = createServer(async (request, response) => {
       const denial = checklistWriteDenial({
         user: session.user,
         checklist,
-        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        visibleClientIds: visibleClientIdSet(session, data),
         error: 'This task belongs to someone else — only its assignee or an editor can skip it.',
       })
       if (denial) {
@@ -7361,7 +7402,7 @@ const server = createServer(async (request, response) => {
       const metaDenial = checklistWriteDenial({
         user: session.user,
         checklist,
-        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        visibleClientIds: visibleClientIdSet(session, data),
         error: 'You do not have permission to edit this task',
       })
       if (metaDenial) {
@@ -7463,7 +7504,7 @@ const server = createServer(async (request, response) => {
       // in their visible set AND they're the assignee or an editor) may request
       // deletion. Mirror the PATCH-item authorization. Everyone else → 403.
       if (session.user.role !== 'owner') {
-        const visible = visibleClientIdSet(session, existing.clients ?? [])
+        const visible = visibleClientIdSet(session, existing)
         const editorIds = Array.isArray(target.editorIds) ? target.editorIds : []
         const canRequest =
           visible.has(target.clientId) &&
@@ -7547,7 +7588,7 @@ const server = createServer(async (request, response) => {
       // L3 — a client outside your visible set is a checklist that does not
       // exist. Runs BEFORE the responsible-person check below so the refusal
       // says nothing about who the step belongs to.
-      if (checklistOutOfScope(checklist, visibleClientIdSet(session, data.clients ?? []))) {
+      if (checklistOutOfScope(checklist, visibleClientIdSet(session, data))) {
         sendJson(response, 404, { error: 'Checklist not found' })
         return
       }
@@ -7786,7 +7827,7 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+      const visibleClientIds = visibleClientIdSet(session, data)
       // L3 — 404, not 403, for a client outside the visible set. The denial
       // below would refuse this anyway (visibility is an AND inside it); this
       // only stops the 403 from confirming the id is real.
@@ -7909,7 +7950,7 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+      const visibleClientIds = visibleClientIdSet(session, data)
       // L3 — 404, not 403, for a client outside the visible set. The denial
       // below would refuse this anyway (visibility is an AND inside it); this
       // only stops the 403 from confirming the id is real.
@@ -8366,7 +8407,7 @@ const server = createServer(async (request, response) => {
       const waitDenial = checklistWriteDenial({
         user: session.user,
         checklist,
-        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        visibleClientIds: visibleClientIdSet(session, data),
         error: 'You do not have permission to flag this step',
       })
       if (waitDenial) {
@@ -8545,7 +8586,7 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+      const visibleClientIds = visibleClientIdSet(session, data)
       // L3 — 404, not 403, for a client outside the visible set. The denial
       // below would refuse this anyway (visibility is an AND inside it); this
       // only stops the 403 from confirming the id is real.
@@ -8601,7 +8642,7 @@ const server = createServer(async (request, response) => {
 
       // Owner / the task's assignee / an editor. Sharing the client is read
       // scope, not write access — see lib/checklist-write-permission.js.
-      const visibleClientIds = visibleClientIdSet(session, data.clients ?? [])
+      const visibleClientIds = visibleClientIdSet(session, data)
 
       // L3 — 404, not 403, for a client outside the visible set. Each denial
       // below would refuse this anyway (visibility is an AND inside them); this
@@ -9325,7 +9366,7 @@ const server = createServer(async (request, response) => {
       }
       if (session.user.role !== 'owner') {
         const allData = await appDataStore.read()
-        const allowed = visibleClientIdSet(session, allData.clients ?? [])
+        const allowed = visibleClientIdSet(session, allData)
         if (!caseRecord.client || !allowed.has(caseRecord.client.id)) {
           // Return 404 (not 403) so a non-owner can't distinguish "no such
           // case" from "exists but not yours" and enumerate firm-wide case ids.
@@ -9336,7 +9377,7 @@ const server = createServer(async (request, response) => {
         caseRecord.activity = scopeActivityEntriesForSession(
           session,
           caseRecord.activity ?? [],
-          allData.clients ?? [],
+          allData,
         )
       }
       sendJson(response, 200, caseRecord)
@@ -9393,7 +9434,7 @@ const server = createServer(async (request, response) => {
           sendJson(response, 403, { error: 'Only owners can edit standard templates' })
           return
         }
-        if (!visibleClientIdSet(session, data.clients ?? []).has(template.clientId)) {
+        if (!visibleClientIdSet(session, data).has(template.clientId)) {
           sendJson(response, 403, { error: 'That client is not in your assigned list.' })
           return
         }
@@ -9578,7 +9619,7 @@ const server = createServer(async (request, response) => {
         user: session.user,
         template: source,
         clientId,
-        visibleClientIds: visibleClientIdSet(session, data.clients ?? []),
+        visibleClientIds: visibleClientIdSet(session, data),
       })
       if (scopeDenial) {
         sendJson(response, scopeDenial.status, { error: scopeDenial.error })
@@ -9640,7 +9681,7 @@ const server = createServer(async (request, response) => {
       // task for a client they're assigned to — so staff can "get ahead" and
       // log time against an upcoming task before its instance exists.
       if (session.user.role !== 'owner') {
-        const allowedClients = visibleClientIdSet(session, data.clients ?? [])
+        const allowedClients = visibleClientIdSet(session, data)
         if (!template.clientId || !allowedClients.has(template.clientId)) {
           sendJson(response, 403, {
             error: 'You can only generate tasks for your assigned clients',

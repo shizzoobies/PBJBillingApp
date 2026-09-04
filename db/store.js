@@ -1898,8 +1898,19 @@ function buildChecklistFromStage({
  * checklists, recurring templates, and template stages. Idempotent. Owners
  * are never added — visibility scoping is for non-owner roles only. Returns
  * the (possibly mutated) clients array and a `changed` flag.
+ *
+ * NO LONGER CALLED BY THE APP (2026-09-04). This ran on every workspace read
+ * and is the reason a client's "assigned team" meant "everyone who ever held a
+ * task here" — 33 of Lisa's 35 clients, 13 of Allison's 15 — which is right for
+ * checklists and wrong for money once the Invoice Recap read the same field.
+ * The same three sources are now computed at read time as VISIBILITY
+ * (`taskClientIdsForUser` in lib/data-scope.js) instead of being written into
+ * the team. Kept and exported for the historical record and for the one-time
+ * reset/verification scripts that need to reproduce what it used to write;
+ * nothing in the request path may call it again.
+ * docs/plans/team-visibility-split-2026-09.md.
  */
-function backfillAssignedBookkeepers(data) {
+export function backfillAssignedBookkeepers(data) {
   const clients = Array.isArray(data.clients) ? data.clients : []
   if (clients.length === 0) {
     return { changed: false, clients }
@@ -2561,10 +2572,9 @@ const MASTER_ESTIMATE_FIELDS = [
 export function materializeRecurringChecklists(data) {
   const templates = Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []
   if (templates.length === 0) {
-    const backfill = backfillAssignedBookkeepers(data)
-    if (backfill.changed) {
-      return { changed: true, data: { ...data, clients: backfill.clients } }
-    }
+    // No backfill pass here any more: `changed` reports real materialization
+    // only. Task-derived access is computed as visibility at read time now
+    // (docs/plans/team-visibility-split-2026-09.md).
     return { changed: false, data }
   }
 
@@ -2750,19 +2760,16 @@ export function materializeRecurringChecklists(data) {
     checklistTemplates: nextTemplates,
     checklists: sortChecklists(nextChecklists),
   }
-  const backfill = backfillAssignedBookkeepers(intermediateData)
 
-  if (!changed && !backfill.changed) {
+  // `changed` is now materialization alone. It used to also go true whenever
+  // the assigned-team backfill rewrote a client, which meant an ordinary read
+  // could write a task assignee into a client's team; that grant is computed
+  // as visibility instead (docs/plans/team-visibility-split-2026-09.md).
+  if (!changed) {
     return { changed: false, data }
   }
 
-  return {
-    changed: true,
-    data: {
-      ...intermediateData,
-      clients: backfill.changed ? backfill.clients : intermediateData.clients,
-    },
-  }
+  return { changed: true, data: intermediateData }
 }
 
 /**
@@ -8908,52 +8915,45 @@ export class AppDataStore {
   }
 
   /**
-   * Idempotently add `userId` to a client's `assignedBookkeeperIds`. Owners
-   * are skipped. Returns the (possibly mutated) client record. Best-effort —
-   * silent no-op if the client/user can't be found.
+   * DELIBERATE NO-OP since 2026-09-04. Writes nothing, on either backend.
+   *
+   * It used to add `userId` to a client's `assignedBookkeeperIds` whenever a
+   * checklist, case, or template stage was assigned to them, so they could see
+   * the work they had been given. That worked while the field only gated
+   * checklists — but it is also the field an owner picks a client's TEAM in,
+   * and the Invoice Recap reads the team. The result in production was staff
+   * seeing invoices for clients they had a single "Clear Client Email" step on:
+   * 33 of Lisa's 35 team memberships and 13 of Allison's 15 were written by
+   * this method, not chosen by anyone.
+   *
+   * The access it was granting is now COMPUTED, not stored:
+   * `visibleClientIdsForUser` (lib/data-scope.js) unions the owner-picked team
+   * with the clients the user holds a task on, so a task assignee still sees
+   * the client's checklists and can log time to it — while the team list stays
+   * exactly what an owner picked and money reads that alone
+   * (`teamClientIdSet` in server.js).
+   *
+   * The method and its EIGHT remaining call sites are kept for one commit so
+   * the split stays reviewable; they are slated for removal in the follow-up.
+   * Two of the eight are INSIDE THIS FILE, which is easy to miss from a
+   * server.js-only sweep — the full list:
+   *
+   *   server.js ×6 — checklist create; checklist meta update (assignee
+   *     change); addTemplateStage; template stage update; and the template
+   *     copy, once for the template assignee and once per stage assignee.
+   *   db/store.js ×2 — `maybeSpawnNextStage` (the next stage's assignee) and
+   *     `generateChecklistFromTemplate` (the generated instance's assignee).
+   *
+   * `lib/assistant.js` used to be a ninth; its `assign_client` tool now writes
+   * the explicit team through `setClientAssignedTeam` instead, because an owner
+   * naming someone to a client IS the deliberate pick this method stopped being.
+   * docs/plans/team-visibility-split-2026-09.md.
+   *
+   * @returns {Promise<null>} always null, both backends.
    */
   async grantClientVisibility(clientId, userId) {
-    if (!clientId || !userId) return null
-
-    if (this.pool) {
-      // Skip if user is owner.
-      const userResult = await this.pool.query(
-        `select role from users where id = $1`,
-        [userId],
-      )
-      if (!userResult.rowCount || userResult.rows[0].role === 'owner') return null
-
-      await this.pool.query(
-        `
-          update clients
-          set assigned_bookkeeper_ids = (
-            select coalesce(array_agg(distinct x), '{}')
-            from unnest(coalesce(assigned_bookkeeper_ids, '{}')::text[] || array[$2]::text[]) as x
-          ),
-          updated_at = now()
-          where id = $1
-        `,
-        [clientId, userId],
-      )
-      return null
-    }
-
-    const data = await readJson(localDataPath)
-    const employees = Array.isArray(data.employees) ? data.employees : []
-    const employee = employees.find((e) => e.id === userId)
-    if (!employee || employee.role === 'Owner') return null
-
-    let mutated = false
-    data.clients = (data.clients ?? []).map((client) => {
-      if (client.id !== clientId) return client
-      const ids = Array.isArray(client.assignedBookkeeperIds) ? client.assignedBookkeeperIds : []
-      if (ids.includes(userId)) return client
-      mutated = true
-      return { ...client, assignedBookkeeperIds: [...ids, userId] }
-    })
-    if (mutated) {
-      await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    }
+    void clientId
+    void userId
     return null
   }
 

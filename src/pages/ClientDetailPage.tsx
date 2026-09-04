@@ -891,9 +891,13 @@ function AssignedTeamField({
   return (
     <div className="field full-row">
       <span className="field-label-row">
-        Who can see this client
+        Assigned team
         <SaveBadge state={state} />
       </span>
+      <small className="field-helper">
+        Who works this account. This list decides who sees the client&rsquo;s invoices. People
+        given a task on the client see its checklists and can log time either way.
+      </small>
       <AssignedTeamControl
         assignedIds={client.assignedBookkeeperIds ?? []}
         employees={employees}
