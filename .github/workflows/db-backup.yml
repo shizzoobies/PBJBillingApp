@@ -1,0 +1,161 @@
+name: db-backup
+
+# Nightly production Postgres backup to Cloudflare R2, with a restore drill
+# ("a backup that has never been restored is a hope, not a backup" —
+# docs/plans/resilience-2026-09.md §2.3, Tier 1 step 2.3).
+#
+# What this does NOT do: connect to production to discover its Postgres
+# version. PG_MAJOR below was verified against production by hand (see the
+# comment on that line) and must be kept correct by hand.
+#
+# Owner-provided secrets (repo Settings > Secrets and variables > Actions —
+# names only here, values never touch this file):
+#   DATABASE_PUBLIC_URL   Railway Postgres PUBLIC connection string (the one
+#                         reachable from outside Railway's network — not the
+#                         internal DATABASE_URL the app itself uses).
+#   R2_ACCOUNT_ID         Cloudflare account id (builds the R2 endpoint URL).
+#   R2_ACCESS_KEY_ID      R2 API token access key id.
+#   R2_SECRET_ACCESS_KEY  R2 API token secret.
+#   R2_BUCKET             R2 bucket the dumps live in.
+#
+# See docs/runbooks/db-backup-and-restore.md for setup, the restore
+# procedure, and how to tell this is actually working.
+
+on:
+  schedule:
+    # 08:15 UTC = 03:15/04:15 US-Eastern depending on DST — quiet hours for a
+    # US-East firm, and off the hour so it isn't queued behind everyone
+    # else's on-the-hour crons.
+    - cron: '15 8 * * *'
+  workflow_dispatch:
+    inputs:
+      run_restore_drill:
+        description: 'Also run the restore drill (it always runs automatically on the 1st of the month)'
+        type: boolean
+        default: false
+
+# A backup mid-dump should never be cancelled by a newer trigger — unlike
+# verify.yml's CI runs, there's no "in-flight, now-stale" work here to save
+# time by killing.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  # Production Postgres major version. VERIFIED 2026-09-03 with a read-only
+  # `select version()` against production: PostgreSQL 18.6. It has to match
+  # or exceed the server — pg_dump refuses to dump a server newer than
+  # itself — and the restore drill's throwaway container reads it too. If
+  # Railway ever upgrades Postgres, this one line is the fix.
+  PG_MAJOR: '18'
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      dump_name: ${{ steps.dump.outputs.dump_name }}
+      run_drill: ${{ steps.decide-drill.outputs.run_drill }}
+      # The env context is not available inside a services: block, so the
+      # drill job reads the major version through this output instead.
+      pg_major: ${{ env.PG_MAJOR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install postgresql-client ${{ env.PG_MAJOR }}
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}"
+          # Pinned explicitly onto PATH rather than trusting
+          # update-alternatives, in case the runner image ever ships a
+          # different default client version.
+          echo "/usr/lib/postgresql/${PG_MAJOR}/bin" >> "$GITHUB_PATH"
+
+      - name: Verify pg_dump matches PG_MAJOR
+        run: pg_dump --version
+
+      - name: Dump and upload to R2
+        id: dump
+        env:
+          DATABASE_PUBLIC_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: bash scripts/db-backup.sh
+
+      - name: Decide whether to run the restore drill
+        id: decide-drill
+        run: |
+          MANUAL="${{ github.event_name == 'workflow_dispatch' && inputs.run_restore_drill }}"
+          TODAY="$(date -u +%d)"
+          if [ "$MANUAL" = "true" ] || [ "$TODAY" = "01" ]; then
+            echo "run_drill=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_drill=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload dump for the restore-drill job
+        if: steps.decide-drill.outputs.run_drill == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-dump
+          path: ${{ steps.dump.outputs.dump_path }}
+          # Only needs to survive this run handing off to the next job, not
+          # linger as a second unencrypted copy of production data.
+          retention-days: 1
+
+  restore-drill:
+    needs: backup
+    if: needs.backup.outputs.run_drill == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:${{ needs.backup.outputs.pg_major }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: restore_drill
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install postgresql-client ${{ env.PG_MAJOR }}
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}"
+          echo "/usr/lib/postgresql/${PG_MAJOR}/bin" >> "$GITHUB_PATH"
+
+      - name: Download the dump this run just made
+        uses: actions/download-artifact@v4
+        with:
+          name: db-dump
+          path: dump
+
+      - name: Restore into the throwaway Postgres and verify row counts
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: restore_drill
+          DUMP_PATH: dump/${{ needs.backup.outputs.dump_name }}
+        run: bash scripts/db-restore-drill.sh
