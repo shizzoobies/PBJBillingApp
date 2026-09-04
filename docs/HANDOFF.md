@@ -256,10 +256,47 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-09-04 (later) — the team/visibility split is LIVE, the production
+team lists were RESET to explicit picks, and the Invoice Recap is back for
+staff scoped by the owner-picked team. Brittany must now re-pick each
+client's team on the Team page — until she does, staff see NO invoices.**
+Commits: `ba06474` (split, gate still on), `cbf5c6a` (gate off); plan
+of record `docs/plans/team-visibility-split-2026-09.md`.
+
+What is now true:
+- `assignedBookkeeperIds` is the TEAM: only `setClientAssignedTeam`
+  (picker on the client page / Team page), `createClient`, and the
+  assistant's `assign_client` write it. `grantClientVisibility` is inert on
+  both backends (call sites kept, slated for removal); the materializer no
+  longer backfills.
+- Visibility is computed: `visibleClientIdsForUser(data, userId)` in
+  `lib/data-scope.js` = team ∪ clients where the person is assignee of a
+  live checklist, a recurring template, or a template stage. Server:
+  `visibleClientIdSet(session, data)` (takes the WORKSPACE — handing it a
+  bare clients array silently narrows to the team; a test pins this) vs
+  `teamClientIdSet(session, clients)` (money). SPA: the time picker and the
+  visible-clients union both call the same leaf.
+- Production reset (approved, applied 17:28 UTC, 37 rows): Lisa team 0,
+  Allison team = Skyline, test accounts unchanged; computed visibility
+  identical before/after for all four non-owners. Undo:
+  `scripts/prod/restore-team-lists.mjs docs/prod-snapshots/2026-09-04T17-28-36-035Z-team-lists-before-reset.json --apply`.
+
+Expected side effects Brittany will see: the Setup Checklist's "Assign a
+team member" item lights up for ~37 clients (that IS her worklist); an
+accountant's "their bookkeepers" open-task badge shrinks until teams are
+re-picked. Tell her before she asks.
+
+Tracker: `featreq-0c2d4ce5` is still `planned` with her review note; the
+explanation in her terms (plan §3.6) is NOT posted — in-session tracker
+writes were blocked; Alex posts it or approves the write. Follow-ups:
+remove the eight `grantClientVisibility` call sites (list in its doc
+comment in db/store.js); rename `buildInvoiceRecap`'s `visibleClientIds`
+param to `teamClientIds`.
+
+
 **2026-09-04 — "Allison can see clients invoices she is not on." She is
-right; the Invoice Recap is OWNER-ONLY as containment (`00046f4`, deployed,
-health 200, voice re-provisioned) and the real fix is a planned
-team/visibility split. Read this before touching `assignedBookkeeperIds`.**
+right; the Invoice Recap was OWNER-ONLY as containment (`00046f4`) for the
+hours until the entry above. Kept for the diagnosis.**
 
 The recap's gate (`visibleClientIdSet`) is correct. The field it reads is
 not what anyone thinks it is: `grantClientVisibility` adds a person to a
