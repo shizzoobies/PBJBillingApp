@@ -1,0 +1,59 @@
+# Generate package-lock.json ON LINUX and hand it back as an artifact.
+#
+# Why Linux: the lockfile was gitignored on 2026-04-30 (a2e6afe) because one
+# generated on a Windows laptop lacked the linux-x64 native optional deps
+# (esbuild / rolldown bindings) and Railway's install failed. Generating it
+# where production builds run solves the original problem instead of dodging
+# it. See docs/plans/resilience-2026-09.md §2.2.
+#
+# Run it (from the repo root):
+#   gh workflow run lockfile-refresh.yml && gh run watch
+#   gh run download --name package-lock   # then commit package-lock.json
+# Re-run whenever package.json's dependencies change.
+
+name: lockfile-refresh
+
+on:
+  workflow_dispatch:
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+
+      - name: Pin npm to the version the Dockerfile uses
+        run: npm install -g npm@11.6.2 && npm -v
+
+      - name: Resolve the full tree on Linux (no node_modules written)
+        run: npm install --package-lock-only --include=dev --no-audit --no-fund
+
+      - name: Prove the lockfile carries every platform's native optionals
+        run: |
+          set -e
+          node -e '
+            const lock = require("./package-lock.json");
+            const pk = Object.keys(lock.packages);
+            const need = ["linux-x64", "win32-x64", "darwin-arm64"];
+            const families = ["@rolldown/binding-", "@esbuild/"];
+            let missing = [];
+            for (const fam of families) {
+              const present = pk.filter((k) => k.includes(fam));
+              if (present.length === 0) continue; // family not in tree
+              for (const plat of need) {
+                if (!present.some((k) => k.includes(plat))) missing.push(fam + plat);
+              }
+            }
+            if (missing.length) { console.error("MISSING platform optionals:", missing); process.exit(1); }
+            console.log("lockfile v" + lock.lockfileVersion + ", " + pk.length + " package entries, all platforms present");
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-lock
+          path: package-lock.json
+          if-no-files-found: error

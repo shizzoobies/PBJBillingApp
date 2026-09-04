@@ -1,0 +1,25 @@
+# Keep the build context to what the image needs. A stray file here cannot
+# change the artifact, and the context upload stays small.
+.git
+.github
+.claude
+.omc
+.vscode
+node_modules
+dist
+tmp
+desktop
+docs/plans
+docs/prod-snapshots
+docs/client-emails
+docs/runbooks
+*.test.mjs
+*.test.ts
+*.test.tsx
+src/__tests__
+coverage
+.env
+.env.*
+*.log
+Dockerfile
+.dockerignore
