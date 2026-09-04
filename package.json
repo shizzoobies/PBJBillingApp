@@ -2,6 +2,7 @@
   "name": "pbj-strategic-accounting-app",
   "private": true,
   "version": "0.0.0",
+  "packageManager": "npm@11.6.2",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"node server.js\"",
