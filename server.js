@@ -1448,9 +1448,25 @@ const server = createServer(async (request, response) => {
       // for the sandbox->live cutover and for every operator after it: nothing
       // else in the app tells a human whether real money moves, and "live key
       // with the test webhook secret" is the classic silent misconfiguration.
-      sendJson(response, 200, {
-        ok: true,
+      //
+      // This is a READINESS check, not a liveness one: it pings the database
+      // (short timeout, via the store so this stays backend-agnostic per
+      // cardinal rule 1) so a load balancer or Railway's own healthcheck can
+      // tell "process alive" from "can actually serve". A hung or unreachable
+      // DB answers 503, not 200.
+      let db = 'ok'
+      let status = 200
+      try {
+        await appDataStore.ping()
+      } catch (error) {
+        db = 'unreachable'
+        status = 503
+        console.warn('[health] db unreachable:', error?.message || error)
+      }
+      sendJson(response, status, {
+        ok: status === 200,
         mode: appDataStore.mode,
+        db,
         stripe: !isStripeConfigured() ? 'unconfigured' : isStripeTestMode() ? 'test' : 'live',
         stripeWebhook: isStripeWebhookConfigured() ? 'configured' : 'missing',
       })

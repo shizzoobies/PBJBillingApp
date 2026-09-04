@@ -4571,6 +4571,35 @@ export class AppDataStore {
     await this.syncOwnerEmailInFile()
   }
 
+  /**
+   * Cheap reachability probe for the readiness check (server.js's `/health`).
+   * Postgres mode races a real `select 1` against a short timer so a hung
+   * pool can never hang the health endpoint — `pool.query` acquires and
+   * releases its own client internally, so this never holds one longer than
+   * the query itself. File mode has no database to be unreachable, so it
+   * always resolves. Resolves `true` on success; throws on failure or
+   * timeout so the caller's catch decides the response.
+   */
+  async ping() {
+    if (!this.pool) return true
+    const timeoutMs = 2000
+    let timer
+    try {
+      await Promise.race([
+        this.pool.query(`select 1`),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`db ping timed out after ${timeoutMs}ms`)),
+            timeoutMs,
+          )
+        }),
+      ])
+      return true
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   async syncOwnerEmailInPostgres() {
     const ownerEmail = process.env.OWNER_EMAIL?.trim().toLowerCase()
     if (!ownerEmail) {

@@ -11085,3 +11085,36 @@ describe('reconcileProcessingInvoicePaid (file backend)', () => {
     )
   })
 })
+
+
+/**
+ * `ping()` — the reachability probe the readiness check (server.js's
+ * `/health`, plan step 2.4) calls before answering 200. File backend has no
+ * database to be unreachable, so it always resolves. Postgres backend is
+ * exercised here with `fakePostgres()`, which cannot simulate a hang but CAN
+ * simulate an outright rejection — that's the branch `/health`'s 503 path
+ * depends on.
+ */
+describe('ping()', () => {
+  it('file backend always resolves true (no database to be unreachable)', async () => {
+    await expect(store.ping()).resolves.toBe(true)
+  })
+
+  it('postgres backend issues select 1 and resolves true on success', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+
+    await expect(pgStore.ping()).resolves.toBe(true)
+    expect(fake.matching(/^select 1$/i)).toHaveLength(1)
+  })
+
+  it('postgres backend throws when the pool query rejects (the /health 503 branch)', async () => {
+    const pgStore = new AppDataStore()
+    pgStore.mode = 'postgres'
+    pgStore.pool = {
+      query: vi.fn().mockRejectedValue(new Error('connection terminated unexpectedly')),
+    }
+
+    await expect(pgStore.ping()).rejects.toThrow(/connection terminated/)
+  })
+})
