@@ -72,7 +72,15 @@ const INVOICES: NavItem = { to: '/invoices', label: 'Invoices', icon: ReceiptTex
 // NOT ownerOnly — the one invoicing surface staff can see (featreq-0c2d4ce5):
 // the monthly totals + reimbursed-expense breakout they record transactions
 // from, server-scoped to each viewer's assigned clients.
-const INVOICE_RECAP: NavItem = { to: '/invoice-recap', label: 'Invoice Recap', icon: Receipt }
+// Owner-only since 2026-09-04 (containment): the team list that scopes it is
+// widened by task assignment, so staff saw invoices for clients they only
+// had a checklist on. Reopens to staff once money reads an explicit team.
+const INVOICE_RECAP: NavItem = {
+  to: '/invoice-recap',
+  label: 'Invoice Recap',
+  icon: Receipt,
+  ownerOnly: true,
+}
 const PLANS: NavItem = { to: '/plans', label: 'Plans', icon: WalletCards, ownerOnly: true }
 const REPORTS: NavItem = { to: '/reports', label: 'Reports', icon: FolderKanban, ownerOnly: true }
 const PRODUCTIVITY: NavItem = {

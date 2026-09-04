@@ -216,22 +216,26 @@ describe('the mark-paid route', () => {
  * human's. Behavior is on the store; this pins the order of operations.
  */
 /**
- * invoice-recap glue (featreq-0c2d4ce5): the ONE invoice route that is
- * deliberately NOT owner-only — staff read it to record deposits — so what
- * must hold is the SCOPING: the visible-client set is computed and handed to
- * the builder, which drops everything outside it. The builder's behavior
- * (statuses, scoping, line kinds) is exercised properly in
- * lib/invoice-recap.test.mjs; this pins the wiring.
+ * invoice-recap glue (featreq-0c2d4ce5): built as the ONE invoice route that
+ * was NOT owner-only — staff read it to record deposits. CONTAINED 2026-09-04:
+ * owner-only until the team/visibility split ships, because the visible-client
+ * set it scopes through is widened by task assignment and staff saw invoices
+ * for clients they only had a checklist on. The scoping wiring stays pinned so
+ * reopening it to staff is one gate removal, not a rebuild. The builder's
+ * behavior (statuses, scoping, line kinds) is exercised properly in
+ * lib/invoice-recap.test.mjs.
  */
 describe('the invoice-recap route', () => {
-  const block = routeBlock(/normalizedPath === '\/api\/invoice-recap'/, 2200)
+  const block = routeBlock(/normalizedPath === '\/api\/invoice-recap'/, 2600)
 
-  it('requires a session but NOT the owner role', () => {
+  it('is owner-gated (containment) before anything is read', () => {
     expect(block).toContain('requireSession(request, response)')
-    // The staff-facing point of the feature: no owner gate in this block.
-    expect(block.slice(0, block.indexOf('sendJson(response, 200'))).not.toContain(
-      "session.user.role !== 'owner'",
-    )
+    const gate = block.indexOf("session.user.role !== 'owner'")
+    const read = block.indexOf('appDataStore.read()')
+    expect(gate).toBeGreaterThan(-1)
+    expect(read).toBeGreaterThan(-1)
+    expect(gate).toBeLessThan(read)
+    expect(block).toContain("Only owners can see the invoice recap")
   })
 
   it('scopes through visibleClientIdSet and shapes through the lib builder', () => {

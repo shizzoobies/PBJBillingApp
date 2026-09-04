@@ -2946,9 +2946,23 @@ const server = createServer(async (request, response) => {
     // the point — but scoped: staff get exactly their assigned clients'
     // invoices, through the same visibleClientIdSet gate the Client Recap
     // uses. All the shaping lives in lib/invoice-recap.js.
+    //
+    // CONTAINED 2026-09-04 — OWNER-ONLY UNTIL THE TEAM/VISIBILITY SPLIT SHIPS.
+    // Brittany reported staff seeing invoices for clients they are not
+    // assigned to. Read-only reproduction: the gate is correct, but the
+    // `assignedBookkeeperIds` it reads is auto-widened by every task
+    // assignment (grantClientVisibility + backfillAssignedBookkeepers), so
+    // "assigned team" in production is "everyone who ever had a checklist on
+    // the client" — 33 of Lisa's 35, 13 of Allison's 15. Right for tasks,
+    // wrong for money. The recap stays owner-only until money reads an
+    // explicit team that no task can widen (docs/plans/team-visibility-split-2026-09.md).
     if (normalizedPath === '/api/invoice-recap' && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see the invoice recap' })
+        return
+      }
       const periodParam = requestUrl.searchParams.get('period') || ''
       if (periodParam && !/^\d{4}-\d{2}$/.test(periodParam)) {
         sendJson(response, 400, { error: 'period must look like 2026-08' })
