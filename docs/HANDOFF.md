@@ -256,6 +256,50 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-09-04 (evening) — invoice email deliverability: named sender + human
+reply-to, a Resend delivery webhook that puts Delivered / Bounced / Marked
+as spam on the invoice, and a softer body. LIVE (`17a9797`), webhook
+registered and proven with signed probes.** Brittany reported client
+invoices landing in spam. Verified first: DKIM (resend._domainkey.pbjsa.com)
+verified, return path `send.pbjsa.com` aligned, DMARC `p=reject` passing,
+no click/open tracking — authentication was never the problem.
+
+What changed:
+- Service vars: `INVOICE_EMAIL_FROM` = `PB&J Strategic Accounting
+  <billing@pbjsa.com>` (was a bare address), `INVOICE_REPLY_TO` =
+  bferguson@pbjsa.com, `RESEND_WEBHOOK_SECRET` (set from the Resend API
+  response, never seen). billing@ is a real M365 mailbox (Alex tested).
+- `lib/notify.js` `sendInvoiceEmail`: reply_to, friendly From when the var
+  is bare, Resend tags `invoice_id` + `kind`, and the provider message id
+  stored on the email-log entry (`providerId`).
+- `POST /api/resend/webhook` (server.js, verified on raw bytes by
+  `lib/resend-webhook.js` — Svix HMAC, ±5 min, any-of signatures). Records
+  `{kind:'delivery', event, at, providerId, to, detail}` on the invoice's
+  email log via `recordInvoiceDeliveryEvent` (BOTH backends; Postgres
+  `email_log || $2::jsonb`, proven in a rolled-back txn), idempotent, NEVER
+  touches status; notifies every owner on bounced/complained
+  (`invoice_email_bounced`). Resend webhook id
+  `71dcdb62-ffdf-4f88-b188-e9d12e45993a`, events sent / delivered /
+  delivery_delayed / bounced / complained. Live probe: signed 200
+  `matched:false`, tampered 400, unrelated type 200 `ignored`.
+- SPA: `InvoiceDeliveryBadge` on the month run next to "Sent to …";
+  `latestInvoiceSend` now means the INVOICE email (acks/receipts excluded),
+  so a bounced invoice never reads "Delivered" because the receipt landed.
+  Invoices sent before this deploy have no providerId → no badge, by design.
+- Body: amount + due date sentence above the pay button, firm contact
+  block in the footer, both parts. `firmContactLines` is a copy of the PDF's
+  `firmDetailLines` — a follow-up should share it.
+
+Still Alex's / Brittany's: ask flagged clients to add billing@pbjsa.com to
+contacts; register pbjsa.com in Google Postmaster Tools (DNS TXT) and point
+the DMARC `rua` somewhere read (it goes to a GoDaddy default today). The
+bigger lever if spam persists: send through her M365 mailbox via Graph.
+
+Unrelated but noticed: Railway now warns that `railway.json` config-as-code
+is deprecated in favor of `.railway/railway.ts`, "existing files keep
+working until 2026-12-01". Migrate before then.
+
+
 **2026-09-04 (later) — the team/visibility split is LIVE, the production
 team lists were RESET to explicit picks, and the Invoice Recap is back for
 staff scoped by the owner-picked team. Brittany must now re-pick each
