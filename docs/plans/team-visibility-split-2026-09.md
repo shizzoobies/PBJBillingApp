@@ -108,6 +108,33 @@ already does the visibility half for the SPA; it stays.
    for staff; pick each client's team on the Team page — that list now
    decides who sees the client's invoices; tasks no longer add people to it."
 
+## 3.6 Draft note for Brittany's tracker item (`featreq-0c2d4ce5` dev_notes)
+
+Not yet posted — the in-session write was blocked; Alex posts it or approves
+the write. Paste as-is:
+
+> [2026-09-04 — you are right, and here is why it happened] Checked against
+> the live data: Allison is on 15 clients' team lists, and 13 of those came
+> from TASKS, not from anyone picking her. The app has always added a person
+> to a client's team automatically the moment they are given a checklist on
+> that client (so they can see the checklist). That was fine while it only
+> controlled checklists — the Invoice Recap then used the same list, so a
+> single "Clear Client Email" or "Payroll" step on Emerald or Four Leaf made
+> their invoices visible to her. Lisa is the same: 33 of her 35 clients are
+> from tasks.
+>
+> WHAT IS DONE NOW: the Invoice Recap is owner-only (deployed today). Your
+> team no longer sees it at all, so nobody can see an invoice they should
+> not.
+>
+> WHAT COMES NEXT: the team list will become one only an owner picks — a
+> task will never add anyone to it again — and only that list decides who
+> sees a client's invoices. Tasks will still show people the checklists they
+> are given. Once that ships, the team lists will be reset to the deliberate
+> picks and you pick each client's real team once on the Team page; the
+> recap reopens to staff with that rule. Alex will confirm the reset with
+> you before it runs.
+
 ## 4. What does not change
 
 - Owners see everything, everywhere.

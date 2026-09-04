@@ -256,7 +256,44 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
-**2026-09-03 (latest) — Resilience Tier 1 is BUILT: Railway builds from a
+**2026-09-04 — "Allison can see clients invoices she is not on." She is
+right; the Invoice Recap is OWNER-ONLY as containment (`00046f4`, deployed,
+health 200, voice re-provisioned) and the real fix is a planned
+team/visibility split. Read this before touching `assignedBookkeeperIds`.**
+
+The recap's gate (`visibleClientIdSet`) is correct. The field it reads is
+not what anyone thinks it is: `grantClientVisibility` adds a person to a
+client's team whenever they are given a checklist / case / template stage
+there (six call sites in server.js + lib/assistant.js), and
+`backfillAssignedBookkeepers` re-adds anyone named on a checklist or
+template on every `read()`. Production, read-only: Lisa is on 35 clients,
+33 task-derived; Allison on 15, 13 task-derived; Lisa sees Welch Properties'
+invoice because of one "Clean up 2023" checklist. Nobody has used the
+explicit team picker since at least early August (`client_team_updated`
+never appears in activity_log). The UI even labels the picker "Who can see
+this client". Ruled out: owner-only `/api/invoices`, the empty legacy
+`client_assignments` table, the KLC master (team empty), the stale-save
+race (fingerprint covers clients).
+
+Decided by Alex 2026-09-04: (1) contain now — done; (2) build the split in
+`docs/plans/team-visibility-split-2026-09.md` (explicit owner-picked team
+gates money; task visibility computed at read time, never written into the
+team); (3) reset the team lists to explicit-only and Brittany re-picks —
+**a production write that still needs his explicit yes at write time, with a
+snapshot first** (the provably-explicit survivors are listed in plan §3.5).
+Tracker: `featreq-0c2d4ce5` stays `planned` (her review note is the
+report); the explanation in her terms is NOT yet posted on it — the
+dev_notes write was blocked in-session, so Alex posts it or approves the
+write (text: plan §3.6 wording). When the split ships, the owner gate on
+`/api/invoice-recap` comes off, the nav item's `ownerOnly` comes off, the
+route-glue test flips back, and the manifest section reverts to "owner +
+staff".
+
+Trap: the containment comment in server.js and the manifest both name the
+plan file — keep them in step when the split lands.
+
+
+**2026-09-03 — Resilience Tier 1 is BUILT: Railway builds from a
 Dockerfile, the lockfile is committed (Linux-generated), `/health` is a
 readiness check, and nightly backups + a restore drill exist but are DORMANT
 until Alex adds four R2 secrets.** `main` = `3d2cfc9` (+ this handoff),
