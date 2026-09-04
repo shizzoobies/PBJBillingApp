@@ -448,22 +448,15 @@ export type PersistedInvoice = {
   paidAt: string | null
   paymentMethod: string | null
   /**
-   * Every send attempt, oldest first — append-only, and failures are kept too.
-   * `sentAt` says when the clock started; this says what actually happened, which
-   * is the question that comes up when a client claims the invoice never arrived.
+   * Every send attempt and everything the mail provider did afterwards, oldest
+   * first — append-only, and failures are kept too. `sentAt` says when the clock
+   * started; this says what actually happened, which is the question that comes
+   * up when a client claims the invoice never arrived.
    *
    * Optional because the file backend only grows the field on the first send —
    * Postgres always answers with an array.
    */
-  emailLog?: Array<{
-    at: string
-    to: string[]
-    subject: string
-    ok: boolean
-    /** What was billed when it went out — the lines can be edited afterwards. */
-    total?: number
-    error?: string
-  }>
+  emailLog?: InvoiceEmailLogEntry[]
   /**
    * RETAINER invoices only: the invoice this retainer's credit was given back
    * on. Non-null means the money has been spent and cannot be spent again — the
@@ -473,6 +466,45 @@ export type PersistedInvoice = {
   createdAt: string | null
   updatedAt: string | null
 }
+
+/** What the mail provider did with one message, in the log's own words. */
+export type InvoiceDeliveryEvent = 'sent' | 'delivered' | 'delayed' | 'bounced' | 'complained'
+
+/**
+ * One email we tried to send about an invoice: the invoice itself (no `kind`),
+ * or one of the two payment notices the Stripe webhook sends the client.
+ */
+export interface InvoiceEmailSendEntry {
+  at: string
+  to: string[]
+  subject: string
+  ok: boolean
+  /** What was billed when it went out — the lines can be edited afterwards. */
+  total?: number
+  error?: string
+  /** Absent on a send of the invoice; set on the two payment notices. */
+  kind?: 'ack' | 'receipt'
+  /** Resend's own id for the message — the join key to its delivery events. */
+  providerId?: string | null
+}
+
+/**
+ * What the mail provider reported back about one of those sends, written by the
+ * Resend webhook. Never carries `ok`, and NEVER changes an invoice's status —
+ * a bounce does not un-send an invoice, it means the address is wrong.
+ */
+export interface InvoiceEmailDeliveryEntry {
+  kind: 'delivery'
+  event: InvoiceDeliveryEvent
+  at: string
+  /** Which send this is about. Null for an event we could only place by tag. */
+  providerId: string | null
+  to: string[]
+  /** The bounce reason or spam complaint detail, when the provider gave one. */
+  detail?: string
+}
+
+export type InvoiceEmailLogEntry = InvoiceEmailSendEntry | InvoiceEmailDeliveryEntry
 
 /**
  * One thing the rater wants a second look at. `warn` is "this could be wrong";

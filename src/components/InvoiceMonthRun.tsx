@@ -69,12 +69,14 @@ import {
   formatInvoiceRecipient,
   formatSentOn,
   getBillingPeriodLabel,
+  latestInvoiceSend,
   recipientCountLabel,
   resolveInvoiceRecipients,
   shiftReviewPeriod,
   toCents,
   type ResolvedInvoiceRecipients,
 } from '../lib/utils'
+import { InvoiceDeliveryBadge } from './InvoiceDeliveryBadge'
 
 /**
  * The month run (I2): every client's stored invoice for a period, grouped into
@@ -1831,7 +1833,7 @@ function InvoiceEditor({
   // The last send that actually landed. Read off the invoice rather than local
   // state on purpose: a send remounts this editor, so anything transient is gone
   // by the time she looks, and this line has to survive that.
-  const lastSent = [...(invoice.emailLog ?? [])].reverse().find((entry) => entry.ok) ?? null
+  const lastSent = latestInvoiceSend(invoice.emailLog)
 
   /**
    * Ask the server for a hosted Checkout URL. Deliberately does NOT open it —
@@ -2516,7 +2518,10 @@ function InvoiceEditor({
       {lastSent ? (
         <details className="invoice-run-sent">
           <summary>
-            Sent {formatSentOn(lastSent.at)} to {recipientCountLabel(lastSent.to.length)}
+            Sent {formatSentOn(lastSent.at)} to {recipientCountLabel(lastSent.to.length)}{' '}
+            {/* What the mail provider then did with it. Silent until it says
+                something — see InvoiceDeliveryBadge. */}
+            <InvoiceDeliveryBadge emailLog={invoice.emailLog} />
           </summary>
           <ul>
             {lastSent.to.map((email) => (

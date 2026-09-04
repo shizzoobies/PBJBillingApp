@@ -12528,6 +12528,27 @@ tr.is-inactive-client .client-name-link {
   margin: 10px 0 0;
 }
 
+/* What the mail provider did with that send. Quiet by default — "Delivered"
+   is reassurance, not news — and loud only for the two that need a person:
+   a bounce (wrong address) and a spam complaint (ask the client to allow us). */
+.invoice-delivery-badge {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.invoice-delivery-badge.is-bad {
+  border-color: color-mix(in srgb, var(--red) 45%, transparent);
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+
 /* The send receipt is a disclosure now: the headline answers "did it go out",
    the addresses answer "to whom", and only one of those gets asked often. */
 details.invoice-run-sent > summary {

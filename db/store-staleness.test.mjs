@@ -2397,6 +2397,207 @@ describe('recordInvoiceSent statement shape (postgres branch)', () => {
     expect(update.params[2]).toBe(true)
     expect(JSON.parse(update.params[1])[0]).not.toHaveProperty('kind')
   })
+
+  // The provider's id is the join key every delivery event is matched on. An
+  // entry written without it is an event we can never place.
+  it('keeps the mail provider’s message id on the entry', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+      providerId: 'ee-abc-123',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(JSON.parse(update.params[1])[0]).toMatchObject({ providerId: 'ee-abc-123' })
+  })
+})
+
+/**
+ * `recordInvoiceDeliveryEvent` — what the mail provider did with an invoice
+ * email, appended to the same log the sends live on.
+ *
+ * Two rules matter more than the shape. It NEVER touches the status: a bounce
+ * does not un-send an invoice, it means the address is wrong and the bill still
+ * stands. And it is idempotent on (providerId, event), because Resend retries a
+ * webhook until it gets a 200 and the same bounce arrives several times.
+ */
+describe('recordInvoiceDeliveryEvent (file backend)', () => {
+  const seedInvoice = {
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-08',
+    number: '1042',
+    status: 'sent',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-09-15',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: '2026-08-09T12:00:00.000Z',
+    paidAt: null,
+    paymentMethod: null,
+    emailLog: [
+      {
+        at: '2026-08-09T12:00:00.000Z',
+        to: ['ann@acme.com'],
+        subject: 'Invoice 1042',
+        ok: true,
+        total: 400,
+        providerId: 'ee-1',
+      },
+    ],
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [{ ...seedInvoice, ...overrides }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('appends a delivery entry beside the send, tagged so it is not one', async () => {
+    await seed()
+    const updated = await store.recordInvoiceDeliveryEvent('inv-1', {
+      event: 'delivered',
+      at: '2026-08-09T12:00:04.000Z',
+      providerId: 'ee-1',
+      to: ['ann@acme.com'],
+    })
+
+    expect(updated.emailLog).toHaveLength(2)
+    expect(updated.emailLog[1]).toEqual({
+      kind: 'delivery',
+      event: 'delivered',
+      at: '2026-08-09T12:00:04.000Z',
+      providerId: 'ee-1',
+      to: ['ann@acme.com'],
+      detail: '',
+    })
+    // The entry the send wrote is untouched.
+    expect(updated.emailLog[0].ok).toBe(true)
+  })
+
+  // THE RULE. A mail provider must never be able to move money state.
+  it('never changes the status, not even on a bounce', async () => {
+    await seed()
+    const updated = await store.recordInvoiceDeliveryEvent('inv-1', {
+      event: 'bounced',
+      providerId: 'ee-1',
+      to: ['ann@acme.com'],
+      detail: 'mailbox does not exist',
+    })
+
+    expect(updated.status).toBe('sent')
+    expect(updated.sentAt).toBe('2026-08-09T12:00:00.000Z')
+    expect(updated.emailLog[1].detail).toBe('mailbox does not exist')
+  })
+
+  it('is idempotent on (providerId, event) — a retried notice logs once', async () => {
+    await seed()
+    const entry = { event: 'bounced', providerId: 'ee-1', to: ['ann@acme.com'], detail: 'no such user' }
+    await store.recordInvoiceDeliveryEvent('inv-1', entry)
+    const again = await store.recordInvoiceDeliveryEvent('inv-1', entry)
+
+    expect(again.emailLog.filter((logged) => logged.kind === 'delivery')).toHaveLength(1)
+  })
+
+  // A delayed notice followed by a delivered one is the normal happy path for
+  // a greylisting server. Both are kept; they are different events.
+  it('keeps two different events about the same message', async () => {
+    await seed()
+    await store.recordInvoiceDeliveryEvent('inv-1', { event: 'delayed', providerId: 'ee-1' })
+    const updated = await store.recordInvoiceDeliveryEvent('inv-1', {
+      event: 'delivered',
+      providerId: 'ee-1',
+    })
+
+    expect(updated.emailLog.filter((logged) => logged.kind === 'delivery')).toHaveLength(2)
+  })
+
+  it('refuses an unnamed event and an invoice that is not there', async () => {
+    await seed()
+    expect(await store.recordInvoiceDeliveryEvent('inv-1', { event: '' })).toBeNull()
+    expect(await store.recordInvoiceDeliveryEvent('nope', { event: 'delivered' })).toBeNull()
+  })
+
+  // Resend stamps its events with an ISO string; a missing or unusable one must
+  // not produce an entry dated "Invalid Date".
+  it('falls back to now when the provider’s timestamp is unusable', async () => {
+    await seed()
+    const updated = await store.recordInvoiceDeliveryEvent('inv-1', {
+      event: 'delivered',
+      at: 'whenever',
+      providerId: 'ee-1',
+    })
+
+    expect(Number.isNaN(new Date(updated.emailLog[1].at).getTime())).toBe(false)
+  })
+})
+
+/**
+ * The Postgres statement behind the same contract. It appends in SQL, for the
+ * reason `recordInvoiceSent` does — two events about one invoice can land at
+ * once — and the statement must name no other column than the log and
+ * `updated_at`.
+ */
+describe('recordInvoiceDeliveryEvent statement shape (postgres branch)', () => {
+  it('appends to email_log and touches nothing else', async () => {
+    const fake = fakePostgres({
+      invoices: [
+        {
+          ...existingInvoice,
+          email_log: [
+            { at: '2026-09-01T12:00:00.000Z', to: ['ann@acme.com'], subject: 's', ok: true, providerId: 'ee-1' },
+          ],
+        },
+      ],
+    })
+    await postgresStore(fake).recordInvoiceDeliveryEvent('inv-1', {
+      event: 'complained',
+      at: '2026-09-02T09:00:00.000Z',
+      providerId: 'ee-1',
+      to: ['ann@acme.com'],
+      detail: 'marked as spam',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    // The two columns it is allowed to write, and no third.
+    expect(update.text).not.toMatch(/\bstatus\b/)
+    expect(update.text).not.toMatch(/\bsent_at\b/)
+    expect(JSON.parse(update.params[1])[0]).toEqual({
+      kind: 'delivery',
+      event: 'complained',
+      at: '2026-09-02T09:00:00.000Z',
+      providerId: 'ee-1',
+      to: ['ann@acme.com'],
+      detail: 'marked as spam',
+    })
+  })
+
+  it('writes nothing at all for a notice it has already logged', async () => {
+    const fake = fakePostgres({
+      invoices: [
+        {
+          ...existingInvoice,
+          email_log: [
+            { at: '2026-09-01T12:00:00.000Z', to: ['ann@acme.com'], subject: 's', ok: true, providerId: 'ee-1' },
+            { kind: 'delivery', event: 'bounced', at: '2026-09-01T12:01:00.000Z', providerId: 'ee-1', to: [], detail: '' },
+          ],
+        },
+      ],
+    })
+    await postgresStore(fake).recordInvoiceDeliveryEvent('inv-1', {
+      event: 'bounced',
+      providerId: 'ee-1',
+    })
+
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+  })
 })
 
 /**

@@ -1845,6 +1845,34 @@ Clients page meanwhile. Owner-only.
 > invoice sent — every attempt, including failures, is kept in a permanent
 > per-invoice email log along with the total that was billed at the time.
 >
+> **You can see whether the email actually arrived.** Next to "Sent … to …" the
+> invoice now carries a small badge saying what the mail provider did with that
+> message:
+>
+> - **Delivered** — it reached the client's mail server. Nothing to do.
+> - **Delayed** — the client's mail server is holding it for a retry, which is
+>   normal and usually clears itself within the hour. Nothing to do yet.
+> - **Bounced** — it could not be delivered at all. **Check the client's email
+>   address** on their Contacts (a typo, a closed mailbox, a changed domain),
+>   fix it, and press **Send again**. Hover the badge to read the provider's own
+>   reason.
+> - **Marked as spam** — it arrived and the client's provider filed it as junk.
+>   **Ask the client to add billing@pbjsa.com to their contacts or safe-sender
+>   list**, then press **Send again**. Nothing is wrong with the invoice.
+>
+> **No badge means no news yet** — an invoice sent a moment ago, or one sent
+> before this existed. The badge never changes the invoice's status: a bounce
+> does not un-send an invoice, the bill still stands and the due date has not
+> moved. **A bounce or a spam complaint also notifies every owner** through the
+> bell, so it is not something you have to go looking for.
+>
+> **The invoice email itself is built to stay out of spam.** It comes from the
+> firm's name rather than a bare address ("PB&J Strategic Accounting
+> <billing@pbjsa.com>"), a reply goes to the billing mailbox rather than
+> nowhere, it says in one plain sentence what is owed and when before it shows
+> the pay button, and its footer carries the firm's address, phone and email —
+> the same details as the letterhead on the PDF.
+>
 > **Choosing who gets it.** When a client has **more than one** address on file,
 > Send opens a short checkbox list — one line per address, showing whose it is —
 > with **everything ticked**, so sending to all of them is still one click.

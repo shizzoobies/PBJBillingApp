@@ -8,6 +8,9 @@ import type {
   Contact,
   Employee,
   Invoice,
+  InvoiceEmailDeliveryEntry,
+  InvoiceEmailLogEntry,
+  InvoiceEmailSendEntry,
   PersistedInvoice,
   RecurringReimbursement,
   Reimbursement,
@@ -256,6 +259,58 @@ export function formatSentOn(iso: string) {
     day: 'numeric',
     ...(thisYear ? {} : { year: 'numeric' }),
   }).format(parsed)
+}
+
+/**
+ * The email log holds two kinds of entry now. This is the discriminant, in one
+ * place, so no reader has to remember which fields belong to which.
+ */
+export function isInvoiceDeliveryEntry(
+  entry: InvoiceEmailLogEntry,
+): entry is InvoiceEmailDeliveryEntry {
+  return (entry as InvoiceEmailDeliveryEntry).kind === 'delivery'
+}
+
+/**
+ * The last send that actually landed with the provider — the one the
+ * "Sent … to …" line is about. Delivery events are skipped: they are records of
+ * what happened to a send, not sends of their own. Payment acks and receipts
+ * are skipped too (they carry a `kind`): a paid invoice whose INVOICE email
+ * bounced must keep saying so, not report the receipt's delivery instead.
+ */
+export function latestInvoiceSend(
+  emailLog: InvoiceEmailLogEntry[] | undefined,
+): InvoiceEmailSendEntry | null {
+  const entries = (emailLog ?? []).filter(
+    (entry): entry is InvoiceEmailSendEntry =>
+      !isInvoiceDeliveryEntry(entry) && entry.ok && !entry.kind,
+  )
+  return entries.length > 0 ? entries[entries.length - 1] : null
+}
+
+/**
+ * What became of that last send: delivered, delayed, bounced, marked as spam.
+ *
+ * Matched on the provider's id, NOT on "the newest delivery entry" — an invoice
+ * sent three times has three threads of events in one log, and showing the
+ * bounce from a stale address next to a send that went somewhere else would be
+ * worse than showing nothing. A send from before ids were recorded has nothing
+ * to match on, so nothing is claimed about it.
+ */
+export function latestInvoiceDelivery(
+  emailLog: InvoiceEmailLogEntry[] | undefined,
+): InvoiceEmailDeliveryEntry | null {
+  const send = latestInvoiceSend(emailLog)
+  const id = send?.providerId ?? null
+  if (!id) return null
+  let latest: InvoiceEmailDeliveryEntry | null = null
+  for (const entry of emailLog ?? []) {
+    if (!isInvoiceDeliveryEntry(entry) || entry.providerId !== id) continue
+    // `>=` so a later position wins a tie: the log is append-only and two events
+    // can share a timestamp to the second.
+    if (!latest || entry.at >= latest.at) latest = entry
+  }
+  return latest
 }
 
 /**

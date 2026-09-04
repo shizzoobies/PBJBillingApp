@@ -10826,10 +10826,15 @@ export class AppDataStore {
    * without touching `sentAt` or the status — an untouched `kind` (every entry
    * written before this existed, and every real invoice send) keeps the
    * original behavior exactly.
+   *
+   * `providerId` is Resend's own id for the message. It is the join key the
+   * delivery webhook uses when an event arrives carrying no invoice tag, so it
+   * is stored on the entry rather than derived — an id we did not write down is
+   * an event we can never place.
    */
   async recordInvoiceSent(
     invoiceId,
-    { to = [], subject = '', ok = true, error = null, kind = null } = {},
+    { to = [], subject = '', ok = true, error = null, kind = null, providerId = null } = {},
   ) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
@@ -10855,6 +10860,7 @@ export class AppDataStore {
       // but not what the client was asked to pay.
       total: Number(current.total) || 0,
       ...(kind ? { kind: String(kind) } : {}),
+      ...(providerId ? { providerId: String(providerId) } : {}),
       ...(error ? { error: String(error).slice(0, 300) } : {}),
     }
     // Only the invoice going out marks the invoice sent. A payment receipt is
@@ -10905,6 +10911,99 @@ export class AppDataStore {
     data.invoices[index] = { ...current, emailLog, sentAt, status, updatedAt: nowIso() }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return data.invoices[index]
+  }
+
+  /**
+   * Record what the mail provider did with an invoice email: delivered,
+   * delayed, bounced, or marked as spam by the recipient.
+   *
+   * Appended to the SAME append-only `email_log` the sends live on, tagged
+   * `kind: 'delivery'` so it can never be mistaken for a send — `recordInvoiceSent`
+   * is what marks an invoice sent, and nothing here does.
+   *
+   * THE STATUS IS NEVER TOUCHED. A bounce does not un-send an invoice: it went
+   * out, the clock is running, and what is wrong is the address. Letting a
+   * webhook rewrite the status would let a mail provider's bad afternoon
+   * silently reopen a bill.
+   *
+   * Idempotent on (providerId, event), because Resend retries until it gets a
+   * 200 and the same delivery notice can arrive several times.
+   *
+   * @returns the invoice, or null when there is no such invoice
+   */
+  async recordInvoiceDeliveryEvent(
+    invoiceId,
+    { event, at = null, providerId = null, to = [], detail = '' } = {},
+  ) {
+    const name = String(event ?? '').trim()
+    if (!invoiceId || !name) return null
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+
+    const id = providerId ? String(providerId) : null
+    const duplicate = (current.emailLog ?? []).some(
+      (logged) =>
+        logged?.kind === 'delivery' &&
+        logged?.event === name &&
+        (logged?.providerId ?? null) === id,
+    )
+    if (duplicate) return current
+
+    const stamp = at && !Number.isNaN(new Date(at).getTime())
+      ? new Date(at).toISOString()
+      : nowIso()
+    const entry = {
+      kind: 'delivery',
+      event: name,
+      at: stamp,
+      providerId: id,
+      to: (Array.isArray(to) ? to : [to]).filter(Boolean).map((address) => String(address)),
+      detail: String(detail ?? '').slice(0, 300),
+    }
+
+    if (this.pool) {
+      // Concatenated in SQL for the same reason the send entry is: the read
+      // above is a snapshot, and two events about one invoice can land at once.
+      // `status` is deliberately absent from this statement.
+      const { rowCount } = await this.pool.query(
+        `update invoices
+            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                updated_at = now()
+          where id = $1`,
+        [invoiceId, JSON.stringify([entry])],
+      )
+      if (rowCount === 0) return null
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    data.invoices[index] = {
+      ...data.invoices[index],
+      emailLog: [...(data.invoices[index].emailLog ?? []), entry],
+      updatedAt: nowIso(),
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return data.invoices[index]
+  }
+
+  /**
+   * The invoice a Resend delivery event belongs to, when the event carries no
+   * usable invoice tag: the one whose email log holds a send filed under that
+   * provider id. A scan, like `findInvoiceByStripeRef` — the id lives inside a
+   * jsonb array on one row of a table this app reads whole anyway.
+   */
+  async findInvoiceByEmailProviderId(providerId) {
+    const id = String(providerId ?? '').trim()
+    if (!id) return null
+    const all = await this.listInvoices()
+    return (
+      all.find((invoice) =>
+        (invoice.emailLog ?? []).some((entry) => entry?.providerId === id && entry?.kind !== 'delivery'),
+      ) ?? null
+    )
   }
 
   /**

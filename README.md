@@ -67,6 +67,9 @@ The health check confirms the deployed server is up, that `/health` returns 200,
 - `ADMIN_EMAIL`: **recommended for multi-owner setup.** Creates (or updates) a second Owner account for Alex Anderson using this email address. Useful when a second person needs independent owner-level sign-in. Without it, this second account is not created.
 - `RESEND_API_KEY`: **required for sign-in.** When set, sign-in links and notification emails are sent via the [Resend](https://resend.com) HTTP API. The app technically still runs without it, but **no one can sign in until it's configured.**
 - `EMAIL_FROM`: **required for sign-in.** The `From:` address used for sign-in and notification emails (e.g. `notifications@pbj.local`). Without it, no sign-in emails go out and **no one can sign in.**
+- `INVOICE_EMAIL_FROM`: the `From:` address for client-facing invoice emails, separate from `EMAIL_FROM` so invoices come from billing@ while sign-in links come from the general address. Falls back to `EMAIL_FROM`. A bare address (no `<`) gets the firm's name put in front of it automatically.
+- `INVOICE_REPLY_TO`: **recommended.** The `Reply-To:` on client invoice emails — where a client's reply actually lands. Falls back to `OWNER_EMAIL`; if neither is set the header is left off. A sending address nobody answers is itself a spam signal, which is why this exists.
+- `RESEND_WEBHOOK_SECRET`: **recommended.** The Svix signing secret (`whsec_…`) for Resend's delivery webhook at `POST /api/resend/webhook`. Without it that endpoint answers 503 and refuses every event — the signature is the only thing separating Resend from anyone on the internet. With it, each invoice records whether its email was delivered, delayed, bounced or marked as spam, and owners are notified on the last two.
 
 If `DATABASE_URL` is not set, the server falls back to `tmp/app-data.json` so local development still uses the API layer without needing a database immediately.
 

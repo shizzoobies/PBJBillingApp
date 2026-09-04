@@ -78,7 +78,10 @@ notification / Customize-in-email).
 | `RESEND_API_KEY` | set — **replaced 2026-08-09**; the previous key was domain-scoped and 403'd with a misleading "domain is not verified" |
 | `pbjsa.com` in Resend | verified. DKIM at the root, envelope SPF on `send.pbjsa.com`, root SPF untouched |
 | `EMAIL_FROM` | `PB&J Strategic Accounting <notifications@pbjsa.com>` — magic-link sign-in confirmed working |
-| `INVOICE_EMAIL_FROM` | `billing@pbjsa.com` — set 2026-08-09, applied via redeploy |
+| `INVOICE_EMAIL_FROM` | `billing@pbjsa.com` — set 2026-08-09, applied via redeploy. A bare address now gets the firm's name prefixed automatically, so it sends as `PB&J Strategic Accounting <billing@pbjsa.com>` |
+| `INVOICE_REPLY_TO` | **not set yet.** `Reply-To:` on client invoice emails; falls back to `OWNER_EMAIL`, omitted if neither is set. Should be `billing@pbjsa.com` — the monitored mailbox |
+| `RESEND_WEBHOOK_SECRET` | **not set yet.** Svix signing secret (`whsec_…`) from the Resend dashboard's webhook endpoint. Without it `/api/resend/webhook` answers 503 and records nothing |
+| Resend webhook endpoint | `https://app.pbjsa.com/api/resend/webhook`, events `email.sent`, `email.delivered`, `email.delivery_delayed`, `email.bounced`, `email.complained`. Anything else is acknowledged and ignored |
 
 **✅ PROVEN 2026-08-09: the signing secret verified real Stripe-signed events.**
 Alex ran a full end-to-end test (his Test client, $15, sandbox ACH): the email

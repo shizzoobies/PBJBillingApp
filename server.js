@@ -57,6 +57,11 @@ import {
   sendInvoicePaymentEmail,
 } from './lib/invoice-email.js'
 import { chooseInvoiceRecipients } from './lib/invoice-recipients.js'
+import {
+  isResendWebhookConfigured,
+  resendDeliveryEventFor,
+  verifyResendWebhook,
+} from './lib/resend-webhook.js'
 import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
 import {
   cardProcessingFeeLine,
@@ -3203,6 +3208,136 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/resend/webhook — the mail provider tells us what became of an
+    // invoice email: delivered, delayed, bounced, or marked as spam.
+    //
+    // UNAUTHENTICATED BY NECESSITY, on exactly the terms the Stripe webhook
+    // above is: Resend cannot hold a session, so the Svix signature over the
+    // RAW bytes is the whole security boundary, and it runs before anything is
+    // parsed. Without it, anyone on the internet could write "bounced" into a
+    // client's invoice history.
+    //
+    // It NEVER changes an invoice's status. A bounce does not un-send an
+    // invoice — it went out, the clock is running, and what is wrong is the
+    // address. The store refuses to touch status from here too.
+    if (normalizedPath === '/api/resend/webhook' && request.method === 'POST') {
+      if (!isResendWebhookConfigured()) {
+        // No secret means we cannot tell Resend from anyone else. Refuse rather
+        // than trust the body — the same answer the Stripe endpoint gives.
+        sendJson(response, 503, { error: 'Resend webhooks are not configured' })
+        return
+      }
+      let rawBody
+      try {
+        rawBody = await readRawBody(request)
+      } catch {
+        sendJson(response, 400, { error: 'Could not read body' })
+        return
+      }
+      const resendEvent = verifyResendWebhook(rawBody, request.headers)
+      if (!resendEvent) {
+        console.warn('[resend] rejected a webhook with an invalid signature')
+        sendJson(response, 400, { error: 'Invalid signature' })
+        return
+      }
+
+      const deliveryEvent = resendDeliveryEventFor(resendEvent.type)
+      if (!deliveryEvent) {
+        // Opens, clicks, contact changes. Acknowledged so Resend stops asking,
+        // and recorded nowhere.
+        sendJson(response, 200, { received: true, ignored: true })
+        return
+      }
+
+      try {
+        const eventData = resendEvent.data ?? {}
+        const providerId = typeof eventData.email_id === 'string' ? eventData.email_id : null
+        // Tags come BACK as an object keyed by name, not as the array we sent —
+        // but accept the array form too, so a payload-shape change degrades to
+        // the providerId fallback only if BOTH are absent.
+        const tagBag = Array.isArray(eventData.tags)
+          ? Object.fromEntries(eventData.tags.map((tag) => [tag?.name, tag?.value]))
+          : (eventData.tags ?? {})
+        const taggedInvoiceId =
+          typeof tagBag.invoice_id === 'string' ? tagBag.invoice_id : null
+        // The tag is the answer when it is there. The provider id is the
+        // fallback for a message sent before tagging existed, or one whose id
+        // could not be sanitized into a legal tag value.
+        const deliveryInvoice =
+          (taggedInvoiceId
+            ? ((await appDataStore.listInvoices()).find((entry) => entry.id === taggedInvoiceId) ??
+              null)
+            : null) ??
+          (providerId ? await appDataStore.findInvoiceByEmailProviderId(providerId) : null)
+        if (!deliveryInvoice) {
+          // 200 anyway: an event about a message we cannot place is not
+          // something Resend can fix by retrying it for three days.
+          console.warn(
+            '[resend] event for an unknown invoice',
+            resendEvent.type,
+            taggedInvoiceId,
+            providerId,
+          )
+          sendJson(response, 200, { received: true, matched: false })
+          return
+        }
+
+        const bounceDetail =
+          deliveryEvent === 'bounced' || deliveryEvent === 'complained'
+            ? String(eventData.bounce?.message ?? eventData.bounce?.type ?? '')
+            : ''
+        // Resend retries until it gets a 200, so the SAME notice arrives more
+        // than once. The store is idempotent on (providerId, event); this is
+        // the same question asked one step earlier, so a retry cannot notify
+        // the owners a second time either.
+        const alreadyLogged = (deliveryInvoice.emailLog ?? []).some(
+          (entry) =>
+            entry?.kind === 'delivery' &&
+            entry?.event === deliveryEvent &&
+            (entry?.providerId ?? null) === providerId,
+        )
+
+        await appDataStore.recordInvoiceDeliveryEvent(deliveryInvoice.id, {
+          event: deliveryEvent,
+          at: resendEvent.created_at ?? null,
+          providerId,
+          to: Array.isArray(eventData.to) ? eventData.to : [eventData.to].filter(Boolean),
+          detail: bounceDetail,
+        })
+
+        // A bounce or a spam complaint is a person's problem, not a log line:
+        // the client did not get their bill and somebody has to fix an address
+        // or ask them to allow the sender. Every owner is told, once.
+        if (!alreadyLogged && (deliveryEvent === 'bounced' || deliveryEvent === 'complained')) {
+          const deliveryClientName =
+            (await appDataStore.getClientNameById(deliveryInvoice.clientId).catch(() => '')) ||
+            'a client'
+          const what = deliveryEvent === 'bounced' ? 'bounced' : 'was marked as spam'
+          const members = await appDataStore.getTeamMembers()
+          for (const owner of members.filter((member) => member.role === 'owner')) {
+            await notify(appDataStore, owner.id, 'invoice_email_bounced', {
+              message: `Invoice ${deliveryInvoice.number ?? deliveryInvoice.id} to ${deliveryClientName} ${what}${
+                bounceDetail ? `: ${bounceDetail}` : ''
+              }`,
+              link: '/invoices',
+              clientId: deliveryInvoice.clientId,
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+        }
+      } catch (error) {
+        // A 500 makes Resend retry, which is right for a transient failure —
+        // the idempotency above means the retry cannot double-log or notify
+        // twice.
+        console.error('[resend] webhook handling failed:', error)
+        sendJson(response, 500, { error: 'webhook_failed' })
+        return
+      }
+
+      sendJson(response, 200, { received: true })
+      return
+    }
+
     // POST /api/invoices/:id/payment-link — create the ACH Checkout Session.
     // Owner-only. Does NOT email anything: that is I4.
     //
@@ -3798,6 +3933,10 @@ const server = createServer(async (request, response) => {
         payUrl,
         cardPayUrl,
         firmName: firmSettings?.name || undefined,
+        // Phone, address and email in the footer, from the same settings the
+        // PDF letterhead reads. A client who can see how to reach the firm is
+        // reading an invoice, not a suspicious link.
+        firmSettings,
       })
       // The invoice as a document, built from the invoice as it stands right
       // now. Best-effort on purpose: the email is the payment vehicle and the
@@ -3821,6 +3960,11 @@ const server = createServer(async (request, response) => {
         html: email.html,
         text: email.text,
         attachments: sendAttachments,
+        // The firm's name on the From: line, and the tags the delivery webhook
+        // reads to know which invoice an event is about.
+        fromName: firmSettings?.name || undefined,
+        invoiceId: invoice.id,
+        kind: 'invoice',
       })
 
       if (!sendResult.ok) {
@@ -3832,6 +3976,7 @@ const server = createServer(async (request, response) => {
           subject: email.subject,
           ok: false,
           error: sendResult.error,
+          providerId: sendResult.providerId ?? null,
         })
         sendJson(response, 502, { error: 'invoice_send_failed', message: sendResult.error })
         return
@@ -3848,6 +3993,9 @@ const server = createServer(async (request, response) => {
             subject: email.subject,
             ok: true,
             error: null,
+            // Resend's own id for the message. Without it on the entry, a
+            // delivery event that carries no tag can never be placed.
+            providerId: sendResult.providerId ?? null,
           })) ?? invoice
         await appDataStore.recordActivity(
           session.user.id,

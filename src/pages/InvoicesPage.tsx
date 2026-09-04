@@ -9,6 +9,7 @@ import type {
   Client,
   Employee,
   Invoice,
+  InvoiceEmailLogEntry,
   PersistedInvoice,
   PersistedInvoiceLine,
   InvoiceLine,
@@ -26,6 +27,7 @@ import {
   isInBillingPeriod,
   isSafeHttpUrl,
   isSafeImageSrc,
+  latestInvoiceSend,
   recipientCountLabel,
   resolveInvoiceRecipients,
   type InvoiceRecipientDetail,
@@ -41,6 +43,7 @@ import {
   renderedInvoiceLines,
 } from '../../lib/invoice-lines.js'
 import type { InvoiceLineOut, InvoiceRoleTier } from '../../lib/invoice-lines.js'
+import { InvoiceDeliveryBadge } from '../components/InvoiceDeliveryBadge'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
 import { generateInvoicesRequest, listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
 import { selectableClients } from '../lib/clientLifecycle'
@@ -533,6 +536,7 @@ export function InvoicesPage() {
     key: string
     note?: string
     error?: string
+    emailLog?: InvoiceEmailLogEntry[]
   } | null>(null)
   const [monthRunRefresh, setMonthRunRefresh] = useState(0)
   // The send waiting on her checkbox choices. Only ever set when the client has
@@ -775,7 +779,7 @@ export function InvoicesPage() {
     try {
       const { invoice: updated } = await sendInvoiceRequest(invoiceId, to)
       setPickingSend(null)
-      const lastSent = [...(updated.emailLog ?? [])].reverse().find((entry) => entry.ok) ?? null
+      const lastSent = latestInvoiceSend(updated.emailLog)
       setSendResult({
         key: seedKey,
         note: lastSent
@@ -783,6 +787,10 @@ export function InvoicesPage() {
               lastSent.at,
             )} — ${lastSent.to.join(', ')}`
           : 'Sent.',
+        // Carried so the badge beside the note reads the same log the note
+        // does. Delivery events arrive seconds to hours later, so this is
+        // usually empty at this moment and the badge stays silent.
+        emailLog: updated.emailLog,
       })
       // Tell the month run to reload so it does not still read "Reviewed". It
       // keeps its own month picker, so this only shows up there when it happens
@@ -926,7 +934,11 @@ export function InvoicesPage() {
                 {shownSend.error}
               </p>
             ) : null}
-            {shownSend?.note ? <p className="invoice-run-sent">{shownSend.note}</p> : null}
+            {shownSend?.note ? (
+              <p className="invoice-run-sent">
+                {shownSend.note} <InvoiceDeliveryBadge emailLog={shownSend.emailLog} />
+              </p>
+            ) : null}
             <div className="invoice-context">
               <span>{billingPeriodLabel}</span>
               <span>{baseInvoice.entryCount} billable entries</span>
