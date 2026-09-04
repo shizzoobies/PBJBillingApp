@@ -238,6 +238,49 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-09-03 (late) — every Railway deploy failed for two hours; the fix is a
+DASHBOARD VARIABLE you cannot see from the repo. Read this before your first
+push.** `main` = `c7526ed` (the redesign + a reverted experiment), deployed
+SUCCESS, `/health` 200.
+
+What happened: from ~23:50 UTC every build died inside `npm install` with
+`Cannot read properties of null (reading 'edgesOut')` — npm 10.9.8's arborist
+crashing while loading a peer set. Not our code: the same crash reproduces on
+the PREVIOUS commit (which had deployed fine at 12:21) under npm 10.9.8, and
+both commits install cleanly under npm 11.6.2. A dependency published a
+manifest that day whose peer graph npm 10.9.8 cannot walk (the crash lands
+right after arborist places `rolldown@1.2.7`, Vite's bundler). Railway's
+status page stayed green because nothing of theirs broke — and most projects
+were shielded by a lockfile, which skips the peer re-resolution. Ours is
+deliberately gitignored, so every build re-resolved fresh and hit it.
+
+The fix that works, and the one that does not:
+- **`RAILPACK_INSTALL_CMD = npx -y npm@11.6.2 install --include=dev --no-audit --no-fund`**
+  set on the PBJBillingApp service. `--include=dev` is required: the service
+  has `NODE_ENV=production`, under which a plain install skips the
+  devDependencies the build needs (tsc, vite). Railpack's own default install
+  compensates for that; an override must do it itself.
+- **Do NOT set `packageManager` in package.json.** It was tried (`11434fa`)
+  and reverted (`c7526ed`): Railpack then "enables corepack shims" and the
+  image export fails with `lstat /opt/corepack: no such file or directory`.
+  The build and install both succeed — it dies at the very last step, which
+  is what made it slow to diagnose.
+- `RAILPACK_DISABLE_CACHES` and `RAILPACK_NODE_PRUNE_CMD` were set on wrong
+  hypotheses and REMOVED again. If you find either present, it is cruft.
+
+How to see a failed build's log (the CLI never shows one — `logs --build`
+returns the last SUCCESSFUL build): Railway's GraphQL API,
+`buildLogs(deploymentId)`, with `user.accessToken` from
+`~/.railway/config.json`. That is how this was finally diagnosed. Or Alex
+pastes it from the dashboard.
+
+**Open question for Alex, raised 2026-09-03:** the "lockfile stays gitignored"
+rule is what exposed us. A committed `package-lock.json` would have shielded
+every build (and made installs deterministic besides). Nobody in this history
+recorded WHY the rule exists. Until he rules, the override above is the
+shield; when npm 11 becomes Railpack's default the override becomes a no-op.
+
+
 **2026-09-03 — the invoice redesign (featreq-97ae3214) is BUILT and shipped.
 It is a RENDERING change, not a money-calculator change — read that sentence
 twice before touching `lib/invoice-lines.js`.**
