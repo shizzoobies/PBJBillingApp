@@ -231,14 +231,12 @@ describe('the mark-paid route', () => {
 describe('the invoice-recap route', () => {
   const block = routeBlock(/normalizedPath === '\/api\/invoice-recap'/, 2600)
 
-  it('is owner-gated (containment) before anything is read', () => {
+  it('requires a session but NOT the owner role (the containment is lifted)', () => {
     expect(block).toContain('requireSession(request, response)')
-    const gate = block.indexOf("session.user.role !== 'owner'")
-    const read = block.indexOf('appDataStore.read()')
-    expect(gate).toBeGreaterThan(-1)
-    expect(read).toBeGreaterThan(-1)
-    expect(gate).toBeLessThan(read)
-    expect(block).toContain("Only owners can see the invoice recap")
+    // The staff-facing point of the feature: no owner gate before the 200.
+    expect(block.slice(0, block.indexOf('sendJson(response, 200'))).not.toContain(
+      "session.user.role !== 'owner'",
+    )
   })
 
   // FLIPPED by the 2026-09-04 team/visibility split: MONEY READS THE TEAM.

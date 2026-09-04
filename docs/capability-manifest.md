@@ -2213,18 +2213,14 @@ Clients page meanwhile. Owner-only.
 - Estimated hours fields anywhere in the app are informational only and
   never change invoice amounts.
 
-## Invoice Recap (owner only — for now)
+## Invoice Recap (owner + staff)
 
-> **Owner-only since 2026-09-04, as containment.** Built for staff, and it
-> will reopen to them: Brittany reported staff seeing invoices for clients
-> they are not assigned to, and the cause is that the app's "assigned team"
-> list is widened automatically whenever someone is given a task on a client —
-> right for seeing checklists, wrong for seeing money. Until the team list
-> that gates money is one only an owner picks, staff do not get this page
-> (the sidebar hides it and the server refuses it). If a team member asks why
-> the Invoice Recap disappeared, that is why.
->
-> **What it is.** Built so the team can record each
+> **The one invoicing page staff can see.** (It was owner-only for part of
+> 2026-09-04 while a visibility bug was fixed: the "assigned team" list used
+> to be widened automatically whenever someone was given a task on a client,
+> so staff saw invoices for clients they only had a checklist on. Since the
+> fix, that list is one only an owner picks, and the page reads only it.)
+> Built so the team can record each
 > month's deposits correctly: for every invoice that actually went out (sent,
 > processing, paid, or overdue — never drafts) for a month, one card shows the
 > **Invoice total** for the company, the **Accounting services** amount, and
@@ -2234,9 +2230,11 @@ Clients page meanwhile. Owner-only.
 > always add up to the invoice total, because all three come from the same
 > stored lines.
 >
-> **Each team member will see only their assigned clients' invoices** once it
-> reopens — a team an owner picked, never one a task assignment widened;
-> owners see every client. On a
+> **Each team member sees only their assigned clients' invoices** — the
+> ASSIGNED TEAM an owner picked on the client's page or the Team page, never
+> a list a task assignment widened; owners see every client. If a team member
+> sees no invoices here, their owner has not put them on any client's team
+> yet. On a
 > combined (billing-master) invoice, each reimbursed expense names which
 > company it belongs to; the combined invoice itself appears only for people
 > who can see the master client.

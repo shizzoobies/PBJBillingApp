@@ -4036,7 +4036,6 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
       '/reports',
       '/productivity',
       '/invoices',
-      '/invoice-recap',
       '/plans',
       '/contacts',
       '/team',
@@ -4142,19 +4141,11 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
             </OwnerOnly>
           }
         />
-        {/* Built staff-facing (featreq-0c2d4ce5); OWNER-ONLY since 2026-09-04
-            as containment — the team list that scopes it is widened by task
-            assignment, so staff saw invoices for clients they only had a
-            checklist on. The server refuses non-owners too. Reopens to staff
-            once money reads an explicit team (team-visibility split). */}
-        <Route
-          path="/invoice-recap"
-          element={
-            <OwnerOnly ownerMode={ownerMode}>
-              <InvoiceRecapPage />
-            </OwnerOnly>
-          }
-        />
+        {/* NOT owner-only (featreq-0c2d4ce5): the staff-facing monthly recap.
+            The server scopes it by the owner-picked TEAM (teamClientIdSet) —
+            never the task-widened visible set — so staff receive only the
+            invoices of clients an owner put them on. */}
+        <Route path="/invoice-recap" element={<InvoiceRecapPage />} />
         <Route
           path="/plans"
           element={

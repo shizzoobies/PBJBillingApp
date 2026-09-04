@@ -2991,17 +2991,13 @@ const server = createServer(async (request, response) => {
     // 13 of Allison's 15 came from a checklist, and the recap showed their
     // invoices. See docs/plans/team-visibility-split-2026-09.md.
     //
-    // STILL OWNER-ONLY (containment, 2026-09-04). The gate below comes off in
-    // its own commit, after the production team lists are reset to explicit
-    // picks — reopening it before the reset would hand staff the same widened
-    // lists this split stopped writing.
+    // NOT owner-only — that is the point of the page. It was owner-only for
+    // the hours between the 2026-09-04 report and the production reset of
+    // the team lists to explicit picks; with the reset done, a staffer sees
+    // exactly the invoices of the clients an owner put them on.
     if (normalizedPath === '/api/invoice-recap' && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
-      if (session.user.role !== 'owner') {
-        sendJson(response, 403, { error: 'Only owners can see the invoice recap' })
-        return
-      }
       const periodParam = requestUrl.searchParams.get('period') || ''
       if (periodParam && !/^\d{4}-\d{2}$/.test(periodParam)) {
         sendJson(response, 400, { error: 'period must look like 2026-08' })
