@@ -23,20 +23,34 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-03, evening):** `main` = the redesign commit, deployed SUCCESS,
-`/health` 200, tree clean, suite **2691 tests / 160 files**. The 2026-09-02
-evening entry in §5 is the latest digest. The queue:
+**State right now (2026-09-04, evening):** `main` = `31212c8`, deployed
+SUCCESS, `/health` 200, tree clean, suite **2840 tests / 168 files**. The
+three 2026-09-04 entries in §5 (deliverability; team/visibility split; the
+invoice-visibility leak) are the latest digest — read them in that order.
+The queue:
 
-1. `featreq-97ae3214` — **invoice redesign** — SHIPPED 2026-09-03 (awaiting
-   her review; §5 entry).
-2. `featreq-68638ed2` — **Skip vs Push** (planned; ONE open question for
+1. **Brittany must re-pick every client's team** on the Team page (the
+   2026-09-04 reset emptied Lisa's and Allison's lists; until she does, staff
+   see no invoices on the Invoice Recap). Her tracker item
+   `featreq-0c2d4ce5` still needs the explanation posted (text in
+   `docs/plans/team-visibility-split-2026-09.md` §3.6). The two TEST accounts
+   (Bookkeepington / Accountington) are still explicitly on 34 / 17 teams —
+   if she tests as one of them she will see 30 invoices and think it is
+   broken; she prunes them or Alex approves a write to clear them.
+2. **Deliverability owner steps** (§6): safe-sender ask to flagged clients,
+   Google Postmaster Tools, DMARC reports to Cloudflare. Watch the new
+   delivery badge on the invoice month run.
+3. `featreq-68638ed2` — **Skip vs Push** (planned; ONE open question for
    Brittany, see §5).
-3. `featreq-8cec48db` — hours-per-client tagging panel sits in `needs_input`
+4. `featreq-8cec48db` — hours-per-client tagging panel sits in `needs_input`
    awaiting Brittany; do not build past her answer.
-4. Two parked `planned_not_eom` items (§5), thirteen Shipped items awaiting
-   her live review — re-read the board at session start, it moves.
-5. **Watch:** September's KLC generate is the first combined invoice
+5. Resilience Tier 1 is built but the backups are DORMANT until Alex adds
+   four R2 secrets (§5 2026-09-03 entry); Tier 2 waits on that.
+6. **Watch:** September's KLC generate is the first combined invoice
    (~$720, master `client-lamjjjc`); the first send is irreversible.
+7. Follow-ups: remove the eight inert `grantClientVisibility` call sites;
+   share `firmDetailLines` between the PDF and the email; migrate
+   `railway.json` to `.railway/railway.ts` before 2026-12-01.
 
 **The five rules that break things** (details §2–§4): (1) `db/store.js` has
 TWO backends — any persisted change touches both, tests only exercise the file
@@ -58,7 +72,26 @@ prefix) and end with the Co-Authored-By trailer your session specifies
 `lockfile-refresh` workflow (§3), never with `npm install` on Windows; `tmp/` is NOT eslint-ignored, so scratch
 scripts go in the OS-temp scratchpad, never the repo.
 
-**Machine-local paths (this machine only — gone elsewhere):** the repo at
+**Picking up on a different machine (e.g. Alex's Mac):** this file is the
+ONLY memory that travels — the Claude memory directory lives on the Windows
+PC. Setup: Node 22 (`node -v`), then `npm ci` (the committed lockfile is
+Linux-generated and carries the darwin-arm64 rolldown/esbuild bindings, so it
+installs clean on Apple silicon — do NOT run `npm install`, which would
+rewrite the lockfile; refresh it only via the `lockfile-refresh` workflow).
+Set `git config core.autocrlf false` in the clone so CRLF files stay CRLF
+(the repo is mixed per file; the patch-script habit in §3 preserves each
+file's endings). `npm run verify` needs nothing else. For deploys and
+production diagnostics: `npx @railway/cli@latest login` (browser) and
+`gh auth login` as `shizzoobies`; production reads use
+`npx @railway/cli@latest variables --service Postgres --json | node <script>`
+piped, never pasted. The print check needs Playwright's Chromium:
+`npx playwright install chromium`, then run
+`node scripts/check-print-pdf.mjs` without the Windows `PLAYWRIGHT_MODULE`
+wrapper. NOT on the Mac and not needed for app work: the desktop updater
+signing key (desktop releases stay on the PC), the Jan–May re-import assets,
+Brittany's contact-list spreadsheet.
+
+**Machine-local paths (the Windows PC only — gone elsewhere):** the repo at
 `D:\PBJ Accounting Work\AP For Time Stuff`; the Jan–May re-import assets at
 `D:\PBJ Accounting\Old Time\`; the desktop updater signing key at
 `D:\PBJ Accounting Work\desktop-updater-key\` (if it AND the GitHub Actions
@@ -1457,6 +1490,36 @@ the code:
 ---
 
 ## 6. Open follow-ups
+
+### Deliverability — Alex's two dashboard steps (2026-09-04), for the road
+
+DNS for pbjsa.com is on Cloudflare (nameservers carlane / melnicoff). Change
+ONLY the records named here; the SPF record, `resend._domainkey`, and the
+`send` subdomain records are what make invoices pass authentication.
+
+**Google Postmaster Tools** (Gmail's report card: spam rate, reputation):
+1. postmaster.google.com → sign in → red **+** → `pbjsa.com` → Next.
+2. Copy the `google-site-verification=…` TXT value it shows.
+3. Cloudflare → pbjsa.com → DNS → Records → Add: type TXT, name `@`,
+   content = that value (a second google-site-verification TXT beside the
+   existing one is fine — do not replace it).
+4. Postmaster → Verify (retry after a minute if "not found").
+Dashboards stay empty until enough mail reaches Gmail users — weeks at her
+volume. Spam rate above ~0.3% is what Gmail acts on.
+
+**DMARC reports somewhere read** (today `rua=` goes to a GoDaddy default):
+1. Cloudflare → pbjsa.com → Email → **DMARC Management** → Enable.
+2. Accept the offered `_dmarc` record update (it swaps only the `rua=`
+   address; `p=reject; adkim=r; aspf=r` stay).
+3. If not offered, edit the `_dmarc` TXT by hand: replace the
+   `rua=mailto:…` part with the address on the DMARC Management page.
+Within a day or two the page lists every source sending as pbjsa.com
+(Microsoft 365, Resend via Amazon SES) with pass/fail counts.
+
+**Then, per flagged client:** ask them to add billing@pbjsa.com to contacts
+or safe senders, and resend from the Invoices page — the delivery badge
+will say what happened this time.
+
 
 Nothing is half-built — every item above shipped and deployed.
 
