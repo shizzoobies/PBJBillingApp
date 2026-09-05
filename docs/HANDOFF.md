@@ -84,10 +84,11 @@ file's endings). `npm run verify` needs nothing else. For deploys and
 production diagnostics: `npx @railway/cli@latest login` (browser) and
 `gh auth login` as `shizzoobies`; production reads use
 `npx @railway/cli@latest variables --service Postgres --json | node <script>`
-piped, never pasted. The print check needs Playwright's Chromium:
-`npx playwright install chromium`, then run
-`node scripts/check-print-pdf.mjs` without the Windows `PLAYWRIGHT_MODULE`
-wrapper. NOT on the Mac and not needed for app work: the desktop updater
+piped, never pasted. The print check needs Playwright, which is NOT a
+devDependency: `npm i -g playwright && npx playwright install chromium`,
+then `PLAYWRIGHT_MODULE="$(npm root -g)/playwright/index.mjs" node
+scripts/check-print-pdf.mjs` (the script prints this hint itself if the
+module is missing). NOT on the Mac and not needed for app work: the desktop updater
 signing key (desktop releases stay on the PC), the Jan–May re-import assets,
 Brittany's contact-list spreadsheet.
 
