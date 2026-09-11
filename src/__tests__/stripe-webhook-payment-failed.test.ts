@@ -29,7 +29,7 @@ describe('the Stripe webhook remembers a failed payment', () => {
   it('moves the status back to sent FIRST, then records the failure on the log', () => {
     const text = branch()
     const statusAt = text.indexOf("status: 'sent'")
-    const recordAt = text.indexOf('appDataStore.recordInvoicePaymentFailure(')
+    const recordAt = text.indexOf('.recordInvoicePaymentFailure(')
     expect(statusAt).toBeGreaterThan(-1)
     expect(recordAt).toBeGreaterThan(-1)
     expect(statusAt).toBeLessThan(recordAt)
@@ -39,11 +39,22 @@ describe('the Stripe webhook remembers a failed payment', () => {
   // the row. Losing either makes the tab either double up or say nothing.
   it('passes the PaymentIntent id and Stripe’s own reason', () => {
     const text = branch()
-    const recordAt = text.indexOf('appDataStore.recordInvoicePaymentFailure(')
+    const recordAt = text.indexOf('.recordInvoicePaymentFailure(')
     const call = text.slice(recordAt, recordAt + 400)
     expect(call).toContain('paymentIntentId: object.id')
     expect(call).toContain('detail: failureMessage')
     expect(call).toContain('at:')
+  })
+
+  // The event id is ledgered BEFORE the handler runs, so a 500 here is not a
+  // second chance — Stripe's retry answers `duplicate`. A failed log write must
+  // therefore never take the owners' notification down with it.
+  it('never lets the log write cost the owners their notification', () => {
+    const text = branch()
+    const recordAt = text.indexOf('.recordInvoicePaymentFailure(')
+    const notifyAt = text.indexOf("'invoice_payment_failed'")
+    expect(recordAt).toBeLessThan(notifyAt)
+    expect(text.slice(recordAt, notifyAt)).toContain('.catch(')
   })
 
   it('names the client in the owners’ notification', () => {

@@ -2564,15 +2564,17 @@ function InvoiceEditor({
         </details>
       ) : null}
 
-      {/* What went wrong, in Stripe's words, and what to do about it. The old
-          pay link died with the attempt, so "call them" and "send it again"
-          are the two moves — a fresh link rides on the re-send. */}
+      {/* What went wrong, in Stripe's words, and what to do about it. A bank
+          attempt spends its Checkout session, so that link is dead; a card
+          decline leaves its session open, so "may" is the honest word. Either
+          way "call them" and "send it again" are the two moves — a fresh link
+          rides on the re-send. */}
       {paymentFailure ? (
         <p className="invoice-run-error invoice-run-payment-failed" role="alert">
           <strong>Payment failed {formatSentOn(paymentFailure.at)}</strong>
           {paymentFailure.detail ? ` — ${paymentFailure.detail}` : ''}
           <br />
-          The pay link from that attempt no longer works. Follow up with the client, then
+          The pay link from that attempt may no longer work. Follow up with the client, then
           send the invoice again for a fresh link — or mark it paid if they pay another way.
         </p>
       ) : null}

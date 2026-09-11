@@ -43,10 +43,13 @@ const send = (over = {}) => ({
   ...over,
 })
 
+// 10:00Z, like every date fixture in the sibling suites: `formatSentOn` renders
+// LOCAL time and the suite pins no TZ, so a mid-day stamp is the same calendar
+// day from UTC-10 to UTC+13. 14:00Z reads "Sep 11" in Sydney.
 const failure = (over = {}) => ({
   kind: 'payment' as const,
   event: 'failed' as const,
-  at: '2026-09-10T14:00:00.000Z',
+  at: '2026-09-10T10:00:00.000Z',
   paymentIntentId: 'pi_1',
   detail:
     'Microdeposit verification for this PaymentIntent has timed out. Customer has not verified their bank account within the required 10 day period.',

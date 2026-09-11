@@ -1602,11 +1602,13 @@ Clients page meanwhile. Owner-only.
 > still owed (nothing was collected); they sit in this tab instead of Sent so
 > the client who tried and stalled is not lost among the ones who have not
 > opened their email yet. The row shows a red **Payment failed [date]** flag,
-> and opening it shows Stripe's reason and what to do: the pay link from that
-> attempt is dead, so follow up with the client and **Send again** — the
-> re-send carries a fresh link and moves the invoice back to Sent — or **Mark
-> paid** if they pay another way. Every owner is also notified (bell + email)
-> the moment a payment fails, naming the invoice, the client and the reason. Within a tab the invoices are **alphabetical by
+> and opening it shows Stripe's reason and what to do: a bank-payment link is
+> spent once the attempt fails (a card link may still work), so follow up with
+> the client and **Send again** — the re-send carries a fresh link and moves
+> the invoice back to Sent — or **Mark paid** if they pay another way. Every owner is also notified (bell + email)
+> the moment a payment fails, naming the invoice, the client and the reason.
+>
+> Within a tab the invoices are **alphabetical by
 > client by default**, with a Sort control to switch to invoice-number order or
 > total (high to low) — whichever is chosen, rows never rearrange while you
 > work through them. When you mark one reviewed, send it or void it, it simply

@@ -3138,11 +3138,20 @@ const server = createServer(async (request, response) => {
           // the row reads "Sent" as if nobody had tried. The log entry is what
           // puts the invoice in the month run's "Payment failed" tab until she
           // sends it again or the client pays another way.
-          await appDataStore.recordInvoicePaymentFailure(invoice.id, {
-            at: new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
-            paymentIntentId: object.id,
-            detail: failureMessage,
-          })
+          //
+          // Best effort, on purpose: the event id was ledgered before this
+          // handler ran, so a 500 here would NOT be retried into a second
+          // chance — Stripe's retry answers `duplicate` and never reaches this
+          // line again. A log write that fails must not also cost the owners
+          // the notification below, which is the one thing they cannot get
+          // back.
+          await appDataStore
+            .recordInvoicePaymentFailure(invoice.id, {
+              at: new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
+              paymentIntentId: object.id,
+              detail: failureMessage,
+            })
+            .catch((error) => console.error('[stripe] payment-failure log write failed:', error))
           const failedClientName =
             (await appDataStore.getClientNameById(invoice.clientId).catch(() => '')) || 'a client'
           const members = await appDataStore.getTeamMembers()
