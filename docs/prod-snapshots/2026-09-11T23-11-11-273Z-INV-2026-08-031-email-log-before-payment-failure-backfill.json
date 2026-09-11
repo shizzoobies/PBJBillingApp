@@ -1,0 +1,117 @@
+{
+  "invoiceId": "inv-9392f706",
+  "number": "INV-2026-08-031",
+  "status": "sent",
+  "emailLog": [
+    {
+      "at": "2026-09-01T15:57:04.936Z",
+      "ok": true,
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "total": 512.5,
+      "subject": "Invoice INV-2026-08-031 from PB&J Strategic Accounting"
+    },
+    {
+      "at": "2026-09-01T16:00:08.334Z",
+      "ok": true,
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "kind": "ack",
+      "total": 512.5,
+      "subject": "Payment received for invoice INV-2026-08-031 — processing"
+    },
+    {
+      "at": "2026-09-08T20:27:04.841Z",
+      "ok": true,
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "total": 512.5,
+      "subject": "Invoice INV-2026-08-031 from PB&J Strategic Accounting",
+      "providerId": "6cc0717f-e3ad-4008-bbd6-ff905b167382"
+    },
+    {
+      "at": "2026-09-08T20:27:05.187Z",
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "kind": "delivery",
+      "event": "sent",
+      "detail": "",
+      "providerId": "6cc0717f-e3ad-4008-bbd6-ff905b167382"
+    },
+    {
+      "at": "2026-09-08T20:27:06.522Z",
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "kind": "delivery",
+      "event": "delivered",
+      "detail": "",
+      "providerId": "6cc0717f-e3ad-4008-bbd6-ff905b167382"
+    },
+    {
+      "at": "2026-09-09T20:22:14.614Z",
+      "ok": true,
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "total": 512.5,
+      "subject": "Invoice INV-2026-08-031 from PB&J Strategic Accounting",
+      "providerId": "87632e38-c0c3-48ca-a8e2-1c9aed8bb10a"
+    },
+    {
+      "at": "2026-09-09T20:22:14.910Z",
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "kind": "delivery",
+      "event": "sent",
+      "detail": "",
+      "providerId": "87632e38-c0c3-48ca-a8e2-1c9aed8bb10a"
+    },
+    {
+      "at": "2026-09-09T20:22:16.750Z",
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "kind": "delivery",
+      "event": "delivered",
+      "detail": "",
+      "providerId": "87632e38-c0c3-48ca-a8e2-1c9aed8bb10a"
+    },
+    {
+      "at": "2026-09-09T22:38:40.749Z",
+      "ok": true,
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "total": 512.5,
+      "subject": "Invoice INV-2026-08-031 from PB&J Strategic Accounting",
+      "providerId": "7e0e2b08-c381-4ffb-ba35-2c443b36a707"
+    },
+    {
+      "at": "2026-09-09T22:38:41.040Z",
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "kind": "delivery",
+      "event": "sent",
+      "detail": "",
+      "providerId": "7e0e2b08-c381-4ffb-ba35-2c443b36a707"
+    },
+    {
+      "at": "2026-09-09T22:38:41.945Z",
+      "to": [
+        "saylorgraceplumbing22@gmail.com"
+      ],
+      "kind": "delivery",
+      "event": "delivered",
+      "detail": "",
+      "providerId": "7e0e2b08-c381-4ffb-ba35-2c443b36a707"
+    }
+  ],
+  "writtenAt": "2026-09-11T23:11:11.728Z"
+}
