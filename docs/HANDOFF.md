@@ -23,12 +23,20 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-04, evening):** `main` = `31212c8`, deployed
-SUCCESS, `/health` 200, tree clean, suite **2840 tests / 168 files**. The
-three 2026-09-04 entries in §5 (deliverability; team/visibility split; the
-invoice-visibility leak) are the latest digest — read them in that order.
+**State right now (2026-09-11):** `main` = `e1b5266` (unchanged since
+2026-09-05), deployed SUCCESS. **Branch `claude/brittany-update-requests-c74z9v`
+carries the "Payment failed" tab, built from a claude.ai cloud session with NO
+Railway/DB access — it is verified (`npm run verify` green, **2864 tests /
+170 files**) but NOT merged, NOT deployed, and the manifest changed, so
+merging it means the full ship ritual including the voice re-provision.** Read
+the 2026-09-11 entry in §5 first, then the three 2026-09-04 entries.
 The queue:
 
+0. **Ship the Payment failed tab** (§5 2026-09-11): merge the branch to
+   `main` → deploy SUCCESS → `/health` 200 → `node
+   scripts/provision-voice-agent.mjs`. Then run the approval-gated backfill
+   for INV-2026-08-031 (Alex asked for it; the script is on the branch), so
+   the one failure that predates the log write shows in the tab too.
 1. **Brittany must re-pick every client's team** on the Team page (the
    2026-09-04 reset emptied Lisa's and Allison's lists; until she does, staff
    see no invoices on the Invoice Recap). Her tracker item
@@ -143,7 +151,8 @@ already and the problem is interpretation, not code.** See §7.
    do, **re-provision the voice agent after deploying** (§3).
 
 3. **`npm run verify`** = `eslint` + `tsc -b && vite build` + `vitest`. Green
-   before every push. Currently **2646 tests / 154 files** (2026-09-02).
+   before every push. Currently **2864 tests / 170 files** (2026-09-11, on
+   the unmerged branch; `main` is at 2840 / 168).
 
 4. Prefer targeted endpoints over the bulk save. `PUT /api/app-data` (the bulk
    workspace save) is **owner-only (403 for staff)** — anything staff must do
@@ -289,6 +298,44 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-11 — the month run has a "Payment failed" tab. BUILT + REVIEWED on
+branch `claude/brittany-update-requests-c74z9v`, NOT merged or deployed.**
+Built from a claude.ai cloud session (no Railway login, no `DATABASE_URL`, so
+no prod reproduction and no deploy — the first session in this history with
+that constraint; §0's "picking up on a different machine" applies, plus: the
+tracker is unreadable from there unless `DATABASE_PUBLIC_URL` is added to the
+cloud environment's variables). Alex's ask, after an owner email "Payment
+failed on invoice INV-2026-08-031 — Microdeposit verification … timed out":
+"we need a failed section probably so she knows to follow up with the client."
+
+What the failure IS: the client picked Stripe's manual bank entry instead of
+instant login, never confirmed the microdeposits, and Stripe cancelled the
+intent after 10 days. No money moved. The webhook (`server.js`
+`payment_intent.payment_failed`) already put the invoice back to `sent` and
+notified owners — and left NO trace on the invoice, so the row read "Sent"
+exactly like a client who never opened the email. That was the gap.
+
+| Commit | What |
+|---|---|
+| `03e4249` | **The tab.** NOT a status — a derived tab. `recordInvoicePaymentFailure` (db/store.js, both backends, modeled on `recordInvoiceDeliveryEvent`) appends `{kind:'payment', event:'failed', at, paymentIntentId, detail}` to the append-only `email_log`; never touches status; idempotent on the intent id. `unresolvedPaymentFailure()` (src/lib/utils.ts) = status `sent`/`overdue` AND newest failure newer than the newest successful invoice send → `byTab` routes it to **Payment failed** (between Sent and Paid) instead of Sent. Row: red `invoice-run-flag is-bad` "Payment failed Sep 10", Stripe's reason on hover. Editor: `role=alert` notice with the reason + "follow up, Send again for a fresh link, or Mark paid". **Send again is the follow-up and returns it to Sent.** A copied payment link does NOT clear it (that route logs no send) — the client's next attempt moving the status does. Owner notification now names the client. Manifest updated. |
+| `f82e97d` | **From the Opus review pass** (it found real things — keep doing it): the Stripe event id is ledgered BEFORE the handler runs, so a 500 on the new log write would NOT be retried into a second chance — Stripe's retry answers `duplicate` — and the owners' notification would silently never fire. The write is `.catch`-wrapped, pinned by a source test that the catch sits between the write and the notify loop. Also: "the pay link no longer works" → "may" (true for bank — the Checkout session is spent — false for a card decline, whose session stays open); the manifest paragraph had swallowed the tabs paragraph's sort sentence; the UI fixture used 14:00Z, which `formatSentOn` (LOCAL time, no TZ pinned in the suite) renders as the next day at UTC+10 — every sibling fixture uses 10:00Z, now this one does too. |
+
+Deliberately left (review flagged, cosmetic): dedup is on `paymentIntentId`
+only, so a card retried inside the same Checkout session keeps the FIRST
+attempt's date; a late failure for a voided-and-regenerated invoice logs onto
+the dead row (matches delivery events; nothing renders, notification still
+fires).
+
+**INV-2026-08-031 itself predates the log write and will NOT appear in the
+tab after deploy.** Alex asked for it backfilled with the reason:
+`scripts/prod/backfill-payment-failure.mjs <number> [--apply]` — reads the
+reason and time from production's OWN `invoice_payment_failed` notification
+rows and the intent id from the invoice row, snapshot to
+`docs/prod-snapshots/` before the write, `--undo <snapshot>`, dry-run by
+default. It is a prod write: Alex's explicit yes at run time, then commit the
+snapshot. The webhook has stored no client name for it — find it in the
+August run under Sent (search "031").
 
 **2026-09-04 (evening) — invoice email deliverability: named sender + human
 reply-to, a Resend delivery webhook that puts Delivered / Bounced / Marked
