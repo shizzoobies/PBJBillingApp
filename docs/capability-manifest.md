@@ -1588,12 +1588,25 @@ Clients page meanwhile. Owner-only.
 > months asks before discarding them, same as the picker.
 >
 > **The month's invoices are grouped into status tabs** — **To review**,
-> **Reviewed**, **Sent**, **Paid**, **Voided** — so you work one group at a time
-> instead of scrolling a single list of every client. Sent, Processing and
-> Overdue all live under **Sent** (each row still shows its own status). Every
-> tab carries its count, and all five counts stay visible at once, so you can
-> see the shape of the month without opening anything; a tab with nothing in it
-> is dimmed but still there. Within a tab the invoices are **alphabetical by
+> **Reviewed**, **Sent**, **Payment failed**, **Paid**, **Voided** — so you work
+> one group at a time instead of scrolling a single list of every client. Sent,
+> Processing and Overdue all live under **Sent** (each row still shows its own
+> status). Every tab carries its count, and all six counts stay visible at
+> once, so you can see the shape of the month without opening anything; a tab
+> with nothing in it is dimmed but still there.
+>
+> **Payment failed** is the follow-up list: invoices where the client tried to
+> pay and the payment did not go through — most often a bank account they
+> entered by hand and never verified within Stripe's 10-day microdeposit
+> window, or a debit their bank returned. Those invoices are still **Sent** and
+> still owed (nothing was collected); they sit in this tab instead of Sent so
+> the client who tried and stalled is not lost among the ones who have not
+> opened their email yet. The row shows a red **Payment failed [date]** flag,
+> and opening it shows Stripe's reason and what to do: the pay link from that
+> attempt is dead, so follow up with the client and **Send again** — the
+> re-send carries a fresh link and moves the invoice back to Sent — or **Mark
+> paid** if they pay another way. Every owner is also notified (bell + email)
+> the moment a payment fails, naming the invoice, the client and the reason. Within a tab the invoices are **alphabetical by
 > client by default**, with a Sort control to switch to invoice-number order or
 > total (high to low) — whichever is chosen, rows never rearrange while you
 > work through them. When you mark one reviewed, send it or void it, it simply
@@ -1814,8 +1827,10 @@ Clients page meanwhile. Owner-only.
 > transfer (ACH), which takes about **4 business days to clear**, so the invoice
 > reads **Processing** for several days before it turns **Paid**. That delay is
 > normal and is how bank transfers work - it is not stuck. A failed payment puts
-> the invoice back to Sent and notifies the owners. There is no button on a
-> voided invoice or one with nothing owed.
+> the invoice back to Sent, notifies the owners, and lists it under the month
+> run's **Payment failed** tab until it is sent again or paid another way (see
+> that tab above). There is no button on a voided invoice or one with nothing
+> owed.
 >
 > **Send (email the invoice).** In the month-run editor, next to Payment link,
 > there is a **Send** button. It emails the invoice to **every address attached

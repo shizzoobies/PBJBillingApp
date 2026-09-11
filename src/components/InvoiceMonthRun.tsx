@@ -74,6 +74,7 @@ import {
   resolveInvoiceRecipients,
   shiftReviewPeriod,
   toCents,
+  unresolvedPaymentFailure,
   type ResolvedInvoiceRecipients,
 } from '../lib/utils'
 import { InvoiceDeliveryBadge } from './InvoiceDeliveryBadge'
@@ -94,7 +95,7 @@ import { InvoiceDeliveryBadge } from './InvoiceDeliveryBadge'
  * are deliberately not part of the workspace bulk save — see the API module.
  */
 
-type RunTabId = 'to-review' | 'reviewed' | 'sent' | 'paid' | 'voided'
+type RunTabId = 'to-review' | 'reviewed' | 'sent' | 'failed' | 'paid' | 'voided'
 
 /**
  * What the page can ask of the run from outside — History's "Open in month
@@ -131,6 +132,13 @@ export type InvoiceMonthRunHandle = {
  * Sent, Processing and Overdue share one tab: they are all "it has gone out",
  * and the row still shows its own status pill, so nothing is lost by grouping
  * them.
+ *
+ * "Payment failed" is NOT a status — a failed attempt puts the invoice back to
+ * `sent`, still owed. It is a derived tab: a sent invoice whose newest payment
+ * failure is more recent than its newest send lands there instead of in Sent
+ * (`unresolvedPaymentFailure`), so the client who tried and stalled is not
+ * indistinguishable from the one who never opened the email. Sending it again
+ * is the follow-up, and returns it to Sent.
  */
 const TAB_OF_STATUS: Record<PersistedInvoice['status'], RunTabId> = {
   draft: 'to-review',
@@ -146,6 +154,11 @@ const RUN_TABS: ReadonlyArray<{ id: RunTabId; label: string; empty: string }> = 
   { id: 'to-review', label: 'To review', empty: 'Nothing left to review this month.' },
   { id: 'reviewed', label: 'Reviewed', empty: 'Nothing reviewed and waiting to go out.' },
   { id: 'sent', label: 'Sent', empty: 'Nothing has gone out for this month yet.' },
+  {
+    id: 'failed',
+    label: 'Payment failed',
+    empty: 'No failed payments this month — nothing to follow up on.',
+  },
   { id: 'paid', label: 'Paid', empty: 'Nothing paid for this month yet.' },
   { id: 'voided', label: 'Voided', empty: 'Nothing voided this month.' },
 ]
@@ -649,7 +662,9 @@ export function InvoiceMonthRun({
       // A money document must never vanish from the run. If the server ever
       // answers with a status this build does not know, it lands in To review
       // rather than nowhere — that tab forces eyes on it.
-      const tabId: RunTabId = TAB_OF_STATUS[invoice.status] ?? 'to-review'
+      const tabId: RunTabId = unresolvedPaymentFailure(invoice)
+        ? 'failed'
+        : (TAB_OF_STATUS[invoice.status] ?? 'to-review')
       map.get(tabId)?.push(invoice)
     }
     return map
@@ -1282,6 +1297,7 @@ function InvoiceRow({
   const isVoid = invoice.status === 'void'
   const flagged = invoice.scopeFlags.length > 0
   const adjustment = invoice.lineItems.find((line) => line.kind === 'adjustment')
+  const paymentFailure = unresolvedPaymentFailure(invoice)
 
   const rowClass = [
     'invoice-run-row',
@@ -1327,6 +1343,21 @@ function InvoiceRow({
               ? ` · ${recipientCountLabel(recipients.to.length)}`
               : ''}
           </span>
+          {/* The client tried to pay and it failed. Louder than the amber
+              scope flags because it is the one row here that needs a phone
+              call, not a decision — and the status pill on the right still
+              says Sent, which on its own would say nothing happened. */}
+          {paymentFailure ? (
+            <span className="invoice-run-flags">
+              <span
+                className="invoice-run-flag is-bad"
+                title={paymentFailure.detail || undefined}
+              >
+                <AlertTriangle size={13} />
+                Payment failed {formatSentOn(paymentFailure.at)}
+              </span>
+            </span>
+          ) : null}
           {/* Nobody on file is a flag in its own right — it used to surface as a
               409 only after she pressed Send. */}
           {!isVoid && recipients.to.length === 0 ? (
@@ -1834,6 +1865,8 @@ function InvoiceEditor({
   // state on purpose: a send remounts this editor, so anything transient is gone
   // by the time she looks, and this line has to survive that.
   const lastSent = latestInvoiceSend(invoice.emailLog)
+  // A failed payment attempt nobody has answered yet — same source, same reason.
+  const paymentFailure = unresolvedPaymentFailure(invoice)
 
   /**
    * Ask the server for a hosted Checkout URL. Deliberately does NOT open it —
@@ -2529,6 +2562,19 @@ function InvoiceEditor({
             ))}
           </ul>
         </details>
+      ) : null}
+
+      {/* What went wrong, in Stripe's words, and what to do about it. The old
+          pay link died with the attempt, so "call them" and "send it again"
+          are the two moves — a fresh link rides on the re-send. */}
+      {paymentFailure ? (
+        <p className="invoice-run-error invoice-run-payment-failed" role="alert">
+          <strong>Payment failed {formatSentOn(paymentFailure.at)}</strong>
+          {paymentFailure.detail ? ` — ${paymentFailure.detail}` : ''}
+          <br />
+          The pay link from that attempt no longer works. Follow up with the client, then
+          send the invoice again for a fresh link — or mark it paid if they pay another way.
+        </p>
       ) : null}
 
       {picking ? (

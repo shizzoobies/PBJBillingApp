@@ -2601,6 +2601,158 @@ describe('recordInvoiceDeliveryEvent statement shape (postgres branch)', () => {
 })
 
 /**
+ * `recordInvoicePaymentFailure` — a client's payment attempt that did not go
+ * through, remembered on the same log.
+ *
+ * The webhook moves the status back to `sent` separately; this entry is the
+ * only trace that anyone tried, and it is what puts the invoice in the month
+ * run's "Payment failed" tab. Same two rules as the delivery events: never a
+ * status write, and idempotent — here on the PaymentIntent, because one intent
+ * fails once no matter how many times Stripe retries the webhook.
+ */
+describe('recordInvoicePaymentFailure (file backend)', () => {
+  const seedInvoice = {
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-08',
+    number: 'INV-2026-08-031',
+    status: 'sent',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-09-15',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: '2026-08-28T12:00:00.000Z',
+    paidAt: null,
+    paymentMethod: null,
+    stripePaymentIntentId: 'pi_1',
+    emailLog: [
+      {
+        at: '2026-08-28T12:00:00.000Z',
+        to: ['ann@acme.com'],
+        subject: 'Invoice INV-2026-08-031',
+        ok: true,
+        total: 400,
+        providerId: 'ee-1',
+      },
+    ],
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [{ ...seedInvoice, ...overrides }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('appends a payment entry beside the send, tagged so it is neither a send nor a delivery', async () => {
+    await seed()
+    const updated = await store.recordInvoicePaymentFailure('inv-1', {
+      at: '2026-09-10T14:00:00.000Z',
+      paymentIntentId: 'pi_1',
+      detail: 'Microdeposit verification for this PaymentIntent has timed out.',
+    })
+
+    expect(updated.emailLog).toHaveLength(2)
+    expect(updated.emailLog[1]).toEqual({
+      kind: 'payment',
+      event: 'failed',
+      at: '2026-09-10T14:00:00.000Z',
+      paymentIntentId: 'pi_1',
+      detail: 'Microdeposit verification for this PaymentIntent has timed out.',
+    })
+    expect(updated.emailLog[0].ok).toBe(true)
+  })
+
+  // THE RULE. The status move is applyInvoicePayment's; this only remembers.
+  it('never changes the status or the sent date', async () => {
+    await seed()
+    const updated = await store.recordInvoicePaymentFailure('inv-1', {
+      paymentIntentId: 'pi_1',
+      detail: 'returned by the bank',
+    })
+
+    expect(updated.status).toBe('sent')
+    expect(updated.sentAt).toBe('2026-08-28T12:00:00.000Z')
+  })
+
+  it('is idempotent on the PaymentIntent — a retried webhook logs one attempt', async () => {
+    await seed()
+    const entry = { paymentIntentId: 'pi_1', detail: 'timed out' }
+    await store.recordInvoicePaymentFailure('inv-1', entry)
+    const again = await store.recordInvoicePaymentFailure('inv-1', entry)
+
+    expect(again.emailLog.filter((logged) => logged.kind === 'payment')).toHaveLength(1)
+  })
+
+  // Two attempts, two intents: the client tried twice, and both count.
+  it('keeps failures from two different attempts', async () => {
+    await seed()
+    await store.recordInvoicePaymentFailure('inv-1', { paymentIntentId: 'pi_1' })
+    const updated = await store.recordInvoicePaymentFailure('inv-1', { paymentIntentId: 'pi_2' })
+
+    expect(updated.emailLog.filter((logged) => logged.kind === 'payment')).toHaveLength(2)
+  })
+
+  it('refuses an invoice that is not there', async () => {
+    await seed()
+    expect(await store.recordInvoicePaymentFailure('nope', { paymentIntentId: 'pi_1' })).toBeNull()
+  })
+
+  it('falls back to now when the timestamp is unusable', async () => {
+    await seed()
+    const updated = await store.recordInvoicePaymentFailure('inv-1', {
+      at: 'whenever',
+      paymentIntentId: 'pi_1',
+    })
+
+    expect(Number.isNaN(new Date(updated.emailLog[1].at).getTime())).toBe(false)
+  })
+})
+
+describe('recordInvoicePaymentFailure statement shape (postgres branch)', () => {
+  it('appends to email_log and touches nothing else', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoicePaymentFailure('inv-1', {
+      at: '2026-09-10T14:00:00.000Z',
+      paymentIntentId: 'pi_1',
+      detail: 'timed out',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    expect(update.text).not.toMatch(/\bstatus\b/)
+    expect(update.text).not.toMatch(/\bsent_at\b/)
+    expect(update.text).not.toMatch(/\bstripe_payment_intent_id\b/)
+    expect(JSON.parse(update.params[1])[0]).toEqual({
+      kind: 'payment',
+      event: 'failed',
+      at: '2026-09-10T14:00:00.000Z',
+      paymentIntentId: 'pi_1',
+      detail: 'timed out',
+    })
+  })
+
+  it('writes nothing at all for an attempt it has already logged', async () => {
+    const fake = fakePostgres({
+      invoices: [
+        {
+          ...existingInvoice,
+          email_log: [
+            { kind: 'payment', event: 'failed', at: '2026-09-10T14:00:00.000Z', paymentIntentId: 'pi_1', detail: '' },
+          ],
+        },
+      ],
+    })
+    await postgresStore(fake).recordInvoicePaymentFailure('inv-1', { paymentIntentId: 'pi_1' })
+
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+  })
+})
+
+/**
  * Column parity between the invoice SELECT and the row mapper.
  *
  * This is the Postgres guard for the whole invoice read path, and it has to be

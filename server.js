@@ -3134,11 +3134,23 @@ const server = createServer(async (request, response) => {
             paymentIntentId: object.id,
           })
           const failureMessage = object.last_payment_error?.message ?? 'the payment was declined'
+          // The status move above leaves no trace — once the bell is cleared
+          // the row reads "Sent" as if nobody had tried. The log entry is what
+          // puts the invoice in the month run's "Payment failed" tab until she
+          // sends it again or the client pays another way.
+          await appDataStore.recordInvoicePaymentFailure(invoice.id, {
+            at: new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
+            paymentIntentId: object.id,
+            detail: failureMessage,
+          })
+          const failedClientName =
+            (await appDataStore.getClientNameById(invoice.clientId).catch(() => '')) || 'a client'
           const members = await appDataStore.getTeamMembers()
           for (const owner of members.filter((member) => member.role === 'owner')) {
             await notify(appDataStore, owner.id, 'invoice_payment_failed', {
-              message: `Payment failed on invoice ${invoice.number ?? invoice.id} — ${failureMessage}`,
+              message: `Payment failed on invoice ${invoice.number ?? invoice.id} to ${failedClientName} — ${failureMessage}`,
               link: '/invoices',
+              clientId: invoice.clientId,
               appPublicUrl: getPublicAppUrl(request),
             })
           }

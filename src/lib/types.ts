@@ -504,7 +504,26 @@ export interface InvoiceEmailDeliveryEntry {
   detail?: string
 }
 
-export type InvoiceEmailLogEntry = InvoiceEmailSendEntry | InvoiceEmailDeliveryEntry
+/**
+ * A client's payment attempt that FAILED, written by the Stripe webhook: a bank
+ * account never verified inside the microdeposit window, a returned debit, a
+ * declined card. The status went back to `sent` separately — this is the
+ * record that somebody tried, which the status alone cannot carry.
+ */
+export interface InvoicePaymentFailureEntry {
+  kind: 'payment'
+  event: 'failed'
+  at: string
+  /** Stripe's PaymentIntent id — the attempt this is about. */
+  paymentIntentId: string | null
+  /** Stripe's own reason, in its words. */
+  detail?: string
+}
+
+export type InvoiceEmailLogEntry =
+  | InvoiceEmailSendEntry
+  | InvoiceEmailDeliveryEntry
+  | InvoicePaymentFailureEntry
 
 /**
  * One thing the rater wants a second look at. `warn` is "this could be wrong";

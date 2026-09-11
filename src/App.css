@@ -12090,6 +12090,13 @@ tr.is-inactive-client .client-name-link {
   width: fit-content;
 }
 
+/* A failed payment attempt: red, not amber — it needs a person to follow up,
+   not a decision about the invoice. */
+.invoice-run-flag.is-bad {
+  background: rgba(197, 48, 48, 0.1);
+  color: #9b2226;
+}
+
 .invoice-run-amount {
   display: grid;
   gap: 5px;

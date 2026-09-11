@@ -10990,6 +10990,84 @@ export class AppDataStore {
   }
 
   /**
+   * Record that a client's payment attempt on an invoice FAILED — the Stripe
+   * `payment_intent.payment_failed` event: a bank account never verified
+   * within the microdeposit window, a debit returned by the bank, a card
+   * declined.
+   *
+   * Appended to the same append-only `email_log` the sends and delivery events
+   * live on, tagged `kind: 'payment'`. It is the durable trace the status
+   * cannot carry: the webhook puts the invoice back to `sent` (still owed),
+   * and without this entry the row would read exactly as it did before the
+   * client ever tried — nothing to tell Brittany to follow up.
+   *
+   * THE STATUS IS NEVER TOUCHED HERE. The status move belongs to
+   * `applyInvoicePayment`, called first by the webhook; this only remembers.
+   *
+   * Idempotent on `paymentIntentId`: one intent fails once, and a retried
+   * webhook must not make one attempt read as two.
+   *
+   * @returns the invoice, or null when there is no such invoice
+   */
+  async recordInvoicePaymentFailure(
+    invoiceId,
+    { at = null, paymentIntentId = null, detail = '' } = {},
+  ) {
+    if (!invoiceId) return null
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+
+    const intentId = paymentIntentId ? String(paymentIntentId) : null
+    const duplicate =
+      intentId !== null &&
+      (current.emailLog ?? []).some(
+        (logged) =>
+          logged?.kind === 'payment' &&
+          logged?.event === 'failed' &&
+          (logged?.paymentIntentId ?? null) === intentId,
+      )
+    if (duplicate) return current
+
+    const stamp = at && !Number.isNaN(new Date(at).getTime())
+      ? new Date(at).toISOString()
+      : nowIso()
+    const entry = {
+      kind: 'payment',
+      event: 'failed',
+      at: stamp,
+      paymentIntentId: intentId,
+      detail: String(detail ?? '').slice(0, 300),
+    }
+
+    if (this.pool) {
+      // Appended in SQL, not read-modify-write: the read above is a snapshot,
+      // and a delivery event about the same invoice can land in the same
+      // second. `status` is deliberately absent from this statement.
+      const { rowCount } = await this.pool.query(
+        `update invoices
+            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                updated_at = now()
+          where id = $1`,
+        [invoiceId, JSON.stringify([entry])],
+      )
+      if (rowCount === 0) return null
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    data.invoices[index] = {
+      ...data.invoices[index],
+      emailLog: [...(data.invoices[index].emailLog ?? []), entry],
+      updatedAt: nowIso(),
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return data.invoices[index]
+  }
+
+  /**
    * The invoice a Resend delivery event belongs to, when the event carries no
    * usable invoice tag: the one whose email log holds a send filed under that
    * provider id. A scan, like `findInvoiceByStripeRef` — the id lives inside a
