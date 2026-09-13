@@ -23,20 +23,19 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-11):** `main` = `e1b5266` (unchanged since
-2026-09-05), deployed SUCCESS. **Branch `claude/brittany-update-requests-c74z9v`
-carries the "Payment failed" tab, built from a claude.ai cloud session with NO
-Railway/DB access — it is verified (`npm run verify` green, **2864 tests /
-170 files**) but NOT merged, NOT deployed, and the manifest changed, so
-merging it means the full ship ritual including the voice re-provision.** Read
+**State right now (2026-09-13):** `main` = `HEAD_HASH`, deployed SUCCESS,
+`/health` 200 (and it now reports the serving `commit`), suite **2864 tests /
+170 files**. The "Payment failed" tab is MERGED and LIVE (`03e4249`,
+`f82e97d`, `404071e`), the INV-2026-08-031 backfill was APPLIED 2026-09-11
+(snapshot `c06cd0d`; the row's log ends `payment:failed@2026-09-11`), and
+the voice agent was re-provisioned 2026-09-13. The branch
+`claude/brittany-update-requests-c74z9v` is merged and can be deleted. Read
 the 2026-09-11 entry in §5 first, then the three 2026-09-04 entries.
 The queue:
 
-0. **Ship the Payment failed tab** (§5 2026-09-11): merge the branch to
-   `main` → deploy SUCCESS → `/health` 200 → `node
-   scripts/provision-voice-agent.mjs`. Then run the approval-gated backfill
-   for INV-2026-08-031 (Alex asked for it; the script is on the branch), so
-   the one failure that predates the log write shows in the tab too.
+0. Watch the Payment failed tab do its job: INV-2026-08-031 should sit in it
+   until Brittany sends it again or marks it paid. If it does not, the
+   `unresolvedPaymentFailure` rule (src/lib/utils.ts) is the place to look.
 1. **Brittany must re-pick every client's team** on the Team page (the
    2026-09-04 reset emptied Lisa's and Allison's lists; until she does, staff
    see no invoices on the Invoice Recap). Her tracker item
@@ -80,9 +79,35 @@ prefix) and end with the Co-Authored-By trailer your session specifies
 `lockfile-refresh` workflow (§3), never with `npm install` on Windows; `tmp/` is NOT eslint-ignored, so scratch
 scripts go in the OS-temp scratchpad, never the repo.
 
-**Picking up on a different machine (e.g. Alex's Mac):** this file is the
-ONLY memory that travels — the Claude memory directory lives on the Windows
-PC. Setup: Node 22 (`node -v`), then `npm ci` (the committed lockfile is
+**Picking up in ANY Claude account or environment (claude.ai cloud session,
+a colleague's account, a fresh install):** this file is the ONLY memory that
+travels — there is no other context anywhere, so read it start to finish
+before the first change. What works with nothing but the repo: everything
+in §3's ritual up to the push (`npm ci`, `npm run verify`), and the push
+itself deploys (Railway watches `main`). What needs credentials, and the
+workaround when you have none:
+- **Confirming a deploy** without the Railway CLI: `curl -s
+  https://app.pbjsa.com/health` — the body carries `commit` (first 7 of
+  the SHA Railway built); when it equals the commit you pushed and `ok` is
+  true, the deploy is live. Give Railway two to four minutes after the push.
+  If `/health` still shows the previous commit after ten minutes, the build
+  failed; only the Railway dashboard or the CLI's GraphQL route (§5
+  2026-09-03) shows a failed build's log — tell Alex.
+- **Production reads and the tracker** need `DATABASE_PUBLIC_URL`. In a
+  claude.ai cloud session it is unavailable unless Alex adds it to that
+  environment's variables; without it, say plainly that you could not
+  reproduce against production, and do not guess at data.
+- **Voice re-provision** (manifest changed) needs `ELEVENLABS_API_KEY`,
+  `ELEVENLABS_AGENT_ID`, `APP_PUBLIC_URL`, `VOICE_TOOL_SECRET` — without
+  them, leave it as the FIRST line of your handoff entry so the next session
+  with Railway access runs `node scripts/provision-voice-agent.mjs`.
+- **Prod writes** (backfills, resets) are Railway-credentialed and need
+  Alex's yes at run time regardless of where you are.
+- Cloud sessions work on a branch; the merge to `main` is the deploy. Say
+  in the handoff whether the branch is merged — the 2026-09-11 session did,
+  and that is what let the next one pick up cleanly.
+
+**On Alex's Mac specifically:** Setup: Node 22 (`node -v`), then `npm ci` (the committed lockfile is
 Linux-generated and carries the darwin-arm64 rolldown/esbuild bindings, so it
 installs clean on Apple silicon — do NOT run `npm install`, which would
 rewrite the lockfile; refresh it only via the `lockfile-refresh` workflow).
@@ -175,10 +200,9 @@ re-provision the voice agent:
 # deploy status — poll until SUCCESS
 npx @railway/cli@latest deployment list --service PBJBillingApp --json
 
-# health (expect 200)
-APP=$(npx @railway/cli@latest variables --service PBJBillingApp --json \
-  | node -e 'const v=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(v.APP_PUBLIC_URL)')
-curl -s -o /dev/null -w "%{http_code}\n" "$APP/health"
+# health (expect 200) — the body's "commit" must equal the hash you pushed;
+# this is the whole deploy check when you have no Railway login
+curl -s https://app.pbjsa.com/health
 
 # ONLY when docs/capability-manifest.md changed:
 #   export ELEVENLABS_API_KEY / ELEVENLABS_AGENT_ID / APP_PUBLIC_URL / VOICE_TOOL_SECRET

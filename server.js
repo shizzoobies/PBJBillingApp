@@ -1512,6 +1512,11 @@ const server = createServer(async (request, response) => {
         db,
         stripe: !isStripeConfigured() ? 'unconfigured' : isStripeTestMode() ? 'test' : 'live',
         stripeWebhook: isStripeWebhookConfigured() ? 'configured' : 'missing',
+        // Which commit is serving. Railway injects RAILWAY_GIT_COMMIT_SHA at
+        // runtime; a session with no Railway login (a claude.ai cloud session,
+        // a laptop on the road) confirms a deploy by matching this to the
+        // commit it pushed, instead of polling the CLI. Null off Railway.
+        commit: String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || null,
       })
       return
     }

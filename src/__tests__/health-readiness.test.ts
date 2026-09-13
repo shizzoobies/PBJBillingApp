@@ -77,6 +77,9 @@ describe('/health pings the store instead of just answering', () => {
       "stripe: !isStripeConfigured() ? 'unconfigured' : isStripeTestMode() ? 'test' : 'live'",
     )
     expect(block).toContain("stripeWebhook: isStripeWebhookConfigured() ? 'configured' : 'missing'")
+    // The deployed commit rides on the same body so a session without the
+    // Railway CLI can confirm a deploy from curl alone.
+    expect(block).toContain("commit: String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || null")
   })
 
   it('does not log a stack on a failed ping — one console.warn per failure only', () => {
