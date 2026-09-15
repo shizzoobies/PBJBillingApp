@@ -1361,6 +1361,24 @@ export function decimalHours(minutes: number) {
 }
 
 /**
+ * The task name to show for one time entry. An attached checklist reads back by
+ * id; otherwise the entry's free-text task name is shown — a custom task name
+ * the person typed on the Time page has to reach whoever is reading the row,
+ * not read "Unassigned".
+ *
+ * Lifted out of `src/pages/TimeApprovalsPage.tsx` when the invoicing side grew
+ * its own hours panel (featreq-8cec48db). The approver and the owner reviewing
+ * the invoice are looking at the same entries in two places, and a task that
+ * named itself differently in the two would read as two pieces of work.
+ */
+export function taskTitleFor(checklists: Checklist[], entry: TimeEntry): string {
+  if (entry.taskId) {
+    return checklists.find((checklist) => checklist.id === entry.taskId)?.title ?? 'Unassigned'
+  }
+  return entry.taskLabel?.trim() || 'Unassigned'
+}
+
+/**
  * The same "x.xxh" label for a figure that is ALREADY in hours and already
  * rounded — a total built by summing the displayed rows (`sumDisplayHours`)
  * rather than by rounding a pile of minutes. Kept beside `formatDecimalHours`

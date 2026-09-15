@@ -9,6 +9,7 @@ import {
   BillingMasterError,
   CHECKLIST_ITEM_SELECT_COLUMNS,
   CREATED_AT_PRESERVED_TABLES,
+  EntryTagError,
   INVOICE_SELECT_COLUMNS,
   InvoiceLockedError,
   ManualPaymentError,
@@ -977,6 +978,7 @@ function fakePostgres({
   recurringRows = [],
   aiReviewRows = [],
   aiReviewUpdateRowCount = 1,
+  timeEntryRows = [],
 } = {}) {
   const statements = []
   const record = (text, params) => {
@@ -1074,6 +1076,15 @@ function fakePostgres({
     }
     if (/^update invoice_ai_reviews set questions/i.test(trimmed)) {
       return { rows: [], rowCount: aiReviewUpdateRowCount }
+    }
+    // The scope re-tag's validation read (featreq-8cec48db). Anchored on its
+    // exact shape so a rewrite that stopped checking the client or the month
+    // falls through to the empty default and fails loudly, rather than
+    // silently trusting whatever entry ids a payload named.
+    if (/^select id, client_id, to_char\(entry_date/i.test(trimmed)) {
+      const wanted = new Set(params?.[0] ?? [])
+      const rows = timeEntryRows.filter((row) => wanted.has(row.id))
+      return { rows, rowCount: rows.length }
     }
     return { rows: [] }
   }
@@ -11682,5 +11693,257 @@ describe('ping()', () => {
     }
 
     await expect(pgStore.ping()).rejects.toThrow(/connection terminated/)
+  })
+})
+
+/**
+ * `updateInvoice`'s `entryTags` — the hours panel beside the invoice
+ * (featreq-8cec48db).
+ *
+ * The contract worth pinning is that THE LINES AND THE HOURS ARE ONE WRITE.
+ * Brittany re-tags a row as out of scope while reviewing the invoice; the save
+ * carries both the recomputed lines and the tag. If the tag were a second
+ * request, or were skipped when the lines were refused, the invoice would be
+ * the only record of a decision the time never got — which is the disagreement
+ * this whole feature exists to end.
+ *
+ * The second rule: a refused tag refuses the WHOLE save. It is checked before
+ * anything is written, on both backends.
+ */
+describe('updateInvoice entryTags (file backend)', () => {
+  const draftInvoice = {
+    id: 'inv-1',
+    clientId: 'c1',
+    kind: 'monthly',
+    period: '2026-08',
+    number: 'INV-2026-08-001',
+    status: 'draft',
+    lineItems: [
+      {
+        kind: 'hourly',
+        label: 'Billable hours — Lisa',
+        detail: '1.00h at $80.00/hr',
+        hours: 1,
+        rate: 80,
+        amount: 80,
+      },
+    ],
+    subtotal: 80,
+    total: 80,
+    dueDate: '2026-09-30',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: null,
+    paidAt: null,
+    paymentMethod: null,
+    appliedToInvoiceId: null,
+    emailLog: [],
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+
+  const approvedEntry = {
+    id: 't1',
+    clientId: 'c1',
+    employeeId: 'emp-1',
+    date: '2026-08-04',
+    minutes: 60,
+    description: 'Month-end close',
+    billable: true,
+    approvalStatus: 'approved',
+    approvedBy: 'emp-owner',
+    approvedAt: '2026-08-05T00:00:00.000Z',
+  }
+
+  /** The lines the panel's re-tag would leave behind: her hours are gone. */
+  const afterRetag = [{ kind: 'custom', label: 'Filing fee', detail: '', amount: 20 }]
+
+  async function seed(invoiceOverrides = {}, entries = [approvedEntry]) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients = [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 60 }]
+    data.employees = [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 80 }]
+    data.timeEntries = entries
+    data.invoices = [{ ...draftInvoice, ...invoiceOverrides }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const stored = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  it('writes the lines and the time entries in one read-modify-write', async () => {
+    await seed()
+    const updated = await store.updateInvoice('inv-1', {
+      lineItems: afterRetag,
+      entryTags: [{ entryId: 't1', tag: 'out-of-scope' }],
+    })
+
+    expect(updated.total).toBe(20)
+    const data = await stored()
+    expect(data.invoices[0].lineItems).toEqual(afterRetag)
+    expect(data.timeEntries[0]).toMatchObject({ billable: false, isAdhoc: false })
+  })
+
+  // Approval asks "is this record of the work right"; the scope tag decides how
+  // it BILLS. Writing one must never quietly answer the other.
+  it('leaves the approval alone', async () => {
+    await seed()
+    await store.updateInvoice('inv-1', {
+      lineItems: afterRetag,
+      entryTags: [{ entryId: 't1', tag: 'adhoc' }],
+    })
+
+    const entry = (await stored()).timeEntries[0]
+    expect(entry).toMatchObject({ billable: true, isAdhoc: true })
+    expect(entry.approvalStatus).toBe('approved')
+    expect(entry.approvedBy).toBe('emp-owner')
+    expect(entry.approvedAt).toBe('2026-08-05T00:00:00.000Z')
+  })
+
+  it('refuses an entry id it cannot find, and writes NOTHING', async () => {
+    await seed()
+    await expect(
+      store.updateInvoice('inv-1', {
+        lineItems: afterRetag,
+        entryTags: [{ entryId: 'nope', tag: 'out-of-scope' }],
+      }),
+    ).rejects.toBeInstanceOf(EntryTagError)
+
+    const data = await stored()
+    expect(data.invoices[0].lineItems).toEqual(draftInvoice.lineItems)
+    expect(data.timeEntries[0].billable).toBe(true)
+  })
+
+  it('refuses time from another client', async () => {
+    await seed({}, [{ ...approvedEntry, clientId: 'c2' }])
+    await expect(
+      store.updateInvoice('inv-1', {
+        lineItems: afterRetag,
+        entryTags: [{ entryId: 't1', tag: 'out-of-scope' }],
+      }),
+    ).rejects.toBeInstanceOf(EntryTagError)
+    expect((await stored()).invoices[0].lineItems).toEqual(draftInvoice.lineItems)
+  })
+
+  it('refuses time from another month', async () => {
+    await seed({}, [{ ...approvedEntry, date: '2026-07-31' }])
+    await expect(
+      store.updateInvoice('inv-1', {
+        lineItems: afterRetag,
+        entryTags: [{ entryId: 't1', tag: 'out-of-scope' }],
+      }),
+    ).rejects.toBeInstanceOf(EntryTagError)
+  })
+
+  it('takes a sub s time on a billing master s invoice', async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients = [
+      { id: 'c1', name: 'KLC', billingMode: 'hourly', hourlyRate: 60, isBillingMaster: true },
+      { id: 'c2', name: 'KLC Farms', billingMode: 'hourly', hourlyRate: 60, billToClientId: 'c1' },
+    ]
+    data.employees = [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 80 }]
+    data.timeEntries = [{ ...approvedEntry, clientId: 'c2' }]
+    data.invoices = [draftInvoice]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    await store.updateInvoice('inv-1', {
+      lineItems: afterRetag,
+      entryTags: [{ entryId: 't1', tag: 'adhoc' }],
+    })
+
+    expect((await stored()).timeEntries[0]).toMatchObject({ billable: true, isAdhoc: true })
+  })
+
+  // Past review the client is holding a copy of what this would change.
+  it('refuses a sent invoice', async () => {
+    await seed({ status: 'sent', sentAt: '2026-09-01T00:00:00.000Z' })
+    await expect(
+      store.updateInvoice('inv-1', {
+        lineItems: afterRetag,
+        entryTags: [{ entryId: 't1', tag: 'out-of-scope' }],
+      }),
+    ).rejects.toBeInstanceOf(EntryTagError)
+  })
+
+  it('refuses a voided invoice', async () => {
+    await seed({ status: 'void' })
+    await expect(
+      store.updateInvoice('inv-1', {
+        lineItems: afterRetag,
+        entryTags: [{ entryId: 't1', tag: 'out-of-scope' }],
+      }),
+    ).rejects.toBeInstanceOf(EntryTagError)
+  })
+
+  // A paid invoice is frozen by the older, broader rule — `entryTags` is one of
+  // `LOCKED_INVOICE_FIELDS`, so it never reaches the tag check at all.
+  it('refuses a paid invoice with the lock s own sentence', async () => {
+    await seed({ status: 'paid', paidAt: '2026-09-05T00:00:00.000Z' })
+    await expect(
+      store.updateInvoice('inv-1', {
+        entryTags: [{ entryId: 't1', tag: 'out-of-scope' }],
+      }),
+    ).rejects.toBeInstanceOf(InvoiceLockedError)
+
+    expect((await stored()).timeEntries[0].billable).toBe(true)
+  })
+
+  it('a save with no tags is untouched by any of this', async () => {
+    await seed()
+    const updated = await store.updateInvoice('inv-1', { lineItems: afterRetag })
+
+    expect(updated.total).toBe(20)
+    expect((await stored()).timeEntries[0].billable).toBe(true)
+  })
+})
+
+describe('updateInvoice entryTags statement shape (postgres branch)', () => {
+  const draftRow = {
+    ...existingInvoice,
+    status: 'draft',
+    sent_at: null,
+    line_items: [
+      { kind: 'hourly', label: 'Billable hours — Lisa', detail: '', hours: 1, rate: 80, amount: 80 },
+    ],
+  }
+  const entryRow = { id: 't1', client_id: 'c1', entry_date: '2026-08-04' }
+
+  const save = async (fake, entryTags) =>
+    postgresStore(fake).updateInvoice('inv-1', {
+      lineItems: [{ kind: 'custom', label: 'Filing fee', detail: '', amount: 20 }],
+      entryTags,
+    })
+
+  it('issues one batched update per tag, inside the invoice s own transaction', async () => {
+    const fake = fakePostgres({ invoices: [draftRow], timeEntryRows: [entryRow] })
+    await save(fake, [{ entryId: 't1', tag: 'adhoc' }])
+
+    const updates = fake.matching(/^update time_entries/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toMatch(/set billable = \$2, is_adhoc = \$3/)
+    expect(updates[0].params).toEqual([['t1'], true, true])
+    // Between the BEGIN and the COMMIT — the lines and the hours commit
+    // together or not at all.
+    expect(fake.indexOf(/^BEGIN$/i)).toBeGreaterThanOrEqual(0)
+    expect(fake.indexOf(/^update time_entries/i)).toBeGreaterThan(fake.indexOf(/^BEGIN$/i))
+    expect(fake.indexOf(/^COMMIT$/i)).toBeGreaterThan(fake.indexOf(/^update time_entries/i))
+  })
+
+  it('never touches an approval column', async () => {
+    const fake = fakePostgres({ invoices: [draftRow], timeEntryRows: [entryRow] })
+    await save(fake, [{ entryId: 't1', tag: 'out-of-scope' }])
+
+    const [update] = fake.matching(/^update time_entries/i)
+    expect(update.params).toEqual([['t1'], false, false])
+    expect(update.text).not.toMatch(/approval_status|approved_by|approved_at/)
+  })
+
+  it('writes nothing when an entry id does not belong to this invoice', async () => {
+    const fake = fakePostgres({ invoices: [draftRow], timeEntryRows: [] })
+    await expect(save(fake, [{ entryId: 't1', tag: 'adhoc' }])).rejects.toBeInstanceOf(
+      EntryTagError,
+    )
+
+    expect(fake.matching(/^update time_entries/i)).toEqual([])
+    expect(fake.matching(/^update invoices/i)).toEqual([])
+    expect(fake.matching(/^BEGIN$/i)).toEqual([])
   })
 })

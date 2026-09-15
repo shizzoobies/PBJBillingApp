@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoiceMonthRun, type InvoiceMonthRunHandle } from '../components/InvoiceMonthRun'
-import type { Client, PersistedInvoice } from '../lib/types'
+import type { Client, PersistedInvoice, TimeEntry } from '../lib/types'
 
 /**
  * The unsaved-edits guard on a MONTH change.
@@ -60,6 +60,18 @@ const invoice: PersistedInvoice = {
   createdAt: null,
   updatedAt: null,
 }
+
+/** One row for the hours panel, so a scope tag can be staged against it. */
+const taggableEntry = {
+  id: 'entry-1',
+  clientId: 'client-acme',
+  employeeId: 'emp-lisa',
+  date: '2026-08-04',
+  minutes: 90,
+  description: 'Month-end close',
+  billable: true,
+  approvalStatus: 'approved',
+} as unknown as TimeEntry
 
 /** Render the run, open its one invoice, and type into it so it is dirty. */
 async function renderWithDirtyEditor() {
@@ -188,6 +200,43 @@ describe('InvoiceMonthRun — unsaved edits guard on a month change', () => {
     // So the next month change has to ask again rather than assume they are gone.
     confirm.mockClear()
     fireEvent.change(monthInput, { target: { value: '2020-02' } })
+    expect(confirm).toHaveBeenCalledOnce()
+  })
+
+  /**
+   * A STAGED SCOPE TAG IS AN UNSAVED EDIT (featreq-8cec48db).
+   *
+   * Unlike the covered-date boxes and the AI answer drafts, which are
+   * deliberately kept out of `dirty`, a staged tag moves money: it takes hours
+   * off a person's billable line. So it has to gate Print and Send and warn on
+   * a month change exactly as a typed amount does — printing an invoice whose
+   * total is about to change is the whole reason those gates exist.
+   */
+  it('counts a staged scope tag as an unsaved edit', async () => {
+    confirm.mockReturnValue(false)
+    render(
+      <InvoiceMonthRun
+        clients={clients}
+        timeEntries={[taggableEntry]}
+        employees={[{ id: 'emp-lisa', name: 'Lisa', role: 'Bookkeeper', billRate: 100 }] as never}
+        onPrint={vi.fn()}
+      />,
+    )
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+
+    expect(screen.queryByText(/unsaved/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Print' })).not.toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText('Scope for Month-end close on 2026-08-04'), {
+      target: { value: 'out-of-scope' },
+    })
+
+    await screen.findByText(/unsaved/)
+    expect(screen.getByRole('button', { name: 'Print' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Mark reviewed' })).toBeDisabled()
+
+    // And the month guard asks about it, the same as a typed line would.
+    fireEvent.change(screen.getByLabelText('Billing month'), { target: { value: '2020-01' } })
     expect(confirm).toHaveBeenCalledOnce()
   })
 

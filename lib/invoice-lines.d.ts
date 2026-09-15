@@ -36,6 +36,9 @@ export type InvoiceLineOut = {
   adhocMode?: AdhocMode
   /** What billing this work WOULD charge, kept while the line sits at $0.00. */
   adhocAmount?: number
+  /** `adhoc` lines only: WHICH time entry this line is, so re-tagging that
+   *  entry from the invoicing panel can find its line again. */
+  entryId?: string
   /* -- the hours rule (featreq-cfb1536a) ----------------------------------- */
   /** Printed 2dp hours. `hours * rate === amount` by construction. */
   hours?: number
@@ -113,6 +116,9 @@ export const MONTH_NAMES: string[]
 export const currency: Intl.NumberFormat
 
 export function formatDecimalHours(minutes: number): string
+/** "2026-08-04" -> "Aug 4, 2026" — the ad hoc line's date, shared with the
+ *  scope-retag rule so a line reads the same wherever it was built. */
+export function adhocDateLabel(date: string | null | undefined): string
 export function normalizeBillingMonth(value: unknown): number
 export function getBillingPeriodLabel(period: string): string
 export function isInBillingPeriod(entry: { date?: string }, period: string): boolean

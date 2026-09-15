@@ -283,4 +283,27 @@ describe('editRequiresReapproval', () => {
   it('still un-approves when a non-owner changes the flag', () => {
     expect(editRequiresReapproval('approved', { isAdhoc: true }, false)).toBe(true)
   })
+
+  /**
+   * `billable` joined `isAdhoc` in the exemption with the hours panel beside the
+   * invoice (featreq-8cec48db). The two flags together ARE the scope decision —
+   * in scope, out of scope, ad hoc — and the panel writes it without touching
+   * approval at all. A narrower rule here would mean the same decision cost an
+   * entry its sign-off on the Time page and not on the invoice.
+   */
+  it('does NOT un-approve when an owner changes only the billable flag', () => {
+    expect(editRequiresReapproval('approved', { billable: false }, true)).toBe(false)
+  })
+
+  it('does NOT un-approve when an owner sets both scope flags together', () => {
+    expect(editRequiresReapproval('approved', { billable: true, isAdhoc: true }, true)).toBe(false)
+  })
+
+  it('still un-approves when an owner changes billable AND something else', () => {
+    expect(editRequiresReapproval('approved', { billable: false, minutes: 45 }, true)).toBe(true)
+  })
+
+  it('still un-approves when a non-owner changes billable', () => {
+    expect(editRequiresReapproval('approved', { billable: false }, false)).toBe(true)
+  })
 })

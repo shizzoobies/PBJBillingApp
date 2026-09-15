@@ -132,7 +132,11 @@ describe('the recurring-reimbursement routes never accept a ledger from the wire
  * behavior.
  */
 describe('the invoice PATCH route answers a locked invoice with a sentence', () => {
-  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 3000)
+  // Long enough to reach the catch-all 500 at the bottom of the same catch —
+  // the block grew when the scope re-tag's 409 joined the other three
+  // (featreq-8cec48db), and a window that stopped short would report the
+  // fallback as missing rather than as out of order.
+  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 4000)
 
   it('catches the locked error rather than letting it fall to the 500', () => {
     expect(block).toContain('error instanceof InvoiceLockedError')

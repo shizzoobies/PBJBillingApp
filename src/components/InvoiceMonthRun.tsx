@@ -54,14 +54,24 @@ import {
   hasUnconfirmedCoverage,
 } from '../../lib/expense-coverage.js'
 import {
+  applyScopeRetag,
+  type ScopeTag,
+  type ScopeTagEdits,
+} from '../../lib/invoice-scope-retag.js'
+import { InvoiceScopePanel } from './InvoiceScopePanel'
+import {
   ApiError,
   type AdhocMode,
+  type Checklist,
   type Client,
   type Contact,
+  type Employee,
   type InvoiceAiReview,
   type InvoiceAiReviewQuestion,
   type PersistedInvoice,
   type PersistedInvoiceLine,
+  type TimeEntry,
+  type TimesheetLock,
 } from '../lib/types'
 import {
   INVOICE_STATUS_LABELS,
@@ -185,6 +195,25 @@ const ADHOC_CHOICES: ReadonlyArray<{ value: AdhocMode; label: string }> = [
 type PatchResult =
   | { ok: true; invoice: PersistedInvoice }
   | { ok: false; message: string; retainer: boolean; locked: boolean }
+
+/**
+ * Everything ONE invoice's hours panel needs, resolved by the run rather than
+ * by the editor — the entries have to be narrowed the same way the re-tag rule
+ * narrows them, and a billing master's hours are its SUBS'. Gathered once per
+ * row so the editor and `applyScopeRetag` can never be looking at two different
+ * sets of entries.
+ */
+type ScopePanelData = {
+  client: Client | null
+  /** This invoice's entries: its client (or its subs), in its period. */
+  entries: TimeEntry[]
+  employees: Employee[]
+  checklists: Checklist[]
+  timesheetLocks: TimesheetLock[]
+  /** Preview, or an invoice past the point where its lines may change. */
+  readOnly: boolean
+  onEntriesTagged?: (tags: Array<{ entryId: string; tag: ScopeTag }>) => void
+}
 
 /**
  * The statuses in which a retainer credit may be ADDED. Mirrors
@@ -329,6 +358,12 @@ function formatDue(due: string | null) {
 export function InvoiceMonthRun({
   clients,
   contacts = [],
+  timeEntries = [],
+  employees = [],
+  checklists = [],
+  timesheetLocks = [],
+  previewMode = false,
+  onEntriesTagged,
   onPrint,
   refreshToken = 0,
   ref,
@@ -341,6 +376,29 @@ export function InvoiceMonthRun({
    * than a crash.
    */
   contacts?: Contact[]
+  /* ---- the hours panel beside an open invoice (featreq-8cec48db) ---------- */
+  /**
+   * The workspace's time entries, employees and checklists. DRILLED AS PROPS
+   * rather than read from the app context on purpose: this component has never
+   * touched the context (its tests mock only `../lib/api`), and reaching for it
+   * here would make every one of them set up a provider to render a month run.
+   * All four default to empty, so a caller that has no hours to show simply
+   * gets a panel that says so.
+   */
+  timeEntries?: TimeEntry[]
+  employees?: Employee[]
+  checklists?: Checklist[]
+  /** Signed-off months — a note on the row, not a block: owners are exempt. */
+  timesheetLocks?: TimesheetLock[]
+  /** An owner is previewing someone else's view; nothing here may be changed. */
+  previewMode?: boolean
+  /**
+   * The scope tags a save just wrote, handed back so the page can move them in
+   * local app data. Without it the panel would go on showing the old tags until
+   * the next full refetch — and the entry she just re-tagged is the one she is
+   * looking at.
+   */
+  onEntriesTagged?: (tags: Array<{ entryId: string; tag: ScopeTag }>) => void
   /** Hand a stored invoice up to the page, which owns the print document. */
   onPrint: (invoice: PersistedInvoice) => void
   /**
@@ -422,6 +480,52 @@ export function InvoiceMonthRun({
         contacts,
       }),
     [clients, contacts],
+  )
+
+  /**
+   * The hours behind one invoice, and who may change how they bill.
+   *
+   * A BILLING MASTER holds no time of its own, so its panel shows its SUBS'
+   * rows — the same resolution the generator used to build the lines those
+   * hours are behind (`billToClientId`). Anything else is that client's own.
+   *
+   * Only a draft or a reviewed invoice can take a re-tag: past that the client
+   * is holding a copy of what this would change, and the server refuses it. The
+   * panel still renders — she can read the hours behind a sent invoice — with
+   * the controls disabled and the reason said once at the top.
+   */
+  const scopeDataFor = useCallback(
+    (invoice: PersistedInvoice): ScopePanelData => {
+      const client = clients.find((c) => c.id === invoice.clientId) ?? null
+      const owning = new Set<string>([invoice.clientId])
+      if (client?.isBillingMaster) {
+        for (const sub of clients) {
+          if (sub.billToClientId === invoice.clientId) owning.add(sub.id)
+        }
+      }
+      return {
+        client,
+        entries: timeEntries.filter(
+          (entry) =>
+            owning.has(entry.clientId) && String(entry.date ?? '').startsWith(invoice.period),
+        ),
+        employees,
+        checklists,
+        timesheetLocks,
+        readOnly:
+          previewMode || (invoice.status !== 'draft' && invoice.status !== 'reviewed'),
+        onEntriesTagged,
+      }
+    },
+    [
+      clients,
+      timeEntries,
+      employees,
+      checklists,
+      timesheetLocks,
+      previewMode,
+      onEntriesTagged,
+    ],
   )
 
   /**
@@ -1206,6 +1310,7 @@ export function InvoiceMonthRun({
                     sourceClientName={clientName}
                     cardEnabled={cardEnabled(invoice.clientId)}
                     recipients={recipientsFor(invoice.clientId)}
+                    scope={scopeDataFor(invoice)}
                     // A retainer invoice is not itself a thing you credit —
                     // offering to give it back on itself would be circular.
                     retainer={
@@ -1249,6 +1354,7 @@ function InvoiceRow({
   sourceClientName,
   cardEnabled,
   recipients,
+  scope,
   retainer,
   review,
   rating,
@@ -1272,6 +1378,8 @@ function InvoiceRow({
   cardEnabled: boolean
   /** Every address this invoice would be emailed to, resolved before any click. */
   recipients: ResolvedInvoiceRecipients
+  /** The hours behind this invoice, for the panel beside it. */
+  scope: ScopePanelData
   /** A paid retainer of this client's that has not been given back yet, if any. */
   retainer: PersistedInvoice | null
   /** The AI's current read on this draft, if it has been rated. Advisory only. */
@@ -1405,6 +1513,7 @@ function InvoiceRow({
           isBillingMaster={isBillingMaster}
           sourceClientName={sourceClientName}
           recipients={recipients}
+          scope={scope}
           retainer={retainer}
           review={review}
           rating={rating}
@@ -1647,6 +1756,7 @@ function InvoiceEditor({
   isBillingMaster,
   sourceClientName,
   recipients,
+  scope,
   retainer,
   review,
   rating,
@@ -1666,6 +1776,8 @@ function InvoiceEditor({
   sourceClientName: (clientId: string) => string
   /** Who this would go to, resolved by the same code the send endpoint uses. */
   recipients: ResolvedInvoiceRecipients
+  /** The hours behind this invoice, for the panel beside the lines. */
+  scope: ScopePanelData
   /** A paid retainer of this client's with nothing spent against it yet. */
   retainer: PersistedInvoice | null
   /** The AI's current read on this draft, if it has one. */
@@ -1703,6 +1815,21 @@ function InvoiceEditor({
   // the run, because it is about the lines on this screen and it arrives with
   // the credit line being removed from them.
   const [retainerError, setRetainerError] = useState<string | null>(null)
+
+  /**
+   * The scope decisions staged in the hours panel, keyed by time entry id.
+   *
+   * Her answer to "live or on save" was ON SAVE — "stage up and apply together
+   * when the invoice is saved" — so this is the stage. UNLIKE `coverageEdits`
+   * and `answerDrafts`, which are deliberately kept out of `dirty`, a staged tag
+   * MOVES MONEY: it takes hours off a person's billable line or gives them their
+   * own ad hoc line. So it counts as an unsaved edit and gates Print and Send
+   * exactly as a typed amount does.
+   *
+   * Cleared by the remount a successful save causes (`key={invoice.updatedAt}`),
+   * which is also when the entries it describes come back re-tagged.
+   */
+  const [tagEdits, setTagEdits] = useState<ScopeTagEdits>({})
 
   /**
    * Covered-date windows being edited before confirming, keyed by expense id.
@@ -1926,9 +2053,47 @@ function InvoiceEditor({
     setPicking(true)
   }
 
+  /**
+   * The lines as the staged scope tags would leave them — what Save will send.
+   *
+   * Recomputed from the lines ON SCREEN on every render rather than folded into
+   * `lines`, for the reason every edit in this editor addresses a line by its
+   * INDEX in the saved array: folding a re-tag in would insert and remove rows
+   * underneath the controls she is using. The table stays the lines she is
+   * editing; the total, and the save, are what the tags would make of them.
+   */
+  const retag = applyScopeRetag({
+    lines,
+    entries: scope.entries,
+    tagEdits,
+    employees: scope.employees,
+    client: scope.client,
+    period: invoice.period,
+    defaultHourlyRate: Number(scope.client?.hourlyRate) || 0,
+  })
+  const previewLines = retag.lines
+
+  /** What each entry's own ad hoc line already says, so the panel shows it. */
+  const savedAdhocModes: Record<string, AdhocMode> = {}
+  for (const line of lines) {
+    if (line.kind === 'adhoc' && line.entryId) {
+      savedAdhocModes[line.entryId] = normalizeAdhocMode(line.adhocMode)
+    }
+  }
+
+  const stageTag = (entryId: string, tag: ScopeTag, adhocMode?: AdhocMode) => {
+    setTagEdits((current) => ({
+      ...current,
+      [entryId]: { tag, ...(tag === 'adhoc' ? { adhocMode: adhocMode ?? 'billed' } : {}) },
+    }))
+    setSaved(false)
+  }
+
   const dirty =
-    JSON.stringify(lines) !== JSON.stringify(invoice.lineItems) || blurb !== invoice.blurb
-  const localTotal = lines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0)
+    JSON.stringify(lines) !== JSON.stringify(invoice.lineItems) ||
+    blurb !== invoice.blurb ||
+    Object.keys(tagEdits).length > 0
+  const localTotal = previewLines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0)
   // Read off the lines ON SCREEN rather than the saved ones, so deleting the
   // line that is asking clears the block as soon as she does it — the same
   // shared rule the store applies on save, from the same function.
@@ -2155,9 +2320,23 @@ function InvoiceEditor({
 
   const save = async () => {
     setRetainerError(null)
-    const result = await onPatch({ lineItems: lines, blurb })
+    // The lines and the tags that moved them go in ONE request, because the
+    // server writes them in one transaction: there is no moment in which the
+    // invoice bills work its own time entries disagree about.
+    const entryTags = Object.entries(tagEdits).map(([entryId, edit]) => ({
+      entryId,
+      tag: edit.tag,
+    }))
+    const result = await onPatch({
+      lineItems: previewLines,
+      blurb,
+      ...(entryTags.length > 0 ? { entryTags } : {}),
+    })
     if (result.ok) {
       setSaved(true)
+      // The page moves them in local app data; the remount this save causes
+      // then re-reads the tags off entries that already carry them.
+      if (entryTags.length > 0) scope.onEntriesTagged?.(entryTags)
       return
     }
     // A locked invoice refused the save outright. Say so where she is looking
@@ -2195,79 +2374,100 @@ function InvoiceEditor({
           {MASTER_BREAKDOWN_NOTE}
         </p>
       ) : null}
-      <table className="invoice-run-lines">
-        {/* A master's invoice is grouped by COMPANY instead of by scope — see
-            `sourceGroups`. Everything about editing a row is the same either
-            way; only which block it sits in changes. */}
-        {sourceGroups.length > 0
-          ? sourceGroups.map((group) => (
-              <tbody className="invoice-run-source" key={group.key || '__own'}>
-                <tr className="invoice-run-source-heading">
-                  <th scope="colgroup">{group.name}</th>
-                  {/* Over the amount column, so a company's share reads down
-                      the same line its charges do. */}
-                  <th className="invoice-run-source-subtotal">
-                    {currency.format(group.subtotal)}
-                  </th>
-                  <td aria-hidden="true" />
-                </tr>
-                {group.rows.map(({ line, index }) => (
-                  <InvoiceLineRow
-                    key={`${line.kind}-${index}`}
-                    line={line}
-                    index={index}
-                    onChange={setLine}
-                    onRemove={removeLine}
-                    locked={Boolean(lockMessage)}
-                    coverage={coverageFor(line)}
-                    // Ad hoc work keeps its three-way decision inside its
-                    // company's block; a scoped line has none, and that absence
-                    // is what makes the row scoped.
-                    onModeChange={line.kind === 'adhoc' ? setAdhocMode : undefined}
-                  />
-                ))}
-              </tbody>
-            ))
-          : null}
-        {sourceGroups.length > 0 ? null : (
-          <tbody>
-            {scopedRows.map(({ line, index }) => (
-              <InvoiceLineRow
-                key={`${line.kind}-${index}`}
-                line={line}
-                index={index}
-                onChange={setLine}
-                onRemove={removeLine}
-                locked={Boolean(lockMessage)}
-                coverage={coverageFor(line)}
-              />
-            ))}
-          </tbody>
-        )}
-        {/* Out-of-scope work, set off in its own block so it can be reviewed as
-            a group. Each line carries its own decision: bill it, show it for
-            nothing, or leave it off entirely. */}
-        {sourceGroups.length === 0 && adhocRows.length > 0 ? (
-          <tbody className="invoice-run-adhoc">
-            <tr className="invoice-run-adhoc-heading">
-              <th colSpan={3} scope="colgroup">
-                Ad hoc — outside scope
-              </th>
-            </tr>
-            {adhocRows.map(({ line, index }) => (
-              <InvoiceLineRow
-                key={`${line.kind}-${index}`}
-                line={line}
-                index={index}
-                onChange={setLine}
-                onRemove={removeLine}
-                locked={Boolean(lockMessage)}
-                onModeChange={setAdhocMode}
-              />
-            ))}
-          </tbody>
-        ) : null}
-      </table>
+      {/* The lines, and BESIDE THEM the hours they were built from. Two columns
+          on a wide screen, stacked below it — she asked to see the time without
+          leaving the invoice, and a panel she has to scroll past the invoice to
+          reach is a second screen with extra steps. */}
+      <div className="invoice-run-editor-body">
+        <table className="invoice-run-lines">
+          {/* A master's invoice is grouped by COMPANY instead of by scope — see
+              `sourceGroups`. Everything about editing a row is the same either
+              way; only which block it sits in changes. */}
+          {sourceGroups.length > 0
+            ? sourceGroups.map((group) => (
+                <tbody className="invoice-run-source" key={group.key || '__own'}>
+                  <tr className="invoice-run-source-heading">
+                    <th scope="colgroup">{group.name}</th>
+                    {/* Over the amount column, so a company's share reads down
+                        the same line its charges do. */}
+                    <th className="invoice-run-source-subtotal">
+                      {currency.format(group.subtotal)}
+                    </th>
+                    <td aria-hidden="true" />
+                  </tr>
+                  {group.rows.map(({ line, index }) => (
+                    <InvoiceLineRow
+                      key={`${line.kind}-${index}`}
+                      line={line}
+                      index={index}
+                      onChange={setLine}
+                      onRemove={removeLine}
+                      locked={Boolean(lockMessage)}
+                      coverage={coverageFor(line)}
+                      // Ad hoc work keeps its three-way decision inside its
+                      // company's block; a scoped line has none, and that absence
+                      // is what makes the row scoped.
+                      onModeChange={line.kind === 'adhoc' ? setAdhocMode : undefined}
+                    />
+                  ))}
+                </tbody>
+              ))
+            : null}
+          {sourceGroups.length > 0 ? null : (
+            <tbody>
+              {scopedRows.map(({ line, index }) => (
+                <InvoiceLineRow
+                  key={`${line.kind}-${index}`}
+                  line={line}
+                  index={index}
+                  onChange={setLine}
+                  onRemove={removeLine}
+                  locked={Boolean(lockMessage)}
+                  coverage={coverageFor(line)}
+                />
+              ))}
+            </tbody>
+          )}
+          {/* Out-of-scope work, set off in its own block so it can be reviewed as
+              a group. Each line carries its own decision: bill it, show it for
+              nothing, or leave it off entirely. */}
+          {sourceGroups.length === 0 && adhocRows.length > 0 ? (
+            <tbody className="invoice-run-adhoc">
+              <tr className="invoice-run-adhoc-heading">
+                <th colSpan={3} scope="colgroup">
+                  Ad hoc — outside scope
+                </th>
+              </tr>
+              {adhocRows.map(({ line, index }) => (
+                <InvoiceLineRow
+                  key={`${line.kind}-${index}`}
+                  line={line}
+                  index={index}
+                  onChange={setLine}
+                  onRemove={removeLine}
+                  locked={Boolean(lockMessage)}
+                  onModeChange={setAdhocMode}
+                />
+              ))}
+            </tbody>
+          ) : null}
+        </table>
+        <InvoiceScopePanel
+          entries={scope.entries}
+          employees={scope.employees}
+          checklists={scope.checklists}
+          timesheetLocks={scope.timesheetLocks}
+          period={invoice.period}
+          tagEdits={tagEdits}
+          savedAdhocModes={savedAdhocModes}
+          onTagChange={stageTag}
+          applicable={retag.applicable}
+          blocked={retag.blocked}
+          readOnly={scope.readOnly || Boolean(lockMessage)}
+          isBillingMaster={isBillingMaster}
+          sourceClientName={sourceClientName}
+        />
+      </div>
 
       {/* Adding a line to a paid invoice would strand it: nothing here saves,
           and the remove control beside it is gone too. */}

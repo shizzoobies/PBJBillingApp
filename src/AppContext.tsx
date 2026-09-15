@@ -26,6 +26,7 @@ import type {
   WaitingOnMeItem,
 } from './lib/types'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
+import type { ScopeTag } from '../lib/invoice-scope-retag.js'
 import type { RecurringReimbursementCoverageInput } from './lib/api'
 
 export type AppContextValue = {
@@ -109,6 +110,16 @@ export type AppContextValue = {
   approveTimeEntry: (entryId: string) => Promise<void>
   rejectTimeEntry: (entryId: string, note: string) => Promise<void>
   approveTimeEntriesBatch: (entryIds: string[]) => Promise<void>
+  /**
+   * Move scope tags that the INVOICE save has already written (featreq-8cec48db).
+   *
+   * Local only, and deliberately so: `PATCH /api/invoices/:id` writes the lines
+   * and the entries' `billable` / `isAdhoc` in one transaction, so by the time
+   * this runs the server is already right. It exists to keep the hours panel
+   * she is looking at from showing the tag she just replaced — it does NOT mark
+   * the workspace dirty, so no bulk PUT echoes it back.
+   */
+  applyScopeTagsLocally: (tags: Array<{ entryId: string; tag: ScopeTag }>) => void
   lockTimesheet: (userId: string, period: string) => Promise<void>
   unlockTimesheet: (userId: string, period: string) => Promise<void>
   /**

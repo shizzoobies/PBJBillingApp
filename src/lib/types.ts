@@ -363,6 +363,15 @@ export type PersistedInvoiceLine = {
    */
   adhocAmount?: number
   /**
+   * `adhoc` lines only: WHICH time entry this line is (featreq-8cec48db).
+   * Stamped by the generator and carried through the store's sanitizer, so the
+   * hours panel beside the invoice can take the line back off when she re-tags
+   * that entry — matching on the label would break the moment she retypes it.
+   * Absent on drafts generated before this shipped; those fall back to an exact
+   * label+detail match.
+   */
+  entryId?: string
+  /**
    * `recurring` lines whose expense carries a covered-date window. The id is
    * how a confirmation finds its way back to that expense's ledger — matching
    * on the label would break the moment the wording is edited, which is the one

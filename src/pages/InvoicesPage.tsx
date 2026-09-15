@@ -451,6 +451,8 @@ export function InvoicesPage() {
     billingPeriod,
     printInvoice,
     ownerMode,
+    previewMode,
+    applyScopeTagsLocally,
     firmSettings,
   } = useAppContext()
 
@@ -861,6 +863,16 @@ export function InvoicesPage() {
         <InvoiceMonthRun
           clients={data.clients}
           contacts={data.contacts}
+          // The hours behind each invoice, for the review panel beside it
+          // (featreq-8cec48db). Handed down as props rather than read from the
+          // context inside the run: that component has never touched the
+          // context, and its tests mock only the API.
+          timeEntries={data.timeEntries}
+          employees={data.employees}
+          checklists={data.checklists}
+          timesheetLocks={data.timesheetLocks}
+          previewMode={previewMode}
+          onEntriesTagged={applyScopeTagsLocally}
           refreshToken={monthRunRefresh}
           ref={monthRunRef}
           onPrint={printStored}

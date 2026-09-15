@@ -149,6 +149,7 @@ import { checklistsVisibleTo } from './lib/checklistVisibility'
 import { isChecklistSkipped } from '../lib/checklist-skip.js'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
 import { visibleClientIdsForUser } from '../lib/data-scope.js'
+import { entryFlagsForScopeTag, type ScopeTag } from '../lib/invoice-scope-retag.js'
 import {
   defaultReportPeriod,
   normalizeReportPeriod,
@@ -1742,6 +1743,28 @@ function App() {
       setDataSyncState('error')
       throw error
     }
+  }
+
+  /**
+   * Move scope tags the INVOICE save has already written (featreq-8cec48db).
+   *
+   * There is no request here on purpose. `PATCH /api/invoices/:id` writes the
+   * lines and these two flags in ONE transaction, so the server is already
+   * right by the time this runs; a second call would be a way for the two to
+   * disagree. Built on `applyServerDataUpdate` for the same reason the approval
+   * batch is: the change is persisted, so the workspace must NOT be marked
+   * dirty and no bulk PUT may echo it back.
+   */
+  const applyScopeTagsLocally = (tags: Array<{ entryId: string; tag: ScopeTag }>) => {
+    if (previewActiveRef.current || tags.length === 0) return
+    const byId = new Map(tags.map((tag) => [tag.entryId, tag.tag]))
+    applyServerDataUpdate((current) => ({
+      ...current,
+      timeEntries: current.timeEntries.map((entry) => {
+        const tag = byId.get(entry.id)
+        return tag ? { ...entry, ...entryFlagsForScopeTag(tag) } : entry
+      }),
+    }))
   }
 
   const lockTimesheet = async (userId: string, period: string) => {
@@ -3905,6 +3928,7 @@ function App() {
     approveTimeEntry,
     rejectTimeEntry,
     approveTimeEntriesBatch,
+    applyScopeTagsLocally,
     lockTimesheet,
     unlockTimesheet,
     submitWeeklyTimesheet,

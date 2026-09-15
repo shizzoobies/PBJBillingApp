@@ -34,6 +34,7 @@
   type WeeklySubmission,
 } from './types'
 import type { GroupAllocationMode } from '../../lib/group-allocation.js'
+import type { ScopeTag } from '../../lib/invoice-scope-retag.js'
 import type { SkipReasonCategory } from '../../lib/checklist-skip.js'
 
 /**
@@ -3448,6 +3449,13 @@ export async function updateInvoiceRequest(
     blurb?: string
     dueDate?: string
     status?: 'draft' | 'reviewed' | 'void'
+    /**
+     * Scope decisions staged in the hours panel beside the invoice
+     * (featreq-8cec48db), sent WITH the lines they moved. The server writes
+     * both inside one transaction — the point of the pairing is that an invoice
+     * can never bill work its own time entries disagree about.
+     */
+    entryTags?: Array<{ entryId: string; tag: ScopeTag }>
   },
 ) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}`, {

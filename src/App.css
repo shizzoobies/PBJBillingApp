@@ -12181,9 +12181,130 @@ tr.is-inactive-client .client-name-link {
   padding: 14px;
 }
 
+/* The lines, and the hours they were built from, side by side — she asked to
+   review the time WITHOUT leaving the invoice (featreq-8cec48db). One column
+   below 1200px, because at that width the panel would squeeze the amounts. */
+.invoice-run-editor-body {
+  display: grid;
+  gap: 16px;
+}
+
+@media (min-width: 1200px) {
+  .invoice-run-editor-body {
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  }
+}
+
 .invoice-run-lines {
   border-collapse: collapse;
   width: 100%;
+}
+
+/* ---- the hours review panel ---------------------------------------------- */
+
+.invoice-scope {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.invoice-scope-head h3 {
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.invoice-scope-note,
+.invoice-scope-empty {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+.invoice-scope-panel {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+
+.invoice-scope-panel th,
+.invoice-scope-panel td {
+  padding: 4px 6px 4px 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.invoice-scope-panel thead th {
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.invoice-scope-company th {
+  color: var(--gold);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding-top: 12px;
+  text-transform: uppercase;
+}
+
+.invoice-scope-member th {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.invoice-scope-subtotals {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  padding-top: 8px;
+}
+
+.invoice-scope-hours {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.invoice-scope-date {
+  white-space: nowrap;
+}
+
+.invoice-scope-choice {
+  display: grid;
+  gap: 4px;
+  min-width: 170px;
+}
+
+/* Said on the row, because "on save" is the whole rule: nothing here has
+   happened yet, and she should be able to see which rows are waiting. */
+.invoice-scope-staged {
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* An owner is exempt from the month lock, so this is a note and not a block —
+   knowing the month was signed off is the useful part. */
+.invoice-scope-locked {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* The hours are on a line somebody renamed, so they cannot be moved by the
+   arithmetic. Said out loud rather than swallowed: a tag that quietly moved no
+   money would be worse than one that admits it. */
+.invoice-scope-blocked {
+  color: var(--danger, #b4483d);
+  font-size: 11px;
 }
 
 .invoice-run-lines td {

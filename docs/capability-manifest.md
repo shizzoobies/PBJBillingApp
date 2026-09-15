@@ -1829,6 +1829,55 @@ Clients page meanwhile. Owner-only.
 > everything else — which means it also discards the choices you made on them,
 > the same as any other edit.
 >
+> **THE HOURS BEHIND THE INVOICE SIT BESIDE IT, AND YOU CAN RE-TAG THEM
+> THERE.** Opening an invoice in the month run shows a **Hours this period**
+> panel next to the lines (beside them on a wide screen, below them on a narrow
+> one): every time entry the invoice's month and client cover, grouped by team
+> member, with Date, Description, Task and Hours. Each member's heading carries
+> their in-scope, ad hoc and out-of-scope hour subtotals. On a billing master
+> the rows are grouped by company first, then by person.
+>
+> Each row carries a dropdown — **In scope**, **Out of scope**, **Ad hoc** —
+> showing the tag the entry ALREADY has from when the time was logged or
+> reviewed, so this is an override rather than a fresh decision. Picking **Ad
+> hoc** offers the same three options as the ad hoc block above (Invoice it /
+> Show detail only / Leave off the invoice), and billed ad hoc work is charged at
+> that person's own bill rate. The panel is the last catch before an invoice goes
+> out: out-of-scope or one-off work that slipped into the ordinary hours can be
+> moved without leaving the invoice.
+>
+> **Nothing happens until you press Save.** Tags stage up, marked **"Will apply
+> on save"**, and the running total under the lines shows what the invoice will
+> come to. One Save writes the lines and the re-tagged time entries together, so
+> the invoice can never bill work the time entries disagree about. Until then
+> Print, Send and the payment link are held behind "Save your changes first", the
+> same as any typed edit. Re-tagging never changes an entry's approval — approval
+> is about whether the record of the work is right; the tag is about how it bills.
+>
+> **Out of scope travels beyond this invoice:** it marks the time non-billable
+> everywhere, reports and analytics included. To keep the hours billable but off
+> this one invoice, use **Ad hoc → Leave off the invoice** instead.
+>
+> **When the lines have been renamed, the tag saves but the money does not
+> move.** The panel can only shift hours between lines that carry their own
+> hours and rate — the "Billable hours — <name>" lines Generate writes. Once a
+> line has been retyped ("Bookkeeping Services", "CFO/Advisory Services", "For
+> services rendered for the month of") there is no way to tell which of them a
+> given entry is inside, so the app refuses to add a charge it cannot also
+> subtract: adding one anyway would bill that work twice. The row says so —
+> *"The tag will save, but these hours are on a renamed line — adjust the
+> invoice line yourself"* — the tag is still recorded, and the invoice line is
+> edited by hand.
+>
+> Where the panel does not offer the decision: **subscription and annual
+> clients** and **months before June 2026** have no per-employee hourly lines to
+> move hours between, so the hours are shown for reference with the controls
+> disabled and a line saying why. So are **sent, processing, paid and voided**
+> invoices — past review the client is holding a copy of what this would change,
+> and the app refuses the re-tag rather than quietly rewriting it. A month a
+> timesheet lock has signed off shows a **Month locked** note on the row; an
+> owner may still re-tag it.
+>
 > **Download for QBO** exports the month as a line-level CSV for QuickBooks'
 > invoice import. Voided invoices are left out. ⚠️ The `Item` column is a
 > placeholder until Brittany confirms the product/service names in her own QBO

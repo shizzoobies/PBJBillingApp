@@ -25,6 +25,7 @@ import {
   isGroupHoldingEntry,
   localDateOnly,
   sessionMinutes,
+  taskTitleFor,
   weekRangeOf,
 } from '../lib/utils'
 
@@ -43,18 +44,9 @@ function previousPeriod(period: string): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
 }
 
-/**
- * The task name to show for an entry. An attached checklist reads back by id;
- * otherwise the entry's free-text task name is shown — a custom task name the
- * person typed on the Time page has to reach the approver, not read
- * "Unassigned".
- */
-function taskTitleFor(checklists: Checklist[], entry: TimeEntry): string {
-  if (entry.taskId) {
-    return checklists.find((checklist) => checklist.id === entry.taskId)?.title ?? 'Unassigned'
-  }
-  return entry.taskLabel?.trim() || 'Unassigned'
-}
+/* `taskTitleFor` now lives in src/lib/utils.ts — the hours panel beside an
+   invoice reads the same rule, and the approver and the owner must not see one
+   entry's task named two ways. */
 
 export function TimeApprovalsPage() {
   const {

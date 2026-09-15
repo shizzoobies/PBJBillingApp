@@ -38,6 +38,9 @@ import {
   normalizeTimeBreakdownMode,
   retainerCreditAmount,
 } from '../lib/invoice-lines.js'
+// THE tag -> flags rule, shared with the panel that stages the decision, so
+// what she saw staged and what lands in `time_entries` cannot differ.
+import { entryFlagsForScopeTag, isScopeTag } from '../lib/invoice-scope-retag.js'
 import {
   anchorDayFromRange,
   anchorDayOf,
@@ -920,6 +923,23 @@ export class CoverageConfirmationError extends Error {
 }
 
 /**
+ * A scope re-tag the invoice will not carry — the invoice has gone out, or one
+ * of the entry ids does not belong to the month and client being invoiced.
+ *
+ * Same shape and same reason as `RetainerCreditError`: a fact about the data,
+ * said in a sentence she can act on. It is thrown BEFORE any write, and the
+ * whole save goes with it — a refused tag must never leave the lines stored and
+ * the hours un-moved, because the invoice would then be the only record of a
+ * decision the time never got.
+ */
+export class EntryTagError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'EntryTagError'
+  }
+}
+
+/**
  * A write a BILLING MASTER refuses, or a bill-to link that does not hold.
  *
  * Same shape and same reason as the three above: a fact about the data, said in
@@ -1174,12 +1194,20 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
       const reserved = roundMoney(
         mode === 'billed' ? line?.amount : line?.adhocAmount ?? line?.amount,
       )
-      return {
+      const adhoc = {
         ...base,
         amount: mode === 'billed' ? reserved : 0,
         adhocMode: mode,
         adhocAmount: reserved,
       }
+      // WHICH PIECE OF TIME THIS LINE IS (featreq-8cec48db). Named here for the
+      // same reason `sourceClientId` is named on `base`: this sanitizer is the
+      // one chokepoint every line passes through and it drops props it does not
+      // name — so without this, one round trip through the editor would strip
+      // the identity the hours panel uses to take the line back off when she
+      // re-tags that entry, and a later un-tag would leave it stranded.
+      if (typeof line?.entryId === 'string' && line.entryId) adhoc.entryId = line.entryId
+      return adhoc
     })
     // A courtesy or omitted adhoc line is $0.00 BY DECISION, not by being an
     // empty row someone left behind, and it still holds the amount it would
@@ -9814,6 +9842,116 @@ export class AppDataStore {
    * who acted, not a fact. `original_line_items` is deliberately NOT written
    * here — it is the as-generated snapshot and only `_insertInvoice` sets it.
    */
+  /**
+   * The entries a scope re-tag could legitimately name, and what is known about
+   * them — one lookup, written twice because this store has two backends and a
+   * Postgres-only gap would pass CI in silence.
+   */
+  async _entryTagContext(ids, current) {
+    if (this.pool) {
+      const found = await this.pool.query(
+        `select id, client_id, to_char(entry_date, 'YYYY-MM-DD') as entry_date
+           from time_entries where id = any($1::text[])`,
+        [ids],
+      )
+      const subs = await this.pool.query(
+        `select id from clients where bill_to_client_id = $1`,
+        [current.clientId],
+      )
+      return {
+        entries: new Map(
+          found.rows.map((row) => [
+            row.id,
+            { clientId: row.client_id ?? '', date: row.entry_date ?? '' },
+          ]),
+        ),
+        allowedClientIds: new Set([current.clientId, ...subs.rows.map((row) => row.id)]),
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const wanted = new Set(ids)
+    return {
+      entries: new Map(
+        (data.timeEntries ?? [])
+          .filter((entry) => wanted.has(entry.id))
+          .map((entry) => [entry.id, { clientId: entry.clientId ?? '', date: entry.date ?? '' }]),
+      ),
+      allowedClientIds: new Set([
+        current.clientId,
+        ...(data.clients ?? [])
+          .filter((client) => client?.billToClientId === current.clientId)
+          .map((client) => client.id),
+      ]),
+    }
+  }
+
+  /**
+   * The scope re-tags travelling with this save, grouped by tag — or null when
+   * there are none.
+   *
+   * VALIDATED BEFORE ANY WRITE, and a refusal takes the whole save with it. The
+   * alternative — store the lines, skip the tags — would leave the invoice as
+   * the only record of a decision the time never got, which is exactly the
+   * disagreement this feature exists to end.
+   *
+   * What it refuses: an invoice that has already gone out (the client is
+   * holding a copy of what this would change), and any entry id that is not in
+   * this invoice's month and not this client's — or, on a billing master, not
+   * one of its subs'. An entry id is a claim about what is being tagged, so it
+   * is checked against the store rather than trusted.
+   *
+   * APPROVAL FIELDS ARE NEVER TOUCHED. Approval asks "is this record of the
+   * work right"; the scope tag decides how the work BILLS. They are different
+   * questions, and the person answering the second one here is the approver.
+   */
+  async _resolveEntryTags(current, patch) {
+    const raw = patch?.entryTags
+    if (raw === undefined || raw === null) return null
+    if (!Array.isArray(raw)) {
+      throw new EntryTagError('That scope change was not in a shape this invoice can read.')
+    }
+    if (raw.length === 0) return null
+
+    if (current.status !== 'draft' && current.status !== 'reviewed') {
+      throw new EntryTagError(
+        'Scope tags can only be changed while the invoice is a draft or reviewed. Void it and issue a new one if it is wrong.',
+      )
+    }
+
+    const wanted = new Map()
+    for (const item of raw) {
+      const entryId = typeof item?.entryId === 'string' ? item.entryId : ''
+      if (!entryId || !isScopeTag(item?.tag)) {
+        throw new EntryTagError('That scope change names time this invoice does not cover.')
+      }
+      wanted.set(entryId, item.tag)
+    }
+
+    const ids = [...wanted.keys()]
+    const { entries, allowedClientIds } = await this._entryTagContext(ids, current)
+    for (const entryId of ids) {
+      const entry = entries.get(entryId)
+      if (
+        !entry ||
+        !String(entry.date).startsWith(current.period) ||
+        !allowedClientIds.has(entry.clientId)
+      ) {
+        throw new EntryTagError('That scope change names time this invoice does not cover.')
+      }
+    }
+
+    // Grouped by tag, so however many rows she tagged there are at most three
+    // statements — and each one is the same two flags for every id in it.
+    const byTag = new Map()
+    for (const [entryId, tag] of wanted) {
+      const group = byTag.get(tag)
+      if (group) group.push(entryId)
+      else byTag.set(tag, [entryId])
+    }
+    return byTag
+  }
+
   async updateInvoice(id, patch = {}, opts = {}) {
     const all = await this.listInvoices()
     const current = all.find((invoice) => invoice.id === id)
@@ -9829,6 +9967,12 @@ export class AppDataStore {
     // PATCH route is reachable with a stale tab, a replayed request, or curl.
     const lockRefusal = invoiceLockRefusal(current, patch)
     if (lockRefusal) throw new InvoiceLockedError(lockRefusal)
+
+    // The hours panel beside the invoice stages her scope decisions and sends
+    // them with the lines they moved. Resolved HERE, above the backend split and
+    // above every field assignment, for the same reason the lock is: a refusal
+    // has to refuse the whole save, on both backends.
+    const entryTags = await this._resolveEntryTags(current, patch)
 
     const next = { ...current }
     if (Array.isArray(patch.lineItems)) {
@@ -9895,11 +10039,15 @@ export class AppDataStore {
       // second row to keep in step — the single statement is still the whole
       // write. An event DOES need the transaction: the record of what she
       // changed and the change itself must land together or not at all.
+      // Scope re-tags force the transaction too: the lines and the hours they
+      // moved are one decision, and a window in which the invoice bills work the
+      // time entries no longer agree is the disagreement this feature removes.
       if (
         !retainerWork.apply &&
         !retainerWork.clear &&
         coverageToRelease.length === 0 &&
-        !reviewEvent
+        !reviewEvent &&
+        !entryTags
       ) {
         const { rowCount } = await this.pool.query(
           `update invoices
@@ -9982,6 +10130,21 @@ export class AppDataStore {
           await this._clearCoverageLedgerForPeriod(current.period, coverageToRelease, { dbClient })
         }
 
+        // The hours follow the lines, on the SAME connection and inside the same
+        // BEGIN. Only the two scope flags move; approval status, approver and
+        // approved-at are deliberately left alone (see `_resolveEntryTags`).
+        if (entryTags) {
+          for (const [tag, entryIds] of entryTags) {
+            const flags = entryFlagsForScopeTag(tag)
+            await dbClient.query(
+              `update time_entries
+                  set billable = $2, is_adhoc = $3, updated_at = now()
+                where id = any($1::text[])`,
+              [entryIds, flags.billable, flags.isAdhoc],
+            )
+          }
+        }
+
         if (reviewEvent) {
           await this._insertInvoiceReviewEvent(reviewEvent, { dbClient })
         }
@@ -10025,6 +10188,19 @@ export class AppDataStore {
       }
       retainer.appliedToInvoiceId = id
       retainer.updatedAt = nowIso()
+    }
+    // The hours this save re-tagged, inside the SAME read-modify-write — the
+    // file backend's version of the transaction above, and the reason a refused
+    // entry id has to throw before this function reaches here.
+    if (entryTags) {
+      const tagById = new Map()
+      for (const [tag, entryIds] of entryTags) {
+        for (const entryId of entryIds) tagById.set(entryId, tag)
+      }
+      data.timeEntries = (data.timeEntries ?? []).map((entry) => {
+        const tag = tagById.get(entry.id)
+        return tag ? { ...entry, ...entryFlagsForScopeTag(tag) } : entry
+      })
     }
     // The windows this void releases, inside the SAME read-modify-write — the
     // file backend's version of the transaction above.

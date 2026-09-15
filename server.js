@@ -9,6 +9,7 @@ import {
   BillingMasterError,
   coerceEntryMinutes,
   CoverageConfirmationError,
+  EntryTagError,
   InvoiceAiReviewError,
   InvoiceLockedError,
   ManualPaymentError,
@@ -4223,6 +4224,14 @@ const server = createServer(async (request, response) => {
         // under her, not that something went wrong.
         if (error instanceof InvoiceLockedError) {
           sendJson(response, 409, { error: 'invoice_locked', message: error.message })
+          return
+        }
+        // A scope re-tag the invoice will not carry — it has gone out, or an
+        // entry id in the body is not this invoice's month and client. Same
+        // treatment as the three above: a sentence, and NOTHING was written, so
+        // the lines she is looking at are still the lines on file.
+        if (error instanceof EntryTagError) {
+          sendJson(response, 409, { error: 'entry_tag_refused', message: error.message })
           return
         }
         console.error('[invoices] update failed:', error)
