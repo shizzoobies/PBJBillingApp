@@ -314,6 +314,32 @@ function mapSessionUser(user) {
   }
 }
 
+/**
+ * One `users` row -> the app-shaped team member. Shared by `getTeamMembers`
+ * (the whole roster) and `getTeamMember` (a single row), so the two can never
+ * hand back differently-shaped members.
+ */
+function mapTeamMemberRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    role: row.role === 'owner' ? 'owner' : 'employee',
+    staffRole: row.staff_role,
+    magicToken: row.magic_token ?? null,
+    tokenRevokedAt: row.token_revoked_at ? new Date(row.token_revoked_at).toISOString() : null,
+    lastActiveAt: row.last_active_at ? new Date(row.last_active_at).toISOString() : null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    totpEnabled: Boolean(row.totp_enabled),
+    costRate: row.cost_rate == null ? null : Number(row.cost_rate),
+    billRate: row.bill_rate == null ? null : Number(row.bill_rate),
+    emailNotificationPrefs:
+      row.email_notification_prefs && typeof row.email_notification_prefs === 'object'
+        ? row.email_notification_prefs
+        : {},
+  }
+}
+
 function generateMagicToken() {
   return randomBytes(32).toString('base64url')
 }
@@ -14131,24 +14157,7 @@ export class AppDataStore {
         order by sort_order asc nulls last, name asc
       `)
 
-      return result.rows.map((row) => ({
-        id: row.id,
-        name: row.name,
-        email: row.email,
-        role: row.role === 'owner' ? 'owner' : 'employee',
-        staffRole: row.staff_role,
-        magicToken: row.magic_token ?? null,
-        tokenRevokedAt: row.token_revoked_at ? new Date(row.token_revoked_at).toISOString() : null,
-        lastActiveAt: row.last_active_at ? new Date(row.last_active_at).toISOString() : null,
-        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
-        totpEnabled: Boolean(row.totp_enabled),
-        costRate: row.cost_rate == null ? null : Number(row.cost_rate),
-        billRate: row.bill_rate == null ? null : Number(row.bill_rate),
-        emailNotificationPrefs:
-          row.email_notification_prefs && typeof row.email_notification_prefs === 'object'
-            ? row.email_notification_prefs
-            : {},
-      }))
+      return result.rows.map(mapTeamMemberRow)
     }
 
     const authState = await readJson(localAuthPath)
@@ -14229,7 +14238,28 @@ export class AppDataStore {
     return normalized
   }
 
+  /**
+   * One active team member by id, or null.
+   *
+   * Postgres reads the single row rather than mapping the whole roster: this is
+   * on the hot path for `X-Preview-As` (every API read while an owner previews
+   * somebody resolves through it), and it used to select and shape all ~30
+   * users to find one. Same `inactive_at is null` rule as `getTeamMembers` —
+   * soft-deleted users must stay unresolvable — and the same shaped row, which
+   * is why the mapping is shared rather than written twice.
+   */
   async getTeamMember(userId) {
+    if (!userId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at,
+                created_at, totp_enabled, cost_rate, bill_rate, email_notification_prefs
+           from users
+          where id = $1 and inactive_at is null`,
+        [userId],
+      )
+      return result.rows.length ? mapTeamMemberRow(result.rows[0]) : null
+    }
     const members = await this.getTeamMembers()
     return members.find((member) => member.id === userId) ?? null
   }

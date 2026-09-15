@@ -72,7 +72,11 @@ export declare function canOfferSkip(args: {
   canWrite: boolean
 }): boolean
 
-/** Same gate as {@link canOfferSkip} — one template setting governs both. */
+/**
+ * Every task the viewer can edit, one-offs included — NOT gated by the
+ * template's `skipAllowed`. `templates` is accepted and ignored so callers that
+ * pass the same argument object to both gates still type-check.
+ */
 export declare function canOfferPush(args: {
   checklist: { templateId?: string; skippedAt?: string | null } | null | undefined
   templates?: { id?: string; skipAllowed?: boolean }[]

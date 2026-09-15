@@ -124,16 +124,24 @@ Clients page meanwhile. Owner-only.
 - Quick actions: New task, Invite bookkeeper, Add client, Notifications.
 - "Viewing as" (owner): preview the app exactly as a specific bookkeeper sees
   it (read-only preview; exit anytime).
-  - **Every page in preview shows the previewed person's own data**, not the
-    owner's — the Invoice Recap (only the clients that person's team is on),
-    the notification bell and its unread badge, "Waiting on you", and the
-    item-deletion and pending-edit approval queues. Entering or leaving
-    preview refreshes all of them straight away; there is no need to reload.
+  - **Every page built for preview shows the previewed person's own data**, not
+    the owner's — the Invoice Recap (only the clients that person's team is on),
+    the notification bell and its unread badge, "Waiting on you", the
+    item-deletion and pending-edit approval queues, a case timeline, a client's
+    notes, and a team member's activity log. Entering or leaving preview
+    refreshes all of them straight away; there is no need to reload.
+  - **Owner-only pages stay owner-only in preview, which means they refuse.**
+    Firm settings, the AI assistant, invoices, the client recap and the feature
+    tracker all answer firm-wide, and a bookkeeper cannot open them at all — so
+    while viewing as one they say they cannot load, exactly as she would see.
   - Anything that has not been built for preview **refuses to answer rather
-    than showing the owner's data**. If a panel says it cannot load while
-    viewing as somebody else, that is deliberate — report it and it will be
-    taught about preview; it is never quietly showing the owner's figures
-    under a bookkeeper's name.
+    than showing the owner's data**. That includes naming somebody the app
+    cannot find: preview refuses instead of quietly falling back to the owner.
+    If a panel says it cannot load while viewing as somebody else, that is
+    deliberate — report it and it will be taught about preview; it is never
+    quietly showing the owner's figures under a bookkeeper's name.
+  - Entering a preview is written to the activity log, against the owner who
+    started it.
   - Preview stays strictly read-only: nothing can be changed from inside it.
 
 ## Time tracking (Time page)
@@ -663,11 +671,13 @@ Clients page meanwhile. Owner-only.
 - **Pushing a recurring task to a new date.** When someone still intends to do a
   recurring task but not by the date it is due, they can push it — the task
   stays open and moves to a new due date instead of being stepped past.
-  - **It sits beside Skip, behind the same setting.** The card shows two buttons
-    where skipping is turned on: "Skip this cycle" and "Push to a new date".
-    Where skipping is off there is neither — one setting on the repeating setup
-    governs both, and one-off tasks are never pushable for the same reason they
-    are never skippable.
+  - **It is on every task you can edit.** "Push to a new date" shows on any task
+    you are allowed to change — recurring or one-off, whatever the repeating
+    setup says about skipping. It sits beside "Skip this cycle" where skipping
+    is turned on, and on its own everywhere else. **Skip is unchanged**: it
+    still appears only where an owner turned it on for that repeating setup, and
+    never on a one-off. (Push used to share that setting, which is why it was
+    hard to find — it was on 6 of 150 repeating setups.)
   - **The form is the same, plus a date.** A required dropdown for **who could
     not complete it (me / a colleague / the client)**, a required written
     explanation, and a **new due date pre-filled with the next cycle** of that
@@ -1230,9 +1240,13 @@ Clients page meanwhile. Owner-only.
     split-across-clients list, the Track time modal, and the client dropdown
     when editing an entry); the "For which client" picker when creating a task
     or recurring checklist; template copy targets; the Team page's "+ Add
-    client"; the Invoices billing queue and its client picker; and the Client
-    Recap picker, which lists active clients only until you tick "Include
-    inactive clients" on it.
+    client"; the Invoices billing queue and its client picker; the **Client
+    filter on the Checklists and Gantt pages** (a filter over work still
+    outstanding, which a retired client has none of — if a saved link already
+    names one, it stays in the list so the filter still reads correctly); the
+    **repeating-task lists** on Checklists, whether or not anything is typed in
+    the search box; and the Client Recap picker, which lists active clients only
+    until you tick "Include inactive clients" on it.
   - What is NOT touched: every time entry, checklist, invoice, note,
     reimbursement, contact link, plan, and assigned-team member stays exactly
     as it was. Nothing is deleted, and reactivating restores the client with

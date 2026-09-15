@@ -14,11 +14,22 @@
  *   - a picker that CREATES something else about a client (team assignment,
  *     invoice run) → `selectableClients`;
  *   - a filter/label over data that already exists (reports, timesheets,
- *     approvals, invoice history, board filters) → the raw list, because
- *     history must never lose its subject.
+ *     approvals, invoice history) → the raw list, because history must never
+ *     lose its subject.
  *
- * The Client Recap picker is the one deliberate exception to that last line.
- * It reads as a filter over existing data, but it is the page the owner opens
+ * TWO deliberate exceptions to that last line, both filters that offer
+ * `selectableClients` instead of the raw list.
+ *
+ * The first is the shared board filter (`components/FilterBar`, used by the
+ * Checklists and Gantt pages). It looks like a filter over history, but what it
+ * filters is work still OUTSTANDING — a client the firm no longer works for has
+ * no open tasks to narrow to, so its only effect was to put two retired names
+ * (one of them alphabetically first) at the top of a dropdown the whole team
+ * opens daily. It passes the filter's CURRENT value as `keepIds`, so a
+ * persisted `?client=` URL naming a retired client still renders its name.
+ *
+ * The second is the Client Recap picker. It reads as a filter over existing
+ * data too, but it is the page the owner opens
  * every month, and a list of everyone the firm has ever had makes the routine
  * job harder ("I want to be able to recap old clients but not on a regular
  * basis" — featreq-60f24838). So it offers ACTIVE clients by default behind an

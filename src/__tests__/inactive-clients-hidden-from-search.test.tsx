@@ -10,9 +10,13 @@
  * (filterInProgressChecklists) and, for a page whose filter is inline-only, a
  * light render mirroring the existing pattern already used for that page.
  */
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
+import { FilterBar } from '../components/FilterBar'
 import { inactiveClientIdSet } from '../lib/clientLifecycle'
 import { filterInProgressChecklists } from '../lib/inProgressFilter'
 import { DelayedPage } from '../pages/DelayedPage'
@@ -172,5 +176,72 @@ describe('DelayedPage search — inactive clients (featreq-60f24838)', () => {
     fireEvent.change(search, { target: { value: 'gone co' } })
 
     expect(screen.queryByText('Gone Co')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * featreq-60f24838, sent back: the two retired clients were still in the
+ * Checklists "Client" filter, "17 Signature" sitting at the top of it.
+ *
+ * `FilterBar` is the shared dropdown behind the Checklists and Gantt pages and
+ * it mapped the raw `clients` prop. It is a filter, which normally means the
+ * raw list — but what it filters is work still outstanding, and a client the
+ * firm no longer works for has none. See the header of lib/clientLifecycle.ts.
+ */
+describe('FilterBar client dropdown — inactive clients (featreq-60f24838)', () => {
+  const CLIENTS = [ACTIVE_CLIENT, RETIRED_CLIENT] as unknown as Client[]
+
+  const renderBar = (search = '') =>
+    render(
+      <MemoryRouter initialEntries={[`/checklists${search}`]}>
+        <FilterBar clients={CLIENTS} employees={[]} />
+      </MemoryRouter>,
+    )
+
+  it('offers the active client and leaves the retired one out', () => {
+    renderBar()
+    const select = screen.getByLabelText('Client')
+    const names = [...select.querySelectorAll('option')].map((option) => option.textContent)
+    expect(names).toContain('Acme Dental')
+    expect(names).not.toContain('Gone Co')
+  })
+
+  it('keeps a retired client that the filter is CURRENTLY set to', () => {
+    // A bookmarked or shared `?client=<retired id>` URL. Dropping the option
+    // would render a select whose value matches nothing — blank, and silently
+    // re-pointing the filter on the next change.
+    renderBar(`?client=${RETIRED_CLIENT.id}`)
+    const select = screen.getByLabelText('Client') as HTMLSelectElement
+    expect(select.value).toBe(RETIRED_CLIENT.id)
+    expect([...select.querySelectorAll('option')].map((o) => o.textContent)).toContain('Gone Co')
+  })
+})
+
+/**
+ * The two repeating-task lists dropped a retired client's setups only while
+ * something was typed, so the names came straight back when the search box was
+ * cleared. Both are inline inside unexported components of ChecklistsPage, so
+ * the filter is pinned at its source — the same arrangement the server-route
+ * suites use.
+ */
+describe('repeating-task lists hide retired clients with an EMPTY query too', () => {
+  const pageSource = readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../pages/ChecklistsPage.tsx'),
+    'utf8',
+  )
+
+  it('the staff view narrows its base list, not just the search result', () => {
+    // `liveGroups` is the inactive-free base; the query branch and the header
+    // count both read it, so the count can never promise rows the list hides.
+    expect(pageSource).toContain('const liveGroups = useMemo(()')
+    expect(pageSource).toContain('if (!q) return liveGroups')
+    expect(pageSource).toContain('if (liveGroups.length === 0) return null')
+    expect(pageSource).toContain('const totalTemplates = liveGroups.reduce(')
+  })
+
+  it('the owner’s Repeating tasks manager narrows before the query, not inside it', () => {
+    expect(pageSource).toContain('const liveRegularTemplates = allRegularTemplates.filter(')
+    expect(pageSource).toContain('? liveRegularTemplates.filter(')
+    expect(pageSource).toContain(': liveRegularTemplates')
   })
 })

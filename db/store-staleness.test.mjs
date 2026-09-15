@@ -5787,6 +5787,49 @@ describe('quiet skip (file backend)', () => {
     expect(await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')).toBeNull()
   })
 
+  // Push is offered on EVERY task now, one-offs included (featreq-68638ed2 —
+  // the `skipAllowed` gate hid it on 95% of them). Nothing in the write reads
+  // the template, so the only question is whether a null `templateId` is
+  // tolerated: the cycle stamp is inert on a row the materializer never looks at.
+  it('pushes a ONE-OFF task — no template, no cycle to keep a place in', async () => {
+    await store.write(
+      workspace({
+        checklists: [instance({ id: 'cl-oneoff', templateId: null, dueDate: '2026-08-31' })],
+        checklistTemplates: [],
+      }),
+    )
+
+    const updated = await store.pushChecklistInstance('cl-oneoff', 'emp-1', '2026-09-30')
+    expect(updated.dueDate).toBe('2026-09-30')
+    expect(updated.pushedBy).toBe('emp-1')
+    // Stamped harmlessly: with no template there is no identity tuple reading it.
+    expect(updated.cycleDueDate).toBe('2026-08-31')
+
+    const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-oneoff')
+    expect(row.dueDate).toBe('2026-09-30')
+    expect(row.templateId ?? null).toBeNull()
+  })
+
+  it('files a one-off push on the review trail with a null template id', async () => {
+    const record = await store.createChecklistSkip({
+      checklistId: 'cl-oneoff',
+      templateId: null,
+      clientId: 'c1',
+      title: 'Clean up the 2025 books',
+      skippedBy: 'emp-1',
+      skippedByName: 'Lisa Chen',
+      reasonCategory: 'client',
+      reasonNote: 'They have not sent the statements yet.',
+      kind: 'push',
+      newDueDate: '2026-09-30',
+    })
+
+    const stored = (await authPersisted()).checklistSkips.find((entry) => entry.id === record.id)
+    expect(stored.templateId).toBeNull()
+    expect(stored.kind).toBe('push')
+    expect(stored.newDueDate).toBe('2026-09-30')
+  })
+
   it('survives a bulk save — an autosave must not un-push a task', async () => {
     await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
     const stamped = (await persisted()).checklists[0].pushedAt
@@ -5991,6 +6034,33 @@ describe('quiet skip (postgres branch)', () => {
     expect(statement.text).toMatch(/skipped_at is null/i)
     expect(statement.text).toMatch(/deleted_at is null/i)
     expect(statement.params).toEqual(['cl-1', 'emp-1', '2026-09-30'])
+    // The update never mentions template_id, which is why a ONE-OFF task
+    // (featreq-68638ed2) pushes on Postgres exactly as it does on the file
+    // backend — there is no per-template gate left in the write.
+    expect(statement.text).not.toMatch(/template_id/i)
+  })
+
+  it('files a ONE-OFF push with a null template_id — the column is nullable', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createChecklistSkip({
+      checklistId: 'cl-oneoff',
+      templateId: null,
+      clientId: 'c1',
+      title: 'Clean up the 2025 books',
+      skippedBy: 'emp-1',
+      skippedByName: 'Lisa Chen',
+      reasonCategory: 'client',
+      reasonNote: 'They have not sent the statements yet.',
+      kind: 'push',
+      newDueDate: '2026-09-30',
+    })
+
+    const [statement] = fake.matching(/insert into checklist_skips/i)
+    expect(statement).toBeTruthy()
+    // params: id, checklist_id, template_id, client_id, ...
+    expect(statement.params[2]).toBeNull()
+    expect(statement.params).toContain('push')
+    expect(statement.params).toContain('2026-09-30')
   })
 
   it('files the push on the same trail, with its kind and its new date', async () => {

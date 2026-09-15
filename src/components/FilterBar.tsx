@@ -1,3 +1,4 @@
+import { selectableClients } from '../lib/clientLifecycle'
 import type { Client, Employee } from '../lib/types'
 import { useFilters } from './useFilters'
 
@@ -38,7 +39,16 @@ export function FilterBar({
           value={client}
         >
           <option value="">All</option>
-          {clients.map((option) => (
+          {/*
+            Retired clients are left out (featreq-60f24838): this dropdown is
+            the Checklists and Gantt client filter, and both are lists of work
+            still to do, so a client the firm no longer works for has nothing to
+            filter down to — "17 Signature" simply sat at the top of the list.
+            `keepIds` re-admits whichever client the filter is currently SET to,
+            so a bookmarked or shared `?client=<retired id>` URL still renders
+            its own name instead of a blank select.
+          */}
+          {selectableClients(clients, [client]).map((option) => (
             <option key={option.id} value={option.id}>
               {option.name}
             </option>

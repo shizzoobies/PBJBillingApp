@@ -228,4 +228,44 @@ describe('owner previewing a staff member: checklist surfaces scope to them', ()
     expect(headers.get('X-Preview-As')).toBe(JORDAN_ID)
     expect(headers.get('X-Preview-Mode')).toBe('1')
   })
+
+  /**
+   * A CHILD's effects run before its parent's. The notification bell refetches
+   * on `previewUserId`, and App published the same value to `api.ts`'s fetch
+   * wrapper from an effect — so the bell's request went out while the module
+   * still held the previous preview, and the badge answered with the owner's
+   * unread mail under the staffer's name until its next 60-second poll. App
+   * writes it during render now, which is ordered before every effect.
+   */
+  it('the notification bell’s first refetch already names the previewed person', async () => {
+    await bootAndEnterPreview()
+
+    const calls = (globalThis.fetch as unknown as Mock).mock.calls
+    const counts = calls.filter(([input]) => String(input).includes('/api/notifications/unread-count'))
+    expect(counts.length).toBeGreaterThan(1)
+
+    const headers = new Headers((counts[counts.length - 1][1] as RequestInit | undefined)?.headers)
+    expect(headers.get('X-Preview-As')).toBe(JORDAN_ID)
+  })
+
+  /**
+   * Logging out FROM INSIDE a preview. `logoutSession` goes through the same
+   * wrapper as everything else, so the POST carried `X-Preview-Mode: 1` — and
+   * the server refuses every write verb carrying it. The UI signed you out and
+   * the session stayed alive on the server.
+   */
+  it('logging out while previewing sends no preview headers, so the session is really revoked', async () => {
+    await bootAndEnterPreview()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Log out' }))
+    await screen.findByRole('heading', { name: /^sign in to /i })
+
+    const calls = (globalThis.fetch as unknown as Mock).mock.calls
+    const logout = calls.filter(([input]) => String(input).includes('/api/logout'))
+    expect(logout).toHaveLength(1)
+
+    const headers = new Headers((logout[0][1] as RequestInit | undefined)?.headers)
+    expect(headers.get('X-Preview-As')).toBeNull()
+    expect(headers.get('X-Preview-Mode')).toBeNull()
+  })
 })

@@ -1745,6 +1745,11 @@ export function describeActivityAction(action: string): string {
       return 'reviewed the skip of'
     case 'template_viewers_updated':
       return 'updated template viewers'
+    case 'preview_started':
+      // Reads "<owner> started viewing as <user id>" — the target is the id of
+      // the person whose workspace was loaded, not a name, because the entry is
+      // written server-side where only the id is resolved.
+      return 'started viewing as'
     case 'team_invited':
       return 'invited'
     case 'team_revoked':

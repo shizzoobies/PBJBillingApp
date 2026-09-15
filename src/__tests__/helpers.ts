@@ -76,6 +76,12 @@ export function installFetchMock(options: FetchMockOptions): void {
     if (path.endsWith('/api/notifications/unread-count')) {
       return jsonResponse({ count: 0 })
     }
+    // Signing out. Mocked so a test can assert what the request CARRIED (a
+    // logout sent from inside a preview used to carry the read-only preview
+    // headers, and the server refused it) rather than only that it happened.
+    if (path.endsWith('/api/logout')) {
+      return jsonResponse({ ok: true })
+    }
     // Secondary endpoints the authenticated dashboard polls. Returning empty
     // payloads keeps the boot path quiet; the components also tolerate 404s.
     if (path.endsWith('/api/team')) {

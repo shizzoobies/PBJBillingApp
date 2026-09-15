@@ -371,14 +371,25 @@ function App() {
     previewUserId !== null && role === 'owner' && Boolean(sessionUser)
   const previewActiveRef = useRef(previewActive)
 
-  // Mirror preview state into the ref AND into api.ts's central fetch wrapper
-  // so every request carries the preview headers while previewing: the
-  // `X-Preview-Mode` read-only guard, and `X-Preview-As` naming WHO is being
-  // previewed so each endpoint can scope its own answer to them.
+  // Mirror preview state into api.ts's central fetch wrapper so every request
+  // carries the preview headers while previewing: the `X-Preview-Mode`
+  // read-only guard, and `X-Preview-As` naming WHO is being previewed so each
+  // endpoint can scope its own answer to them.
+  //
+  // DURING RENDER, not in an effect. React runs a CHILD's effects before its
+  // parent's, so the NotificationBell's `previewUserId` effects fired — and
+  // refetched — while this module value still held the previous preview, and
+  // the bell answered with the owner's mail under the staffer's name until its
+  // next 60-second poll. Writing it here is safe because it is idempotent and
+  // touches nothing React owns: no state is set, so no re-render is scheduled.
+  setPreviewUser(previewActive ? previewUserId : null)
+
+  // The ref stays in an effect — it exists for handlers that run after commit,
+  // and a render-phase write to it would be wrong under StrictMode's double
+  // render / an abandoned concurrent render.
   useEffect(() => {
     previewActiveRef.current = previewActive
-    setPreviewUser(previewActive ? previewUserId : null)
-  }, [previewActive, previewUserId])
+  }, [previewActive])
 
   useEffect(() => {
     dataSyncStateRef.current = dataSyncState
@@ -3784,6 +3795,15 @@ function App() {
   }
 
   const handleLogout = async () => {
+    // LEAVE PREVIEW FIRST, synchronously. `logoutSession` goes through the same
+    // fetch wrapper as everything else, so while a preview was open the POST
+    // carried `X-Preview-Mode: 1` — and preview is strictly read-only on the
+    // server, so the logout was refused and the session stayed alive. Clearing
+    // the module value before the call (not just the state, whose effect runs
+    // after this function has already fired the request) is what makes the
+    // sign-out actually revoke the session.
+    setPreviewUserId(null)
+    setPreviewUser(null)
     try {
       await logoutSession()
     } finally {

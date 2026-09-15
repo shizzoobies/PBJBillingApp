@@ -101,6 +101,10 @@ import {
 } from './lib/template-apply-permission.js'
 import { checklistWriteDenial } from './lib/checklist-write-permission.js'
 import {
+  isPreviewUnsupportedError,
+  previewScopedSession as resolvePreviewScope,
+} from './lib/preview-scope.js'
+import {
   SKIP_ALREADY_SKIPPED_MESSAGE,
   SKIP_NOT_ENABLED_MESSAGE,
   isSkipAllowedForChecklist,
@@ -763,15 +767,23 @@ function teamClientIdSet(session, clients) {
  *     answers as the previewed person: `/api/app-data` and the five surfaces
  *     that were leaking (`/api/invoice-recap`, `/api/waiting-on-me`, the two
  *     notification reads, and the two checklist approval queues).
- *  2. THE SAME ANSWER FOR EVERYONE. Firm settings and the service-category
- *     catalog do not depend on who is asking, so there is nothing to leak.
- *     `/api/session` and `/api/auth/*` / `/api/me/*` are about the signed-in
- *     owner by definition — the banner says so, and preview never claims to
- *     re-authenticate.
+ *  2. THE SAME ANSWER FOR EVERYONE. The public branding and the
+ *     service-category catalog do not depend on who is asking, so there is
+ *     nothing to leak. `/api/session` and `/api/auth/*` / `/api/me/*` are about
+ *     the REAL signed-in owner by definition — `/api/me/notification-prefs`
+ *     manages the owner's own email toggles and is deliberately NOT scoped to
+ *     the previewed person; the banner says whose session it is, and preview
+ *     never claims to re-authenticate.
  *  3. ONE EXPLICITLY-NAMED RECORD, reachable only from the previewed
- *     workspace. `/api/team/:id/activity` is asked for the previewed user by
- *     id; a case or a client's notes can only be opened from a link that
- *     exists in the scoped workspace the preview was served.
+ *     workspace, AND scoped by the previewed person. `/api/team/:id/activity`
+ *     gates on the previewed role; `/api/cases/:id` and a client's notes gate
+ *     on what the previewed person can see.
+ *
+ * `GET /api/firm-settings` (the firm's address, EIN and contact details) is
+ * 403 for a real staffer, so it is NOT here: in preview it 403s too, which is
+ * exactly what the person being previewed would get. The SPA loads it once per
+ * sign-in and already keeps its defaults when it fails, and the only page that
+ * reads the rest of it — Settings — is owner-only and hidden in preview.
  *
  * Deliberately absent, and therefore refused in preview: `/api/invoices`,
  * `/api/client-recap`, `/api/clients/:id/billed-on-invoices`,
@@ -792,15 +804,23 @@ const PREVIEW_AWARE_API_PATHS = new Set([
   '/api/checklists/item-deletions',
   '/api/checklists/pending-edits',
   '/api/session',
-  '/api/firm-settings',
   '/api/firm-settings/public',
   '/api/service-categories',
   '/api/events',
 ])
 
+// Each of these matches ONE path segment. They used to allow slashes as well,
+// which meant any deeper path under a prefix was allowlisted by a parent it has
+// nothing to do with. `normalizedPath` carries no query string, but `?` stays
+// excluded too so a normalizer change cannot quietly widen them.
 const PREVIEW_AWARE_API_PATTERNS = [
-  /^\/api\/auth\/[^?]*$/,
-  /^\/api\/me\/[^?]*$/,
+  /^\/api\/auth\/[^/?]*$/,
+  // Named rather than swept in by the line above: `GET /api/auth/totp/status`
+  // is reachable from `/security`, which is not owner-only, and it reports the
+  // REAL signed-in owner's two-factor state (the writes beside it are already
+  // refused by the read-only guard).
+  /^\/api\/auth\/totp\/[^/?]*$/,
+  /^\/api\/me\/[^/?]*$/,
   /^\/api\/team\/[^/]+\/activity$/,
   /^\/api\/cases\/[^/]+$/,
   /^\/api\/clients\/[^/]+\/notes$/,
@@ -815,55 +835,44 @@ function isPreviewAwareApiPath(normalizedPath) {
 
 /**
  * PREVIEW: the session a route should SCOPE BY while an owner is previewing
- * another user. The one place the previewed identity is resolved.
+ * another user. The resolution rule itself lives in `lib/preview-scope.js`
+ * (behavior-testable, one copy); this is the HTTP half of it.
  *
- * "Preview as <staffer>" used to travel on exactly one route —
- * `GET /api/app-data?previewAs=<id>`. The SPA's fetch wrapper sent only
- * `X-Preview-Mode: 1`, a boolean that says THAT an owner is previewing and
- * never WHO, so every surface that fetches its own endpoint answered with the
- * OWNER's scope while the banner named a staffer. That is what Brittany saw on
- * the Invoice Recap: Allison's name over all 37 of August's invoices.
- *
- * The client now sends `X-Preview-As: <id>` alongside, and a route opts in by
- * scoping through the session this returns instead of its own.
+ * Shaped exactly like `requireSession`: it answers the refusal itself and
+ * returns `null`, so a route is one line plus `if (!scoped) return`. The
+ * refusal is a 403 `preview_unsupported` — an id this workspace cannot resolve
+ * used to fall through to the caller's own session, which for an owner is the
+ * OWNER's data served under somebody else's name.
  *
  * USE IT FOR SCOPE ONLY. The real `session` stays the one that authenticated
- * and the one an audit entry names — nothing here grants access the owner did
- * not already have. It only ever NARROWS: the header is honored solely for a
- * real owner, and an unknown id falls back to the caller's own session rather
- * than inventing a user.
+ * and the one an audit entry names.
  *
- * `data` is optional and is only a shortcut for callers that already hold the
- * workspace. `users` is the authoritative list (in Postgres the workspace's
- * `employees` is read straight off that table, so the two agree); the fallback
- * exists for the JSON-file backend, where the two stores are separate.
+ * EVERY route resolves against the same roster, whether or not it holds the
+ * workspace. The JSON-file backend keeps users and workspace employees in
+ * separate stores, so resolving against `getTeamMember` alone would honor an
+ * identity on one route and refuse it on the next. The workspace fallback is
+ * LAZY, though — it is reached only by a request that actually names somebody
+ * the user store missed, so the notification badge's sixty-second poll does not
+ * read (and materialize) the whole workspace to answer a count. Pass `data`
+ * when the route already has it and the fallback costs nothing at all.
  */
-async function previewScopedSession(request, session, { previewAs = null, data = null } = {}) {
-  if (session?.user?.role !== 'owner') {
-    return session
-  }
-  const header = request?.headers?.['x-preview-as']
-  const targetId = String((Array.isArray(header) ? header[0] : header) ?? previewAs ?? '').trim()
-  if (!targetId) {
-    return session
-  }
-  const target =
-    (await appDataStore.getTeamMember(targetId)) ??
-    (data?.employees ?? []).find((employee) => employee.id === targetId) ??
-    null
-  if (!target) {
-    return session
-  }
-  return {
-    ...session,
-    user: {
-      ...session.user,
-      id: target.id,
-      // Case-insensitive: workspace employee roles are display-cased
-      // ('Owner') while a stored user role is 'owner', and the two must map
-      // the same way or a preview scopes an owner as staff (or vice-versa).
-      role: String(target.role).toLowerCase() === 'owner' ? 'owner' : 'employee',
-    },
+async function previewScopedSession(request, session, response, { previewAs = null, data = null } = {}) {
+  try {
+    return await resolvePreviewScope(request, session, {
+      previewAs,
+      getTeamMember: async (id) => {
+        const member = await appDataStore.getTeamMember(id)
+        if (member) return member
+        const workspace = data ?? (await appDataStore.read())
+        return (workspace?.employees ?? []).find((employee) => employee.id === id) ?? null
+      },
+    })
+  } catch (error) {
+    if (isPreviewUnsupportedError(error)) {
+      sendJson(response, 403, { error: 'preview_unsupported' })
+      return null
+    }
+    throw error
   }
 }
 
@@ -1791,13 +1800,22 @@ const server = createServer(async (request, response) => {
     // silent by nature. So an API read carrying the identity header is
     // REFUSED unless the route is known to honor it. A visible 403 in preview
     // is a bug report; owner data quietly rendered as a staffer's is a leak.
-    if (
-      request.headers['x-preview-as'] &&
-      normalizedPath.startsWith('/api/') &&
-      !isPreviewAwareApiPath(normalizedPath)
-    ) {
-      sendJson(response, 403, { error: 'preview_unsupported' })
-      return
+    //
+    // AUTHENTICATION IS CHECKED FIRST, deliberately. Answering 403 vs. 404/200
+    // before knowing whether there is a session turns this guard into an
+    // allowlist oracle: anyone could probe which `/api/` paths exist by adding
+    // one header. With no session it is a 401, the same thing every route
+    // behind `requireSession` would have said.
+    if (request.headers['x-preview-as'] && normalizedPath.startsWith('/api/')) {
+      const previewCookies = parseCookies(request.headers.cookie)
+      if (!(await appDataStore.getUserSession(previewCookies[sessionCookieName]))) {
+        sendJson(response, 401, { error: 'Authentication required' })
+        return
+      }
+      if (!isPreviewAwareApiPath(normalizedPath)) {
+        sendJson(response, 403, { error: 'preview_unsupported' })
+        return
+      }
     }
 
     // Central real-time hook: after any successful API write, ping every open
@@ -3655,7 +3673,8 @@ const server = createServer(async (request, response) => {
       // "what does she see here", and an owner's own team set is every client
       // — which is how this page came to show all 37 of August's invoices
       // under Allison's name. `session` still holds who actually signed in.
-      const scoped = await previewScopedSession(request, session, { data })
+      const scoped = await previewScopedSession(request, session, response, { data })
+      if (!scoped) return
       const teamClientIds = teamClientIdSet(scoped, data.clients ?? [])
       const invoices = await appDataStore.listInvoices({ period })
       const rows = buildInvoiceRecap({
@@ -5818,7 +5837,13 @@ const server = createServer(async (request, response) => {
       if (!session) return
       const clientId = decodeURIComponent(clientNotesMatch[1])
       const data = await appDataStore.read()
-      const allowed = visibleClientIdSet(session, data)
+      // Scoped, for the same reason as `/api/cases/:id`: notes open from a link
+      // in the previewed workspace, so "may I read these" is the previewed
+      // person's question. An owner's set is every client, which is exactly the
+      // answer preview must not give.
+      const scoped = await previewScopedSession(request, session, response, { data })
+      if (!scoped) return
+      const allowed = visibleClientIdSet(scoped, data)
       if (!allowed.has(clientId)) {
         sendJson(response, 403, { error: 'No access to that client' })
         return
@@ -5909,12 +5934,25 @@ const server = createServer(async (request, response) => {
         // The identity travels as `X-Preview-As` (every route reads it now);
         // the older `?previewAs=<userId>` query is still accepted here, which
         // is the only place it was ever sent. `previewScopedSession` is the
-        // one resolution rule — honored only for a real owner, ignored when
-        // the target does not exist.
-        const scopingSession = await previewScopedSession(request, session, {
+        // one resolution rule — honored only for a real owner, and a 403
+        // rather than the owner's own workspace when the target is unknown.
+        const scopingSession = await previewScopedSession(request, session, response, {
           previewAs: requestUrl.searchParams.get('previewAs'),
           data,
         })
+        if (!scopingSession) return
+        // One activity entry per preview LOAD, not per request: `/api/app-data`
+        // is the fetch that entering a preview makes, so this names who looked
+        // at whose workspace without burying the log under the bell's 60-second
+        // poll. It is recorded against the REAL owner — preview never changes
+        // who an audit entry names.
+        if (scopingSession.user.id !== session.user.id) {
+          await appDataStore.recordActivity(
+            session.user.id,
+            'preview_started',
+            scopingSession.user.id,
+          )
+        }
         // Staleness guard token. Computed AFTER read() so it reflects any
         // materializer write-back that read() just performed, and from the FULL
         // workspace rather than the scoped view — the fingerprint describes the
@@ -7813,7 +7851,8 @@ const server = createServer(async (request, response) => {
       const all = await appDataStore.listItemDeletionRequests()
       // The owner branch answers firm-wide, so previewing a staffer had to
       // narrow here too or the badges stayed the owner's.
-      const scoped = await previewScopedSession(request, session)
+      const scoped = await previewScopedSession(request, session, response)
+      if (!scoped) return
       if (scoped.user.role === 'owner') {
         sendJson(response, 200, { requests: all })
         return
@@ -7834,7 +7873,8 @@ const server = createServer(async (request, response) => {
       const session = await requireSession(request, response)
       if (!session) return
       // "Waiting on ME" — and while previewing, "me" is the previewed person.
-      const scoped = await previewScopedSession(request, session)
+      const scoped = await previewScopedSession(request, session, response)
+      if (!scoped) return
       const items = await appDataStore.listWaitingOnMe(scoped.user.id)
       sendJson(response, 200, { items })
       return
@@ -7924,7 +7964,8 @@ const server = createServer(async (request, response) => {
       if (!session) return
       // The queue is "edits routed to you" (everything, for an owner), so a
       // preview has to ask it as the previewed person.
-      const scoped = await previewScopedSession(request, session)
+      const scoped = await previewScopedSession(request, session, response)
+      if (!scoped) return
       const edits = await appDataStore.listPendingTaskEdits(scoped)
       sendJson(response, 200, { edits })
       return
@@ -8276,10 +8317,13 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      if (!isSkipAllowedForChecklist(checklist, data.checklistTemplates ?? [])) {
-        sendJson(response, 403, { error: SKIP_NOT_ENABLED_MESSAGE })
-        return
-      }
+      // NO per-template opt-in gate here — deliberately, and unlike the skip
+      // route above. Pushing moves a date on a task that stays open, so it
+      // needs no owner permission per recipe and works on a one-off too
+      // (featreq-68638ed2: "I cannot find the push button" — the flag is on 6 of
+      // 150 templates). `checklistWriteDenial` above is the whole permission
+      // boundary; the already-skipped 409 still stands, because an occurrence
+      // closed out for its cycle has nothing left to move.
       if (isChecklistSkipped(checklist)) {
         sendJson(response, 409, { error: SKIP_ALREADY_SKIPPED_MESSAGE })
         return
@@ -10334,7 +10378,12 @@ const server = createServer(async (request, response) => {
       if (!session) {
         return
       }
-      if (session.user.role !== 'owner') {
+      // Gated on the PREVIEWED role: an owner previewing a bookkeeper is asking
+      // what she sees, and she sees a 403 here. Reading `session.user.role`
+      // instead served the firm's activity log inside a staffer's preview.
+      const scoped = await previewScopedSession(request, session, response)
+      if (!scoped) return
+      if (scoped.user.role !== 'owner') {
         sendJson(response, 403, { error: 'Only owners can view activity' })
         return
       }
@@ -10356,9 +10405,15 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Case not found' })
         return
       }
-      if (session.user.role !== 'owner') {
+      // Scoped, not `session`: a case is only reachable from a link inside the
+      // previewed workspace, so it has to answer by what THAT person can see —
+      // otherwise the one owner-shaped branch here handed back a case (and an
+      // unscrubbed timeline) for a client the previewed staffer is not on.
+      const scoped = await previewScopedSession(request, session, response)
+      if (!scoped) return
+      if (scoped.user.role !== 'owner') {
         const allData = await appDataStore.read()
-        const allowed = visibleClientIdSet(session, allData)
+        const allowed = visibleClientIdSet(scoped, allData)
         if (!caseRecord.client || !allowed.has(caseRecord.client.id)) {
           // Return 404 (not 403) so a non-owner can't distinguish "no such
           // case" from "exists but not yours" and enumerate firm-wide case ids.
@@ -10367,7 +10422,7 @@ const server = createServer(async (request, response) => {
         }
         // Scrub activity entries that mention clients the user can't see.
         caseRecord.activity = scopeActivityEntriesForSession(
-          session,
+          scoped,
           caseRecord.activity ?? [],
           allData,
         )
@@ -10851,7 +10906,8 @@ const server = createServer(async (request, response) => {
       const limit = Math.min(Math.max(1, Number(requestUrl.searchParams.get('limit')) || 50), 500)
       // The bell stays in the topbar during a preview, so it must carry the
       // previewed person's mail rather than the owner's.
-      const scoped = await previewScopedSession(request, session)
+      const scoped = await previewScopedSession(request, session, response)
+      if (!scoped) return
       const entries = await appDataStore.listNotifications(scoped.user.id, {
         limit,
         unreadOnly,
@@ -10865,7 +10921,8 @@ const server = createServer(async (request, response) => {
       if (!session) return
       // Same reason as the list above: the badge counts the previewed
       // person's unread mail.
-      const scoped = await previewScopedSession(request, session)
+      const scoped = await previewScopedSession(request, session, response)
+      if (!scoped) return
       const count = await appDataStore.unreadNotificationCount(scoped.user.id)
       sendJson(response, 200, { count })
       return

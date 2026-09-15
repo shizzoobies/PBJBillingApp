@@ -858,13 +858,23 @@ function StaffRecurringTemplatesView({ data }: { data: AppData }) {
     return list.sort((a, b) => a.clientName.localeCompare(b.clientName))
   }, [checklistTemplates, clients])
 
+  // featreq-60f24838: a retired client's repeating setups are hidden here
+  // WHETHER OR NOT anything is typed. The general rule is that an empty query
+  // leaves a base list alone, because history must keep its subject — but these
+  // are templates, i.e. work the app intends to KEEP generating, and a retired
+  // client has none. Hiding them only while someone typed left the retired
+  // names sitting in the list the moment the search box was cleared. This is
+  // the base list for the count and the empty check too, so the header can
+  // never promise more setups than the list shows.
+  const liveGroups = useMemo(() => {
+    const inactiveIds = inactiveClientIdSet(clients)
+    return groups.filter((group) => !inactiveIds.has(group.clientId))
+  }, [groups, clients])
+
   const q = query.trim().toLowerCase()
   const filtered = useMemo(() => {
-    if (!q) return groups
-    // featreq-60f24838: a typed search must not surface a retired client's group.
-    const inactiveIds = inactiveClientIdSet(clients)
-    return groups
-      .filter((group) => !inactiveIds.has(group.clientId))
+    if (!q) return liveGroups
+    return liveGroups
       .map((group) => {
         if (group.clientName.toLowerCase().includes(q)) return group
         return {
@@ -875,10 +885,10 @@ function StaffRecurringTemplatesView({ data }: { data: AppData }) {
         }
       })
       .filter((group) => group.templates.length > 0)
-  }, [groups, q, clients])
+  }, [liveGroups, q])
 
-  if (groups.length === 0) return null
-  const totalTemplates = groups.reduce((sum, group) => sum + group.templates.length, 0)
+  if (liveGroups.length === 0) return null
+  const totalTemplates = liveGroups.reduce((sum, group) => sum + group.templates.length, 0)
   const searching = q.length > 0
 
   const toggleClient = (clientId: string) =>
@@ -2139,16 +2149,12 @@ export function ChecklistCard({
       templates: contextData.checklistTemplates,
       canWrite: canEditStructure,
     })
-  // Push rides the SAME gate (canOfferPush === canOfferSkip): one owner setting
-  // says this task may be moved off its cycle, and both buttons appear together
-  // or not at all.
+  // Push is on EVERY task this viewer can edit, one-offs included — it does NOT
+  // ride skipping's per-template opt-in any more (featreq-68638ed2: that flag is
+  // on 6 of 150 templates, so the button was invisible). A projected ghost is
+  // still excluded: there is no instance yet to move.
   const canPush =
-    !checklist.projected &&
-    canOfferPush({
-      checklist,
-      templates: contextData.checklistTemplates,
-      canWrite: canEditStructure,
-    })
+    !checklist.projected && canOfferPush({ checklist, canWrite: canEditStructure })
   // The push date the dialog pre-fills: this task's own next cycle. A missing
   // template (a stray instance whose repeating setup was deleted) falls back to
   // a month, which is what the frequency helper defaults to anyway.
@@ -4945,16 +4951,22 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   // to one business was the only way in. Matching the client name first is the
   // point: "jump to a business" is the actual job.
   const q = query.trim().toLowerCase()
-  // featreq-60f24838: typing a search must not surface a retired client's tasks.
+  // featreq-60f24838: a retired client's repeating tasks are gone from this
+  // list whether or not anything is typed. These are setups that keep
+  // GENERATING work, so a client the firm no longer works for has none —
+  // dropping them only while a query was live meant the retired names came
+  // straight back when the box was cleared.
   const inactiveIds = inactiveClientIdSet(props.clients)
+  const liveRegularTemplates = allRegularTemplates.filter(
+    (template) => !inactiveIds.has(template.clientId),
+  )
   const regularTemplates = q
-    ? allRegularTemplates.filter(
+    ? liveRegularTemplates.filter(
         (template) =>
-          (clientName(props.clients, template.clientId).toLowerCase().includes(q) ||
-            template.title.toLowerCase().includes(q)) &&
-          !inactiveIds.has(template.clientId),
+          clientName(props.clients, template.clientId).toLowerCase().includes(q) ||
+          template.title.toLowerCase().includes(q),
       )
-    : allRegularTemplates
+    : liveRegularTemplates
 
   // Group the repeating tasks under their client so the list stays organized.
   const clientGroups = (() => {

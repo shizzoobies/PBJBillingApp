@@ -240,18 +240,29 @@ describe('after a skip', () => {
 })
 
 /**
- * Push sits beside Skip on the same card, behind the same setting
- * (featreq-68638ed2). The absence rule is therefore identical: a task nobody
- * may skip is a task nobody may push, and neither button appears.
+ * Push sits beside Skip on the same card, but NOT behind the same setting any
+ * more (featreq-68638ed2, sent back as "I cannot find the push button"). The
+ * `skipAllowed` opt-in is on 6 of 150 active templates, so sharing it hid Push
+ * on 95% of tasks. Moving a date is not stepping past work: Push is on every
+ * task the viewer may edit, one-offs included. The absence rule that still
+ * holds is Skip's own, and an occurrence already skipped is closed out.
  */
 describe('the push affordance', () => {
   const PUSH_LABEL = 'Push to a new date'
   const pushDialog = () => screen.getByRole('group', { name: /Push Skippable close to a new date/i })
 
-  it('is absent wherever Skip is absent', () => {
+  it('is offered where Skip is NOT — a task whose template has skipping off', () => {
     renderPage()
-    expect(within(cardFor('Locked close')).queryByText(PUSH_LABEL)).not.toBeInTheDocument()
-    expect(within(cardFor('One off cleanup')).queryByText(PUSH_LABEL)).not.toBeInTheDocument()
+    const card = within(cardFor('Locked close'))
+    expect(card.queryByText('Skip this cycle')).not.toBeInTheDocument()
+    expect(card.getByText(PUSH_LABEL)).toBeInTheDocument()
+  })
+
+  it('is offered on a ONE-OFF task, which can never be skipped', () => {
+    renderPage()
+    const card = within(cardFor('One off cleanup'))
+    expect(card.queryByText('Skip this cycle')).not.toBeInTheDocument()
+    expect(card.getByText(PUSH_LABEL)).toBeInTheDocument()
   })
 
   it('is offered alongside Skip when the template allows it', () => {
