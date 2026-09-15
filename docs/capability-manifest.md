@@ -1628,16 +1628,23 @@ Clients page meanwhile. Owner-only.
 
 > **The monthly run is live.** At the top of the Invoices page: pick a month,
 > press **Generate**, and the app builds one numbered draft invoice per client
-> with something to bill — lines, a due date **30 days after the day the
-> invoice is generated**, any prior-month adjustment carried forward, and
-> out-of-scope flags.
+> with something to bill — lines, a due date, any prior-month adjustment
+> carried forward, and out-of-scope flags.
 >
-> **Every invoice gets the same 30-day payment window, counted from the day it
-> is issued.** A client whose own payment terms are LONGER keeps the longer one
-> — "Net 45" on the record still means 45 days. Terms that are shorter, that
-> ask for payment now ("Due on receipt", "Due on Demand"), or that are blank
-> are all lifted to the 30 days, so no invoice is ever due before the day it
-> was sent.
+> **The client is asked to pay on receipt. The due date the app records is the
+> firm's own.** The invoice and the email a client receives say **"Due on
+> receipt"** and show no date at all. What the app stores against the invoice is
+> a date **30 days after the day it was generated** — the firm's internal
+> past-due line, the day after which an invoice counts as late and gets chased.
+> It appears in the month run, where the owner works, and nowhere the client can
+> see. (Hovering that date in the month run says so.)
+>
+> **The exception is a client whose own payment terms name a LONGER window.**
+> "Net 45" on a client's record means 45 days: that client's invoice prints
+> their own wording and their own due date, because it is the window they were
+> promised. Terms that are shorter ("Net 15"), that ask for payment now ("Due
+> on receipt", "Due on Demand"), or that are blank all produce the same thing —
+> an invoice that asks for payment on receipt and is chased after 30 days.
 >
 > **Moving between months:** the month picker has a back arrow and a forward
 > arrow flanking it — one press steps the run one month and the list reloads to
@@ -1746,8 +1753,9 @@ Clients page meanwhile. Owner-only.
 > is off, which is the default). A billing master's combined invoice is
 > unaffected by all of this: it still shows one combined line and no sections,
 > headings or company names, exactly as the client chose. The payment-terms
-> line prints the window the invoice was actually dated by — **Net 30** — unless
-> the client's own terms are longer, in which case their own wording prints.
+> line and the **Due** field both say **on receipt**, unless the client's own
+> terms name a longer window, in which case their wording and their due date
+> print instead.
 >
 > **MARK PAID — for money that arrived outside the app.** A check, a direct
 > transfer nobody linked, an invoice that was never sent through the system:

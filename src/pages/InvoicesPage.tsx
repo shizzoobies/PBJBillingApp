@@ -164,9 +164,9 @@ function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean
       address: hasAddress(client),
       logo: hasText(client.logoUrl) || hasFirmLogo,
       serviceLabel: true,
-      // Always on offer now: the terms line states the firm's payment window, so
-      // it has something to say even for a client whose record leaves terms
-      // blank. It is still hers to switch off.
+      // Always on offer now: the terms line tells the client when to pay, so it
+      // has something to say even for a client whose record leaves terms blank.
+      // It is still hers to switch off.
       paymentTerms: true,
       footerNote: hasText(client.footerNote),
       payLink: hasText(client.quickbooksPayUrl),
@@ -1575,9 +1575,10 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
               ))}
         </tbody>
       </table>
-      {/* The window the invoice was DATED by, by the same rule the emailed PDF
-          prints — a sheet reading "Due on receipt" beside a due date thirty days
-          out would contradict itself. Longer client terms still print verbatim. */}
+      {/* What the client is asked for, by the same rule the emailed PDF prints:
+          "Due on receipt" unless their record names a longer window of its own.
+          The invoice's stored due date is the firm's internal past-due line and
+          is deliberately not on the client's sheet. */}
       {showField('paymentTerms') ? (
         <div className="print-terms">
           <span>Payment terms:</span>

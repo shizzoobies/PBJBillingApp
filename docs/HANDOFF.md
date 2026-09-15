@@ -734,9 +734,10 @@ is not installed here and the script SKIPS (exit 0) without it. Charge rows
 three sections regardless of stored order — deliberate. The owner's on-screen
 `InvoicePreview` is intentionally flat (her review copy); the sectioned
 `InvoiceDocument` is the client's view. Payment terms printed from each
-client's record ("Due on receipt") until 2026-09-15, when Alex gave every
-invoice a 30-day window from its issue date; the line now prints "Net 30"
-unless a client's own terms are longer (`paymentTermsLabel`).
+client's record verbatim until 2026-09-15. Now the client-facing line says
+"Due on receipt" (`paymentTermsLabel`) unless the record names a LONGER window,
+and the stored 30-day due date is the firm's internal past-due line, shown in
+the month run and on no client document.
 
 Suite 2691 → **2759 tests / 162 files**. Manifest updated — re-provision voice.
 

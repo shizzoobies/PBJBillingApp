@@ -8,13 +8,30 @@
  * their types here if that ever changes, rather than importing them untyped.
  */
 
-/** Days from issue to due, unless a client's own terms are longer. */
+/**
+ * Days from issue to the firm's INTERNAL past-due line, unless a client's own
+ * terms are longer. Not what the client is told — see `paymentTermsLabel`.
+ */
 export declare const DEFAULT_PAYMENT_WINDOW_DAYS: number
 
+/** What the customer is told when their record names no window of its own. */
+export declare const DUE_ON_RECEIPT_LABEL: string
+
+/** The `Net N` a client's free-text terms name, or null when they name none. */
+export declare function parsedNetDays(terms?: string | null): number | null
+
 /**
- * The terms line to PRINT beside an invoice's due date: the client's own
- * wording when it parses to a `Net N` at or beyond `windowDays`, and
- * `Net <windowDays>` for everything else.
+ * The window the CUSTOMER is held to, or null when they are asked to pay on
+ * receipt. Only a `Net N` at or beyond `windowDays` counts.
+ */
+export declare function customerNetDays(
+  terms?: string | null,
+  windowDays?: number,
+): number | null
+
+/**
+ * The terms line to PRINT on the client's invoice: their own wording when it
+ * names a longer window, and "Due on receipt" for everything else.
  */
 export declare function paymentTermsLabel(
   terms?: string | null,

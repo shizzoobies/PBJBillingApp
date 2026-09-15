@@ -487,15 +487,14 @@ describe('InvoicesPage — the sheet’s footer', () => {
     )
   })
 
-  // The terms line states the window the invoice was DATED by. This client's
-  // record still says "Due on receipt" — printing those words beside a due date
-  // thirty days out would contradict the sheet's own date, so the sheet prints
-  // the window. A client whose stored terms are LONGER prints their own words.
-  it('prints the firm’s payment window, not the record’s "Due on receipt"', async () => {
+  // The sheet tells the client WHEN TO PAY: on receipt, unless their record
+  // names a longer window of its own. The invoice's stored due date is the
+  // firm's internal past-due line and is deliberately not on this page.
+  it('asks the client to pay on receipt', async () => {
     await printStored(fullInvoice)
 
-    expect(printed()).toContain('Net 30')
-    expect(printed()).not.toContain('Due on receipt')
+    expect(printed()).toContain('Due on receipt')
+    expect(printed()).not.toContain('Net 30')
   })
 })
 

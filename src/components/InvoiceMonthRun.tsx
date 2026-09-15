@@ -91,6 +91,7 @@ import {
   type ResolvedInvoiceRecipients,
 } from '../lib/utils'
 import { InvoiceDeliveryBadge } from './InvoiceDeliveryBadge'
+import { customerNetDays } from '../../lib/invoice-draft.js'
 
 /**
  * The month run (I2): every client's stored invoice for a period, grouped into
@@ -467,6 +468,18 @@ export function InvoiceMonthRun({
   /** Whether this invoice went out with a card option beside bank transfer. */
   const cardEnabled = useCallback(
     (clientId: string) => clients.find((c) => c.id === clientId)?.cardPaymentsEnabled ?? false,
+    [clients],
+  )
+
+  /**
+   * Whether this client's invoice ASKS to be paid on receipt — which is nearly
+   * all of them. When it does, the due date on the row is the firm's own
+   * follow-up date and the client has never seen it, so the row says so on
+   * hover rather than letting her quote a date the client was not given.
+   */
+  const dueOnReceipt = useCallback(
+    (clientId: string) =>
+      customerNetDays(clients.find((c) => c.id === clientId)?.paymentTerms) === null,
     [clients],
   )
 
@@ -1312,6 +1325,7 @@ export function InvoiceMonthRun({
                     isBillingMaster={isBillingMaster(invoice.clientId)}
                     sourceClientName={clientName}
                     cardEnabled={cardEnabled(invoice.clientId)}
+                    dueOnReceipt={dueOnReceipt(invoice.clientId)}
                     recipients={recipientsFor(invoice.clientId)}
                     scope={scopeDataFor(invoice)}
                     // A retainer invoice is not itself a thing you credit —
@@ -1353,6 +1367,7 @@ export function InvoiceMonthRun({
 function InvoiceRow({
   invoice,
   clientName,
+  dueOnReceipt,
   isBillingMaster,
   sourceClientName,
   cardEnabled,
@@ -1373,6 +1388,8 @@ function InvoiceRow({
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** The client's own invoice says "due on receipt", so the date here is ours. */
+  dueOnReceipt: boolean
   /** This invoice's client is a billing master — its editor groups by company. */
   isBillingMaster: boolean
   /** A line's `sourceClientId` to that company's name, for the group headings. */
@@ -1440,7 +1457,15 @@ function InvoiceRow({
                 the row promise a line that never prints. */}
             {renderedInvoiceLines(invoice.lineItems).length} line
             {renderedInvoiceLines(invoice.lineItems).length === 1 ? '' : 's'} ·{' '}
-            {formatDue(invoice.dueDate)}
+            <span
+              title={
+                dueOnReceipt
+                  ? 'Internal follow-up date; the client’s invoice says due on receipt'
+                  : undefined
+              }
+            >
+              {formatDue(invoice.dueDate)}
+            </span>
             {adjustment
               ? ` · carries ${currency.format(adjustment.amount)} from last month`
               : ''}
