@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git push *)",
+      "Bash(git push origin main)",
       "Bash(node scripts/prod/tracker-update.mjs *)"
     ]
   }
