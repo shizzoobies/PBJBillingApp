@@ -1,7 +1,8 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-09-03. Everything below is live on `main`;
-the working tree was clean at handoff. Read this top to bottom before your first
+Written 2026-07-21, last updated 2026-09-14. Everything below is committed on
+local `main`; as of 2026-09-14 eight commits are NOT yet pushed (§0 says what
+to do first). The working tree was clean at handoff. Read this top to bottom before your first
 change — several rules here are non-obvious and breaking them has caused a
 production outage before. **If you do only one extra thing, read §7's
 "queue-run contract": the Updates tracker is now the primary way work arrives,
