@@ -1093,6 +1093,21 @@ function fakePostgres({
       const rows = timeEntryRows.filter((row) => wanted.has(row.id))
       return { rows, rowCount: rows.length }
     }
+    // Its client read: the invoice's own client — whose billing mode says
+    // whether this panel exists on this invoice at all — and its subs, in one
+    // statement. Anchored the same way, so dropping the billing mode from it
+    // falls through to the empty default and refuses rather than passing.
+    if (
+      /^select id, billing_mode from clients where id = \$1 or bill_to_client_id = \$1$/i.test(
+        trimmed,
+      )
+    ) {
+      const owner = params?.[0]
+      const rows = clientRows
+        .filter((row) => row.id === owner || row.bill_to_client_id === owner)
+        .map((row) => ({ id: row.id, billing_mode: row.billing_mode ?? null }))
+      return { rows, rowCount: rows.length }
+    }
     return { rows: [] }
   }
   const client = {
@@ -11978,6 +11993,47 @@ describe('updateInvoice entryTags (file backend)', () => {
     expect(updated.total).toBe(20)
     expect((await stored()).timeEntries[0].billable).toBe(true)
   })
+
+  /**
+   * WHERE THE PANEL DOES NOT EXIST. Re-tagging moves hours between a client's
+   * per-employee billable lines and its ad hoc lines, and that partition only
+   * exists on an hourly invoice from the June 2026 cutover on. The UI offers no
+   * control on the others, and the route refuses them for the same reason it
+   * refuses a sent invoice: a stale tab, a replay and curl all reach it.
+   */
+  it('refuses a tag on a subscription invoice, and writes NOTHING', async () => {
+    await seed()
+    const data = await stored()
+    data.clients[0].billingMode = 'subscription'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    await expect(
+      store.updateInvoice('inv-1', {
+        lineItems: afterRetag,
+        entryTags: [{ entryId: 't1', tag: 'adhoc' }],
+      }),
+    ).rejects.toBeInstanceOf(EntryTagError)
+
+    const after = await stored()
+    expect(after.invoices[0].lineItems).toEqual(draftInvoice.lineItems)
+    expect(after.timeEntries[0]).toMatchObject({ billable: true })
+  })
+
+  it('refuses a tag before the June 2026 cutover, where one aggregate line was sent', async () => {
+    await seed(
+      { period: '2026-05', number: 'INV-2026-05-001' },
+      [{ ...approvedEntry, date: '2026-05-04' }],
+    )
+
+    await expect(
+      store.updateInvoice('inv-1', {
+        lineItems: afterRetag,
+        entryTags: [{ entryId: 't1', tag: 'out-of-scope' }],
+      }),
+    ).rejects.toBeInstanceOf(EntryTagError)
+
+    expect((await stored()).timeEntries[0].billable).toBe(true)
+  })
 })
 
 describe('updateInvoice entryTags statement shape (postgres branch)', () => {
@@ -11990,6 +12046,7 @@ describe('updateInvoice entryTags statement shape (postgres branch)', () => {
     ],
   }
   const entryRow = { id: 't1', client_id: 'c1', entry_date: '2026-08-04' }
+  const hourlyClient = { id: 'c1', name: 'Acme', billing_mode: 'hourly' }
 
   const save = async (fake, entryTags) =>
     postgresStore(fake).updateInvoice('inv-1', {
@@ -11998,13 +12055,17 @@ describe('updateInvoice entryTags statement shape (postgres branch)', () => {
     })
 
   it('issues one batched update per tag, inside the invoice s own transaction', async () => {
-    const fake = fakePostgres({ invoices: [draftRow], timeEntryRows: [entryRow] })
+    const fake = fakePostgres({
+      invoices: [draftRow],
+      timeEntryRows: [entryRow],
+      clientRows: [hourlyClient],
+    })
     await save(fake, [{ entryId: 't1', tag: 'adhoc' }])
 
     const updates = fake.matching(/^update time_entries/i)
     expect(updates).toHaveLength(1)
     expect(updates[0].text).toMatch(/set billable = \$2, is_adhoc = \$3/)
-    expect(updates[0].params).toEqual([['t1'], true, true])
+    expect(updates[0].params).toEqual([['t1'], true, true, ['c1'], '2026-08'])
     // Between the BEGIN and the COMMIT — the lines and the hours commit
     // together or not at all.
     expect(fake.indexOf(/^BEGIN$/i)).toBeGreaterThanOrEqual(0)
@@ -12012,23 +12073,90 @@ describe('updateInvoice entryTags statement shape (postgres branch)', () => {
     expect(fake.indexOf(/^COMMIT$/i)).toBeGreaterThan(fake.indexOf(/^update time_entries/i))
   })
 
-  it('never touches an approval column', async () => {
-    const fake = fakePostgres({ invoices: [draftRow], timeEntryRows: [entryRow] })
+  /**
+   * THE STATEMENT ENFORCES WHAT THE LOOKUP CHECKED. An entry id in the payload
+   * is a claim about what is being tagged; naming this invoice's clients and
+   * its month in the WHERE clause means a row that is neither cannot be written
+   * even if the row moved between the check and the write.
+   */
+  it('names this invoice s clients and month in the update s own predicate', async () => {
+    const fake = fakePostgres({
+      invoices: [draftRow],
+      timeEntryRows: [entryRow],
+      clientRows: [hourlyClient, { id: 'c2', name: 'Sub', billing_mode: 'hourly', bill_to_client_id: 'c1' }],
+    })
     await save(fake, [{ entryId: 't1', tag: 'out-of-scope' }])
 
     const [update] = fake.matching(/^update time_entries/i)
-    expect(update.params).toEqual([['t1'], false, false])
+    expect(update.text).toMatch(/where id = any\(\$1::text\[\]\)/)
+    expect(update.text).toMatch(/and client_id = any\(\$4::text\[\]\)/)
+    expect(update.text).toMatch(/and to_char\(entry_date, 'YYYY-MM'\) = \$5/)
+    // The master's own id and its sub's — the same set the lookup allowed.
+    expect(update.params[3]).toEqual(['c1', 'c2'])
+    expect(update.params[4]).toBe('2026-08')
+  })
+
+  /**
+   * The lookup runs on the TRANSACTION's connection, so the rows it checked
+   * cannot move before the update that names them. Its refusal therefore
+   * happens inside the BEGIN and rolls back — with nothing written, which is
+   * the part that matters.
+   */
+  it('reads the entries on the transaction s own connection', async () => {
+    const fake = fakePostgres({
+      invoices: [draftRow],
+      timeEntryRows: [entryRow],
+      clientRows: [hourlyClient],
+    })
+    await save(fake, [{ entryId: 't1', tag: 'adhoc' }])
+
+    const lookup = fake.indexOf(/^select id, client_id, to_char\(entry_date/i)
+    expect(lookup).toBeGreaterThan(fake.indexOf(/^BEGIN$/i))
+    expect(lookup).toBeLessThan(fake.indexOf(/^update invoices/i))
+  })
+
+  it('never touches an approval column', async () => {
+    const fake = fakePostgres({
+      invoices: [draftRow],
+      timeEntryRows: [entryRow],
+      clientRows: [hourlyClient],
+    })
+    await save(fake, [{ entryId: 't1', tag: 'out-of-scope' }])
+
+    const [update] = fake.matching(/^update time_entries/i)
+    expect(update.params.slice(0, 3)).toEqual([['t1'], false, false])
     expect(update.text).not.toMatch(/approval_status|approved_by|approved_at/)
   })
 
   it('writes nothing when an entry id does not belong to this invoice', async () => {
-    const fake = fakePostgres({ invoices: [draftRow], timeEntryRows: [] })
+    const fake = fakePostgres({ invoices: [draftRow], timeEntryRows: [], clientRows: [hourlyClient] })
     await expect(save(fake, [{ entryId: 't1', tag: 'adhoc' }])).rejects.toBeInstanceOf(
       EntryTagError,
     )
 
     expect(fake.matching(/^update time_entries/i)).toEqual([])
     expect(fake.matching(/^update invoices/i)).toEqual([])
-    expect(fake.matching(/^BEGIN$/i)).toEqual([])
+    expect(fake.matching(/^COMMIT$/i)).toEqual([])
+    expect(fake.matching(/^ROLLBACK$/i)).not.toEqual([])
+  })
+
+  /**
+   * A subscription invoice has no per-employee hourly lines and no ad hoc
+   * lines, so the panel is not offered on it — and the route has to say the
+   * same thing, because a stale tab and curl both reach it.
+   */
+  it('refuses a tag on a subscription invoice and writes nothing', async () => {
+    const fake = fakePostgres({
+      invoices: [draftRow],
+      timeEntryRows: [entryRow],
+      clientRows: [{ ...hourlyClient, billing_mode: 'subscription' }],
+    })
+    await expect(save(fake, [{ entryId: 't1', tag: 'adhoc' }])).rejects.toThrow(
+      /hours panel is not available/i,
+    )
+
+    expect(fake.matching(/^update time_entries/i)).toEqual([])
+    expect(fake.matching(/^update invoices/i)).toEqual([])
+    expect(fake.matching(/^COMMIT$/i)).toEqual([])
   })
 })

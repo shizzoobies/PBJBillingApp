@@ -1868,14 +1868,22 @@ Clients page meanwhile. Owner-only.
 > services rendered for the month of") there is no way to tell which of them a
 > given entry is inside, so the app refuses to add a charge it cannot also
 > subtract: adding one anyway would bill that work twice. The row says so —
-> *"The tag will save, but these hours are on a renamed line — adjust the
+> *"The tag stands, but these hours are on a renamed line — adjust the
 > invoice line yourself"* — the tag is still recorded, and the invoice line is
-> edited by hand.
+> edited by hand. **That warning stays on the row after the save**, for as long
+> as the invoice's lines and the entry's tag disagree, so a charge nobody
+> adjusted cannot go quiet. The same refusal covers a line rounded DOWN below
+> the hours leaving it (the line is left exactly as typed rather than deleted)
+> and **an ad hoc row whose own line was renamed** — a renamed ad hoc line
+> cannot be re-priced or re-moded from the panel, because the panel can no
+> longer tell that line is the one billing that entry.
 >
 > Where the panel does not offer the decision: **subscription and annual
 > clients** and **months before June 2026** have no per-employee hourly lines to
 > move hours between, so the hours are shown for reference with the controls
-> disabled and a line saying why. So are **sent, processing, paid and voided**
+> disabled and a line saying why — and a tag sent for one of those invoices
+> anyway (a stale tab, a replayed request) is refused by the server rather than
+> half-applied. So are **sent, processing, paid and voided**
 > invoices — past review the client is holding a copy of what this would change,
 > and the app refuses the re-tag rather than quietly rewriting it. A month a
 > timesheet lock has signed off shows a **Month locked** note on the row; an

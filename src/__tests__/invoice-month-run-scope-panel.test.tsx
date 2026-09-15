@@ -287,7 +287,9 @@ describe('InvoiceScopePanel — staging', () => {
       target: { value: 'adhoc' },
     })
 
-    expect(screen.getByText(/these hours are on a renamed line/i)).toBeInTheDocument()
+    // Her row, plus the ad hoc row this invoice has no ad hoc line for — both
+    // are hours the lines cannot account for.
+    expect(screen.getAllByText(/these hours are on a renamed line/i)).toHaveLength(2)
     expect(screen.queryByText('Will apply on save')).not.toBeInTheDocument()
     expect(screen.getByText(/Total \$800\.00/)).toBeInTheDocument()
   })
@@ -313,6 +315,80 @@ describe('InvoiceScopePanel — staging', () => {
     const [, body] = mockUpdate.mock.calls[0]
     expect(body.entryTags).toEqual([{ entryId: 'entry-1', tag: 'out-of-scope' }])
     expect(body.lineItems).toEqual(renamed.lineItems)
+  })
+
+  /**
+   * A blocked tag still SAVES — it is a fact about the work. So after the save
+   * the row must keep its warning, or the only sign that the invoice is still
+   * billing hours the entry disowns disappears with the remount.
+   */
+  it('keeps the warning on a saved tag the lines never followed', async () => {
+    mockList.mockResolvedValue([
+      {
+        ...invoice,
+        lineItems: [
+          { kind: 'hourly', label: 'For services rendered for the month of', detail: '', amount: 800 },
+        ],
+        subtotal: 800,
+        total: 800,
+      },
+    ])
+    // Already saved out of scope by an earlier, blocked save.
+    await openEditor({
+      timeEntries: timeEntries.map((row) =>
+        row.id === 'entry-1' ? { ...row, billable: false } : row,
+      ),
+    })
+
+    expect(scopeSelect('Month-end close', '2026-08-04').value).toBe('out-of-scope')
+    expect(screen.queryByText('Will apply on save')).not.toBeInTheDocument()
+    expect(screen.getAllByText(/these hours are on a renamed line/i).length).toBeGreaterThan(0)
+  })
+
+  /**
+   * A pre-commit draft's ad hoc lines carry no entry id. Reading only the
+   * stamped ones showed "Invoice it" beside a row already sitting at courtesy,
+   * and one round trip through the panel re-billed the work.
+   */
+  it('shows the ad hoc decision a pre-commit draft s line already carries', async () => {
+    const legacy = {
+      ...invoice.lineItems[1],
+      adhocMode: 'courtesy' as const,
+      amount: 0,
+      adhocAmount: 100,
+    }
+    delete (legacy as Record<string, unknown>).entryId
+    mockList.mockResolvedValue([
+      {
+        ...invoice,
+        lineItems: [invoice.lineItems[0], legacy],
+        subtotal: 200,
+        total: 200,
+      },
+    ])
+    await openEditor()
+
+    const choice = screen.getByLabelText(
+      'What to do with this ad hoc work on 2026-08-18',
+    ) as HTMLSelectElement
+    expect(choice.value).toBe('courtesy')
+  })
+
+  // Landing back on the tag the entry already has is a retraction, not an edit:
+  // the editor goes clean again and the save sends no tag write at all.
+  it('drops a tag she changed her mind about', async () => {
+    await openEditor()
+    const select = scopeSelect('Month-end close', '2026-08-04')
+
+    fireEvent.change(select, { target: { value: 'out-of-scope' } })
+    expect(screen.getByText('Will apply on save')).toBeInTheDocument()
+
+    fireEvent.change(select, { target: { value: 'in-scope' } })
+    expect(screen.queryByText('Will apply on save')).not.toBeInTheDocument()
+    expect(screen.getByText(/Total \$300\.00/)).toBeInTheDocument()
+    // Nothing left to save, so there is nothing to send: the editor is clean
+    // rather than holding a tag write that would change nothing.
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled()
   })
 
   it('sends no entryTags at all when she only edited a line', async () => {

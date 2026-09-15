@@ -40,7 +40,11 @@ import {
 } from '../lib/invoice-lines.js'
 // THE tag -> flags rule, shared with the panel that stages the decision, so
 // what she saw staged and what lands in `time_entries` cannot differ.
-import { entryFlagsForScopeTag, isScopeTag } from '../lib/invoice-scope-retag.js'
+import {
+  entryFlagsForScopeTag,
+  isScopeTag,
+  scopeRetagApplies,
+} from '../lib/invoice-scope-retag.js'
 import {
   anchorDayFromRange,
   anchorDayOf,
@@ -9917,15 +9921,23 @@ export class AppDataStore {
    * them — one lookup, written twice because this store has two backends and a
    * Postgres-only gap would pass CI in silence.
    */
-  async _entryTagContext(ids, current) {
+  async _entryTagContext(ids, current, { dbClient = null, data = null } = {}) {
     if (this.pool) {
-      const found = await this.pool.query(
+      // ON THE TRANSACTION'S CONNECTION when there is one. The check and the
+      // write have to see one snapshot: read the rows on the pool, outside the
+      // BEGIN, and an entry that moved client or month in between is written
+      // anyway on the strength of a lookup that is no longer true.
+      const runner = dbClient ?? this.pool
+      const found = await runner.query(
         `select id, client_id, to_char(entry_date, 'YYYY-MM-DD') as entry_date
            from time_entries where id = any($1::text[])`,
         [ids],
       )
-      const subs = await this.pool.query(
-        `select id from clients where bill_to_client_id = $1`,
+      // The invoice's own client and its subs in one read — the billing mode
+      // says whether this panel exists on this invoice at all, and the sub ids
+      // say whose time it may name.
+      const family = await runner.query(
+        `select id, billing_mode from clients where id = $1 or bill_to_client_id = $1`,
         [current.clientId],
       )
       return {
@@ -9935,25 +9947,74 @@ export class AppDataStore {
             { clientId: row.client_id ?? '', date: row.entry_date ?? '' },
           ]),
         ),
-        allowedClientIds: new Set([current.clientId, ...subs.rows.map((row) => row.id)]),
+        allowedClientIds: new Set([current.clientId, ...family.rows.map((row) => row.id)]),
+        billingMode:
+          family.rows.find((row) => row.id === current.clientId)?.billing_mode ?? '',
       }
     }
 
-    const data = await readJson(localDataPath)
+    // The data the save is about to WRITE, handed in by the caller — reading
+    // app-data a second time here would validate against a workspace that is
+    // not the one the tags land in.
+    const workspace = data ?? (await readJson(localDataPath))
     const wanted = new Set(ids)
     return {
       entries: new Map(
-        (data.timeEntries ?? [])
+        (workspace.timeEntries ?? [])
           .filter((entry) => wanted.has(entry.id))
           .map((entry) => [entry.id, { clientId: entry.clientId ?? '', date: entry.date ?? '' }]),
       ),
       allowedClientIds: new Set([
         current.clientId,
-        ...(data.clients ?? [])
+        ...(workspace.clients ?? [])
           .filter((client) => client?.billToClientId === current.clientId)
           .map((client) => client.id),
       ]),
+      billingMode:
+        (workspace.clients ?? []).find((client) => client?.id === current.clientId)?.billingMode ??
+        '',
     }
+  }
+
+  /**
+   * The store's half of the tag check — everything that needs to look something
+   * up, run where the write runs. Returns the client ids the tagged time may
+   * belong to, which the Postgres UPDATE then names in its own WHERE clause so
+   * the statement enforces what this function checked.
+   *
+   * Throws `EntryTagError`, which the route answers 409 with.
+   */
+  async _assertEntryTagsWritable(entryTags, current, source) {
+    const ids = [...new Set([...entryTags.values()].flat())]
+    const { entries, allowedClientIds, billingMode } = await this._entryTagContext(
+      ids,
+      current,
+      source,
+    )
+
+    // WHERE THE PANEL DOES NOT EXIST. Re-tagging moves hours between a client's
+    // per-employee billable lines and its ad hoc lines, and that partition only
+    // exists on an hourly invoice from the June 2026 cutover on. The UI offers
+    // no control on the others; the route has to refuse them for the same
+    // reason it refuses a sent invoice — a stale tab, a replay and curl all
+    // reach it.
+    if (!scopeRetagApplies({ billingMode }, current.period)) {
+      throw new EntryTagError(
+        'The hours panel is not available on this invoice — scope tags can only be changed on an hourly invoice from June 2026 on.',
+      )
+    }
+
+    for (const entryId of ids) {
+      const entry = entries.get(entryId)
+      if (
+        !entry ||
+        !String(entry.date).startsWith(current.period) ||
+        !allowedClientIds.has(entry.clientId)
+      ) {
+        throw new EntryTagError('That scope change names time this invoice does not cover.')
+      }
+    }
+    return [...allowedClientIds]
   }
 
   /**
@@ -9975,7 +10036,7 @@ export class AppDataStore {
    * work right"; the scope tag decides how the work BILLS. They are different
    * questions, and the person answering the second one here is the approver.
    */
-  async _resolveEntryTags(current, patch) {
+  _resolveEntryTags(current, patch) {
     const raw = patch?.entryTags
     if (raw === undefined || raw === null) return null
     if (!Array.isArray(raw)) {
@@ -9998,21 +10059,11 @@ export class AppDataStore {
       wanted.set(entryId, item.tag)
     }
 
-    const ids = [...wanted.keys()]
-    const { entries, allowedClientIds } = await this._entryTagContext(ids, current)
-    for (const entryId of ids) {
-      const entry = entries.get(entryId)
-      if (
-        !entry ||
-        !String(entry.date).startsWith(current.period) ||
-        !allowedClientIds.has(entry.clientId)
-      ) {
-        throw new EntryTagError('That scope change names time this invoice does not cover.')
-      }
-    }
-
     // Grouped by tag, so however many rows she tagged there are at most three
-    // statements — and each one is the same two flags for every id in it.
+    // statements — and each one is the same two flags for every id in it. What
+    // the STORE has to be asked about — does this invoice have a panel at all,
+    // and is this really its time — is checked by `_assertEntryTagsWritable`
+    // where the write happens, not here.
     const byTag = new Map()
     for (const [entryId, tag] of wanted) {
       const group = byTag.get(tag)
@@ -10039,10 +10090,12 @@ export class AppDataStore {
     if (lockRefusal) throw new InvoiceLockedError(lockRefusal)
 
     // The hours panel beside the invoice stages her scope decisions and sends
-    // them with the lines they moved. Resolved HERE, above the backend split and
+    // them with the lines they moved. Read HERE, above the backend split and
     // above every field assignment, for the same reason the lock is: a refusal
-    // has to refuse the whole save, on both backends.
-    const entryTags = await this._resolveEntryTags(current, patch)
+    // has to refuse the whole save, on both backends. What the payload alone
+    // settles is settled now; what the store has to be asked is asked inside
+    // the write, on the same connection and against the same data.
+    const entryTags = this._resolveEntryTags(current, patch)
 
     const next = { ...current }
     if (Array.isArray(patch.lineItems)) {
@@ -10141,6 +10194,12 @@ export class AppDataStore {
       const dbClient = await this.pool.connect()
       try {
         await dbClient.query('BEGIN')
+        // FIRST statement after the BEGIN, so a refused tag rolls back a
+        // transaction that has written nothing, and so the rows it checked
+        // cannot move before the UPDATE that names them.
+        const taggedClientIds = entryTags
+          ? await this._assertEntryTagsWritable(entryTags, current, { dbClient })
+          : []
         const { rowCount } = await dbClient.query(
           `update invoices
               set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
@@ -10203,14 +10262,20 @@ export class AppDataStore {
         // The hours follow the lines, on the SAME connection and inside the same
         // BEGIN. Only the two scope flags move; approval status, approver and
         // approved-at are deliberately left alone (see `_resolveEntryTags`).
+        // The predicate carries the whole check, not just the ids: an id is a
+        // claim about what is being tagged, and naming this invoice's clients
+        // and month in the statement itself means a row that is not the
+        // invoice's cannot be written even if it slipped past the lookup.
         if (entryTags) {
           for (const [tag, entryIds] of entryTags) {
             const flags = entryFlagsForScopeTag(tag)
             await dbClient.query(
               `update time_entries
                   set billable = $2, is_adhoc = $3, updated_at = now()
-                where id = any($1::text[])`,
-              [entryIds, flags.billable, flags.isAdhoc],
+                where id = any($1::text[])
+                  and client_id = any($4::text[])
+                  and to_char(entry_date, 'YYYY-MM') = $5`,
+              [entryIds, flags.billable, flags.isAdhoc, taggedClientIds, current.period],
             )
           }
         }
@@ -10239,6 +10304,10 @@ export class AppDataStore {
     if (!Array.isArray(data.invoices)) data.invoices = []
     const index = data.invoices.findIndex((invoice) => invoice.id === id)
     if (index === -1) return null
+    // Against the SAME data this save is about to write, and before a single
+    // field of it moves — the file backend's version of the in-transaction
+    // check above.
+    if (entryTags) await this._assertEntryTagsWritable(entryTags, current, { data })
     data.invoices[index] = next
     // One read-modify-write covers both rows, which is this backend's version of
     // the transaction above.

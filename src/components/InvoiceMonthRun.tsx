@@ -55,6 +55,9 @@ import {
 } from '../../lib/expense-coverage.js'
 import {
   applyScopeRetag,
+  savedAdhocModesForEntries,
+  scopeTagOfEntry,
+  unaccountedScopeEntries,
   type ScopeTag,
   type ScopeTagEdits,
 } from '../../lib/invoice-scope-retag.js'
@@ -2073,19 +2076,60 @@ function InvoiceEditor({
   })
   const previewLines = retag.lines
 
-  /** What each entry's own ad hoc line already says, so the panel shows it. */
-  const savedAdhocModes: Record<string, AdhocMode> = {}
-  for (const line of lines) {
-    if (line.kind === 'adhoc' && line.entryId) {
-      savedAdhocModes[line.entryId] = normalizeAdhocMode(line.adhocMode)
-    }
-  }
+  /**
+   * What each entry's own ad hoc line already says, so the panel shows it —
+   * matched the way the re-tag matches, `entryId` first and then the label and
+   * detail an un-stamped draft carries. Reading only the stamped lines showed
+   * "Invoice it" beside a row already set to courtesy on a pre-commit draft,
+   * and one round trip through the panel re-billed it.
+   */
+  const savedAdhocModes = savedAdhocModesForEntries({
+    lines,
+    entries: scope.entries,
+    employees: scope.employees,
+    client: scope.client,
+    defaultHourlyRate: Number(scope.client?.hourlyRate) || 0,
+  }) as Record<string, AdhocMode>
+
+  /**
+   * The rows whose hours the lines do not account for — the staged ones this
+   * save would refuse to move, and the SAVED ones an earlier save already
+   * refused. Without the second half the warning disappears on the remount
+   * after Save while the hours are still billing on a line nobody adjusted.
+   */
+  const blocked = [
+    ...new Set([
+      ...retag.blocked,
+      ...unaccountedScopeEntries({
+        lines,
+        entries: scope.entries,
+        employees: scope.employees,
+        client: scope.client,
+        period: invoice.period,
+        defaultHourlyRate: Number(scope.client?.hourlyRate) || 0,
+      }),
+    ]),
+  ]
 
   const stageTag = (entryId: string, tag: ScopeTag, adhocMode?: AdhocMode) => {
-    setTagEdits((current) => ({
-      ...current,
-      [entryId]: { tag, ...(tag === 'adhoc' ? { adhocMode: adhocMode ?? 'billed' } : {}) },
-    }))
+    const entry = scope.entries.find((row) => row.id === entryId)
+    const mode = tag === 'adhoc' ? (adhocMode ?? 'billed') : undefined
+    // Picking the tag it already has, with nothing else to decide, is a
+    // RETRACTION rather than an edit: dropping the key leaves the editor clean
+    // and stops the save sending a tag write that changes nothing.
+    const reverted =
+      Boolean(entry) &&
+      tag === scopeTagOfEntry(entry) &&
+      (tag !== 'adhoc' || mode === (savedAdhocModes[entryId] ?? 'billed'))
+    setTagEdits((current) => {
+      if (reverted) {
+        if (!(entryId in current)) return current
+        const rest = { ...current }
+        delete rest[entryId]
+        return rest
+      }
+      return { ...current, [entryId]: { tag, ...(mode ? { adhocMode: mode } : {}) } }
+    })
     setSaved(false)
   }
 
@@ -2462,7 +2506,7 @@ function InvoiceEditor({
           savedAdhocModes={savedAdhocModes}
           onTagChange={stageTag}
           applicable={retag.applicable}
-          blocked={retag.blocked}
+          blocked={blocked}
           readOnly={scope.readOnly || Boolean(lockMessage)}
           isBillingMaster={isBillingMaster}
           sourceClientName={sourceClientName}

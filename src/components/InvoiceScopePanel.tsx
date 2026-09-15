@@ -122,11 +122,13 @@ export function InvoiceScopePanel({
    */
   applicable: boolean
   /**
-   * Entry ids whose staged tag the invoice's lines cannot carry — the hours
-   * could not be taken off the line they are billed on, so nothing was added
-   * either. Nearly always a retyped hourly line with no hours or rate: most
-   * lines on a real invoice have been renamed by hand. Said on the row, because
-   * a tag that quietly moved no money would be worse than one that says so.
+   * Entry ids whose tag the invoice's lines do not carry — the hours could not
+   * be taken off the line they are billed on, so nothing was added either.
+   * Nearly always a retyped hourly line with no hours or rate: most lines on a
+   * real invoice have been renamed by hand. Said on the row, because a tag that
+   * quietly moved no money would be worse than one that says so — and said
+   * whether the tag is STAGED or already saved, because a blocked tag saves
+   * anyway and the line is still unadjusted on the other side of the remount.
    */
   blocked?: string[]
   /** Preview mode, or an invoice past the point where lines may change. */
@@ -317,9 +319,9 @@ export function InvoiceScopePanel({
                           ))}
                         </select>
                       ) : null}
-                      {row.staged && blockedIds.has(row.entry.id) ? (
+                      {blockedIds.has(row.entry.id) ? (
                         <span className="invoice-scope-blocked">
-                          The tag will save, but these hours are on a renamed line — adjust the
+                          The tag stands, but these hours are on a renamed line — adjust the
                           invoice line yourself.
                         </span>
                       ) : row.staged ? (

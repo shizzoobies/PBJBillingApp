@@ -27,6 +27,56 @@ export type ScopeTagEdit = { tag: ScopeTag; adhocMode?: AdhocMode }
 /** Staged decisions, keyed by time entry id. */
 export type ScopeTagEdits = Record<string, ScopeTagEdit>
 
+/** One time entry as every function here reads it. */
+type ScopeEntry = {
+  id: string
+  employeeId: string
+  clientId: string
+  date: string
+  minutes: number
+  description?: string
+  billable?: boolean
+  isAdhoc?: boolean
+}
+
+type ScopeEmployee = { id: string; name?: string; role?: string; billRate?: number | null }
+
+type ScopeClient = {
+  id?: string
+  billingMode?: string
+  isBillingMaster?: boolean
+  hourlyRate?: number
+} | null
+
+/** Can re-tagging move money on this invoice at all? */
+export function scopeRetagApplies(client: ScopeClient, period: string): boolean
+
+/**
+ * What each entry's own ad hoc line already says, keyed by entry id — matched
+ * by `entryId` first, then by the label+detail an un-stamped draft carries.
+ */
+export function savedAdhocModesForEntries(args: {
+  lines?: Array<{ kind?: string; label?: string; detail?: string; adhocMode?: string }>
+  entries?: ScopeEntry[]
+  employees?: ScopeEmployee[]
+  client?: ScopeClient
+  defaultHourlyRate?: number
+}): Record<string, AdhocMode>
+
+/**
+ * Entry ids whose ALREADY SAVED tag the invoice's lines do not carry — the
+ * warning that has to outlive the save, because a blocked tag saves anyway and
+ * the line on the other side of it is still unadjusted.
+ */
+export function unaccountedScopeEntries(args: {
+  lines?: Array<{ kind?: string; label?: string; detail?: string; hours?: number; rate?: number }>
+  entries?: ScopeEntry[]
+  employees?: ScopeEmployee[]
+  client?: ScopeClient
+  period?: string
+  defaultHourlyRate?: number
+}): string[]
+
 /**
  * Generic in the LINE type for the same reason `renderedInvoiceLines` is: the
  * editor hands it `PersistedInvoiceLine[]` and the server hands it plain
