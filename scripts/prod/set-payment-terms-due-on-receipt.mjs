@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-// Sets "Net 30" as the payment terms on every active client whose record says
+// Sets "Due on receipt" as the payment terms on every active client whose record says
 // nothing a machine can read (blank) or says "Due on receipt" / "Due on Demand"
-// / "Immediate", and makes "Net 30" the firm's default terms for new clients.
+// / "Immediate" / a casing variant, and makes it the firm default for new clients.
 //
 // Why: Alex decided 2026-09-15 that every invoice is due 30 days after it is
-// issued. The code now prints "Net 30" for those records regardless; this
-// write makes the client records say what the invoices say, so the Clients
-// page, the PDF and the due date all agree.
+// issued, and the client-facing invoice says "Due on receipt" (the 30 days are the
+// firm's internal past-due line). This write makes the client records say what
+// the invoices say, so the Clients page and the PDF agree.
 //
-//   node scripts/prod/set-payment-terms-net30.mjs              dry run (rolled back)
-//   node scripts/prod/set-payment-terms-net30.mjs --apply      write it, snapshot first
-//   node scripts/prod/set-payment-terms-net30.mjs --undo docs/prod-snapshots/<stamp>-payment-terms-before-net30.json [--apply]
+//   node scripts/prod/set-payment-terms-due-on-receipt.mjs              dry run (rolled back)
+//   node scripts/prod/set-payment-terms-due-on-receipt.mjs --apply      write it, snapshot first
+//   node scripts/prod/set-payment-terms-due-on-receipt.mjs --undo docs/prod-snapshots/<stamp>-payment-terms-before-due-on-receipt.json [--apply]
 //
 // The snapshot (every active client's id, name, payment_terms, plus the firm
 // client_defaults) is written to docs/prod-snapshots/ BEFORE the update and
@@ -24,7 +24,7 @@ import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { Client } = require('pg')
 
-const NEW_TERMS = 'Net 30'
+const NEW_TERMS = 'Due on receipt'
 const RESET_PATTERN = /receipt|demand|immediat/i
 
 const args = process.argv.slice(2)
@@ -73,7 +73,7 @@ async function snapshotState() {
 async function forward() {
   const before = await snapshotState()
   const targets = before.clients.filter(
-    (c) => c.lifecycleStage === 'active' && shouldReset(c.paymentTerms),
+    (c) => c.lifecycleStage === 'active' && shouldReset(c.paymentTerms) && (c.paymentTerms ?? '').trim() !== NEW_TERMS,
   )
   console.log(`Active clients: ${before.clients.filter((c) => c.lifecycleStage === 'active').length}`)
   console.log(`Would set "${NEW_TERMS}" on ${targets.length}:`)
@@ -85,7 +85,7 @@ async function forward() {
   let snapshotPath = null
   if (apply) {
     const stamp = before.takenAt.replace(/[:.]/g, '-')
-    snapshotPath = `docs/prod-snapshots/${stamp}-payment-terms-before-net30.json`
+    snapshotPath = `docs/prod-snapshots/${stamp}-payment-terms-before-due-on-receipt.json`
     mkdirSync('docs/prod-snapshots', { recursive: true })
     writeFileSync(snapshotPath, JSON.stringify(before, null, 2) + '\n')
     console.log(`Snapshot written: ${snapshotPath}`)
