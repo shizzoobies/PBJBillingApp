@@ -16,6 +16,7 @@ import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
   buildConsolidatedInvoiceDraft,
   buildInvoiceDraft,
+  DEFAULT_PAYMENT_WINDOW_DAYS,
   dueDateFromTerms,
   nextInvoiceNumber,
   nextRetainerInvoiceNumber,
@@ -9310,7 +9311,14 @@ export class AppDataStore {
    * on a month-wide run "no invoice appeared for a prospect" is expected, but
    * someone who asked for one specific client deserves to be told why.
    */
-  async generateInvoicesForPeriod(period, { defaultNetDays = 30, clientId = null } = {}) {
+  async generateInvoicesForPeriod(
+    period,
+    {
+      windowDays = DEFAULT_PAYMENT_WINDOW_DAYS,
+      issueDate = nowIso().slice(0, 10),
+      clientId = null,
+    } = {},
+  ) {
     const data = await this.read()
     const existing = await this.listInvoices({ period })
     // MONTHLY only. A retainer issued this month is not the month's invoice, and
@@ -9426,7 +9434,8 @@ export class AppDataStore {
           employees: data.employees ?? [],
           defaultHourlyRate: Number(target.hourlyRate) || 0,
           priorInvoice: prior ?? null,
-          defaultNetDays,
+          issueDate,
+          windowDays,
         })
 
       let draft
@@ -9483,7 +9492,8 @@ export class AppDataStore {
         draft = buildConsolidatedInvoiceDraft({
           master: client,
           period,
-          defaultNetDays,
+          issueDate,
+          windowDays,
           subDrafts,
           priorInvoice: priorByClient.get(client.id) ?? null,
         })
@@ -9561,7 +9571,13 @@ export class AppDataStore {
    * be a positive number — a $0 retainer is a document nobody asked for, and a
    * negative one is a credit note this app has no concept of.
    */
-  async createRetainerInvoice({ clientId, amount, note = '', period = null, defaultNetDays = 30 }) {
+  async createRetainerInvoice({
+    clientId,
+    amount,
+    note = '',
+    period = null,
+    windowDays = DEFAULT_PAYMENT_WINDOW_DAYS,
+  }) {
     const value = roundMoney(amount)
     if (!Number.isFinite(value) || value <= 0) return null
 
@@ -9597,11 +9613,11 @@ export class AppDataStore {
       originalLineItems: [{ kind: 'retainer', label: RETAINER_LABEL, detail, amount: value }],
       subtotal: value,
       total: value,
-      // From TODAY, not from the end of the month. A retainer is due on the
-      // client's terms from the day it is issued; a monthly invoice's clock
-      // starts at the end of the period it bills for, and borrowing that here
-      // would date the retainer to a month that has not happened yet.
-      dueDate: dueDateFromTerms(today, client.paymentTerms, defaultNetDays),
+      // From TODAY — the day this retainer is issued. Every invoice is dated
+      // that way since 2026-09-15, monthly ones included; before then a monthly
+      // invoice's clock started at the end of the period it billed for, and
+      // this line was the exception that already got it right.
+      dueDate: dueDateFromTerms(today, client.paymentTerms, windowDays),
       blurb: '',
       scopeFlags: [],
       sentAt: null,

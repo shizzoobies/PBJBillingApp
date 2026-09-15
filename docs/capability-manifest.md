@@ -1628,8 +1628,16 @@ Clients page meanwhile. Owner-only.
 
 > **The monthly run is live.** At the top of the Invoices page: pick a month,
 > press **Generate**, and the app builds one numbered draft invoice per client
-> with something to bill — lines, a due date from that client's payment terms,
-> any prior-month adjustment carried forward, and out-of-scope flags.
+> with something to bill — lines, a due date **30 days after the day the
+> invoice is generated**, any prior-month adjustment carried forward, and
+> out-of-scope flags.
+>
+> **Every invoice gets the same 30-day payment window, counted from the day it
+> is issued.** A client whose own payment terms are LONGER keeps the longer one
+> — "Net 45" on the record still means 45 days. Terms that are shorter, that
+> ask for payment now ("Due on receipt", "Due on Demand"), or that are blank
+> are all lifted to the 30 days, so no invoice is ever due before the day it
+> was sent.
 >
 > **Moving between months:** the month picker has a back arrow and a forward
 > arrow flanking it — one press steps the run one month and the list reloads to
@@ -1737,8 +1745,9 @@ Clients page meanwhile. Owner-only.
 > **page 2** headed "Detailed Hours" (the invoice itself stays one page when it
 > is off, which is the default). A billing master's combined invoice is
 > unaffected by all of this: it still shows one combined line and no sections,
-> headings or company names, exactly as the client chose. Payment terms print
-> from each client's own record.
+> headings or company names, exactly as the client chose. The payment-terms
+> line prints the window the invoice was actually dated by — **Net 30** — unless
+> the client's own terms are longer, in which case their own wording prints.
 >
 > **MARK PAID — for money that arrived outside the app.** A check, a direct
 > transfer nobody linked, an invoice that was never sent through the system:

@@ -487,12 +487,15 @@ describe('InvoicesPage — the sheet’s footer', () => {
     )
   })
 
-  // Payment terms stay whatever the client record says — that is data, and
-  // changing the words is a record edit rather than a code change (plan §1d).
-  it('still prints the client’s stored payment terms', async () => {
+  // The terms line states the window the invoice was DATED by. This client's
+  // record still says "Due on receipt" — printing those words beside a due date
+  // thirty days out would contradict the sheet's own date, so the sheet prints
+  // the window. A client whose stored terms are LONGER prints their own words.
+  it('prints the firm’s payment window, not the record’s "Due on receipt"', async () => {
     await printStored(fullInvoice)
 
-    expect(printed()).toContain('Due on receipt')
+    expect(printed()).toContain('Net 30')
+    expect(printed()).not.toContain('Due on receipt')
   })
 })
 

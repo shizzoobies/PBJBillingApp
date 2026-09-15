@@ -3187,6 +3187,56 @@ describe('generateInvoicesForPeriod with a single client (file backend)', () => 
 })
 
 /**
+ * THE PAYMENT WINDOW on a generated invoice (Alex, 2026-09-15).
+ *
+ * Every invoice is due thirty days after the day it is ISSUED. This is the
+ * end-to-end version of that rule: the two client records that used to produce
+ * a doomed due date — one saying "Due on receipt", one saying nothing at all —
+ * going through the real generator. Before the change the first was due on the
+ * last day of the month it billed for, so an invoice emailed on Sept 1 for
+ * August arrived already past due, and the second was due Sept 30, a day short
+ * of a month after it was sent.
+ */
+describe('the payment window on generated invoices (file backend)', () => {
+  const period = '2026-08'
+
+  async function seedTermsWorkspace() {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100, paymentTerms: 'Due on receipt' },
+          { id: 'c2', name: 'Globex', billingMode: 'hourly', hourlyRate: 100, paymentTerms: '' },
+          { id: 'c3', name: 'Initech', billingMode: 'hourly', hourlyRate: 100, paymentTerms: 'Net 60' },
+        ],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [
+          { id: 't1', clientId: 'c1', employeeId: 'emp-1', date: `${period}-04`, minutes: 120, billable: true },
+          { id: 't2', clientId: 'c2', employeeId: 'emp-1', date: `${period}-05`, minutes: 60, billable: true },
+          { id: 't3', clientId: 'c3', employeeId: 'emp-1', date: `${period}-06`, minutes: 60, billable: true },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('dates every invoice thirty days from the day it is issued', async () => {
+    await seedTermsWorkspace()
+
+    const result = await store.generateInvoicesForPeriod(period, { issueDate: '2026-10-01' })
+
+    const dueByClient = Object.fromEntries(
+      result.created.map((invoice) => [invoice.clientId, invoice.dueDate]),
+    )
+    expect(dueByClient.c1).toBe('2026-10-31')
+    expect(dueByClient.c2).toBe('2026-10-31')
+    // The one contractual window longer than the firm’s survives untouched.
+    expect(dueByClient.c3).toBe('2026-11-30')
+  })
+})
+
+/**
  * Stage validation. `lifecycle_stage` decides whether a client appears in ANY
  * picker in the app, so a value neither backend recognizes is a client who
  * silently disappears — or a retirement that silently undoes itself on the

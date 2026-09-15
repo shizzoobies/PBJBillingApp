@@ -42,6 +42,7 @@ import {
   normalizeTimeBreakdownMode,
   renderedInvoiceLines,
 } from '../../lib/invoice-lines.js'
+import { paymentTermsLabel } from '../../lib/invoice-draft.js'
 import type { InvoiceLineOut, InvoiceRoleTier } from '../../lib/invoice-lines.js'
 import { InvoiceDeliveryBadge } from '../components/InvoiceDeliveryBadge'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
@@ -163,7 +164,10 @@ function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean
       address: hasAddress(client),
       logo: hasText(client.logoUrl) || hasFirmLogo,
       serviceLabel: true,
-      paymentTerms: hasText(client.paymentTerms),
+      // Always on offer now: the terms line states the firm's payment window, so
+      // it has something to say even for a client whose record leaves terms
+      // blank. It is still hers to switch off.
+      paymentTerms: true,
       footerNote: hasText(client.footerNote),
       payLink: hasText(client.quickbooksPayUrl),
     },
@@ -1261,10 +1265,10 @@ function InvoicePreview({ display, custom }: { display: DisplayInvoice; custom?:
           ))}
         </div>
       ) : null}
-      {showTerms && invoice.client.paymentTerms ? (
+      {showTerms ? (
         <div className="invoice-payment-terms">
           <span>Payment terms</span>
-          <strong>{invoice.client.paymentTerms}</strong>
+          <strong>{paymentTermsLabel(invoice.client.paymentTerms)}</strong>
         </div>
       ) : null}
       <div className="invoice-total-row">
@@ -1571,10 +1575,13 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
               ))}
         </tbody>
       </table>
-      {showField('paymentTerms') && billingClient.paymentTerms ? (
+      {/* The window the invoice was DATED by, by the same rule the emailed PDF
+          prints — a sheet reading "Due on receipt" beside a due date thirty days
+          out would contradict itself. Longer client terms still print verbatim. */}
+      {showField('paymentTerms') ? (
         <div className="print-terms">
           <span>Payment terms:</span>
-          <strong>{billingClient.paymentTerms}</strong>
+          <strong>{paymentTermsLabel(billingClient.paymentTerms)}</strong>
         </div>
       ) : null}
       <footer>

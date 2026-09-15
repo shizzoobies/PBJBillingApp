@@ -733,9 +733,10 @@ is not installed here and the script SKIPS (exit 0) without it. Charge rows
 (card fee, adjustment, credits, hand-typed customs) now always print after the
 three sections regardless of stored order — deliberate. The owner's on-screen
 `InvoicePreview` is intentionally flat (her review copy); the sectioned
-`InvoiceDocument` is the client's view. Payment terms still print from each
-client's record ("Due on receipt") — her markup said "Due on Demand"; Alex
-chose to leave the data alone and let her raise it if she means it.
+`InvoiceDocument` is the client's view. Payment terms printed from each
+client's record ("Due on receipt") until 2026-09-15, when Alex gave every
+invoice a 30-day window from its issue date; the line now prints "Net 30"
+unless a client's own terms are longer (`paymentTermsLabel`).
 
 Suite 2691 → **2759 tests / 162 files**. Manifest updated — re-provision voice.
 
