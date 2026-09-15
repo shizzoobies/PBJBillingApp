@@ -1295,7 +1295,7 @@ export const INVOICE_SELECT_COLUMNS = `id, client_id, period, number, kind, stat
           due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
           stripe_checkout_session_id, stripe_card_session_id,
           stripe_payment_intent_id, email_log, applied_to_invoice_id,
-          original_line_items, created_at, updated_at`
+          original_line_items, pay_token, created_at, updated_at`
 
 /**
  * One invoices row -> the camelCase shape the app and the API speak. jsonb
@@ -1339,6 +1339,9 @@ export function mapInvoiceRow(row) {
     // before the column existed: an empty array here would read as "she deleted
     // every line", which is the opposite of "we never knew".
     originalLineItems: Array.isArray(row.original_line_items) ? row.original_line_items : null,
+    // The durable pay link's token — the invoice's public name at /pay/<token>.
+    // Null until a send (or the Payment link button) mints one.
+    payToken: row.pay_token ?? null,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
   }
@@ -4453,6 +4456,15 @@ export class AppDataStore {
       await this.pool.query(
         `alter table invoices add column if not exists original_line_items jsonb`,
       )
+      // The DURABLE pay link's name for this invoice. Minted lazily on the
+      // first send rather than at insert, so every row already in production
+      // keeps its NULL and nothing has to be backfilled. The unique index is
+      // what makes two invoices sharing a token impossible; Postgres does not
+      // treat two NULLs as equal, so every un-minted row coexists under it.
+      await this.pool.query(`alter table invoices add column if not exists pay_token text`)
+      await this.pool.query(
+        `create unique index if not exists invoices_pay_token_key on invoices (pay_token)`,
+      )
       // PARTIAL unique — one live invoice per client per month, but a VOIDED
       // one must not block re-generating. Same lesson as the checklist
       // materializer's instance index, applied from day one rather than after
@@ -5938,7 +5950,8 @@ export class AppDataStore {
                     due_date, blurb, scope_flags, sent_at, paid_at,
                     stripe_checkout_session_id, stripe_card_session_id,
                     stripe_payment_intent_id, payment_method,
-                    email_log, applied_to_invoice_id, original_line_items, created_at
+                    email_log, applied_to_invoice_id, original_line_items, pay_token,
+                    created_at
                from invoices`,
           )
         ).rows
@@ -6306,9 +6319,10 @@ export class AppDataStore {
                 due_date, blurb, scope_flags, sent_at, paid_at,
                 stripe_checkout_session_id, stripe_card_session_id,
                 stripe_payment_intent_id, payment_method,
-                email_log, applied_to_invoice_id, original_line_items, created_at, updated_at
+                email_log, applied_to_invoice_id, original_line_items, pay_token,
+                created_at, updated_at
               )
-              values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21::jsonb,$22, now())
+              values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21::jsonb,$22,$23, now())
             `,
             [
               invoice.id,
@@ -6340,6 +6354,11 @@ export class AppDataStore {
               // A snapshot column added to one half of this pair and not the
               // other is the exact shape of the three past data-loss bugs.
               invoice.original_line_items ? JSON.stringify(invoice.original_line_items) : null,
+              // The pay token rides the restore like every other column. Drop
+              // it from either half of this pair and the next owner autosave
+              // NULLs it — every Pay button already in a client's inbox goes to
+              // a "not valid" page, with nothing in the app to say why.
+              invoice.pay_token ?? null,
               invoice.created_at,
             ],
           )
@@ -9219,6 +9238,9 @@ export class AppDataStore {
         originalLineItems: Array.isArray(invoice.originalLineItems)
           ? invoice.originalLineItems
           : null,
+        // Same as `mapInvoiceRow`: null, never undefined, so the two backends
+        // answer the same shape for a row minted before the column existed.
+        payToken: invoice.payToken ?? null,
       }))
       .sort((a, b) => String(a.number ?? '').localeCompare(String(b.number ?? '')))
   }
@@ -11502,6 +11524,100 @@ export class AppDataStore {
       ) ??
       null
     )
+  }
+
+  /**
+   * The invoice's DURABLE public name, minted once and kept forever after.
+   *
+   * What the emailed Pay button carries is `/pay/<token>` on our own domain,
+   * not a Stripe URL — a Checkout session dies in about a day, so a client who
+   * opened the email a week later used to hit a dead button. The token never
+   * expires; the route behind it builds a fresh Stripe page on every click.
+   *
+   * ONE STATEMENT on Postgres, and `coalesce` is the whole point: two sends
+   * racing (or a send racing a click) both run this, and the invoice must come
+   * out of it with exactly one token. Reading then writing would let the second
+   * one overwrite the first, invalidating a link that had already been emailed.
+   *
+   * @returns the token, or null when there is no such invoice.
+   */
+  async getOrCreateInvoicePayToken(invoiceId) {
+    if (!invoiceId) return null
+    const candidate = randomBytes(32).toString('base64url')
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update invoices
+            set pay_token = coalesce(pay_token, $2), updated_at = now()
+          where id = $1
+        returning pay_token`,
+        [invoiceId, candidate],
+      )
+      return rows.length > 0 ? (rows[0].pay_token ?? null) : null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    const existing = data.invoices[index].payToken
+    if (typeof existing === 'string' && existing) return existing
+    data.invoices[index] = {
+      ...data.invoices[index],
+      payToken: candidate,
+      updatedAt: nowIso(),
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return candidate
+  }
+
+  /**
+   * The invoice one pay token names, whatever state it is in.
+   *
+   * Deliberately says NOTHING about whether it can be paid — draft, paid, void
+   * and sent all come back the same way. The route is what decides which page a
+   * client sees, and it needs the status to do it.
+   */
+  async findInvoiceByPayToken(token) {
+    const value = String(token ?? '').trim()
+    if (!value) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${INVOICE_SELECT_COLUMNS} from invoices where pay_token = $1`,
+        [value],
+      )
+      return rows.length > 0 ? mapInvoiceRow(rows[0]) : null
+    }
+    const all = await this.listInvoices()
+    return all.find((invoice) => invoice.payToken === value) ?? null
+  }
+
+  /**
+   * Note that somebody opened the pay link — the evidence behind "we never got
+   * the invoice" when the invoice was in fact opened.
+   *
+   * Filed on the same append-only trail as the sends, tagged `kind: 'link'` so
+   * it can NEVER be read as a send: `recordInvoiceSent` only marks an invoice
+   * sent for an untagged entry, and the UI's `latestInvoiceSend` skips tagged
+   * ones for the same reason.
+   *
+   * ONE ENTRY PER UTC DAY. The link is a durable URL a client may reload a
+   * dozen times while deciding; a log with a dozen identical lines in it is a
+   * log nobody reads.
+   */
+  async recordInvoicePayLinkOpened(invoiceId) {
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+    const today = nowIso().slice(0, 10)
+    const alreadyToday = (current.emailLog ?? []).some(
+      (entry) => entry?.kind === 'link' && String(entry?.at ?? '').slice(0, 10) === today,
+    )
+    if (alreadyToday) return current
+    return await this.recordInvoiceSent(invoiceId, {
+      kind: 'link',
+      ok: true,
+      subject: 'Payment link opened',
+      to: [],
+    })
   }
 
   /**

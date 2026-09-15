@@ -2773,8 +2773,9 @@ function InvoiceEditor({
       {paymentLink ? (
         <div className="invoice-run-paylink">
           <span className="invoice-run-paylink-label">
-            Send this to the client — they pay by bank transfer. It clears in about 4 business
-            days, so the invoice will read “processing” until then.
+            Send this to the client. It stays valid until the invoice is paid. They pay by bank
+            transfer, which clears in about 4 business days, so the invoice will read “processing”
+            until then.
           </span>
           <div className="invoice-run-paylink-row">
             <input className="input" readOnly value={paymentLink} aria-label="Payment link" />
@@ -2985,7 +2986,10 @@ function InvoiceEditor({
               onClick={() => void createLink()}
             >
               <LinkIcon size={15} />
-              {payBusy ? 'Creating…' : paymentLink ? 'New payment link' : 'Payment link'}
+              {/* Not "New payment link" any more: pressing it twice gives back
+                  the SAME durable link, because the token is minted once and
+                  kept. "New" promised a replacement it never made. */}
+              {payBusy ? 'Creating…' : 'Payment link'}
             </button>
           ) : null}
           {/* Emails the invoice. The pay link inside it is minted fresh by the

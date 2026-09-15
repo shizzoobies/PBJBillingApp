@@ -491,8 +491,12 @@ export interface InvoiceEmailSendEntry {
   /** What was billed when it went out — the lines can be edited afterwards. */
   total?: number
   error?: string
-  /** Absent on a send of the invoice; set on the two payment notices. */
-  kind?: 'ack' | 'receipt'
+  /**
+   * Absent on a send of the invoice; set on the two payment notices, and on
+   * `'link'` — which is not an email at all but a note that somebody OPENED the
+   * durable pay link. A tagged entry never marks the invoice sent.
+   */
+  kind?: 'ack' | 'receipt' | 'link'
   /** Resend's own id for the message — the join key to its delivery events. */
   providerId?: string | null
 }

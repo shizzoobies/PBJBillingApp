@@ -993,6 +993,14 @@ function fakePostgres({
     if (/md5\(coalesce\(string_agg/i.test(trimmed) && /union all/i.test(trimmed)) {
       return { rows: Array.isArray(versionResponses) ? (versionResponses.shift() ?? []) : [] }
     }
+    // `findInvoiceByPayToken`'s narrow read. It has to come BEFORE the general
+    // invoices select below, and it has to actually filter: answering every row
+    // would make a test that proves one client's token cannot reach another
+    // client's invoice pass no matter what the store does.
+    if (/^select\b[\s\S]*\bfrom invoices where pay_token = \$1$/i.test(trimmed)) {
+      const found = invoices.find((invoice) => invoice.pay_token === params?.[0])
+      return { rows: found ? [found] : [] }
+    }
     if (/^select\b[\s\S]*\bfrom invoices\b/i.test(trimmed)) {
       return { rows: invoices }
     }
@@ -1011,6 +1019,17 @@ function fakePostgres({
     // `update invoices … returning id` — the void pass reads its OWN output to
     // decide which retainers to hand back, so the fake has to answer with the
     // rows it claims to have touched or that second statement never runs.
+    // `getOrCreateInvoicePayToken`'s single statement. The fake reproduces the
+    // `coalesce` rather than just echoing the candidate, because the ONE thing
+    // worth proving about this method is that a second call gives back the
+    // FIRST token — a token that changed would invalidate a link already in a
+    // client's inbox.
+    if (/^update invoices\b[\s\S]*\breturning pay_token$/i.test(trimmed)) {
+      const found = invoices.find((invoice) => invoice.id === params?.[0])
+      if (!found) return { rows: [] }
+      found.pay_token = found.pay_token ?? params?.[1]
+      return { rows: [{ pay_token: found.pay_token }] }
+    }
     if (/^update invoices\b[\s\S]*\breturning id$/i.test(trimmed)) {
       return { rows: invoices.map((invoice) => ({ id: invoice.id })) }
     }
@@ -1290,6 +1309,330 @@ describe('bulk save preserves invoices (postgres branch)', () => {
     expect(restore.text).toMatch(/stripe_card_session_id/)
     expect(restore.params).toContain('cs_ach_1')
     expect(restore.params).toContain('cs_card_1')
+  })
+
+  /**
+   * THE PAY TOKEN'S BULK-SAVE GUARD, and the reason it is worth its own test.
+   *
+   * `pay_token` is the invoice's permanent public address: it is what the Pay
+   * button in every email the client has ever received points at. Leave it out
+   * of the snapshot select OR out of the restore insert and the very next owner
+   * autosave writes it back as NULL — every emailed link starts answering "this
+   * payment link is not valid", the invoice looks perfectly healthy in the app,
+   * and nothing anywhere says what happened. That is the `email_log` bug again,
+   * on a column that collects money.
+   */
+  it('carries the durable pay token through the wipe', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice, pay_token: 'tok_durable_1' }] })
+    await postgresStore(fake).write(workspace())
+
+    const snapshot = fake.matching(/^select[\s\S]*from invoices$/i)[0]
+    expect(snapshot.text).toMatch(/pay_token/)
+
+    const restore = fake.matching(/^insert into invoices \(/i)[0]
+    expect(restore.text).toMatch(/pay_token/)
+    expect(restore.params).toContain('tok_durable_1')
+  })
+
+  // The other half of the same contract: a column in the mapper but not in the
+  // select reads as `undefined` on the row and the mapper turns it into a
+  // plausible empty value. For this column that value is "no link exists".
+  it('selects pay_token on every invoice read', () => {
+    expect(INVOICE_SELECT_COLUMNS).toMatch(/pay_token/)
+  })
+})
+
+/**
+ * `getOrCreateInvoicePayToken` — the durable pay link's name for one invoice.
+ *
+ * The link in an email outlives the Stripe Checkout session it used to carry by
+ * weeks, so the token behind it has to be STABLE: minted once, and the same
+ * answer forever after. A method that re-minted would silently invalidate every
+ * link already sent, and the only symptom would be a client saying the button
+ * does not work.
+ */
+describe('getOrCreateInvoicePayToken (file backend)', () => {
+  async function seedInvoice(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-token',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-001',
+        status: 'sent',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-05T00:00:00.000Z',
+        paidAt: null,
+        paymentMethod: null,
+        stripeCheckoutSessionId: 'cs_ach',
+        stripeCardSessionId: null,
+        emailLog: [],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('mints a base64url token and persists it', async () => {
+    await seedInvoice()
+    const token = await store.getOrCreateInvoicePayToken('inv-token')
+
+    expect(token).toMatch(/^[A-Za-z0-9_-]{20,64}$/)
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.invoices[0].payToken).toBe(token)
+  })
+
+  // The whole point. A second call is a second send, and the client is holding
+  // the link the FIRST one produced.
+  it('gives back the same token on every later call', async () => {
+    await seedInvoice()
+    const first = await store.getOrCreateInvoicePayToken('inv-token')
+    const second = await store.getOrCreateInvoicePayToken('inv-token')
+    expect(second).toBe(first)
+  })
+
+  it('answers null for an invoice that does not exist', async () => {
+    await seedInvoice()
+    expect(await store.getOrCreateInvoicePayToken('inv-nope')).toBeNull()
+    expect(await store.getOrCreateInvoicePayToken('')).toBeNull()
+  })
+
+  it('reads back through listInvoices, as null when nothing was minted', async () => {
+    await seedInvoice()
+    const before = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-token')
+    // Null, never undefined — the shape Postgres answers for a row written
+    // before the column existed (cardinal rule 1).
+    expect(before.payToken).toBeNull()
+
+    const token = await store.getOrCreateInvoicePayToken('inv-token')
+    const after = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-token')
+    expect(after.payToken).toBe(token)
+  })
+
+  /**
+   * The token must survive the two writes that touch an invoice after it is
+   * sent. `applyInvoicePayment` runs on every webhook and on every pay-link
+   * click; `updateInvoice` runs whenever she edits the note. Either one
+   * dropping the field would kill the emailed link mid-month.
+   */
+  it('survives a payment write and an edit', async () => {
+    await seedInvoice()
+    const token = await store.getOrCreateInvoicePayToken('inv-token')
+
+    const paid = await store.applyInvoicePayment('inv-token', { checkoutSessionId: 'cs_new' })
+    expect(paid.payToken).toBe(token)
+
+    const edited = await store.updateInvoice('inv-token', { blurb: 'Thanks!' })
+    expect(edited.payToken).toBe(token)
+  })
+
+  /**
+   * "Void and regenerate" is how a month gets corrected, and it happens after
+   * links have been emailed. The token must still RESOLVE — to the voided row,
+   * so the client gets "this invoice was cancelled" rather than a dead page.
+   */
+  it('survives a void, and still names the voided invoice', async () => {
+    await seedInvoice({ status: 'draft', sentAt: null })
+    const token = await store.getOrCreateInvoicePayToken('inv-token')
+
+    await store.voidUnsentInvoicesForPeriod('2026-08')
+
+    const found = await store.findInvoiceByPayToken(token)
+    expect(found?.id).toBe('inv-token')
+    expect(found?.status).toBe('void')
+  })
+})
+
+/**
+ * `findInvoiceByPayToken` — the only way into an invoice from the public route.
+ *
+ * It answers with the invoice whatever state it is in, because the ROUTE is what
+ * decides which page a client sees and it needs the status to do it. What it
+ * must never do is match loosely: one client's token reaching another client's
+ * invoice would show a stranger a bill and let them pay it.
+ */
+describe('findInvoiceByPayToken (file backend)', () => {
+  async function seedTwo() {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const base = {
+      period: '2026-08',
+      status: 'sent',
+      lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+      subtotal: 100,
+      total: 100,
+      dueDate: '2026-09-15',
+      blurb: '',
+      scopeFlags: [],
+      sentAt: '2026-08-05T00:00:00.000Z',
+      paidAt: null,
+      emailLog: [],
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    }
+    data.invoices = [
+      { ...base, id: 'inv-a', clientId: 'c1', number: 'INV-2026-08-001' },
+      { ...base, id: 'inv-b', clientId: 'c1', number: 'INV-2026-08-002' },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('round-trips the token it just minted', async () => {
+    await seedTwo()
+    const token = await store.getOrCreateInvoicePayToken('inv-a')
+    const found = await store.findInvoiceByPayToken(token)
+    expect(found?.id).toBe('inv-a')
+  })
+
+  it('does not answer with another invoice', async () => {
+    await seedTwo()
+    const tokenA = await store.getOrCreateInvoicePayToken('inv-a')
+    const tokenB = await store.getOrCreateInvoicePayToken('inv-b')
+    expect(tokenB).not.toBe(tokenA)
+    expect((await store.findInvoiceByPayToken(tokenB))?.id).toBe('inv-b')
+  })
+
+  // An un-minted invoice has `payToken: null`. An empty or missing token must
+  // never match it — that would hand `/pay/` the first unsent invoice it found.
+  it('answers null for an unknown, empty or missing token', async () => {
+    await seedTwo()
+    expect(await store.findInvoiceByPayToken('nope_nope_nope')).toBeNull()
+    expect(await store.findInvoiceByPayToken('')).toBeNull()
+    expect(await store.findInvoiceByPayToken('   ')).toBeNull()
+    expect(await store.findInvoiceByPayToken(null)).toBeNull()
+    expect(await store.findInvoiceByPayToken(undefined)).toBeNull()
+  })
+})
+
+/**
+ * The POSTGRES half of the same two methods — the branch production runs.
+ *
+ * The statement shape IS the contract here: `coalesce(pay_token, $2)` in ONE
+ * statement is what makes two sends racing (or a send racing a click) safe. A
+ * read-then-write would let the second one overwrite a token that had already
+ * been emailed.
+ */
+describe('the pay token statements (postgres branch)', () => {
+  const row = { ...existingInvoice, pay_token: null }
+
+  it('mints with a single coalescing update', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row }] })
+    const token = await postgresStore(fake).getOrCreateInvoicePayToken('inv-1')
+
+    expect(token).toMatch(/^[A-Za-z0-9_-]{20,64}$/)
+    const update = fake.matching(/^update invoices[\s\S]*returning pay_token$/i)[0]
+    expect(update).toBeTruthy()
+    expect(update.text).toMatch(/coalesce\(pay_token/)
+    expect(update.params[0]).toBe('inv-1')
+  })
+
+  it('answers the STORED token when there already is one', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row, pay_token: 'tok_already_here' }] })
+    expect(await postgresStore(fake).getOrCreateInvoicePayToken('inv-1')).toBe('tok_already_here')
+  })
+
+  it('answers null when the update matched no row', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row }] })
+    expect(await postgresStore(fake).getOrCreateInvoicePayToken('inv-missing')).toBeNull()
+  })
+
+  it('looks an invoice up by the column, not by scanning', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row, pay_token: 'tok_lookup' }] })
+    const found = await postgresStore(fake).findInvoiceByPayToken('tok_lookup')
+
+    expect(found?.id).toBe('inv-1')
+    expect(found?.payToken).toBe('tok_lookup')
+    expect(fake.matching(/where pay_token = \$1/i)).toHaveLength(1)
+  })
+
+  it('answers null for a token no row carries', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row, pay_token: 'tok_lookup' }] })
+    expect(await postgresStore(fake).findInvoiceByPayToken('tok_other')).toBeNull()
+  })
+})
+
+/**
+ * `recordInvoicePayLinkOpened` — the evidence behind "they say they never got
+ * the invoice".
+ *
+ * Two rules, both of which exist because this is a DURABLE link rather than a
+ * one-shot one. It must not mark the invoice sent (opening a link is not a
+ * send), and it must not write a line every time a client reloads while
+ * deciding — a log with forty identical entries is a log nobody reads.
+ */
+describe('recordInvoicePayLinkOpened (file backend)', () => {
+  async function seedInvoice(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-open',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-001',
+        status: 'sent',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-05T00:00:00.000Z',
+        paidAt: null,
+        emailLog: [],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('files one tagged entry, and only one per day', async () => {
+    await seedInvoice()
+    await store.recordInvoicePayLinkOpened('inv-open')
+    await store.recordInvoicePayLinkOpened('inv-open')
+    await store.recordInvoicePayLinkOpened('inv-open')
+
+    const stored = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-open')
+    const opens = stored.emailLog.filter((entry) => entry.kind === 'link')
+    expect(opens).toHaveLength(1)
+    expect(opens[0].ok).toBe(true)
+    expect(opens[0].subject).toBe('Payment link opened')
+  })
+
+  // A tagged entry is not a send: `recordInvoiceSent` only moves the status and
+  // the sent date for an UNtagged one, and the UI's `latestInvoiceSend` skips
+  // tagged entries for the same reason.
+  it('moves neither the status nor the sent date', async () => {
+    await seedInvoice({ status: 'overdue', sentAt: '2026-08-05T00:00:00.000Z' })
+    await store.recordInvoicePayLinkOpened('inv-open')
+
+    const stored = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-open')
+    expect(stored.status).toBe('overdue')
+    expect(stored.sentAt).toBe('2026-08-05T00:00:00.000Z')
+  })
+
+  it('leaves the real sends in the log beside it', async () => {
+    await seedInvoice()
+    await store.recordInvoiceSent('inv-open', { to: ['a@example.com'], subject: 'Invoice' })
+    await store.recordInvoicePayLinkOpened('inv-open')
+
+    const stored = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-open')
+    expect(stored.emailLog).toHaveLength(2)
+    expect(stored.emailLog[0].kind).toBeUndefined()
+    expect(stored.emailLog[1].kind).toBe('link')
+  })
+
+  it('answers null for an invoice that does not exist', async () => {
+    await seedInvoice()
+    expect(await store.recordInvoicePayLinkOpened('inv-nope')).toBeNull()
   })
 })
 
@@ -6140,7 +6483,7 @@ describe('retainer writes on the postgres branch', () => {
     expect(restores).toHaveLength(1)
     expect(restores[0].text).toMatch(/number, kind, status/i)
     expect(restores[0].text).toMatch(
-      /email_log, applied_to_invoice_id, original_line_items, created_at/i,
+      /email_log, applied_to_invoice_id, original_line_items, pay_token,\s*created_at/i,
     )
     // A retainer that came back as 'monthly' would collide with that client's
     // real invoice on the very next generate; one that came back unapplied
@@ -8989,11 +9332,12 @@ describe('bulk save round-trips original_line_items (postgres branch)', () => {
     await postgresStore(fake).write(workspace())
 
     const restore = fake.matching(/^insert into invoices \(/i)[0]
-    // The column sits one before created_at in the parameter list. NULL, not
-    // the '[]' that `scope_flags` and `email_log` legitimately carry — an empty
-    // array here would read as "she deleted every line".
+    // The column sits two before created_at in the parameter list (`pay_token`
+    // came between them). NULL, not the '[]' that `scope_flags` and `email_log`
+    // legitimately carry — an empty array here would read as "she deleted every
+    // line".
     expect(restore.params[20]).toBeNull()
-    expect(restore.params[21]).toBe(existingInvoice.created_at)
+    expect(restore.params[22]).toBe(existingInvoice.created_at)
   })
 
   it('writes the snapshot on insert and never on update', async () => {

@@ -1948,15 +1948,32 @@ Clients page meanwhile. Owner-only.
 >
 > **Payment link (bank transfer).** On an invoice with an amount owed there is a
 > **Payment link** button. It does NOT open a payment page - Brittany is not the
-> payer - it creates a secure Stripe link and shows it to copy and send to the
-> client. Creating one marks the invoice **Sent**. The client pays by bank
-> transfer (ACH), which takes about **4 business days to clear**, so the invoice
-> reads **Processing** for several days before it turns **Paid**. That delay is
-> normal and is how bank transfers work - it is not stuck. A failed payment puts
-> the invoice back to Sent, notifies the owners, and lists it under the month
-> run's **Payment failed** tab until it is sent again or paid another way (see
-> that tab above). There is no button on a voided invoice or one with nothing
-> owed.
+> payer - it creates a secure link and shows it to copy and send to the client.
+> Creating one marks the invoice **Sent**. The client pays by bank transfer
+> (ACH), which takes about **4 business days to clear**, so the invoice reads
+> **Processing** for several days before it turns **Paid**. That delay is normal
+> and is how bank transfers work - it is not stuck. A failed payment puts the
+> invoice back to Sent, notifies the owners, and lists it under the month run's
+> **Payment failed** tab until it is sent again or paid another way (see that
+> tab above) - and the same link keeps working for the retry. There is no button
+> on a voided invoice or one with nothing owed.
+>
+> **The payment link does not expire.** It is a PB&J address
+> (`app.pbjsa.com/pay/...`), not a Stripe address, and it builds a fresh Stripe
+> payment page every single time it is opened. A link emailed weeks ago still
+> works. This is the same link the **Pay** button in the emailed invoice uses,
+> so there is one link per invoice however the client got it, and pressing
+> **Payment link** again hands back the same one rather than replacing it.
+> Opening the link after the invoice is settled or withdrawn does not charge
+> anybody twice: it shows a plain page saying the invoice is already paid,
+> already being processed, or was canceled. If asked why the old link used to
+> stop working: the button used to carry a Stripe address, and those expire
+> about a day after they are made.
+>
+> **After the client pays, the payment page thanks them** and says the invoice
+> will read Processing within a few minutes - it does not send them into the
+> app, which they cannot sign into. A client who backs out of the payment page
+> instead sees "Nothing was charged" and a button to start again.
 >
 > **Send (email the invoice).** In the month-run editor, next to Payment link,
 > there is a **Send** button. It emails the invoice to **every address attached
@@ -1975,9 +1992,11 @@ Clients page meanwhile. Owner-only.
 > and its Send button is disabled with the reason on it — it no longer fails
 > only after you press Send. The email carries the
 > full breakdown, total, due date and the note to the client, plus a big pink
-> **Pay $[amount]** button (bank transfer) when there is an amount owed — each send gets a fresh
-> payment link, and a re-send of a Paid or Processing invoice goes out as a
-> statement with NO pay button so nobody can pay twice. Sending marks the
+> **Pay $[amount]** button (bank transfer) when there is an amount owed — that
+> button is the invoice's permanent link and does not expire, so a client who
+> opens the email a month later can still pay from it, and a re-send of a Paid
+> or Processing invoice goes out as a statement with NO pay button so nobody can
+> pay twice. Sending marks the
 > invoice **Sent**; the first send's date is kept as THE sent date. The editor
 > shows the last send ("Sent Aug 9 to 2 recipients"), which opens to the actual
 > addresses so a past send can be audited, and the button becomes
@@ -2092,7 +2111,9 @@ Clients page meanwhile. Owner-only.
 > **The Payment link button stays bank transfer only**, even for a card-enabled
 > client. It hands back a bare URL to paste somewhere else, and the sentence
 > explaining the fee would not travel with it. Card is offered through **Send**,
-> where the email carries the explanation.
+> where the email carries the explanation. The card button in that email is a
+> durable PB&J link too (`app.pbjsa.com/pay/.../card`), so it keeps working for
+> as long as the bank-transfer one does.
 >
 > **Email invoice can build the invoice first.** The per-client **Email
 > invoice** button sends the STORED invoice for the client and month on screen.

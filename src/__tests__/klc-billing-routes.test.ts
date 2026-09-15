@@ -110,7 +110,10 @@ describe('who a billing master’s invoice is emailed to', () => {
 })
 
 describe('the send route refuses before it sends anything', () => {
-  const block = () => routeBlock(/const invoiceSendMatch = normalizedPath\.match\(/, 11000)
+  // Widened when the durable pay link landed: the route grew a token mint and
+  // its comment between the refusal and `sendInvoiceEmail`, and a window that
+  // stopped short reports the send call as MISSING rather than as out of order.
+  const block = () => routeBlock(/const invoiceSendMatch = normalizedPath\.match\(/, 12500)
 
   it('answers 409 with the unset-recipient sentence', () => {
     const text = block()

@@ -263,17 +263,32 @@ const RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000
 const RATE_LIMIT_MAX = 3
 const requestLinkAttempts = new Map()
 
-function isRateLimited(emailKey) {
-  if (!emailKey) return false
+/**
+ * The public pay link's own bucket, kept SEPARATE from the sign-in one. The two
+ * limits are nothing alike (3 sign-in emails in five minutes versus 30 page
+ * opens), and sharing a Map would let a client reloading a payment page lock an
+ * owner out of requesting a sign-in link.
+ */
+const payLinkAttempts = new Map()
+
+/**
+ * Sliding-window limiter. The defaults are the sign-in link's, so the two
+ * callers that predate the options argument are unchanged.
+ */
+function isRateLimited(
+  key,
+  { max = RATE_LIMIT_MAX, windowMs = RATE_LIMIT_WINDOW_MS, bucket = requestLinkAttempts } = {},
+) {
+  if (!key) return false
   const now = Date.now()
-  const cutoff = now - RATE_LIMIT_WINDOW_MS
-  const list = (requestLinkAttempts.get(emailKey) || []).filter((ts) => ts > cutoff)
-  if (list.length >= RATE_LIMIT_MAX) {
-    requestLinkAttempts.set(emailKey, list)
+  const cutoff = now - windowMs
+  const list = (bucket.get(key) || []).filter((ts) => ts > cutoff)
+  if (list.length >= max) {
+    bucket.set(key, list)
     return true
   }
   list.push(now)
-  requestLinkAttempts.set(emailKey, list)
+  bucket.set(key, list)
   return false
 }
 
@@ -1116,6 +1131,74 @@ function renderVerifyConfirmPage(token) {
   </div>
 </body>
 </html>`
+}
+
+/**
+ * The public pages behind `GET /pay/:token` — everything a client can see when
+ * the link they were emailed cannot take them to a payment page right now.
+ *
+ * They name the invoice NUMBER and nothing else. The token is bearer
+ * authorization, so whoever holds the link sees this page; lines, totals, the
+ * client's name and the rest of the month stay off it. Self-contained like the
+ * verify interstitial: no SPA, no fonts, nothing to fetch.
+ */
+function renderPayShell(heading, body, action = null) {
+  const actionBlock = action
+    ? `\n    <p><a class="action" href="${escapeHtml(action.href)}">${escapeHtml(action.label)}</a></p>`
+    : ''
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>${escapeHtml(heading)} - PB&amp;J Strategic Accounting</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f6f5f1; color: #1f1d1a; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 24px; box-sizing: border-box; }
+  .card { background: #fff; padding: 32px 36px; border-radius: 14px; box-shadow: 0 12px 40px rgba(31, 29, 26, 0.08); max-width: 460px; text-align: center; }
+  h1 { margin: 0 0 12px 0; font-size: 22px; color: #7d2a4d; }
+  p { line-height: 1.5; margin: 0 0 20px 0; color: #555049; }
+  a.action { display: inline-block; font-weight: 600; color: #fff; background: #7d2a4d; border-radius: 10px; padding: 12px 24px; text-decoration: none; }
+  p.footer { margin: 0; font-size: 13px; color: #8a837a; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>${escapeHtml(heading)}</h1>
+    <p>${escapeHtml(body)}</p>${actionBlock}
+    <p class="footer">Questions? billing@pbjsa.com</p>
+  </div>
+</body>
+</html>`
+}
+
+function renderPayStatusPage({ heading, body, action = null }) {
+  return renderPayShell(heading, body, action)
+}
+
+/**
+ * A token that names nothing and a token that is malformed answer with EXACTLY
+ * this page. Distinguishing them would tell a stranger which guesses were warm.
+ */
+function renderPayNotFoundPage() {
+  return renderPayShell(
+    'This payment link is not valid',
+    'It may have been mistyped, or the invoice it pointed to was replaced. Ask us for a new link at billing@pbjsa.com.',
+  )
+}
+
+/**
+ * Every pay-page response, with the same headers: never cached (the answer
+ * changes the moment the invoice is paid), never framed, and never carrying a
+ * cookie — this is a public page and nobody is being signed in.
+ */
+function sendPayPage(response, html, status = 200) {
+  response.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Frame-Options': 'DENY',
+  })
+  response.end(html)
 }
 
 // ---- Real-time sync: SSE fan-out ------------------------------------------
@@ -2696,6 +2779,289 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // ---- GET /pay/:token — the durable payment link ------------------------
+    //
+    // WHY IT EXISTS. A Stripe Checkout URL expires in about a day, so the Pay
+    // button in an invoice email was dead to anyone who opened the email later
+    // in the week — and the client has no way to tell that from "the bill is
+    // wrong". This route is a permanent address for the invoice: it mints a
+    // FRESH Checkout session on every open and redirects to it, so one link
+    // keeps working until the invoice is paid or withdrawn.
+    //
+    // PUBLIC on purpose — no `requireSession`. The payer is the client, who has
+    // no account here; the 32-byte token IS the authorization. Which is why
+    // every page below says as little as it possibly can.
+    //
+    // It sits HERE, above the `/api/` 404 and above the SPA fallback, because
+    // the fallback would otherwise answer a pay link with 200 and the app
+    // shell — a client staring at a sign-in screen with no idea why.
+    const payLinkMatch = normalizedPath.match(/^\/pay\/([^/]+)(\/card)?$/)
+    if (payLinkMatch && (request.method === 'GET' || request.method === 'HEAD')) {
+      const payToken = payLinkMatch[1]
+      const wantsCard = Boolean(payLinkMatch[2])
+
+      // Shape first, so a scanner walking the path space never reaches the
+      // database. 32 base64url bytes is 43 characters; the range is loose
+      // enough to survive a change of token length later.
+      if (!/^[A-Za-z0-9_-]{20,64}$/.test(payToken)) {
+        sendPayPage(response, renderPayNotFoundPage(), 404)
+        return
+      }
+
+      const tooManyPage = () =>
+        renderPayStatusPage({
+          heading: 'Too many attempts',
+          body: 'Please wait a few minutes and try the link again.',
+        })
+
+      // Two limits, both on this bucket: one per source address, so nobody can
+      // walk the token space, and a tighter one per token below, so a single
+      // link cannot be used to mint Stripe sessions in bulk.
+      if (isRateLimited(`ip:${getClientIp(request)}`, { max: 30, bucket: payLinkAttempts })) {
+        sendPayPage(response, tooManyPage(), 429)
+        return
+      }
+
+      const payInvoice = await appDataStore.findInvoiceByPayToken(payToken)
+      if (!payInvoice) {
+        sendPayPage(response, renderPayNotFoundPage(), 404)
+        return
+      }
+
+      const payNumber = payInvoice.number ?? ''
+      if (payInvoice.status === 'void') {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'This invoice was canceled',
+            body: `Invoice ${payNumber} was withdrawn and is not owed. If you were expecting a bill, contact us at billing@pbjsa.com.`,
+          }),
+        )
+        return
+      }
+      if (payInvoice.status === 'processing') {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'A payment is already in progress',
+            body: `We have your bank payment for invoice ${payNumber}. Bank transfers take about 4 business days to clear. Nothing more is needed from you.`,
+          }),
+        )
+        return
+      }
+      if (payInvoice.status === 'paid') {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'Paid, thank you',
+            body: `Invoice ${payNumber} was paid in full. Nothing is owed.`,
+          }),
+        )
+        return
+      }
+      // Draft, reviewed, and anything a later migration adds: FAIL CLOSED. Only
+      // an invoice that has actually gone to the client is payable, and being
+      // told "not sent yet" about a status nobody has thought about yet is far
+      // better than a payment page for a bill that was never issued.
+      if (payInvoice.status !== 'sent' && payInvoice.status !== 'overdue') {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'This invoice has not been sent yet',
+            body: 'It is still being prepared. You will get an email when it is ready to pay.',
+          }),
+        )
+        return
+      }
+
+      // THE RETURN TRIP. Stripe sends the payer back here with a marker on the
+      // query, and without these two branches the return walks straight into a
+      // NEW Checkout session: a client who has just paid is asked to pay again,
+      // and one who pressed "back to merchant" is bounced into the page they
+      // just left. The status branches above handle it once the webhook has
+      // landed — these handle the seconds before it does.
+      if (requestUrl.searchParams.get('paid') === '1') {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'Thank you — we have your payment',
+            body: `We are confirming it with the bank. Invoice ${payNumber} will read "processing" here within a few minutes, and bank transfers take about 4 business days to clear.`,
+          }),
+        )
+        return
+      }
+      if (requestUrl.searchParams.get('cancelled') === '1') {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'Nothing was charged',
+            body: `Invoice ${payNumber} has not been paid. You can start again whenever you are ready.`,
+            // Back to this same link with the marker dropped, which is what
+            // opens a fresh payment page.
+            action: { href: `/pay/${payToken}${wantsCard ? '/card' : ''}`, label: 'Pay invoice' },
+          }),
+        )
+        return
+      }
+
+      if (!(Number(payInvoice.total) > 0)) {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'Nothing is owed',
+            body: `There is no balance on invoice ${payNumber}.`,
+          }),
+        )
+        return
+      }
+
+      if (!isStripeConfigured()) {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'Online payment is unavailable right now',
+            body: 'Please contact us at billing@pbjsa.com and we will take payment another way.',
+          }),
+          503,
+        )
+        return
+      }
+
+      if (isRateLimited(`token:${payToken}`, { max: 10, bucket: payLinkAttempts })) {
+        sendPayPage(response, tooManyPage(), 429)
+        return
+      }
+
+      const payAppData = await appDataStore.read()
+      const payClient = (payAppData.clients ?? []).find(
+        (entry) => entry.id === payInvoice.clientId,
+      )
+      if (!payClient) {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'This invoice cannot be paid online right now',
+            body: `Please contact us at billing@pbjsa.com about invoice ${payNumber}.`,
+          }),
+        )
+        return
+      }
+
+      // A card link held by a client who is no longer on card payments is a
+      // stale link, not an error. Send them to the bank-transfer page.
+      if (wantsCard && !payClient.cardPaymentsEnabled) {
+        response.writeHead(302, {
+          Location: `/pay/${payToken}`,
+          'Cache-Control': 'no-store',
+          'Referrer-Policy': 'no-referrer',
+        })
+        response.end()
+        return
+      }
+
+      // Reuse the client's Stripe customer, exactly as the send route does, so
+      // a repeat payer is one customer in Stripe rather than one per click.
+      let payCustomerId = payClient.stripeCustomerId ?? null
+      try {
+        if (!payCustomerId) {
+          const customer = await stripeClient().customers.create({
+            name: payClient.name,
+            ...(payClient.email ? { email: payClient.email } : {}),
+            metadata: { clientId: payClient.id },
+          })
+          payCustomerId = customer.id
+          await appDataStore.setClientStripeCustomerId(payClient.id, payCustomerId)
+        }
+      } catch (error) {
+        console.error('[stripe] pay link customer create failed:', error?.message || error)
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'We could not open the payment page',
+            body: 'Please try again in a few minutes, or contact us at billing@pbjsa.com.',
+          }),
+          502,
+        )
+        return
+      }
+
+      const payAppUrl = getPublicAppUrl(request)
+      const payResult = await (wantsCard
+        ? createInvoiceCardCheckoutSession
+        : createInvoiceCheckoutSession)({
+        invoice: payInvoice,
+        client: payClient,
+        customerId: payCustomerId,
+        appUrl: payAppUrl,
+        // Stripe sends the payer back HERE, not to the app they cannot sign
+        // into. This page then reads whatever the invoice now says.
+        returnTo: `${payAppUrl}/pay/${payToken}`,
+      })
+      if (!payResult.ok) {
+        console.error('[stripe] pay link session failed:', payResult.reason)
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'We could not open the payment page',
+            body: 'Please try again in a few minutes, or contact us at billing@pbjsa.com.',
+          }),
+          502,
+        )
+        return
+      }
+
+      // PERSIST BEFORE REDIRECT, and this is the load-bearing step of the whole
+      // route. `resolveWebhookChannel` retires the sibling channel's session by
+      // reading the ids STORED on the invoice — so a session this click minted
+      // and did not write down would survive the payment that made it
+      // redundant, leaving the invoice payable a second time.
+      const payUpdated = await appDataStore.applyInvoicePayment(
+        payInvoice.id,
+        wantsCard
+          ? { cardCheckoutSessionId: payResult.session.id }
+          : { checkoutSessionId: payResult.session.id },
+      )
+      if (!payUpdated) {
+        // Refused means the invoice was voided while we were talking to Stripe.
+        // The session has not been handed to anyone, so abandoning it is free.
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'This invoice was canceled',
+            body: `Invoice ${payNumber} was withdrawn and is not owed. If you were expecting a bill, contact us at billing@pbjsa.com.`,
+          }),
+        )
+        return
+      }
+
+      // The session this invoice used to point at is now superseded. Expired
+      // only AFTER the new id is safely persisted, so the invoice never names a
+      // dead session — the same order the send route uses.
+      const supersededSessionId = wantsCard
+        ? payInvoice.stripeCardSessionId
+        : payInvoice.stripeCheckoutSessionId
+      if (supersededSessionId && supersededSessionId !== payResult.session.id) {
+        await expireCheckoutSession(supersededSessionId)
+      }
+
+      // Best effort: the evidence behind "they say they never got the invoice".
+      // Tagged, so nothing reads it as a send, and once a day, because a
+      // durable link gets reloaded.
+      try {
+        await appDataStore.recordInvoicePayLinkOpened(payInvoice.id)
+      } catch (error) {
+        console.warn('[invoices] could not log a pay link open:', error?.message || error)
+      }
+
+      response.writeHead(302, {
+        Location: payResult.session.url,
+        'Cache-Control': 'no-store',
+        'Referrer-Policy': 'no-referrer',
+      })
+      response.end()
+      return
+    }
+
     if (normalizedPath === '/api/logout' && request.method === 'POST') {
       const cookies = parseCookies(request.headers.cookie)
       const sessionId = cookies[sessionCookieName]
@@ -3478,7 +3844,17 @@ const server = createServer(async (request, response) => {
         'invoice_payment_link_created',
         `${invoice.number ?? invoice.id}`,
       )
-      sendJson(response, 200, { url: result.session.url, invoice: updated })
+      // The DURABLE link, the same one the emailed Pay button carries. What she
+      // copies out of this box goes into her own message and may sit in an
+      // inbox for a week; the Stripe URL minted above would be dead by then.
+      // The fallback keeps the button working if the token cannot be minted.
+      const linkPayToken = await appDataStore.getOrCreateInvoicePayToken(invoice.id)
+      sendJson(response, 200, {
+        url: linkPayToken
+          ? `${getPublicAppUrl(request)}/pay/${linkPayToken}`
+          : result.session.url,
+        invoice: updated,
+      })
       return
     }
 
@@ -3885,11 +4261,25 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // The invoice's DURABLE address, minted once and kept. What goes in the
+        // email is `/pay/<token>` on our own domain, which builds a fresh
+        // Stripe page on every open — the Checkout URL below dies in about a
+        // day, which is why a client who opened the email next week used to
+        // find a dead button.
+        //
+        // The session is STILL minted here, now: Stripe refusing is still a
+        // reason to stop the send rather than email a downgraded invoice, and
+        // having one ready makes the client's first click one hop, not two.
+        const sendAppUrl = getPublicAppUrl(request)
+        const payToken = await appDataStore.getOrCreateInvoicePayToken(invoice.id)
+        const payReturnTo = payToken ? `${sendAppUrl}/pay/${payToken}` : null
+
         const linkResult = await createInvoiceCheckoutSession({
           invoice,
           client: sendClient,
           customerId,
-          appUrl: getPublicAppUrl(request),
+          appUrl: sendAppUrl,
+          ...(payReturnTo ? { returnTo: payReturnTo } : {}),
         })
         if (!linkResult.ok) {
           // Stripe is connected but refused. Sending a link-less email here would
@@ -3897,7 +4287,10 @@ const server = createServer(async (request, response) => {
           sendJson(response, 502, { error: 'stripe_session_failed', message: linkResult.reason })
           return
         }
-        payUrl = linkResult.session.url
+        // The fallback is deliberate: a send must never fail because a
+        // durability upgrade could not mint a token. The worst case is the
+        // 24-hour link this route emailed before any of this existed.
+        payUrl = payToken ? `${sendAppUrl}/pay/${payToken}` : linkResult.session.url
         // Persist the session id only. The status flip belongs to
         // recordInvoiceSent, which refuses to claim "sent" if the email fails.
         await appDataStore.applyInvoicePayment(invoice.id, {
@@ -3926,7 +4319,8 @@ const server = createServer(async (request, response) => {
             invoice,
             client: sendClient,
             customerId,
-            appUrl: getPublicAppUrl(request),
+            appUrl: sendAppUrl,
+            ...(payReturnTo ? { returnTo: payReturnTo } : {}),
           })
           if (!cardResult.ok) {
             // Stop rather than send. Nothing has left yet, and quietly dropping
@@ -3938,7 +4332,10 @@ const server = createServer(async (request, response) => {
             })
             return
           }
-          cardPayUrl = cardResult.session.url
+          // The card channel gets the same durable treatment, one path deeper.
+          cardPayUrl = payToken
+            ? `${sendAppUrl}/pay/${payToken}/card`
+            : cardResult.session.url
           await appDataStore.applyInvoicePayment(invoice.id, {
             cardCheckoutSessionId: cardResult.session.id,
           })
