@@ -11,7 +11,8 @@ playwright-report
 tmp
 design
 .omc
-.claude
+.claude/*
+!.claude/settings.json
 ~$*
 
 node_modules
