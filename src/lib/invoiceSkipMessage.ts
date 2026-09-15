@@ -51,6 +51,11 @@ export function generateSkipMessage(
     // reporting the month as having nothing to bill.
     case 'master-without-subs':
       return 'This is a billing master with no companies pointed at it yet.'
+    // Not a failure either: this client is billed, by the method they were on
+    // before. "No invoice was created" on its own reads as a fault to go and
+    // fix, when the absence IS the setting.
+    case 'opted-out':
+      return `${clientName} is invoiced outside the app, so no invoice was created.`
     default:
       return `No invoice was created for ${clientName} for ${periodLabel}.`
   }

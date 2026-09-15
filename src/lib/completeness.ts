@@ -92,9 +92,21 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
   for (const client of clients) {
     const where = `/clients/${client.id}`
 
+    // Billed outside the app: the app never builds or emails this client's
+    // invoice, so a missing rate or billing email is not an unfinished setup
+    // step — it is a field nothing here reads. Flagging it would dent the score
+    // permanently with issues whose only "fix" is to undo a deliberate choice,
+    // the same call the retired-client rule makes. Team, contacts and checklist
+    // issues are untouched: the work still happens, only the billing moved.
+    const billedOffPlatform = client.platformInvoicingOptOut === true
+
     // Billing rate not set for subscription / annual clients. (Hourly clients
     // bill off per-employee bill rates — covered by the Team check below.)
-    if (client.billingMode === 'subscription' && !isPositive(client.monthlyRate)) {
+    if (
+      !billedOffPlatform &&
+      client.billingMode === 'subscription' &&
+      !isPositive(client.monthlyRate)
+    ) {
       issues.push({
         id: `billing:monthly:${client.id}`,
         category: 'Invoices',
@@ -105,7 +117,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
         severity: 'high',
       })
     }
-    if (client.billingMode === 'annual' && !isPositive(client.annualRate)) {
+    if (!billedOffPlatform && client.billingMode === 'annual' && !isPositive(client.annualRate)) {
       issues.push({
         id: `billing:annual:${client.id}`,
         category: 'Invoices',
@@ -117,8 +129,9 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
       })
     }
 
-    // No billing email — can't email the invoice.
-    if (!client.email || !client.email.trim()) {
+    // No billing email — can't email the invoice. Nothing is emailed to an
+    // opted-out client from here, so there is nothing to be missing.
+    if (!billedOffPlatform && (!client.email || !client.email.trim())) {
       issues.push({
         id: `client:email:${client.id}`,
         category: 'Clients',

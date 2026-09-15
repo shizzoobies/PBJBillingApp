@@ -509,6 +509,17 @@ export function InvoiceMonthRun({
   )
 
   /**
+   * This client is billed outside the app. Nothing new is generated for them,
+   * and an invoice built before the opt-out was switched on is still on screen
+   * — so the row has to say so rather than offering a Send that 409s.
+   */
+  const optedOut = useCallback(
+    (clientId: string) =>
+      clients.find((c) => c.id === clientId)?.platformInvoicingOptOut ?? false,
+    [clients],
+  )
+
+  /**
    * Whether this client's invoice ASKS to be paid on receipt — which is nearly
    * all of them. When it does, the due date on the row is the firm's own
    * follow-up date and the client has never seen it, so the row says so on
@@ -955,12 +966,20 @@ export function InvoiceMonthRun({
       // and waiting for those would put "Rating…" on every unrated row in the
       // month for three minutes, promising work that is not happening.
       if (result.created.length > 0) setRatingPollStartedAt(Date.now())
+      // Clients billed outside the app produce nothing, on purpose. Counted
+      // here so a month that is two invoices short reads as a setting rather
+      // than as a run that half worked.
+      const optedOutCount = result.skipped.filter((row) => row.reason === 'opted-out').length
+      const optedOutNote =
+        optedOutCount > 0
+          ? ` ${optedOutCount} client${optedOutCount === 1 ? '' : 's'} opted out of platform invoicing.`
+          : ''
       // Say what happened, including the nothing-case: running this and seeing
       // the list unchanged otherwise looks like a broken button.
       setNote(
-        result.created.length > 0
+        (result.created.length > 0
           ? `Built ${result.created.length} invoice${result.created.length === 1 ? '' : 's'}.`
-          : 'Nothing new to build — every client already has one for this month.',
+          : 'Nothing new to build — every client already has one for this month.') + optedOutNote,
       )
     } catch (err) {
       if (shownPeriod.current !== target) return
@@ -1027,6 +1046,7 @@ export function InvoiceMonthRun({
       // was one of the ones we deliberately left alone.
       const leftAlone = result.skipped.filter((row) => row.reason === 'already-generated').length
       const nothingToBill = result.skipped.filter((row) => row.reason === 'nothing-to-bill').length
+      const optedOutCount = result.skipped.filter((row) => row.reason === 'opted-out').length
       setNote(
         `Voided ${result.voided} and rebuilt ${result.created.length} invoice${
           result.created.length === 1 ? '' : 's'
@@ -1036,6 +1056,9 @@ export function InvoiceMonthRun({
             : '') +
           (nothingToBill > 0
             ? ` ${nothingToBill} client${nothingToBill === 1 ? '' : 's'} had nothing to bill.`
+            : '') +
+          (optedOutCount > 0
+            ? ` ${optedOutCount} client${optedOutCount === 1 ? '' : 's'} opted out of platform invoicing.`
             : ''),
       )
     } catch (err) {
@@ -1378,6 +1401,7 @@ export function InvoiceMonthRun({
                     isBillingMaster={isBillingMaster(invoice.clientId)}
                     sourceClientName={clientName}
                     cardEnabled={cardEnabled(invoice.clientId)}
+                    optedOut={optedOut(invoice.clientId)}
                     dueOnReceipt={dueOnReceipt(invoice.clientId)}
                     today={today}
                     recipients={recipientsFor(invoice.clientId)}
@@ -1426,6 +1450,7 @@ function InvoiceRow({
   isBillingMaster,
   sourceClientName,
   cardEnabled,
+  optedOut,
   recipients,
   scope,
   retainer,
@@ -1453,6 +1478,8 @@ function InvoiceRow({
   sourceClientName: (clientId: string) => string
   /** This client is offered a card option, so its invoices go out with two ways to pay. */
   cardEnabled: boolean
+  /** This client is billed outside the app — nothing here may be sent or paid. */
+  optedOut: boolean
   /** Every address this invoice would be emailed to, resolved before any click. */
   recipients: ResolvedInvoiceRecipients
   /** The hours behind this invoice, for the panel beside it. */
@@ -1570,6 +1597,20 @@ function InvoiceRow({
               </span>
             </span>
           ) : null}
+          {/* Billed outside the app. Louder than a meta note because it is the
+              reason Send below is dead: this invoice exists (it predates the
+              opt-out, or the setting changed under it) and must not go out. */}
+          {optedOut && !isVoid ? (
+            <span className="invoice-run-flags">
+              <span
+                className="invoice-run-flag"
+                title="This client is invoiced outside the app, so nothing here is sent or paid."
+              >
+                <AlertTriangle size={13} />
+                Opted out
+              </span>
+            </span>
+          ) : null}
           {/* Nobody on file is a flag in its own right — it used to surface as a
               409 only after she pressed Send. */}
           {!isVoid && recipients.to.length === 0 ? (
@@ -1617,6 +1658,7 @@ function InvoiceRow({
           pastDue={pastDue}
           isBillingMaster={isBillingMaster}
           sourceClientName={sourceClientName}
+          optedOut={optedOut}
           recipients={recipients}
           scope={scope}
           retainer={retainer}
@@ -1861,6 +1903,7 @@ function InvoiceEditor({
   pastDue,
   isBillingMaster,
   sourceClientName,
+  optedOut,
   recipients,
   scope,
   retainer,
@@ -1882,6 +1925,8 @@ function InvoiceEditor({
   isBillingMaster: boolean
   /** A line's `sourceClientId` to that company's name, for the group headings. */
   sourceClientName: (clientId: string) => string
+  /** This client is billed outside the app — Send and the pay link are refused. */
+  optedOut: boolean
   /** Who this would go to, resolved by the same code the send endpoint uses. */
   recipients: ResolvedInvoiceRecipients
   /** The hours behind this invoice, for the panel beside the lines. */
@@ -3076,11 +3121,13 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy || payBusy || dirty}
+              disabled={busy || payBusy || dirty || optedOut}
               title={
                 dirty
                   ? 'Save your changes first'
-                  : 'Create a bank-transfer payment link to send to this client'
+                  : optedOut
+                    ? 'This client is invoiced outside the app'
+                    : 'Create a bank-transfer payment link to send to this client'
               }
               onClick={() => void createLink()}
             >
@@ -3104,17 +3151,20 @@ function InvoiceEditor({
                 busy ||
                 sendBusy ||
                 dirty ||
+                optedOut ||
                 invoice.status === 'draft' ||
                 recipients.to.length === 0
               }
               title={
                 dirty
                   ? 'Save your changes first'
-                  : invoice.status === 'draft'
-                    ? 'Mark this invoice reviewed first'
-                    : // Say WHY rather than sit there dead: a 409 after the
-                      // click was the old answer to this.
-                      (recipients.reason ?? 'Email this invoice to the client')
+                  : optedOut
+                    ? 'This client is invoiced outside the app'
+                    : invoice.status === 'draft'
+                      ? 'Mark this invoice reviewed first'
+                      : // Say WHY rather than sit there dead: a 409 after the
+                        // click was the old answer to this.
+                        (recipients.reason ?? 'Email this invoice to the client')
               }
               onClick={startSend}
             >

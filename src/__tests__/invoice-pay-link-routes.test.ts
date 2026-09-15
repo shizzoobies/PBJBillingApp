@@ -437,3 +437,101 @@ describe('the Payment link button hands back the durable link too', () => {
     expect(block).not.toContain('expireCheckoutSession(invoice.stripeCheckoutSessionId)')
   })
 })
+
+/**
+ * A CLIENT BILLED OUTSIDE THE APP (featreq-006f12f6).
+ *
+ * The opt-out is a promise that this app bills them nothing, and the three
+ * money routes are where that promise is kept. Each refusal has to land BEFORE
+ * the route mints anything — a Stripe session, a customer, a pay-link log line —
+ * because an invoice can already exist for this client from before the toggle
+ * went on, and taking payment on it would bill them twice by two channels.
+ *
+ * Source assertions for the same reason as everything above: there is no HTTP
+ * harness here, and the failure mode is silent.
+ */
+describe('the money routes refuse a client invoiced outside the app', () => {
+  const sendRefusalBlock = (() => {
+    const start = serverSource.indexOf('const sendClient = (sendAppData.clients ?? []).find(')
+    expect(start, 'the send route’s client lookup moved — re-anchor this').toBeGreaterThan(-1)
+    const end = serverSource.indexOf('const sendAddressee = invoiceEmailAddressee(', start)
+    expect(end, 'the send route’s addressee resolution is gone').toBeGreaterThan(start)
+    return serverSource.slice(start, end)
+  })()
+
+  const paymentLinkBlock = (() => {
+    const start = serverSource.indexOf('const invoicePaymentLinkMatch = normalizedPath.match(')
+    const end = serverSource.indexOf('// POST /api/invoices/:id/mark-paid', start)
+    return serverSource.slice(start, end)
+  })()
+
+  // Right after the client is resolved and before ANY addressee, token or
+  // Stripe work — same shape as `invoice_no_recipient`, which the month run
+  // already knows how to show.
+  it('the send route refuses before it resolves an addressee or mints a thing', () => {
+    expect(sendRefusalBlock).toContain('sendClient.platformInvoicingOptOut')
+    expect(sendRefusalBlock).toContain("error: 'client_opted_out'")
+    expect(sendRefusalBlock).toContain('is invoiced outside the app.')
+    expect(sendRefusalBlock).not.toContain('getOrCreateInvoicePayToken')
+    expect(sendRefusalBlock).not.toContain('stripeClient()')
+  })
+
+  it('the payment-link route refuses before a Stripe session exists to leak', () => {
+    const refusalAt = paymentLinkBlock.indexOf('invoiceClient.platformInvoicingOptOut')
+    expect(refusalAt).toBeGreaterThan(-1)
+    expect(paymentLinkBlock).toContain("error: 'client_opted_out'")
+    expect(refusalAt).toBeLessThan(paymentLinkBlock.indexOf('createInvoiceCheckoutSession('))
+    expect(refusalAt).toBeLessThan(paymentLinkBlock.indexOf('customers.create('))
+  })
+
+  // The public page says as little as it can — the same sentence a client with
+  // no row on file gets — and it lands before the customer create below it.
+  it('the pay page refuses before it mints a customer or a session', () => {
+    const refusalAt = payBlock.indexOf('payClient.platformInvoicingOptOut')
+    expect(refusalAt).toBeGreaterThan(-1)
+    expect(payBlock.slice(refusalAt, refusalAt + 400)).toContain(
+      'This invoice cannot be paid online right now',
+    )
+    expect(refusalAt).toBeLessThan(payBlock.indexOf('customers.create('))
+    // The pay route picks the session minter conditionally, so the name is not
+    // followed by its own paren — match the bare name.
+    expect(refusalAt).toBeLessThan(payBlock.indexOf('createInvoiceCardCheckoutSession'))
+  })
+
+  // The retainer button is a document too, and its handler turns a null from
+  // the store into "Client not found" — so the route reads the client itself to
+  // say which of the two refusals this is.
+  it('the retainer route names the opt-out rather than "Client not found"', () => {
+    const start = serverSource.indexOf("normalizedPath === '/api/invoices/retainer'")
+    expect(start).toBeGreaterThan(-1)
+    const block = serverSource.slice(start, serverSource.indexOf('createRetainerInvoice({', start))
+    expect(block).toContain('retainerClient?.platformInvoicingOptOut')
+    expect(block).toContain("error: 'client_opted_out'")
+  })
+})
+
+/**
+ * THE STRIPE CUSTOMER IS READ BEFORE ONE IS CREATED.
+ *
+ * All three money routes already say `?? null` off the client object — that was
+ * never the bug. The bug was that `stripeCustomerId` was never SELECTED on
+ * Postgres, so the read answered undefined every time and each route fell into
+ * its create branch: a new Stripe customer per send, per link, per pay click.
+ * The column parity guard in db/store-staleness.test.mjs is the other half; this
+ * pins that the routes still consult the client rather than minting blind.
+ */
+describe('a repeat payer stays one Stripe customer', () => {
+  it('the send route reads the client’s customer before creating one', () => {
+    const readAt = serverSource.indexOf('let customerId = sendClient.stripeCustomerId ?? null')
+    expect(readAt, 'the send route stopped reading the stored customer').toBeGreaterThan(-1)
+    const afterRead = serverSource.slice(readAt, readAt + 600)
+    expect(afterRead).toContain('if (!customerId)')
+    expect(afterRead).toContain('customers.create(')
+    expect(afterRead).toContain('setClientStripeCustomerId(sendClient.id, customerId)')
+  })
+
+  it('the payment-link and pay routes read it too', () => {
+    expect(serverSource).toContain('let customerId = invoiceClient.stripeCustomerId ?? null')
+    expect(serverSource).toContain('let payCustomerId = payClient.stripeCustomerId ?? null')
+  })
+})

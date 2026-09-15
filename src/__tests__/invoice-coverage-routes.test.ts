@@ -38,7 +38,11 @@ function routeBlock(startPattern: RegExp, length = 4000): string {
 describe('the send route refuses an unanswered covered-date window', () => {
   // Anchored on the send route's own void message — `listInvoices()` alone also
   // matches the payment-link route a few hundred lines earlier.
-  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 6000)
+  // The window is a character count, so it has to be re-widened whenever a
+  // guard is added ahead of the Checkout mint — the opt-out refusal
+  // (featreq-006f12f6) pushed that mint past 6000. Still well short of
+  // `sendInvoiceEmail`, so it stays inside the pre-send half of the route.
+  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 8000)
 
   // The UI disables Send behind review, and review is gated — but this route is
   // reachable directly, and an invoice reviewed BEFORE the question existed

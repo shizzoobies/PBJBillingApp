@@ -81,6 +81,57 @@ describe('computeSetupIssues', () => {
     })
   })
 
+  /**
+   * A client billed outside the app (featreq-006f12f6).
+   *
+   * The Invoices-category rates and the billing email are fields nothing here
+   * reads any more, so flagging them would dent the score permanently with
+   * issues whose only "fix" is to undo a deliberate choice — the same call the
+   * retired-client rule makes. Everything that is still true of this client —
+   * a team, contacts, their checklists — is untouched: the work still happens,
+   * only the billing moved.
+   */
+  describe('a client opted out of platform invoicing', () => {
+    const optedOut = (overrides: Partial<Client> = {}) =>
+      computeSetupIssues({
+        ...emptyInput,
+        clients: [makeClient({ platformInvoicingOptOut: true, ...overrides })],
+      })
+
+    it('raises no billing-rate issue for a monthly client with no rate', () => {
+      expect(optedOut({ monthlyRate: 0 }).some((i) => i.id === 'billing:monthly:client-1')).toBe(
+        false,
+      )
+    })
+
+    it('raises no billing-rate issue for an annual client with no fee', () => {
+      expect(
+        optedOut({ billingMode: 'annual', monthlyRate: undefined, annualRate: 0 }).some(
+          (i) => i.id === 'billing:annual:client-1',
+        ),
+      ).toBe(false)
+    })
+
+    it('raises no billing-email issue', () => {
+      expect(optedOut({ email: '' }).some((i) => i.id === 'client:email:client-1')).toBe(false)
+    })
+
+    it('still asks for a team and contacts', () => {
+      const ids = optedOut({ assignedBookkeeperIds: [], contactIds: [] }).map((i) => i.id)
+      expect(ids).toContain('client:team:client-1')
+      expect(ids).toContain('client:contacts:client-1')
+    })
+
+    it('flags all three again the moment the opt-out is switched off', () => {
+      const ids = computeSetupIssues({
+        ...emptyInput,
+        clients: [makeClient({ platformInvoicingOptOut: false, monthlyRate: 0, email: '' })],
+      }).map((i) => i.id)
+      expect(ids).toContain('billing:monthly:client-1')
+      expect(ids).toContain('client:email:client-1')
+    })
+  })
+
   it('flags an annual client with no annual rate', () => {
     const input: CompletenessInput = {
       ...emptyInput,

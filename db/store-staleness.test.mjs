@@ -8,12 +8,14 @@ import {
   AppDataStore,
   BillingMasterError,
   CHECKLIST_ITEM_SELECT_COLUMNS,
+  CLIENT_SELECT_COLUMNS,
   CREATED_AT_PRESERVED_TABLES,
   EntryTagError,
   INVOICE_SELECT_COLUMNS,
   InvoiceLockedError,
   ManualPaymentError,
   mapChecklistItemRow,
+  mapClientRow,
   mapInvoiceRow,
   mapRecurringReimbursementRow,
   sanitizeAppData,
@@ -1085,6 +1087,18 @@ function fakePostgres({
         })),
       }
     }
+    // The bulk save's Stripe-customer snapshot, taken before the wipe. Answered
+    // out of `clientRows` for the same reason the push stamps are: a fake that
+    // returned nothing would make every stored id look absent, and the
+    // stored-wins assertion would pass against a store that dropped the column.
+    if (/^select id, stripe_customer_id from clients$/i.test(trimmed)) {
+      return {
+        rows: clientRows.map((row) => ({
+          id: row.id,
+          stripe_customer_id: row.stripe_customer_id ?? null,
+        })),
+      }
+    }
     // The clients read inside read() — lets a test exercise the row mapper.
     if (/^select\b[\s\S]*\bfrom clients\b[\s\S]*order by name asc/i.test(trimmed)) {
       return { rows: clientRows }
@@ -2131,6 +2145,7 @@ describe('createClient keeps every field the Add-client form sends (file backend
     invoiceHideInternalHours: false,
     invoiceGroupByCategory: true,
     cardPaymentsEnabled: true,
+    platformInvoicingOptOut: true,
     lifecycleStage: 'proposal',
     assignedEmployeeIds: ['emp-1'],
   }
@@ -2159,6 +2174,9 @@ describe('createClient keeps every field the Add-client form sends (file backend
     // Same rule for the card toggle: chosen-true must not read back as the
     // default false, or a client would silently lose the option she gave them.
     expect(stored.cardPaymentsEnabled).toBe(true)
+    // And for the opt-out, where reading back false is worse than losing an
+    // option: it puts a client who is billed elsewhere back into the month run.
+    expect(stored.platformInvoicingOptOut).toBe(true)
   })
 
   it('keeps the team selection in the field that drives client visibility', async () => {
@@ -2208,6 +2226,7 @@ describe('createClient writes every form field to Postgres', () => {
     invoiceHideInternalHours: false,
     invoiceGroupByCategory: true,
     cardPaymentsEnabled: true,
+    platformInvoicingOptOut: true,
     lifecycleStage: 'proposal',
     assignedEmployeeIds: ['emp-1'],
   }
@@ -2251,6 +2270,7 @@ describe('createClient writes every form field to Postgres', () => {
       invoice_hide_internal_hours: false,
       invoice_group_by_category: true,
       card_payments_enabled: true,
+      platform_invoicing_opt_out: true,
       lifecycle_stage: 'proposal',
     })
   })
@@ -3780,6 +3800,158 @@ describe('listInvoices selects every column mapInvoiceRow reads', () => {
 })
 
 /**
+ * The same parity guard on CLIENTS — and the same bug, found the same way.
+ *
+ * `stripe_customer_id` existed on the table and `setClientStripeCustomerId`
+ * wrote it, but it was in NO select. So on Postgres `client.stripeCustomerId`
+ * read `undefined` FOREVER: every send, every payment link and every click on a
+ * pay link created a brand-new Stripe customer for the same company, and the
+ * bank details a repeat payer had saved sat on a customer nobody was charging.
+ * Nothing in the app looked wrong. The file backend keeps whatever it stored,
+ * so no test in this file could have noticed.
+ */
+describe('read() selects every column mapClientRow reads', () => {
+  it('has no column the mapper reads but the select omits', () => {
+    const readColumns = new Set()
+    mapClientRow(
+      new Proxy(
+        {},
+        {
+          get(_target, key) {
+            if (typeof key === 'string') readColumns.add(key)
+            return undefined
+          },
+        },
+      ),
+    )
+
+    const selected = new Set(
+      CLIENT_SELECT_COLUMNS.split(',')
+        .map((column) => column.trim())
+        .filter(Boolean),
+    )
+
+    // Sanity: a mapper that read nothing would pass the real assertion.
+    expect(readColumns.size).toBeGreaterThan(20)
+    expect([...readColumns].filter((column) => !selected.has(column))).toEqual([])
+    // Named outright, because these two are the ones this commit is about.
+    expect(selected.has('stripe_customer_id')).toBe(true)
+    expect(selected.has('platform_invoicing_opt_out')).toBe(true)
+  })
+
+  it('maps an absent Stripe customer to null rather than undefined', () => {
+    expect(mapClientRow({ id: 'c1', name: 'Acme' }).stripeCustomerId).toBeNull()
+    expect(
+      mapClientRow({ id: 'c1', name: 'Acme', stripe_customer_id: 'cus_123' }).stripeCustomerId,
+    ).toBe('cus_123')
+  })
+
+  it('maps a row written before the opt-out column existed to false', () => {
+    expect(mapClientRow({ id: 'c1', name: 'Acme' }).platformInvoicingOptOut).toBe(false)
+    expect(
+      mapClientRow({ id: 'c1', name: 'Acme', platform_invoicing_opt_out: true })
+        .platformInvoicingOptOut,
+    ).toBe(true)
+  })
+})
+
+/**
+ * THE CLIENTS HALF OF THE BULK-SAVE WIPE — two columns, two different rules.
+ *
+ * `platform_invoicing_opt_out` travels with the payload like every other client
+ * setting: leave it out of the insert and the next owner autosave switches it
+ * back off, and the month run bills a company that is invoiced elsewhere.
+ *
+ * `stripe_customer_id` is the opposite rule and the sharper one. It is
+ * endpoint-owned (`setClientStripeCustomerId` is the only writer) and the
+ * payload has NEVER carried it, so the STORED value must be snapshotted before
+ * the wipe and written back verbatim. Without that the column is NULLed on
+ * every autosave — the same shape as the `pay_token` bug, on the field that
+ * decides which Stripe customer a repeat payer is.
+ */
+describe('the bulk save carries the clients columns it does not own', () => {
+  // Zip the clients insert's column list against its bound parameters.
+  const boundClientColumns = (statement) => {
+    const match = /insert into clients\s*\(([\s\S]*?)\)\s*values/i.exec(statement.text)
+    const columns = match[1].split(',').map((column) => column.trim())
+    const bound = {}
+    statement.params.forEach((value, index) => {
+      bound[columns[index]] = value
+    })
+    return bound
+  }
+
+  it('snapshots the stored Stripe customer before the wipe and writes it back', async () => {
+    const fake = fakePostgres({
+      clientRows: [{ id: 'c1', name: 'Acme', stripe_customer_id: 'cus_stored' }],
+    })
+    await postgresStore(fake).write(workspace())
+
+    expect(fake.matching(/^select id, stripe_customer_id from clients$/i)).toHaveLength(1)
+    const insert = fake.matching(/^insert into clients \(/i)[0]
+    expect(insert.text).toMatch(/stripe_customer_id/)
+    expect(boundClientColumns(insert).stripe_customer_id).toBe('cus_stored')
+  })
+
+  // The payload is not consulted AT ALL. A stale tab that somehow carried a
+  // customer id must not be able to re-point a client at it.
+  it('ignores a customer id in the payload in favor of the stored one', async () => {
+    const fake = fakePostgres({
+      clientRows: [{ id: 'c1', name: 'Acme', stripe_customer_id: 'cus_stored' }],
+    })
+    await postgresStore(fake).write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme', stripeCustomerId: 'cus_from_payload' }] }),
+    )
+
+    const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+    expect(bound.stripe_customer_id).toBe('cus_stored')
+  })
+
+  // A client this save is creating has no snapshot entry, and null is exactly
+  // right: it has no Stripe customer yet.
+  it('leaves a brand-new client’s customer id null', async () => {
+    const fake = fakePostgres({ clientRows: [] })
+    await postgresStore(fake).write(workspace())
+
+    const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+    expect(bound.stripe_customer_id).toBeNull()
+  })
+
+  it('carries the platform-invoicing opt-out through the wipe', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme', platformInvoicingOptOut: true }] }),
+    )
+
+    const insert = fake.matching(/^insert into clients \(/i)[0]
+    expect(insert.text).toMatch(/platform_invoicing_opt_out/)
+    expect(boundClientColumns(insert).platform_invoicing_opt_out).toBe(true)
+  })
+
+  // The file backend's half of both contracts (cardinal rule 1). It re-writes
+  // each record whole, so what matters is that a round trip through the bulk
+  // save gives both fields back.
+  it('keeps both fields across a file-backend save and read', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            platformInvoicingOptOut: true,
+            stripeCustomerId: 'cus_file',
+          },
+        ],
+      }),
+    )
+
+    const stored = (await store.read()).clients.find((client) => client.id === 'c1')
+    expect(stored.platformInvoicingOptOut).toBe(true)
+    expect(stored.stripeCustomerId).toBe('cus_file')
+  })
+})
+
+/**
  * The void guard on the two invoice WRITERS.
  *
  * "Void & regenerate" made a race real that used to be unreachable: a send or a
@@ -4102,6 +4274,62 @@ describe('generateInvoicesForPeriod with a single client (file backend)', () => 
 
     expect(result.created).toHaveLength(0)
     expect(result.skipped).toEqual([{ clientId: 'c1', reason: 'client-inactive' }])
+  })
+
+  /** Switch a seeded client to billed-outside-the-app, nothing else. */
+  async function optOut(clientId) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients.find((entry) => entry.id === clientId).platformInvoicingOptOut = true
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('builds nothing for a client billed outside the app', async () => {
+    await seedBillableWorkspace()
+    await optOut('c1')
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    expect(result.created).toHaveLength(0)
+    expect(result.skipped).toEqual([{ clientId: 'c1', reason: 'opted-out' }])
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.invoices).toEqual([])
+  })
+
+  // Said OUT LOUD on the month run, unlike the lifecycle reasons. Silence would
+  // have the never-generates detector report this client as unbilled every
+  // month forever, when the absence is the setting working.
+  it('reports the opt-out on the month run too, and bills nobody else differently', async () => {
+    await seedBillableWorkspace()
+    await optOut('c1')
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    expect(result.created.map((entry) => entry.clientId)).toEqual(['c2'])
+    expect(result.skipped).toEqual(
+      expect.arrayContaining([{ clientId: 'c1', reason: 'opted-out' }]),
+    )
+  })
+
+  // The opt-out is the standing decision; the lifecycle will move. But an
+  // invoice that already EXISTS is still the more useful answer — it was built
+  // before the toggle went on and is sitting on her screen.
+  it('names the existing invoice, not the opt-out, when both apply', async () => {
+    await seedBillableWorkspace()
+    await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    await optOut('c1')
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    expect(result.skipped).toEqual([{ clientId: 'c1', reason: 'already-generated' }])
+  })
+
+  it('refuses a retainer for a client billed outside the app', async () => {
+    await seedBillableWorkspace()
+    await optOut('c1')
+
+    expect(await store.createRetainerInvoice({ clientId: 'c1', amount: 500 })).toBeNull()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.invoices).toEqual([])
   })
 
   it('leaves a retired client’s existing invoices untouched', async () => {
@@ -11572,6 +11800,47 @@ describe('consolidated billing: generateInvoicesForPeriod merges the subs', () =
     expect(
       (await store.generateInvoicesForPeriod(period, { clientId: 'sub-b' })).skipped,
     ).toEqual([{ clientId: 'sub-b', reason: 'not-billable-yet' }])
+  })
+
+  /**
+   * A sub billed outside the app leaves the merge — and says so ONCE.
+   *
+   * Two things have to hold together here. Its hours must be off the master's
+   * invoice (otherwise the company that opted out is still billed, just on
+   * somebody else's document), and the reason it reports has to be the opt-out
+   * rather than 'billed-to-other', which would name a master whose invoice it
+   * is deliberately not on.
+   */
+  it('keeps an opted-out sub off the master’s invoice and names the opt-out', async () => {
+    await seedGroup()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients.find((entry) => entry.id === 'sub-b').platformInvoicingOptOut = true
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    const merged = result.created.find((invoice) => invoice.clientId === 'klc-master')
+    expect(merged.lineItems.map((line) => line.sourceClientId)).toEqual(['sub-x'])
+    // Exactly one row for it, and it names the opt-out.
+    expect(result.skipped.filter((row) => row.clientId === 'sub-b')).toEqual([
+      { clientId: 'sub-b', reason: 'opted-out' },
+    ])
+  })
+
+  // An opted-out MASTER produces nothing at all — it is caught by the same check
+  // its subs are, before the merge is ever assembled.
+  it('builds no combined invoice when the master itself is opted out', async () => {
+    await seedGroup()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients.find((entry) => entry.id === 'klc-master').platformInvoicingOptOut = true
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    expect(result.created.map((invoice) => invoice.clientId)).toEqual(['plain'])
+    expect(result.skipped).toEqual(
+      expect.arrayContaining([{ clientId: 'klc-master', reason: 'opted-out' }]),
+    )
   })
 
   it('stays silent about a retired sub on the month run', async () => {

@@ -192,6 +192,13 @@ export type Client = {
    */
   cardPaymentsEnabled?: boolean
   /**
+   * This client is NOT invoiced from this app. With it on, the month run
+   * generates nothing for them, the single-client generate refuses, and Send
+   * and the payment link are refused too — they are billed by whatever method
+   * they were on before. Off unless someone switched it on.
+   */
+  platformInvoicingOptOut?: boolean
+  /**
    * Onboarding lifecycle stage (Proposal → Onboarding → Active). Optional —
    * absent is treated as 'active' (existing clients default to active and must
    * never silently become a prospect). See {@link LifecycleStage}.

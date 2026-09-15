@@ -554,6 +554,13 @@ export function normalizeClientProfile(client) {
     // processing fee must never be offered one by accident.
     cardPaymentsEnabled:
       typeof client.cardPaymentsEnabled === 'boolean' ? client.cardPaymentsEnabled : false,
+    // Billed outside the app (featreq-006f12f6). Off unless someone switched it
+    // on, and an unrecognized value is off too — a bad payload must never be
+    // able to stop a client being invoiced.
+    platformInvoicingOptOut:
+      typeof client.platformInvoicingOptOut === 'boolean'
+        ? client.platformInvoicingOptOut
+        : false,
     // Consolidated billing (featreq-65f5eac1). `billToClientId` names the
     // BILLING MASTER this client's work is invoiced on; `isBillingMaster` marks
     // that payer row itself; `invoiceRecipientClientId` is the sub whose
@@ -1392,7 +1399,8 @@ export const CLIENT_SELECT_COLUMNS = `id, name, contact, billing_mode, hourly_ra
           footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
           invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
           invoice_hide_internal_hours, invoice_group_by_category,
-          card_payments_enabled,
+          card_payments_enabled, platform_invoicing_opt_out,
+          stripe_customer_id,
           assigned_bookkeeper_ids, monthly_service_tier,
           annual_rate, annual_billing_month, lifecycle_stage,
           bill_to_client_id, is_billing_master, invoice_recipient_client_id`
@@ -1469,6 +1477,14 @@ export function mapClientRow(row) {
     invoiceHideInternalHours: row.invoice_hide_internal_hours ?? true,
     invoiceGroupByCategory: row.invoice_group_by_category ?? false,
     cardPaymentsEnabled: row.card_payments_enabled ?? false,
+    // Billed outside the app. Same shape the file backend produces — cardinal
+    // rule 1 — and false for every row written before the column existed.
+    platformInvoicingOptOut: row.platform_invoicing_opt_out ?? false,
+    // The client's Stripe customer, written by `setClientStripeCustomerId` at
+    // first send. It was written and never read back on Postgres, so every
+    // send, payment link and pay click minted a BRAND NEW Stripe customer for
+    // the same client. Selecting it here is the whole fix.
+    stripeCustomerId: row.stripe_customer_id ?? null,
     // Default 'active' when null so legacy/absent rows are never treated as
     // prospects.
     lifecycleStage: row.lifecycle_stage ?? 'active',
@@ -2414,6 +2430,13 @@ export function sanitizeAppData(data) {
     }
     if ('estimatedCfoHours' in client) {
       client.estimatedCfoHours = clampMoney(client.estimatedCfoHours)
+    }
+    // The opt-out is a gate on whether this client is billed at all, so a
+    // truthy-but-not-boolean value ("false", 0, {}) must resolve to a real
+    // boolean before it reaches either backend. Guarded on presence like the
+    // stage above: a client that never had the field keeps not having it.
+    if ('platformInvoicingOptOut' in client) {
+      client.platformInvoicingOptOut = client.platformInvoicingOptOut === true
     }
   }
 
@@ -3799,6 +3822,12 @@ export class AppDataStore {
       // for one client at a time after agreeing the client covers the fee.
       await this.pool.query(
         `alter table clients add column if not exists card_payments_enabled boolean not null default false`,
+      )
+      // Per-client opt-out from platform invoicing (featreq-006f12f6). Default
+      // FALSE for the same reason: every existing client keeps being invoiced
+      // from here, and opting one out is a deliberate act on their Billing tab.
+      await this.pool.query(
+        `alter table clients add column if not exists platform_invoicing_opt_out boolean not null default false`,
       )
       await this.pool.query(
         `alter table clients add column if not exists assigned_bookkeeper_ids text[] not null default '{}'`,
@@ -6097,6 +6126,22 @@ export class AppDataStore {
           ]),
         )
 
+        // The Stripe customer id, by the same rule as the push stamps: it is
+        // ENDPOINT-OWNED (`setClientStripeCustomerId` is the only writer, called
+        // from the send, payment-link and pay-page paths) and the bulk-save
+        // payload has never carried it. Without this snapshot the re-insert
+        // below writes NULL, so the next owner autosave detaches every client
+        // from their Stripe customer and the following send silently creates a
+        // second one — the same client twice in Stripe, their saved bank
+        // details on the copy nobody is charging. Stored wins; the payload is
+        // not consulted at all.
+        const priorStripeCustomerIds = new Map(
+          (await client.query(`select id, stripe_customer_id from clients`)).rows.map((row) => [
+            row.id,
+            row.stripe_customer_id ?? null,
+          ]),
+        )
+
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
         await client.query('delete from checklist_template_items')
@@ -6243,12 +6288,13 @@ export class AppDataStore {
                 estimated_bookkeeper_hours, estimated_accountant_hours,
                 estimated_cfo_hours, monthly_service_tier,
                 annual_rate, annual_billing_month, lifecycle_stage,
-                card_payments_enabled,
+                card_payments_enabled, platform_invoicing_opt_out,
+                stripe_customer_id,
                 invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
                 bill_to_client_id, is_billing_master, invoice_recipient_client_id,
                 created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, now())
             `,
             [
               clientRecord.id,
@@ -6318,6 +6364,14 @@ export class AppDataStore {
                 : Number(clientRecord.annualBillingMonth),
               coerceLifecycleStage(clientRecord.lifecycleStage),
               clientRecord.cardPaymentsEnabled ?? false,
+              // Miss this and the next autosave silently switches a client's
+              // opt-out back off — and the month run bills someone who is
+              // invoiced elsewhere.
+              clientRecord.platformInvoicingOptOut === true,
+              // Stored wins outright (see the snapshot above). A brand-new
+              // client has no entry and gets null, which is exactly right: it
+              // has no Stripe customer yet.
+              priorStripeCustomerIds.get(clientRecord.id) ?? null,
               normalizeTimeBreakdownMode(clientRecord.invoiceTimeBreakdownMode),
               clientRecord.invoiceTimeBreakdownAmounts === true,
               // Already resolved against this payload by `sanitizeAppData` at
@@ -9428,6 +9482,22 @@ export class AppDataStore {
         skipped.push({ clientId: client.id, reason: 'already-generated' })
         continue
       }
+      // BILLED OUTSIDE THE APP (featreq-006f12f6). Nothing is generated for this
+      // client, ever, and it is said OUT LOUD on a month-wide run as well as a
+      // single one — exactly like 'billed-to-other', and for the same reason:
+      // silence here would have the never-generates detector name a client as
+      // unbilled every month forever, when in fact they are invoiced by the old
+      // method on purpose.
+      //
+      // ABOVE the lifecycle checks and BELOW 'already-generated': an invoice
+      // that already exists is still the more useful answer (the opt-out may
+      // have been switched on after it was built), but a prospect who is also
+      // opted out is opted out first — the opt-out is the standing decision and
+      // the lifecycle will move.
+      if (client.platformInvoicingOptOut === true) {
+        skipped.push({ clientId: client.id, reason: 'opted-out' })
+        continue
+      }
       // A retired client generates no new drafts. Reported separately from
       // 'not-billable-yet' because the two are opposite ends of the lifecycle
       // and the fix differs: a prospect is waiting to start, a retired client
@@ -9512,6 +9582,11 @@ export class AppDataStore {
           ) {
             continue
           }
+          // Opted out of platform invoicing: off the merge for the same reason
+          // a retired sub is. Silent here because the sub's OWN iteration
+          // already reported 'opted-out' on this very run — a second row would
+          // say the same thing twice.
+          if (sub.platformInvoicingOptOut === true) continue
           // THE MIGRATION MONTH. 2026-08 was billed per-company before the
           // master row existed, and those invoices are deliberately left alone
           // (plan §0). Merging a sub that still holds a LIVE invoice for this
@@ -9637,6 +9712,11 @@ export class AppDataStore {
     const data = await this.read()
     const client = (data.clients ?? []).find((entry) => entry.id === clientId)
     if (!client) return null
+    // Billed outside the app: no document of any kind is issued from here, and
+    // a retainer is a document. The route says which of the two nulls this is
+    // (it reads the client first) — this guard is the store's own, so no future
+    // caller can route around it.
+    if (client.platformInvoicingOptOut === true) return null
 
     const today = nowIso().slice(0, 10)
     const issuedPeriod = /^\d{4}-\d{2}$/.test(String(period ?? '')) ? period : today.slice(0, 7)
@@ -12028,11 +12108,11 @@ export class AppDataStore {
              estimated_bookkeeper_hours, estimated_accountant_hours,
              estimated_cfo_hours, monthly_service_tier,
              annual_rate, annual_billing_month, lifecycle_stage,
-             card_payments_enabled,
+             card_payments_enabled, platform_invoicing_opt_out,
              invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
              bill_to_client_id, is_billing_master, invoice_recipient_client_id, updated_at
            )
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39, now())`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40, now())`,
           [
             record.id,
             record.name,
@@ -12075,6 +12155,7 @@ export class AppDataStore {
               : null,
             record.lifecycleStage,
             record.cardPaymentsEnabled ?? false,
+            record.platformInvoicingOptOut === true,
             normalizeTimeBreakdownMode(record.invoiceTimeBreakdownMode),
             record.invoiceTimeBreakdownAmounts === true,
             record.billToClientId ?? null,

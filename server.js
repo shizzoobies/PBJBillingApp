@@ -1090,6 +1090,11 @@ function scopeAppDataForSession(session, data) {
     .filter((client) => allowedClientIds.has(client.id))
     .map((client) => ({
       ...client,
+      // Not secret, but a staff member has no use for a Stripe customer id and
+      // nothing on their side of the app reads it. It rides the client object
+      // now that Postgres actually selects it, so it is stripped here with the
+      // rates rather than being shipped to every phone by accident.
+      stripeCustomerId: undefined,
       hourlyRate: 0,
       monthlyRate: undefined,
       customMonthlyFee: null,
@@ -3188,6 +3193,22 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // Billed outside the app. A link minted before the opt-out was switched
+        // on is still in somebody's inbox; taking money on it here would be a
+        // payment the firm is also asking for by the old method. The same page
+        // a missing client gets — it says as little as it can, and billing@ is
+        // where the answer actually lives.
+        if (payClient.platformInvoicingOptOut) {
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'This invoice cannot be paid online right now',
+              body: `Please contact us at billing@pbjsa.com about invoice ${payNumber}.`,
+            }),
+          )
+          return
+        }
+
         // A card link held by a client who is no longer on card payments is a
         // stale link, not an error. Send them to the bank-transfer page.
         if (wantsCard && !payClient.cardPaymentsEnabled) {
@@ -4072,6 +4093,16 @@ const server = createServer(async (request, response) => {
         sendJson(response, 409, { error: 'This invoice has no client on file.' })
         return
       }
+      // Billed outside the app — the same refusal Send makes, and for the same
+      // reason. A pay link is a way to be paid through this app, so it is
+      // refused before a Stripe session exists to leak.
+      if (invoiceClient.platformInvoicingOptOut) {
+        sendJson(response, 409, {
+          error: 'client_opted_out',
+          message: `${invoiceClient.name} is invoiced outside the app.`,
+        })
+        return
+      }
 
       // Reuse the client's Stripe customer so a repeat payer is one customer in
       // Stripe rather than one per invoice.
@@ -4492,6 +4523,18 @@ const server = createServer(async (request, response) => {
         sendJson(response, 409, { error: 'This invoice has no client on file.' })
         return
       }
+      // Billed outside the app (featreq-006f12f6). Refused BEFORE anything is
+      // minted or emailed: an invoice may already exist for this client from
+      // before the opt-out was switched on, and sending it would bill them a
+      // second time by a channel they never agreed to. Same shape as
+      // `invoice_no_recipient` so the month run can say why in the same place.
+      if (sendClient.platformInvoicingOptOut) {
+        sendJson(response, 409, {
+          error: 'client_opted_out',
+          message: `${sendClient.name} is invoiced outside the app.`,
+        })
+        return
+      }
 
       // A billing master has no contacts of its own: the email goes to the ONE
       // sub it names, and an unnamed one is refused BEFORE anything is sent
@@ -4847,6 +4890,19 @@ const server = createServer(async (request, response) => {
       }
       if (!Number.isFinite(retainerAmount) || retainerAmount <= 0) {
         sendJson(response, 400, { error: 'amount must be more than zero' })
+        return
+      }
+
+      // Billed outside the app: no document is issued from here. Read the
+      // client FIRST so the refusal is a sentence about the opt-out — the store
+      // guard below answers null, which the handler would otherwise report as
+      // "Client not found".
+      const retainerClient = await appDataStore.getClientById(retainerClientId)
+      if (retainerClient?.platformInvoicingOptOut) {
+        sendJson(response, 409, {
+          error: 'client_opted_out',
+          message: `${retainerClient.name} is invoiced outside the app.`,
+        })
         return
       }
 

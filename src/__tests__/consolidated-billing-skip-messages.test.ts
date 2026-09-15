@@ -63,6 +63,17 @@ describe('generateSkipMessage — consolidated billing', () => {
     ).toBe('This is a billing master with no companies pointed at it yet.')
   })
 
+  // Not a failure either (featreq-006f12f6). This client IS billed — by the
+  // method they were on before — so the sentence has to say where the invoice
+  // went, not just that there isn't one.
+  it('says a client is invoiced outside the app', () => {
+    expect(
+      generateSkipMessage({ reason: 'opted-out' }, 'Rivercity Appraisal Services, Inc.', 'September 2026', masters),
+    ).toBe(
+      'Rivercity Appraisal Services, Inc. is invoiced outside the app, so no invoice was created.',
+    )
+  })
+
   it('leaves the pre-existing reasons alone', () => {
     expect(
       generateSkipMessage({ reason: 'nothing-to-bill' }, 'Acme', 'August 2026', masters),

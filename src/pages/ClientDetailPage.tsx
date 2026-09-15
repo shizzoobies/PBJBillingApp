@@ -1401,7 +1401,10 @@ function BrandingSectionBody({
   )
 }
 
-function InvoiceSettingsSectionBody({
+// Exported for its own test, exactly as `MasterInvoiceRecipientBody` is: the
+// toggles here decide whether a client is billed at all, and rendering the whole
+// page to reach them would test the page instead.
+export function InvoiceSettingsSectionBody({
   client,
   onCommit,
 }: {
@@ -1473,6 +1476,15 @@ function InvoiceSettingsSectionBody({
         description="Also offer a card option in the emailed invoice. The client pays the card processing fee, so the firm still receives the invoice total in full."
         label="Pay by card"
         onChange={(value) => onCommit({ cardPaymentsEnabled: value })}
+      />
+      {/* The whole of featreq-006f12f6. On, this client leaves the platform's
+          billing entirely: nothing is generated for them, nothing can be sent,
+          and no payment link exists — they keep whatever method they were on. */}
+      <SaveToggleField
+        checked={client.platformInvoicingOptOut ?? false}
+        description="No invoices are generated or sent for this client here; they are billed outside the app."
+        label="Opt out of platform invoicing"
+        onChange={(value) => onCommit({ platformInvoicingOptOut: value })}
       />
     </div>
   )

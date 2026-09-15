@@ -1974,7 +1974,10 @@ Clients page meanwhile. Owner-only.
 >
 > Running Generate again is safe and expected: a client that already has an
 > invoice for that month is skipped, never rewritten, so a second run cannot
-> revert edits. A client with nothing to bill gets no invoice at all.
+> revert edits. A client with nothing to bill gets no invoice at all. **A client
+> opted out of platform invoicing gets no invoice either**, and the run says so
+> when it finishes ("… 1 client opted out of platform invoicing.") rather than
+> passing over it in silence — see **Opt out of platform invoicing** below.
 >
 > **Void & regenerate.** Next to Generate. Because Generate leaves an existing
 > invoice alone, it cannot refresh a month that was built early and has since
@@ -2191,6 +2194,26 @@ Clients page meanwhile. Owner-only.
 > durable PB&J link too (`app.pbjsa.com/pay/.../card`), so it keeps working for
 > as long as the bank-transfer one does.
 >
+> **Opt out of platform invoicing — a per-client switch, off by default.** On a
+> client's **Billing** tab (owner only), beside Pay by card, there is an **Opt
+> out of platform invoicing** toggle: "No invoices are generated or sent for this
+> client here; they are billed outside the app." It is for a client who is
+> invoiced by the firm's older method and should simply not be part of this
+> app's billing at all.
+>
+> With it on, **nothing is generated and nothing can go out** for that client:
+> the month run builds them no invoice (and reports them, so a short month reads
+> as a setting rather than a fault), **Generate for this one client** answers
+> "<Client> is invoiced outside the app, so no invoice was created", and a
+> retainer invoice is refused the same way. If an invoice already exists from
+> before the switch was turned on, it stays on screen with an **Opted out** flag
+> and **Send** and **Payment link** are greyed out with that reason; a pay link
+> already in the client's inbox stops taking money and shows the "cannot be paid
+> online right now" page instead. Their time, tasks, team and contacts are
+> untouched — only the billing moved — and the setup checklist stops asking for
+> a billing rate or a billing email for them, since nothing here reads either.
+> Switching it back off puts them straight back into the next month run.
+>
 > **Email invoice can build the invoice first.** The per-client **Email
 > invoice** button sends the STORED invoice for the client and month on screen.
 > If that client has no live invoice for that month — none at all, or only
@@ -2203,7 +2226,9 @@ Clients page meanwhile. Owner-only.
 > review before send is the rule everywhere, and nothing is emailed off the
 > back of that one question. Saying no changes nothing. If there is genuinely
 > nothing to bill — no hours, plan or reimbursements that month — it says that
-> instead of creating an empty invoice.
+> instead of creating an empty invoice. For a client **opted out of platform
+> invoicing** it does not offer to build one at all: it answers "<Client> is
+> invoiced outside the app, so no invoice was created."
 >
 > **History — every month, on the same page.** At the very top of the Invoices
 > page there is a switch: **This month** and **History**. This month is
