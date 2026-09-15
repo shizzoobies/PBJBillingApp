@@ -91,7 +91,7 @@ import {
   saveAppData,
   StaleWorkspaceApiError,
   setChecklistViewersRequest,
-  setPreviewModeActive,
+  setPreviewUser,
   setTemplateViewersRequest,
   toggleChecklistItemRequest,
   unlockTimesheetRequest,
@@ -372,12 +372,13 @@ function App() {
   const previewActiveRef = useRef(previewActive)
 
   // Mirror preview state into the ref AND into api.ts's central fetch wrapper
-  // so every request carries the `X-Preview-Mode` header while previewing —
-  // the server-side read-only guard.
+  // so every request carries the preview headers while previewing: the
+  // `X-Preview-Mode` read-only guard, and `X-Preview-As` naming WHO is being
+  // previewed so each endpoint can scope its own answer to them.
   useEffect(() => {
     previewActiveRef.current = previewActive
-    setPreviewModeActive(previewActive)
-  }, [previewActive])
+    setPreviewUser(previewActive ? previewUserId : null)
+  }, [previewActive, previewUserId])
 
   useEffect(() => {
     dataSyncStateRef.current = dataSyncState
@@ -643,6 +644,13 @@ function App() {
     }
   }, [])
 
+  // All three of these endpoints answer "…for the caller", so entering or
+  // leaving preview changes their answer. `previewUserId` is in the dependency
+  // list for exactly that reason: without it the effect fired once on sign-in
+  // and the owner's approval queues and "Waiting on you" card stayed on screen
+  // under the previewed person's name. The effect that mirrors the preview
+  // headers into api.ts is declared above this one, so the header is already
+  // set by the time these fetches go out.
   useEffect(() => {
     if (!sessionUser) return
     let cancelled = false
@@ -665,7 +673,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [sessionUser])
+  }, [sessionUser, previewUserId])
 
   useEffect(() => {
     if (!sessionUser) return

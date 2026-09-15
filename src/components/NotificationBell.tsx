@@ -28,7 +28,12 @@ function relativeTime(iso: string) {
 
 export function NotificationBell() {
   const navigate = useNavigate()
-  const { dataSyncState } = useAppContext()
+  // `previewUserId` is a dependency of both loads below, not decoration: the
+  // bell stays in the topbar while an owner previews a staffer, and the
+  // notifications endpoints now answer for the PREVIEWED person. Without it
+  // the badge and the list would keep showing the owner's mail under someone
+  // else's name until the next 60-second poll.
+  const { dataSyncState, previewUserId } = useAppContext()
   const [open, setOpen] = useState(false)
   const [unreadCount, setUnreadCount] = useState(0)
   const [entries, setEntries] = useState<NotificationEntry[]>([])
@@ -56,7 +61,7 @@ export function NotificationBell() {
       controller.abort()
       window.clearInterval(intervalId)
     }
-  }, [])
+  }, [previewUserId])
 
   // Refresh the badge after any user action that just synced (toggle item, etc.).
   useEffect(() => {
@@ -99,7 +104,7 @@ export function NotificationBell() {
       cancelled = true
       controller.abort()
     }
-  }, [open])
+  }, [open, previewUserId])
 
   // Click-outside to close.
   useEffect(() => {

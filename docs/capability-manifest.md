@@ -124,6 +124,17 @@ Clients page meanwhile. Owner-only.
 - Quick actions: New task, Invite bookkeeper, Add client, Notifications.
 - "Viewing as" (owner): preview the app exactly as a specific bookkeeper sees
   it (read-only preview; exit anytime).
+  - **Every page in preview shows the previewed person's own data**, not the
+    owner's — the Invoice Recap (only the clients that person's team is on),
+    the notification bell and its unread badge, "Waiting on you", and the
+    item-deletion and pending-edit approval queues. Entering or leaving
+    preview refreshes all of them straight away; there is no need to reload.
+  - Anything that has not been built for preview **refuses to answer rather
+    than showing the owner's data**. If a panel says it cannot load while
+    viewing as somebody else, that is deliberate — report it and it will be
+    taught about preview; it is never quietly showing the owner's figures
+    under a bookkeeper's name.
+  - Preview stays strictly read-only: nothing can be changed from inside it.
 
 ## Time tracking (Time page)
 

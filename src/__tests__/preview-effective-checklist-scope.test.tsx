@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import App from '../App'
 import { installFetchMock, OWNER_SESSION } from './helpers'
@@ -205,5 +205,27 @@ describe('owner previewing a staff member: checklist surfaces scope to them', ()
     expandOverduePin()
     expect(await screen.findAllByText('Owner overdue payroll')).not.toHaveLength(0)
     expect(document.querySelector('.overdue-pin')).not.toBeNull()
+  })
+
+  /**
+   * The second half of the same leak, and the half `/api/app-data` could never
+   * fix: the surfaces that fetch their OWN endpoint. The loader that fills
+   * "Waiting on you", the item-deletion badges and the pending-edit queue used
+   * to key its effect on `[sessionUser]` alone, so entering preview did not
+   * even re-ask — and when it did ask, the request named nobody, so the server
+   * answered as the owner.
+   */
+  it('entering preview re-asks the per-user endpoints, as the previewed person', async () => {
+    await bootAndEnterPreview()
+
+    const calls = (globalThis.fetch as unknown as Mock).mock.calls
+    const waiting = calls.filter(([input]) => String(input).includes('/api/waiting-on-me'))
+
+    // Once on sign-in, again on preview entry.
+    expect(waiting.length).toBeGreaterThan(1)
+
+    const headers = new Headers((waiting[waiting.length - 1][1] as RequestInit | undefined)?.headers)
+    expect(headers.get('X-Preview-As')).toBe(JORDAN_ID)
+    expect(headers.get('X-Preview-Mode')).toBe('1')
   })
 })

@@ -251,8 +251,12 @@ describe('the invoice-recap route', () => {
   // on. The negative assertion is the real regression guard — reverting to the
   // wider set here is the bug, not a style choice.
   // docs/plans/team-visibility-split-2026-09.md.
+  //
+  // The session handed to it is the PREVIEW-SCOPED one (featreq-0c2d4ce5,
+  // 2026-09-15): while an owner previews a staffer, the team that gates the
+  // money is the staffer's. See preview-scoped-routes.test.ts.
   it('scopes through teamClientIdSet, never the wider visible set', () => {
-    const scope = block.indexOf('teamClientIdSet(session,')
+    const scope = block.indexOf('teamClientIdSet(scoped,')
     const build = block.indexOf('buildInvoiceRecap(')
     expect(scope).toBeGreaterThan(-1)
     expect(build).toBeGreaterThan(-1)

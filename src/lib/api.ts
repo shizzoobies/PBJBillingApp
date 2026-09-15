@@ -38,28 +38,35 @@ import type { ScopeTag } from '../../lib/invoice-scope-retag.js'
 import type { SkipReasonCategory } from '../../lib/checklist-skip.js'
 
 /**
- * Module-level preview state. `AppContext` calls `setPreviewModeActive`
- * whenever `previewMode` changes so that the central fetch wrapper can tag
- * every outgoing request with `X-Preview-Mode: 1`. The server rejects any
- * write verb carrying that header — a server-side guarantee that preview
- * mode stays strictly read-only even if a client-side guard is missed.
+ * Module-level preview state: WHO the owner is previewing, not merely THAT
+ * they are. `App` calls `setPreviewUser` whenever the previewed user changes,
+ * and the central fetch wrapper tags every outgoing request with both
+ * `X-Preview-Mode: 1` and `X-Preview-As: <id>`.
+ *
+ * The boolean header is the read-only guarantee — the server rejects any write
+ * verb carrying it, so preview stays read-only even if a client-side guard is
+ * missed. The identity header is the SCOPE: without it only
+ * `GET /api/app-data?previewAs=` knew who was being previewed, so every page
+ * that fetches its own endpoint (the Invoice Recap, the bell, the approval
+ * queues) answered with the OWNER's data while the banner named a staffer.
  */
-let previewModeActive = false
+let previewUserId: string | null = null
 
-export function setPreviewModeActive(active: boolean) {
-  previewModeActive = active
+export function setPreviewUser(id: string | null) {
+  previewUserId = id
 }
 
 /**
- * Central fetch wrapper. Identical to `fetch` except it injects the
- * `X-Preview-Mode` header while an owner is previewing another user.
+ * Central fetch wrapper. Identical to `fetch` except it injects the preview
+ * headers while an owner is previewing another user.
  */
 function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
-  if (!previewModeActive) {
+  if (previewUserId === null) {
     return fetch(input, init)
   }
   const headers = new Headers(init.headers)
   headers.set('X-Preview-Mode', '1')
+  headers.set('X-Preview-As', previewUserId)
   return fetch(input, { ...init, headers })
 }
 
