@@ -7631,7 +7631,15 @@ const server = createServer(async (request, response) => {
         validatedPush.newDueDate,
       )
       if (!pushed) {
-        sendJson(response, 409, { error: SKIP_ALREADY_SKIPPED_MESSAGE })
+        // NOT the already-skipped refusal above: that one is checked and
+        // answered before we get here. Reaching this means the row changed
+        // underneath us between the read and the update — someone else skipped
+        // or deleted it in the same seconds — and telling the person it was
+        // "already skipped" would send them looking for a skip they made.
+        sendJson(response, 409, {
+          error:
+            'Someone else changed this task while you were filling this in — reload and take another look.',
+        })
         return
       }
       const pushRecord = await appDataStore.createChecklistSkip({

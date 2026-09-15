@@ -38,6 +38,7 @@ import {
   resolveSpecificMonthsStageDueDate,
   resolveStageDueDate,
 } from './utils'
+import { checklistIdentityDueDate } from '../../lib/checklist-identity.js'
 import { inactiveClientIds } from '../../lib/recurring-gate.js'
 
 /** Default cap on ghosts emitted per template, so an annual horizon doesn't explode weekly templates. */
@@ -148,9 +149,17 @@ export function projectUpcomingChecklists(data: AppData, opts: ProjectOptions): 
     return []
   }
 
-  // Dedupe key set mirrors the materializer: `${templateId}:${dueDate}:${stageIndex}`
+  // Dedupe key set mirrors the materializer: `${templateId}:${cycleDate}:${stageIndex}`
   // over BOTH active and recycled (soft-deleted) checklists, so a ghost is never
   // a duplicate of a real / about-to-be-real / deliberately-removed instance.
+  //
+  // The date is the CYCLE date (`checklistIdentityDueDate`), not the working
+  // `dueDate` — the same rule the materializer and the unique index follow. A
+  // pushed occurrence keeps its original date as its identity and carries a
+  // LATER `dueDate`, which by default is exactly the next cycle's date. Keying
+  // on the raw `dueDate` would therefore make a pushed row suppress the ghost
+  // of a real future occurrence (and stop suppressing the ghost of its own
+  // cycle, which it still owns).
   const realChecklists = [
     ...(data.checklists ?? []),
     ...(data.recycledChecklists ?? []),
@@ -158,7 +167,10 @@ export function projectUpcomingChecklists(data: AppData, opts: ProjectOptions): 
   const existingKeys = new Set(
     realChecklists
       .filter((checklist) => checklist.templateId)
-      .map((checklist) => `${checklist.templateId}:${checklist.dueDate}:${checklist.stageIndex ?? 0}`),
+      .map(
+        (checklist) =>
+          `${checklist.templateId}:${checklistIdentityDueDate(checklist)}:${checklist.stageIndex ?? 0}`,
+      ),
   )
 
   const ghosts: Checklist[] = []

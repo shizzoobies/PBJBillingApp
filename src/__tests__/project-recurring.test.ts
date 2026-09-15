@@ -204,6 +204,62 @@ describe('projectUpcomingChecklists', () => {
 })
 
 /**
+ * Pushed occurrences (featreq-68638ed2). A push moves `dueDate` forward and
+ * keeps the cycle it belongs to in `cycleDueDate`, and the DEFAULT push date is
+ * exactly the next occurrence's date. The overlay dedupes on the same identity
+ * the materializer uses — the CYCLE date — or a single pushed task would hide
+ * the ghost of a real occurrence that has not been generated yet.
+ */
+describe('projectUpcomingChecklists — pushed occurrences', () => {
+  // Weekly from yesterday: the cycles land on dateOffset(6), (13), (20)…
+  const template = makeTemplate({
+    id: 'tmpl-weekly',
+    frequency: 'weekly',
+    nextDueDate: dateOffset(-1),
+  })
+
+  const pushed: Checklist = {
+    id: 'check-pushed',
+    title: 'Recurring Task',
+    clientId: 'client-1',
+    assigneeId: 'emp-1',
+    templateId: 'tmpl-weekly',
+    frequency: 'weekly',
+    // Pushed off yesterday's cycle onto the next cycle's date — the default the
+    // dialog offers.
+    dueDate: dateOffset(6),
+    cycleDueDate: dateOffset(-1),
+    pushedAt: '2026-09-14T12:00:00.000Z',
+    pushedBy: 'emp-1',
+    viewerIds: [],
+    editorIds: [],
+    stageIndex: 0,
+    items: [],
+  }
+
+  it('still projects the cycle a pushed task happens to be parked on', () => {
+    const ghosts = projectUpcomingChecklists(makeData([template], [pushed]), {
+      fromDateOnly: TODAY,
+      horizonEndDateOnly: dateOffset(21),
+    })
+    // The real occurrence due that day has NOT been generated yet — the pushed
+    // row answers for yesterday's cycle, not for this one.
+    expect(ghosts.map((ghost) => ghost.dueDate)).toContain(dateOffset(6))
+  })
+
+  it('suppresses nothing differently for an unpushed row', () => {
+    // The control: the same row with no push is genuinely the dateOffset(6)
+    // occurrence, so its ghost must NOT be emitted.
+    const unpushed: Checklist = { ...pushed, cycleDueDate: undefined, pushedAt: undefined }
+    const ghosts = projectUpcomingChecklists(makeData([template], [unpushed]), {
+      fromDateOnly: TODAY,
+      horizonEndDateOnly: dateOffset(21),
+    })
+    expect(ghosts.map((ghost) => ghost.dueDate)).not.toContain(dateOffset(6))
+  })
+})
+
+/**
  * The Board/Gantt projection has to skip exactly what the materializer skips,
  * or the ghosts promise work that will never appear. A retired client is the
  * newest way those two could drift, so it is pinned here.

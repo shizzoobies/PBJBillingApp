@@ -33,10 +33,13 @@ export declare function validateSkipRequest(input?: {
 export declare const PUSH_NEEDS_DATE_MESSAGE: string
 export declare const PUSH_DATE_UNREADABLE_MESSAGE: string
 export declare const PUSH_DATE_NOT_LATER_MESSAGE: string
+export declare const PUSH_DATE_TOO_FAR_MESSAGE: string
+export declare const PUSH_MAX_YEARS_AHEAD: number
 
 /**
  * A push carries everything a skip does plus the new due date, which must be a
- * real `yyyy-mm-dd` strictly after the instance's current `dueDate`.
+ * real `yyyy-mm-dd` strictly after the instance's current `dueDate` and no more
+ * than {@link PUSH_MAX_YEARS_AHEAD} years past it.
  */
 export declare function validatePushRequest(
   input?: {

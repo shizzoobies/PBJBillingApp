@@ -1950,7 +1950,10 @@ function SkipTaskDialog({
             className="input"
             type="date"
             value={newDueDate}
-            min={currentDueDate}
+            // The day AFTER the current due date: the current one is refused
+            // (a push has to move the task), so offering it in the picker only
+            // invites the error message below.
+            min={addDays(currentDueDate, 1)}
             onChange={(event) => setNewDueDate(event.target.value)}
           />
         </label>

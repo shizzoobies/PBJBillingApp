@@ -103,7 +103,7 @@ function SkippedTasksReviewSection() {
   if (rows.length === 0) return null
 
   return (
-    <section className="dashboard-section" aria-label="Skipped tasks">
+    <section className="dashboard-section" aria-label="Skipped and pushed tasks to review">
       <h2>Skipped and pushed tasks to review ({rows.length})</h2>
       <ul className="dashboard-cases">
         {rows.map((skip) => (

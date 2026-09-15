@@ -2884,7 +2884,7 @@ function mapChecklistSkipRow(row) {
     // default, so this coalesce only covers a select that omitted it.
     kind: row.kind === 'push' ? 'push' : 'skip',
     // Same shape every other `date` column is mapped with in this file.
-    newDueDate: row.new_due_date ? new Date(row.new_due_date).toISOString().slice(0, 10) : null,
+    newDueDate: row.new_due_date ? row.new_due_date.toISOString().slice(0, 10) : null,
     reviewedBy: row.reviewed_by ?? null,
     reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
   }
@@ -3402,10 +3402,9 @@ export class AppDataStore {
       // initialize() is the boot path, an unguarded throw would take the whole
       // app down. So we attempt it on every boot and log loudly when it can't
       // be built yet; the first boot after the cleanup lands creates it and the
-      // backstop arms itself with no further deploy. Each statement here runs
-      // in its own implicit transaction, so a failure leaves nothing poisoned.
-      // Until then the shared in-code guard (lib/checklist-identity.js) is what
-      // prevents new duplicates.
+      // backstop arms itself with no further deploy. Until then the shared
+      // in-code guard (lib/checklist-identity.js) is what prevents new
+      // duplicates.
       //
       // PUSH CHANGED THE TUPLE'S DATE. It is now the CYCLE date
       // (`coalesce(cycle_due_date, due_date)`), not the working due date: a
@@ -3416,23 +3415,52 @@ export class AppDataStore {
       // (`cycle_due_date` is null there), so this index builds exactly when the
       // old one would have.
       //
-      // Order matters: build v2 FIRST, drop v1 only after it succeeds. A
-      // database still too dirty for the new index therefore keeps the old
-      // backstop instead of ending up with none.
+      // THE SWAP IS ONE TRANSACTION, for the same reason the
+      // `invoices_client_period_live` swap further down is: two implicit
+      // transactions leave a window in which this table has NO backstop at all
+      // (create v2, then a failing drop, or the reverse ordering after a crash
+      // between them), and a materializer racing through that window writes the
+      // duplicates this index exists to make impossible. `create index`
+      // (non-concurrent) is transactional in Postgres, so the window can simply
+      // be closed. Order inside it still matters: build v2 FIRST so a ROLLBACK
+      // leaves v1 — the old backstop — standing rather than nothing.
+      const checklistIndexClient = await this.pool.connect()
+      let checklistIndexV2Created = false
       try {
-        await this.pool.query(`
+        await checklistIndexClient.query('BEGIN')
+        await checklistIndexClient.query(`
           create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2}
             on checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
             where deleted_at is null and template_id is not null
         `)
-        await this.pool.query(`drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX}`)
+        checklistIndexV2Created = true
+        await checklistIndexClient.query(`drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX}`)
+        await checklistIndexClient.query('COMMIT')
       } catch (error) {
-        console.warn(
-          `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} — most likely duplicate ` +
-            `(template_id, cycle date, stage_index) rows still present. New duplicates are still ` +
-            `blocked in code; this will be retried on the next boot. Reason:`,
-          error && error.message ? error.message : error,
-        )
+        try {
+          await checklistIndexClient.query('ROLLBACK')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        // Two different failures, two different things to go look at. Only the
+        // first is the dirty-data case everyone is waiting on.
+        if (checklistIndexV2Created) {
+          console.warn(
+            `[init] built ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} but could not finish the swap, so ` +
+              `the whole swap was rolled back and ${CHECKLIST_INSTANCE_UNIQUE_INDEX} is still the ` +
+              `backstop. Not a data problem — this will be retried on the next boot. Reason:`,
+            error && error.message ? error.message : error,
+          )
+        } else {
+          console.warn(
+            `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} — most likely duplicate ` +
+              `(template_id, cycle date, stage_index) rows still present. New duplicates are still ` +
+              `blocked in code; this will be retried on the next boot. Reason:`,
+            error && error.message ? error.message : error,
+          )
+        }
+      } finally {
+        checklistIndexClient.release()
       }
 
       // Templates cloned from another template stamp their origin id so the UI
@@ -3856,10 +3884,11 @@ export class AppDataStore {
 
       // The instance's own skip marker. Deliberately NOT a soft-delete: the row
       // must stay out of the recycle bin and stay visible to the materializer's
-      // identity tuple (template_id, due_date, stage_index), because that is what
-      // stops this period respawning while the NEXT period's different due date
-      // generates exactly as before. Views drop skipped rows from the active
-      // lists, so a skipped task can never reach an overdue bucket either.
+      // identity tuple (template_id, the CYCLE date `coalesce(cycle_due_date,
+      // due_date)`, stage_index), because that is what stops this period
+      // respawning while the NEXT period's different due date generates exactly
+      // as before. Views drop skipped rows from the active lists, so a skipped
+      // task can never reach an overdue bucket either.
       await this.pool.query(`alter table checklists add column if not exists skipped_at timestamptz`)
       await this.pool.query(`alter table checklists add column if not exists skipped_by text`)
 
@@ -5997,6 +6026,28 @@ export class AppDataStore {
           ]),
         )
 
+        // The push stamps, by the same rule and for a sharper reason. These
+        // three are endpoint-owned (POST /api/checklists/:id/push is the only
+        // writer) and `cycle_due_date` is the row's IDENTITY — the unique index
+        // is built on `coalesce(cycle_due_date, due_date)`. The insert below is
+        // `on conflict do nothing`, so a payload carrying a WRONG or MISSING
+        // cycle date does not merely lose a stamp: it collides with some other
+        // row's identity and the checklist AND every one of its items are
+        // dropped from the save with nothing but a warn. What is stored wins;
+        // the payload's copy is ignored outright.
+        const priorChecklistPushStamps = new Map(
+          (
+            await client.query(`select id, cycle_due_date, pushed_at, pushed_by from checklists`)
+          ).rows.map((row) => [
+            row.id,
+            {
+              cycleDueDate: row.cycle_due_date ?? null,
+              pushedAt: row.pushed_at ?? null,
+              pushedBy: row.pushed_by ?? null,
+            },
+          ]),
+        )
+
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
         await client.query('delete from checklist_template_items')
@@ -6522,11 +6573,15 @@ export class AppDataStore {
         // deleted locally) don't wedge the FK insert.
         const checklistsToWrite = [...safeChecklists, ...safeRecycledChecklists]
         for (const checklist of checklistsToWrite) {
+          // What was STORED for this row's push (see `priorChecklistPushStamps`).
+          // A row this save is genuinely creating has none — and correctly so:
+          // nothing but the push endpoint may ever mint these.
+          const storedPush = priorChecklistPushStamps.get(checklist.id) ?? null
           // `on conflict do nothing` is the write-side half of the duplicate
           // backstop. A stale tab that still holds a duplicate instance in
           // memory would otherwise re-upload it here. Two conflicts are
           // possible: the primary key (same id twice in one payload) and the
-          // UNIQUE partial index on (template_id, due_date, stage_index).
+          // UNIQUE partial index on (template_id, the CYCLE date, stage_index).
           // Either way the row is skipped rather than aborting the transaction
           // — an aborted bulk save 500s every read and takes the app offline
           // (the 2026-06-17 incident), which is far worse than dropping a row
@@ -6567,11 +6622,13 @@ export class AppDataStore {
               // reason a skip must — and with more at stake: losing
               // `cycle_due_date` would hand the instance back to the
               // materializer under the WRONG identity, respawning the cycle it
-              // was pushed out of. POST /api/checklists/:id/push is the only
-              // writer; the tab round-trips these three untouched.
-              checklist.cycleDueDate ?? null,
-              checklist.pushedAt ?? null,
-              checklist.pushedBy ?? null,
+              // was pushed out of. Stronger than the skip stamps above,
+              // therefore: these come from what was STORED, never from the
+              // payload, so a stale tab cannot erase a push OR collide its way
+              // out of this save (see `priorChecklistPushStamps`).
+              storedPush ? storedPush.cycleDueDate : null,
+              storedPush ? storedPush.pushedAt : null,
+              storedPush ? storedPush.pushedBy : null,
               // Preserved like the skip stamps above: the bulk save wipes and
               // reinserts, and a column missing here is a label that vanishes on
               // the next autosave with no error anywhere.
@@ -6810,6 +6867,19 @@ export class AppDataStore {
             )
             const next = { ...checklist }
             if (prior?.createdAt) next.createdAt = prior.createdAt
+            // Cardinal rule 1 mirror of `priorChecklistPushStamps` in the
+            // Postgres branch: the push stamps are endpoint-owned, so what is
+            // STORED wins and the payload's copy is ignored outright. This
+            // backend has no unique index to collide with, but `cycleDueDate`
+            // is still the row's identity — a stale tab that sent a wrong one
+            // would hand the instance to the materializer under a cycle it does
+            // not belong to.
+            if (prior) {
+              for (const field of ['cycleDueDate', 'pushedAt', 'pushedBy']) {
+                if (prior[field] == null) delete next[field]
+                else next[field] = prior[field]
+              }
+            }
             if (Array.isArray(checklist.items)) {
               next.items = checklist.items.map((payloadItem) => {
                 if (!payloadItem || typeof payloadItem.id !== 'string') return payloadItem

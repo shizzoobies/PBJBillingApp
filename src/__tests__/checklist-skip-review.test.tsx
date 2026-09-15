@@ -96,7 +96,8 @@ const renderDashboard = () =>
     </MemoryRouter>,
   )
 
-const section = () => screen.queryByRole('region', { name: 'Skipped tasks' })
+const section = () =>
+  screen.queryByRole('region', { name: 'Skipped and pushed tasks to review' })
 
 describe('scoping', () => {
   it('never renders for a bookkeeper', () => {

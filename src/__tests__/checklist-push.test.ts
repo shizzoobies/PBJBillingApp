@@ -105,6 +105,24 @@ describe('the new date is the rule a skip does not have', () => {
     expect(validatePushRequest({ ...good, newDueDate: '2026-10-01' }, instance()).ok).toBe(true)
     expect(validatePushRequest({ ...good, newDueDate: '2027-01-15' }, instance()).ok).toBe(true)
   })
+
+  // The other end of the same rule. A mistyped year in the date field is one
+  // keystroke, and a push moves only the WORKING date — the row keeps its
+  // identity on the cycle it came from, so a task parked decades out is simply
+  // gone from every list, with nothing downstream to notice.
+  it('accepts a push up to two years out', () => {
+    expect(validatePushRequest({ ...good, newDueDate: '2028-09-30' }, instance()).ok).toBe(true)
+  })
+
+  it('refuses a push further than two years out', () => {
+    const result = validatePushRequest({ ...good, newDueDate: '2028-10-01' }, instance())
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/within two years/i)
+  })
+
+  it('refuses a mistyped year outright', () => {
+    expect(validatePushRequest({ ...good, newDueDate: '2226-10-31' }, instance()).ok).toBe(false)
+  })
 })
 
 describe('who is offered a push', () => {

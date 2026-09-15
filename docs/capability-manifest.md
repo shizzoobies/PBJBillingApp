@@ -654,7 +654,10 @@ Clients page meanwhile. Owner-only.
     explanation, and a **new due date pre-filled with the next cycle** of that
     task's own schedule — a monthly task offers next month, a quarterly one next
     quarter. The date is editable to anything later than the date it is due now;
-    a push only ever moves a task forward.
+    a push only ever moves a task forward. The picker starts at the day after
+    the current due date, and a push may not land more than **two years** past
+    it — further out than that is a mistyped year far more often than a plan,
+    and a genuinely distant task can simply be pushed twice.
   - **It is not a completion and not a skip.** Nothing is checked off, nothing is
     unblocked, and no next step is started. The task simply lives on at its new
     date, with every step exactly as it was.

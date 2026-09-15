@@ -971,6 +971,7 @@ function fakePostgres({
   userRows = [],
   createdAtRows = {},
   priorItemRows = [],
+  priorChecklistRows = [],
   templateRows = [],
   templateStageRows = [],
   templateItemRows = [],
@@ -1023,6 +1024,12 @@ function fakePostgres({
     // preservation, of what waiting state each row already carried.
     if (/^select id, done, completed_at[\s\S]*from checklist_items$/i.test(trimmed)) {
       return { rows: priorItemRows }
+    }
+    // The bulk save's push-stamp snapshot, taken before the wipe. What is
+    // STORED here wins over whatever the payload carried, so a fake that
+    // answered nothing would make every push stamp look like a new row's.
+    if (/^select id, cycle_due_date, pushed_at, pushed_by from checklists$/i.test(trimmed)) {
+      return { rows: priorChecklistRows }
     }
     // `_refuseBillingMasterWrite`'s single-row lookup, and `createClient`'s
     // roster read for the bill-to rules. Both answer out of `clientRows` so one
@@ -4790,6 +4797,49 @@ describe('quiet skip (file backend)', () => {
     expect(row.pushedAt).toBe(stamped)
   })
 
+  it('ignores the push stamps a bulk save carries — stored wins', async () => {
+    await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
+    const stamped = (await persisted()).checklists[0].pushedAt
+
+    // A tab that loaded before the push, or one that mangled the field on the
+    // way back up: a cycle date that is not this row's, and stamps that are not
+    // its own. `cycle_due_date` is the identity the materializer reads — in
+    // Postgres a wrong one collides on the unique index and takes the whole
+    // checklist out of the save — so the payload never gets a vote.
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            dueDate: '2026-09-30',
+            cycleDueDate: '2026-12-31',
+            pushedAt: '2020-01-01T00:00:00.000Z',
+            pushedBy: 'emp-9',
+          }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+
+    const row = (await persisted()).checklists[0]
+    expect(row.cycleDueDate).toBe('2026-08-31')
+    expect(row.pushedAt).toBe(stamped)
+    expect(row.pushedBy).toBe('emp-1')
+  })
+
+  it('does not let a bulk save invent a push on a task that was never pushed', async () => {
+    await store.write(
+      workspace({
+        checklists: [instance({ cycleDueDate: '2026-12-31', pushedBy: 'emp-9' })],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+
+    const row = (await persisted()).checklists[0]
+    expect(row.cycleDueDate ?? null).toBeNull()
+    expect(row.pushedAt ?? null).toBeNull()
+    expect(row.pushedBy ?? null).toBeNull()
+  })
+
   it('files a push record on the same trail, naming the date it moved to', async () => {
     const record = await store.createChecklistSkip({
       checklistId: 'cl-1',
@@ -4973,8 +5023,31 @@ describe('quiet skip (postgres branch)', () => {
     expect(fake.statements.indexOf(created)).toBeLessThan(fake.statements.indexOf(dropped))
   })
 
-  it('carries cycle_due_date / pushed_at / pushed_by through the bulk save', async () => {
+  it('reads cycle_due_date / pushed_at / pushed_by back out of checklists', async () => {
     const fake = fakePostgres()
+    await postgresStore(fake).read()
+
+    const [statement] = fake.matching(/^select id, title, client_id[\s\S]*from checklists/i)
+    expect(statement).toBeTruthy()
+    // The file backend cannot see this, and it is the path that would erase
+    // every push in silence: a column missing from the READ comes back to the
+    // owner's tab as undefined and goes straight back down the bulk save as
+    // null. Losing `cycle_due_date` hands the row to the materializer under
+    // the WRONG identity and respawns the cycle it was pushed out of.
+    expect(statement.text).toMatch(/cycle_due_date, pushed_at, pushed_by/i)
+  })
+
+  it('writes the STORED cycle_due_date / pushed_at / pushed_by through the bulk save', async () => {
+    const fake = fakePostgres({
+      priorChecklistRows: [
+        {
+          id: 'cl-1',
+          cycle_due_date: '2026-08-31',
+          pushed_at: '2026-08-20T10:00:00.000Z',
+          pushed_by: 'emp-1',
+        },
+      ],
+    })
     await postgresStore(fake).write(
       workspace({
         checklists: [
@@ -4985,20 +5058,32 @@ describe('quiet skip (postgres branch)', () => {
             assigneeId: 'emp-1',
             dueDate: '2026-09-30',
             items: [],
-            cycleDueDate: '2026-08-31',
-            pushedAt: '2026-08-20T10:00:00.000Z',
-            pushedBy: 'emp-1',
+            // What a stale tab hands back: a cycle date that is not this row's
+            // and no stamps at all.
+            cycleDueDate: '2026-12-31',
           },
         ],
       }),
     )
 
+    // The snapshot has to be taken BEFORE the wipe, or there is nothing left to
+    // preserve from.
+    const snapshotAt = fake.indexOf(
+      /^select id, cycle_due_date, pushed_at, pushed_by from checklists$/i,
+    )
+    expect(snapshotAt).toBeGreaterThan(-1)
+    expect(snapshotAt).toBeLessThan(fake.indexOf(/^delete from checklists$/i))
+
     const [statement] = fake.matching(/insert into checklists \(/i)
     expect(statement.text).toMatch(/cycle_due_date, pushed_at, pushed_by/i)
-    // Losing this one would hand the row back to the materializer under the
-    // WRONG identity and respawn the cycle it was pushed out of.
+    // `cycle_due_date` is the row's identity and the insert is `on conflict do
+    // nothing`: a payload's wrong cycle date does not merely lose a stamp, it
+    // collides on the unique index and drops the checklist AND all of its items
+    // with only a warn. So the payload's copy is ignored outright.
     expect(statement.params).toContain('2026-08-31')
     expect(statement.params).toContain('2026-08-20T10:00:00.000Z')
+    expect(statement.params).toContain('emp-1')
+    expect(statement.params).not.toContain('2026-12-31')
   })
 
   it('carries skipped_at / skipped_by through the bulk save', async () => {
