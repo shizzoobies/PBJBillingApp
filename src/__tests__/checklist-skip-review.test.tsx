@@ -19,6 +19,9 @@ vi.mock('../lib/api', () => ({
   fetchGlobalActivity: vi.fn().mockResolvedValue([]),
   fetchTeam: vi.fn().mockResolvedValue({ users: [] }),
   fetchTeamActivity: vi.fn().mockResolvedValue([]),
+  // The owner dashboard also asks for the past-due invoices; that section has
+  // its own suite (dashboard-past-due.test.tsx) and simply renders nothing here.
+  listInvoicesRequest: vi.fn().mockResolvedValue([]),
 }))
 
 const OWNER = 'emp-patrice'

@@ -22,11 +22,17 @@ import {
   skipReasonLabel,
 } from '../../lib/checklist-skip.js'
 import { useAppContext } from '../AppContext'
-import { fetchGlobalActivity, fetchTeam, fetchTeamActivity } from '../lib/api'
-import type { ActivityEntry, Checklist, TeamMember } from '../lib/types'
+import {
+  fetchGlobalActivity,
+  fetchTeam,
+  fetchTeamActivity,
+  listInvoicesRequest,
+} from '../lib/api'
+import type { ActivityEntry, Checklist, PersistedInvoice, TeamMember } from '../lib/types'
 import {
   clientName,
   currency,
+  daysPastDueLabel,
   describeActivityAction,
   employeeName,
   formatActivityTimestamp,
@@ -34,7 +40,10 @@ import {
   isInBillingPeriod,
   localDateOnly,
   normalizeBillingMonth,
+  pastDueInvoice,
   relativeTime,
+  shortDate,
+  type PastDueInvoice,
 } from '../lib/utils'
 
 const today = () => localDateOnly()
@@ -141,6 +150,88 @@ function SkippedTasksReviewSection() {
             >
               {busyId === skip.id ? 'Saving…' : 'Reviewed'}
             </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/**
+ * Owner-only: every invoice that is past the firm's own thirty-day line,
+ * oldest first — the list to work down when she wants to know who to chase.
+ *
+ * The invoices are FETCHED here rather than read off `data`. Invoices are
+ * deliberately not part of the workspace bulk save (they are money documents
+ * and the bulk save wipes and restores that table), so AppContext does not hold
+ * them and putting them there to fill in one dashboard section would be the
+ * wrong trade. One owner-only GET with no period — past due is not a question
+ * about the month on the top bar, it is a question about every month.
+ *
+ * Which invoices count is `pastDueInvoice`, the same rule the month run's Past
+ * due tab uses, so the two can never give different answers. A failed payment
+ * wins over past due in that rule, which is why an invoice sitting in the month
+ * run's Payment failed tab is deliberately absent from here.
+ *
+ * Renders nothing for staff, nothing while an owner is previewing as somebody
+ * else, and nothing when the list is empty — a clean dashboard stays clean.
+ */
+function PastDueInvoicesSection() {
+  const { data, role, previewMode } = useAppContext()
+  const [invoices, setInvoices] = useState<PersistedInvoice[]>([])
+  const hidden = role !== 'owner' || previewMode
+
+  useEffect(() => {
+    if (hidden) return
+    let cancelled = false
+    listInvoicesRequest()
+      .then((rows) => {
+        if (!cancelled) setInvoices(rows)
+      })
+      .catch(() => {
+        // Non-fatal, like the activity feed: the rest of the dashboard renders.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [hidden])
+
+  const rows = useMemo(() => {
+    const today = localDateOnly()
+    const found: Array<{ invoice: PersistedInvoice; pastDue: PastDueInvoice }> = []
+    for (const invoice of invoices) {
+      const pastDue = pastDueInvoice(invoice, today)
+      // Oldest line first: the one that has been owed longest is the one to
+      // call about, and that order does not change while she reads it.
+      if (pastDue) found.push({ invoice, pastDue })
+    }
+    return found.sort((a, b) => a.pastDue.dueDate.localeCompare(b.pastDue.dueDate))
+  }, [invoices])
+
+  if (hidden || rows.length === 0) return null
+
+  return (
+    <section className="dashboard-section" aria-label="Invoices past due">
+      <h2>Invoices past due ({rows.length})</h2>
+      <ul className="dashboard-cases">
+        {rows.map(({ invoice, pastDue }) => (
+          <li key={invoice.id} className="dashboard-case-row">
+            <div className="dashboard-case-main">
+              <strong>{invoice.number ?? invoice.id}</strong>
+              <span className="dashboard-case-client">
+                {clientName(data.clients, invoice.clientId)}
+              </span>
+            </div>
+            <div className="dashboard-case-stage">
+              {invoice.sentAt ? `sent ${shortDate.format(new Date(invoice.sentAt))}` : 'never sent'}
+            </div>
+            <div className="dashboard-case-holder">
+              {daysPastDueLabel(pastDue.daysPastDue)} past due
+            </div>
+            <span className="dashboard-case-client">{currency.format(invoice.total)}</span>
+            <Link to="/invoices" className="dashboard-case-link">
+              Open invoices →
+            </Link>
           </li>
         ))}
       </ul>
@@ -583,6 +674,8 @@ function OwnerDashboardView() {
       </section>
 
       <SkippedTasksReviewSection />
+
+      <PastDueInvoicesSection />
 
       <section className="dashboard-section" aria-label="Recent activity">
         <h2>Recent activity</h2>

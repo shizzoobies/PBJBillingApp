@@ -2791,6 +2791,310 @@ describe('recordInvoiceSent statement shape (postgres branch)', () => {
 })
 
 /**
+ * The past-due line moves to the FIRST SEND.
+ *
+ * Generation stamps `dueDate` from the day the draft was built, which is wrong
+ * whenever the run is built early — September's 35 drafts were generated on the
+ * 15th to be emailed on October 1, so their stored line fell two weeks before
+ * the client had seen the bill. The first real send re-stamps it; nothing else
+ * ever moves it again.
+ */
+describe('recordInvoiceSent re-stamps the past-due line (file backend)', () => {
+  const seedInvoice = {
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-09',
+    number: '1043',
+    status: 'reviewed',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    // The provisional date generation wrote: 30 days from the day the draft was
+    // built, which is NOT the day it goes out.
+    dueDate: '2026-10-15',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: null,
+    paidAt: null,
+    paymentMethod: null,
+    createdAt: '2026-09-15T00:00:00.000Z',
+    updatedAt: '2026-09-15T00:00:00.000Z',
+  }
+
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [{ ...seedInvoice, ...overrides }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  /** Whole days between two YYYY-MM-DD dates, counted independently of the store. */
+  const gapDays = (from, to) =>
+    Math.round(
+      (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / (24 * 60 * 60 * 1000),
+    )
+
+  /** `dateOnly` moved by whole days, for building a date relative to today. */
+  const shiftDays = (dateOnly, days) =>
+    new Date(Date.parse(`${dateOnly}T00:00:00Z`) + days * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10)
+
+  it('sets the line to thirty days after the day it actually went out', async () => {
+    // Seeded with the line a draft generated YESTERDAY would carry. Relative to
+    // today rather than a fixed date, because a fixed one eventually IS today
+    // plus thirty and the re-stamp becomes invisible.
+    const provisional = shiftDays(new Date().toISOString().slice(0, 10), 29)
+    await seed({ dueDate: provisional })
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1043',
+      ok: true,
+    })
+
+    const sendDay = updated.emailLog[0].at.slice(0, 10)
+    expect(gapDays(sendDay, updated.dueDate)).toBe(30)
+    expect(updated.dueDate).not.toBe(provisional)
+  })
+
+  // THE RULE. Chasing a client does not buy them another thirty days.
+  it('leaves the line alone on a re-send', async () => {
+    await seed({
+      status: 'sent',
+      sentAt: '2026-10-01T12:00:00.000Z',
+      dueDate: '2026-10-31',
+      emailLog: [
+        {
+          at: '2026-10-01T12:00:00.000Z',
+          to: ['ann@acme.com'],
+          subject: 'Invoice 1043',
+          ok: true,
+          total: 400,
+        },
+      ],
+    })
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1043',
+      ok: true,
+    })
+
+    expect(updated.dueDate).toBe('2026-10-31')
+    expect(updated.emailLog).toHaveLength(2)
+  })
+
+  // A payment ack, a receipt or a pay-link open is not the invoice going out.
+  it('never moves the line for a tagged entry', async () => {
+    for (const kind of ['receipt', 'ack', 'link']) {
+      await seed()
+      const updated = await store.recordInvoiceSent('inv-1', {
+        to: ['ann@acme.com'],
+        subject: 'Payment received',
+        ok: true,
+        kind,
+      })
+      expect(updated.dueDate).toBe('2026-10-15')
+      expect(updated.sentAt).toBeNull()
+    }
+  })
+
+  it('never moves the line for a send that did not go out', async () => {
+    await seed()
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1043',
+      ok: false,
+      error: 'The domain is not verified.',
+    })
+
+    expect(updated.dueDate).toBe('2026-10-15')
+  })
+})
+
+/**
+ * The Postgres half of the same rule. The condition that matters is in the SQL,
+ * not in JS: `sent_at is null` reads the row's PRE-update value, so two sends
+ * racing cannot both claim to be the first.
+ */
+describe('recordInvoiceSent past-due line (postgres branch)', () => {
+  /** The statement with its indentation flattened, so an assertion can quote it. */
+  const flat = (text) => String(text).replace(/\s+/g, ' ').trim()
+
+  it('re-stamps due_date only under the first-send condition', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(flat(update.text)).toContain(
+      'due_date = case when $3::boolean and sent_at is null and $5::date is not null' +
+        ' then $5::date else due_date end',
+    )
+    // $5 is the line this send would set: a date, thirty days out.
+    expect(update.params[4]).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  })
+
+  // With $5 null the CASE cannot fire, so a payment email can never blank a
+  // date that is already on the row.
+  it('sends no date at all for a tagged entry', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice, status: 'processing' }] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Receipt for invoice INV-2026-08-001',
+      ok: true,
+      kind: 'receipt',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.params[4]).toBeNull()
+  })
+
+  it('sends no date for a failed attempt either', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: false,
+      error: 'refused',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.params[4]).toBeNull()
+  })
+})
+
+/**
+ * `recordInvoicePastDueNoticed` — the marker that makes the owner's past-due
+ * email arrive ONCE.
+ *
+ * Being past due is derived at read time (lib/invoice-overdue.js), so there is
+ * no status to flip and nothing to un-flip when the invoice is paid. The only
+ * thing that has to be remembered is "we already said something", and it is
+ * remembered on the same append-only log the sends live on.
+ */
+describe('recordInvoicePastDueNoticed (file backend)', () => {
+  const seedInvoice = {
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-09',
+    number: '1043',
+    status: 'sent',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-10-31',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: '2026-10-01T12:00:00.000Z',
+    paidAt: null,
+    paymentMethod: null,
+    emailLog: [
+      {
+        at: '2026-10-01T12:00:00.000Z',
+        to: ['ann@acme.com'],
+        subject: 'Invoice 1043',
+        ok: true,
+        total: 400,
+        providerId: 'ee-1',
+      },
+    ],
+    createdAt: '2026-09-15T00:00:00.000Z',
+    updatedAt: '2026-10-01T12:00:00.000Z',
+  }
+
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [{ ...seedInvoice, ...overrides }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('appends a tagged marker beside the send, naming the line it passed', async () => {
+    await seed()
+    const updated = await store.recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+
+    expect(updated.emailLog).toHaveLength(2)
+    expect(updated.emailLog[1]).toMatchObject({
+      kind: 'past-due',
+      event: 'noticed',
+      dueDate: '2026-10-31',
+    })
+    expect(Number.isNaN(new Date(updated.emailLog[1].at).getTime())).toBe(false)
+    // The send it sits beside is untouched.
+    expect(updated.emailLog[0].ok).toBe(true)
+  })
+
+  // THE RULE. `overdue` is a status nothing writes, and this must not be what
+  // starts writing it.
+  it('never changes the status or the dates', async () => {
+    await seed()
+    const updated = await store.recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+
+    expect(updated.status).toBe('sent')
+    expect(updated.sentAt).toBe('2026-10-01T12:00:00.000Z')
+    expect(updated.dueDate).toBe('2026-10-31')
+  })
+
+  // One email per invoice, ever — the hourly check asks this question every
+  // hour until the invoice is paid.
+  it('is idempotent: a second call writes nothing', async () => {
+    await seed()
+    await store.recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+    const again = await store.recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+
+    expect(again.emailLog.filter((logged) => logged.kind === 'past-due')).toHaveLength(1)
+  })
+
+  it('falls back to the invoice\u2019s own due date when none is given', async () => {
+    await seed()
+    const updated = await store.recordInvoicePastDueNoticed('inv-1')
+
+    expect(updated.emailLog[1].dueDate).toBe('2026-10-31')
+  })
+
+  it('refuses an invoice that is not there', async () => {
+    await seed()
+    expect(await store.recordInvoicePastDueNoticed('nope', '2026-10-31')).toBeNull()
+    expect(await store.recordInvoicePastDueNoticed('', '2026-10-31')).toBeNull()
+  })
+})
+
+describe('recordInvoicePastDueNoticed statement shape (postgres branch)', () => {
+  it('appends to email_log and touches nothing else', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    // The two columns it is allowed to write, and no third.
+    expect(update.text).not.toMatch(/\bstatus\b/)
+    expect(update.text).not.toMatch(/\bdue_date\b/)
+    expect(JSON.parse(update.params[1])[0]).toMatchObject({
+      kind: 'past-due',
+      event: 'noticed',
+      dueDate: '2026-10-31',
+    })
+  })
+
+  it('writes nothing at all for an invoice already noticed', async () => {
+    const fake = fakePostgres({
+      invoices: [
+        {
+          ...existingInvoice,
+          email_log: [
+            { kind: 'past-due', event: 'noticed', at: '2026-10-31T12:00:00.000Z', dueDate: '2026-10-31' },
+          ],
+        },
+      ],
+    })
+    await postgresStore(fake).recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+  })
+})
+
+/**
  * `recordInvoiceDeliveryEvent` — what the mail provider did with an invoice
  * email, appended to the same log the sends live on.
  *

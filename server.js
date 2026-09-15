@@ -70,6 +70,7 @@ import {
   PER_EMPLOYEE_BILLING_START,
 } from './lib/invoice-lines.js'
 import { previousPeriod } from './lib/invoice-draft.js'
+import { pastDueInvoice } from './lib/invoice-overdue.js'
 import { rateInvoiceDraft } from './lib/invoice-confidence.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
 import {
@@ -11080,3 +11081,70 @@ async function maybeSendWeeklyDigest() {
 const digestTimer = setInterval(maybeSendWeeklyDigest, 60 * 60 * 1000)
 digestTimer.unref?.()
 setTimeout(() => void maybeSendWeeklyDigest(), 30 * 1000).unref?.()
+
+// ---- Past-due invoice notices ----
+// Deterministic, like the digest above: any invoice that has passed the firm's
+// thirty-day line and that nobody has been told about yet earns ONE notice to
+// every owner — bell always, email when they have not switched invoice alerts
+// off. The line itself is 30 days from the day the invoice was first SENT
+// (db/store.js recordInvoiceSent), and `pastDueInvoice` is the SAME rule the
+// month run's Past due tab and the dashboard section use, so the three cannot
+// tell her different things.
+//
+// It writes no status. `overdue` remains a status nothing writes; being late is
+// derived from today's date every time it is asked, and this scheduler's only
+// persistent trace is a `kind: 'past-due'` marker on the invoice's email log.
+//
+// Server-side "today" is `todayIso()` (UTC). The browser's is its own local day,
+// which means the two can disagree for a few hours either side of midnight —
+// accepted: a notice an hour early or late about a thirty-day line is not a
+// thing anybody can notice, and passing a clock into the rule is what keeps
+// both callers honest about which day they mean.
+async function maybeNotifyPastDueInvoices() {
+  try {
+    if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) return
+    const today = todayIso()
+    const invoices = await appDataStore.listInvoices()
+    const late = invoices.filter(
+      (invoice) =>
+        pastDueInvoice(invoice, today) &&
+        !(invoice.emailLog ?? []).some((entry) => entry?.kind === 'past-due'),
+    )
+    if (late.length === 0) return
+    const owners = (await appDataStore.getTeamMembers()).filter(
+      (member) => member.role === 'owner',
+    )
+    if (owners.length === 0) return
+
+    for (const invoice of late) {
+      const signal = pastDueInvoice(invoice, today)
+      if (!signal) continue
+      // The marker is written BEFORE anybody is notified, deliberately. If the
+      // mail provider is having a bad afternoon and this throws, the worst case
+      // is one owner missing one bell notice; marking afterwards would make the
+      // worst case an alert about the same invoice every hour until it is paid.
+      const marked = await appDataStore.recordInvoicePastDueNoticed(invoice.id, signal.dueDate)
+      if (!marked) continue
+      const pastDueClientName =
+        (await appDataStore.getClientNameById(invoice.clientId).catch(() => '')) || 'a client'
+      const amount = (Number(invoice.total) || 0).toFixed(2)
+      for (const owner of owners) {
+        await notify(appDataStore, owner.id, 'invoice_past_due', {
+          message: `${invoice.number ?? invoice.id} · ${pastDueClientName} · $${amount} · due ${signal.dueDate}`,
+          link: '/invoices',
+          clientId: invoice.clientId,
+          appPublicUrl: process.env.APP_PUBLIC_URL,
+        })
+      }
+    }
+  } catch (error) {
+    console.error('[invoices] past-due notice failed:', error?.message || error)
+  }
+}
+// Hourly; the per-invoice marker keeps it to one notice each. First check
+// shortly after boot so a restart does not push a day's worth of them back an
+// hour, and unref'd so it can never hold the process open.
+const pastDueTimer = setInterval(maybeNotifyPastDueInvoices, 60 * 60 * 1000)
+pastDueTimer.unref?.()
+setTimeout(() => void maybeNotifyPastDueInvoices(), 30 * 1000).unref?.()
+

@@ -10,7 +10,6 @@ import type {
   Invoice,
   InvoiceEmailDeliveryEntry,
   InvoiceEmailLogEntry,
-  InvoiceEmailSendEntry,
   InvoicePaymentFailureEntry,
   PersistedInvoice,
   RecurringReimbursement,
@@ -279,57 +278,29 @@ export function isInvoicePaymentFailureEntry(
 }
 
 /**
- * The last send that actually landed with the provider — the one the
- * "Sent … to …" line is about. Delivery and payment events are skipped: they
- * are records of what happened to an invoice, not sends of their own. Payment
- * acks and receipts are skipped too (they carry a `kind`): a paid invoice whose
- * INVOICE email bounced must keep saying so, not report the receipt's delivery
- * instead.
- */
-export function latestInvoiceSend(
-  emailLog: InvoiceEmailLogEntry[] | undefined,
-): InvoiceEmailSendEntry | null {
-  const entries = (emailLog ?? []).filter(
-    (entry): entry is InvoiceEmailSendEntry =>
-      !isInvoiceDeliveryEntry(entry) &&
-      !isInvoicePaymentFailureEntry(entry) &&
-      entry.ok &&
-      !entry.kind,
-  )
-  return entries.length > 0 ? entries[entries.length - 1] : null
-}
-
-/**
- * A payment attempt that failed and that nobody has acted on yet — the reason
- * an invoice sits in the month run's "Payment failed" tab.
+ * The two read-time signals about an invoice that has gone out — "the client
+ * tried to pay and it failed", and "this is past the firm’s thirty-day line"
+ * — live in `lib/invoice-overdue.js` and are re-exported here.
  *
- * Unresolved means: the invoice is still owed (`sent` or `overdue` — the
- * webhook puts a failed one back to `sent`), and the newest failure is more
- * recent than the newest invoice email. A re-send is the follow-up: it mints a
- * fresh pay link and goes to the client, so the failure is answered and the
- * invoice returns to Sent. A payment that starts another way (a new link the
- * client actually uses, a check marked paid by hand) moves the status off
- * `sent`, which resolves it too.
+ * They were TypeScript in this file until the owner asked to be emailed about
+ * a past-due invoice. That made the server a second reader of the same rule,
+ * and a second copy of "what counts as past due" is exactly how the month run,
+ * the dashboard and the hourly email would end up disagreeing about which
+ * invoices are late. One plain-JS module, three callers, and every existing
+ * import of these two names keeps working.
  *
- * Copying a fresh payment link does NOT write a send entry, so a failure stays
- * visible through that path until the client's next attempt begins. Deliberate:
- * a copied link is not yet in the client's hands as far as the log can tell.
+ * `pastDueInvoice` takes "today" as an argument on purpose: this side passes
+ * `localDateOnly()` (the browser’s wall clock) and the server passes its own
+ * UTC day. See that module’s header for why there is no clock inside it.
  */
-export function unresolvedPaymentFailure(
-  invoice: Pick<PersistedInvoice, 'status' | 'emailLog'>,
-): InvoicePaymentFailureEntry | null {
-  if (invoice.status !== 'sent' && invoice.status !== 'overdue') return null
-  let latest: InvoicePaymentFailureEntry | null = null
-  for (const entry of invoice.emailLog ?? []) {
-    if (!isInvoicePaymentFailureEntry(entry)) continue
-    // `>=` so a later position wins a tie, as with delivery events.
-    if (!latest || entry.at >= latest.at) latest = entry
-  }
-  if (!latest) return null
-  const send = latestInvoiceSend(invoice.emailLog)
-  if (send && send.at >= latest.at) return null
-  return latest
-}
+export {
+  daysPastDueLabel,
+  latestInvoiceSend,
+  pastDueInvoice,
+  unresolvedPaymentFailure,
+} from '../../lib/invoice-overdue.js'
+export type { InvoiceSignalSource, PastDueInvoice } from '../../lib/invoice-overdue.js'
+import { latestInvoiceSend } from '../../lib/invoice-overdue.js'
 
 /**
  * What became of that last send: delivered, delayed, bounced, marked as spam.

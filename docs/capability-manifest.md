@@ -112,6 +112,14 @@ Clients page meanwhile. Owner-only.
   accountant. **Reviewing keeps the record** — it is an audit trail, so the row
   is stamped with who reviewed it and when, never deleted. See "Skipping a
   recurring task" and "Pushing a recurring task to a new date" under Checklists.
+- **"Invoices past due (N)" (owner only)** — every invoice that has gone out,
+  is still owed, and is past its 30-day line, across ALL months, oldest line
+  first. Each row shows the invoice number, the client, when it was sent, how
+  many days past due it is, the total, and a link to the Invoices page. Same
+  rule as the month run's **Past due** tab, so the two can never name different
+  invoices; an invoice with a failed payment is left out here, because that has
+  its own tab. Hidden entirely when nothing is past due, and never shown to a
+  bookkeeper or while an owner is previewing as somebody else.
 - Recent activity feed (owner).
 - Quick actions: New task, Invite bookkeeper, Add client, Notifications.
 - "Viewing as" (owner): preview the app exactly as a specific bookkeeper sees
@@ -1634,10 +1642,18 @@ Clients page meanwhile. Owner-only.
 > **The client is asked to pay on receipt. The due date the app records is the
 > firm's own.** The invoice and the email a client receives say **"Due on
 > receipt"** and show no date at all. What the app stores against the invoice is
-> a date **30 days after the day it was generated** — the firm's internal
-> past-due line, the day after which an invoice counts as late and gets chased.
-> It appears in the month run, where the owner works, and nowhere the client can
-> see. (Hovering that date in the month run says so.)
+> a date **30 days after the day the invoice is first SENT** — the firm's
+> internal past-due line, the day after which an invoice counts as late and gets
+> chased. It appears in the month run, where the owner works, and nowhere the
+> client can see. (Hovering that date in the month run says so.)
+>
+> Generating the month stamps a **provisional** date (30 days from the day the
+> draft was built), and the first send replaces it with 30 days from the day the
+> email actually went out. That matters whenever a run is built early: September's
+> invoices were generated on the 15th to be emailed on October 1, and without this
+> their past-due line would have fallen two weeks before the client had seen the
+> bill. **Sending an invoice AGAIN never moves the line** — chasing a client does
+> not buy them another thirty days.
 >
 > **The exception is a client whose own payment terms name a LONGER window.**
 > "Net 45" on a client's record means 45 days: that client's invoice prints
@@ -1653,12 +1669,29 @@ Clients page meanwhile. Owner-only.
 > months asks before discarding them, same as the picker.
 >
 > **The month's invoices are grouped into status tabs** — **To review**,
-> **Reviewed**, **Sent**, **Payment failed**, **Paid**, **Voided** — so you work
-> one group at a time instead of scrolling a single list of every client. Sent,
-> Processing and Overdue all live under **Sent** (each row still shows its own
-> status). Every tab carries its count, and all six counts stay visible at
-> once, so you can see the shape of the month without opening anything; a tab
-> with nothing in it is dimmed but still there.
+> **Reviewed**, **Sent**, **Past due**, **Payment failed**, **Paid**, **Voided**
+> — so you work one group at a time instead of scrolling a single list of every
+> client. Sent and Processing both live under **Sent** (each row still shows its
+> own status). **Past due** and **Payment failed** are DERIVED tabs, not statuses:
+> an invoice in either one is still Sent underneath and still owed, and it is
+> worked out fresh every time the page is drawn, so nothing can go stale.
+> (Nothing in the app ever writes an "Overdue" status — being late is a fact
+> about today's date, not a state.) Every tab carries its count, and all seven
+> counts stay visible at once, so you can see the shape of the month without
+> opening anything; a tab with nothing in it is dimmed but still there.
+>
+> **Past due** is the chase list: invoices that have gone out, are still owed,
+> and whose 30-day line has passed. The row carries a red **Past due · N days**
+> flag (hovering it names the line itself, e.g. "Past-due line was October 15,
+> 2026"), and the count sits in the strip above beside Need a look. An invoice
+> due TODAY is not past due — the client has the day. Opening one says what to
+> do: **Send again** to nudge them (a fresh pay link rides along), or **Mark
+> paid** if it was settled another way. Sending again does NOT move the line, so
+> the invoice stays in this tab until it is actually paid. An invoice that is
+> both past due AND has a failed payment shows up under **Payment failed** only
+> — that is the more actionable of the two, and nothing should be chased out of
+> two lists. Every owner is also notified once per invoice (bell + email) the
+> first time it passes the line; it is never repeated for the same invoice.
 >
 > **Payment failed** is the follow-up list: invoices where the client tried to
 > pay and the payment did not go through — most often a bank account they
@@ -1688,8 +1721,8 @@ Clients page meanwhile. Owner-only.
 > / Status filters, and its month tables also open alphabetical by client
 > (click a column header to sort by anything else).
 >
-> Above the tabs are the counts for To review / Reviewed / Need a look and the
-> month total. Rows flagged for a second look get an amber rule down the left.
+> Above the tabs are the counts for To review / Reviewed / Need a look / Past
+> due and the month total (Past due turns amber when there is anything in it). Rows flagged for a second look get an amber rule down the left.
 > Flagged invoices keep their place in number order, so they can turn up in any
 > tab — a small amber dot on a tab means some of the flagged ones are in there.
 > If you switch tabs with unsaved edits in an open invoice, it asks before
@@ -1760,7 +1793,8 @@ Clients page meanwhile. Owner-only.
 > **MARK PAID — for money that arrived outside the app.** A check, a direct
 > transfer nobody linked, an invoice that was never sent through the system:
 > open the invoice in the month run and press **Mark paid**. It works on Draft,
-> Reviewed, Sent and Overdue invoices; it is NOT offered while a bank payment
+> Reviewed and Sent invoices — including one showing as past due, which is still
+> Sent underneath; it is NOT offered while a bank payment
 > is **going through** (a real debit is settling — let it finish, or the two
 > answers would race). Marking paid records the date, locks the invoice like
 > any paid invoice, and **kills any payment links already emailed for it** so a
@@ -1920,8 +1954,8 @@ Clients page meanwhile. Owner-only.
 > moved on — that is what this button is for. It voids every **Draft** and
 > **Reviewed** invoice for the chosen month and immediately builds them again
 > from current data. It NEVER touches an invoice that has already gone out:
-> Sent, Processing, Paid and Overdue are left exactly as they are, and so is
-> every other month. The trade is real and the confirm says so with the actual
+> Sent, Processing and Paid are left exactly as they are (a past-due invoice is
+> Sent, so it is safe too), and so is every other month. The trade is real and the confirm says so with the actual
 > counts ("Void 12 drafts and 3 reviewed invoices for August 2026…"): line
 > edits, the note to the client and the review status on the voided invoices
 > are **discarded**, not carried forward. The voided invoices stay on the
@@ -2412,7 +2446,8 @@ Clients page meanwhile. Owner-only.
 > fix, that list is one only an owner picks, and the page reads only it.)
 > Built so the team can record each
 > month's deposits correctly: for every invoice that actually went out (sent,
-> processing, paid, or overdue — never drafts) for a month, one card shows the
+> processing or paid — never drafts; a past-due invoice is Sent, so it counts)
+> for a month, one card shows the
 > **Invoice total** for the company, the **Accounting services** amount, and
 > the **Reimbursed expenses** total — and then every client-reimbursed expense
 > **listed individually with its description**, never combined, so it is clear
@@ -2584,8 +2619,16 @@ Clients page meanwhile. Owner-only.
   waiting-on updates (including a question sent back about one), time entries
   needing approval, your time entry was
   sent back, deletion requests, edit requests/decisions, skipped recurring
-  tasks, and Updates tracker activity. Turning a type off stops the EMAIL only —
-  in-app bell notifications always arrive. All types default to on.
+  tasks, Updates tracker activity, and invoice alerts. Turning a type off stops
+  the EMAIL only — in-app bell notifications always arrive. All types default to
+  on.
+- **Invoice alerts** (the "invoiceAlerts" toggle, owners): an invoice is ready to
+  send, a client's invoice email bounced or was marked as spam, or **a sent
+  invoice passes its 30-day past-due line**. The past-due notice names the
+  invoice number, the client, the total and the line it passed, links to the
+  Invoices page, and arrives **once per invoice, ever** — the app checks hourly
+  and remembers which invoices it has already mentioned, so nothing repeats
+  while a bill goes unpaid.
 - **Skipped recurring tasks** (the "skippedTasks" toggle): covers both halves of
   the quiet-skip flow — a recurring task being skipped for a cycle (the owner
   always; an accountant when a bookkeeper skips on a client that accountant is

@@ -11238,6 +11238,16 @@ export class AppDataStore {
    * a client says they never got it. `sentAt` keeps the FIRST send, because
    * that is the date the clock started for payment terms.
    *
+   * THE FIRST SEND ALSO SETS THE PAST-DUE LINE. Generation stamps a provisional
+   * `due_date` of issue + `DEFAULT_PAYMENT_WINDOW_DAYS`, which is wrong whenever
+   * the run is built early: September's 35 drafts were generated on the 15th and
+   * emailed on October 1, so their stored line would have fallen two weeks
+   * BEFORE the client had even seen the bill. The first real send therefore
+   * re-stamps it to that send day plus the firm's window. A RE-SEND NEVER MOVES
+   * IT — a client does not buy another thirty days by being chased — which is
+   * why the condition is the ROW's own `sent_at` being null rather than anything
+   * this call computes, and why a tagged (payment-side) entry never reaches it.
+   *
    * `kind` tags the payment-side emails the Stripe webhook sends the client:
    * `'ack'` when a bank payment starts, `'receipt'` when it completes. Those
    * are records of a PAYMENT, not of the invoice going out, so they are logged
@@ -11285,6 +11295,13 @@ export class AppDataStore {
     // logged on the same append-only trail but must not restart the payment
     // clock or rewrite a status the webhook just set.
     const marksSent = Boolean(ok) && !kind
+    // The past-due line this send would set, if this send turns out to be the
+    // first. Built with the SAME function generation uses, so the two dates are
+    // the same arithmetic and cannot drift apart; whether it is actually applied
+    // is decided from `sent_at` below, on each backend's own read.
+    const firstSendDueDate = marksSent
+      ? dueDateFromTerms(String(entry.at).slice(0, 10), null, DEFAULT_PAYMENT_WINDOW_DAYS)
+      : null
     if (this.pool) {
       // The entry is APPENDED server-side, deliberately: `current` above is a
       // read, and building `[...current.emailLog, entry]` in JS means the log
@@ -11293,9 +11310,15 @@ export class AppDataStore {
       // one-entry array. Concatenating in SQL is immune to both that and to
       // two sends racing: whatever is in the column, this adds to it.
       //
-      // `sent_at` and `status` are decided from the row's OWN values for the
-      // same reason, and a failed attempt (ok = false) is logged without
-      // touching either. The void guard stays a pre-read above.
+      // `sent_at`, `status` and `due_date` are decided from the row's OWN
+      // values for the same reason, and a failed attempt (ok = false) is logged
+      // without touching any of them. The void guard stays a pre-read above.
+      //
+      // `due_date` moves on the FIRST send only. `sent_at is null` reads the
+      // row's PRE-update value (every expression in a SET list does), so two
+      // sends racing cannot both claim to be the first; and the `is not null`
+      // on $5 means a re-send or a payment email can never blank a date that is
+      // already there.
       const { rowCount } = await this.pool.query(
         `update invoices
             set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
@@ -11303,9 +11326,11 @@ export class AppDataStore {
                                else sent_at end,
                 status = case when $3::boolean and status <> 'paid' and status <> 'processing'
                               then 'sent' else status end,
+                due_date = case when $3::boolean and sent_at is null and $5::date is not null
+                                then $5::date else due_date end,
                 updated_at = now()
           where id = $1`,
-        [invoiceId, JSON.stringify([entry]), marksSent, entry.at],
+        [invoiceId, JSON.stringify([entry]), marksSent, entry.at, firstSendDueDate],
       )
       if (rowCount === 0) return null
       return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
@@ -11321,12 +11346,16 @@ export class AppDataStore {
     const status = marksSent && current.status !== 'paid' && current.status !== 'processing'
       ? 'sent'
       : current.status
+    // The same first-send rule as the Postgres branch: only an invoice that had
+    // no `sentAt` before this call has its past-due line moved.
+    const dueDate =
+      marksSent && !current.sentAt && firstSendDueDate ? firstSendDueDate : current.dueDate
 
     const data = await readJson(localDataPath)
     if (!Array.isArray(data.invoices)) data.invoices = []
     const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
     if (index === -1) return null
-    data.invoices[index] = { ...current, emailLog, sentAt, status, updatedAt: nowIso() }
+    data.invoices[index] = { ...current, emailLog, sentAt, status, dueDate, updatedAt: nowIso() }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return data.invoices[index]
   }
@@ -11461,6 +11490,67 @@ export class AppDataStore {
       // Appended in SQL, not read-modify-write: the read above is a snapshot,
       // and a delivery event about the same invoice can land in the same
       // second. `status` is deliberately absent from this statement.
+      const { rowCount } = await this.pool.query(
+        `update invoices
+            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                updated_at = now()
+          where id = $1`,
+        [invoiceId, JSON.stringify([entry])],
+      )
+      if (rowCount === 0) return null
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    data.invoices[index] = {
+      ...data.invoices[index],
+      emailLog: [...(data.invoices[index].emailLog ?? []), entry],
+      updatedAt: nowIso(),
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return data.invoices[index]
+  }
+
+  /**
+   * Remember that the owners have been told this invoice passed its past-due
+   * line. This is the ONLY thing that stops the hourly check emailing them
+   * about the same invoice every hour until it is paid.
+   *
+   * It writes a marker onto the SAME append-only `email_log` the sends,
+   * delivery events and payment failures live on, tagged `kind: 'past-due'` so
+   * nothing can mistake it for a send — `latestInvoiceSend` skips every tagged
+   * entry, so the "Sent … to …" line and the delivery badge are untouched by it.
+   *
+   * THE STATUS IS NEVER TOUCHED, for the same reason the delivery events never
+   * touch it: `overdue` is a status nothing writes, being past due is derived at
+   * read time (`lib/invoice-overdue.js`), and a scheduler that started writing
+   * statuses would be racing the payment webhook over the same column.
+   *
+   * Idempotent on "has this invoice ever been noticed", not on a date: the point
+   * is one email per invoice, ever. If she re-sends and the line moves, that is
+   * a new conversation with the client, not a second alert.
+   *
+   * @returns the invoice, or null when there is no such invoice
+   */
+  async recordInvoicePastDueNoticed(invoiceId, dueDate = null) {
+    if (!invoiceId) return null
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+    if ((current.emailLog ?? []).some((logged) => logged?.kind === 'past-due')) return current
+
+    const entry = {
+      kind: 'past-due',
+      event: 'noticed',
+      at: nowIso(),
+      dueDate: dueDate ? String(dueDate) : (current.dueDate ?? null),
+    }
+
+    if (this.pool) {
+      // Appended in SQL like every other entry on this log, and naming no other
+      // column than the log and `updated_at`.
       const { rowCount } = await this.pool.query(
         `update invoices
             set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,

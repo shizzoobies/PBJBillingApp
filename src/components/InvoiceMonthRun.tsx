@@ -79,15 +79,19 @@ import {
 import {
   INVOICE_STATUS_LABELS,
   currency,
+  daysPastDueLabel,
   formatInvoiceRecipient,
   formatSentOn,
   getBillingPeriodLabel,
   latestInvoiceSend,
+  localDateOnly,
+  pastDueInvoice,
   recipientCountLabel,
   resolveInvoiceRecipients,
   shiftReviewPeriod,
   toCents,
   unresolvedPaymentFailure,
+  type PastDueInvoice,
   type ResolvedInvoiceRecipients,
 } from '../lib/utils'
 import { InvoiceDeliveryBadge } from './InvoiceDeliveryBadge'
@@ -109,7 +113,14 @@ import { customerNetDays } from '../../lib/invoice-draft.js'
  * are deliberately not part of the workspace bulk save — see the API module.
  */
 
-type RunTabId = 'to-review' | 'reviewed' | 'sent' | 'failed' | 'paid' | 'voided'
+type RunTabId =
+  | 'to-review'
+  | 'reviewed'
+  | 'sent'
+  | 'past-due'
+  | 'failed'
+  | 'paid'
+  | 'voided'
 
 /**
  * What the page can ask of the run from outside — History's "Open in month
@@ -153,6 +164,14 @@ export type InvoiceMonthRunHandle = {
  * (`unresolvedPaymentFailure`), so the client who tried and stalled is not
  * indistinguishable from the one who never opened the email. Sending it again
  * is the follow-up, and returns it to Sent.
+ *
+ * "Past due" is derived the same way and for the same reason (`pastDueInvoice`):
+ * a sent invoice whose stored due date — the firm's own line, thirty days after
+ * the invoice was first emailed — has passed. Nothing writes the `overdue`
+ * status, deliberately; being late is a fact about today's date, not a state to
+ * migrate and keep in step. Payment failed WINS when an invoice is both: the
+ * failure is the thing somebody has to act on, and one invoice must not be
+ * chased twice out of two tabs.
  */
 const TAB_OF_STATUS: Record<PersistedInvoice['status'], RunTabId> = {
   draft: 'to-review',
@@ -168,6 +187,7 @@ const RUN_TABS: ReadonlyArray<{ id: RunTabId; label: string; empty: string }> = 
   { id: 'to-review', label: 'To review', empty: 'Nothing left to review this month.' },
   { id: 'reviewed', label: 'Reviewed', empty: 'Nothing reviewed and waiting to go out.' },
   { id: 'sent', label: 'Sent', empty: 'Nothing has gone out for this month yet.' },
+  { id: 'past-due', label: 'Past due', empty: 'Nothing is past its 30-day line.' },
   {
     id: 'failed',
     label: 'Payment failed',
@@ -350,6 +370,23 @@ function AiConfidenceBadge({
       {confidenceLabel(review)}
     </span>
   )
+}
+
+/**
+ * "October 15, 2026" — the past-due line spelled out. Long-form on purpose: it
+ * appears in a hover title and in an alert, where the reader is being told a
+ * date matters rather than scanning a column, and a bare "Oct 15" across a year
+ * boundary is the kind of ambiguity that gets a client chased in the wrong year.
+ */
+const pastDueLineDate = new Intl.DateTimeFormat('en-US', {
+  month: 'long',
+  day: 'numeric',
+  year: 'numeric',
+})
+
+function formatPastDueLine(due: string) {
+  const parsed = new Date(`${due}T12:00:00`)
+  return Number.isNaN(parsed.getTime()) ? due : pastDueLineDate.format(parsed)
 }
 
 function formatDue(due: string | null) {
@@ -773,6 +810,13 @@ export function InvoiceMonthRun({
     )
   }, [ordered, query, clientName, openId])
 
+  // Today, in the BROWSER's time zone, computed once for the whole render so
+  // every past-due answer on screen — the tab, the row flags, the stat, the
+  // notice in an open editor — is measured against the same day. `localDateOnly`
+  // rather than a UTC day: an owner working at 8pm CDT must not have tomorrow's
+  // date deciding what is late.
+  const today = localDateOnly()
+
   // The run split into its tabs. Each group keeps the sort order above, so
   // moving between tabs never re-sorts anything.
   const byTab = useMemo(() => {
@@ -784,11 +828,13 @@ export function InvoiceMonthRun({
       // rather than nowhere — that tab forces eyes on it.
       const tabId: RunTabId = unresolvedPaymentFailure(invoice)
         ? 'failed'
-        : (TAB_OF_STATUS[invoice.status] ?? 'to-review')
+        : pastDueInvoice(invoice, today)
+          ? 'past-due'
+          : (TAB_OF_STATUS[invoice.status] ?? 'to-review')
       map.get(tabId)?.push(invoice)
     }
     return map
-  }, [visible])
+  }, [visible, today])
 
   // Derived at render rather than stored, so an unknown id can never strand the
   // panel on nothing. An EMPTY tab is still a valid place to stand: marking the
@@ -827,6 +873,9 @@ export function InvoiceMonthRun({
   const toReview = live.filter((invoice) => invoice.status === 'draft').length
   const reviewed = live.filter((invoice) => invoice.status === 'reviewed').length
   const needALook = live.filter((invoice) => invoice.scopeFlags.length > 0).length
+  // Whole-month, like every other figure in the strip — the search narrows the
+  // tabs, never this.
+  const pastDue = live.filter((invoice) => pastDueInvoice(invoice, today)).length
   const monthTotal = live.reduce((sum, invoice) => sum + invoice.total, 0)
 
   // What a poll is waiting for: a live monthly invoice with no rating yet.
@@ -1206,6 +1255,10 @@ export function InvoiceMonthRun({
           <span>Need a look</span>
           <strong>{needALook}</strong>
         </div>
+        <div className={pastDue > 0 ? 'invoice-run-stat is-flagged' : 'invoice-run-stat'}>
+          <span>Past due</span>
+          <strong>{pastDue}</strong>
+        </div>
         <div className="invoice-run-stat">
           <span>Month total</span>
           <strong>{currency.format(monthTotal)}</strong>
@@ -1326,6 +1379,7 @@ export function InvoiceMonthRun({
                     sourceClientName={clientName}
                     cardEnabled={cardEnabled(invoice.clientId)}
                     dueOnReceipt={dueOnReceipt(invoice.clientId)}
+                    today={today}
                     recipients={recipientsFor(invoice.clientId)}
                     scope={scopeDataFor(invoice)}
                     // A retainer invoice is not itself a thing you credit —
@@ -1368,6 +1422,7 @@ function InvoiceRow({
   invoice,
   clientName,
   dueOnReceipt,
+  today,
   isBillingMaster,
   sourceClientName,
   cardEnabled,
@@ -1390,6 +1445,8 @@ function InvoiceRow({
   clientName: string
   /** The client's own invoice says "due on receipt", so the date here is ours. */
   dueOnReceipt: boolean
+  /** The run's one "today" (YYYY-MM-DD), so every row measures late the same way. */
+  today: string
   /** This invoice's client is a billing master — its editor groups by company. */
   isBillingMaster: boolean
   /** A line's `sourceClientId` to that company's name, for the group headings. */
@@ -1426,6 +1483,9 @@ function InvoiceRow({
   const flagged = invoice.scopeFlags.length > 0
   const adjustment = invoice.lineItems.find((line) => line.kind === 'adjustment')
   const paymentFailure = unresolvedPaymentFailure(invoice)
+  // Computed once here and handed to the editor, so the row's flag and the
+  // notice inside it can never disagree about how late this invoice is.
+  const pastDue = pastDueInvoice(invoice, today)
 
   const rowClass = [
     'invoice-run-row',
@@ -1494,6 +1554,22 @@ function InvoiceRow({
               </span>
             </span>
           ) : null}
+          {/* Past the firm's own thirty-day line. Red like the payment failure,
+              because it is the same kind of thing — somebody has to go and ask
+              a client for money — and the status pill still reads Sent. The
+              hover names the line itself, since the meta row's "due Oct 15" is
+              deliberately quiet about what that date is for. */}
+          {pastDue ? (
+            <span className="invoice-run-flags">
+              <span
+                className="invoice-run-flag is-bad"
+                title={`Past-due line was ${formatPastDueLine(pastDue.dueDate)}`}
+              >
+                <AlertTriangle size={13} />
+                Past due · {daysPastDueLabel(pastDue.daysPastDue)}
+              </span>
+            </span>
+          ) : null}
           {/* Nobody on file is a flag in its own right — it used to surface as a
               409 only after she pressed Send. */}
           {!isVoid && recipients.to.length === 0 ? (
@@ -1538,6 +1614,7 @@ function InvoiceRow({
           key={invoice.updatedAt ?? invoice.id}
           invoice={invoice}
           clientName={clientName}
+          pastDue={pastDue}
           isBillingMaster={isBillingMaster}
           sourceClientName={sourceClientName}
           recipients={recipients}
@@ -1781,6 +1858,7 @@ function InvoiceLineRow({
 function InvoiceEditor({
   invoice,
   clientName,
+  pastDue,
   isBillingMaster,
   sourceClientName,
   recipients,
@@ -1798,6 +1876,8 @@ function InvoiceEditor({
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** How far past the firm's line this invoice is, if it is. Computed by the row. */
+  pastDue: PastDueInvoice | null
   /** This invoice's client is a billing master — group the lines by company. */
   isBillingMaster: boolean
   /** A line's `sourceClientId` to that company's name, for the group headings. */
@@ -2846,6 +2926,21 @@ function InvoiceEditor({
           <br />
           The pay link from that attempt may no longer work. Follow up with the client, then
           send the invoice again for a fresh link — or mark it paid if they pay another way.
+        </p>
+      ) : null}
+
+      {/* Past the thirty-day line. Both moves named, because neither is obvious:
+          Send again is a nudge and nothing more — it does NOT move the line, the
+          line was set by the FIRST send and stays there until this is paid — and
+          plenty of these are already settled by a check nobody recorded. An
+          invoice with an unresolved payment failure never reaches here: that
+          notice above is the one to act on. */}
+      {pastDue ? (
+        <p className="invoice-run-error invoice-run-past-due" role="alert">
+          <strong>Past due</strong>: sent {formatSentOn(invoice.sentAt ?? '')}, past the
+          30-day line since {formatPastDueLine(pastDue.dueDate)}.
+          <br />
+          Send again to nudge, or Mark paid if it was settled another way.
         </p>
       ) : null}
 

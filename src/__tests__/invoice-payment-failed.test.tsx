@@ -93,13 +93,14 @@ beforeEach(() => {
 })
 
 describe('the Payment failed tab', () => {
-  it('sits between Sent and Paid, and holds the invoice whose payment failed instead of Sent', async () => {
+  it('sits between Past due and Paid, and holds the invoice whose payment failed instead of Sent', async () => {
     const run = await renderRun([invoice({ emailLog: [send(), failure()] })])
     const tabs = (await screen.findAllByRole('tab')).map((tab) => tab.textContent ?? '')
     expect(tabs.map((text) => text.replace(/\d+$/, ''))).toEqual([
       'To review',
       'Reviewed',
       'Sent',
+      'Past due',
       'Payment failed',
       'Paid',
       'Voided',
