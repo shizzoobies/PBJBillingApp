@@ -1,0 +1,215 @@
+{
+  "takenAt": "2026-09-15T16:26:28.431Z",
+  "duplicateId": "client-seed-susannah-dobbs",
+  "survivorId": "client-1bk7piv",
+  "duplicateRow": {
+    "id": "client-seed-susannah-dobbs",
+    "name": "Dobco Properites, LLC (duplicate)",
+    "contact": "",
+    "billing_mode": "hourly",
+    "hourly_rate": "0.00",
+    "plan_id": null,
+    "created_at": "2026-08-14T13:16:53.555Z",
+    "updated_at": "2026-09-15T15:29:25.487Z",
+    "email": "",
+    "contact_name": "",
+    "phone": "",
+    "address_line1": "",
+    "address_line2": "",
+    "city": "",
+    "state": "",
+    "postal_code": "",
+    "logo_url": "",
+    "payment_terms": "",
+    "footer_note": "",
+    "quickbooks_pay_url": "",
+    "invoice_show_time_breakdown": true,
+    "invoice_hide_internal_hours": true,
+    "invoice_group_by_category": false,
+    "assigned_bookkeeper_ids": [],
+    "custom_monthly_fee": null,
+    "monthly_rate": "0.00",
+    "estimated_monthly_hours": null,
+    "plan_ids": [],
+    "contact_ids": [],
+    "estimated_bookkeeper_hours": null,
+    "estimated_accountant_hours": null,
+    "estimated_cfo_hours": null,
+    "monthly_service_tier": null,
+    "annual_rate": "0.00",
+    "annual_billing_month": null,
+    "lifecycle_stage": "active",
+    "stripe_customer_id": null,
+    "card_payments_enabled": false,
+    "invoice_time_breakdown_mode": "off",
+    "invoice_time_breakdown_amounts": false,
+    "bill_to_client_id": null,
+    "is_billing_master": false,
+    "invoice_recipient_client_id": null
+  },
+  "survivorRow": {
+    "id": "client-1bk7piv",
+    "name": "Dobco Properties, LLC",
+    "contact": "Susannah Dobbs",
+    "billing_mode": "hourly",
+    "hourly_rate": "125.00",
+    "plan_id": "plan-9varu7w",
+    "created_at": "2026-08-14T13:16:53.555Z",
+    "updated_at": "2026-09-15T15:29:25.487Z",
+    "email": "",
+    "contact_name": "",
+    "phone": "",
+    "address_line1": "",
+    "address_line2": "",
+    "city": "",
+    "state": "",
+    "postal_code": "",
+    "logo_url": "",
+    "payment_terms": "Due on Demand",
+    "footer_note": "",
+    "quickbooks_pay_url": "",
+    "invoice_show_time_breakdown": true,
+    "invoice_hide_internal_hours": true,
+    "invoice_group_by_category": false,
+    "assigned_bookkeeper_ids": [],
+    "custom_monthly_fee": null,
+    "monthly_rate": "0.00",
+    "estimated_monthly_hours": null,
+    "plan_ids": [
+      "plan-9varu7w"
+    ],
+    "contact_ids": [
+      "contact-9633a2ea",
+      "contact-1maqgdu"
+    ],
+    "estimated_bookkeeper_hours": "0",
+    "estimated_accountant_hours": "0",
+    "estimated_cfo_hours": "6",
+    "monthly_service_tier": null,
+    "annual_rate": "0.00",
+    "annual_billing_month": null,
+    "lifecycle_stage": "active",
+    "stripe_customer_id": null,
+    "card_payments_enabled": false,
+    "invoice_time_breakdown_mode": "entry",
+    "invoice_time_breakdown_amounts": false,
+    "bill_to_client_id": null,
+    "is_billing_master": false,
+    "invoice_recipient_client_id": null
+  },
+  "countsBefore": {
+    "time_entries": {
+      "duplicate": 6,
+      "survivor": 40
+    },
+    "checklists": {
+      "duplicate": 0,
+      "survivor": 16
+    },
+    "checklist_templates": {
+      "duplicate": 0,
+      "survivor": 2
+    },
+    "checklist_skips": {
+      "duplicate": 0,
+      "survivor": 4
+    },
+    "reimbursements": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "recurring_reimbursements": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "client_notes": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "item_deletion_requests": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "sales_tax_records": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "invoices": {
+      "duplicate": 0,
+      "survivor": 2
+    },
+    "invoice_review_events": {
+      "duplicate": 0,
+      "survivor": 4
+    },
+    "invoice_ai_reviews": {
+      "duplicate": 0,
+      "survivor": 0
+    }
+  },
+  "moved": {
+    "time_entries": [
+      "seed-01107",
+      "seed-01351",
+      "seed-01352",
+      "seed-01353",
+      "seed-01354",
+      "seed-01355"
+    ],
+    "checklists": [],
+    "checklist_templates": [],
+    "checklist_skips": [],
+    "reimbursements": [],
+    "recurring_reimbursements": [],
+    "client_notes": [],
+    "item_deletion_requests": [],
+    "sales_tax_records": [],
+    "invoices": [],
+    "invoice_review_events": [],
+    "invoice_ai_reviews": []
+  },
+  "onboarding": {
+    "checklists": [],
+    "checklist_templates": []
+  },
+  "onboardingCounts": {
+    "checklists": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "checklist_templates": {
+      "duplicate": 0,
+      "survivor": 0
+    }
+  },
+  "pointers": {
+    "bill_to_client_id": [],
+    "invoice_recipient_client_id": []
+  },
+  "pointerCounts": {
+    "bill_to_client_id": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "invoice_recipient_client_id": {
+      "duplicate": 0,
+      "survivor": 0
+    }
+  },
+  "groupRows": [],
+  "jsonbColumns": [
+    "line_items",
+    "original_line_items"
+  ],
+  "invoiceJsonBefore": [],
+  "duplicateAssignments": [],
+  "survivorAssignmentUserIdsBefore": [],
+  "minutes": {
+    "duplicate": "216",
+    "survivor": "1209.433333333333326"
+  },
+  "survivorInvoices": [
+    "{\"id\":\"inv-4d40bcda\",\"number\":\"INV-2026-08-010\",\"status\":\"void\",\"total\":\"246.46\",\"sent_at\":null,\"due_date\":\"2026-09-30\"}",
+    "{\"id\":\"inv-ba2b636c\",\"number\":\"INV-2026-08-044\",\"status\":\"processing\",\"total\":\"256.25\",\"sent_at\":\"2026-09-01T15:49:11.688Z\",\"due_date\":\"2026-09-30\"}"
+  ]
+}

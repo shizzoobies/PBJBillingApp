@@ -1,0 +1,329 @@
+{
+  "takenAt": "2026-09-15T16:27:11.809Z",
+  "clients": [
+    {
+      "id": "client-seed-17-signiture",
+      "name": "17 Signature",
+      "paymentTerms": "",
+      "lifecycleStage": "inactive"
+    },
+    {
+      "id": "client-wdmb88x",
+      "name": "1969 Beach, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-rryq1yn",
+      "name": "51 Beach, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-j1kaxr2",
+      "name": "5 Sunset, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-bp4il41",
+      "name": "Associated Enterprises",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-6ygp3wp",
+      "name": "Brentwood United Pentecostal Church",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-5eqylk0",
+      "name": "Bright Tower Development, LLC",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-w9sznjy",
+      "name": "Chemtrex, Inc.",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-y80ugnu",
+      "name": "Christopher & Crystal Garrison",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-ltlzyis",
+      "name": "Cooper & Cooper, PA",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-seed-susannah-dobbs",
+      "name": "Dobco Properites, LLC (duplicate) (merged into Dobco Properties, LLC)",
+      "paymentTerms": "",
+      "lifecycleStage": "inactive"
+    },
+    {
+      "id": "client-1bk7piv",
+      "name": "Dobco Properties, LLC",
+      "paymentTerms": "Due on Demand",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-fv8gray",
+      "name": "Emerald Custom Homes",
+      "paymentTerms": "Due on Demand",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-2drk4li",
+      "name": "FHS Partnership Group",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-uusfsaa",
+      "name": "Flourish Restaurants, LLC",
+      "paymentTerms": "Due on Demand",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-9as12jy",
+      "name": "Fore Motion Golf, LLC",
+      "paymentTerms": "Due on Demand",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-f7hi3ir",
+      "name": "Four Leaf Ventures",
+      "paymentTerms": "Due on Demand",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-aebc739b",
+      "name": "K & A Performance, LLC",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-lamjjjc",
+      "name": "KLC Floors & More",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-6t9crg6",
+      "name": "KLC Floors & More — Bookkeeping",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-h8rwhnn",
+      "name": "Let's Eat, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-o4zfkfz",
+      "name": "Let's Fish, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-bsxoenl",
+      "name": "Lilac and Lemons Design, LLC",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-7vr11zs",
+      "name": "Mark & Deania Obermeyer",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-7e51c20c",
+      "name": "Mind Body & Spirit Medicine, Inc.",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-yqkey3m",
+      "name": "N568RT, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-seed-new-gen-construction-llc",
+      "name": "New Gen Construction, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "inactive"
+    },
+    {
+      "id": "client-96svwyc",
+      "name": "Old No. 1 Partners, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-viov05e",
+      "name": "R68 Investments, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-p8u5b1p",
+      "name": "Reflect & Renew Therapy, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-seed-clean-up-split-project",
+      "name": "[Review] CLEAN UP/SPLIT PROJECT",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-seed-craig-s-design",
+      "name": "[Review] Craig's Design",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-urv06ij",
+      "name": "Ride Right Custom Carts, LLC",
+      "paymentTerms": "Due on Receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-c1qdfpd",
+      "name": "Rivercity Appraisal Services, Inc.",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-mv4vrwv",
+      "name": "Robin O. Sorensen Family Trust",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-j17sdts",
+      "name": "Robin O. Sorensen Living Trust",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-fc88ygp",
+      "name": "Robin & Tabitha Sorensen",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-xmozesp",
+      "name": "Robin & Tabitha Sorensen Family Foundation, Inc.",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-vjecmxj",
+      "name": "San Jose Partners, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-p483k7v",
+      "name": "SAS Collections",
+      "paymentTerms": "Due on Demand",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-o0vogz6",
+      "name": "Saylor Grace Plumbing, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-le5j6g0",
+      "name": "Skyline Roofing, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-k8xj4gr",
+      "name": "Sophie Paris, LLC",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-seed-sophie-sorensen",
+      "name": "Sophie Paris, LLC (merged into Sophie Paris, LLC)",
+      "paymentTerms": "",
+      "lifecycleStage": "inactive"
+    },
+    {
+      "id": "client-lz1wlvi",
+      "name": "Sorensen Brothers, Inc.",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-u8i5dcj",
+      "name": "Sorensen Family Investments, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-tjfzeqv",
+      "name": "Tabitha Leigh Sorensen 2021 Trust",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-5dxovmv",
+      "name": "Tabitha L. Sorensen Family Trust",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-ee19df0a",
+      "name": "Test",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-dks8yp5",
+      "name": "Welch Properties of Pensacola, LLC",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-nn18dtd",
+      "name": "Westview Signature, LLC",
+      "paymentTerms": "",
+      "lifecycleStage": "active"
+    },
+    {
+      "id": "client-yw0a4eo",
+      "name": "XAct Administrative Solutions, LLC",
+      "paymentTerms": "Due on receipt",
+      "lifecycleStage": "active"
+    }
+  ],
+  "firmClientDefaults": [
+    {
+      "footerNote": "",
+      "hourlyRate": 125,
+      "billingMode": "hourly",
+      "monthlyRate": 0,
+      "paymentTerms": "Due on receipt",
+      "invoiceGroupByCategory": false,
+      "invoiceHideInternalHours": true,
+      "invoiceShowTimeBreakdown": true
+    }
+  ]
+}

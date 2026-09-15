@@ -1,0 +1,204 @@
+{
+  "takenAt": "2026-09-15T16:26:56.742Z",
+  "duplicateId": "client-seed-sophie-sorensen",
+  "survivorId": "client-k8xj4gr",
+  "duplicateRow": {
+    "id": "client-seed-sophie-sorensen",
+    "name": "Sophie Paris, LLC",
+    "contact": "",
+    "billing_mode": "hourly",
+    "hourly_rate": "0.00",
+    "plan_id": null,
+    "created_at": "2026-08-14T13:16:53.555Z",
+    "updated_at": "2026-09-15T15:29:25.487Z",
+    "email": "",
+    "contact_name": "",
+    "phone": "",
+    "address_line1": "",
+    "address_line2": "",
+    "city": "",
+    "state": "",
+    "postal_code": "",
+    "logo_url": "",
+    "payment_terms": "",
+    "footer_note": "",
+    "quickbooks_pay_url": "",
+    "invoice_show_time_breakdown": true,
+    "invoice_hide_internal_hours": true,
+    "invoice_group_by_category": false,
+    "assigned_bookkeeper_ids": [],
+    "custom_monthly_fee": null,
+    "monthly_rate": "0.00",
+    "estimated_monthly_hours": null,
+    "plan_ids": [],
+    "contact_ids": [],
+    "estimated_bookkeeper_hours": null,
+    "estimated_accountant_hours": null,
+    "estimated_cfo_hours": null,
+    "monthly_service_tier": null,
+    "annual_rate": "0.00",
+    "annual_billing_month": null,
+    "lifecycle_stage": "active",
+    "stripe_customer_id": null,
+    "card_payments_enabled": false,
+    "invoice_time_breakdown_mode": "off",
+    "invoice_time_breakdown_amounts": false,
+    "bill_to_client_id": null,
+    "is_billing_master": false,
+    "invoice_recipient_client_id": null
+  },
+  "survivorRow": {
+    "id": "client-k8xj4gr",
+    "name": "Sophie Paris, LLC",
+    "contact": "Sophie Sorensen",
+    "billing_mode": "hourly",
+    "hourly_rate": "125.00",
+    "plan_id": null,
+    "created_at": "2026-08-14T13:16:53.555Z",
+    "updated_at": "2026-09-15T15:29:25.487Z",
+    "email": "",
+    "contact_name": "",
+    "phone": "",
+    "address_line1": "",
+    "address_line2": "",
+    "city": "",
+    "state": "",
+    "postal_code": "",
+    "logo_url": "",
+    "payment_terms": "Due on receipt",
+    "footer_note": "",
+    "quickbooks_pay_url": "",
+    "invoice_show_time_breakdown": true,
+    "invoice_hide_internal_hours": true,
+    "invoice_group_by_category": false,
+    "assigned_bookkeeper_ids": [],
+    "custom_monthly_fee": null,
+    "monthly_rate": "0.00",
+    "estimated_monthly_hours": null,
+    "plan_ids": [],
+    "contact_ids": [
+      "contact-3c65da29"
+    ],
+    "estimated_bookkeeper_hours": null,
+    "estimated_accountant_hours": null,
+    "estimated_cfo_hours": null,
+    "monthly_service_tier": null,
+    "annual_rate": "0.00",
+    "annual_billing_month": null,
+    "lifecycle_stage": "active",
+    "stripe_customer_id": null,
+    "card_payments_enabled": false,
+    "invoice_time_breakdown_mode": "off",
+    "invoice_time_breakdown_amounts": false,
+    "bill_to_client_id": null,
+    "is_billing_master": false,
+    "invoice_recipient_client_id": null
+  },
+  "countsBefore": {
+    "time_entries": {
+      "duplicate": 1,
+      "survivor": 0
+    },
+    "checklists": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "checklist_templates": {
+      "duplicate": 0,
+      "survivor": 1
+    },
+    "checklist_skips": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "reimbursements": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "recurring_reimbursements": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "client_notes": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "item_deletion_requests": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "sales_tax_records": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "invoices": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "invoice_review_events": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "invoice_ai_reviews": {
+      "duplicate": 0,
+      "survivor": 0
+    }
+  },
+  "moved": {
+    "time_entries": [
+      "seed-01093"
+    ],
+    "checklists": [],
+    "checklist_templates": [],
+    "checklist_skips": [],
+    "reimbursements": [],
+    "recurring_reimbursements": [],
+    "client_notes": [],
+    "item_deletion_requests": [],
+    "sales_tax_records": [],
+    "invoices": [],
+    "invoice_review_events": [],
+    "invoice_ai_reviews": []
+  },
+  "onboarding": {
+    "checklists": [],
+    "checklist_templates": []
+  },
+  "onboardingCounts": {
+    "checklists": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "checklist_templates": {
+      "duplicate": 0,
+      "survivor": 0
+    }
+  },
+  "pointers": {
+    "bill_to_client_id": [],
+    "invoice_recipient_client_id": []
+  },
+  "pointerCounts": {
+    "bill_to_client_id": {
+      "duplicate": 0,
+      "survivor": 0
+    },
+    "invoice_recipient_client_id": {
+      "duplicate": 0,
+      "survivor": 0
+    }
+  },
+  "groupRows": [],
+  "jsonbColumns": [
+    "line_items",
+    "original_line_items"
+  ],
+  "invoiceJsonBefore": [],
+  "duplicateAssignments": [],
+  "survivorAssignmentUserIdsBefore": [],
+  "minutes": {
+    "duplicate": "16",
+    "survivor": "0"
+  },
+  "survivorInvoices": []
+}
