@@ -1,0 +1,9 @@
+[2026-09-14 - fixed and live] You were right. Allison was on 15 clients' team lists and 13 of those came from TASKS, not from anyone picking her: the app used to add a person to a client's team automatically the moment they were given a checklist there, and the Invoice Recap read that same list. Lisa was the same (33 of her 35).
+
+WHAT CHANGED (live since Sept 4): a client's team is now only what an owner picks on the Team page. A task never adds anyone to it, and only that list decides whose invoices a person sees on the Invoice Recap. People still see the checklists they are given.
+
+WHAT WE DID TO THE DATA: on Sept 4 the team lists were reset to the deliberate picks only. Lisa is on no client teams and Allison is on Skyline Roofing only. Checked today against the live data: Allison sees Skyline's invoices and nothing else, Lisa sees none. The KLC combined invoice follows the master client's team.
+
+WHAT YOU NEED TO DO: pick each client's real team once on the Team page. The Setup Checklist's "Assign a team member" item lights up for every client that still needs it, so that is your worklist. Until you do, your team sees no invoices on the recap, which is the safe direction.
+
+One heads-up: the two TEST accounts (Bookkeepington on 34 clients, Accountington on 17) still carry their old auto-added lists. If you test as one of them you will see 30-odd invoices and it will look broken. Prune them on the Team page or ask Alex to clear them.
