@@ -22,10 +22,17 @@
 //     --acting <user-id>              who the write is attributed to (default emp-alex-anderson)
 //     --dry-run                       print the row and the planned change, write nothing
 //
+//   Filing a shipped record for a feature Alex ordered directly (HANDOFF §7
+//   item 6 covers this too). No id argument; one new row, status 'shipped':
+//   node scripts/prod/tracker-update.mjs --file-shipped --title "<120 chars>" \
+//        --description "<what and why, 2000 chars>" [--type feature|bug|improvement] \
+//        [--dev-notes "<text>" | --dev-notes-file <path>] [--acting <user-id>] [--dry-run]
+//
 // The connection string comes from DATABASE_PUBLIC_URL (or DATABASE_URL) in
 // the environment, else from `railway variables --service Postgres --json`.
 
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import pg from 'pg'
 
@@ -42,12 +49,23 @@ const STATUSES = [
 ]
 
 function parseArgs(argv) {
-  const out = { id: null, acting: 'emp-alex-anderson', dryRun: false, replaceNotes: false }
+  const out = {
+    id: null,
+    acting: 'emp-alex-anderson',
+    dryRun: false,
+    replaceNotes: false,
+    fileShipped: false,
+    type: 'feature',
+  }
   const args = [...argv]
   while (args.length) {
     const a = args.shift()
     if (a === '--dry-run') out.dryRun = true
     else if (a === '--replace-notes') out.replaceNotes = true
+    else if (a === '--file-shipped') out.fileShipped = true
+    else if (a === '--title') out.title = args.shift()
+    else if (a === '--description') out.description = args.shift()
+    else if (a === '--type') out.type = args.shift()
     else if (a === '--status') out.status = args.shift()
     else if (a === '--dev-notes') out.devNotes = args.shift()
     else if (a === '--dev-notes-file') out.devNotes = readFileSync(args.shift(), 'utf8')
@@ -56,6 +74,14 @@ function parseArgs(argv) {
     else if (a === '--acting') out.acting = args.shift()
     else if (!out.id && /^featreq-[0-9a-f]{8}$/.test(a)) out.id = a
     else throw new Error(`Unexpected argument: ${a}`)
+  }
+  if (out.fileShipped) {
+    if (out.id) throw new Error('--file-shipped creates a new row; do not pass an id')
+    if (!out.title || !out.title.trim()) throw new Error('--file-shipped needs --title')
+    if (!out.description || !out.description.trim()) throw new Error('--file-shipped needs --description')
+    if (!['feature', 'bug', 'improvement'].includes(out.type))
+      throw new Error('--type must be feature, bug or improvement')
+    return out
   }
   if (!out.id) throw new Error('First argument must be the item id, e.g. featreq-0c2d4ce5')
   if (out.status !== undefined && !STATUSES.includes(out.status))
@@ -86,7 +112,33 @@ function connectionString() {
 const opts = parseArgs(process.argv.slice(2))
 const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: false } })
 
+async function fileShipped() {
+  const id = `featreq-${randomUUID().slice(0, 8)}`
+  const title = opts.title.trim().slice(0, 120)
+  const description = opts.description.trim().slice(0, 2000)
+  const devNotes = opts.devNotes === undefined ? null : opts.devNotes.trim().slice(0, 4000)
+  console.log(`NEW ROW ${id} "${title}"`)
+  console.log(`  type=${opts.type} status=shipped priority=medium acting=${opts.acting}`)
+  console.log(`  description ${description.length} chars, dev_notes ${devNotes ? devNotes.length : 0} chars`)
+  if (opts.dryRun) {
+    console.log('DRY RUN - nothing written')
+    return
+  }
+  const rank = await pool.query(`select coalesce(max(priority_rank), -1) + 1 as next from feature_requests`)
+  const r = await pool.query(
+    `insert into feature_requests
+       (id, user_id, title, description, type, status, priority, priority_rank, dev_notes, created_at, shipped_at)
+     values ($1, $2, $3, $4, $5, 'shipped', 'medium', $6, $7, now(), now())
+     returning id, status, shipped_at`,
+    [id, opts.acting, title, description, opts.type, Number(rank.rows[0]?.next ?? 0) || 0, devNotes],
+  )
+  console.log(`FILED  ${r.rows[0].id} status=${r.rows[0].status} shipped_at=${r.rows[0].shipped_at.toISOString()}`)
+}
+
 try {
+  if (opts.fileShipped) {
+    await fileShipped()
+  } else {
   const before = await pool.query(
     `select id, title, status, priority, dev_notes, review_note, reviewed_by,
             clarification_question, clarification_answer, shipped_at, approved_by, updated_at
@@ -164,6 +216,7 @@ try {
         ` review_note=${r.review_note ? 'set' : null} question=${r.clarification_question ? 'set' : null}` +
         ` answer=${r.clarification_answer ? 'set' : null} dev_notes=${r.dev_notes_len} chars`,
     )
+  }
   }
 } finally {
   await pool.end()
