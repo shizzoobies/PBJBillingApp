@@ -1170,15 +1170,18 @@ Clients page meanwhile. Owner-only.
     split-across-clients list, the Track time modal, and the client dropdown
     when editing an entry); the "For which client" picker when creating a task
     or recurring checklist; template copy targets; the Team page's "+ Add
-    client"; and the Invoices billing queue and its client picker.
+    client"; the Invoices billing queue and its client picker; and the Client
+    Recap picker, which lists active clients only until you tick "Include
+    inactive clients" on it.
   - What is NOT touched: every time entry, checklist, invoice, note,
     reimbursement, contact link, plan, and assigned-team member stays exactly
     as it was. Nothing is deleted, and reactivating restores the client with
     all of it intact — the stage flag is the only thing that changed.
   - What still shows them: reports and analytics for any period they have data
-    in, timesheets, time approvals, Client Recap, the Board and Gantt filters,
-    invoice history (including the monthly archive), and their own client page,
-    which stays fully viewable across all tabs with an "Inactive" banner.
+    in, timesheets, time approvals, the Board and Gantt filters, invoice
+    history (including the monthly archive), and their own client page, which
+    stays fully viewable across all tabs with an "Inactive" banner. Their
+    Client Recap is still there too — it is one checkbox away, not gone.
   - What stops happening: their recurring checklists generate no new instances
     (existing ones stay open and visible, and generation resumes on
     reactivation), and the monthly invoice run skips them (existing invoices
@@ -1206,6 +1209,12 @@ Clients page meanwhile. Owner-only.
   by whichever one is active, so Yearly moves 2026 → 2025. A quarter is three
   calendar months, a year is the calendar year (Jan 1 – Dec 31); nothing is
   fiscal or prorated.
+- **The client picker lists active clients by default.** Retired clients are
+  left out of it so the monthly round does not scroll past companies that have
+  left; an "Include inactive clients" checkbox beside the picker puts them
+  back, each marked "(inactive)", and their recap loads exactly as it always
+  did. Unticking the box while looking at a retired client returns you to the
+  first active one.
 - **The page reads plan against reality, top to bottom, in this order:** Time &
   hours, Billing, Profitability, the projected invoice, and **Tasks & workflow
   last**. Tasks used to sit second, above the money; it moved to the bottom

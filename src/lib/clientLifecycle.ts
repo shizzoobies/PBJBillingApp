@@ -14,8 +14,17 @@
  *   - a picker that CREATES something else about a client (team assignment,
  *     invoice run) → `selectableClients`;
  *   - a filter/label over data that already exists (reports, timesheets,
- *     approvals, invoice history, board filters, Client Recap) → the raw list,
- *     because history must never lose its subject.
+ *     approvals, invoice history, board filters) → the raw list, because
+ *     history must never lose its subject.
+ *
+ * The Client Recap picker is the one deliberate exception to that last line.
+ * It reads as a filter over existing data, but it is the page the owner opens
+ * every month, and a list of everyone the firm has ever had makes the routine
+ * job harder ("I want to be able to recap old clients but not on a regular
+ * basis" — featreq-60f24838). So it offers ACTIVE clients by default behind an
+ * "Include inactive clients" checkbox that puts the retired ones back, marked
+ * "(inactive)". Nothing is withheld: the recap of a retired client loads
+ * exactly as it always did once the box is ticked.
  *
  * The work/not-work split is the second reason a client can be unofferable, and
  * it arrived with consolidated billing: a BILLING MASTER is a payer, not a
@@ -84,7 +93,10 @@ export function isBillingMasterClient(client: Pick<Client, 'isBillingMaster'>): 
  *
  * Masters are still offered wherever they are legitimately addressed — the
  * invoice month run, the client list and detail pages, and the Client Recap
- * picker, which is where their roll-up lives.
+ * picker, which is where their roll-up lives. (That picker drops RETIRED
+ * clients by default — see the header comment — but it has never dropped a
+ * master, and a retired master comes back with the rest when the box is
+ * ticked.)
  */
 export function workableClients<
   T extends Pick<Client, 'id' | 'lifecycleStage' | 'isBillingMaster'>,

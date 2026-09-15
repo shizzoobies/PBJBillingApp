@@ -9,6 +9,7 @@ import {
   type ClientRecapPeriodType,
   type ClientRecapProjection,
 } from '../lib/api'
+import { isInactiveClient } from '../lib/clientLifecycle'
 import { ApiError } from '../lib/types'
 import { currentReviewPeriod, formatDecimalHours, shiftReviewPeriod } from '../lib/utils'
 
@@ -125,7 +126,14 @@ const MASTER_NOT_ROLLED_UP: ReadonlyArray<{ label: string; reason: string }> = [
 
 export function ClientRecapPage() {
   const { visibleClients } = useAppContext()
-  const [clientId, setClientId] = useState(visibleClients[0]?.id ?? '')
+  const [clientId, setClientId] = useState('')
+  /**
+   * Retired clients are kept OUT of the picker until she asks for them
+   * (featreq-60f24838): "I want to be able to recap old clients but not on a
+   * regular basis." The recap of an inactive client still loads — the server
+   * takes any client id — so this is a default, not a prohibition.
+   */
+  const [includeInactive, setIncludeInactive] = useState(false)
   const [periodType, setPeriodType] = useState<ClientRecapPeriodType>('month')
   const [period, setPeriod] = useState(() => currentReviewPeriod('month'))
   const [recap, setRecap] = useState<ClientRecap | null>(null)
@@ -140,10 +148,15 @@ export function ClientRecapPage() {
    */
   const [notice, setNotice] = useState('')
 
+  const pickerClients = includeInactive
+    ? visibleClients
+    : visibleClients.filter((client) => !isInactiveClient(client))
+
   // Derived so we never sync state in an effect: falls back to the first
-  // visible client until the user picks one (handles visibleClients arriving
-  // after first render).
-  const effectiveClientId = clientId || visibleClients[0]?.id || ''
+  // client the picker OFFERS until the user picks one (handles visibleClients
+  // arriving after first render). Falling back to the raw first client would
+  // open the page on a retired one whenever a retired name sorts first.
+  const effectiveClientId = clientId || pickerClients[0]?.id || ''
 
   useEffect(() => {
     if (!effectiveClientId) return
@@ -223,12 +236,32 @@ export function ClientRecapPage() {
               value={effectiveClientId}
               onChange={(event) => setClientId(event.target.value)}
             >
-              {visibleClients.map((client) => (
+              {pickerClients.map((client) => (
                 <option key={client.id} value={client.id}>
                   {client.name}
+                  {isInactiveClient(client) ? ' (inactive)' : ''}
                 </option>
               ))}
             </select>
+          </label>
+
+          {/* Unticking while a retired client is on screen drops the selection
+              back to the derived default rather than leaving the select on a
+              value that no longer has an option — done here, not in an effect,
+              so the page never renders a blank picker in between. */}
+          <label className="upcoming-toggle">
+            <input
+              type="checkbox"
+              checked={includeInactive}
+              onChange={(event) => {
+                const next = event.target.checked
+                setIncludeInactive(next)
+                if (next) return
+                const chosen = visibleClients.find((client) => client.id === effectiveClientId)
+                if (chosen && isInactiveClient(chosen)) setClientId('')
+              }}
+            />
+            Include inactive clients
           </label>
 
           {/* Monthly / Quarterly / Yearly. The prev/next arrows below step by
