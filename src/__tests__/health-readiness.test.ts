@@ -43,7 +43,7 @@ function healthRouteBlock(): string {
   expect(at, 'the /health route is gone').toBeGreaterThan(-1)
   // Generous slice — comfortably covers the handler body without running into
   // the next route.
-  return serverSource.slice(at, at + 1600)
+  return serverSource.slice(at, at + 2400)
 }
 
 describe('/health pings the store instead of just answering', () => {
