@@ -1615,6 +1615,29 @@ export async function skipChecklistOccurrence(
   return (await response.json()) as { checklist: Checklist; skip: ChecklistSkip }
 }
 
+/**
+ * Push this occurrence of a recurring task to a new due date — the task stays
+ * alive rather than being closed out for the cycle. Same required reason as a
+ * skip, plus the date; the SERVER enforces that the date is real and later than
+ * the one the task is due on now.
+ */
+export async function pushChecklistOccurrence(
+  checklistId: string,
+  input: { category: SkipReasonCategory; explanation: string; newDueDate: string },
+) {
+  const response = await apiFetch(`/api/checklists/${encodeURIComponent(checklistId)}/push`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to push task (${response.status})`)
+  }
+  return (await response.json()) as { checklist: Checklist; skip: ChecklistSkip }
+}
+
 /** Owner-only: every skip record ever filed, newest first (reviewed included). */
 export async function listChecklistSkips() {
   const response = await apiFetch('/api/checklists/skips', { credentials: 'same-origin' })

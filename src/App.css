@@ -3867,6 +3867,14 @@ td strong {
   color: var(--muted);
   font-size: 12px;
 }
+/* "Pushed · was Sep 30" — a quiet note on a task that was moved off its own
+   cycle date. Muted on purpose: it explains the date, it does not flag it. */
+.checklist-pushed-flag {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: italic;
+}
 /* Client name leads the card (bold + larger) for fast by-client scanning; the
    checklist title sits just beneath it. */
 .checklist-card-client {

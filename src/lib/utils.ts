@@ -1748,6 +1748,10 @@ export function describeActivityAction(action: string): string {
       return 'created checklist'
     case 'checklist_skipped':
       return 'skipped this cycle of'
+    case 'checklist_pushed':
+      // Reads "<name> pushed to a new date <task>", the same shape as the
+      // skip label directly above it.
+      return 'pushed to a new date'
     case 'checklist_skip_reviewed':
       return 'reviewed the skip of'
     case 'template_viewers_updated':

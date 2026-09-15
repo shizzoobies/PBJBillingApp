@@ -30,6 +30,7 @@ import {
 } from '../../lib/waiting-on-state.js'
 import {
   SKIP_REASON_CATEGORIES,
+  canOfferPush,
   canOfferSkip,
   type SkipReasonCategory,
 } from '../../lib/checklist-skip.js'
@@ -74,6 +75,7 @@ import { inactiveClientIdSet, workableClients } from '../lib/clientLifecycle'
 import { waitForTaskOptions } from '../lib/waitForTaskOptions'
 import {
   addDays,
+  advanceChecklistFrequency,
   checklistFrequencies,
   checklistHasPendingDeletionRequest,
   clientName,
@@ -1842,46 +1844,89 @@ function ChecklistGroup({
 }
 
 /**
- * The skip dialog — the ONLY interruption a quiet skip produces.
+ * The skip / push dialog — the ONLY interruption either move produces.
  *
- * A required category from a three-option dropdown and a required written
- * explanation. Both are re-checked server-side; the disabled Confirm button here
+ * ONE dialog, two modes, because Brittany asked for the two buttons to carry
+ * the same requirements: a required category from the three-option dropdown and
+ * a required written explanation. Push adds the one thing that makes it a push
+ * — the new due date — pre-filled with the next cycle so the common case is a
+ * single click. Everything is re-checked server-side; the disabled Confirm here
  * is a courtesy so nobody submits an empty form, not the boundary. Whatever the
  * server refuses is shown verbatim, because its wording is the friendly one.
  */
 function SkipTaskDialog({
+  mode,
   title,
+  currentDueDate,
+  defaultNewDueDate,
   onCancel,
   onConfirm,
 }: {
+  mode: 'skip' | 'push'
   title: string
+  /** The date the task is due now — a push must land strictly after it. */
+  currentDueDate: string
+  /** Pre-filled push date: the next cycle of this task's own schedule. */
+  defaultNewDueDate: string
   onCancel: () => void
-  onConfirm: (input: { category: SkipReasonCategory; explanation: string }) => Promise<void>
+  onConfirm: (input: {
+    category: SkipReasonCategory
+    explanation: string
+    newDueDate: string
+  }) => Promise<void>
 }) {
+  const isPush = mode === 'push'
   const [category, setCategory] = useState<SkipReasonCategory | ''>('')
   const [explanation, setExplanation] = useState('')
+  const [newDueDate, setNewDueDate] = useState(defaultNewDueDate)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
-  const ready = category !== '' && explanation.trim().length > 0
+  const dateIsLater = newDueDate > currentDueDate
+  const ready =
+    category !== '' && explanation.trim().length > 0 && (!isPush || (!!newDueDate && dateIsLater))
 
   const submit = async () => {
     if (!ready || saving) return
     setSaving(true)
     setError('')
     try {
-      await onConfirm({ category: category as SkipReasonCategory, explanation: explanation.trim() })
+      await onConfirm({
+        category: category as SkipReasonCategory,
+        explanation: explanation.trim(),
+        newDueDate,
+      })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not skip this task.')
+      setError(
+        err instanceof Error
+          ? err.message
+          : isPush
+            ? 'Could not push this task.'
+            : 'Could not skip this task.',
+      )
     } finally {
       setSaving(false)
     }
   }
 
   return (
-    <div className="skip-task-dialog" role="group" aria-label={`Skip ${title} this cycle`}>
+    <div
+      className="skip-task-dialog"
+      role="group"
+      aria-label={isPush ? `Push ${title} to a new date` : `Skip ${title} this cycle`}
+    >
       <p className="skip-task-dialog-lead">
-        Skipping “{title}” for this cycle. It leaves your list now and the next occurrence still
-        generates as normal.
+        {isPush ? (
+          <>
+            Pushing “{title}” to a new date. It stays on your list and stays open — nothing is
+            completed and nothing is skipped — and it keeps its place in the cycle, so the next
+            occurrence still generates as normal.
+          </>
+        ) : (
+          <>
+            Skipping “{title}” for this cycle. It leaves your list now and the next occurrence still
+            generates as normal.
+          </>
+        )}
       </p>
       <label className="field">
         <span>Who could not complete it?</span>
@@ -1898,6 +1943,18 @@ function SkipTaskDialog({
           ))}
         </select>
       </label>
+      {isPush ? (
+        <label className="field">
+          <span>New due date</span>
+          <input
+            className="input"
+            type="date"
+            value={newDueDate}
+            min={currentDueDate}
+            onChange={(event) => setNewDueDate(event.target.value)}
+          />
+        </label>
+      ) : null}
       <label className="field">
         <span>What happened?</span>
         <textarea
@@ -1908,6 +1965,11 @@ function SkipTaskDialog({
           onChange={(event) => setExplanation(event.target.value)}
         />
       </label>
+      {isPush && newDueDate && !dateIsLater ? (
+        <p className="form-error">
+          Pick a date after the one it is due on now — pushing only ever moves a task forward.
+        </p>
+      ) : null}
       {error ? <p className="form-error">{error}</p> : null}
       <div className="series-scope-actions">
         <button
@@ -1916,7 +1978,13 @@ function SkipTaskDialog({
           disabled={!ready || saving}
           onClick={() => void submit()}
         >
-          {saving ? 'Skipping…' : 'Skip this cycle'}
+          {isPush
+            ? saving
+              ? 'Pushing…'
+              : 'Push to this date'
+            : saving
+              ? 'Skipping…'
+              : 'Skip this cycle'}
         </button>
         <button type="button" className="link-button" onClick={onCancel} disabled={saving}>
           Cancel
@@ -2052,13 +2120,15 @@ export function ChecklistCard({
     addSeriesChecklistItem,
     data: contextData,
     skipChecklistOccurrence,
+    pushChecklistOccurrence,
   } = useAppContext()
   const [editingMeta, setEditingMeta] = useState(false)
   // Quiet skip. The affordance renders ONLY when the task's recurring template
   // has skipping turned on — a task with it off shows nothing at all, because
   // "they don't necessarily know skipping is an option unless enabled". A
   // projected ghost isn't a real instance, so it is never skippable.
-  const [skipOpen, setSkipOpen] = useState(false)
+  // `null` = closed; otherwise which of the two moves the dialog is asking about.
+  const [skipOpen, setSkipOpen] = useState<'skip' | 'push' | null>(null)
   const canSkip =
     !checklist.projected &&
     canOfferSkip({
@@ -2066,6 +2136,31 @@ export function ChecklistCard({
       templates: contextData.checklistTemplates,
       canWrite: canEditStructure,
     })
+  // Push rides the SAME gate (canOfferPush === canOfferSkip): one owner setting
+  // says this task may be moved off its cycle, and both buttons appear together
+  // or not at all.
+  const canPush =
+    !checklist.projected &&
+    canOfferPush({
+      checklist,
+      templates: contextData.checklistTemplates,
+      canWrite: canEditStructure,
+    })
+  // The push date the dialog pre-fills: this task's own next cycle. A missing
+  // template (a stray instance whose repeating setup was deleted) falls back to
+  // a month, which is what the frequency helper defaults to anyway.
+  const pushDefaultDueDate = useMemo(() => {
+    const template = contextData.checklistTemplates.find(
+      (entry) => entry.id === checklist.templateId,
+    )
+    return advanceChecklistFrequency(checklist.dueDate, template?.frequency ?? 'monthly')
+  }, [contextData.checklistTemplates, checklist.templateId, checklist.dueDate])
+  // "Pushed · was <Mon D>" — shown only once the row actually carries a cycle
+  // date that differs from where it now sits, so an ordinary task says nothing.
+  const pushedFromDate =
+    checklist.cycleDueDate && checklist.cycleDueDate !== checklist.dueDate
+      ? checklist.cycleDueDate
+      : null
   // When the owner adds a task to a live RECURRING instance, ask whether it's
   // for this checklist only or the whole series. Holds the pending label(s)
   // until they pick; null = no prompt open.
@@ -2266,6 +2361,14 @@ export function ChecklistCard({
                       )
                     })()
                   : null}
+                {/* A pushed task is due somewhere it was not originally. Say so
+                    quietly, and say where it came from, so "why is this in
+                    October?" answers itself on the card. */}
+                {pushedFromDate ? (
+                  <span className="checklist-pushed-flag">
+                    Pushed · was {shortDate.format(new Date(`${pushedFromDate}T12:00:00`))}
+                  </span>
+                ) : null}
               </span>
             </>
           )}
@@ -2321,10 +2424,20 @@ export function ChecklistCard({
             <button
               type="button"
               className="secondary-action"
-              onClick={() => setSkipOpen(true)}
+              onClick={() => setSkipOpen('skip')}
               title="Not doing this one this cycle? Skip it — the next occurrence still generates."
             >
               Skip this cycle
+            </button>
+          ) : null}
+          {canPush ? (
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => setSkipOpen('push')}
+              title="Still doing it, just later? Push it to a new date — it stays open and keeps its place in the cycle."
+            >
+              Push to a new date
             </button>
           ) : null}
           {/* The actions menu is available to anyone who can edit the task's
@@ -2364,11 +2477,18 @@ export function ChecklistCard({
       </header>
       {skipOpen ? (
         <SkipTaskDialog
+          mode={skipOpen}
           title={checklist.title}
-          onCancel={() => setSkipOpen(false)}
-          onConfirm={async (input) => {
-            await skipChecklistOccurrence(checklist.id, input)
-            setSkipOpen(false)
+          currentDueDate={checklist.dueDate}
+          defaultNewDueDate={pushDefaultDueDate}
+          onCancel={() => setSkipOpen(null)}
+          onConfirm={async ({ category, explanation, newDueDate }) => {
+            if (skipOpen === 'push') {
+              await pushChecklistOccurrence(checklist.id, { category, explanation, newDueDate })
+            } else {
+              await skipChecklistOccurrence(checklist.id, { category, explanation })
+            }
+            setSkipOpen(null)
           }}
         />
       ) : null}

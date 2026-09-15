@@ -63,6 +63,7 @@ import {
   listChecklistSkips,
   reviewChecklistSkip as reviewChecklistSkipRequest,
   skipChecklistOccurrence as skipChecklistOccurrenceRequest,
+  pushChecklistOccurrence as pushChecklistOccurrenceRequest,
   approvePendingTaskEdit as approvePendingTaskEditRequest,
   rejectPendingTaskEdit as rejectPendingTaskEditRequest,
   isTaskEditPending,
@@ -1333,6 +1334,30 @@ function App() {
     async (checklistId: string, input: { category: SkipReasonCategory; explanation: string }) => {
       if (previewActiveRef.current) return
       const { checklist } = await skipChecklistOccurrenceRequest(checklistId, input)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((entry) =>
+          entry.id === checklist.id ? checklist : entry,
+        ),
+      }))
+      await refreshChecklistSkips()
+    },
+    [refreshChecklistSkips],
+  )
+
+  /**
+   * Push. The server returns the checklist with its NEW `dueDate` (and the
+   * `cycleDueDate` stamp that keeps its place in the cycle); merging it is all
+   * the screen needs — the lists sort by due date, so the task simply moves.
+   * It is not skipped, so it stays visible throughout.
+   */
+  const pushChecklistOccurrence = useCallback(
+    async (
+      checklistId: string,
+      input: { category: SkipReasonCategory; explanation: string; newDueDate: string },
+    ) => {
+      if (previewActiveRef.current) return
+      const { checklist } = await pushChecklistOccurrenceRequest(checklistId, input)
       applyServerDataUpdate((current) => ({
         ...current,
         checklists: current.checklists.map((entry) =>
@@ -3958,6 +3983,7 @@ function App() {
     rejectPendingTaskEdit,
     checklistSkips,
     skipChecklistOccurrence,
+    pushChecklistOccurrence,
     reviewChecklistSkip,
     waitingOnMe,
     addWaitingOn,

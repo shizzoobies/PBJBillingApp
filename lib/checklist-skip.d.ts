@@ -30,6 +30,25 @@ export declare function validateSkipRequest(input?: {
   | { ok: true; error: null; category: SkipReasonCategory; explanation: string }
   | { ok: false; error: string }
 
+export declare const PUSH_NEEDS_DATE_MESSAGE: string
+export declare const PUSH_DATE_UNREADABLE_MESSAGE: string
+export declare const PUSH_DATE_NOT_LATER_MESSAGE: string
+
+/**
+ * A push carries everything a skip does plus the new due date, which must be a
+ * real `yyyy-mm-dd` strictly after the instance's current `dueDate`.
+ */
+export declare function validatePushRequest(
+  input?: {
+    category?: string
+    explanation?: string
+    newDueDate?: string
+  },
+  checklist?: { dueDate?: string } | null,
+):
+  | { ok: true; error: null; category: SkipReasonCategory; explanation: string; newDueDate: string }
+  | { ok: false; error: string }
+
 /**
  * Accepts any checklist-shaped object: callers pass real `Checklist` values and
  * test fixtures alike, and an object that simply has no `skippedAt` is the
@@ -45,6 +64,13 @@ export declare function isSkipAllowedForChecklist(
 ): boolean
 
 export declare function canOfferSkip(args: {
+  checklist: { templateId?: string; skippedAt?: string | null } | null | undefined
+  templates?: { id?: string; skipAllowed?: boolean }[]
+  canWrite: boolean
+}): boolean
+
+/** Same gate as {@link canOfferSkip} — one template setting governs both. */
+export declare function canOfferPush(args: {
   checklist: { templateId?: string; skippedAt?: string | null } | null | undefined
   templates?: { id?: string; skipAllowed?: boolean }[]
   canWrite: boolean

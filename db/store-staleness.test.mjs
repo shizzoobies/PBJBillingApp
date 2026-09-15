@@ -4721,6 +4721,99 @@ describe('quiet skip (file backend)', () => {
     await store.reviewChecklistSkip(record.id, 'emp-owner')
     expect(await store.reviewChecklistSkip(record.id, 'emp-other')).toBeNull()
   })
+
+  // ---- Push (featreq-68638ed2): the same row, moved instead of closed out ----
+
+  it('moves the due date and stamps the cycle it came from', async () => {
+    const updated = await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
+    expect(updated.dueDate).toBe('2026-09-30')
+    // The date it was ORIGINALLY due — this is what identity reads, and losing
+    // it would let the materializer respawn the cycle it was pushed out of.
+    expect(updated.cycleDueDate).toBe('2026-08-31')
+    expect(updated.pushedAt).toBeTruthy()
+    expect(updated.pushedBy).toBe('emp-1')
+
+    const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-1')
+    expect(row.dueDate).toBe('2026-09-30')
+    expect(row.cycleDueDate).toBe('2026-08-31')
+    // Not skipped and not deleted: a push closes nothing.
+    expect(row.skippedAt ?? null).toBeNull()
+    expect(row.deletedAt ?? null).toBeNull()
+  })
+
+  it('keeps the FIRST cycle date when a task is pushed a second time', async () => {
+    await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
+    const twice = await store.pushChecklistInstance('cl-1', 'emp-1', '2026-10-31')
+    expect(twice.dueDate).toBe('2026-10-31')
+    // Still the original. The row belongs to the cycle it was born in however
+    // many times it moves.
+    expect(twice.cycleDueDate).toBe('2026-08-31')
+  })
+
+  it('refuses to push an occurrence that was skipped — it is closed out', async () => {
+    await store.skipChecklistInstance('cl-1', 'emp-1')
+    expect(await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')).toBeNull()
+  })
+
+  it('survives a bulk save — an autosave must not un-push a task', async () => {
+    await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
+    const stamped = (await persisted()).checklists[0].pushedAt
+
+    // The owner's tab round-trips the workspace it was served.
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            dueDate: '2026-09-30',
+            cycleDueDate: '2026-08-31',
+            pushedAt: stamped,
+            pushedBy: 'emp-1',
+          }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+
+    const row = (await persisted()).checklists[0]
+    expect(row.cycleDueDate).toBe('2026-08-31')
+    expect(row.pushedAt).toBe(stamped)
+  })
+
+  it('files a push record on the same trail, naming the date it moved to', async () => {
+    const record = await store.createChecklistSkip({
+      checklistId: 'cl-1',
+      templateId: 'tmpl-skip',
+      clientId: 'c1',
+      title: 'Monthly close',
+      skippedBy: 'emp-1',
+      skippedByName: 'Lisa Chen',
+      reasonCategory: 'client',
+      reasonNote: 'Statements are late.',
+      kind: 'push',
+      newDueDate: '2026-09-30',
+    })
+
+    const stored = (await authPersisted()).checklistSkips.find((entry) => entry.id === record.id)
+    expect(stored.kind).toBe('push')
+    expect(stored.newDueDate).toBe('2026-09-30')
+
+    // And it reaches the owner's queue through the same list as a skip.
+    const listed = (await store.listChecklistSkips()).find((entry) => entry.id === record.id)
+    expect(listed.kind).toBe('push')
+    expect(listed.newDueDate).toBe('2026-09-30')
+  })
+
+  it('reads an ordinary skip record as a skip, with no date', async () => {
+    const record = await store.createChecklistSkip({
+      checklistId: 'cl-1',
+      title: 'Monthly close',
+      reasonCategory: 'me',
+      reasonNote: 'Ran out of week.',
+    })
+    const listed = (await store.listChecklistSkips()).find((entry) => entry.id === record.id)
+    expect(listed.kind).toBe('skip')
+    expect(listed.newDueDate).toBeNull()
+  })
 })
 
 /**
@@ -4794,6 +4887,107 @@ describe('quiet skip (postgres branch)', () => {
     await pgStore.reviewChecklistSkip('skip-1', 'emp-owner')
 
     expect(fake.matching(/delete from checklist_skips/i)).toHaveLength(0)
+  })
+
+  // ---- Push (featreq-68638ed2) ----
+  //
+  // NEW SQL SHAPES, flagged for the rolled-back production validation:
+  //   - alter table checklists add column if not exists cycle_due_date date
+  //   - alter table checklists add column if not exists pushed_at timestamptz
+  //   - alter table checklists add column if not exists pushed_by text
+  //   - alter table checklist_skips add column if not exists kind text
+  //       not null default 'skip'  /  new_due_date date
+  //   - create unique index checklists_template_instance_uniq_v2 on
+  //       checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
+  //       where deleted_at is null and template_id is not null
+  //     then drop index checklists_template_instance_uniq
+
+  it('stamps the ORIGINAL cycle date once, and only ever moves due_date', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
+
+    const [statement] = fake.matching(/^update checklists\s+set cycle_due_date/i)
+    expect(statement).toBeTruthy()
+    // `coalesce` is the whole rule: a second push must not overwrite the date
+    // the occurrence was born on, because that is its identity.
+    expect(statement.text).toMatch(/cycle_due_date = coalesce\(cycle_due_date, due_date\)/i)
+    expect(statement.text).toMatch(/due_date = \$3/i)
+    // A skipped or recycled occurrence is closed out and cannot be pushed.
+    expect(statement.text).toMatch(/skipped_at is null/i)
+    expect(statement.text).toMatch(/deleted_at is null/i)
+    expect(statement.params).toEqual(['cl-1', 'emp-1', '2026-09-30'])
+  })
+
+  it('files the push on the same trail, with its kind and its new date', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createChecklistSkip({
+      checklistId: 'cl-1',
+      title: 'Monthly close',
+      reasonCategory: 'client',
+      reasonNote: 'Statements are late.',
+      kind: 'push',
+      newDueDate: '2026-09-30',
+    })
+
+    const [statement] = fake.matching(/insert into checklist_skips/i)
+    expect(statement.text).toMatch(/kind, new_due_date/i)
+    expect(statement.params).toContain('push')
+    expect(statement.params).toContain('2026-09-30')
+  })
+
+  it('keys the duplicate backstop on the CYCLE date, replacing the old index', async () => {
+    const fake = fakePostgres()
+    // `initialize()` runs the whole DDL and then seeds users, which the fake
+    // cannot answer (it returns no rows for a count). The DDL is long finished
+    // by then and every statement is already recorded, so the seed's failure is
+    // swallowed rather than worked around with a richer fake.
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+
+    const [created] = fake.matching(/create unique index if not exists checklists_template_instance_uniq_v2/i)
+    expect(created).toBeTruthy()
+    // An index on `due_date` would refuse the default push — which lands on
+    // exactly the next occurrence's date — and would stop recognizing the cycle
+    // the pushed row came from.
+    expect(created.text).toMatch(
+      /on checklists \(template_id, coalesce\(cycle_due_date, due_date\), stage_index\)/i,
+    )
+    expect(created.text).toMatch(/where deleted_at is null and template_id is not null/i)
+
+    // The old one goes, but only AFTER the new one exists — so a database too
+    // dirty to build v2 keeps a backstop instead of ending up with none.
+    const [dropped] = fake.matching(/^drop index if exists checklists_template_instance_uniq$/i)
+    expect(dropped).toBeTruthy()
+    expect(fake.statements.indexOf(created)).toBeLessThan(fake.statements.indexOf(dropped))
+  })
+
+  it('carries cycle_due_date / pushed_at / pushed_by through the bulk save', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'Monthly close',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            dueDate: '2026-09-30',
+            items: [],
+            cycleDueDate: '2026-08-31',
+            pushedAt: '2026-08-20T10:00:00.000Z',
+            pushedBy: 'emp-1',
+          },
+        ],
+      }),
+    )
+
+    const [statement] = fake.matching(/insert into checklists \(/i)
+    expect(statement.text).toMatch(/cycle_due_date, pushed_at, pushed_by/i)
+    // Losing this one would hand the row back to the materializer under the
+    // WRONG identity and respawn the cycle it was pushed out of.
+    expect(statement.params).toContain('2026-08-31')
+    expect(statement.params).toContain('2026-08-20T10:00:00.000Z')
   })
 
   it('carries skipped_at / skipped_by through the bulk save', async () => {

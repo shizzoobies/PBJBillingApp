@@ -38,6 +38,17 @@ import {
 } from '../lib/utils'
 
 const today = () => localDateOnly()
+
+/**
+ * "Oct 31, 2026" for a pushed task's new date. The year is spelled out here (it
+ * is not in the shared `shortDate`) because a push routinely crosses a year end
+ * and "Jan 15" would be genuinely ambiguous on a review queue.
+ */
+const pushedToDate = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+})
 const addDays = (iso: string, days: number) => {
   const d = new Date(iso + 'T00:00:00')
   d.setDate(d.getDate() + days)
@@ -64,7 +75,12 @@ export function DashboardPage() {
 }
 
 /**
- * Owner-only: this year's skipped recurring tasks awaiting her review.
+ * Owner-only: this year's skipped AND pushed recurring tasks awaiting review.
+ *
+ * Both kinds share this one section because they are one question to her —
+ * "this recurring task did not happen as scheduled, and here is who and why".
+ * A pushed row names the date it moved to; a skipped row does not, because
+ * there isn't one.
  *
  * Renders NOTHING for anyone else — `checklistSkips` is empty for staff (the
  * endpoint 403s), and the role check here makes that explicit rather than
@@ -88,7 +104,7 @@ function SkippedTasksReviewSection() {
 
   return (
     <section className="dashboard-section" aria-label="Skipped tasks">
-      <h2>Skipped tasks to review ({rows.length})</h2>
+      <h2>Skipped and pushed tasks to review ({rows.length})</h2>
       <ul className="dashboard-cases">
         {rows.map((skip) => (
           <li key={skip.id} className="dashboard-case-row">
@@ -101,7 +117,14 @@ function SkippedTasksReviewSection() {
                 {skip.reasonNote}
               </span>
             </div>
-            <div className="dashboard-case-stage">{skipReasonLabel(skip.reasonCategory)}</div>
+            <div className="dashboard-case-stage">
+              {/* What actually happened, before why. A push names its date —
+                  it is the thing she is being asked to accept. */}
+              {skip.kind === 'push' && skip.newDueDate
+                ? `Pushed to ${pushedToDate.format(new Date(`${skip.newDueDate}T12:00:00`))}`
+                : 'Skipped'}
+              {` · ${skipReasonLabel(skip.reasonCategory)}`}
+            </div>
             <div className="dashboard-case-holder">
               {skip.skippedByName ?? employeeName(data.employees, skip.skippedBy ?? '')}
               {skip.skippedAt ? ` · ${formatActivityTimestamp(skip.skippedAt)}` : ''}

@@ -8,8 +8,14 @@
 export interface ChecklistInstanceIdentity {
   templateId?: string | null
   dueDate?: string | null
+  /** Set once when the occurrence is pushed: the date it was ORIGINALLY due. */
+  cycleDueDate?: string | null
   stageIndex?: number | null
 }
+
+export function checklistIdentityDueDate(
+  checklist: ChecklistInstanceIdentity | null | undefined,
+): string | null
 
 export function checklistInstanceKey(
   templateId: string | null | undefined,
@@ -36,3 +42,4 @@ export function findChecklistInstance<T extends ChecklistInstanceIdentity>(
 ): T | undefined
 
 export const CHECKLIST_INSTANCE_UNIQUE_INDEX: string
+export const CHECKLIST_INSTANCE_UNIQUE_INDEX_V2: string

@@ -1178,6 +1178,25 @@ export type Checklist = {
   skippedAt?: string | null
   /** User id of whoever skipped this occurrence. */
   skippedBy?: string | null
+  /**
+   * Push (featreq-68638ed2): the date this occurrence was ORIGINALLY due.
+   *
+   * Set ONCE, the first time the task is pushed; `dueDate` then carries the
+   * date the work is now expected. This field is what recurring identity reads
+   * (`checklistIdentityDueDate` in lib/checklist-identity.js) and what the
+   * Postgres unique index covers, so a pushed occurrence still answers for its
+   * own cycle: the cycle it left is not respawned, and the occurrence it was
+   * pushed onto does not collide with it. Unset on every task never pushed —
+   * identity falls back to `dueDate` for all of them.
+   *
+   * Only `POST /api/checklists/:id/push` writes it; the bulk save round-trips
+   * it untouched.
+   */
+  cycleDueDate?: string | null
+  /** ISO timestamp of the most recent push. */
+  pushedAt?: string | null
+  /** User id of whoever pushed it last. */
+  pushedBy?: string | null
 }
 
 /**
@@ -1206,6 +1225,15 @@ export type ChecklistSkip = {
   reasonCategory: string
   /** The required written explanation. */
   reasonNote: string
+  /**
+   * Which move this record is. A PUSH files the same row with the same required
+   * reason and reaches the same review queue — the owner is reviewing "this
+   * task moved and here is why" either way. Rows predating the feature read as
+   * `'skip'` (the column's default).
+   */
+  kind: 'skip' | 'push'
+  /** The date a push moved the task to. Null on a skip. */
+  newDueDate?: string | null
   reviewedBy: string | null
   reviewedAt: string | null
 }

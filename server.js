@@ -105,6 +105,7 @@ import {
   isChecklistSkipped,
   skipNotificationRecipients,
   skipReasonLabel,
+  validatePushRequest,
   validateSkipRequest,
 } from './lib/checklist-skip.js'
 import { buildQboCsv } from './lib/qbo-export.js'
@@ -7537,6 +7538,131 @@ const server = createServer(async (request, response) => {
       }
 
       sendJson(response, 200, { checklist: skipped, skip: record })
+      return
+    }
+
+    // POST /api/checklists/:id/push — move this occurrence to a NEW due date
+    // instead of stepping past it (featreq-68638ed2). Body:
+    // { category, explanation, newDueDate }. All three required.
+    //
+    // Modeled line for line on the skip route above, and deliberately so: the
+    // same write boundary, the same template gate (skipping and pushing are one
+    // permission), the same refusal once an occurrence has been skipped, the
+    // same required reason, the same audit record and the same recipients. The
+    // ONLY difference is the outcome — the task stays alive, due later. It
+    // completes nothing and unblocks nothing.
+    const checklistPushMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/push$/)
+    if (checklistPushMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
+      const checklistId = decodeURIComponent(checklistPushMatch[1])
+      const data = await appDataStore.read()
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
+      if (!checklist || checklist.deletedAt) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      const denial = checklistWriteDenial({
+        user: session.user,
+        checklist,
+        visibleClientIds: visibleClientIdSet(session, data),
+        error: 'This task belongs to someone else — only its assignee or an editor can push it.',
+      })
+      if (denial) {
+        sendJson(response, denial.status, { error: denial.error })
+        return
+      }
+
+      if (!isSkipAllowedForChecklist(checklist, data.checklistTemplates ?? [])) {
+        sendJson(response, 403, { error: SKIP_NOT_ENABLED_MESSAGE })
+        return
+      }
+      if (isChecklistSkipped(checklist)) {
+        sendJson(response, 409, { error: SKIP_ALREADY_SKIPPED_MESSAGE })
+        return
+      }
+
+      const pushPayload = await readJsonBody(request)
+      const validatedPush = validatePushRequest(
+        {
+          category: pushPayload?.category,
+          explanation: pushPayload?.explanation,
+          newDueDate: pushPayload?.newDueDate,
+        },
+        checklist,
+      )
+      if (!validatedPush.ok) {
+        sendJson(response, 400, { error: validatedPush.error })
+        return
+      }
+
+      const pusherName =
+        (data.employees ?? []).find((employee) => employee.id === session.user.id)?.name ??
+        session.user.name ??
+        'A team member'
+
+      const pushed = await appDataStore.pushChecklistInstance(
+        checklistId,
+        session.user.id,
+        validatedPush.newDueDate,
+      )
+      if (!pushed) {
+        sendJson(response, 409, { error: SKIP_ALREADY_SKIPPED_MESSAGE })
+        return
+      }
+      const pushRecord = await appDataStore.createChecklistSkip({
+        checklistId,
+        templateId: checklist.templateId ?? null,
+        clientId: checklist.clientId ?? null,
+        title: checklist.title,
+        skippedBy: session.user.id,
+        skippedByName: pusherName,
+        reasonCategory: validatedPush.category,
+        reasonNote: validatedPush.explanation,
+        kind: 'push',
+        newDueDate: validatedPush.newDueDate,
+      })
+
+      await appDataStore.recordActivity(session.user.id, 'checklist_pushed', checklist.title)
+
+      try {
+        const client = (data.clients ?? []).find((entry) => entry.id === checklist.clientId) ?? null
+        const recipients = skipNotificationRecipients({
+          client,
+          employees: data.employees ?? [],
+          skipperId: session.user.id,
+        })
+        for (const userId of recipients) {
+          await notify(appDataStore, userId, 'checklist_pushed', {
+            checklistId,
+            clientId: checklist.clientId,
+            message:
+              `${pusherName} pushed "${checklist.title}" to ${validatedPush.newDueDate} ` +
+              `(${skipReasonLabel(validatedPush.category)}): ${validatedPush.explanation}`,
+            link: '/',
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
+      } catch (err) {
+        console.error('[notify] checklist_pushed dispatch failed:', err?.message || err)
+      }
+
+      sendJson(response, 200, { checklist: pushed, skip: pushRecord })
       return
     }
 

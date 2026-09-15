@@ -4,6 +4,7 @@ import { classifySplitTarget } from '../lib/group-allocation.js'
 import { inactiveClientIds, isInactiveClientStage } from '../lib/recurring-gate.js'
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
+  CHECKLIST_INSTANCE_UNIQUE_INDEX_V2,
   buildChecklistInstanceKeys,
   checklistInstanceKey,
   checklistMonthKey,
@@ -2851,6 +2852,11 @@ function mapChecklistSkipRow(row) {
     skippedAt: row.skipped_at ? new Date(row.skipped_at).toISOString() : null,
     reasonCategory: row.reason_category,
     reasonNote: row.reason_note ?? '',
+    // 'skip' | 'push'. Rows written before push existed carry the column
+    // default, so this coalesce only covers a select that omitted it.
+    kind: row.kind === 'push' ? 'push' : 'skip',
+    // Same shape every other `date` column is mapped with in this file.
+    newDueDate: row.new_due_date ? new Date(row.new_due_date).toISOString().slice(0, 10) : null,
     reviewedBy: row.reviewed_by ?? null,
     reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
   }
@@ -2869,6 +2875,8 @@ function normalizeChecklistSkip(record) {
     skippedAt: record.skippedAt ?? null,
     reasonCategory: record.reasonCategory,
     reasonNote: record.reasonNote ?? '',
+    kind: record.kind === 'push' ? 'push' : 'skip',
+    newDueDate: record.newDueDate ?? null,
     reviewedBy: record.reviewedBy ?? null,
     reviewedAt: record.reviewedAt ?? null,
   }
@@ -3331,6 +3339,19 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_templates add column if not exists category_id text`,
       )
+      // Push (featreq-68638ed2). These three columns are declared HERE, ahead
+      // of the skip stamps further down, only because the unique index built
+      // immediately below reads `cycle_due_date` and a column has to exist
+      // before an index can mention it.
+      //
+      // `cycle_due_date` is the date this occurrence was ORIGINALLY due. It is
+      // written once (coalesce, never overwritten by a second push) and it is
+      // what identity reads, so a pushed row still answers for its own cycle
+      // while `due_date` carries the date the work is now expected.
+      await this.pool.query(`alter table checklists add column if not exists cycle_due_date date`)
+      await this.pool.query(`alter table checklists add column if not exists pushed_at timestamptz`)
+      await this.pool.query(`alter table checklists add column if not exists pushed_by text`)
+
       // DUPLICATE-INSTANCE BACKSTOP.
       //
       // The materializer's idempotency was check-then-insert with nothing
@@ -3357,16 +3378,30 @@ export class AppDataStore {
       // in its own implicit transaction, so a failure leaves nothing poisoned.
       // Until then the shared in-code guard (lib/checklist-identity.js) is what
       // prevents new duplicates.
+      //
+      // PUSH CHANGED THE TUPLE'S DATE. It is now the CYCLE date
+      // (`coalesce(cycle_due_date, due_date)`), not the working due date: a
+      // pushed occurrence parks by default on exactly the next cycle's date,
+      // so an index on `due_date` would refuse the push the moment that
+      // occurrence exists — and would stop recognizing the cycle the row came
+      // from. The two are identical for every row that has never been pushed
+      // (`cycle_due_date` is null there), so this index builds exactly when the
+      // old one would have.
+      //
+      // Order matters: build v2 FIRST, drop v1 only after it succeeds. A
+      // database still too dirty for the new index therefore keeps the old
+      // backstop instead of ending up with none.
       try {
         await this.pool.query(`
-          create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX}
-            on checklists (template_id, due_date, stage_index)
+          create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2}
+            on checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
             where deleted_at is null and template_id is not null
         `)
+        await this.pool.query(`drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX}`)
       } catch (error) {
         console.warn(
-          `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX} — most likely duplicate ` +
-            `(template_id, due_date, stage_index) rows still present. New duplicates are still ` +
+          `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} — most likely duplicate ` +
+            `(template_id, cycle date, stage_index) rows still present. New duplicates are still ` +
             `blocked in code; this will be retried on the next boot. Reason:`,
           error && error.message ? error.message : error,
         )
@@ -3824,6 +3859,19 @@ export class AppDataStore {
       `)
       await this.pool.query(
         `create index if not exists checklist_skips_skipped_at_idx on checklist_skips (skipped_at desc)`,
+      )
+      // One trail, two kinds. A push files the same record with the same
+      // required reason — the owner reviews "this task moved and here is why"
+      // either way — so it reuses this table rather than growing a second one
+      // that would need its own list, its own review endpoint and its own
+      // dashboard section. `kind` says which; `new_due_date` is the date a push
+      // moved the task to (null on a skip). Defaulting to 'skip' is what makes
+      // every pre-existing row correct with no backfill.
+      await this.pool.query(
+        `alter table checklist_skips add column if not exists kind text not null default 'skip'`,
+      )
+      await this.pool.query(
+        `alter table checklist_skips add column if not exists new_due_date date`,
       )
 
       // Time approval workflow. Detect whether the column already exists BEFORE
@@ -5037,7 +5085,7 @@ export class AppDataStore {
             select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
                    case_id, stage_id, stage_index, stage_count, category_id, deleted_at,
                    deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by,
-                   skipped_at, skipped_by, period_label
+                   skipped_at, skipped_by, cycle_due_date, pushed_at, pushed_by, period_label
             from checklists
             order by due_date asc, id asc
           `),
@@ -5190,6 +5238,14 @@ export class AppDataStore {
         // view layer is what drops it from the active surfaces.
         skippedAt: row.skipped_at ? row.skipped_at.toISOString() : null,
         skippedBy: row.skipped_by ?? null,
+        // Push: the date this occurrence was ORIGINALLY due. Set once, and it
+        // is what the materializer's identity reads — `dueDate` above is the
+        // date the work is now expected, which is not the same question.
+        cycleDueDate: row.cycle_due_date
+          ? row.cycle_due_date.toISOString().slice(0, 10)
+          : null,
+        pushedAt: row.pushed_at ? row.pushed_at.toISOString() : null,
+        pushedBy: row.pushed_by ?? null,
         // COSMETIC ONLY — see lib/checklist-period-label.js. Nothing may read
         // this to decide anything; it is rendered beside the title and that is
         // the whole of it.
@@ -6449,8 +6505,8 @@ export class AppDataStore {
           // we already have.
           const insertResult = await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, skipped_at, skipped_by, period_label, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, skipped_at, skipped_by, cycle_due_date, pushed_at, pushed_by, period_label, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, now())
               on conflict do nothing
             `,
             [
@@ -6479,6 +6535,15 @@ export class AppDataStore {
               // them here is what stops an autosave silently un-skipping a task.
               checklist.skippedAt ?? null,
               checklist.skippedBy ?? null,
+              // A push must survive the owner's next bulk save for the same
+              // reason a skip must — and with more at stake: losing
+              // `cycle_due_date` would hand the instance back to the
+              // materializer under the WRONG identity, respawning the cycle it
+              // was pushed out of. POST /api/checklists/:id/push is the only
+              // writer; the tab round-trips these three untouched.
+              checklist.cycleDueDate ?? null,
+              checklist.pushedAt ?? null,
+              checklist.pushedBy ?? null,
               // Preserved like the skip stamps above: the bulk save wipes and
               // reinserts, and a column missing here is a label that vanishes on
               // the next autosave with no error anywhere.
@@ -15837,6 +15902,47 @@ export class AppDataStore {
   }
 
   /**
+   * Push an instance to a new due date, keeping it alive (featreq-68638ed2).
+   *
+   * `cycle_due_date = coalesce(cycle_due_date, due_date)` stamps the date the
+   * occurrence was ORIGINALLY due, once — a second push moves `due_date` again
+   * and leaves the cycle date alone, because the row still belongs to the cycle
+   * it was born in. That column is what the materializer's identity reads
+   * (lib/checklist-identity.js), so the cycle left behind is not respawned and
+   * the occurrence being pushed into does not collide with it.
+   *
+   * Refuses a task that is skipped or in the recycle bin — both are closed out.
+   * Returns the updated checklist, or null.
+   */
+  async pushChecklistInstance(checklistId, userId, newDueDate) {
+    if (!checklistId || !newDueDate) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update checklists
+            set cycle_due_date = coalesce(cycle_due_date, due_date),
+                due_date = $3,
+                pushed_at = now(),
+                pushed_by = $2
+          where id = $1 and deleted_at is null and skipped_at is null
+          returning id`,
+        [checklistId, userId ?? null, newDueDate],
+      )
+      if ((result.rowCount ?? 0) === 0) return null
+      const data = await this.read()
+      return (data.checklists ?? []).find((checklist) => checklist.id === checklistId) ?? null
+    }
+    const data = await readJson(localDataPath)
+    const target = (data.checklists ?? []).find((checklist) => checklist.id === checklistId)
+    if (!target || target.deletedAt || target.skippedAt) return null
+    target.cycleDueDate = target.cycleDueDate ?? target.dueDate
+    target.dueDate = newDueDate
+    target.pushedAt = nowIso()
+    target.pushedBy = userId ?? null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return target
+  }
+
+  /**
    * Every skip record, newest first. Not scoped: the only caller is the
    * owner-only dashboard endpoint, which does its own role check — a scoped
    * variant with no scoped caller would be a second rule to keep honest.
@@ -15845,7 +15951,7 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
-                skipped_at, reason_category, reason_note, reviewed_by, reviewed_at
+                skipped_at, reason_category, reason_note, kind, new_due_date, reviewed_by, reviewed_at
            from checklist_skips order by skipped_at desc`,
       )
       return result.rows.map(mapChecklistSkipRow)
@@ -15857,7 +15963,10 @@ export class AppDataStore {
       .sort((a, b) => String(b.skippedAt).localeCompare(String(a.skippedAt)))
   }
 
-  /** File a skip record. Returns the created record. */
+  /**
+   * File a skip record — or a PUSH record, which is the same row with
+   * `kind: 'push'` and the date it was moved to. Returns the created record.
+   */
   async createChecklistSkip({
     checklistId,
     templateId,
@@ -15867,6 +15976,8 @@ export class AppDataStore {
     skippedByName,
     reasonCategory,
     reasonNote,
+    kind,
+    newDueDate,
   } = {}) {
     if (!checklistId || !reasonCategory || !reasonNote) return null
     const record = {
@@ -15881,6 +15992,10 @@ export class AppDataStore {
       skippedAt: nowIso(),
       reasonCategory,
       reasonNote: String(reasonNote),
+      // Anything that isn't an explicit push is a skip — which keeps every
+      // existing caller, and every existing row, correct without a backfill.
+      kind: kind === 'push' ? 'push' : 'skip',
+      newDueDate: kind === 'push' ? (newDueDate ?? null) : null,
       reviewedBy: null,
       reviewedAt: null,
     }
@@ -15888,8 +16003,8 @@ export class AppDataStore {
       await this.pool.query(
         `insert into checklist_skips
            (id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
-            skipped_at, reason_category, reason_note)
-         values ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9)`,
+            skipped_at, reason_category, reason_note, kind, new_due_date)
+         values ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9, $10, $11)`,
         [
           record.id,
           record.checklistId,
@@ -15900,6 +16015,8 @@ export class AppDataStore {
           record.skippedByName,
           record.reasonCategory,
           record.reasonNote,
+          record.kind,
+          record.newDueDate,
         ],
       )
       return record
@@ -15924,7 +16041,8 @@ export class AppDataStore {
         `update checklist_skips set reviewed_by = $2, reviewed_at = now()
          where id = $1 and reviewed_at is null
          returning id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
-                   skipped_at, reason_category, reason_note, reviewed_by, reviewed_at`,
+                   skipped_at, reason_category, reason_note, kind, new_due_date,
+                   reviewed_by, reviewed_at`,
         [skipId, reviewerId ?? null],
       )
       const row = result.rows[0]

@@ -479,6 +479,16 @@ export type AppContextValue = {
     checklistId: string,
     input: { category: SkipReasonCategory; explanation: string },
   ) => Promise<void>
+  /**
+   * Push this occurrence to a new due date — the task lives on rather than
+   * closing out for the cycle. Same template gate and same required reason as a
+   * skip, plus a date the server checks is later than the current due date.
+   * Completes nothing and unblocks nothing.
+   */
+  pushChecklistOccurrence: (
+    checklistId: string,
+    input: { category: SkipReasonCategory; explanation: string; newDueDate: string },
+  ) => Promise<void>
   /** Owner-only: mark a skip reviewed — clears it off the dashboard, keeps the record. */
   reviewChecklistSkip: (skipId: string) => Promise<void>
   /**

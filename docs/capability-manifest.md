@@ -102,14 +102,16 @@ Clients page meanwhile. Owner-only.
   link to view their tasks.
 - Cases in flight: multi-step cases with current step, who holds it, and a
   Stuck badge when blocked. Click to open the case.
-- **"Skipped tasks to review (N)" (owner only)** — this year's quietly-skipped
-  recurring tasks, newest first, each showing the task, the client, who skipped
-  it, when, which of the three reasons they picked, and their written
-  explanation. One button per row, "Reviewed", clears it off the dashboard. The
-  section is hidden entirely when there is nothing to review, and it never
-  appears for a bookkeeper or an accountant. **Reviewing keeps the record** — it
-  is an audit trail, so the row is stamped with who reviewed it and when, never
-  deleted. See "Skipping a recurring task" under Checklists.
+- **"Skipped and pushed tasks to review (N)" (owner only)** — this year's
+  quietly-skipped recurring tasks AND the ones pushed to a new date, newest
+  first, each showing the task, the client, who did it, when, which of the three
+  reasons they picked, and their written explanation. A pushed row reads "Pushed
+  to &lt;date&gt;" where a skipped row reads "Skipped". One button per row,
+  "Reviewed", clears it off the dashboard. The section is hidden entirely when
+  there is nothing to review, and it never appears for a bookkeeper or an
+  accountant. **Reviewing keeps the record** — it is an audit trail, so the row
+  is stamped with who reviewed it and when, never deleted. See "Skipping a
+  recurring task" and "Pushing a recurring task to a new date" under Checklists.
 - Recent activity feed (owner).
 - Quick actions: New task, Invite bookkeeper, Add client, Notifications.
 - "Viewing as" (owner): preview the app exactly as a specific bookkeeper sees
@@ -639,6 +641,42 @@ Clients page meanwhile. Owner-only.
   - **A skip is not a deletion and not a completion.** The task is still there,
     still attached to its time entries and its history; it is simply out of the
     way for this cycle.
+- **Pushing a recurring task to a new date.** When someone still intends to do a
+  recurring task but not by the date it is due, they can push it — the task
+  stays open and moves to a new due date instead of being stepped past.
+  - **It sits beside Skip, behind the same setting.** The card shows two buttons
+    where skipping is turned on: "Skip this cycle" and "Push to a new date".
+    Where skipping is off there is neither — one setting on the repeating setup
+    governs both, and one-off tasks are never pushable for the same reason they
+    are never skippable.
+  - **The form is the same, plus a date.** A required dropdown for **who could
+    not complete it (me / a colleague / the client)**, a required written
+    explanation, and a **new due date pre-filled with the next cycle** of that
+    task's own schedule — a monthly task offers next month, a quarterly one next
+    quarter. The date is editable to anything later than the date it is due now;
+    a push only ever moves a task forward.
+  - **It is not a completion and not a skip.** Nothing is checked off, nothing is
+    unblocked, and no next step is started. The task simply lives on at its new
+    date, with every step exactly as it was.
+  - **It keeps its place in the cycle, so the next occurrence still generates.**
+    The task remembers the date it was originally due, and that is what the
+    schedule counts. So a task pushed from September into October does not make
+    September generate again, and October's own occurrence is still created on
+    time as a separate task — even when it lands on the very same day.
+  - **The card says so.** A pushed task reads "Pushed · was &lt;date&gt;" beside
+    its due date, so the new date explains itself.
+  - **Who gets told:** exactly the same people as a skip — the owner every time,
+    and an **Accountant** when a **Bookkeeper** pushes a task on a client that
+    accountant is assigned to. Same in-app notice plus email, same per-person
+    switch under Settings → Notifications ("Skipped and pushed recurring tasks").
+  - **The owner reviews pushes on her Dashboard,** in the same list as skips —
+    see "Skipped and pushed tasks to review" there. A pushed row reads "Pushed to
+    &lt;date&gt;" where a skipped row reads "Skipped". Marking one reviewed clears
+    it off the dashboard and keeps the record permanently.
+  - **Still open, not built:** whether a push should apply to a single step
+    rather than the whole task, and whether pushing a step in a multi-step case
+    should trigger the next step. Today a push always applies to the whole task
+    and triggers nothing.
 - **When a team member creates a task, the owner is notified.** The notice names
   the task and the person, so she can decide whether skipping should be allowed
   on that kind of work. (Repeating setups — where the skip setting actually

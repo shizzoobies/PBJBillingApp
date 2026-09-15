@@ -36,6 +36,8 @@ const skip = (over: Partial<ChecklistSkip>): ChecklistSkip => ({
   skippedAt: `${THIS_YEAR}-08-10T12:00:00.000Z`,
   reasonCategory: 'client',
   reasonNote: 'Statements never arrived from the client.',
+  kind: 'skip',
+  newDueDate: null,
   reviewedBy: null,
   reviewedAt: null,
   ...over,
@@ -129,7 +131,9 @@ describe('what the owner sees', () => {
   it('counts them so it reads at a glance', () => {
     signInAs(OWNER, true, [skip({ id: 'a' }), skip({ id: 'b' })])
     renderDashboard()
-    expect(screen.getByRole('heading', { name: 'Skipped tasks to review (2)' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { name: 'Skipped and pushed tasks to review (2)' }),
+    ).toBeInTheDocument()
   })
 
   it('lists newest first', () => {
@@ -167,5 +171,59 @@ describe('reviewing', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }))
     await waitFor(() => expect(reviewChecklistSkip).toHaveBeenCalledWith('skip-42'))
+  })
+})
+
+/**
+ * Pushes land on the SAME queue (featreq-68638ed2). They are one question to
+ * the owner — "this recurring task did not happen as scheduled, here is who and
+ * why" — so they share the section, the sort and the Reviewed button. The only
+ * difference she should see is what happened to the task.
+ */
+describe('a pushed task on the same queue', () => {
+  const push = (over: Partial<ChecklistSkip> = {}) =>
+    skip({
+      id: 'push-1',
+      kind: 'push',
+      newDueDate: `${THIS_YEAR}-10-31`,
+      reasonNote: 'Client is closing their old bank account first.',
+      ...over,
+    })
+
+  it('says where the task went, where a skip just says it was skipped', () => {
+    signInAs(OWNER, true, [push()])
+    renderDashboard()
+    const text = section()?.textContent ?? ''
+
+    expect(text).toContain(`Pushed to Oct 31, ${THIS_YEAR}`)
+    expect(text).not.toContain('Skipped ·')
+  })
+
+  it('still names the task, the client, the person and the reason', () => {
+    signInAs(OWNER, true, [push()])
+    renderDashboard()
+    const text = section()?.textContent ?? ''
+
+    expect(text).toContain('Monthly close')
+    expect(text).toContain('Shared Books LLC')
+    expect(text).toContain('Lisa Chen')
+    expect(text).toContain('The client')
+    expect(text).toContain('Client is closing their old bank account first.')
+  })
+
+  it('counts alongside skips under one heading', () => {
+    signInAs(OWNER, true, [skip({ id: 'a' }), push({ id: 'b' })])
+    renderDashboard()
+    expect(
+      screen.getByRole('heading', { name: 'Skipped and pushed tasks to review (2)' }),
+    ).toBeInTheDocument()
+  })
+
+  it('is cleared by the same Reviewed button', async () => {
+    signInAs(OWNER, true, [push({ id: 'push-42' })])
+    renderDashboard()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }))
+    await waitFor(() => expect(reviewChecklistSkip).toHaveBeenCalledWith('push-42'))
   })
 })
