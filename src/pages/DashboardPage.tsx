@@ -28,7 +28,7 @@ import {
   fetchTeamActivity,
   listInvoicesRequest,
 } from '../lib/api'
-import type { ActivityEntry, Checklist, PersistedInvoice, TeamMember } from '../lib/types'
+import type { ActivityEntry, Checklist, PastDueInvoiceRow, TeamMember } from '../lib/types'
 import {
   clientName,
   currency,
@@ -178,13 +178,16 @@ function SkippedTasksReviewSection() {
  */
 function PastDueInvoicesSection() {
   const { data, role, previewMode } = useAppContext()
-  const [invoices, setInvoices] = useState<PersistedInvoice[]>([])
+  const [invoices, setInvoices] = useState<PastDueInvoiceRow[]>([])
   const hidden = role !== 'owner' || previewMode
 
   useEffect(() => {
     if (hidden) return
     let cancelled = false
-    listInvoicesRequest()
+    // `pastDue: 1` — the server applies the rule and answers with the six
+    // fields below. Without it this asked for every invoice the firm has ever
+    // written, lines and email logs included, to render a handful of rows.
+    listInvoicesRequest(undefined, { pastDue: true })
       .then((rows) => {
         if (!cancelled) setInvoices(rows)
       })
@@ -198,7 +201,7 @@ function PastDueInvoicesSection() {
 
   const rows = useMemo(() => {
     const today = localDateOnly()
-    const found: Array<{ invoice: PersistedInvoice; pastDue: PastDueInvoice }> = []
+    const found: Array<{ invoice: PastDueInvoiceRow; pastDue: PastDueInvoice }> = []
     for (const invoice of invoices) {
       const pastDue = pastDueInvoice(invoice, today)
       // Oldest line first: the one that has been owed longest is the one to

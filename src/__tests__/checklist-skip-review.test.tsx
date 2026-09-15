@@ -16,9 +16,12 @@ import type { AppData, ChecklistSkip } from '../lib/types'
 
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
 vi.mock('../lib/api', () => ({
-  fetchGlobalActivity: vi.fn().mockResolvedValue([]),
+  // Shaped like the real responses: the owner view reads `.entries` off these
+  // two, and an array would hand React `Array.prototype.entries` as a state
+  // updater and take the whole view down.
+  fetchGlobalActivity: vi.fn().mockResolvedValue({ entries: [] }),
   fetchTeam: vi.fn().mockResolvedValue({ users: [] }),
-  fetchTeamActivity: vi.fn().mockResolvedValue([]),
+  fetchTeamActivity: vi.fn().mockResolvedValue({ entries: [] }),
   // The owner dashboard also asks for the past-due invoices; that section has
   // its own suite (dashboard-past-due.test.tsx) and simply renders nothing here.
   listInvoicesRequest: vi.fn().mockResolvedValue([]),

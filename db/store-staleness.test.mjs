@@ -1033,6 +1033,20 @@ function fakePostgres({
     if (/^update invoices\b[\s\S]*\breturning id$/i.test(trimmed)) {
       return { rows: invoices.map((invoice) => ({ id: invoice.id })) }
     }
+    // `swapInvoiceCheckoutSession`. The fake answers with the row's value as it
+    // stood BEFORE the write and then applies the new one, because the one
+    // thing worth proving about this statement is exactly that: the caller has
+    // to be handed the id it REPLACED, not one it read a round-trip earlier.
+    if (/^with prev as \([\s\S]*update invoices[\s\S]*returning prev\.previous$/i.test(trimmed)) {
+      const found = invoices.find((invoice) => invoice.id === params?.[0])
+      if (!found || found.status === 'void') return { rows: [], rowCount: 0 }
+      const column = /set stripe_card_session_id = \$2/i.test(trimmed)
+        ? 'stripe_card_session_id'
+        : 'stripe_checkout_session_id'
+      const previous = found[column] ?? null
+      found[column] = params?.[1]
+      return { rows: [{ previous }], rowCount: 1 }
+    }
     // The bulk save's created_at snapshots — one bare select per table in
     // CREATED_AT_PRESERVED_TABLES, taken before the wipe.
     const createdAtSnapshot = /^select id, created_at from (\w+)$/i.exec(trimmed)
@@ -1074,6 +1088,13 @@ function fakePostgres({
     // The clients read inside read() — lets a test exercise the row mapper.
     if (/^select\b[\s\S]*\bfrom clients\b[\s\S]*order by name asc/i.test(trimmed)) {
       return { rows: clientRows }
+    }
+    // `getClientById` — the SAME column list, one row. Anchored on the head of
+    // that list rather than on `from clients where id = $1`, which would also
+    // swallow the bare `select 1 from clients where id = $1` existence checks.
+    if (/^select id, name, contact, billing_mode\b[\s\S]*from clients where id = \$1$/i.test(trimmed)) {
+      const found = clientRows.find((row) => row.id === params?.[0])
+      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
     }
     // The `for update` read a split adjustment starts with.
     if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
@@ -1437,7 +1458,7 @@ describe('getOrCreateInvoicePayToken (file backend)', () => {
   /**
    * "Void and regenerate" is how a month gets corrected, and it happens after
    * links have been emailed. The token must still RESOLVE — to the voided row,
-   * so the client gets "this invoice was cancelled" rather than a dead page.
+   * so the client gets "this invoice was canceled" rather than a dead page.
    */
   it('survives a void, and still names the voided invoice', async () => {
     await seedInvoice({ status: 'draft', sentAt: null })
@@ -1555,6 +1576,196 @@ describe('the pay token statements (postgres branch)', () => {
   it('answers null for a token no row carries', async () => {
     const fake = fakePostgres({ invoices: [{ ...row, pay_token: 'tok_lookup' }] })
     expect(await postgresStore(fake).findInvoiceByPayToken('tok_other')).toBeNull()
+  })
+
+  // The token is the invoice's permanent name; asking for it again is a read.
+  // Bumping `updated_at` on every send, click and copy would make the column
+  // say the invoice was edited when nothing about it changed.
+  it('leaves updated_at alone when the token is already there', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row, pay_token: 'tok_already_here' }] })
+    await postgresStore(fake).getOrCreateInvoicePayToken('inv-1')
+
+    const update = fake.matching(/^update invoices[\s\S]*returning pay_token$/i)[0]
+    expect(update.text).toMatch(
+      /updated_at = case when pay_token is null then now\(\) else updated_at end/i,
+    )
+  })
+})
+
+/**
+ * `swapInvoiceCheckoutSession` — point an invoice at a NEW Stripe session and
+ * hand back the id it replaced, in one write.
+ *
+ * THE BUG THIS EXISTS FOR. The pay link mints a fresh session on every open and
+ * the route expires the one it supersedes. Taking that id off a snapshot read
+ * BEFORE the mint is a race: two opens a second apart both see S0, mint SA and
+ * SB, both write (last wins), and both expire S0 — leaving SA live and the
+ * invoice payable twice, by two Stripe sessions, for one bill.
+ *
+ * So the ANSWER is the contract: whatever this call replaced, and never what
+ * the caller thought was there.
+ */
+describe('swapInvoiceCheckoutSession (file backend)', () => {
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-swap',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-001',
+        status: 'sent',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-05T00:00:00.000Z',
+        paidAt: null,
+        stripeCheckoutSessionId: 'cs_S0',
+        stripeCardSessionId: null,
+        emailLog: [],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('stores the new id and returns the one it replaced', async () => {
+    await seed()
+    const result = await store.swapInvoiceCheckoutSession('inv-swap', {
+      channel: 'ach',
+      sessionId: 'cs_SA',
+    })
+
+    expect(result.previous).toBe('cs_S0')
+    expect(result.invoice.stripeCheckoutSessionId).toBe('cs_SA')
+    const stored = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-swap')
+    expect(stored.stripeCheckoutSessionId).toBe('cs_SA')
+  })
+
+  // The whole point, spelled out: two in a row hand back S0 and then SA. A
+  // method that answered off a pre-read snapshot would say S0 twice, and the
+  // caller would leave SA live.
+  it('two swaps in a row return S0 then SA', async () => {
+    await seed()
+    const first = await store.swapInvoiceCheckoutSession('inv-swap', {
+      channel: 'ach',
+      sessionId: 'cs_SA',
+    })
+    const second = await store.swapInvoiceCheckoutSession('inv-swap', {
+      channel: 'ach',
+      sessionId: 'cs_SB',
+    })
+
+    expect(first.previous).toBe('cs_S0')
+    expect(second.previous).toBe('cs_SA')
+  })
+
+  // Two channels, two columns. A card swap must not retire the bank-transfer
+  // session the same invoice is still offering.
+  it('keeps the two channels apart', async () => {
+    await seed({ stripeCardSessionId: 'cs_card_0' })
+    const result = await store.swapInvoiceCheckoutSession('inv-swap', {
+      channel: 'card',
+      sessionId: 'cs_card_1',
+    })
+
+    expect(result.previous).toBe('cs_card_0')
+    expect(result.invoice.stripeCardSessionId).toBe('cs_card_1')
+    expect(result.invoice.stripeCheckoutSessionId).toBe('cs_S0')
+  })
+
+  // Null, not undefined — an invoice that has never had a session has nothing
+  // to expire, and the caller branches on exactly this.
+  it('returns null previous when the channel was empty', async () => {
+    await seed({ stripeCheckoutSessionId: null })
+    const result = await store.swapInvoiceCheckoutSession('inv-swap', {
+      channel: 'ach',
+      sessionId: 'cs_SA',
+    })
+    expect(result.previous).toBeNull()
+  })
+
+  // The same refusal `applyInvoicePayment` makes: a late write must not revive
+  // an invoice that was voided while we were talking to Stripe.
+  it('refuses a voided invoice, and an invoice that is not there', async () => {
+    await seed({ status: 'void' })
+    expect(
+      await store.swapInvoiceCheckoutSession('inv-swap', { channel: 'ach', sessionId: 'cs_SA' }),
+    ).toBeNull()
+    expect(
+      await store.swapInvoiceCheckoutSession('inv-nope', { channel: 'ach', sessionId: 'cs_SA' }),
+    ).toBeNull()
+    expect(await store.swapInvoiceCheckoutSession('inv-swap', { channel: 'ach' })).toBeNull()
+  })
+})
+
+describe('swapInvoiceCheckoutSession (postgres branch)', () => {
+  const row = { ...existingInvoice, stripe_checkout_session_id: 'cs_S0' }
+
+  it('returns the replaced id, and twice in a row returns S0 then SA', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row }] })
+    const pg = postgresStore(fake)
+
+    const first = await pg.swapInvoiceCheckoutSession('inv-1', {
+      channel: 'ach',
+      sessionId: 'cs_SA',
+    })
+    const second = await pg.swapInvoiceCheckoutSession('inv-1', {
+      channel: 'ach',
+      sessionId: 'cs_SB',
+    })
+
+    expect(first.previous).toBe('cs_S0')
+    expect(second.previous).toBe('cs_SA')
+  })
+
+  /**
+   * The statement shape IS the fix. `for update` inside the CTE takes the row
+   * lock before the update reads it, so two concurrent swaps serialize and the
+   * second one's `previous` is the first one's new id. A subquery inside
+   * RETURNING would not be safe — it may be planned against the updated row.
+   */
+  it('reads the previous value through a locking CTE, never a RETURNING subquery', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row }] })
+    await postgresStore(fake).swapInvoiceCheckoutSession('inv-1', {
+      channel: 'ach',
+      sessionId: 'cs_SA',
+    })
+
+    const [statement] = fake.matching(/^with prev as \(/i)
+    expect(statement).toBeTruthy()
+    expect(statement.text).toMatch(/for update/i)
+    expect(statement.text).toMatch(/returning prev\.previous/i)
+    expect(statement.text).toMatch(/set stripe_checkout_session_id = \$2/i)
+    // A void invoice is refused in the WHERE, so the refusal survives a race
+    // with "Void & regenerate" rather than being decided by a stale read.
+    expect(statement.text).toMatch(/invoices\.status <> 'void'/i)
+  })
+
+  it('writes the card column for the card channel', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row, stripe_card_session_id: 'cs_card_0' }] })
+    const result = await postgresStore(fake).swapInvoiceCheckoutSession('inv-1', {
+      channel: 'card',
+      sessionId: 'cs_card_1',
+    })
+
+    expect(result.previous).toBe('cs_card_0')
+    expect(fake.matching(/set stripe_card_session_id = \$2/i)).toHaveLength(1)
+  })
+
+  it('answers null when the update matched no row', async () => {
+    const fake = fakePostgres({ invoices: [{ ...row }] })
+    expect(
+      await postgresStore(fake).swapInvoiceCheckoutSession('inv-missing', {
+        channel: 'ach',
+        sessionId: 'cs_SA',
+      }),
+    ).toBeNull()
   })
 })
 
@@ -2821,9 +3032,21 @@ describe('recordInvoiceSent re-stamps the past-due line (file backend)', () => {
     updatedAt: '2026-09-15T00:00:00.000Z',
   }
 
-  async function seed(overrides = {}) {
+  async function seed(overrides = {}, clientOverrides = {}) {
     const data = JSON.parse(await readFile(localDataPath, 'utf8'))
     data.invoices = [{ ...seedInvoice, ...overrides }]
+    // The invoice's client, because the re-stamp reads its terms.
+    data.clients = [
+      {
+        id: 'c1',
+        name: 'Acme',
+        contact: 'Pat',
+        billingMode: 'hourly',
+        hourlyRate: 0,
+        paymentTerms: '',
+        ...clientOverrides,
+      },
+    ]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
   }
 
@@ -2908,6 +3131,54 @@ describe('recordInvoiceSent re-stamps the past-due line (file backend)', () => {
 
     expect(updated.dueDate).toBe('2026-10-15')
   })
+
+  /**
+   * THE CLIENT'S OWN TERMS. Generation honors them; the re-stamp used to pass
+   * null and flatten every client to the firm's thirty days — so a Net 45
+   * client's first send moved their line FIFTEEN DAYS EARLIER than the invoice
+   * they were holding, and the PDF printed "Net 45" over a 30-day date.
+   */
+  it('honors a longer window on the client record', async () => {
+    await seed({}, { paymentTerms: 'Net 45' })
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1043',
+      ok: true,
+    })
+
+    const sendDay = updated.emailLog[0].at.slice(0, 10)
+    expect(gapDays(sendDay, updated.dueDate)).toBe(45)
+  })
+
+  // `dueDateFromTerms` FLOORS at the firm's window, so a short "Net 15" buys
+  // the client nothing — they are asked to pay on receipt like everyone else.
+  it('never shortens the window below the firm’s thirty days', async () => {
+    await seed({}, { paymentTerms: 'Net 15' })
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1043',
+      ok: true,
+    })
+
+    const sendDay = updated.emailLog[0].at.slice(0, 10)
+    expect(gapDays(sendDay, updated.dueDate)).toBe(30)
+  })
+
+  // A bounce or a delivery receipt is the mail provider talking about a send
+  // that already happened. It appends to the same log and must not touch the
+  // date, the status or the sent stamp.
+  it('leaves the line alone for a delivery event', async () => {
+    await seed({ status: 'sent', sentAt: '2026-10-01T12:00:00.000Z', dueDate: '2026-10-31' })
+    const updated = await store.recordInvoiceDeliveryEvent('inv-1', {
+      event: 'bounced',
+      providerId: 'ee-1',
+      to: ['ann@acme.com'],
+    })
+
+    expect(updated.dueDate).toBe('2026-10-31')
+    expect(updated.sentAt).toBe('2026-10-01T12:00:00.000Z')
+    expect(updated.status).toBe('sent')
+  })
 })
 
 /**
@@ -2928,12 +3199,43 @@ describe('recordInvoiceSent past-due line (postgres branch)', () => {
     })
 
     const update = fake.matching(/^update invoices/i)[0]
+    // `$5::date::text` is load-bearing, not tidiness. `invoices.due_date` is a
+    // TEXT column, and `case … then <date> else <text> end` is rejected by
+    // Postgres at PARSE time ("CASE types text and date cannot be matched") —
+    // so without the second cast this statement fails for every invoice, and
+    // every send in production fails with it. A bare `$5` does not work either
+    // ("could not determine data type of parameter"). Confirmed against the
+    // production database in a rolled-back transaction, 2026-09-15.
     expect(flat(update.text)).toContain(
       'due_date = case when $3::boolean and sent_at is null and $5::date is not null' +
-        ' then $5::date else due_date end',
+        ' then $5::date::text else due_date end',
     )
     // $5 is the line this send would set: a date, thirty days out.
     expect(update.params[4]).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  })
+
+  // The client's terms, read through `getClientById` — one row, the same
+  // column list `read()` uses. Passing null here floored every client at the
+  // firm's thirty days, which is fifteen days of a Net 45 client's window.
+  it('reads the client’s terms and lengthens the window', async () => {
+    const fake = fakePostgres({
+      invoices: [existingInvoice],
+      clientRows: [{ id: 'c1', name: 'Acme', contact: 'Pat', billing_mode: 'hourly', hourly_rate: 0, payment_terms: 'Net 45' }],
+    })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    const sendDay = JSON.parse(update.params[1])[0].at.slice(0, 10)
+    const gap = Math.round(
+      (Date.parse(`${update.params[4]}T00:00:00Z`) - Date.parse(`${sendDay}T00:00:00Z`)) /
+        (24 * 60 * 60 * 1000),
+    )
+    expect(gap).toBe(45)
+    expect(fake.matching(/from clients where id = \$1$/i).length).toBeGreaterThan(0)
   })
 
   // With $5 null the CASE cannot fire, so a payment email can never blank a

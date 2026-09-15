@@ -9,6 +9,7 @@
   type Client,
   type NewClientInput,
   type InvoiceAiReview,
+  type PastDueInvoiceRow,
   type PersistedInvoice,
   type PersistedInvoiceLine,
   type ClientNote,
@@ -3274,8 +3275,29 @@ export async function assistantDismissSuggestion(key: string) {
  * invoices are money, and keeping them off the bulk-save payload is what stops
  * a stale owner tab from ever rewriting one. So the page fetches them itself.
  */
-export async function listInvoicesRequest(period?: string) {
-  const query = period ? `?period=${encodeURIComponent(period)}` : ''
+/**
+ * `pastDue: true` asks the server to apply the past-due rule and answer with
+ * the trimmed rows only — the dashboard's question is "who owes us money",
+ * across every month, and the full documents are jsonb the page never reads.
+ *
+ * This overload is FIRST and the plain one LAST on purpose: `vi.mocked()` and
+ * every other single-signature consumer resolve an overloaded function to its
+ * last signature, and the plain list is what a hundred call sites mean.
+ */
+export async function listInvoicesRequest(
+  period: string | undefined,
+  options: { pastDue: true },
+): Promise<PastDueInvoiceRow[]>
+export async function listInvoicesRequest(period?: string): Promise<PersistedInvoice[]>
+export async function listInvoicesRequest(
+  period?: string,
+  options: { pastDue?: boolean } = {},
+) {
+  const params = new URLSearchParams()
+  if (period) params.set('period', period)
+  if (options.pastDue) params.set('pastDue', '1')
+  const search = params.toString()
+  const query = search ? `?${search}` : ''
   const response = await apiFetch(`/api/invoices${query}`, { credentials: 'same-origin' })
   if (!response.ok) {
     const message = await safeErrorMessage(response)

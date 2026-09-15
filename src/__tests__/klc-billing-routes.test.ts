@@ -113,7 +113,7 @@ describe('the send route refuses before it sends anything', () => {
   // Widened when the durable pay link landed: the route grew a token mint and
   // its comment between the refusal and `sendInvoiceEmail`, and a window that
   // stopped short reports the send call as MISSING rather than as out of order.
-  const block = () => routeBlock(/const invoiceSendMatch = normalizedPath\.match\(/, 12500)
+  const block = () => routeBlock(/const invoiceSendMatch = normalizedPath\.match\(/, 13600)
 
   it('answers 409 with the unset-recipient sentence', () => {
     const text = block()

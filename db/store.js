@@ -1348,6 +1348,115 @@ export function mapInvoiceRow(row) {
 }
 
 /**
+ * The clients columns every Postgres read selects, and the row map that turns
+ * one of them into the shape the app speaks.
+ *
+ * Lifted out of `read()` so `getClientById` can answer with EXACTLY the same
+ * client object the workspace read produces. One client fetched a second way,
+ * with a second column list, is how a field silently goes missing on one screen
+ * and not another — cardinal rule 1's failure mode, one table over.
+ */
+export const CLIENT_SELECT_COLUMNS = `id, name, contact, billing_mode, hourly_rate, plan_id,
+          custom_monthly_fee, monthly_rate, estimated_monthly_hours,
+          estimated_bookkeeper_hours, estimated_accountant_hours,
+          estimated_cfo_hours,
+          plan_ids, contact_ids,
+          email, contact_name, phone, address_line1, address_line2,
+          city, state, postal_code, logo_url, payment_terms,
+          footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
+          invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
+          invoice_hide_internal_hours, invoice_group_by_category,
+          card_payments_enabled,
+          assigned_bookkeeper_ids, monthly_service_tier,
+          annual_rate, annual_billing_month, lifecycle_stage,
+          bill_to_client_id, is_billing_master, invoice_recipient_client_id`
+
+/** One `clients` row -> the camelCase shape the app and the API speak. */
+export function mapClientRow(row) {
+  // Back-compat normalization. The frontend always gets `planIds: string[]` and
+  // `contactIds: string[]` (never undefined), and a `monthlyRate` that prefers
+  // the new column, then the legacy per-client custom fee.
+  const planIds = Array.isArray(row.plan_ids)
+    ? row.plan_ids.filter((id) => typeof id === 'string' && id)
+    : []
+  const normalizedPlanIds = planIds.length > 0 ? planIds : row.plan_id ? [row.plan_id] : []
+  const contactIds = Array.isArray(row.contact_ids)
+    ? row.contact_ids.filter((id) => typeof id === 'string' && id)
+    : []
+  // One assigned team, normalized once. `assignedEmployeeIds` below is an alias
+  // of this — it used to come from the `client_assignments` table, which could
+  // and did disagree with the column that actually gates visibility.
+  const assignedTeam = Array.isArray(row.assigned_bookkeeper_ids)
+    ? [...new Set(row.assigned_bookkeeper_ids.filter((id) => typeof id === 'string'))]
+    : []
+  const monthlyRate =
+    row.monthly_rate === null || row.monthly_rate === undefined
+      ? row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
+        ? null
+        : Number(row.custom_monthly_fee)
+      : Number(row.monthly_rate)
+  return {
+    id: row.id,
+    name: row.name,
+    contact: row.contact,
+    billingMode: row.billing_mode,
+    hourlyRate: Number(row.hourly_rate),
+    planIds: normalizedPlanIds,
+    contactIds,
+    monthlyRate: monthlyRate === null ? undefined : monthlyRate,
+    monthlyServiceTier: row.monthly_service_tier ?? undefined,
+    annualRate:
+      row.annual_rate === null || row.annual_rate === undefined ? undefined : Number(row.annual_rate),
+    annualBillingMonth:
+      row.annual_billing_month === null || row.annual_billing_month === undefined
+        ? undefined
+        : Number(row.annual_billing_month),
+    ...mapEstimatedRoleHours({
+      legacy: row.estimated_monthly_hours,
+      bookkeeper: row.estimated_bookkeeper_hours,
+      accountant: row.estimated_accountant_hours,
+      cfo: row.estimated_cfo_hours,
+    }),
+    // Legacy fields surfaced for back-compat reads + migration only.
+    planId: row.plan_id ?? null,
+    customMonthlyFee:
+      row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
+        ? null
+        : Number(row.custom_monthly_fee),
+    assignedEmployeeIds: assignedTeam,
+    assignedBookkeeperIds: assignedTeam,
+    email: row.email ?? '',
+    contactName: row.contact_name ?? '',
+    phone: row.phone ?? '',
+    addressLine1: row.address_line1 ?? '',
+    addressLine2: row.address_line2 ?? '',
+    city: row.city ?? '',
+    state: row.state ?? '',
+    postalCode: row.postal_code ?? '',
+    logoUrl: row.logo_url ?? '',
+    paymentTerms: row.payment_terms ?? '',
+    footerNote: row.footer_note ?? '',
+    quickbooksPayUrl: row.quickbooks_pay_url ?? '',
+    invoiceShowTimeBreakdown: row.invoice_show_time_breakdown ?? true,
+    invoiceTimeBreakdownMode: normalizeTimeBreakdownMode(row.invoice_time_breakdown_mode),
+    invoiceTimeBreakdownAmounts: row.invoice_time_breakdown_amounts ?? false,
+    invoiceHideInternalHours: row.invoice_hide_internal_hours ?? true,
+    invoiceGroupByCategory: row.invoice_group_by_category ?? false,
+    cardPaymentsEnabled: row.card_payments_enabled ?? false,
+    // Default 'active' when null so legacy/absent rows are never treated as
+    // prospects.
+    lifecycleStage: row.lifecycle_stage ?? 'active',
+    // Consolidated billing. Null is the ordinary client on both id columns; the
+    // boolean answers false for every row written before the column existed.
+    // Same shape `normalizeClientProfile` produces for the file backend —
+    // cardinal rule 1.
+    billToClientId: row.bill_to_client_id ?? null,
+    isBillingMaster: row.is_billing_master === true,
+    invoiceRecipientClientId: row.invoice_recipient_client_id ?? null,
+  }
+}
+
+/**
  * One `invoice_review_events` row -> the camelCase shape the app speaks.
  * Exported for the same reason `mapInvoiceRow` is: so a test can watch which
  * columns it reads.
@@ -5130,20 +5239,7 @@ export class AppDataStore {
             order by name asc
           `),
           this.pool.query(`
-            select id, name, contact, billing_mode, hourly_rate, plan_id,
-                   custom_monthly_fee, monthly_rate, estimated_monthly_hours,
-                   estimated_bookkeeper_hours, estimated_accountant_hours,
-                   estimated_cfo_hours,
-                   plan_ids, contact_ids,
-                   email, contact_name, phone, address_line1, address_line2,
-                   city, state, postal_code, logo_url, payment_terms,
-                   footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
-                   invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
-                   invoice_hide_internal_hours, invoice_group_by_category,
-                   card_payments_enabled,
-                   assigned_bookkeeper_ids, monthly_service_tier,
-                   annual_rate, annual_billing_month, lifecycle_stage,
-                   bill_to_client_id, is_billing_master, invoice_recipient_client_id
+            select ${CLIENT_SELECT_COLUMNS}
             from clients
             order by name asc
           `),
@@ -5361,98 +5457,7 @@ export class AppDataStore {
           // Optional named group; empty column → undefined (ungrouped).
           group: row.group_name ?? undefined,
         })),
-        clients: clientsResult.rows.map((row) => {
-          // Back-compat normalization. The frontend always gets
-          // `planIds: string[]` and `contactIds: string[]` (never undefined),
-          // and a `monthlyRate` that prefers the new column, then the legacy
-          // per-client custom fee.
-          const planIds = Array.isArray(row.plan_ids)
-            ? row.plan_ids.filter((id) => typeof id === 'string' && id)
-            : []
-          const normalizedPlanIds =
-            planIds.length > 0
-              ? planIds
-              : row.plan_id
-                ? [row.plan_id]
-                : []
-          const contactIds = Array.isArray(row.contact_ids)
-            ? row.contact_ids.filter((id) => typeof id === 'string' && id)
-            : []
-          // One assigned team, normalized once. `assignedEmployeeIds` below is
-          // an alias of this — it used to come from the `client_assignments`
-          // table, which could and did disagree with the column that actually
-          // gates visibility.
-          const assignedTeam = Array.isArray(row.assigned_bookkeeper_ids)
-            ? [...new Set(row.assigned_bookkeeper_ids.filter((id) => typeof id === 'string'))]
-            : []
-          const monthlyRate =
-            row.monthly_rate === null || row.monthly_rate === undefined
-              ? row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
-                ? null
-                : Number(row.custom_monthly_fee)
-              : Number(row.monthly_rate)
-          return {
-            id: row.id,
-            name: row.name,
-            contact: row.contact,
-            billingMode: row.billing_mode,
-            hourlyRate: Number(row.hourly_rate),
-            planIds: normalizedPlanIds,
-            contactIds,
-            monthlyRate: monthlyRate === null ? undefined : monthlyRate,
-            monthlyServiceTier: row.monthly_service_tier ?? undefined,
-            annualRate:
-              row.annual_rate === null || row.annual_rate === undefined
-                ? undefined
-                : Number(row.annual_rate),
-            annualBillingMonth:
-              row.annual_billing_month === null || row.annual_billing_month === undefined
-                ? undefined
-                : Number(row.annual_billing_month),
-            ...mapEstimatedRoleHours({
-              legacy: row.estimated_monthly_hours,
-              bookkeeper: row.estimated_bookkeeper_hours,
-              accountant: row.estimated_accountant_hours,
-              cfo: row.estimated_cfo_hours,
-            }),
-            // Legacy fields surfaced for back-compat reads + migration only.
-            planId: row.plan_id ?? null,
-            customMonthlyFee:
-              row.custom_monthly_fee === null || row.custom_monthly_fee === undefined
-                ? null
-                : Number(row.custom_monthly_fee),
-            assignedEmployeeIds: assignedTeam,
-            assignedBookkeeperIds: assignedTeam,
-          email: row.email ?? '',
-          contactName: row.contact_name ?? '',
-          phone: row.phone ?? '',
-          addressLine1: row.address_line1 ?? '',
-          addressLine2: row.address_line2 ?? '',
-          city: row.city ?? '',
-          state: row.state ?? '',
-          postalCode: row.postal_code ?? '',
-          logoUrl: row.logo_url ?? '',
-          paymentTerms: row.payment_terms ?? '',
-          footerNote: row.footer_note ?? '',
-          quickbooksPayUrl: row.quickbooks_pay_url ?? '',
-            invoiceShowTimeBreakdown: row.invoice_show_time_breakdown ?? true,
-            invoiceTimeBreakdownMode: normalizeTimeBreakdownMode(row.invoice_time_breakdown_mode),
-            invoiceTimeBreakdownAmounts: row.invoice_time_breakdown_amounts ?? false,
-            invoiceHideInternalHours: row.invoice_hide_internal_hours ?? true,
-            invoiceGroupByCategory: row.invoice_group_by_category ?? false,
-            cardPaymentsEnabled: row.card_payments_enabled ?? false,
-            // Default 'active' when null so legacy/absent rows are never treated
-            // as prospects.
-            lifecycleStage: row.lifecycle_stage ?? 'active',
-            // Consolidated billing. Null is the ordinary client on both id
-            // columns; the boolean answers false for every row written before
-            // the column existed. Same shape `normalizeClientProfile` produces
-            // for the file backend — cardinal rule 1.
-            billToClientId: row.bill_to_client_id ?? null,
-            isBillingMaster: row.is_billing_master === true,
-            invoiceRecipientClientId: row.invoice_recipient_client_id ?? null,
-          }
-        }),
+        clients: clientsResult.rows.map(mapClientRow),
         timeEntries: timeEntriesResult.rows.map((row) => ({
           id: row.id,
           employeeId: row.user_id,
@@ -10989,6 +10994,72 @@ export class AppDataStore {
   }
 
   /**
+   * Point one invoice at a NEW Stripe Checkout session and hand back the id it
+   * used to point at, in a single write.
+   *
+   * WHY THIS IS NOT `applyInvoicePayment`. The pay link mints a fresh session on
+   * every open, and the caller has to expire the one it supersedes. Reading that
+   * id off a snapshot taken BEFORE the mint is a race with teeth: two clicks a
+   * second apart both read S0, mint SA and SB, both write (last one wins), and
+   * both expire S0 — leaving SA live and the invoice payable twice, which is the
+   * exact thing the whole persist-then-expire dance exists to prevent. The
+   * REPLACED value can only come from the write itself.
+   *
+   * `for update` inside the CTE takes the row lock before the update reads it,
+   * so two concurrent swaps serialize and the second one's `previous` is the
+   * first one's new id. A subquery in RETURNING would not be safe: it may be
+   * planned against the updated row.
+   *
+   * @param channel 'ach' (stripe_checkout_session_id) or 'card'
+   *   (stripe_card_session_id).
+   * @returns `{ invoice, previous }`, or null when there is no such invoice or
+   *   it is void — the same refusal `applyInvoicePayment` makes, for the same
+   *   reason (a late write must not revive a voided row).
+   */
+  async swapInvoiceCheckoutSession(invoiceId, { channel = 'ach', sessionId } = {}) {
+    if (!invoiceId || typeof sessionId !== 'string' || !sessionId) return null
+    const column = channel === 'card' ? 'stripe_card_session_id' : 'stripe_checkout_session_id'
+    const field = channel === 'card' ? 'stripeCardSessionId' : 'stripeCheckoutSessionId'
+
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `with prev as (
+           select id, ${column} as previous from invoices where id = $1 for update
+         )
+         update invoices
+            set ${column} = $2, updated_at = now()
+           from prev
+          where invoices.id = prev.id and invoices.status <> 'void'
+        returning prev.previous`,
+        [invoiceId, sessionId],
+      )
+      if (rows.length === 0) return null
+      const invoice = (await this.listInvoices()).find((entry) => entry.id === invoiceId) ?? null
+      return { invoice, previous: rows[0].previous ?? null }
+    }
+
+    // Read-modify-write, returning the value it replaced. Node is single
+    // threaded through this function up to the first await, and the file
+    // backend is a single process — what matters here is parity of the ANSWER.
+    const data = await readJson(localDataPath)
+    if (!Array.isArray(data.invoices)) data.invoices = []
+    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+    if (index === -1) return null
+    if (data.invoices[index].status === 'void') {
+      console.warn(`[invoices] swapInvoiceCheckoutSession skipped: ${invoiceId} is void`)
+      return null
+    }
+    const previous = data.invoices[index][field] ?? null
+    data.invoices[index] = {
+      ...data.invoices[index],
+      [field]: sessionId,
+      updatedAt: nowIso(),
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return { invoice: data.invoices[index], previous }
+  }
+
+  /**
    * Mark an invoice paid BY HAND — featreq-602d2c6e, for money that arrived
    * outside the app (a paper check, a bank transfer nobody linked, an invoice
    * that was never sent through the system at all).
@@ -11295,14 +11366,29 @@ export class AppDataStore {
     // logged on the same append-only trail but must not restart the payment
     // clock or rewrite a status the webhook just set.
     const marksSent = Boolean(ok) && !kind
-    // The past-due line this send would set, if this send turns out to be the
-    // first. Built with the SAME function generation uses, so the two dates are
-    // the same arithmetic and cannot drift apart; whether it is actually applied
-    // is decided from `sent_at` below, on each backend's own read.
-    const firstSendDueDate = marksSent
-      ? dueDateFromTerms(String(entry.at).slice(0, 10), null, DEFAULT_PAYMENT_WINDOW_DAYS)
-      : null
+    /**
+     * The past-due line this send would set, if this send turns out to be the
+     * first. Built with the SAME function generation uses, so the two dates are
+     * the same arithmetic and cannot drift apart; whether it is actually applied
+     * is decided from `sent_at` below, on each backend's own read.
+     *
+     * The CLIENT'S OWN TERMS go in, exactly as generation passes them. Passing
+     * null here floored every client at the firm's thirty days, so a Net 45
+     * client's first send moved their line FORWARD by fifteen days and the PDF
+     * printed "Net 45" over a 30-day date. `dueDateFromTerms` can only lengthen
+     * the window, never shorten it.
+     */
+    const firstSendDueDateFor = (terms) =>
+      marksSent
+        ? dueDateFromTerms(String(entry.at).slice(0, 10), terms ?? null, DEFAULT_PAYMENT_WINDOW_DAYS)
+        : null
     if (this.pool) {
+      // One row, and never a reason to fail a send that has already gone out:
+      // an unreadable client just means the firm's own window.
+      const sendClient = marksSent
+        ? await this.getClientById(current.clientId).catch(() => null)
+        : null
+      const firstSendDueDate = firstSendDueDateFor(sendClient?.paymentTerms)
       // The entry is APPENDED server-side, deliberately: `current` above is a
       // read, and building `[...current.emailLog, entry]` in JS means the log
       // is only as complete as that read was. It was not — `email_log` was
@@ -11319,6 +11405,15 @@ export class AppDataStore {
       // sends racing cannot both claim to be the first; and the `is not null`
       // on $5 means a re-send or a payment email can never blank a date that is
       // already there.
+      //
+      // `$5::date::text` AND NOT `$5::date`: `invoices.due_date` is a TEXT
+      // column, and Postgres rejects `case … then <date> else <text> end` at
+      // PARSE time — "CASE types text and date cannot be matched". That is not
+      // a bad row, it is every row: the statement never reaches the planner, so
+      // this one cast is the difference between every send working and every
+      // send 500ing in production. A bare `$5` does not work either ("could not
+      // determine data type of parameter"); the `::date` is what validates the
+      // parameter as a real date before it is stored as text.
       const { rowCount } = await this.pool.query(
         `update invoices
             set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
@@ -11327,7 +11422,7 @@ export class AppDataStore {
                 status = case when $3::boolean and status <> 'paid' and status <> 'processing'
                               then 'sent' else status end,
                 due_date = case when $3::boolean and sent_at is null and $5::date is not null
-                                then $5::date else due_date end,
+                                then $5::date::text else due_date end,
                 updated_at = now()
           where id = $1`,
         [invoiceId, JSON.stringify([entry]), marksSent, entry.at, firstSendDueDate],
@@ -11346,12 +11441,19 @@ export class AppDataStore {
     const status = marksSent && current.status !== 'paid' && current.status !== 'processing'
       ? 'sent'
       : current.status
+
+    const data = await readJson(localDataPath)
+    // The client's terms off the read this branch already had to do — no
+    // `this.read()`, which materializes recurring checklists and can write back.
+    const sendClient = marksSent
+      ? ((data.clients ?? []).find((client) => client.id === current.clientId) ?? null)
+      : null
+    const firstSendDueDate = firstSendDueDateFor(sendClient?.paymentTerms)
     // The same first-send rule as the Postgres branch: only an invoice that had
     // no `sentAt` before this call has its past-due line moved.
     const dueDate =
       marksSent && !current.sentAt && firstSendDueDate ? firstSendDueDate : current.dueDate
 
-    const data = await readJson(localDataPath)
     if (!Array.isArray(data.invoices)) data.invoices = []
     const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
     if (index === -1) return null
@@ -11637,7 +11739,8 @@ export class AppDataStore {
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update invoices
-            set pay_token = coalesce(pay_token, $2), updated_at = now()
+            set pay_token = coalesce(pay_token, $2),
+                updated_at = case when pay_token is null then now() else updated_at end
           where id = $1
         returning pay_token`,
         [invoiceId, candidate],
@@ -14206,6 +14309,29 @@ export class AppDataStore {
     stage.items = [...(stage.items ?? []), ...created]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return created
+  }
+
+  /**
+   * ONE client by id, in the same shape `read()` hands back — or null.
+   *
+   * The public pay route needs a single client (its name, its email, whether
+   * card payments are on) and used to get there through a full `read()`: every
+   * table in the workspace, assembled and mapped, so a stranger reloading a
+   * payment page could be told the invoice cannot be paid online. On Postgres
+   * this is one row; on the file backend it is the read that already had to
+   * happen.
+   */
+  async getClientById(clientId) {
+    if (!clientId) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${CLIENT_SELECT_COLUMNS} from clients where id = $1`,
+        [clientId],
+      )
+      return rows.length > 0 ? mapClientRow(rows[0]) : null
+    }
+    const data = await this.read()
+    return (data.clients ?? []).find((client) => client.id === clientId) ?? null
   }
 
   /**

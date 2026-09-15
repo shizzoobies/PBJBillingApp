@@ -159,8 +159,9 @@ describe('scoping', () => {
 
     expect(await screen.findByRole('region', { name: 'Invoices past due' })).toBeInTheDocument()
     // No period: past due is a question about every month, not the one on the
-    // top bar.
-    expect(mockList).toHaveBeenCalledWith()
+    // top bar. And `pastDue` — without it this asked for every invoice the firm
+    // has ever written, lines and email logs included, to render these rows.
+    expect(mockList).toHaveBeenCalledWith(undefined, { pastDue: true })
   })
 })
 

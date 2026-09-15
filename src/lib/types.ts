@@ -472,9 +472,34 @@ export type PersistedInvoice = {
    * server enforces that on save, so this is a fact to READ, never a lever.
    */
   appliedToInvoiceId: string | null
+  /**
+   * The invoice's DURABLE public name — what `/pay/<token>` is keyed on, minted
+   * on the first send (or by the Payment link button) and never changed after.
+   * Null until something mints it.
+   *
+   * Optional for the same reason `emailLog` is: both backends answer with the
+   * field, but the fixtures that build an invoice by hand predate it and it is
+   * not a field any of them are about.
+   */
+  payToken?: string | null
   createdAt: string | null
   updatedAt: string | null
 }
+
+/**
+ * What `GET /api/invoices?pastDue=1` answers with: the six fields the
+ * dashboard's past-due section prints, and nothing else.
+ *
+ * Deliberately NOT a `PersistedInvoice`. That section asks about every month
+ * the firm has ever billed, and the full rows carry lines, original lines and
+ * email logs — every one of them jsonb — to render a handful of list items.
+ * Which invoices qualify is decided server-side by the same `pastDueInvoice`
+ * rule the month run uses.
+ */
+export type PastDueInvoiceRow = Pick<
+  PersistedInvoice,
+  'id' | 'number' | 'clientId' | 'status' | 'dueDate' | 'sentAt' | 'total'
+>
 
 /** What the mail provider did with one message, in the log's own words. */
 export type InvoiceDeliveryEvent = 'sent' | 'delivered' | 'delayed' | 'bounced' | 'complained'

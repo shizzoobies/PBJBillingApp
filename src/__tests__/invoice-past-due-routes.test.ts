@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { listInvoicesRequest } from '../lib/api'
 
 /**
  * The hourly past-due notice, pinned at the level this repo can reach.
@@ -102,6 +103,100 @@ describe('the past-due scheduler', () => {
   // The bell is the source of truth; a mail failure must not take the tick down.
   it('swallows its own errors', () => {
     expect(block()).toContain("console.error('[invoices] past-due notice failed:'")
+  })
+
+  /**
+   * ONE FAILURE COSTS ONE NOTICE. The marker is written before anybody is told,
+   * so a throw out of `notify` is never retried — with a single try/catch
+   * around the whole loop, one owner's bad address would silently swallow every
+   * remaining invoice in that morning's batch, permanently.
+   */
+  it('gives each notice its own catch', () => {
+    const text = block()
+    const at = text.indexOf("notify(appDataStore, owner.id, 'invoice_past_due'")
+    expect(at).toBeGreaterThan(-1)
+    // The `try {` immediately above the call, and the catch immediately below.
+    expect(text.slice(at - 400, at)).toContain('try {')
+    expect(text.slice(at, at + 600)).toContain('past-due notice to ${owner.id} failed:')
+  })
+})
+
+/**
+ * `GET /api/invoices?pastDue=1` — what the dashboard's past-due section asks.
+ *
+ * Without the flag that section pulled EVERY invoice the firm has ever written
+ * (no period), each one carrying its lines, its original lines and its whole
+ * email log — all jsonb — to render a handful of list items. The filtering is
+ * server-side and uses `pastDueInvoice`, the same rule the month run and the
+ * scheduler use, so the three cannot name different invoices.
+ */
+describe('the dashboard’s past-due fetch', () => {
+  const listBlock = (() => {
+    const start = serverSource.indexOf("if (normalizedPath === '/api/invoices' && request.method === 'GET')")
+    expect(start, 'the invoices list route is gone').toBeGreaterThan(-1)
+    return serverSource.slice(start, start + 2200)
+  })()
+
+  it('filters with the shared rule and the server’s own day', () => {
+    expect(listBlock).toContain("requestUrl.searchParams.get('pastDue') === '1'")
+    expect(listBlock).toContain('pastDueInvoice(invoice, today)')
+    expect(listBlock).toContain('const today = todayIso()')
+  })
+
+  // The six fields the section prints, and nothing else — no jsonb over the
+  // wire for a list of client names and dates.
+  it('answers with the trimmed row, not the document', () => {
+    const at = listBlock.indexOf("requestUrl.searchParams.get('pastDue') === '1'")
+    const branch = listBlock.slice(at, at + 900)
+    for (const field of ['id:', 'number:', 'clientId:', 'status:', 'dueDate:', 'sentAt:', 'total:']) {
+      expect(branch).toContain(field)
+    }
+    expect(branch).not.toContain('lineItems')
+    expect(branch).not.toContain('emailLog')
+  })
+
+  // It is still owner-only, and the period branch is untouched.
+  it('keeps the owner gate and the period answer', () => {
+    expect(listBlock).toContain("session.user.role !== 'owner'")
+    expect(listBlock).toContain('period must look like 2026-08')
+  })
+})
+
+/** The other half: the URL the client actually asks for. */
+describe('listInvoicesRequest builds the query', () => {
+  let fetchMock: ReturnType<typeof vi.fn>
+  const requestedUrl = () => String(fetchMock.mock.calls[0][0])
+
+  beforeEach(() => {
+    fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ invoices: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('asks for nothing extra by default', async () => {
+    await listInvoicesRequest()
+    expect(requestedUrl()).toContain('/api/invoices')
+    expect(requestedUrl()).not.toContain('pastDue')
+  })
+
+  it('carries the period on its own', async () => {
+    await listInvoicesRequest('2026-08')
+    expect(requestedUrl()).toContain('period=2026-08')
+  })
+
+  it('carries pastDue=1, and both together', async () => {
+    await listInvoicesRequest(undefined, { pastDue: true })
+    expect(requestedUrl()).toContain('pastDue=1')
+    expect(requestedUrl()).not.toContain('period=')
   })
 })
 

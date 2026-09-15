@@ -2937,8 +2937,12 @@ function InvoiceEditor({
           notice above is the one to act on. */}
       {pastDue ? (
         <p className="invoice-run-error invoice-run-past-due" role="alert">
-          <strong>Past due</strong>: sent {formatSentOn(invoice.sentAt ?? '')}, past the
-          30-day line since {formatPastDueLine(pastDue.dueDate)}.
+          {/* `sentAt` can be null here: the Payment link button stamps a date,
+              but an invoice whose status was set another way may carry none,
+              and `formatSentOn('')` renders "sent , past the…". */}
+          <strong>Past due</strong>
+          {invoice.sentAt ? `: sent ${formatSentOn(invoice.sentAt)}, past the` : ': past the'} 30-day
+          line since {formatPastDueLine(pastDue.dueDate)}.
           <br />
           Send again to nudge, or Mark paid if it was settled another way.
         </p>

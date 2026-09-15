@@ -1669,9 +1669,11 @@ Clients page meanwhile. Owner-only.
 > **The exception is a client whose own payment terms name a LONGER window.**
 > "Net 45" on a client's record means 45 days: that client's invoice prints
 > their own wording and their own due date, because it is the window they were
-> promised. Terms that are shorter ("Net 15"), that ask for payment now ("Due
-> on receipt", "Due on Demand"), or that are blank all produce the same thing —
-> an invoice that asks for payment on receipt and is chased after 30 days.
+> promised — and the first send re-stamps 45 days from the day it went out, not
+> 30, so the date and the printed wording always agree. Terms that are shorter
+> ("Net 15"), that ask for payment now ("Due on receipt", "Due on Demand"), or
+> that are blank all produce the same thing — an invoice that asks for payment
+> on receipt and is chased after 30 days.
 >
 > **Moving between months:** the month picker has a back arrow and a forward
 > arrow flanking it — one press steps the run one month and the list reloads to
@@ -2015,10 +2017,25 @@ Clients page meanwhile. Owner-only.
 > stop working: the button used to carry a Stripe address, and those expire
 > about a day after they are made.
 >
-> **After the client pays, the payment page thanks them** and says the invoice
-> will read Processing within a few minutes - it does not send them into the
-> app, which they cannot sign into. A client who backs out of the payment page
-> instead sees "Nothing was charged" and a button to start again.
+> **After the client pays, the payment page thanks them** and says that if they
+> have just finished checkout the payment is being confirmed with the bank, and
+> that the page will show Paid once it clears - it does not claim the money has
+> arrived, because that page can be reached before the bank has said anything,
+> and it does not send them into the app, which they cannot sign into. A client
+> who backs out of the payment page instead sees "Nothing was charged" and a
+> button to start again.
+>
+> **A card payer comes back to the card page.** A client whose invoice offered
+> both ways to pay opened the card link (`app.pbjsa.com/pay/.../card`), and
+> backing out or finishing returns them to that same card address — so if they
+> try again they get the card page they chose, with the processing fee shown,
+> rather than being quietly switched to bank transfer.
+>
+> **Opening a payment link is written into the invoice's history** as a
+> "Payment link opened" line, at most once a day however many times the client
+> reloads it. It is NOT a send and never marks the invoice sent - it is the
+> evidence for "we never got the invoice" when the invoice was in fact opened.
+> Only a real browser visit is logged; link checkers and mail scanners are not.
 >
 > **Send (email the invoice).** In the month-run editor, next to Payment link,
 > there is a **Send** button. It emails the invoice to **every address attached

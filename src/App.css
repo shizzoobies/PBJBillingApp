@@ -11968,6 +11968,15 @@ tr.is-inactive-client .client-name-link {
   padding: 9px 12px;
 }
 
+/* Past the firm's own thirty-day line — the same red as a failed payment,
+   because both end in somebody phoning a client, but marked with a rule down
+   the side so the two notices are not mistaken for each other at a glance. */
+.invoice-run-past-due {
+  border-left: 3px solid rgba(197, 48, 48, 0.55);
+  border-radius: 0 8px 8px 0;
+  padding-left: 9px;
+}
+
 .invoice-run-note,
 .invoice-run-empty {
   color: var(--muted);
