@@ -1,7 +1,8 @@
 # Handoff — PBJBillingApp
 
 Written 2026-07-21, last updated 2026-09-15. Everything below is committed on
-local `main`; as of 2026-09-15 eleven commits are NOT yet pushed (§0 says what
+local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
+UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
 change — several rules here are non-obvious and breaking them has caused a
 production outage before. **If you do only one extra thing, read §7's
@@ -24,8 +25,11 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-15):** local `main` = `c175447`, and **eleven
-commits are UNPUSHED as of this entry** — production still serves `5933d5d`.
+**State right now (2026-09-15):** local `main` = `c175447`, and **those
+eleven commits were PUSHED at ~16:20 UTC** — the deploy was in flight as this
+was written, so production may still have been serving `5933d5d` for a few
+minutes after. `curl -s https://app.pbjsa.com/health` settles it: when the
+body's `commit` reads `c175447`, the release is live.
 Suite **3241 tests / 182 files**, green (3010 / 176 the night before). One
 autopilot session worked Alex's direct ask — "clients let their invoices time
 out because we sent them with the standard 1 week pay window; up that to 30
@@ -35,10 +39,10 @@ headline is that **there was never a 7-day window to fix** (the default was
 already period end + 30 days; the real timeouts are Stripe's), and that three
 of the five tracker items were interpretation, not code.
 
-**First actions for the next session that has push rights**, in this order:
+**First actions for the next session that has production access**, in this
+order — the push is already done, so this starts at the deploy check:
 
 ```bash
-git push origin main
 # poll until the body's "commit" reads c175447 (two to four minutes):
 curl -s https://app.pbjsa.com/health
 # the manifest changed in eight of the eleven commits, so:
@@ -59,8 +63,15 @@ node scripts/prod/tracker-update.mjs --file-shipped --type feature \
 Add `--dry-run` to any of those to see the row and the planned change before it
 writes. **Expect one email on the first boot of the new build:**
 INV-2026-08-023 (Ride Right, $513.40) is the only sent invoice past due today,
-so each owner gets one `invoice_past_due` message for it. That is the feature
-working, not an incident.
+so each owner gets one `invoice_past_due` message for it. The whole burst is
+therefore two messages — one invoice × two owners. That is the feature working,
+not an incident.
+
+If it ever is an incident, **`INVOICE_PAST_DUE_NOTICES=off`** in Railway stops
+the past-due notices without touching the rest of the invoice alerts. The
+once-per-invoice marker is written only as a notice goes out, and is now written
+by the same statement that checks for it, so nothing is silently spent while the
+switch is off and two containers cannot both notify about one invoice.
 
 Then the queue:
 
@@ -379,7 +390,8 @@ with instructions rather than failing. Run it by hand after any print change.
 told due on receipt, the 30-day line is internal, the Pay link is durable, Past
 due is a derived tab plus a dashboard section plus one email, preview-as was
 the Allison leak, five tracker items closed. Eleven commits on local `main`,
-UNPUSHED as of this entry — production serves `5933d5d`.** Suite 3241 tests /
+PUSHED 2026-09-15 ~16:20 UTC with the deploy in flight as this was written —
+production was still serving `5933d5d` at that moment.** Suite 3241 tests /
 182 files, green (3010 / 176 the night before).
 
 Alex's ask opened it: "clients let their invoices time out because we sent them

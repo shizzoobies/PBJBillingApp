@@ -1003,6 +1003,14 @@ function fakePostgres({
       const found = invoices.find((invoice) => invoice.pay_token === params?.[0])
       return { rows: found ? [found] : [] }
     }
+    // `recordInvoicePayLinkOpened`'s single-row read, and for the same two
+    // reasons: before the general invoices select, and actually filtering.
+    // Answering every row would let a pay link for an invoice that is not there
+    // file an open against somebody else's.
+    if (/^select\b[\s\S]*\bfrom invoices where id = \$1$/i.test(trimmed)) {
+      const found = invoices.find((invoice) => invoice.id === params?.[0])
+      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
+    }
     if (/^select\b[\s\S]*\bfrom invoices\b/i.test(trimmed)) {
       return { rows: invoices }
     }
@@ -1034,6 +1042,26 @@ function fakePostgres({
     }
     if (/^update invoices\b[\s\S]*\breturning id$/i.test(trimmed)) {
       return { rows: invoices.map((invoice) => ({ id: invoice.id })) }
+    }
+    // The two statements that hand back the row they WROTE rather than
+    // re-listing every invoice afterwards — `recordInvoiceSent` and
+    // `recordInvoicePastDueNoticed`. The fake has to answer with the row AND a
+    // rowCount, or the store reads its own write as a miss and returns null.
+    //
+    // The past-due marker's `@>` guard is REPRODUCED, not waved through: the
+    // entire point of that statement is that a second container matches no row,
+    // and a fake that answered anyway would let its removal pass CI. The row is
+    // copied rather than mutated — these fixtures are shared across tests.
+    if (/^update invoices\b[\s\S]*\breturning id, client_id\b/i.test(trimmed)) {
+      const found = invoices.find((invoice) => invoice.id === params?.[0])
+      if (!found) return { rows: [], rowCount: 0 }
+      const guarded = /@> '\[\{"kind":"past-due"\}\]'::jsonb/i.test(trimmed)
+      if (guarded && (found.email_log ?? []).some((entry) => entry?.kind === 'past-due')) {
+        return { rows: [], rowCount: 0 }
+      }
+      const appended = JSON.parse(params?.[1] ?? '[]')
+      const merged = { ...found, email_log: [...(found.email_log ?? []), ...appended] }
+      return { rows: [merged], rowCount: 1 }
     }
     // `swapInvoiceCheckoutSession`. The fake answers with the row's value as it
     // stood BEFORE the write and then applies the new one, because the one
@@ -1858,6 +1886,68 @@ describe('recordInvoicePayLinkOpened (file backend)', () => {
   it('answers null for an invoice that does not exist', async () => {
     await seedInvoice()
     expect(await store.recordInvoicePayLinkOpened('inv-nope')).toBeNull()
+  })
+})
+
+/**
+ * The same method on Postgres, where the COST is the point: this runs on every
+ * load of a public pay link, and it used to open with a full `listInvoices()`
+ * scan before handing off to `recordInvoiceSent`, which scanned twice more —
+ * three passes over every invoice the firm has ever issued, to answer a
+ * question one row wide.
+ */
+describe('recordInvoicePayLinkOpened (postgres branch)', () => {
+  const invoiceReads = (fake) => fake.matching(/^select\b[\s\S]*\bfrom invoices\b/i)
+
+  it('opens with one row by id, not a scan', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    const opened = await postgresStore(fake).recordInvoicePayLinkOpened('inv-1')
+
+    const reads = invoiceReads(fake)
+    expect(reads[0].text).toMatch(/from invoices where id = \$1$/)
+    expect(reads[0].params).toEqual(['inv-1'])
+    // That read, plus the void pre-check inside `recordInvoiceSent` — one full
+    // scan on this path where there were three.
+    expect(reads.filter((read) => /order by number/i.test(read.text))).toHaveLength(1)
+    expect(reads).toHaveLength(2)
+    expect(opened.id).toBe('inv-1')
+  })
+
+  // Tagged `link`, so nothing downstream can read an open as a send.
+  it('files the open as a tagged entry that marks nothing sent', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoicePayLinkOpened('inv-1')
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(JSON.parse(update.params[1])[0]).toMatchObject({
+      kind: 'link',
+      ok: true,
+      subject: 'Payment link opened',
+    })
+    expect(update.params[2]).toBe(false)
+  })
+
+  it('answers null for an invoice that is not there, and writes nothing', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    expect(await postgresStore(fake).recordInvoicePayLinkOpened('inv-nope')).toBeNull()
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+  })
+
+  it('files nothing a second time on the same day', async () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const fake = fakePostgres({
+      invoices: [
+        {
+          ...existingInvoice,
+          email_log: [
+            { kind: 'link', ok: true, subject: 'Payment link opened', at: `${today}T01:00:00.000Z` },
+          ],
+        },
+      ],
+    })
+    await postgresStore(fake).recordInvoicePayLinkOpened('inv-1')
+
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
   })
 })
 
@@ -3005,6 +3095,26 @@ describe('recordInvoiceSent statement shape (postgres branch)', () => {
     expect(JSON.parse(update.params[1])[0]).not.toHaveProperty('kind')
   })
 
+  // The send statement hands back the row it WROTE. It used to re-list every
+  // invoice the firm has ever issued to find that row again — a second full
+  // scan, on a path the public pay link takes.
+  it('returns the updated row off the statement, with no second read', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    const updated = await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+    })
+
+    expect(fake.matching(/^update invoices/i)[0].text).toMatch(
+      /returning id, client_id, period, number, kind, status/,
+    )
+    expect(updated.id).toBe('inv-1')
+    expect(updated.emailLog).toHaveLength(1)
+    // The void pre-check before the write, and nothing after it.
+    expect(fake.matching(/^select\b[\s\S]*\bfrom invoices\b/i)).toHaveLength(1)
+  })
+
   // The provider's id is the join key every delivery event is matched on. An
   // entry written without it is an event we can never place.
   it('keeps the mail provider’s message id on the entry', async () => {
@@ -3359,13 +3469,18 @@ describe('recordInvoicePastDueNoticed (file backend)', () => {
   })
 
   // One email per invoice, ever — the hourly check asks this question every
-  // hour until the invoice is paid.
-  it('is idempotent: a second call writes nothing', async () => {
+  // hour until the invoice is paid. The ANSWER is what carries that rule: the
+  // scheduler notifies on a truthy result, so a second call has to come back
+  // null. Handing the invoice back made its `if (!marked) continue` unreachable.
+  it('is idempotent: a second call returns null and appends nothing', async () => {
     await seed()
-    await store.recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+    const first = await store.recordInvoicePastDueNoticed('inv-1', '2026-10-31')
     const again = await store.recordInvoicePastDueNoticed('inv-1', '2026-10-31')
 
-    expect(again.emailLog.filter((logged) => logged.kind === 'past-due')).toHaveLength(1)
+    expect(first).not.toBeNull()
+    expect(again).toBeNull()
+    const stored = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-1')
+    expect(stored.emailLog.filter((logged) => logged.kind === 'past-due')).toHaveLength(1)
   })
 
   it('falls back to the invoice\u2019s own due date when none is given', async () => {
@@ -3383,20 +3498,65 @@ describe('recordInvoicePastDueNoticed (file backend)', () => {
 })
 
 describe('recordInvoicePastDueNoticed statement shape (postgres branch)', () => {
+  /** Everything the statement WRITES — the clause ahead of `returning`. */
+  const written = (text) => String(text).split(/\breturning\b/i)[0]
+
   it('appends to email_log and touches nothing else', async () => {
     const fake = fakePostgres({ invoices: [existingInvoice] })
-    await postgresStore(fake).recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+    const marked = await postgresStore(fake).recordInvoicePastDueNoticed('inv-1', '2026-10-31')
 
     const update = fake.matching(/^update invoices/i)[0]
     expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
-    // The two columns it is allowed to write, and no third.
-    expect(update.text).not.toMatch(/\bstatus\b/)
-    expect(update.text).not.toMatch(/\bdue_date\b/)
+    // The two columns it is allowed to WRITE, and no third. Asked of the write
+    // clause alone now that the statement hands the whole row back: every
+    // column is named after `returning`, and none of them may appear before it.
+    expect(written(update.text)).not.toMatch(/\bstatus\b/)
+    expect(written(update.text)).not.toMatch(/\bdue_date\b/)
     expect(JSON.parse(update.params[1])[0]).toMatchObject({
       kind: 'past-due',
       event: 'noticed',
       dueDate: '2026-10-31',
     })
+    // The row it wrote, off the statement that wrote it — no read afterwards.
+    expect(marked?.id).toBe('inv-1')
+    expect(fake.matching(/^select\b[\s\S]*\bfrom invoices\b/i)).toHaveLength(1)
+  })
+
+  // THE DE-DUP. Two containers run this scheduler and both wake on the hour, so
+  // both can read the same unmarked invoice before either writes. The check has
+  // to live in the WHERE, which is the only place one of them can lose it.
+  it('makes the once-ever check part of the write itself', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+
+    const update = fake.matching(/^update invoices/i)[0]
+    // `coalesce` is load-bearing: `null @> …` is NULL and `not NULL` matches
+    // nothing, which would silence every invoice whose log column is still null.
+    expect(written(update.text).replace(/\s+/g, ' ')).toContain(
+      `and not (coalesce(email_log, '[]'::jsonb) @> '[{"kind":"past-due"}]'::jsonb)`,
+    )
+  })
+
+  // The loser of that race: the row is already marked, the statement matches
+  // nothing, and the store has to say so rather than hand back a truthy invoice
+  // — the scheduler reads truthy as "you may email the owners".
+  it('answers null when the guard matches no row', async () => {
+    const alreadyNoticed = {
+      ...existingInvoice,
+      email_log: [
+        { kind: 'past-due', event: 'noticed', at: '2026-10-31T12:00:00.000Z', dueDate: '2026-10-31' },
+      ],
+    }
+    const fake = fakePostgres({ invoices: [alreadyNoticed] })
+    const pgStore = postgresStore(fake)
+    // Straight at the statement, with the pre-read's own early return taken out
+    // of the way: this is the container that read the invoice a moment before
+    // the other one marked it.
+    pgStore.listInvoices = async () => [{ id: 'inv-1', emailLog: [] }]
+    const marked = await pgStore.recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+
+    expect(marked).toBeNull()
+    expect(alreadyNoticed.email_log.filter((entry) => entry.kind === 'past-due')).toHaveLength(1)
   })
 
   it('writes nothing at all for an invoice already noticed', async () => {
@@ -3410,8 +3570,9 @@ describe('recordInvoicePastDueNoticed statement shape (postgres branch)', () => 
         },
       ],
     })
-    await postgresStore(fake).recordInvoicePastDueNoticed('inv-1', '2026-10-31')
+    const marked = await postgresStore(fake).recordInvoicePastDueNoticed('inv-1', '2026-10-31')
 
+    expect(marked).toBeNull()
     expect(fake.matching(/^update invoices/i)).toHaveLength(0)
   })
 })

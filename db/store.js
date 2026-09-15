@@ -9583,10 +9583,16 @@ export class AppDataStore {
             continue
           }
           // Opted out of platform invoicing: off the merge for the same reason
-          // a retired sub is. Silent here because the sub's OWN iteration
-          // already reported 'opted-out' on this very run — a second row would
-          // say the same thing twice.
-          if (sub.platformInvoicingOptOut === true) continue
+          // a retired sub is. Silent on a MONTH-WIDE run because the sub's own
+          // iteration already reported 'opted-out' on that run — a second row
+          // would say the same thing twice. On a single-client run OF THE
+          // MASTER the sub gets no iteration of its own, so without this line
+          // it simply vanishes off the invoice with nothing said — the same
+          // reason 'client-inactive' is reported under `if (clientId)` above.
+          if (sub.platformInvoicingOptOut === true) {
+            if (clientId) skipped.push({ clientId: sub.id, reason: 'opted-out' })
+            continue
+          }
           // THE MIGRATION MONTH. 2026-08 was billed per-company before the
           // master row existed, and those invoices are deliberately left alone
           // (plan §0). Merging a sub that still holds a LIVE invoice for this
@@ -11520,7 +11526,13 @@ export class AppDataStore {
       // send 500ing in production. A bare `$5` does not work either ("could not
       // determine data type of parameter"); the `::date` is what validates the
       // parameter as a real date before it is stored as text.
-      const { rowCount } = await this.pool.query(
+      //
+      // `returning` rather than a second read. The row this hands back is the
+      // row the statement just wrote, which is both cheaper — the pay link used
+      // to scan every invoice the firm has issued three times over — and more
+      // honest: a re-list can only show what the table looks like afterwards,
+      // which is not necessarily what this write did.
+      const { rows, rowCount } = await this.pool.query(
         `update invoices
             set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
                 sent_at = case when $3::boolean then coalesce(sent_at, $4::timestamptz)
@@ -11530,11 +11542,12 @@ export class AppDataStore {
                 due_date = case when $3::boolean and sent_at is null and $5::date is not null
                                 then $5::date::text else due_date end,
                 updated_at = now()
-          where id = $1`,
+          where id = $1
+          returning ${INVOICE_SELECT_COLUMNS}`,
         [invoiceId, JSON.stringify([entry]), marksSent, entry.at, firstSendDueDate],
       )
       if (rowCount === 0) return null
-      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+      return mapInvoiceRow(rows[0])
     }
 
     // Same semantics, spelled out in JS. The file backend's read IS the whole
@@ -11741,13 +11754,19 @@ export class AppDataStore {
    * is one email per invoice, ever. If she re-sends and the line moves, that is
    * a new conversation with the client, not a second alert.
    *
-   * @returns the invoice, or null when there is no such invoice
+   * @returns the invoice when THIS call is the one that marked it, and null
+   * otherwise — no such invoice, or somebody marked it first. The caller
+   * notifies only on a truthy answer, so a truthy "already marked" would be a
+   * second email; that is exactly the bug this used to have.
    */
   async recordInvoicePastDueNoticed(invoiceId, dueDate = null) {
     if (!invoiceId) return null
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
-    if ((current.emailLog ?? []).some((logged) => logged?.kind === 'past-due')) return current
+    // NULL, not the invoice. The scheduler's `if (!marked) continue` is the only
+    // thing standing between an unpaid invoice and an hourly email, and handing
+    // back a truthy invoice here made that guard unreachable.
+    if ((current.emailLog ?? []).some((logged) => logged?.kind === 'past-due')) return null
 
     const entry = {
       kind: 'past-due',
@@ -11759,21 +11778,39 @@ export class AppDataStore {
     if (this.pool) {
       // Appended in SQL like every other entry on this log, and naming no other
       // column than the log and `updated_at`.
-      const { rowCount } = await this.pool.query(
+      //
+      // The `@>` in the WHERE is the de-dup ITSELF, not a second opinion on the
+      // read above. The read is a snapshot: two containers run this scheduler,
+      // both wake on the hour, and both can see the same unmarked invoice
+      // before either writes — read-then-write lets both of them notify. Here
+      // the check and the marker are one statement, so the loser matches no row
+      // and is told so.
+      //
+      // `coalesce` is load-bearing: `null @> …` is NULL and `not NULL` never
+      // matches, so without it every invoice whose log column is still null
+      // would be silently skipped.
+      const { rows, rowCount } = await this.pool.query(
         `update invoices
             set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
                 updated_at = now()
-          where id = $1`,
+          where id = $1
+            and not (coalesce(email_log, '[]'::jsonb) @> '[{"kind":"past-due"}]'::jsonb)
+          returning ${INVOICE_SELECT_COLUMNS}`,
         [invoiceId, JSON.stringify([entry])],
       )
       if (rowCount === 0) return null
-      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+      return mapInvoiceRow(rows[0])
     }
 
     const data = await readJson(localDataPath)
     if (!Array.isArray(data.invoices)) data.invoices = []
     const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
     if (index === -1) return null
+    // The same once-ever guard the statement above carries, asked of the file as
+    // it is NOW rather than of the snapshot the pre-read took.
+    if ((data.invoices[index].emailLog ?? []).some((logged) => logged?.kind === 'past-due')) {
+      return null
+    }
     data.invoices[index] = {
       ...data.invoices[index],
       emailLog: [...(data.invoices[index].emailLog ?? []), entry],
@@ -11904,7 +11941,24 @@ export class AppDataStore {
    * log nobody reads.
    */
   async recordInvoicePayLinkOpened(invoiceId) {
-    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    let current = null
+    if (this.pool) {
+      // ONE ROW. This runs on every load of a public pay link — a durable URL a
+      // client may reload a dozen times while deciding — and all it has to know
+      // is what today's entries on THIS invoice's log look like. Scanning the
+      // whole invoices table to find that out, and then handing off to
+      // `recordInvoiceSent`, which scanned it twice more, made three full
+      // passes of an answer that is one row wide.
+      const { rows } = await this.pool.query(
+        `select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1`,
+        [invoiceId],
+      )
+      current = rows.length > 0 ? mapInvoiceRow(rows[0]) : null
+    } else {
+      // Unchanged on the file backend: there, the whole file is the read either
+      // way, so a narrower question buys nothing.
+      current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
     if (!current) return null
     const today = nowIso().slice(0, 10)
     const alreadyToday = (current.emailLog ?? []).some(
@@ -14441,8 +14495,15 @@ export class AppDataStore {
       )
       return rows.length > 0 ? mapClientRow(rows[0]) : null
     }
-    const data = await this.read()
-    return (data.clients ?? []).find((client) => client.id === clientId) ?? null
+    // `readJson`, NOT `this.read()`. The public pay route is a caller, and
+    // `read()` materializes recurring checklists and can write them back — a
+    // stranger reloading a payment page must not be able to provoke a workspace
+    // write. `recordInvoiceSent`'s file branch reads the file directly for the
+    // same reason. `normalizeClientProfile` is what `read()` would have applied,
+    // and is what keeps the promise above that this is the same shape.
+    const data = await readJson(localDataPath)
+    const found = (data.clients ?? []).find((client) => client.id === clientId)
+    return found ? normalizeClientProfile(found) : null
   }
 
   /**

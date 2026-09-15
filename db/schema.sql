@@ -78,6 +78,14 @@ alter table clients add column if not exists card_payments_enabled boolean not n
 -- Per-client opt-out from platform invoicing. Off by default: every client is
 -- invoiced from here until someone says this one is billed outside the app.
 alter table clients add column if not exists platform_invoicing_opt_out boolean not null default false;
+-- The Stripe customer a client's payments are filed under, remembered so the
+-- next invoice reuses it instead of creating a second customer for the same
+-- company. Null until they have paid once.
+--
+-- Like every statement in this file it is a MIRROR, not the migration: the
+-- authoritative path is `initialize()` in db/store.js, which is what production
+-- actually runs. A column added there and not here drifts silently.
+alter table clients add column if not exists stripe_customer_id text;
 
 create table if not exists client_assignments (
   client_id text not null references clients(id) on delete cascade,

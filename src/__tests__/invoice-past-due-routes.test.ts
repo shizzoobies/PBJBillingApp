@@ -49,6 +49,18 @@ describe('the past-due scheduler', () => {
     expect(block()).toContain('setInterval(maybeNotifyPastDueInvoices, 60 * 60 * 1000)')
   })
 
+  // The off switch, the same shape as the weekly digest's ASSISTANT_DIGEST=off
+  // above it. FIRST line of the try, ahead of the mail gate and every read, so
+  // switching it off costs nothing and — because the once-per-invoice marker is
+  // written only as a notice goes out — spends no marker while it is off.
+  it('can be switched off with one environment variable', () => {
+    const text = block()
+    const off = text.indexOf('process.env.INVOICE_PAST_DUE_NOTICES')
+    expect(off).toBeGreaterThan(-1)
+    expect(text.slice(off, off + 120)).toContain("=== 'off'")
+    expect(off).toBeLessThan(text.indexOf('!process.env.RESEND_API_KEY'))
+  })
+
   // No mail configuration means no notices at all — a dev machine running this
   // must not start mailing the firm's owners.
   it('is gated on the mail environment before it reads anything', () => {

@@ -2695,7 +2695,10 @@ Clients page meanwhile. Owner-only.
   invoice number, the client, the total and the line it passed, links to the
   Invoices page, and arrives **once per invoice, ever** — the app checks hourly
   and remembers which invoices it has already mentioned, so nothing repeats
-  while a bill goes unpaid.
+  while a bill goes unpaid. The remembering and the sending are one step, so two
+  app instances running at once still produce one notice. Past-due notices can
+  be switched off entirely without touching the rest of the invoice alerts, by
+  setting the server's `INVOICE_PAST_DUE_NOTICES` to `off`.
 - **Skipped recurring tasks** (the "skippedTasks" toggle): covers both halves of
   the quiet-skip flow — a recurring task being skipped for a cycle (the owner
   always; an accountant when a bookkeeper skips on a client that accountant is

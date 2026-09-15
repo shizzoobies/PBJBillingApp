@@ -11495,6 +11495,12 @@ setTimeout(() => void maybeSendWeeklyDigest(), 30 * 1000).unref?.()
 // derived from today's date every time it is asked, and this scheduler's only
 // persistent trace is a `kind: 'past-due'` marker on the invoice's email log.
 //
+// Switch it off with INVOICE_PAST_DUE_NOTICES=off, the same shape as the
+// digest's ASSISTANT_DIGEST=off above. This is the lever to reach for if the
+// notices ever start arriving wrong — the marker is written only as a notice
+// goes out, so switching this off buys time without spending the once-per-
+// invoice marker on invoices nobody was ever told about.
+//
 // Server-side "today" is `todayIso()` (UTC). The browser's is its own local day,
 // which means the two can disagree for a few hours either side of midnight —
 // accepted: a notice an hour early or late about a thirty-day line is not a
@@ -11502,6 +11508,7 @@ setTimeout(() => void maybeSendWeeklyDigest(), 30 * 1000).unref?.()
 // both callers honest about which day they mean.
 async function maybeNotifyPastDueInvoices() {
   try {
+    if (String(process.env.INVOICE_PAST_DUE_NOTICES || '').toLowerCase() === 'off') return
     if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) return
     const today = todayIso()
     const invoices = await appDataStore.listInvoices()
