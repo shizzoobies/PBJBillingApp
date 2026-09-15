@@ -1,0 +1,7 @@
+[2026-09-15 - you were right again, and this time it was the app lying to you] Checked against the live data first: Allison's own login shows exactly one client on the Invoice Recap (Skyline Roofing) for August and nothing for September, because her team list is Skyline only. So if you saw more than that under her name, you were almost certainly using "Preview their dashboard" from the Team page. That is the bug: preview mode changed the name at the top and the sidebar, but the Invoice Recap (and the notification bell, and the "Waiting on you" list) kept answering with YOUR owner view. So it showed you all 37 August invoices while saying "Previewing as Allison".
+
+FIXED (commit a0e4477 + 0f68aef): every page you open while previewing someone now shows that person's data, and any page that was not built for preview refuses instead of quietly showing owner data. Preview Allison again and the recap should show Skyline only.
+
+One question so we can close this for good: when you saw the extra clients, was the orange "Previewing as Allison / Exit preview" bar across the top? If it was NOT there and you were looking at Allison's actual login, tell Alex which client names you saw and we will chase it further.
+
+Team picking: your three team saves on 5 Sunset this morning went through, but each one was followed by a "stale tab" refusal, so anything else you changed in that tab at the same time may not have saved. A fresh tab fixes that.

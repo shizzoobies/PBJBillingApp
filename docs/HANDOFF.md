@@ -1,7 +1,7 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-09-14. Everything below is committed on
-local `main`; as of 2026-09-14 eight commits are NOT yet pushed (§0 says what
+Written 2026-07-21, last updated 2026-09-15. Everything below is committed on
+local `main`; as of 2026-09-15 eleven commits are NOT yet pushed (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
 change — several rules here are non-obvious and breaking them has caused a
 production outage before. **If you do only one extra thing, read §7's
@@ -24,77 +24,92 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-14):** local `main` = `7f6b777`, and **seven commits
-are UNPUSHED** — production still serves `a58b33d`. The session that built them
-ran under a permission classifier that refused `git push` (see "The permission
-classifier" below), so every step of the ritual short of the push is done and
-none of it is deployed. Suite **3010 tests / 176 files**, green. Four planned
-tracker items were built in one night for Alex's 2026-09-15 meeting with
-Brittany: Client Recap's active-clients picker (`7c52aa6`), the Checklists
-Push button (`4fcfc5e`, hardened in `bcfea18`), and the invoice hours review
-panel (`d0cbf19`, fixed in `7f6b777`) — plus a health-test repair (`69bea34`)
-and the committed tracker-write script (`678478c`). Read the 2026-09-14 entry
-in §5 first.
+**State right now (2026-09-15):** local `main` = `c175447`, and **eleven
+commits are UNPUSHED as of this entry** — production still serves `5933d5d`.
+Suite **3241 tests / 182 files**, green (3010 / 176 the night before). One
+autopilot session worked Alex's direct ask — "clients let their invoices time
+out because we sent them with the standard 1 week pay window; up that to 30
+days", plus "tell us when a sent invoice has timed out" — and five tracker
+items that had come back planned. Read the 2026-09-15 entry in §5 first: the
+headline is that **there was never a 7-day window to fix** (the default was
+already period end + 30 days; the real timeouts are Stripe's), and that three
+of the five tracker items were interpretation, not code.
 
 **First actions for the next session that has push rights**, in this order:
 
 ```bash
 git push origin main
-# poll until the body's "commit" reads 7f6b777 (two to four minutes):
+# poll until the body's "commit" reads c175447 (two to four minutes):
 curl -s https://app.pbjsa.com/health
-# the manifest changed in four of the seven commits, so:
+# the manifest changed in eight of the eleven commits, so:
 node scripts/provision-voice-agent.mjs
-# then the four tracker flips (the dev notes are committed):
-node scripts/prod/tracker-update.mjs featreq-0c2d4ce5 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-14-featreq-0c2d4ce5-dev-note.txt
-node scripts/prod/tracker-update.mjs featreq-60f24838 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-14-featreq-60f24838-dev-note.txt
-node scripts/prod/tracker-update.mjs featreq-68638ed2 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-14-featreq-68638ed2-dev-note.txt
-node scripts/prod/tracker-update.mjs featreq-8cec48db --status shipped --dev-notes-file docs/prod-snapshots/2026-09-14-featreq-8cec48db-dev-note.txt
+# then the five tracker flips (the dev notes are committed):
+node scripts/prod/tracker-update.mjs featreq-0c2d4ce5 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-0c2d4ce5-dev-note.txt
+node scripts/prod/tracker-update.mjs featreq-68638ed2 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-68638ed2-dev-note.txt
+node scripts/prod/tracker-update.mjs featreq-60f24838 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-60f24838-dev-note.txt
+node scripts/prod/tracker-update.mjs featreq-006f12f6 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-006f12f6-dev-note.txt
+node scripts/prod/tracker-update.mjs featreq-160e3252 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-160e3252-dev-note.txt
+# then file a shipped record for Alex's direct ask, which never had a tracker
+# row of its own (the pay window, the durable Pay link and Past due):
+node scripts/prod/tracker-update.mjs --file-shipped --type feature \
+  --title "Invoices are due in 30 days, the Pay link keeps working, and a timed-out invoice says so" \
+  --description "<what shipped and why — see the 2026-09-15 entry in docs/HANDOFF.md>"
 ```
 
-Add `--dry-run` to any of those four to see the row and the planned change
-before it writes. Then the queue:
+Add `--dry-run` to any of those to see the row and the planned change before it
+writes. **Expect one email on the first boot of the new build:**
+INV-2026-08-023 (Ride Right, $513.40) is the only sent invoice past due today,
+so each owner gets one `invoice_past_due` message for it. That is the feature
+working, not an incident.
 
-1. **Brittany must re-pick every client's team** on the Team page (the
-   2026-09-04 reset emptied Lisa's and Allison's lists; until she does, staff
-   see no invoices on the Invoice Recap). Her tracker item `featreq-0c2d4ce5`
-   is the explanation she is owed, and the flip above posts it —
-   `docs/prod-snapshots/2026-09-14-featreq-0c2d4ce5-dev-note.txt` is that
-   text, committed. Confirmed still undone on 2026-09-14: Lisa 0 clients,
-   Allison 1, `client_team_updated` never logged. The two TEST accounts
-   (Bookkeepington / Accountington) are still explicitly on 34 / 17 teams —
-   if she tests as one of them she will see 30 invoices and think it is
-   broken; she prunes them or Alex approves a write to clear them.
-2. **Deliverability owner steps** (§6): safe-sender ask to flagged clients,
-   Google Postmaster Tools, DMARC reports to Cloudflare. Watch the new
-   delivery badge on the invoice month run.
-3. **Two Skip/Push questions for Brittany** (§6), for Alex's 2026-09-15
-   meeting: may a single subtask be skipped or pushed on its own, and does a
-   skip or a push advance the next step in a sequence? Push shipped
-   whole-checklist, matching skip. Do not build past her answers.
-4. Resilience Tier 1 is built but the backups are DORMANT — no R2 secrets in
-   GitHub or Railway as of 2026-09-14, and **Alex said hold off for now**
-   (§5 2026-09-03 entry). Tier 2 waits on that.
-5. **KLC:** September's combined invoice generated correctly —
-   INV-2026-08-045, $929.93, 13 lines across the four members, and the members
-   were not billed separately. But it was never emailed from the app and was
-   marked paid by hand on 2026-09-01 (INV-2026-08-056, Skyline, $255 is the
-   same pattern). Worth asking Brittany whether she means to send these from
-   the app at all.
-6. Follow-ups: remove the eight inert `grantClientVisibility` call sites;
+Then the queue:
+
+1. **Brittany's team re-pick is under way, not finished.** She re-picked 5
+   Sunset's team (Lisa) on 2026-09-15 at 14:18 UTC — the first
+   `client_team_updated` since the 09-04 reset — hitting three stale-tab
+   refusals on the way. Every other client's team is still empty, including
+   the **KLC master client**, so nobody but the owners sees the combined
+   invoice. The two TEST accounts are still explicitly on **33 / 16** teams:
+   if she tests as one of them she sees a pile of invoices and thinks it is
+   broken. Her tracker item `featreq-0c2d4ce5` is the explanation she is owed,
+   and the flip above posts it.
+2. **Two questions for Brittany from tonight** (§6): was the **preview banner**
+   up when she saw "Allison can still see clients not hers" — preview-as was
+   the leak and it is fixed, and Allison's real login shows Skyline only — and
+   do the **"[Review]" and "Test" clients**, which look retired but are active,
+   want retiring?
+3. **Three production data steps need Alex's yes at run time** (§6): the
+   cosmetic payment-terms normalization, the two client merges, and two UI
+   actions of his own (toggle Rivercity's invoicing opt-out, void
+   INV-2026-09-022).
+4. **The two Skip/Push questions for Brittany are still open** (§6): may a
+   single subtask be skipped or pushed on its own, and does a skip or a push
+   advance the next step in a sequence? Push now appears on every task the user
+   can write (`0f68aef`), still whole-checklist. Do not build past her answers.
+5. **Deliverability owner steps** (§6): safe-sender ask to flagged clients,
+   Google Postmaster Tools, DMARC reports to Cloudflare. Watch the delivery
+   badge on the invoice month run.
+6. Resilience Tier 1 is built but the backups are DORMANT — no R2 secrets in
+   GitHub or Railway, and **Alex said hold off for now** (§5 2026-09-03 entry).
+   Tier 2 waits on that.
+7. Follow-ups: remove the eight inert `grantClientVisibility` call sites;
    share `firmDetailLines` between the PDF and the email; migrate
    `railway.json` to `.railway/railway.ts` before 2026-12-01.
 
-**The permission classifier (new, 2026-09-14).** In a Claude Code desktop
-session running in auto mode, the permission classifier may refuse `git push`,
-production writes, and edits to the permission settings themselves — the
-2026-09-14 session hit all three, which is why seven commits sit unpushed and
-four tracker rows are unflipped. Everything else in the ritual (build,
-`npm run verify`, commit, read-only production reproduction) ran fine. The
-intended fix is the committed `scripts/prod/tracker-update.mjs` — one row of
-one table, by construction — plus allow rules `Bash(git push*)` and
-`Bash(node scripts/prod/tracker-update.mjs*)` in `.claude/settings.json`.
-Until those exist, the human pushes and flips; a session that hits this should
-say so plainly in its handoff entry rather than reporting the work as shipped.
+**The permission classifier (2026-09-14, now mostly solved).** In a Claude Code
+desktop session running in auto mode the classifier can refuse `git push`,
+production writes, and the edits to the permission settings that would allow
+either — which is why the 2026-09-14 commits sat unpushed. `.claude/settings.json`
+now allows exactly two things: `Bash(git push origin main)` and
+`Bash(node scripts/prod/tracker-update.mjs *)`. Those rules match **literal
+commands**: run `git push origin main` on its own, and the tracker script as a
+plain command — wrap either in a subshell, a `cd … && …` chain or a variable
+and the rule stops matching, so the prompt comes back. The push rule
+deliberately does not cover a force push or a branch delete. Everything else in
+the ritual (build, `npm run verify`, commit, read-only production reproduction)
+has always run fine. A session that still gets refused stops at the commit,
+hands the push and the tracker flips to Alex, and says so plainly in its
+handoff entry rather than reporting the work as shipped.
 
 **The five rules that break things** (details §2–§4): (1) `db/store.js` has
 TWO backends — any persisted change touches both, tests only exercise the file
@@ -359,6 +374,84 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-15 — the pay-window session: no 7-day window existed, the customer is
+told due on receipt, the 30-day line is internal, the Pay link is durable, Past
+due is a derived tab plus a dashboard section plus one email, preview-as was
+the Allison leak, five tracker items closed. Eleven commits on local `main`,
+UNPUSHED as of this entry — production serves `5933d5d`.** Suite 3241 tests /
+182 files, green (3010 / 176 the night before).
+
+Alex's ask opened it: "clients let their invoices time out because we sent them
+with the standard 1 week pay window; up that to 30 days", and "tell us when a
+sent invoice has timed out". **Read-only production reproduction found there
+was no 7-day window.** The default due date was already period end + 30 days.
+What actually bites is two other things: 22 clients carry "Due on receipt"
+terms, so their due date lands in the past on the day the invoice is sent; and
+the real *timeouts* are Stripe's — a Checkout Session expires after 24 hours,
+and a bank microdeposit verification after 10 days. The ask therefore
+decomposed into three separate builds, and Alex made the calls: everyone gets
+30 days; then, after seeing the wording, **the customer must still be told "Due
+on receipt"**, which makes the stored 30-day date the firm's own internal
+past-due line rather than a promise to the client; and yes to a durable pay
+link.
+
+| Commit | What |
+|---|---|
+| `38f6a43` | **Prod scripts**: the payment-terms normalization (renamed in `7eb9a32` once the client-facing wording changed) and `scripts/prod/tracker-update.mjs --file-shipped`, which files a new `shipped` row for a feature Alex ordered directly — this night's headline work had no tracker item of its own. |
+| `03abb58` | **Every invoice is due 30 days after it is issued.** `DEFAULT_PAYMENT_WINDOW_DAYS` and `dueDateFromTerms(issueDate, terms, window)` replace the period-end arithmetic; a client whose terms parse to a *longer* Net N keeps the longer one; `paymentTermsLabel` prints terms that agree with the date. |
+| `690537b` | **The client is told "Due on receipt."** Email, PDF and preview all say it, and no date is shown unless the client's terms parse to Net N of 30 or more. The stored `due_date` is internal: it drives Past due, and it is not what the customer reads. |
+| `7eb9a32` | `scripts/prod/set-payment-terms-due-on-receipt.mjs` — 35 rows in the dry run, purely cosmetic (it aligns each client's stored terms string with what the invoice now prints). **Apply only with Alex's yes** (§6). |
+| `e031dd4` | **The Pay button is a durable link.** `GET /pay/<token>` (and `/card`), backed by `invoices.pay_token` and a unique index, minted lazily and **persisted before the redirect**, so a link emailed weeks ago still opens a fresh Stripe page. Plain HTML status pages for paid / canceled / opted-out, and `returnTo` on the Checkout sessions. The email's Pay button and the copied link are now `app.pbjsa.com/pay/<token>`, not a one-shot Stripe URL. |
+| `c4ed368` | **Past due.** `pastDueInvoice(invoice, today)` in `lib/invoice-overdue.js` — derived, never a stored status, and a payment failure wins over past due. A "Past due" tab between Sent and Payment failed, a row flag, a fifth stat, an alert in the editor, an owner dashboard section "Invoices past due", and an hourly `maybeNotifyPastDueInvoices` that sends **one** `invoice_past_due` owner email per invoice (marker `{kind:'past-due'}` in `email_log`) under a new `invoiceAlerts` prefs group. `recordInvoiceSent` re-stamps `due_date` on the FIRST send to send day + window. |
+| `3b037a3` | **`scripts/prod/merge-client.mjs <dup> <survivor> [--apply]`**, for two real pairs: `client-seed-susannah-dobbs` → `client-1bk7piv` (Dobco, 6 entries) and `client-seed-sophie-sorensen` → `client-k8xj4gr` (Sophie Paris, 1 entry). It re-points every reference across the **eight FK-less `client_id` columns** and **retires** the duplicate instead of deleting it — `cleanupOrphanedClientData` would hard-delete a deleted client's children. Both dry runs verified and rolled back; apply needs Alex's yes. Dobco's April and May gain 3.6 billable hours when it lands. |
+| `a0e4477` | **Preview-as was Brittany's "Allison can still see clients not hers".** The SPA now sends `X-Preview-As`; `previewScopedSession` (`lib/preview-scope.js`) scopes `/api/app-data`, `/api/invoice-recap`, `/api/waiting-on-me`, notifications, item deletions and pending edits to the previewed user, and every other `/api/` GET under preview **fails closed** with 403 `preview_unsupported`. The Invoice Recap had been answering with the owner's scope under Allison's name. Allison's real login shows Skyline only — verified against production. |
+| `0f68aef` | **Hardening from the security review, plus two tracker items.** Preview: `setPreviewUser` moved out of the render phase, an unresolvable id refuses instead of guessing, cases / notes / team activity scoped, logout clears preview first, a `preview_started` activity row, behavioral tests. `featreq-68638ed2`: **Push is offered on every task the user can write** — it had ridden Skip's per-template opt-in, and only 6 of 150 templates allow skipping, so Push was invisible almost everywhere. `featreq-60f24838`: the FilterBar client dropdown hides retired clients ("17 Signature" sat at the top of the Checklists and Gantt filters), plus the two empty-query template-list holes. |
+| `81c5033` | **Fixes from two Opus review passes.** Pay link: one live Stripe session per invoice (`swapInvoiceCheckoutSession` returns the id it replaced and all three mint sites expire *that* one), the `/card` return trip, HEAD never mints, per-IP last hop, `getClientById`, and its own try/catch so a failure is an HTML 502. Past due: the first-send re-stamp is `$5::date::text` (see the traps below), longer client terms are honored, each notify is wrapped in its own try/catch, and `GET /api/invoices?pastDue=1` returns the summary the dashboard reads. |
+| `c175447` | **A client can opt out of platform invoicing** (`featreq-006f12f6`): `platformInvoicingOptOut`, a generate skip reason `opted-out`, 409 `client_opted_out` from send / payment-link / retainer, an opted-out `/pay` page, a month-run badge with Send disabled, and completeness checks that stop nagging about billing and email issues for that client. **And a found bug:** `clients.stripe_customer_id` was written but never SELECTed on Postgres, so every bulk save wiped it and every send created a *new* Stripe customer. It is now selected, stored-wins on bulk save, and stripped for non-owners. |
+
+**Three of the five tracker items were interpretation, not code** — §7's
+queue-run contract now says this out loud. Push was invisible because of a
+visibility rule inherited from Skip; the filter complaint was a retired client
+sitting at the top of a dropdown; and "Allison can still see clients not hers"
+was preview mode answering with the owner's scope. Reproducing what the
+reporter was actually looking at found all three. Re-reading the feature's code
+would not have.
+
+**Traps this stretch added.**
+
+1. **`invoices.due_date` is TEXT in production**, not `date`. The committed
+   first-send re-stamp used `$5::date` inside a `CASE` against it and failed at
+   parse time — "CASE types text and date cannot be matched" — so every send
+   would have 500'd. `$5::date::text` is the fix, confirmed and re-verified
+   with rolled-back trials. **Never write `$n::date` in a CASE against that
+   column.**
+2. **`fakePostgres` does no type checking**, so the suite was green with that
+   bug in it. For any new SQL, a rolled-back (`BEGIN` … `ROLLBACK`) trial
+   against production is mandatory — it is the only thing that sees
+   production's real column types. §4 has the recipe.
+3. **Allow rules match literal commands.** Run `git push origin main` and
+   `node scripts/prod/tracker-update.mjs …` as plain commands; a subshell, a
+   `cd … && …` chain or a variable in the string and the classifier prompts
+   again (§0).
+4. **A new notification event needs a prefs group.** `invoice_past_due` lives
+   in the new `invoiceAlerts` group — without one, nobody can turn the email
+   off.
+
+**Production facts recorded today (read-only).** The September run generated
+2026-09-15 at 14:14 UTC, 35 drafts. Brittany re-picked 5 Sunset's team (Lisa)
+at 14:18 UTC with three stale-tab refusals along the way — the first
+`client_team_updated` since the 09-04 reset, and the only one so far. The KLC
+master client's team is empty. The TEST accounts are still on 33 / 16 teams.
+INV-2026-08-031, the microdeposit failure, was paid on 2026-09-15.
+INV-2026-08-023 — Ride Right, $513.40 — is the only sent invoice past due
+today, so the first boot of the new build sends exactly one `invoice_past_due`
+email per owner.
+
+**Two questions for Brittany** came out of this session and are written up in
+§6: was the preview banner up when she saw Allison's extra clients, and do the
+"[Review]" and "Test" clients — which look retired but are active — want
+retiring?
 
 **2026-09-14 — four planned items built in one night for the Brittany meeting;
 seven commits UNPUSHED on local `main` because the session could not push.**
@@ -1666,6 +1759,51 @@ the code:
 
 ## 6. Open follow-ups
 
+### Production data steps waiting on Alex's yes (2026-09-15)
+
+All of these are scripted or one-click, dry-run clean, and reversible; none has
+been applied. Run them from the repo root after the deploy, each with Alex's
+explicit yes at run time — §7 item 7 gives standing approval to single-row
+`feature_requests` writes and to nothing else.
+
+1. **`node scripts/prod/set-payment-terms-due-on-receipt.mjs --apply`** — 35
+   rows, cosmetic. It aligns each client's stored payment-terms string with
+   what the invoice now prints ("Due on receipt"). Nothing computes from that
+   string any more; the due date comes from `dueDateFromTerms`.
+2. **`node scripts/prod/merge-client.mjs client-seed-susannah-dobbs client-1bk7piv --apply`**
+   and **`node scripts/prod/merge-client.mjs client-seed-sophie-sorensen client-k8xj4gr --apply`**
+   — the two real duplicate pairs (Dobco, 6 time entries; Sophie Paris, 1).
+   Both dry runs were verified and rolled back. The duplicate is **retired,
+   never deleted**: eight `client_id` columns have no foreign key, and
+   `cleanupOrphanedClientData` would hard-delete a deleted client's children.
+   Best run when nobody is in the app; Brittany reloads afterward. Dobco's
+   April and May pick up 3.6 billable hours.
+3. **Two actions in the UI that are Alex's, not a script:** toggle
+   **Rivercity**'s new platform-invoicing opt-out, and **void
+   INV-2026-09-022**.
+
+**A data note, not a step.** `clients.stripe_customer_id` was written but never
+SELECTed on Postgres, so every bulk save wiped it and every send created a
+*new* Stripe customer — production has accumulated duplicate Stripe customers
+for any client invoiced more than once. `c175447` stops that. Nothing merges
+the customers that already exist and nothing needs to; the only symptom is that
+a client's receipts are scattered across customer records in the Stripe
+dashboard. Worth knowing before someone reads that dashboard and concludes
+something is broken.
+
+### Two questions for Brittany (2026-09-15)
+
+1. **Was the preview banner up when you saw Allison's extra clients?** The leak
+   was real and is fixed (`a0e4477`): previewing as Allison answered the
+   Invoice Recap with the owner's scope under her name. Allison's *real* login
+   was checked against production and shows Skyline only. If she saw it outside
+   preview, something else is going on and we need to know before the item is
+   called closed.
+2. **The "[Review]" and "Test" clients look retired but are active**, so they
+   sit in pickers next to real clients. Does she want them retired, or are they
+   in use? (Separate from the two TEST *accounts* still on 33 / 16 teams, which
+   is her pruning job or an approved write.)
+
 ### Skip and Push — two questions for Brittany (2026-09-14)
 
 The Push button shipped (§5, `featreq-68638ed2`) with the narrowest reading:
@@ -1821,11 +1959,18 @@ main work channel; the statuses are the protocol with Brittany.
 5. **Before believing a request is unbuilt, check whether it already shipped**
    — several "add X" items were discoverability gaps; the fix was surfacing,
    not rebuilding. Duplicates: ship once, mark both, cross-reference.
-6. **Standing approval (Alex, explicit):** single-row writes on
+6. **When an item comes back, reproduce what the reporter was looking at before
+   touching code** — preview mode, a TEST account, a gate, a stale tab. Three
+   of the five items closed on 2026-09-15 were interpretation, not code: Push
+   was invisible because it had ridden Skip's per-template opt-in, the filter
+   complaint was a retired client at the top of a dropdown, and "Allison can
+   still see clients not hers" was preview-as answering with the owner's scope.
+   None of the three would have been found by re-reading the feature's code.
+7. **Standing approval (Alex, explicit):** single-row writes on
    `feature_requests` (status, dev_notes, clarification fields, shipped_at,
    and filing shipped records for features he ordered directly). Every OTHER
    prod write still needs his per-write approval with a durable undo snapshot.
-7. Post a short digest here after each item lands.
+8. Post a short digest here after each item lands.
 
 ### General agreements
 

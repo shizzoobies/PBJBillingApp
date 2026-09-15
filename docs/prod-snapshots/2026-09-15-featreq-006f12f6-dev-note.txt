@@ -1,0 +1,3 @@
+Shipped c175447, 2026-09-15. On a client's page, under Invoice settings, there is a new switch: "Opt out of platform invoicing". Turn it on and the app leaves that client alone: Generate skips them (the month run's summary says how many were skipped as opted out), Send and Payment link refuse for them, and the Setup Checklist stops asking for their billing email or rates. Turn it off and they come back into the next run.
+
+Rivercity Appraisal: Alex flips the switch on their page after this deploys. Their September draft (INV-2026-09-022) was generated before the switch existed, so it stays in To review until someone voids it; nothing about it can be sent while the switch is on.

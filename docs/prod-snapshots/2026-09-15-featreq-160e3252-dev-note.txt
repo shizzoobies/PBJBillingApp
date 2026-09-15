@@ -1,0 +1,5 @@
+Shipped 3b037a3 (the merge tool), 2026-09-15. There are two pairs, not one: "Dobco Properites, LLC (duplicate)" into "Dobco Properties, LLC" (6 time entries, 3.6 hours from April and May), and a second "Sophie Paris, LLC" into the first one (1 entry, 16 minutes). Every hour, checklist, invoice and contact moves to the surviving record; nothing is lost and nothing is renumbered.
+
+What you will see afterwards: the duplicate disappears from your Clients list. It is not deleted; it is parked under the Inactive tab, renamed "(merged into ...)", so the old hours keep their history. Two things to know: Dobco's April and May now hold 3.6 more billable hours than before (they were never invoiced under the duplicate), and the merge itself is a one-time run Alex does with a saved undo.
+
+MERGE_STATUS_LINE
