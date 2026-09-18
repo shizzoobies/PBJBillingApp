@@ -1008,6 +1008,12 @@ Clients page meanwhile. Owner-only.
   client (same underlying copy as the Checklists page's "Copy to client…"). Works
   for brand-new clients the moment they're added to the list.
 - Time logged against a task shows on the card.
+  **How the dates move (fixed 2026-09-18):** the window you type lands on the
+  occurrence in front of you and moves forward by the recipe's own schedule -
+  a some-months-of-the-year recipe steps by the months it actually runs, a
+  full calendar month stays a full month, and a longer window keeps its
+  length. Saving a recipe's dates updates its open tasks right away; finished
+  tasks keep the period they had.
 
 ## Board — Active Checklists (sidebar: "Board")
 

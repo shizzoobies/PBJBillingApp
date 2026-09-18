@@ -386,6 +386,62 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-09-18 — three planned items shipped in one day (billing-email check,
+period-covered label, recipe start floor), one production write applied (17
+period labels + 26 recipe anchors), and Brittany asked one clarifying
+question.** `main` = `0d7a6b7` + this docs commit, deployed SUCCESS,
+health 200, voice re-provisioned.
+
+- `58087f0` **featreq-284119d9** — her "missing billing address" was the
+  To 100% "Add a billing email" item checking only `client.email` (blank on
+  50/51); it now runs `resolveInvoiceRecipients` (contacts too), mirrors
+  `invoiceEmailAddressee` for masters (the named sub's addresses; the quick
+  fix writes there and says so), still asks a sub (retainers), and a master
+  with no receiving company raises "Pick a receiving company" (high).
+- `8bc1fda` **featreq-053fccba** — three stacked defects in
+  `lib/checklist-period-label.js`: anchor = meaningless nextDueDate for
+  specific-months (SPA now anchors to the first designated month not yet
+  finished; the math snaps stray anchors), steps counted calendar months (now
+  scheduled occurrences), whole-month windows stepped end-anchored (now whole
+  months, span preserved; Feb 28 in a leap year counts as month-end). Saving
+  a recipe's dates restamps its OPEN instances from the anchor month on
+  (`restampPeriodLabelsForTemplate`, both backends, wired into the bulk save
+  because templates have no PATCH route). Production write, approved by Alex,
+  applied after deploy: `scripts/prod/fix-period-labels.mjs --apply`
+  re-anchored 26 recipes to 2026-09-01 (all set on 09-17) and restamped 17
+  Sep-10 "Monthly Reconciliations" from "October 31 – November 30" to
+  "August 1 – August 31"; snapshot in `docs/prod-snapshots/`, `--undo`
+  available; re-scan after = 0 stored disagreements. Four recipes with a
+  window but NO anchor were left alone (Associated Enterprises, Emerald,
+  Four Leaf, Ride Right) — re-saving their dates fixes them. Read-only
+  scan: `scripts/prod/scan-period-labels.mjs`. Open design question from
+  review, NOT changed: a gapped recipe (Feb/Mar/May/Jun/Aug/Sep/Nov/Dec)
+  steps by occurrence, so its December task covers October — if Brittany
+  expects "the month before it runs", that is a different rule; ask her.
+- `0d7a6b7` **featreq-c133daf8** — a recipe carries `createdAt` on both
+  backends and nothing spawns before it (`lib/checklist-start-floor.js`):
+  copies start on the first cycle on/after today unless a date is chosen (a
+  chosen past date also sets the stamp, so the floor never fights it);
+  specific-months skips months before creation at MONTH granularity; the
+  cadence loop floors only when MORE THAN ONE backdated cycle would spawn.
+  Mirrored in the browser materializer and the client page's local
+  plan-checklist clone (a third path that bypasses the endpoint — the one
+  most likely to be re-broken). Legacy recipes without a stamp are
+  unchanged. Prod scanned first: 146/154 recipes carry the 2026-08-14 load
+  date; nothing due is suppressed.
+- **featreq-6fdd9e98 "I need a cost for Brittany"** → `needs_input` with a
+  question asking whether she means a cost rate for herself (owners have no
+  Cost rate box on the Team page; owner time is deliberately $0 in the recap
+  per the manifest) and what number. Do not build until she answers.
+
+Traps this stretch added: two agents editing the same file interleave
+hunks — stage per item by rebuilding each file's content from line ranges;
+`git add -p` under `diff.context=0` placed hunks at the wrong offsets. The
+fixer scripts write a snapshot even in dry-run mode — delete dry-run
+snapshots before committing. The manifest does not carry the SPA's hint
+strings; anchor manifest patches on manifest text.
+
+
 **2026-09-15 — the pay-window session: no 7-day window existed, the customer is
 told due on receipt, the 30-day line is internal, the Pay link is durable, Past
 due is a derived tab plus a dashboard section plus one email, preview-as was
