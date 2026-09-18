@@ -22,6 +22,7 @@ import { ClientTimeModal } from '../components/ClientTimeModal'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
+import { firstCycleOnOrAfter } from '../../lib/checklist-start-floor.js'
 import { inactiveClientIdSet, isInactiveClient, markInactiveConfirm } from '../lib/clientLifecycle'
 import {
   activeChecklistsForClient,
@@ -68,6 +69,7 @@ import {
 import { normalizeTimeBreakdownMode } from '../../lib/invoice-lines.js'
 import {
   addDays,
+  advanceChecklistFrequency,
   clientName,
   currency,
   effectiveSessions,
@@ -1184,7 +1186,13 @@ function RetainerSectionBody({ client }: { client: Client }) {
  * stamped via `sourceTemplateId`. Everything else — stages, items, categoryId
  * (the board column), frequency, scheduling — is preserved. Mirrors the
  * server-side copyTemplateToClient clone, done locally so the copy persists
- * through the normal workspace autosave.
+ * through the normal workspace autosave — including the START FLOOR: the copy
+ * begins at its first cycle on or after today and carries its own creation
+ * stamp, so neither this browser's materializer nor the server's fills in the
+ * months before the client was set up (featreq-c133daf8). Without both, the
+ * blueprint's stale `nextDueDate` (the weekly ones sat at 2026-06-30) spawned a
+ * dozen backdated tasks the moment the clone hit local state, and the autosave
+ * then made them real.
  */
 function cloneTemplateForClient(
   source: ChecklistTemplate,
@@ -1205,7 +1213,13 @@ function cloneTemplateForClient(
     clientId,
     assigneeId: source.assigneeId || '',
     frequency: source.frequency,
-    nextDueDate: source.nextDueDate || localDateOnly(),
+    nextDueDate: firstCycleOnOrAfter(
+      source.nextDueDate || localDateOnly(),
+      source.frequency,
+      localDateOnly(),
+      advanceChecklistFrequency,
+    ),
+    createdAt: new Date().toISOString(),
     active: true,
     isStandard: false,
     sourceTemplateId: source.id,

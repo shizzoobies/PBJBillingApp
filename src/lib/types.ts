@@ -1071,6 +1071,14 @@ export type ChecklistTemplate = {
    * blueprint that can be applied/copied onto a client.
    */
   isStandard?: boolean
+  /**
+   * When the recipe was set up (ISO timestamp). Server-owned: Postgres supplies
+   * it on insert and a bulk save can never move it. It is the floor both
+   * materializers measure a spawn against — a recipe produces no work from
+   * before it existed (lib/checklist-start-floor.js). Absent on templates that
+   * predate the rule, which means no floor.
+   */
+  createdAt?: string
   viewerIds: string[]
   editorIds: string[]
   stages: TemplateStage[]

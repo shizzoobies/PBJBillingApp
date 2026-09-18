@@ -633,6 +633,23 @@ Clients page meanwhile. Owner-only.
     which month work is billed in, not any report, total, filter or sort. It is
     there to be read. Turning it on for a repeating task changes nothing about
     the tasks it creates except that they now carry the label.
+- **A REPEATING TASK STARTS THE DAY IT IS SET UP. Past occurrences are not
+  created.** Setting up a repeating task — by hand, or with "Set up plan
+  checklists" on a client — produces its first task on or after the day it was
+  set up, and never fills in the months or weeks before that. A task set up in
+  September on a recipe that runs in February, March, May, June, August,
+  September, November and December opens with September, not with five older
+  ones to delete. The same is true of a weekly or monthly recipe: it starts at
+  its first cycle from today rather than catching up from whatever date the
+  blueprint carried.
+  - **Tasks that already exist are never touched** — only ones that would have
+    been created from now on.
+  - **One occurrence that is already due still appears.** Setting up a monthly
+    task today and dating it the 1st of this month gives you this month's task —
+    that is a date you chose, not a back-fill. What is skipped is a run of them:
+    a recipe whose date came from a blueprint months back.
+  - **Choosing a first due date yourself still wins.** If you pick a date when
+    you set the task up, that date is used exactly as you typed it, past or not.
 - **Skipping a recurring task (a "quiet skip").** When someone won't complete a
   recurring task this cycle but will catch it on the next occurrence, they can
   step past this one instead of letting it sit there flagged as overdue.
@@ -2547,7 +2564,9 @@ Clients page meanwhile. Owner-only.
   checklists show on a plan. On a client's detail page, for each plan the client is
   on, a "Plan checklists" panel shows that plan's templates, marks which are
   already set up on the client, and a "Set up plan checklists" button adds the
-  missing ones to the client. Because templates carry a board column, the new
+  missing ones to the client. Each one starts from the day it is set up — no
+  back-dated tasks for the weeks or months before it (see "A repeating task
+  starts the day it is set up" under Checklists). Because templates carry a board column, the new
   checklists land in the right Active-Checklists-board column automatically —
   connecting plans → checklists → board.
 

@@ -3,6 +3,12 @@ import { mkdir, readFile, writeFile as fsWriteFile } from 'node:fs/promises'
 import { classifySplitTarget } from '../lib/group-allocation.js'
 import { inactiveClientIds, isInactiveClientStage } from '../lib/recurring-gate.js'
 import {
+  firstCycleOnOrAfter,
+  flooredCycleStart,
+  newTemplateCreatedAt,
+  templateStartFloor,
+} from '../lib/checklist-start-floor.js'
+import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
   CHECKLIST_INSTANCE_UNIQUE_INDEX_V2,
   buildChecklistInstanceKeys,
@@ -2854,6 +2860,13 @@ export function materializeRecurringChecklists(data) {
       continue
     }
 
+    // The day this recipe was set up. Every spawn below is floored at it, so
+    // a template never backfills work from before it existed — Brittany's
+    // featreq-c133daf8: "auto-generated items should begin only from the
+    // client's setup date forward". A template with no creation stamp has NO
+    // floor, so every recipe that predates this rule behaves exactly as before.
+    const startFloor = templateStartFloor(template)
+
     // Specific-months mode: ignore nextDueDate advance logic. For each
     // designated month of the current year that has started, generate a
     // Stage-1 instance unless one already exists for that template+month.
@@ -2872,6 +2885,18 @@ export function materializeRecurringChecklists(data) {
         // `resolveSpecificMonthsStageDueDate` is guaranteed to stay inside the
         // designated month, so the due date's YYYY-MM IS the per-month key.
         const stageOneDue = resolveSpecificMonthsStageDueDate(template, stageOne, currentYear, month)
+        // A designated month that ENDED before this template existed is not
+        // history it owns — it is not spawned at all, not even "born completed"
+        // below. This is what stops a client set up in September from opening
+        // with Feb/Mar/May/Jun/Aug instances the owner has to delete. Instances
+        // that already exist are untouched: they are keyed, not re-derived.
+        //
+        // The comparison is by MONTH, not by date, because this branch is
+        // scheduled by month: a recipe set up on September 18th whose September
+        // day is the 10th is still a September occurrence, and comparing full
+        // dates silently withheld it until November. The due date is guaranteed
+        // to stay inside its designated month, so its YYYY-MM is the month.
+        if (startFloor && stageOneDue.slice(0, 7) < startFloor.slice(0, 7)) continue
         const monthKey = checklistMonthKey(template.id, stageOneDue)
         if (existingMonthKeys.has(monthKey)) continue
         // A designated month whose due date already passed is born completed
@@ -2908,6 +2933,31 @@ export function materializeRecurringChecklists(data) {
         ? Math.min(Math.floor(template.leadDays), 120)
         : 0
     const horizon = leadDays > 0 ? addDays(today, leadDays) : today
+
+    // Same floor for the cadence branch, applied BEFORE the loop rather than
+    // inside it. `copyTemplateToClient` floors a new copy's first due date, but
+    // a template can still hold a cycle date from before it existed (a copy
+    // made earlier, or an owner typing one), and the loop below spawns one OPEN
+    // instance per cycle from there to today. Advancing first is what bounds
+    // that at "the cycles this recipe actually owns". The advance persists with
+    // the rest of the materialization, since `changed` goes true with it.
+    //
+    // It is deliberately NOT the strict floor the other two places use. Here
+    // there is no way to tell an inherited stale date from one an owner typed,
+    // so the rule is "how much history is being asked for": ONE overdue cycle
+    // still generates, which is the recipe set up today whose next due date is
+    // the 1st of this month; a blueprint's date ten weeks back does not. See
+    // `BACKDATED_CYCLE_TOLERANCE`.
+    const flooredNextDue = flooredCycleStart(
+      template.nextDueDate,
+      template.frequency,
+      startFloor,
+      advanceChecklistFrequency,
+    )
+    if (flooredNextDue !== template.nextDueDate) {
+      template.nextDueDate = flooredNextDue
+      changed = true
+    }
 
     let safetyCounter = 0
     while (template.nextDueDate <= horizon && safetyCounter < 60) {
@@ -5383,7 +5433,8 @@ export class AppDataStore {
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
                    scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id,
                    onboarding_for_client_id, skip_allowed, period_label_enabled,
-                   period_coverage_start, period_coverage_end, period_coverage_anchor_due
+                   period_coverage_start, period_coverage_end, period_coverage_anchor_due,
+                   created_at
             from checklist_templates
             order by title asc
           `),
@@ -5613,6 +5664,13 @@ export class AppDataStore {
           nextDueDate: row.next_due_date ? row.next_due_date.toISOString().slice(0, 10) : '',
           active: row.active,
           isStandard: Boolean(row.is_standard),
+          // The day this recipe was set up. Read-only on this side, and the
+          // floor every spawn is measured against (lib/checklist-start-floor.js
+          // — a recipe produces no work from before it existed). The bulk save
+          // never takes it from the payload: its insert supplies
+          // `createdAtFor('checklist_templates', …)`, the snapshot taken inside
+          // the transaction.
+          ...(row.created_at ? { createdAt: row.created_at.toISOString() } : {}),
           categoryId: row.category_id ?? null,
           // Off unless an owner turned it on — a task whose template has this
           // false must not even show the skip affordance.
@@ -6679,7 +6737,15 @@ export class AppDataStore {
               sanitizeCoverageDate(template.periodCoverageStart),
               sanitizeCoverageDate(template.periodCoverageEnd),
               sanitizeCoverageDate(template.periodCoverageAnchorDue),
-              createdAtFor('checklist_templates', template.id),
+              // NOT `createdAtFor`: an id this transaction's snapshot holds
+              // takes the snapshot's value (that is what the helper does, and
+              // what stops a stale tab rewriting history), but a row that is
+              // genuinely new may carry its own stamp —
+              // `copyTemplateToClient` puts an owner's chosen first due date
+              // there so the floor cannot argue with it. Same rule on the file
+              // backend; see `newTemplateCreatedAt`.
+              preservedCreatedAt.get('checklist_templates')?.get(template.id) ??
+                newTemplateCreatedAt(template),
             ],
           )
 
@@ -7118,6 +7184,38 @@ export class AppDataStore {
                 coverageResumePending: prior.coverageResumePending,
                 coverageHistory: prior.coverageHistory,
               })
+            })
+          }
+
+          // Cardinal rule 1 mirror of the template insert in the Postgres
+          // branch, which now reads the same two rules through the same helper.
+          // A template's creation stamp is what floors its spawning
+          // (lib/checklist-start-floor.js):
+          //   - an id already on disk: STORED WINS, unconditionally. That is
+          //     the rule this whole block exists for, and it is what stops a
+          //     stale tab rewriting history. A template on disk WITHOUT a stamp
+          //     keeps none, so recipes that predate the rule stay floor-free
+          //     rather than being dated to today.
+          //   - an id this file has never seen: genuinely new, so its own stamp
+          //     is the only record of when the recipe was meant to start (see
+          //     `newTemplateCreatedAt` for why that is safe, and why a stamp in
+          //     the future is refused).
+          const priorTemplateCreatedAt = new Map(
+            (Array.isArray(previous.checklistTemplates) ? previous.checklistTemplates : [])
+              .filter((template) => template && typeof template.id === 'string')
+              .map((template) => [template.id, template.createdAt]),
+          )
+          if (Array.isArray(data.checklistTemplates)) {
+            data.checklistTemplates = data.checklistTemplates.map((template) => {
+              if (!template || typeof template.id !== 'string') return template
+              if (!priorTemplateCreatedAt.has(template.id)) {
+                return { ...template, createdAt: newTemplateCreatedAt(template).toISOString() }
+              }
+              const stored = priorTemplateCreatedAt.get(template.id)
+              const next = { ...template }
+              if (typeof stored === 'string' && stored) next.createdAt = stored
+              else delete next.createdAt
+              return next
             })
           }
         }
@@ -17541,15 +17639,48 @@ export class AppDataStore {
     if (!source) return null
 
     const migrated = ensureTemplateStages(source)
+    const copyFrequency = typeof frequency === 'string' && frequency ? frequency : source.frequency
+    const today = formatDateOnly(new Date())
+    // Only a well-formed date counts as "the owner chose this" — anything else
+    // falls through to the floored walk below rather than becoming a stamp.
+    const explicitFirstDue =
+      typeof firstDueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(firstDueDate)
+        ? firstDueDate
+        : ''
     const copy = {
       id: `template-${randomUUID().slice(0, 8)}`,
       title: source.title,
       clientId,
       assigneeId: source.assigneeId || '',
-      frequency: typeof frequency === 'string' && frequency ? frequency : source.frequency,
-      nextDueDate: typeof firstDueDate === 'string' && firstDueDate
-        ? firstDueDate
-        : source.nextDueDate || formatDateOnly(new Date()),
+      frequency: copyFrequency,
+      // An explicit `firstDueDate` is honored exactly as given, past or not —
+      // an owner who picks a date means it. With none, the copy starts TODAY:
+      // standard blueprints carry stale `nextDueDate`s (the weekly ones sat at
+      // 2026-06-30, Payroll's biweekly at 2026-05-31) and neither caller passes
+      // a date, so copying the blueprint's verbatim let the materializer spawn
+      // one open instance per cycle from that date to today — the dozen
+      // backdated tasks behind featreq-c133daf8. The walk keeps the cadence's
+      // phase, so a monthly recipe due on the 15th stays on the 15th.
+      nextDueDate: explicitFirstDue
+        ? explicitFirstDue
+        : firstCycleOnOrAfter(
+            source.nextDueDate || today,
+            copyFrequency,
+            today,
+            advanceChecklistFrequency,
+          ),
+      // The stamp the floor is measured from, and the ONLY thing that makes
+      // an explicit past `firstDueDate` durable. Honoring the date on this
+      // object is not enough: the materializer runs on the next `read()`, sees
+      // a recipe created today whose cycle is months back, and floors it — the
+      // owner asks for a June task and gets nothing at all. Dating the recipe
+      // to the day they chose means the floor can never argue with them. A
+      // forward-dated `firstDueDate` is a normal future recipe and takes the
+      // ordinary stamp.
+      createdAt:
+        explicitFirstDue && explicitFirstDue < today
+          ? `${explicitFirstDue}T00:00:00.000Z`
+          : nowIso(),
       active: true,
       isStandard: false,
       viewerIds: Array.isArray(source.viewerIds) ? [...source.viewerIds] : [],

@@ -585,6 +585,7 @@ import {
   type WaitingOnLike,
 } from '../../lib/waiting-on-state.js'
 import { inactiveClientIds } from '../../lib/recurring-gate.js'
+import { flooredCycleStart, templateStartFloor } from '../../lib/checklist-start-floor.js'
 
 /**
  * Recurring-instance identity, shared verbatim with the server materializer
@@ -1202,6 +1203,12 @@ export function ensureRecurringChecklists(data: AppData) {
       continue
     }
 
+    // The day this recipe was set up, floor for every spawn below. Shared
+    // verbatim with the server materializer (lib/checklist-start-floor.js): a
+    // floor the server honors and this copy does not would just be re-created
+    // here and bulk-saved back. No creation stamp means no floor.
+    const startFloor = templateStartFloor(template)
+
     // Specific-months mode: ignore nextDueDate advance logic. For each
     // designated month of the current year that has already started, generate
     // a Stage-1 instance unless one already exists for that template+month.
@@ -1221,6 +1228,11 @@ export function ensureRecurringChecklists(data: AppData) {
         // `resolveSpecificMonthsStageDueDate` always stays inside the designated
         // month, so the due date's YYYY-MM IS the per-month key.
         const stageOneDue = resolveSpecificMonthsStageDueDate(template, stageOne, currentYear, month)
+        // A designated month that ENDED before this template existed is not
+        // history it owns (featreq-c133daf8). Compared by MONTH, not by date:
+        // a recipe set up on the 18th whose September day is the 10th is still
+        // a September occurrence. Mirrors db/store.js exactly.
+        if (startFloor && stageOneDue.slice(0, 7) < startFloor.slice(0, 7)) continue
         const monthKey = checklistMonthKey(template.id, stageOneDue)
         if (monthKey && existingMonthKeys.has(monthKey)) continue
         // A designated month whose due date already passed is born completed
@@ -1245,6 +1257,21 @@ export function ensureRecurringChecklists(data: AppData) {
         ? Math.min(Math.floor(template.leadDays), 120)
         : 0
     const horizon = leadDays > 0 ? addDays(today, leadDays) : today
+    // Advance a cycle date that predates the template to the first cycle it
+    // actually owns, before the loop can spawn one open instance per cycle from
+    // there to today — but only when more than one backdated cycle is at stake,
+    // so a single deliberately overdue occurrence still generates. Mirrors
+    // db/store.js exactly.
+    const flooredNextDue = flooredCycleStart(
+      template.nextDueDate,
+      template.frequency,
+      startFloor,
+      advanceChecklistFrequency,
+    )
+    if (flooredNextDue !== template.nextDueDate) {
+      template.nextDueDate = flooredNextDue
+      changed = true
+    }
     let safetyCounter = 0
     while (template.nextDueDate <= horizon && safetyCounter < 60) {
       const stageOne = stages[0]

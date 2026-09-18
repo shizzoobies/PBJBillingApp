@@ -2465,7 +2465,15 @@ function App() {
       ...current,
       checklistTemplates: [
         ...current.checklistTemplates,
-        { ...template, id: makeId('template') },
+        // Stamped here, not left for the server: this recipe is materialized by
+        // the BROWSER's copy of the materializer the moment it lands in local
+        // state, and the autosave then makes whatever it spawned real. Without
+        // a stamp the browser has no floor, spawns the back history, and the
+        // server sees the instances as already existing
+        // (lib/checklist-start-floor.js). A caller that supplies its own stamp
+        // — the plan-checklist clone, which dates the copy deliberately — keeps
+        // it.
+        { createdAt: new Date().toISOString(), ...template, id: makeId('template') },
       ],
     }))
   }

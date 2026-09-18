@@ -766,3 +766,226 @@ describe('materializeRecurringChecklists — inactive clients', () => {
     ).toBeGreaterThanOrEqual(1)
   })
 })
+
+/**
+ * featreq-c133daf8 — "When a new client is added, the system automatically
+ * generates checklist items for past dates; the owner has to delete them.
+ * Auto-generated items should begin only from the client's setup date forward."
+ *
+ * The floor is the template's own `createdAt` (lib/checklist-start-floor.js).
+ * The two branches of the materializer backfilled in different ways and both
+ * are pinned here:
+ *
+ *   - specific-months spawned an instance for every designated month of the
+ *     year that had already started, "born completed" when its due date had
+ *     passed. A client set up in September opened with Feb/Mar/May/Jun/Aug.
+ *   - the cadence branch walks `nextDueDate` to today, one OPEN instance per
+ *     cycle. A weekly recipe copied from a blueprint stuck at 2026-06-30 is
+ *     twelve backdated tasks.
+ *
+ * The control in each pair is a template with NO `createdAt`, which must keep
+ * the old behavior exactly — every recipe that predates this rule has no stamp
+ * to floor against, and reading a missing stamp as "today" would stop a legacy
+ * recipe from filling in the cycle it is genuinely due for.
+ */
+describe('materializeRecurringChecklists — a recipe starts the day it is set up', () => {
+  const todayDate = new Date()
+  const today = todayDate.toISOString().slice(0, 10)
+  const currentMonth = todayDate.getMonth() + 1
+  const firstOfThisMonth = `${today.slice(0, 7)}-01`
+
+  // Every designated month up to and including this one, each due on the 1st.
+  // Only the current month's due date is not before the first of this month, so
+  // a template created today owns exactly one of them.
+  const elapsedMonths = Array.from({ length: currentMonth }, (_, i) => i + 1)
+
+  function specificMonthsTemplate(overrides: Record<string, unknown> = {}) {
+    return makeMonthlyTemplate({
+      id: 'tpl-sm-floor',
+      frequency: 'specific-months',
+      nextDueDate: '',
+      scheduledMonths: elapsedMonths,
+      dueDayOfMonth: 1,
+      ...overrides,
+    })
+  }
+
+  const dueDatesFor = (result: { data: { checklists: unknown[] } }, templateId: string) =>
+    (result.data.checklists as { templateId?: string; dueDate: string }[])
+      .filter((c) => c.templateId === templateId)
+      .map((c) => c.dueDate)
+
+  it('spawns only the current month for a template created this month', () => {
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [
+          specificMonthsTemplate({ createdAt: `${firstOfThisMonth}T09:00:00.000Z` }),
+        ],
+      }),
+    )
+    expect(dueDatesFor(result, 'tpl-sm-floor')).toEqual([firstOfThisMonth])
+  })
+
+  it('still spawns every elapsed month when the template carries no createdAt', () => {
+    const result = materializeRecurringChecklists(
+      makeData({ checklistTemplates: [specificMonthsTemplate()] }),
+    )
+    // The pre-existing behavior, pinned so a legacy recipe is never quietly
+    // dated to today and stopped.
+    expect(dueDatesFor(result, 'tpl-sm-floor')).toHaveLength(currentMonth)
+  })
+
+  it('never spawns a month that ended before the template existed, even completed', () => {
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [
+          specificMonthsTemplate({ createdAt: `${firstOfThisMonth}T09:00:00.000Z` }),
+        ],
+      }),
+    )
+    const generated = result.data.checklists.filter(
+      (c: { templateId?: string }) => c.templateId === 'tpl-sm-floor',
+    )
+    // The "born completed" history is what the owner was deleting. It is not
+    // created as completed — it is not created.
+    expect(generated.every((c: { dueDate: string }) => c.dueDate >= firstOfThisMonth)).toBe(true)
+  })
+
+  /**
+   * The specific-months branch is scheduled BY MONTH, so its floor has to be
+   * read by month too. Comparing full dates meant a recipe set up on the 18th
+   * whose September day is the 10th withheld September — and, since the next
+   * designated month was November, produced nothing for two months.
+   */
+  it('spawns the setup month even when its due day is earlier than the setup day', () => {
+    // January by any run date, with the recipe dated the 20th of it: the due
+    // date (the 1st) is nineteen days before the stamp, same month.
+    const thisYear = new Date().getFullYear()
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [
+          makeMonthlyTemplate({
+            id: 'tpl-sm-same-month',
+            frequency: 'specific-months',
+            nextDueDate: '',
+            scheduledMonths: [1],
+            dueDayOfMonth: 1,
+            createdAt: `${thisYear}-01-20T09:00:00.000Z`,
+          }),
+        ],
+      }),
+    )
+    expect(dueDatesFor(result, 'tpl-sm-same-month')).toEqual([`${thisYear}-01-01`])
+  })
+
+  it('a weekly recipe created today starts at its first cycle from today', () => {
+    // 70 days is exactly ten weekly cycles, so the floored walk lands on today
+    // whatever day the suite runs.
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [
+          makeMonthlyTemplate({
+            id: 'tpl-weekly-floor',
+            frequency: 'weekly',
+            nextDueDate: daysAgo(70),
+            createdAt: `${today}T09:00:00.000Z`,
+          }),
+        ],
+      }),
+    )
+    expect(dueDatesFor(result, 'tpl-weekly-floor')).toEqual([today])
+  })
+
+  it('still backfills every weekly cycle when the template carries no createdAt', () => {
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [
+          makeMonthlyTemplate({
+            id: 'tpl-weekly-floor',
+            frequency: 'weekly',
+            nextDueDate: daysAgo(70),
+          }),
+        ],
+      }),
+    )
+    // Ten cycles back plus today's — the old behavior, unchanged.
+    expect(dueDatesFor(result, 'tpl-weekly-floor')).toHaveLength(11)
+  })
+
+  /**
+   * The cadence branch floors on HOW MUCH history is being asked for, because a
+   * `nextDueDate` in the past does not say whether it was typed or inherited.
+   * These three pin the boundary at one cycle (`BACKDATED_CYCLE_TOLERANCE`).
+   */
+  it('still generates a single overdue cycle on a recipe created today', () => {
+    // The coordinator's case: a monthly recipe set up today, dated the 1st of
+    // this month. One cycle overdue — a date somebody chose — so this month's
+    // task appears. (On the 1st itself the date is not in the past at all and
+    // the same instance spawns, so this is deterministic either way.)
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [
+          makeMonthlyTemplate({
+            id: 'tpl-one-overdue',
+            frequency: 'monthly',
+            nextDueDate: firstOfThisMonth,
+            createdAt: `${today}T09:00:00.000Z`,
+          }),
+        ],
+      }),
+    )
+    expect(dueDatesFor(result, 'tpl-one-overdue')).toEqual([firstOfThisMonth])
+  })
+
+  it('generates one overdue weekly cycle plus the current one', () => {
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [
+          makeMonthlyTemplate({
+            id: 'tpl-one-week-late',
+            frequency: 'weekly',
+            nextDueDate: daysAgo(7),
+            createdAt: `${today}T09:00:00.000Z`,
+          }),
+        ],
+      }),
+    )
+    expect(dueDatesFor(result, 'tpl-one-week-late')).toEqual([daysAgo(7), today])
+  })
+
+  it('floors as soon as a SECOND backdated cycle is at stake', () => {
+    // Two weeks back is two cycles below the floor — over the tolerance, so the
+    // walk advances and neither backdated occurrence is created.
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [
+          makeMonthlyTemplate({
+            id: 'tpl-two-weeks-late',
+            frequency: 'weekly',
+            nextDueDate: daysAgo(14),
+            createdAt: `${today}T09:00:00.000Z`,
+          }),
+        ],
+      }),
+    )
+    expect(dueDatesFor(result, 'tpl-two-weeks-late')).toEqual([today])
+  })
+
+  it('leaves a template whose cycle already starts after its creation alone', () => {
+    // The floor only ever moves a date FORWARD to the template's own start; a
+    // recipe that is simply overdue still generates the cycle it owes.
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [
+          makeMonthlyTemplate({
+            id: 'tpl-overdue',
+            frequency: 'weekly',
+            nextDueDate: daysAgo(7),
+            createdAt: `${daysAgo(60)}T09:00:00.000Z`,
+          }),
+        ],
+      }),
+    )
+    expect(dueDatesFor(result, 'tpl-overdue')).toEqual([daysAgo(7), today])
+  })
+})

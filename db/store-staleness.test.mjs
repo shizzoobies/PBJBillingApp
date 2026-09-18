@@ -13660,6 +13660,239 @@ describe('updateInvoice entryTags statement shape (postgres branch)', () => {
     expect(fake.matching(/^COMMIT$/i)).toEqual([])
   })
 })
+
+/**
+ * featreq-c133daf8, the other half: where a backdated recipe came FROM.
+ *
+ * "Set up plan checklists" (ClientsPage) and the Setup Checklist both copy a
+ * standard blueprint onto a client through `copyTemplateToClient`, and neither
+ * passes a `firstDueDate`. The copy used to inherit the blueprint's own
+ * `nextDueDate` verbatim — and the blueprints are stale (the weekly ones sat at
+ * 2026-06-30, Payroll's biweekly at 2026-05-31), so the next `read()`
+ * materialized one open instance per cycle between that date and today.
+ *
+ * The copy now starts at the first cycle on or after today, keeping the
+ * cadence's phase. An explicit `firstDueDate` is still honored exactly as
+ * given, past or not: an owner who picks a date means it.
+ */
+describe('copyTemplateToClient starts the copy today, not at the blueprint’s stale date', () => {
+  const today = new Date().toISOString().slice(0, 10)
+  const daysAgo = (n) => {
+    const d = new Date()
+    d.setDate(d.getDate() - n)
+    return d.toISOString().slice(0, 10)
+  }
+
+  const blueprint = (overrides = {}) => ({
+    id: 'tpl-blueprint',
+    title: 'Weekly bank rec',
+    clientId: '',
+    assigneeId: 'emp-1',
+    isStandard: true,
+    active: false,
+    frequency: 'weekly',
+    // Exactly ten weekly cycles back, so the floored walk lands on today
+    // whatever day the suite runs.
+    nextDueDate: daysAgo(70),
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      {
+        id: 'stage-1',
+        name: 'Stage 1',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: 'ti-1', label: 'Reconcile' }],
+      },
+    ],
+    ...overrides,
+  })
+
+  beforeEach(async () => {
+    await store.write(workspace({ checklistTemplates: [blueprint()] }))
+  })
+
+  it('floors the copy’s first due date at today', async () => {
+    const copy = await store.copyTemplateToClient('tpl-blueprint', { clientId: 'c1' })
+    expect(copy.nextDueDate).toBe(today)
+  })
+
+  it('keeps the cadence’s phase rather than snapping to today', async () => {
+    // 68 days back is NOT a whole number of weeks, so the first cycle on or
+    // after today is two days out — the recipe keeps its own weekday.
+    await store.write(workspace({ checklistTemplates: [blueprint({ nextDueDate: daysAgo(68) })] }))
+    const copy = await store.copyTemplateToClient('tpl-blueprint', { clientId: 'c1' })
+    const inTwoDays = new Date()
+    inTwoDays.setDate(inTwoDays.getDate() + 2)
+    expect(copy.nextDueDate).toBe(inTwoDays.toISOString().slice(0, 10))
+  })
+
+  it('honors an explicit firstDueDate even when it is in the past', async () => {
+    const copy = await store.copyTemplateToClient('tpl-blueprint', {
+      clientId: 'c1',
+      firstDueDate: daysAgo(30),
+    })
+    expect(copy.nextDueDate).toBe(daysAgo(30))
+  })
+
+  /**
+   * Honoring the date on the returned object is not the same as honoring it.
+   * The materializer runs on the NEXT read, and a recipe stamped "created
+   * today" whose cycle is a month back is exactly what the floor suppresses —
+   * so the owner would ask for an overdue task and get nothing at all. The
+   * recipe is therefore dated to the day they chose, which is what makes the
+   * choice durable. This test materializes to prove it.
+   */
+  it('actually produces the overdue work an explicit past firstDueDate asks for', async () => {
+    const copy = await store.copyTemplateToClient('tpl-blueprint', {
+      clientId: 'c1',
+      firstDueDate: daysAgo(30),
+    })
+    expect(copy.createdAt.slice(0, 10)).toBe(daysAgo(30))
+
+    const after = await store.read()
+    const dueDates = after.checklists
+      .filter((c) => c.templateId === copy.id)
+      .map((c) => c.dueDate)
+      .sort()
+    // The floor never moved the cycle forward: the first instance is the day
+    // the owner typed, and the weekly cadence fills in from there.
+    expect(dueDates[0]).toBe(daysAgo(30))
+    expect(dueDates).toHaveLength(5)
+    // And the stamp survives the write, so the next read reaches the same
+    // conclusion rather than flooring it away on the second pass.
+    const persisted = after.checklistTemplates.find((t) => t.id === copy.id)
+    expect(persisted.createdAt.slice(0, 10)).toBe(daysAgo(30))
+  })
+
+  /**
+   * `advanceChecklistFrequency` builds its monthly step with `new Date(y, m + 1,
+   * day)`, which overflows instead of clamping — Jan 31 advances to Mar 3, and
+   * every step after that walks off the month end for good. A month-end recipe
+   * that got floored used to land on the 3rd of some month.
+   */
+  it('keeps a month-end recipe near the month end instead of drifting to the 3rd', async () => {
+    const twoYearsAgoJan31 = `${new Date().getFullYear() - 2}-01-31`
+    await store.write(
+      workspace({
+        checklistTemplates: [blueprint({ frequency: 'monthly', nextDueDate: twoYearsAgoJan31 })],
+      }),
+    )
+    const copy = await store.copyTemplateToClient('tpl-blueprint', { clientId: 'c1' })
+
+    expect(copy.nextDueDate >= today).toBe(true)
+    expect(Number(copy.nextDueDate.slice(8, 10))).toBeGreaterThanOrEqual(28)
+  })
+
+  it('stamps the copy with a creation date, which is what floors its spawning', async () => {
+    const copy = await store.copyTemplateToClient('tpl-blueprint', { clientId: 'c1' })
+    expect(copy.createdAt.slice(0, 10)).toBe(today)
+    // And the stamp survives the write — the file backend's "stored wins"
+    // mirror of the Postgres `createdAtFor` snapshot.
+    const persisted = (await store.read()).checklistTemplates.find((t) => t.id === copy.id)
+    expect(persisted.createdAt).toBe(copy.createdAt)
+  })
+
+  it('does not materialize a backdated instance for the copy', async () => {
+    const copy = await store.copyTemplateToClient('tpl-blueprint', { clientId: 'c1' })
+    const spawned = (await store.read()).checklists.filter((c) => c.templateId === copy.id)
+    // One cycle — today's — instead of the eleven the stale blueprint produced.
+    expect(spawned.map((c) => c.dueDate)).toEqual([today])
+  })
+
+  /**
+   * Cardinal rule 1: the same floored date has to reach Postgres. The copy is
+   * persisted through the bulk save, so what proves it is the value the
+   * `insert into checklist_templates` statement carries.
+   */
+  it('writes the floored date on the Postgres branch too', async () => {
+    const fake = fakePostgres({
+      clientRows: [
+        {
+          id: 'c1',
+          name: 'Acme',
+          contact: 'Pat',
+          billing_mode: 'hourly',
+          hourly_rate: 0,
+          plan_id: null,
+          plan_ids: [],
+          contact_ids: [],
+          assigned_bookkeeper_ids: [],
+          lifecycle_stage: 'active',
+        },
+      ],
+      templateRows: [
+        {
+          id: 'tpl-blueprint',
+          title: 'Weekly bank rec',
+          client_id: null,
+          assignee_id: 'emp-1',
+          frequency: 'weekly',
+          next_due_date: new Date(`${daysAgo(70)}T00:00:00.000Z`),
+          active: false,
+          is_standard: true,
+          category_id: null,
+          skip_allowed: false,
+          onboarding_for_client_id: null,
+          source_template_id: null,
+          viewer_ids: [],
+          editor_ids: [],
+          scheduled_months: null,
+          due_day_of_month: null,
+          monthly_due_days: null,
+          repeat_annually: true,
+          schedule_year: null,
+          lead_days: null,
+        },
+      ],
+      templateStageRows: [
+        {
+          id: 'stage-1',
+          template_id: 'tpl-blueprint',
+          name: 'Stage 1',
+          assignee_id: 'emp-1',
+          offset_days: 0,
+          due_date: null,
+          due_day_of_month: null,
+          position: 0,
+          viewer_ids: [],
+          editor_ids: [],
+        },
+      ],
+      templateItemRows: [
+        {
+          id: 'ti-1',
+          template_id: 'tpl-blueprint',
+          label: 'Reconcile',
+          sort_order: 0,
+          due_date: null,
+          due_day_of_month: null,
+          assignee_id: null,
+          stage_id: 'stage-1',
+          sub_items: [],
+        },
+      ],
+    })
+
+    const copy = await postgresStore(fake).copyTemplateToClient('tpl-blueprint', {
+      clientId: 'c1',
+    })
+    expect(copy.nextDueDate).toBe(today)
+
+    const inserts = fake.matching(/^insert into checklist_templates\b/i)
+    const copyInsert = inserts.find((statement) => statement.params[0] === copy.id)
+    expect(copyInsert).toBeTruthy()
+    // `next_due_date` is $6 — the sixth parameter, index 5.
+    expect(copyInsert.params[5]).toBe(today)
+    // The blueprint itself is re-inserted unchanged: the floor applies to the
+    // COPY, never to the source.
+    const sourceInsert = inserts.find((statement) => statement.params[0] === 'tpl-blueprint')
+    expect(sourceInsert.params[5]).toBe(daysAgo(70))
+  })
+})
+
 /**
  * RE-STAMPING A RECIPE'S OPEN LABELS — featreq-053fccba.
  *

@@ -438,3 +438,123 @@ describe('ensureRecurringChecklists — parity with the server materializer', ()
     expect(result.data.checklists[0].categoryId).toBe('cat-bookkeeping')
   })
 })
+
+/**
+ * The BROWSER half of the start floor (featreq-c133daf8). The server
+ * materializer honoring it is not enough on its own: this copy runs first on
+ * local state, and anything it spawns is written back by the ordinary
+ * workspace autosave — so a floor only the server applied would be re-created
+ * here and made real. The rule itself lives in lib/checklist-start-floor.js and
+ * both generators read it.
+ */
+describe('ensureRecurringChecklists — a recipe starts the day it is set up', () => {
+  const now = new Date()
+  const today = now.toISOString().slice(0, 10)
+  const currentMonth = now.getMonth() + 1
+  const firstOfThisMonth = `${today.slice(0, 7)}-01`
+  const elapsedMonths = Array.from({ length: currentMonth }, (_, i) => i + 1)
+
+  const dueDates = (data: AppData) =>
+    ensureRecurringChecklists(data)
+      .data.checklists.filter((c) => c.templateId === 'tmpl-1')
+      .map((c) => c.dueDate)
+
+  it('spawns only the current month for a specific-months recipe created this month', () => {
+    const dates = dueDates(
+      makeData([
+        makeTemplate({
+          frequency: 'specific-months',
+          nextDueDate: '',
+          scheduledMonths: elapsedMonths,
+          dueDayOfMonth: 1,
+          createdAt: `${firstOfThisMonth}T09:00:00.000Z`,
+        }),
+      ]),
+    )
+    expect(dates).toEqual([firstOfThisMonth])
+  })
+
+  it('still spawns every elapsed month when the recipe carries no createdAt', () => {
+    const dates = dueDates(
+      makeData([
+        makeTemplate({
+          frequency: 'specific-months',
+          nextDueDate: '',
+          scheduledMonths: elapsedMonths,
+          dueDayOfMonth: 1,
+        }),
+      ]),
+    )
+    expect(dates).toHaveLength(currentMonth)
+  })
+
+  it('spawns the setup month even when its due day is earlier than the setup day', () => {
+    // The month-granularity half of the floor, mirrored: comparing full dates
+    // here would withhold an occurrence db/store.js creates.
+    const thisYear = new Date().getFullYear()
+    const dates = dueDates(
+      makeData([
+        makeTemplate({
+          frequency: 'specific-months',
+          nextDueDate: '',
+          scheduledMonths: [1],
+          dueDayOfMonth: 1,
+          createdAt: `${thisYear}-01-20T09:00:00.000Z`,
+        }),
+      ]),
+    )
+    expect(dates).toEqual([`${thisYear}-01-01`])
+  })
+
+  it('still generates a single overdue cycle on a recipe created today', () => {
+    // One cycle overdue is a date somebody chose, not a back-fill, and the
+    // browser copy has to agree with db/store.js about that — otherwise it
+    // withholds an occurrence the server would create, or creates one the
+    // server would not.
+    const dates = dueDates(
+      makeData([
+        makeTemplate({
+          frequency: 'monthly',
+          nextDueDate: firstOfThisMonth,
+          createdAt: `${today}T09:00:00.000Z`,
+        }),
+      ]),
+    )
+    expect(dates).toEqual([firstOfThisMonth])
+  })
+
+  it('floors as soon as a SECOND backdated cycle is at stake', () => {
+    const dates = dueDates(
+      makeData([
+        makeTemplate({
+          frequency: 'weekly',
+          nextDueDate: dateOffset(-14),
+          createdAt: `${today}T09:00:00.000Z`,
+        }),
+      ]),
+    )
+    expect(dates).toEqual([today])
+  })
+
+  it('starts a weekly recipe created today at its first cycle from today', () => {
+    // 70 days is exactly ten weekly cycles, so the floored walk lands on today
+    // whatever day the suite runs.
+    const dates = dueDates(
+      makeData([
+        makeTemplate({
+          frequency: 'weekly',
+          nextDueDate: dateOffset(-70),
+          createdAt: `${today}T09:00:00.000Z`,
+        }),
+      ]),
+    )
+    expect(dates).toEqual([today])
+  })
+
+  it('still backfills every weekly cycle when the recipe carries no createdAt', () => {
+    const dates = dueDates(
+      makeData([makeTemplate({ frequency: 'weekly', nextDueDate: dateOffset(-70) })]),
+    )
+    expect(dates).toHaveLength(11)
+  })
+})
