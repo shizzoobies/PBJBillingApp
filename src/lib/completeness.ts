@@ -18,6 +18,7 @@ import type {
   Employee,
   SubscriptionPlan,
 } from './types'
+import { resolveInvoiceRecipients } from '../../lib/invoice-recipients.js'
 import { evaluateRecurringTemplate } from '../../lib/recurring-gate.js'
 import { getAssignedTeamIds, missingPlanTemplatesForClient, unlinkedContacts } from './utils'
 
@@ -129,15 +130,70 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
       })
     }
 
-    // No billing email — can't email the invoice. Nothing is emailed to an
-    // opted-out client from here, so there is nothing to be missing.
-    if (!billedOffPlatform && (!client.email || !client.email.trim())) {
+    // WHOSE addresses an invoice email uses, mirroring `invoiceEmailAddressee`
+    // in server.js — same branch order, same typed check:
+    //   * a BILLING MASTER has no contacts of its own. Its invoice is emailed
+    //     to the ONE sub named by `invoiceRecipientClientId`, so that sub's
+    //     addresses are the ones that matter and the quick-fix writes the
+    //     address onto that sub, where the send actually reads it. Named
+    //     nobody — or naming a client that is no longer this master's sub —
+    //     is a send-time refusal, raised below as its own issue with its own
+    //     remedy rather than as a missing email on the wrong record.
+    //   * everyone ELSE answers for itself, a sub included: `billToClientId`
+    //     moves the MONTHLY invoice onto the master, but retainers stay
+    //     per-sub documents (db/store.js), so a sub still gets emailed and is
+    //     still asked for an address.
+    const namedRecipientId =
+      typeof client.invoiceRecipientClientId === 'string' ? client.invoiceRecipientClientId : ''
+    const addressee: Client | undefined = client.isBillingMaster
+      ? clients.find(
+          (entry) => entry.id === namedRecipientId && entry.billToClientId === client.id,
+        )
+      : client
+
+    // A master with no receiving company CANNOT send its combined invoice at
+    // all — the send route refuses rather than addressing four companies each
+    // other's invoice. High, and it links straight to the picker that sets it.
+    if (!billedOffPlatform && client.isBillingMaster && !addressee) {
+      issues.push({
+        id: `client:invoiceRecipient:${client.id}`,
+        category: 'Invoices',
+        title: `Pick a receiving company for ${client.name}`,
+        detail:
+          "This billing master has no contacts of its own, so its combined invoice can't be sent until one of its companies is chosen to receive it.",
+        to: `${where}#client-section-invoice-recipient`,
+        severity: 'high',
+      })
+    }
+
+    // No way to email the invoice — asked of the SAME resolver the Send button
+    // uses (`lib/invoice-recipients.js`), so the checklist and the send route
+    // cannot disagree. Reading only `client.email` said "add a billing email"
+    // about 50 of 51 reachable clients, whose addresses live on their CONTACTS
+    // (featreq-284119d9): a contact's client-specific address, the contact's
+    // own address, then the address on the client record. Nothing is emailed to
+    // an opted-out client from here, so there is nothing to be missing.
+    if (
+      !billedOffPlatform &&
+      addressee &&
+      resolveInvoiceRecipients({ client: addressee, contacts }).to.length === 0
+    ) {
+      // A master's issue is titled after the MASTER but saves onto the sub, so
+      // both the detail and the field label name the record being written.
+      const forMaster = addressee.id !== client.id
       issues.push({
         id: `client:email:${client.id}`,
         category: 'Clients',
         title: `Add a billing email for ${client.name}`,
-        detail: 'Needed to email this client their invoice.',
-        fix: { kind: 'clientText', clientId: client.id, field: 'email', label: 'Billing email' },
+        detail: forMaster
+          ? `There is no address to email this invoice to — one can live on the client record or on one of its contacts. Saved on ${addressee.name}, the company this master's invoice is emailed to.`
+          : 'There is no address to email this client their invoice — one can live on the client record or on one of its contacts.',
+        fix: {
+          kind: 'clientText',
+          clientId: addressee.id,
+          field: 'email',
+          label: forMaster ? `Billing email for ${addressee.name}` : 'Billing email',
+        },
         to: where,
         severity: 'medium',
       })

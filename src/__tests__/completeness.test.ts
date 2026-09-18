@@ -159,6 +159,184 @@ describe('computeSetupIssues', () => {
     expect(ids).toContain('client:contacts:client-1')
   })
 
+  /**
+   * featreq-284119d9 — "all client records show a warning that a billing
+   * address needs to be added, even though they have one". The rule read only
+   * `client.email`, which all but one active client leaves empty because their
+   * addresses live on CONTACTS. It now asks `resolveInvoiceRecipients`, the
+   * resolver the Send button itself uses, so the two cannot disagree.
+   */
+  describe('the billing-email check asks what Send asks', () => {
+    const flagged = (input: Partial<CompletenessInput>) =>
+      computeSetupIssues({ ...emptyInput, ...input }).some(
+        (i) => i.id === 'client:email:client-1',
+      )
+
+    it('says nothing when the address lives on a contact instead of the client', () => {
+      expect(
+        flagged({
+          clients: [makeClient({ email: '' })],
+          contacts: [{ id: 'contact-1', name: 'Pat', email: 'pat@acme.test' }],
+        }),
+      ).toBe(false)
+    })
+
+    it('flags the client when that contact is archived (nothing would be sent)', () => {
+      expect(
+        flagged({
+          clients: [makeClient({ email: '' })],
+          contacts: [
+            { id: 'contact-1', name: 'Pat', email: 'pat@acme.test', archivedAt: '2026-01-01' },
+          ],
+        }),
+      ).toBe(true)
+    })
+
+    it('says nothing for a company-specific address on a contact of THIS client', () => {
+      expect(
+        flagged({
+          clients: [makeClient({ email: '' })],
+          contacts: [
+            {
+              id: 'contact-1',
+              name: 'Pat',
+              companyEmails: [{ clientId: 'client-1', email: 'ap@acme.test' }],
+            },
+          ],
+        }),
+      ).toBe(false)
+    })
+
+    it('still flags when the only company-specific address belongs to another client', () => {
+      expect(
+        flagged({
+          clients: [makeClient({ email: '' })],
+          contacts: [
+            {
+              id: 'contact-1',
+              name: 'Pat',
+              companyEmails: [{ clientId: 'client-2', email: 'ap@other.test' }],
+            },
+          ],
+        }),
+      ).toBe(true)
+    })
+
+    /**
+     * Consolidated billing: the MASTER's email goes to the sub it names, so the
+     * addresses checked for the master are that sub's. The sub answers for
+     * itself as usual — `billToClientId` moves only the monthly invoice, and a
+     * retainer stays a per-sub document — so here neither is flagged because
+     * the one contact reaches both.
+     */
+    it('says nothing for a master or its sub when the named sub is reachable', () => {
+      const ids = computeSetupIssues({
+        ...emptyInput,
+        clients: [
+          makeClient({
+            id: 'master-1',
+            name: 'KLC Master',
+            isBillingMaster: true,
+            email: '',
+            contactIds: [],
+            invoiceRecipientClientId: 'client-1',
+          }),
+          makeClient({ email: '', billToClientId: 'master-1' }),
+        ],
+        contacts: [{ id: 'contact-1', name: 'Pat', email: 'pat@acme.test' }],
+      }).map((i) => i.id)
+      expect(ids).not.toContain('client:email:client-1')
+      expect(ids).not.toContain('client:email:master-1')
+    })
+
+    it('flags the MASTER, fixing the sub it sends to, when that sub has no address', () => {
+      const issues = computeSetupIssues({
+        ...emptyInput,
+        clients: [
+          makeClient({
+            id: 'master-1',
+            name: 'KLC Master',
+            isBillingMaster: true,
+            email: '',
+            contactIds: [],
+            invoiceRecipientClientId: 'client-1',
+          }),
+          makeClient({ name: 'KLC Floors', email: '', contactIds: [], billToClientId: 'master-1' }),
+        ],
+      })
+      const issue = issues.find((i) => i.id === 'client:email:master-1')
+      expect(issue).toBeDefined()
+      expect(issue?.title).toBe('Add a billing email for KLC Master')
+      // Titled after the master, saved onto the sub — so both the detail and
+      // the field label name the record the address lands on.
+      expect(issue?.detail).toContain('Saved on KLC Floors')
+      expect(issue?.fix).toEqual({
+        kind: 'clientText',
+        clientId: 'client-1',
+        field: 'email',
+        label: 'Billing email for KLC Floors',
+      })
+      // And the sub is asked in its own right: a sub can still hold a RETAINER
+      // invoice of its own, which is emailed to the sub's own recipients.
+      expect(issues.some((i) => i.id === 'client:email:client-1')).toBe(true)
+    })
+  })
+
+  /**
+   * A billing master with no receiving company named cannot send its combined
+   * invoice AT ALL — the send route refuses (`master_recipient_unset`) rather
+   * than addressing four companies each other's invoice. That is a different
+   * gap from a missing email, with a different remedy: the picker under
+   * Billing on the master's own client page.
+   */
+  describe('a billing master with no receiving company', () => {
+    const master = (overrides: Partial<Client> = {}) =>
+      makeClient({
+        id: 'master-1',
+        name: 'KLC Master',
+        isBillingMaster: true,
+        email: '',
+        contactIds: [],
+        ...overrides,
+      })
+
+    it('is asked to pick one, and is NOT asked for a billing email instead', () => {
+      const issues = computeSetupIssues({
+        ...emptyInput,
+        clients: [master({ invoiceRecipientClientId: null })],
+      })
+      const issue = issues.find((i) => i.id === 'client:invoiceRecipient:master-1')
+      expect(issue?.category).toBe('Invoices')
+      expect(issue?.title).toBe('Pick a receiving company for KLC Master')
+      expect(issue?.severity).toBe('high')
+      expect(issue?.to).toBe('/clients/master-1#client-section-invoice-recipient')
+      expect(issue?.fix).toBeUndefined()
+      expect(issues.some((i) => i.id === 'client:email:master-1')).toBe(false)
+    })
+
+    it('is asked again when it names a client that bills to a DIFFERENT master', () => {
+      const ids = computeSetupIssues({
+        ...emptyInput,
+        clients: [
+          master({ invoiceRecipientClientId: 'client-1' }),
+          makeClient({ billToClientId: 'other-master' }),
+        ],
+        contacts: [{ id: 'contact-1', name: 'Pat', email: 'pat@acme.test' }],
+      }).map((i) => i.id)
+      expect(ids).toContain('client:invoiceRecipient:master-1')
+      expect(ids).not.toContain('client:email:master-1')
+    })
+
+    it('says nothing at all when the master is invoiced outside the app', () => {
+      const ids = computeSetupIssues({
+        ...emptyInput,
+        clients: [master({ invoiceRecipientClientId: null, platformInvoicingOptOut: true })],
+      }).map((i) => i.id)
+      expect(ids).not.toContain('client:invoiceRecipient:master-1')
+      expect(ids).not.toContain('client:email:master-1')
+    })
+  })
+
   it('flags a team member with no bill rate', () => {
     const employees: Employee[] = [{ id: 'emp-1', name: 'Alice', role: 'Bookkeeper', billRate: null }]
     const input: CompletenessInput = { ...emptyInput, employees }

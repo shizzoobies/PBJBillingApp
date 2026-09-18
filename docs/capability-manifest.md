@@ -2571,6 +2571,22 @@ Clients page meanwhile. Owner-only.
   only in the old `client_assignments` table (never the field that actually
   gates visibility) now surfaces here as "missing a team member" — the
   single-source-of-truth cleanup makes that gap visible instead of silent.
+- "Add a billing email for <Client>" asks EXACTLY what the Send button asks.
+  A client is listed only when there is no address anywhere to email their
+  invoice to — the check runs the same recipient resolver the send route runs
+  (a contact's client-specific address, that contact's own address, then the
+  address on the client record itself), so a client whose email lives on its
+  CONTACTS is not asked for one it does not need. Consolidated billing follows
+  the same rule as sending: for a MASTER the addresses checked are those of the
+  sub it sends to, and the quick fix writes the address onto that sub — where
+  the send actually reads it — saying so on the item and on the field. A sub is
+  still asked for an address of its own, because a sub can still hold its own
+  retainer invoice.
+- "Pick a receiving company for <Master>" (Invoices, high): a billing master
+  has no contacts of its own, so its combined invoice is emailed to the one
+  company it names. With none named — or one that has moved out from under the
+  master — nothing can be sent at all, so this item links straight to the
+  "Combined invoice recipient" picker under Billing on the master's client page.
 - Top-of-page summary: one chip per tab that HAS problems, with its count;
   clicking a chip opens that tab's section and scrolls to it. Sections with
   issues are collapsed by default; green tabs are always visible.

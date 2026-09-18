@@ -232,8 +232,10 @@ export type Client = {
   /**
    * Billing masters only: WHICH sub's contacts the invoice email goes to. A
    * master has no contacts of its own — "sends invoice to sub client you
-   * choose" — so this names the sub whose recipients are used. Absent leaves it
-   * to the server's resolver default.
+   * choose" — so this names the sub whose recipients are used. There is NO
+   * default: absent, or naming a client that is no longer this master's sub, is
+   * a send-time refusal, because falling back to every sub would send four
+   * companies each other's consolidated invoice.
    */
   invoiceRecipientClientId?: string | null
 }

@@ -1422,10 +1422,12 @@ function activeSubsOfMaster(clients, masterId) {
  * Said once, because the send route and the payment-email path must refuse in
  * the same words.
  *
- * The sentence names a person rather than a screen ON PURPOSE: nothing in the
- * app writes `invoiceRecipientClientId` yet — the picker is a filed follow-up —
- * so "set it in Settings" would send whoever read it hunting for a control that
- * is not there. A remedy that does not exist is worse than no remedy.
+ * The sentence names the control that actually sets it: the "Combined invoice
+ * recipient" picker under Billing on the master's own client page
+ * (`MasterInvoiceRecipientBody`). It named a PERSON while that picker was still
+ * a filed follow-up, because a remedy that does not exist is worse than no
+ * remedy. The To-100% page now raises the same gap as "Pick a receiving
+ * company", linking straight to that section.
  */
 const MASTER_RECIPIENT_UNSET = Object.freeze({
   error: 'master_recipient_unset',
