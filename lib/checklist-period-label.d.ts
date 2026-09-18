@@ -2,6 +2,7 @@ export declare function coverageStepsBetween(
   anchorDue: string | null | undefined,
   dueDate: string | null | undefined,
   frequency: string | null | undefined,
+  template?: { scheduledMonths?: number[] } | null,
 ): number
 
 export declare function periodWindowFor(
@@ -9,6 +10,7 @@ export declare function periodWindowFor(
     | {
         periodLabelEnabled?: boolean
         frequency?: string
+        scheduledMonths?: number[]
         periodCoverageStart?: string | null
         periodCoverageEnd?: string | null
         periodCoverageAnchorDue?: string | null
@@ -23,6 +25,7 @@ export declare function periodLabelForInstance(
     | {
         periodLabelEnabled?: boolean
         frequency?: string
+        scheduledMonths?: number[]
         periodCoverageStart?: string | null
         periodCoverageEnd?: string | null
         periodCoverageAnchorDue?: string | null
@@ -30,6 +33,18 @@ export declare function periodLabelForInstance(
     | null
     | undefined,
   dueDate: string | null | undefined,
+): string | null
+
+export declare function coverageAnchorForTemplate(
+  template:
+    | {
+        frequency?: string
+        scheduledMonths?: number[]
+        nextDueDate?: string | null
+      }
+    | null
+    | undefined,
+  todayIso: string | null | undefined,
 ): string | null
 
 export declare function sanitizePeriodLabel(value: unknown): string | null

@@ -6116,8 +6116,41 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // PERIOD LABELS. A recipe's covered-window fields ride this save like
+        // every other template edit — there is no per-template PATCH route —
+        // so this is where "she corrected the window" lands. `period_label` is
+        // stamped once at spawn, so without this the task she is looking at
+        // keeps the old wording and only a future occurrence reads right:
+        // featreq-053fccba, seen from her side. Restamped for every recipe that
+        // CARRIES a window (not only the enabled ones, so switching the label
+        // off clears the open instances too), and idempotent — the store writes
+        // only rows whose stored label differs — so an ordinary save that
+        // touched none of this writes nothing here.
+        let restampedLabels = 0
+        for (const template of Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []) {
+          if (!template || typeof template.id !== 'string') continue
+          const carriesWindow =
+            template.periodLabelEnabled === true ||
+            Boolean(template.periodCoverageStart) ||
+            Boolean(template.periodCoverageEnd) ||
+            Boolean(template.periodCoverageAnchorDue)
+          if (!carriesWindow) continue
+          try {
+            restampedLabels += await appDataStore.restampPeriodLabelsForTemplate(template.id)
+          } catch (error) {
+            // The save itself landed; a label is a label. Logged, never fatal.
+            console.error(`[bulk-save] period-label restamp failed for ${template.id}:`, error)
+          }
+        }
+        if (restampedLabels > 0) {
+          console.log(`[bulk-save] re-stamped ${restampedLabels} period label(s)`)
+        }
+
         // The write changed the workspace, so the fingerprint moved. Hand the
         // new one back or the tab's very next save would 409 against itself.
+        // Computed AFTER the restamp above, which touches checklists — a
+        // fingerprint taken before it would 409 the tab against this server's
+        // own write.
         const nextVersion = await appDataStore.computeWorkspaceVersion()
         // Forensics for accepted saves goes to the SERVER LOG, deliberately not
         // to activity_log: that table is trimmed to the last 200 rows per user,

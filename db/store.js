@@ -3076,6 +3076,66 @@ function normalizeChecklistSkip(record) {
   }
 }
 
+/**
+ * A step counts as done when its sub-steps are, or — having none — when it is
+ * ticked itself. Mirrors `isChecklistItemDone` in src/lib/utils.ts; an item
+ * carrying sub-items does NOT decide its own state, which is why the parent's
+ * own `done` column cannot be read on its own.
+ */
+function stepIsDone(node) {
+  const subs = Array.isArray(node?.subItems) ? node.subItems : []
+  if (subs.length > 0) return subs.every((sub) => stepIsDone(sub))
+  return Boolean(node?.done)
+}
+
+/** Finished = it HAS steps and every one of them is done (src/lib/completedTasks.ts). */
+function checklistIsFinished(items) {
+  const list = Array.isArray(items) ? items : []
+  if (list.length === 0) return false
+  return list.every((item) => stepIsDone(item))
+}
+
+/**
+ * Which of a recipe's instances need their stored period label rewritten.
+ *
+ * `period_label` is stamped ONCE, at spawn. So correcting the window on the
+ * recipe — which is exactly what she does when a label reads the wrong month —
+ * left the instance in front of her still saying the old thing, and the next
+ * one to spawn reading an occurrence further on. That is featreq-053fccba seen
+ * from the other end, and it is what this repairs.
+ *
+ * Two things are deliberately left alone:
+ *   - a FINISHED instance. Its label is history: it says what that piece of
+ *     work covered when it was done, and rewriting it would edit the past.
+ *   - anything due BEFORE the anchor's month. The anchor is the occurrence the
+ *     window was set for; earlier instances belong to a cycle she was not
+ *     describing, and they already show the seed window.
+ *
+ * Instances arrive normalized — `{ id, dueDate, periodLabel, completed }` —
+ * so the Postgres rows and the file records go through one piece of reasoning.
+ * A stored '' counts as no label. Returns `[{ id, before, after }]`, only for
+ * rows that actually differ, which is what makes calling this on every save
+ * idempotent and cheap.
+ */
+export function periodRestampPlan(template, instances) {
+  if (!template) return []
+  const anchor = template.periodCoverageAnchorDue
+  const floor = typeof anchor === 'string' && anchor.length >= 7 ? `${anchor.slice(0, 7)}-01` : null
+  const plan = []
+  for (const instance of Array.isArray(instances) ? instances : []) {
+    if (!instance || typeof instance.id !== 'string') continue
+    if (instance.completed) continue
+    const due = instance.dueDate
+    if (typeof due !== 'string' || due === '') continue
+    if (floor && due < floor) continue
+    const before = instance.periodLabel ? instance.periodLabel : null
+    const after = periodLabelForInstance(template, due)
+    if (before === after) continue
+    plan.push({ id: instance.id, before, after })
+  }
+  return plan
+}
+
 export class AppDataStore {
   constructor() {
     this.pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null
@@ -9266,6 +9326,109 @@ export class AppDataStore {
     if (!updated) return null
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return updated
+  }
+
+  /**
+   * Re-stamp the stored period labels of ONE recipe's open instances.
+   *
+   * Called after a save that could have moved the window (see the bulk-save
+   * route in server.js). Idempotent by construction — `periodRestampPlan`
+   * returns only the rows whose stored label differs from what the recipe now
+   * computes — so running it on every save writes nothing on the saves that
+   * changed nothing. Returns how many rows were rewritten.
+   *
+   * Cardinal rule 1: both backends, and both reach the decision through the
+   * same planner so they cannot drift.
+   */
+  async restampPeriodLabelsForTemplate(templateId) {
+    if (typeof templateId !== 'string' || templateId === '') return 0
+
+    if (this.pool) {
+      const templateResult = await this.pool.query(
+        `select id, frequency, period_label_enabled, scheduled_months,
+                to_char(period_coverage_start, 'YYYY-MM-DD') as period_coverage_start,
+                to_char(period_coverage_end, 'YYYY-MM-DD') as period_coverage_end,
+                to_char(period_coverage_anchor_due, 'YYYY-MM-DD') as period_coverage_anchor_due
+           from checklist_templates
+          where id = $1`,
+        [templateId],
+      )
+      const row = templateResult.rows[0]
+      if (!row) return 0
+      const template = {
+        frequency: row.frequency,
+        periodLabelEnabled: Boolean(row.period_label_enabled),
+        scheduledMonths: Array.isArray(row.scheduled_months) ? row.scheduled_months : [],
+        periodCoverageStart: row.period_coverage_start,
+        periodCoverageEnd: row.period_coverage_end,
+        periodCoverageAnchorDue: row.period_coverage_anchor_due,
+      }
+
+      const checklistResult = await this.pool.query(
+        `select id, to_char(due_date, 'YYYY-MM-DD') as due_date, period_label
+           from checklists
+          where template_id = $1 and deleted_at is null`,
+        [templateId],
+      )
+      if (checklistResult.rows.length === 0) return 0
+
+      // The steps decide whether an instance is finished, and an item carrying
+      // sub-items does not decide its own state — so the sub_items json comes
+      // back too rather than trusting the parent's `done` column.
+      const itemsResult = await this.pool.query(
+        `select checklist_id, done, sub_items
+           from checklist_items
+          where checklist_id = any($1::text[])`,
+        [checklistResult.rows.map((r) => r.id)],
+      )
+      const itemsByChecklist = new Map()
+      for (const item of itemsResult.rows) {
+        const list = itemsByChecklist.get(item.checklist_id) ?? []
+        list.push({ done: item.done, subItems: item.sub_items })
+        itemsByChecklist.set(item.checklist_id, list)
+      }
+
+      const plan = periodRestampPlan(
+        template,
+        checklistResult.rows.map((r) => ({
+          id: r.id,
+          dueDate: r.due_date,
+          periodLabel: r.period_label,
+          completed: checklistIsFinished(itemsByChecklist.get(r.id)),
+        })),
+      )
+      for (const entry of plan) {
+        await this.pool.query(
+          `update checklists set period_label = $2, updated_at = now() where id = $1`,
+          [entry.id, entry.after],
+        )
+      }
+      return plan.length
+    }
+
+    const data = await readJson(localDataPath)
+    const template = (data.checklistTemplates ?? []).find((item) => item.id === templateId)
+    if (!template) return 0
+    const plan = periodRestampPlan(
+      template,
+      (data.checklists ?? [])
+        .filter((checklist) => checklist.templateId === templateId && !checklist.deletedAt)
+        .map((checklist) => ({
+          id: checklist.id,
+          dueDate: checklist.dueDate,
+          periodLabel: checklist.periodLabel,
+          completed: checklistIsFinished(checklist.items),
+        })),
+    )
+    if (plan.length === 0) return 0
+    const relabeled = new Map(plan.map((entry) => [entry.id, entry.after]))
+    data.checklists = (data.checklists ?? []).map((checklist) =>
+      relabeled.has(checklist.id)
+        ? { ...checklist, periodLabel: relabeled.get(checklist.id) }
+        : checklist,
+    )
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return plan.length
   }
 
   /**

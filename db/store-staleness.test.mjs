@@ -13660,3 +13660,231 @@ describe('updateInvoice entryTags statement shape (postgres branch)', () => {
     expect(fake.matching(/^COMMIT$/i)).toEqual([])
   })
 })
+/**
+ * RE-STAMPING A RECIPE'S OPEN LABELS — featreq-053fccba.
+ *
+ * `period_label` is written once, at spawn. So correcting a recipe's covered
+ * window left the instance she was looking at still reading the old months, and
+ * only a future occurrence came out right. `restampPeriodLabelsForTemplate`
+ * is what the bulk-save route calls to close that gap; both backends reach the
+ * decision through `periodRestampPlan`, so they cannot drift.
+ */
+
+const restampTemplate = (over = {}) => ({
+  id: 'tmpl-recon',
+  title: 'Monthly Reconciliations',
+  clientId: 'c1',
+  assigneeId: 'emp-1',
+  frequency: 'specific-months',
+  scheduledMonths: [2, 3, 5, 6, 8, 9, 11, 12],
+  nextDueDate: '',
+  active: true,
+  periodLabelEnabled: true,
+  periodCoverageStart: '2026-08-01',
+  periodCoverageEnd: '2026-08-31',
+  // The anchor the corrected SPA writes when she sets the dates in September.
+  periodCoverageAnchorDue: '2026-09-01',
+  viewerIds: [],
+  editorIds: [],
+  stages: [
+    {
+      id: 'stage-1',
+      name: 'Step 1',
+      assigneeId: 'emp-1',
+      offsetDays: 0,
+      viewerIds: [],
+      editorIds: [],
+      items: [{ id: 'titem-1', label: 'Reconcile' }],
+    },
+  ],
+  ...over,
+})
+
+const restampChecklist = (over = {}) => ({
+  id: 'chk-1',
+  title: 'Monthly Reconciliations',
+  clientId: 'c1',
+  assigneeId: 'emp-1',
+  templateId: 'tmpl-recon',
+  frequency: 'specific-months',
+  dueDate: '2026-09-10',
+  periodLabel: 'October 31 – November 30, 2026',
+  items: [{ id: 'i1', label: 'Reconcile', done: false }],
+  viewerIds: [],
+  editorIds: [],
+  ...over,
+})
+
+describe('restampPeriodLabelsForTemplate (file backend)', () => {
+  it('rewrites the open instances and leaves the finished and the earlier ones alone', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [restampTemplate()],
+        checklists: [
+          // The one she is looking at: open, in the anchor's month.
+          restampChecklist({ id: 'chk-open' }),
+          // Finished: its label is history and stays exactly as it is.
+          restampChecklist({
+            id: 'chk-done',
+            items: [{ id: 'i1', label: 'Reconcile', done: true }],
+          }),
+          // Before the anchor's month — a cycle she was not describing.
+          restampChecklist({ id: 'chk-june', dueDate: '2026-06-30', periodLabel: 'June words' }),
+          // A later occurrence: one step on from the anchor.
+          restampChecklist({ id: 'chk-nov', dueDate: '2026-11-30', periodLabel: 'wrong' }),
+          // Never stamped at all (the switch went on after it spawned).
+          restampChecklist({ id: 'chk-blank', periodLabel: null }),
+        ],
+      }),
+    )
+
+    const count = await store.restampPeriodLabelsForTemplate('tmpl-recon')
+    expect(count).toBe(3)
+
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const label = (id) => persisted.checklists.find((c) => c.id === id)?.periodLabel
+    expect(label('chk-open')).toBe('August 1 – August 31, 2026')
+    expect(label('chk-blank')).toBe('August 1 – August 31, 2026')
+    expect(label('chk-nov')).toBe('September 1 – September 30, 2026')
+    expect(label('chk-done')).toBe('October 31 – November 30, 2026')
+    expect(label('chk-june')).toBe('June words')
+  })
+
+  it('is idempotent — a second run writes nothing', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [restampTemplate()],
+        checklists: [restampChecklist({ id: 'chk-open' })],
+      }),
+    )
+    expect(await store.restampPeriodLabelsForTemplate('tmpl-recon')).toBe(1)
+    expect(await store.restampPeriodLabelsForTemplate('tmpl-recon')).toBe(0)
+  })
+
+  it('clears the open labels when the switch is turned off', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [restampTemplate({ periodLabelEnabled: false })],
+        checklists: [
+          restampChecklist({ id: 'chk-open' }),
+          restampChecklist({
+            id: 'chk-done',
+            items: [{ id: 'i1', label: 'Reconcile', done: true }],
+          }),
+        ],
+      }),
+    )
+
+    expect(await store.restampPeriodLabelsForTemplate('tmpl-recon')).toBe(1)
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.checklists.find((c) => c.id === 'chk-open').periodLabel).toBeNull()
+    expect(persisted.checklists.find((c) => c.id === 'chk-done').periodLabel).toBe(
+      'October 31 – November 30, 2026',
+    )
+  })
+
+  it('does nothing for a template that is not there', async () => {
+    await store.write(workspace())
+    expect(await store.restampPeriodLabelsForTemplate('tmpl-missing')).toBe(0)
+    expect(await store.restampPeriodLabelsForTemplate('')).toBe(0)
+  })
+})
+
+/**
+ * The Postgres half. Production runs on this branch and CI cannot reach a
+ * database, so what is pinned here is the SQL SHAPE and which rows it decides
+ * to touch — the same thing `fakePostgres` does for `read()` above.
+ */
+function fakeRestampPostgres({ templateRow = null, checklistRows = [], itemRows = [] } = {}) {
+  const statements = []
+  const query = async (text, params) => {
+    statements.push({ text, params })
+    if (/from checklist_templates/i.test(text)) {
+      return { rows: templateRow ? [templateRow] : [], rowCount: templateRow ? 1 : 0 }
+    }
+    if (/from checklist_items/i.test(text)) return { rows: itemRows, rowCount: itemRows.length }
+    if (/from checklists/i.test(text)) return { rows: checklistRows, rowCount: checklistRows.length }
+    if (/update checklists/i.test(text)) return { rows: [], rowCount: 1 }
+    return { rows: [], rowCount: 0 }
+  }
+  const pool = {
+    query,
+    async connect() {
+      return { query, release() {} }
+    },
+  }
+  return { pool, statements, updates: () => statements.filter((s) => /update checklists/i.test(s.text)) }
+}
+
+describe('restampPeriodLabelsForTemplate (postgres branch)', () => {
+  const templateRow = {
+    id: 'tmpl-recon',
+    frequency: 'specific-months',
+    period_label_enabled: true,
+    scheduled_months: [2, 3, 5, 6, 8, 9, 11, 12],
+    period_coverage_start: '2026-08-01',
+    period_coverage_end: '2026-08-31',
+    period_coverage_anchor_due: '2026-09-01',
+  }
+
+  it('updates only the open, on-or-after-the-anchor rows, one row at a time', async () => {
+    const fake = fakeRestampPostgres({
+      templateRow,
+      checklistRows: [
+        { id: 'chk-open', due_date: '2026-09-10', period_label: 'October 31 – November 30, 2026' },
+        { id: 'chk-done', due_date: '2026-09-10', period_label: 'October 31 – November 30, 2026' },
+        { id: 'chk-june', due_date: '2026-06-30', period_label: 'June words' },
+        { id: 'chk-nov', due_date: '2026-11-30', period_label: 'wrong' },
+      ],
+      itemRows: [
+        { checklist_id: 'chk-open', done: false, sub_items: null },
+        { checklist_id: 'chk-done', done: true, sub_items: null },
+        { checklist_id: 'chk-june', done: false, sub_items: null },
+        { checklist_id: 'chk-nov', done: false, sub_items: null },
+      ],
+    })
+    const pgStore = postgresStore(fake)
+
+    expect(await pgStore.restampPeriodLabelsForTemplate('tmpl-recon')).toBe(2)
+    expect(fake.updates().map((s) => s.params)).toEqual([
+      ['chk-open', 'August 1 – August 31, 2026'],
+      ['chk-nov', 'September 1 – September 30, 2026'],
+    ])
+    expect(fake.updates()[0].text).toMatch(/update checklists set period_label = \$2/)
+    expect(fake.updates()[0].text).toMatch(/where id = \$1/)
+  })
+
+  it('reads the dates as text, so a timezone can never shift a due date', async () => {
+    const fake = fakeRestampPostgres({ templateRow })
+    await postgresStore(fake).restampPeriodLabelsForTemplate('tmpl-recon')
+    const selects = fake.statements.filter((s) => /select/i.test(s.text))
+    expect(selects[0].text).toMatch(/to_char\(period_coverage_anchor_due, 'YYYY-MM-DD'\)/)
+    expect(selects[1].text).toMatch(/to_char\(due_date, 'YYYY-MM-DD'\)/)
+    expect(selects[1].text).toMatch(/deleted_at is null/)
+  })
+
+  it('a step with sub-steps is judged by them, not by its own flag', async () => {
+    const fake = fakeRestampPostgres({
+      templateRow,
+      checklistRows: [
+        { id: 'chk-subs', due_date: '2026-09-10', period_label: 'October 31 – November 30, 2026' },
+      ],
+      // Parent not ticked, both sub-steps done: the task IS finished.
+      itemRows: [
+        {
+          checklist_id: 'chk-subs',
+          done: false,
+          sub_items: [{ done: true }, { done: true }],
+        },
+      ],
+    })
+    expect(await postgresStore(fake).restampPeriodLabelsForTemplate('tmpl-recon')).toBe(0)
+    expect(fake.updates()).toEqual([])
+  })
+
+  it('stops at the template when there is none', async () => {
+    const fake = fakeRestampPostgres({ templateRow: null })
+    expect(await postgresStore(fake).restampPeriodLabelsForTemplate('tmpl-recon')).toBe(0)
+    expect(fake.statements).toHaveLength(1)
+  })
+})

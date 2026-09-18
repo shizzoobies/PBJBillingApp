@@ -37,7 +37,10 @@ import {
 import { useAppContext } from '../AppContext'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { PeriodLabelChip } from '../components/PeriodLabelChip'
-import { periodLabelForInstance } from '../../lib/checklist-period-label.js'
+import {
+  coverageAnchorForTemplate,
+  periodLabelForInstance,
+} from '../../lib/checklist-period-label.js'
 import { CompletedTasksSection } from '../components/CompletedTasksSection'
 import { CompletedWaits } from '../components/CompletedWaits'
 import { WaitApprovalActions } from '../components/WaitApprovalActions'
@@ -4399,11 +4402,17 @@ export function NewTaskForm({
         categoryId: categoryId || null,
         skipAllowed,
         periodLabelEnabled,
-        // The first covered window. Anchored to this recipe's first due date, so
-        // every occurrence after it steps forward by the recurrence.
+        // The first covered window, anchored to the occurrence that carries it —
+        // this recipe's first due date, and for specific-months the first
+        // designated month, because those have no meaningful due date at all.
         periodCoverageStart: periodLabelEnabled && periodCoverageStart ? periodCoverageStart : null,
         periodCoverageEnd: periodLabelEnabled && periodCoverageEnd ? periodCoverageEnd : null,
-        periodCoverageAnchorDue: periodLabelEnabled && periodCoverageStart ? dueDate : null,
+        periodCoverageAnchorDue:
+          periodLabelEnabled && periodCoverageStart
+            ? isSpecificMonths
+              ? coverageAnchorForTemplate({ frequency, scheduledMonths }, localDateOnly())
+              : dueDate
+            : null,
         stages: [firstStage, ...extraStages],
         ...(isSpecificMonths
           ? {
@@ -5431,7 +5440,7 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
                     props.onUpdateTemplate(template.id, (current) => ({
                       ...current,
                       periodCoverageStart: event.target.value || null,
-                      periodCoverageAnchorDue: current.nextDueDate ?? null,
+                      periodCoverageAnchorDue: coverageAnchorForTemplate(current, localDateOnly()),
                     }))
                   }
                 />
@@ -5446,7 +5455,7 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
                     props.onUpdateTemplate(template.id, (current) => ({
                       ...current,
                       periodCoverageEnd: event.target.value || null,
-                      periodCoverageAnchorDue: current.nextDueDate ?? null,
+                      periodCoverageAnchorDue: coverageAnchorForTemplate(current, localDateOnly()),
                     }))
                   }
                 />
@@ -5456,7 +5465,10 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
               <p className="repeating-task-coverage-preview">
                 Next one reads{' '}
                 <strong>
-                  {periodLabelForInstance(template, template.nextDueDate) ?? '—'}
+                  {periodLabelForInstance(
+                    template,
+                    coverageAnchorForTemplate(template, localDateOnly()) ?? template.nextDueDate,
+                  ) ?? '—'}
                 </strong>
               </p>
             ) : (
