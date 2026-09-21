@@ -133,6 +133,7 @@ import {
   type TimeEntry,
   type TimerState,
 } from './lib/types'
+import { duplicateTemplateDraft } from './lib/cloneChecklistTemplate'
 import {
   currentBillingPeriod,
   ensureRecurringChecklists,
@@ -3374,7 +3375,22 @@ function App() {
     }
   }
 
+  /**
+   * Duplicate a repeating task, and hand the caller the copy's id so it can
+   * open the copy's editor.
+   *
+   * The copy itself — switched off, starting today, stamped with its origin —
+   * is built in src/lib/cloneChecklistTemplate.ts, shared with "Set up plan
+   * checklists" on a client so the two copy paths cannot drift again. This one
+   * was a bare `{ ...source }` spread that carried the source's creation stamp
+   * and its stale next due date, and generated for the old client seconds after
+   * the copy was made (featreq-0bc2437e); the rationale is written up there.
+   */
   const duplicateChecklistTemplate = (templateId: string) => {
+    if (previewActiveRef.current) return null
+    // Minted out here, not inside the updater, so the id is returned even
+    // though the state update lands later.
+    const copyId = makeId('template')
     updateWorkspaceData((current) => {
       const source = current.checklistTemplates.find((template) => template.id === templateId)
       if (!source) {
@@ -3382,18 +3398,8 @@ function App() {
       }
 
       const draft: ChecklistTemplate = {
-        ...source,
-        id: makeId('template'),
-        title: `${source.title} (copy)`,
-        viewerIds: [...(source.viewerIds ?? [])],
-        editorIds: [...(source.editorIds ?? [])],
-        stages: (source.stages ?? []).map((stage) => ({
-          ...stage,
-          id: makeId('stage'),
-          viewerIds: [...(stage.viewerIds ?? [])],
-          editorIds: [...(stage.editorIds ?? [])],
-          items: stage.items.map((item) => ({ id: makeId('template-item'), label: item.label })),
-        })),
+        ...duplicateTemplateDraft(source),
+        id: copyId,
       }
 
       return {
@@ -3401,6 +3407,7 @@ function App() {
         checklistTemplates: [...current.checklistTemplates, draft],
       }
     })
+    return copyId
   }
 
   // Wave 2: standard templates + apply/copy + on-demand generate. These hit

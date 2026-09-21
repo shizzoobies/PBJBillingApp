@@ -4848,8 +4848,13 @@ type RepeatingTasksManagerProps = {
   onBulkAddItems: (templateId: string, stageId: string, labels: string[]) => void
   onDeleteItem: (templateId: string, stageId: string, itemId: string) => void
   onDeleteTemplate: (templateId: string) => void
-  /** Optional: "Duplicate" a regular repeating task. Omitted for standard templates. */
-  onDuplicate?: (templateId: string) => void
+  /**
+   * Optional: "Duplicate" a regular repeating task. Omitted for standard
+   * templates. Returns the copy's id (null in preview mode) so this list can
+   * open the copy — it is born switched off and has to be re-aimed at a client
+   * and turned on (featreq-0bc2437e).
+   */
+  onDuplicate?: (templateId: string) => string | null
   /** Sub-bullet editing on template items (flows into generated checklists). */
   onAddSubItem: (templateId: string, stageId: string, itemId: string, title: string) => void
   onUpdateSubItem: (
@@ -4933,6 +4938,12 @@ type RepeatingTasksManagerProps = {
 function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
   const [openId, setOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  // The copy "Duplicate" just made. It lands switched off, so the list opens
+  // its editor and scrolls to it — otherwise the button appears to do nothing
+  // and the copy sits further down the list, off, waiting for a client
+  // (featreq-0bc2437e).
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const copiedRef = useRef<HTMLElement | null>(null)
   // Per-client groups, COLLAPSED BY DEFAULT — an empty set means nothing is
   // open. With 135 repeating setups spread across clients, defaulting to
   // expanded meant the tab opened as one continuous wall and you had to scroll
@@ -4958,6 +4969,22 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
       return next
     })
   }
+  // A copy starts life on the source's client, whose group is already open —
+  // all this has to do is open the copy's own editor instead of the source's.
+  const focusCopy = (copyTemplateId: string) => {
+    setOpenId(copyTemplateId)
+    setQuery('')
+    setCopiedId(copyTemplateId)
+  }
+
+  useEffect(() => {
+    if (!copiedId) return
+    // A tick for the new row to render before scrolling to it.
+    const timer = window.setTimeout(() => {
+      copiedRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 50)
+    return () => window.clearTimeout(timer)
+  }, [copiedId])
 
   // Client-bound repeating tasks only — standard (client-agnostic) templates
   // live in their own section.
@@ -5094,7 +5121,14 @@ function RepeatingTasksManager(props: RepeatingTasksManagerProps) {
                       template={template}
                       open={openId === template.id}
                       onToggleOpen={() => toggleOpen(template.id)}
-                      rowRef={template.id === focusTemplateId ? focusRef : undefined}
+                      onDuplicated={focusCopy}
+                      rowRef={
+                        template.id === focusTemplateId
+                          ? focusRef
+                          : template.id === copiedId
+                            ? copiedRef
+                            : undefined
+                      }
                     />
                   ))}
                 </div>
@@ -5111,6 +5145,8 @@ type RepeatingTaskRowProps = Omit<RepeatingTasksManagerProps, 'templates'> & {
   template: ChecklistTemplate
   open: boolean
   onToggleOpen: () => void
+  /** Hands the copy's id back to the list so it can open and scroll to it. */
+  onDuplicated?: (copyTemplateId: string) => void
   rowRef?: RefObject<HTMLElement | null>
 }
 
@@ -5212,8 +5248,20 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
   const { template } = props
   // The Active Checklists board columns — lets the owner sort this template
   // (and the checklists it generates) into a board column.
-  const { serviceCategories } = useAppContext()
+  const { serviceCategories, data } = useAppContext()
   const stages = template.stages ?? []
+  // The tasks this recipe has already produced. An instance's client is a
+  // SNAPSHOT taken when it was born — re-aiming the recipe never moves them —
+  // so both things below turn on this count (featreq-0bc2437e).
+  const liveInstances = (data.checklists ?? []).filter(
+    (checklist) => checklist.templateId === template.id && !checklist.deletedAt,
+  )
+  const everGenerated =
+    liveInstances.length > 0 ||
+    (data.recycledChecklists ?? []).some((checklist) => checklist.templateId === template.id)
+  // A fresh copy: off, never generated, made from another recipe. Say why it is
+  // off, because an owner who doesn't turn it on gets nothing at all.
+  const isUnstartedCopy = Boolean(template.sourceTemplateId) && !template.active && !everGenerated
   return (
     <div className="repeating-task-body">
       {/* "Copy to client" is not repeated here — it lives on the row header
@@ -5233,9 +5281,12 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
         {props.onDuplicate ? (
           <button
             className="secondary-action"
-            onClick={() => props.onDuplicate?.(template.id)}
+            onClick={() => {
+              const copyId = props.onDuplicate?.(template.id)
+              if (copyId) props.onDuplicated?.(copyId)
+            }}
             type="button"
-            title="Create a new repeating task pre-filled from this one"
+            title="Create a new repeating task pre-filled from this one — switched off until you pick its client"
           >
             <Copy size={14} />
             Duplicate
@@ -5249,6 +5300,12 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
           Remove
         </button>
       </div>
+      {isUnstartedCopy ? (
+        <p className="repeating-task-explainer">
+          Switched off until you pick the client and turn it on — nothing generates for the
+          old client meanwhile.
+        </p>
+      ) : null}
       <div className="template-grid">
         <label className="field">
           <span>Title</span>
@@ -5268,12 +5325,34 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
             <span>Client</span>
             <select
               className="input"
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextClientId = event.target.value
+                if (nextClientId === template.clientId) return
+                // Re-aiming the recipe does NOT move the tasks it already made:
+                // each one carries the client it was born with, and nothing
+                // repoints them. Say so, with the count, before the change —
+                // "it keeps creating one for Let's Eat" was this, discovered
+                // afterwards (featreq-0bc2437e).
+                if (liveInstances.length > 0) {
+                  const staying =
+                    liveInstances.length === 1
+                      ? '1 existing task stays'
+                      : `${liveInstances.length} existing tasks stay`
+                  const confirmed = window.confirm(
+                    `${staying} with ${clientName(props.clients, template.clientId)}. Only new tasks will be created for ${clientName(props.clients, nextClientId)}. Change the client?`,
+                  )
+                  if (!confirmed) {
+                    // Nothing changed in state, so React has no re-render to
+                    // put the select back on its old option — do it by hand.
+                    event.target.value = template.clientId
+                    return
+                  }
+                }
                 props.onUpdateTemplate(template.id, (current) => ({
                   ...current,
-                  clientId: event.target.value,
+                  clientId: nextClientId,
                 }))
-              }
+              }}
               value={template.clientId}
             >
               {/* Retired clients are not offered as a new owner for this

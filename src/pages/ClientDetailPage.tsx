@@ -22,7 +22,7 @@ import { ClientTimeModal } from '../components/ClientTimeModal'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
-import { firstCycleOnOrAfter } from '../../lib/checklist-start-floor.js'
+import { cloneChecklistTemplate } from '../lib/cloneChecklistTemplate'
 import { inactiveClientIdSet, isInactiveClient, markInactiveConfirm } from '../lib/clientLifecycle'
 import {
   activeChecklistsForClient,
@@ -69,12 +69,10 @@ import {
 import { normalizeTimeBreakdownMode } from '../../lib/invoice-lines.js'
 import {
   addDays,
-  advanceChecklistFrequency,
   clientName,
   currency,
   effectiveSessions,
   emailForClient,
-  ensureTemplateStages,
   employeeName,
   formatAuditStamp,
   formatDecimalHours,
@@ -83,7 +81,6 @@ import {
   isDueThisMonth,
   isSafeImageSrc,
   localDateOnly,
-  makeId,
   missingPlanTemplatesForClient,
   MONTH_NAMES,
   normalizeBillingMonth,
@@ -1180,66 +1177,24 @@ function RetainerSectionBody({ client }: { client: Client }) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Deep-clone a checklist template ONTO a client: fresh ids at every level
- * (template, stage, item, sub-item) so the bulk autosave can insert the copy
- * without colliding with the source, with `clientId` retargeted and the origin
- * stamped via `sourceTemplateId`. Everything else — stages, items, categoryId
- * (the board column), frequency, scheduling — is preserved. Mirrors the
- * server-side copyTemplateToClient clone, done locally so the copy persists
- * through the normal workspace autosave — including the START FLOOR: the copy
- * begins at its first cycle on or after today and carries its own creation
- * stamp, so neither this browser's materializer nor the server's fills in the
- * months before the client was set up (featreq-c133daf8). Without both, the
- * blueprint's stale `nextDueDate` (the weekly ones sat at 2026-06-30) spawned a
- * dozen backdated tasks the moment the clone hit local state, and the autosave
- * then made them real.
+ * Deep-clone a checklist template ONTO a client. The clone itself now lives in
+ * src/lib/cloneChecklistTemplate.ts, shared with the Checklists tab's
+ * "Duplicate" — the two had drifted and one of them was back-filling history
+ * (featreq-0bc2437e). Everything this path relied on is unchanged: fresh ids at
+ * every level so the bulk autosave inserts the copy rather than colliding with
+ * the source, `clientId` retargeted, the origin stamped via `sourceTemplateId`,
+ * and the START FLOOR — the copy begins at its first cycle on or after today
+ * and carries its own creation stamp, so neither materializer fills in the
+ * months before the client was set up (featreq-c133daf8).
+ *
+ * This copy is born ACTIVE, unlike a Duplicate: its client is chosen up front,
+ * so there is no window in which it could generate work for the wrong one.
  */
 function cloneTemplateForClient(
   source: ChecklistTemplate,
   clientId: string,
 ): Omit<ChecklistTemplate, 'id'> {
-  const migrated = ensureTemplateStages(source)
-  const cloneItems = (items: ChecklistTemplate['stages'][number]['items']) =>
-    (items ?? []).map((item) => ({
-      ...item,
-      id: makeId('template-item'),
-      subItems: (item.subItems ?? []).map((sub) => ({
-        ...sub,
-        id: makeId('template-subitem'),
-      })),
-    }))
-  return {
-    title: source.title,
-    clientId,
-    assigneeId: source.assigneeId || '',
-    frequency: source.frequency,
-    nextDueDate: firstCycleOnOrAfter(
-      source.nextDueDate || localDateOnly(),
-      source.frequency,
-      localDateOnly(),
-      advanceChecklistFrequency,
-    ),
-    createdAt: new Date().toISOString(),
-    active: true,
-    isStandard: false,
-    sourceTemplateId: source.id,
-    categoryId: source.categoryId ?? null,
-    leadDays: source.leadDays,
-    scheduledMonths: source.scheduledMonths ? [...source.scheduledMonths] : undefined,
-    dueDayOfMonth: source.dueDayOfMonth,
-    monthlyDueDays: source.monthlyDueDays ? { ...source.monthlyDueDays } : undefined,
-    repeatAnnually: source.repeatAnnually,
-    scheduleYear: source.scheduleYear,
-    viewerIds: Array.isArray(source.viewerIds) ? [...source.viewerIds] : [],
-    editorIds: Array.isArray(source.editorIds) ? [...source.editorIds] : [],
-    stages: (migrated.stages ?? []).map((stage) => ({
-      ...stage,
-      id: makeId('stage'),
-      viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
-      editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
-      items: cloneItems(stage.items),
-    })),
-  }
+  return cloneChecklistTemplate(source, { clientId, active: true })
 }
 
 function PlanChecklistsBody({ client, data }: { client: Client; data: AppData }) {

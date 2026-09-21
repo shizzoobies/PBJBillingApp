@@ -370,7 +370,12 @@ export type AppContextValue = {
     patch: Partial<TemplateStage>,
   ) => void
   reorderTemplateStages: (templateId: string, orderedStageIds: string[]) => void
-  duplicateChecklistTemplate: (templateId: string) => void
+  /**
+   * Copy a repeating task. Returns the copy's id (null in preview mode, which
+   * writes nothing) so the caller can open the copy's editor — the copy is born
+   * switched off and has to be re-aimed and turned on (featreq-0bc2437e).
+   */
+  duplicateChecklistTemplate: (templateId: string) => string | null
   /** Wave 2: create a standard (client-agnostic) reusable blueprint template. */
   createStandardTemplate: (
     payload: Omit<ChecklistTemplate, 'id' | 'clientId' | 'isStandard'>,

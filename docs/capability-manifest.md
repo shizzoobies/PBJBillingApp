@@ -1002,6 +1002,20 @@ Clients page meanwhile. Owner-only.
   that client from the template's stages and steps, and the row confirms with
   "Copied to <client>". Same copy used everywhere, so a standard blueprint and
   another client's recurring checklist copy the same way.
+- **Duplicate a repeating task (and what the copy does).** "Duplicate" inside an
+  expanded repeating task makes a second copy of the same recipe, titled
+  "<name> (copy)". The copy **arrives switched OFF**, **starts today** (it never
+  fills in months from before it was made), and opens its own editor with a note
+  saying so. You pick its client, change anything else you want, then turn it on
+  — nothing is generated for anyone until you do. That order matters: a copy
+  left switched on would create this month's task for the ORIGINAL client within
+  seconds, and a task keeps the client it was created for forever, which also
+  blocks the new client's month.
+- **Changing a repeating task's client asks first.** If the recipe has already
+  created tasks, switching its client shows a confirmation naming the count —
+  "3 existing tasks stay with Let's Eat, LLC. Only new tasks will be created for
+  I-95 Signature, LLC." Existing tasks are never moved to the new client; only
+  tasks created from then on belong to it.
 - Owners can apply a template **directly from the Clients page** too: every client
   row has a "Template" button that opens a picker of standard templates and
   recurring templates copied from other clients, and applies the chosen one to that
@@ -1054,9 +1068,16 @@ Clients page meanwhile. Owner-only.
   folds their checklists onto the board, each tagged with whose it is and faded
   so it never reads as your own; untick to go back to just yours. Their cards
   are read-only — seeing is not editing, and the server enforces that anyway.
-  There is no supervisor field in the data, so "the bookkeepers under her" is
-  read as **the people staffed alongside her on her clients** — the same
-  substitution the open/late task counts on the Clients list make.
+  There is no supervisor field in the data, so "the bookkeepers under her" means
+  **the people doing live work on the clients she can see** — whoever is
+  assigned the checklists and recurring tasks on those clients. That is the same
+  rule the open/late task counts on the Clients list use, and the same one
+  behind the Completed tasks tab. **Owners are excluded everywhere**: the firm
+  owner works clients herself, but she is not one of her accountant's
+  bookkeepers — her tasks never appear on the toggle's list and never fold onto
+  the board or into the completed history. Note this is deliberately NOT the
+  client's team list an owner picks by hand — that list gates invoices and
+  money, and nothing here widens it.
 - **Filter by client:** a "Filter by client" dropdown in the board toolbar
   narrows the board to one or more selected clients (multi-select checkboxes);
   "Clear" (or no selection) shows all clients again. It only lists clients that
@@ -1324,9 +1345,9 @@ Clients page meanwhile. Owner-only.
   with a Total row.** The cost columns price the same rows: a role's estimated
   hours at its people's pay rate against the actual labor cost, with the
   variance colored the same way as hours (under plan is green — less was spent).
-  A role with no estimate, or no pay rate (the owner), shows an em dash rather
-  than a variance against zero; the labor-cost basis line prints under the
-  table. It replaced four stat tiles (total hours, billable,
+  A role with no estimate, or whose people have no pay rate on file, shows an
+  em dash rather than a variance against zero; the labor-cost basis line prints
+  under the table. It replaced four stat tiles (total hours, billable,
   administrative, vs. the prior period). Each row is named for the people who
   filled that role and tagged with the role, so it reads one person per line in
   the normal case. Rows are per ROLE because that is the grain the estimate is
@@ -1360,17 +1381,20 @@ Clients page meanwhile. Owner-only.
   "leave off" you set on one month's invoice (the same way it has never seen a
   line you hand-edited). It answers "what is this client's work worth", not
   "what was billed".
-- **Labor cost counts team members who have a pay rate on file; owner time
-  carries no hourly cost.** The recap used to withhold margin entirely — showing
-  "—" — whenever anyone who logged time had no cost rate. Because the owner
-  correctly has no cost rate (she draws no hourly wage) and works on most
+- **Labor cost counts team members who have a pay rate on file, owners
+  included; time from anyone without a rate carries no hourly cost.** The recap
+  used to withhold margin entirely — showing "—" — whenever anyone who logged
+  time had no cost rate. Because the owner had no cost rate and works on most
   clients, that blanked margin nearly everywhere: on August 2026 data she had
   logged time on 31 of the 34 clients with any. Someone with no rate now simply
   adds nothing to labor cost, which is exactly how the payroll report and every
   cost figure elsewhere have always treated them — the recap was the odd one
-  out. **Margin is now always a figure**, and a client the owner works alone
-  shows its full fee as profit. The reason is printed on screen under every
-  cost and profit figure so the number is never a puzzle.
+  out. **Margin is now always a figure.** Owners can set their own Cost rate on
+  the Team page, and once one is set that owner's hours are costed exactly like
+  anybody else's, here and everywhere labor cost is computed; an owner who
+  leaves it blank still costs nothing, so a client she works alone shows its
+  full fee as profit. The reason is printed on screen under every cost and
+  profit figure so the number is never a puzzle.
 - **Every hours figure on the recap reads as x.xx** — the totals and each
   person's row. Those printed per-person hours are also what labor cost is
   priced from: pricing each person's shown hours at their cost rate and adding
@@ -1421,9 +1445,11 @@ Clients page meanwhile. Owner-only.
   - **A role's cost/bill rate** is taken from the people ASSIGNED to the client
     in that role; failing that, from whoever actually logged time in it. If
     several people are involved at different rates, the rate is their average
-    and the panel says so. A role whose people have no pay rate (the CFO role,
-    which is the owner's) costs nothing on BOTH sides of the comparison — it
-    never makes the comparison unavailable.
+    and the panel says so. A role whose people have no pay rate on file costs
+    nothing on BOTH sides of the comparison — it never makes the comparison
+    unavailable. That is typically the CFO role, which is the owner's, but only
+    while she leaves her Cost rate blank: set one on the Team page and the role
+    prices like any other.
   - **"No estimate set" is a normal, honest state** — most clients have no
     estimate on file. Those clients show the actual side only and **no
     variance at all**; nothing is ever compared against a zero nobody entered.
@@ -1523,10 +1549,12 @@ Clients page meanwhile. Owner-only.
     ones, because the firm pays for those as well. Set a person's cost rate on
     the Team page ("$/hour — for margin reports only, never billed").
   - Side by side, the two columns give margin per person and per day.
-  - **The OWNER's Cost shows "—" and always will.** An owner draws no hourly
-    wage, so her time carries no labor cost — that blank is the correct answer,
-    not a missing setting, and nothing should prompt her to fill it in. The Cost
-    total is therefore the firm's real STAFF labor cost.
+  - **An OWNER's Cost is whatever her own cost rate says.** Owners get the Cost
+    rate box on the Team page like everyone else, so an owner who wants her
+    hours in the firm's labor cost (to budget against) enters a rate and is
+    costed from it here. An owner who leaves it blank shows "—" and adds
+    nothing, which is a finished answer and not a missing setting — the Cost
+    total is then the firm's STAFF labor cost.
   - Anyone with no rate configured shows "—" rather than "$0.00", so an unset
     rate never reads as "billed nothing" or "cost nothing".
 - **HOW BILLABLE HOURS ARE PRICED ON INVOICES — changed 2026-09-01, her call.**
@@ -1607,8 +1635,11 @@ Clients page meanwhile. Owner-only.
     there are; a muted note under the detail totals says so on the page. A
     full-mode repeat shows no cost, on screen and in the export alike (the firm
     pays for the block once).
-  - **The owner has no cost rate**, so her rows read "—" and she contributes
-    nothing to any cost total. That is permanent and correct, not a gap.
+  - **Anyone with no cost rate** reads "—" on their rows and contributes
+    nothing to any cost total. That is a correct, finished state, not a gap.
+    Owners are in the same boat as everyone else: an owner who has entered a
+    Cost rate on the Team page is priced from it here, and one who has not
+    keeps the em dash.
 - Payroll report detail — "Time by day and job": below the per-member summary,
   the same period broken down day by day. **EVERY TIME ENTRY IS LISTED
   INDIVIDUALLY** — entries are never merged just because they share a day,
@@ -1656,8 +1687,8 @@ Clients page meanwhile. Owner-only.
   COST rate; owners are included) and Client report (hours by client), each with
   Download CSV. Print-friendly output — the Cost column is on the printed
   employee table and in its CSV, matching the payroll tables: "—" (never
-  "$0.00") for anyone with no cost rate, which is the permanent, correct answer
-  for an owner.
+  "$0.00") for anyone with no cost rate on file, owners included — and an owner
+  who has set one is costed like everybody else.
 - Hours by month: a raw, line-by-line CSV export of every time entry in the
   selected period (Date, Employee, Client, Task, Hours, Billable, Description),
   sorted by date — for month-by-month detail / external bookkeeping.
@@ -2654,10 +2685,14 @@ Clients page meanwhile. Owner-only.
   billable hours on Hourly-billed clients. Set for ANY member including the
   owner (so the owner's own hours bill). Leave blank to fall back to the firm's
   default hourly rate. Owner-only to edit.
-- Cost rate (expand a member): optional $/hour pay/cost rate per member. Owner-
-  only, informational — it powers the assistant's margin analytics and is
-  NEVER billed or shown to staff. Leave blank to skip; the assistant then
-  reports realization only. (Distinct from bill rate above.)
+- Cost rate (expand a member): optional $/hour pay/cost rate per member. Set
+  for ANY member including an owner — an owner who wants her own hours in the
+  firm's labor cost (for budgeting) enters her rate here, and from then on her
+  time is costed exactly like anyone else's on the Client Recap, the payroll
+  and employee reports, and the assistant's margin analytics. Owner-only to
+  edit, informational — it is NEVER billed and never shown to staff. Leave it
+  blank and that person's time simply costs nothing: their Cost cells read "—"
+  and the assistant reports realization only. (Distinct from bill rate above.)
 - Roles: owner has everything; staff see their assigned clients, their own
   time, and ALL tasks for those clients (logging time against any of them),
   while editing/completing stays limited to tasks assigned to them. There is
