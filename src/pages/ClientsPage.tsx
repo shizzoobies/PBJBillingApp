@@ -205,8 +205,8 @@ export function ClientsPage() {
   // either on its own.
   //
   // Scoped to whose tasks this viewer is entitled to count: their own, plus —
-  // for an accountant — the people staffed alongside them on their clients.
-  // See `openTaskAssigneeScope` for why that stands in for a hierarchy.
+  // for an accountant — the people doing live work on the clients she can see.
+  // See `openTaskAssigneeScope` for why it reads the feed and not the team.
   const todayDateOnly = localDateOnly()
   const openTaskScope = useMemo(
     () =>
@@ -214,9 +214,18 @@ export function ClientsPage() {
         viewerId: activeEmployeeId,
         isOwner: ownerMode,
         staffRole: effectiveUser?.staffRole,
-        clients: data.clients ?? [],
+        checklists: data.checklists ?? [],
+        checklistTemplates: data.checklistTemplates ?? [],
+        employees: data.employees ?? [],
       }),
-    [activeEmployeeId, ownerMode, effectiveUser?.staffRole, data.clients],
+    [
+      activeEmployeeId,
+      ownerMode,
+      effectiveUser?.staffRole,
+      data.checklists,
+      data.checklistTemplates,
+      data.employees,
+    ],
   )
   const taskCounts = useMemo(
     () =>

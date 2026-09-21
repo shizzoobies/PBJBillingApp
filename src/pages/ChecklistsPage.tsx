@@ -365,9 +365,17 @@ export function ChecklistsPage() {
         viewerId: activeEmployeeId,
         isOwner: ownerMode,
         staffRole: effectiveUser?.staffRole,
-        clients: visibleClients,
+        checklistTemplates: data.checklistTemplates,
+        employees: data.employees,
       }),
-    [data.checklists, activeEmployeeId, ownerMode, effectiveUser?.staffRole, visibleClients],
+    [
+      data.checklists,
+      data.checklistTemplates,
+      data.employees,
+      activeEmployeeId,
+      ownerMode,
+      effectiveUser?.staffRole,
+    ],
   )
 
   const areaCounts: Record<TaskArea, number> = {

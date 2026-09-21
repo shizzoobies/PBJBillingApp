@@ -60,7 +60,8 @@ export function ActiveChecklistsBoardPage() {
   const [showUpcoming, setShowUpcoming] = useState(false)
   // Accountants only, and OFF by default: the standard board is her own work.
   // Ticking it folds in the bookkeepers under her (see `boardTeamMemberIds` for
-  // how "under her" is derived — there is no supervisor field in the data).
+  // how "under her" is derived — off the live work on her clients, not off the
+  // owner-picked team, which is the money gate).
   const [showTeam, setShowTeam] = useState(false)
   // Client filter: empty = all clients; otherwise the board shows only items for
   // the selected clients (single or multiple).
@@ -98,6 +99,14 @@ export function ActiveChecklistsBoardPage() {
     }).filter((ghost) => visibleClientIds.has(ghost.clientId))
   }, [showUpcoming, data, today, reportPeriod.to, visibleClientIds])
 
+  // The session's own checklist feed, minus quietly-skipped occurrences (the
+  // same narrowing App.tsx applies). Both the toggle's roster and the board read
+  // it, so they can never disagree about who is doing live work here.
+  const feed = useMemo(
+    () => data.checklists.filter((checklist) => !isChecklistSkipped(checklist)),
+    [data.checklists],
+  )
+
   // The bookkeepers under this viewer, if any — empty for a bookkeeper and for
   // an owner, so the toggle only appears where it means something.
   const teamMemberIds = useMemo(
@@ -106,9 +115,18 @@ export function ActiveChecklistsBoardPage() {
         viewerId: activeEmployeeId,
         isOwner: ownerMode,
         staffRole: effectiveUser?.staffRole,
-        clients: data.clients,
+        checklists: feed,
+        checklistTemplates: data.checklistTemplates,
+        employees: data.employees,
       }),
-    [activeEmployeeId, ownerMode, effectiveUser?.staffRole, data.clients],
+    [
+      activeEmployeeId,
+      ownerMode,
+      effectiveUser?.staffRole,
+      feed,
+      data.checklistTemplates,
+      data.employees,
+    ],
   )
 
   // Whose card is this, when it isn't yours? Names the teammate on cards the
@@ -122,27 +140,29 @@ export function ActiveChecklistsBoardPage() {
   }
 
   // Everything the board may render, scoped to whom it belongs to. Built from
-  // the session's own feed (minus quietly-skipped occurrences, the same
-  // narrowing App.tsx applies) so previewing a staff member shows their board,
-  // not the owner's. Projected ghosts ride along and get scoped identically.
-  const boardChecklists = useMemo(() => {
-    const feed = data.checklists.filter((checklist) => !isChecklistSkipped(checklist))
-    return boardChecklistsFor([...feed, ...projectedGhosts], {
-      viewerId: activeEmployeeId,
-      isOwner: ownerMode,
-      staffRole: effectiveUser?.staffRole,
-      clients: data.clients,
-      includeTeam: showTeam,
-    })
-  }, [
-    data.checklists,
-    data.clients,
-    projectedGhosts,
-    activeEmployeeId,
-    ownerMode,
-    effectiveUser?.staffRole,
-    showTeam,
-  ])
+  // the session's own feed so previewing a staff member shows their board, not
+  // the owner's. Projected ghosts ride along and get scoped identically.
+  const boardChecklists = useMemo(
+    () =>
+      boardChecklistsFor([...feed, ...projectedGhosts], {
+        viewerId: activeEmployeeId,
+        isOwner: ownerMode,
+        staffRole: effectiveUser?.staffRole,
+        checklistTemplates: data.checklistTemplates,
+        employees: data.employees,
+        includeTeam: showTeam,
+      }),
+    [
+      feed,
+      data.checklistTemplates,
+      data.employees,
+      projectedGhosts,
+      activeEmployeeId,
+      ownerMode,
+      effectiveUser?.staffRole,
+      showTeam,
+    ],
+  )
 
   // The clients that actually have work on the board right now — the filter only
   // offers clients you could meaningfully pick (and it hides itself for ≤1).
@@ -318,7 +338,7 @@ export function ActiveChecklistsBoardPage() {
             {teamMemberIds.length > 0 ? (
               <label
                 className="upcoming-toggle"
-                title="The people staffed alongside you on your clients."
+                title="The people doing live work on the clients you can see."
               >
                 <input
                   type="checkbox"

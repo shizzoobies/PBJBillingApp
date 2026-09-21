@@ -1,5 +1,5 @@
 import { openTaskAssigneeScope, scopeChecklistsToOpenTaskOwners } from './openTaskScope'
-import type { Checklist, Client } from './types'
+import type { Checklist, ChecklistTemplate, Employee } from './types'
 
 /**
  * The checklists a viewer is shown as THEIRS.
@@ -33,13 +33,18 @@ export function checklistsVisibleTo(
  * The people an accountant's Board toggle may reveal — "the bookkeepers under
  * her", in the owner's words.
  *
- * THE DERIVATION, NAMED SO IT CAN BE CORRECTED: there is no supervisor field
- * anywhere in this data. `clients.assigned_bookkeeper_ids` is the only
- * user-to-user link the schema has (see `lib/data-scope.js`) — no reports-to
- * column, no team table. So "under her" is read as "the people staffed
- * alongside her on the clients she is assigned to", exactly the substitution
- * the open-task badge already makes (`openTaskAssigneeScope`). If a real
- * hierarchy is ever added, that function and this one are the two to change.
+ * THE DERIVATION, NAMED SO IT CAN BE CORRECTED (featreq-4fa0e70f): this used to
+ * read `clients.assigned_bookkeeper_ids` as the stand-in for a hierarchy — the
+ * explicit team of the clients she was also explicitly on. Since the 2026-09-04
+ * team/visibility split that field is the MONEY gate (the hand-picked team that
+ * alone opens a client's invoices), while task visibility is COMPUTED from the
+ * work itself. An accountant who reaches her clients by task assignment is on
+ * nobody's explicit team, so the old rule offered her an empty toggle. "Under
+ * her" is now read off the computed side: the people doing live work on the
+ * clients she can see, which is exactly what `openTaskAssigneeScope` returns.
+ *
+ * OWNERS ARE NEVER LISTED — `openTaskAssigneeScope` drops them, so the roster
+ * and the board itself agree without either having to remember to.
  *
  * Empty for a bookkeeper, for an owner (who already sees everything), and for
  * an accountant who happens to be alone on all of her clients — the Board uses
@@ -49,16 +54,28 @@ export function boardTeamMemberIds({
   viewerId,
   isOwner,
   staffRole,
-  clients,
+  checklists,
+  checklistTemplates,
+  employees,
 }: {
   viewerId: string
   isOwner: boolean
   /** Display staff role — 'Owner' | 'Accountant' | 'Bookkeeper'. */
   staffRole?: string
-  clients: Client[]
+  checklists: Checklist[]
+  checklistTemplates?: ChecklistTemplate[]
+  /** The team roster, read only to keep owners out of the list. */
+  employees?: Employee[]
 }): string[] {
   if (isOwner) return []
-  const scope = openTaskAssigneeScope({ viewerId, isOwner: false, staffRole, clients })
+  const scope = openTaskAssigneeScope({
+    viewerId,
+    isOwner: false,
+    staffRole,
+    checklists,
+    checklistTemplates,
+    employees,
+  })
   return [...(scope ?? [])].filter((id) => id !== viewerId).sort()
 }
 
@@ -76,10 +93,13 @@ export function boardTeamMemberIds({
  * An accountant with `includeTeam` also gets her teammates' tasks, which the
  * cards themselves still render read-only (only an assignee, a named editor, or
  * an owner can write — `lib/checklist-write-permission.js` re-checks the same).
+ * The OWNER's own tasks are not among them: "Show my bookkeepers'" means her
+ * bookkeepers, and `employees` is what lets the scope tell them apart.
  *
  * `checklists` must be the feed the session already holds (every task for a
- * client it is assigned to). This only ever NARROWS that feed — the reveal
- * cannot show work the session was not already sent.
+ * client it can see). This only ever NARROWS that feed — the reveal cannot show
+ * work the session was not already sent, which is why widening who counts as
+ * "her bookkeepers" (featreq-4fa0e70f) cannot widen what reaches the browser.
  */
 export function boardChecklistsFor(
   checklists: Checklist[],
@@ -87,20 +107,30 @@ export function boardChecklistsFor(
     viewerId,
     isOwner,
     staffRole,
-    clients,
+    checklistTemplates,
+    employees,
     includeTeam = false,
   }: {
     viewerId: string
     isOwner: boolean
     staffRole?: string
-    clients: Client[]
+    checklistTemplates?: ChecklistTemplate[]
+    /** The team roster, read only to keep owners out of the reveal. */
+    employees?: Employee[]
     includeTeam?: boolean
   },
 ): Checklist[] {
   if (isOwner) return checklists ?? []
   const mine = checklistsVisibleTo(checklists, { viewerId, isOwner: false })
   if (!includeTeam) return mine
-  const scope = openTaskAssigneeScope({ viewerId, isOwner: false, staffRole, clients })
+  const scope = openTaskAssigneeScope({
+    viewerId,
+    isOwner: false,
+    staffRole,
+    checklists,
+    checklistTemplates,
+    employees,
+  })
   const mineIds = new Set(mine.map((checklist) => checklist.id))
   const theirs = scopeChecklistsToOpenTaskOwners(checklists, scope).filter(
     (checklist) => !mineIds.has(checklist.id),

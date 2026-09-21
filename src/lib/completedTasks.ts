@@ -1,6 +1,6 @@
 import { isChecklistItemDone } from './utils'
 import { openTaskAssigneeScope, scopeChecklistsToOpenTaskOwners } from './openTaskScope'
-import type { Checklist, Client } from './types'
+import type { Checklist, ChecklistTemplate, Employee } from './types'
 
 /**
  * The Completed tasks tab's data.
@@ -58,28 +58,38 @@ export function checklistCompletedAt(checklist: Checklist): string | null {
  * Whose completed tasks a viewer may see.
  *
  * Deliberately the SAME rule as the open-task badge (`openTaskAssigneeScope`):
- * an employee sees their own, an Accountant additionally sees the people staffed
- * on the clients they are assigned to, the owner sees everything. Reusing it
- * means there is one definition of "their bookkeepers" in the app rather than
- * two that can drift apart.
+ * an employee sees their own, an Accountant additionally sees the people doing
+ * live work on the clients she can see (never the firm owner), the owner sees
+ * everything. Reusing it means there is one definition of "their bookkeepers"
+ * in the app rather than two that can drift apart.
  *
  * The server has already narrowed `checklists` to the viewer's clients, so this
- * only ever removes rows.
+ * only ever removes rows — and the scope is read off that same feed.
  */
 export function completedTaskRows({
   checklists,
   viewerId,
   isOwner,
   staffRole,
-  clients,
+  checklistTemplates,
+  employees,
 }: {
   checklists: Checklist[]
   viewerId: string
   isOwner: boolean
   staffRole?: string
-  clients: Client[]
+  checklistTemplates?: ChecklistTemplate[]
+  /** The team roster, read only to keep the owner's finished work out. */
+  employees?: Employee[]
 }): CompletedTaskRow[] {
-  const scope = openTaskAssigneeScope({ viewerId, isOwner, staffRole, clients })
+  const scope = openTaskAssigneeScope({
+    viewerId,
+    isOwner,
+    staffRole,
+    checklists,
+    checklistTemplates,
+    employees,
+  })
   const scoped = scopeChecklistsToOpenTaskOwners(
     (checklists ?? []).filter((checklist) => !checklist.deletedAt && isChecklistComplete(checklist)),
     scope,
