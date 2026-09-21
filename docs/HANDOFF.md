@@ -25,87 +25,58 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-15):** local `main` = `c175447`, and **those
-eleven commits were PUSHED at ~16:20 UTC** — the deploy was in flight as this
-was written, so production may still have been serving `5933d5d` for a few
-minutes after. `curl -s https://app.pbjsa.com/health` settles it: when the
-body's `commit` reads `c175447`, the release is live.
-Suite **3241 tests / 182 files**, green (3010 / 176 the night before). One
-autopilot session worked Alex's direct ask — "clients let their invoices time
-out because we sent them with the standard 1 week pay window; up that to 30
-days", plus "tell us when a sent invoice has timed out" — and five tracker
-items that had come back planned. Read the 2026-09-15 entry in §5 first: the
-headline is that **there was never a 7-day window to fix** (the default was
-already period end + 30 days; the real timeouts are Stripe's), and that three
-of the five tracker items were interpretation, not code.
+**State right now (2026-09-21):** `main` = `4c66113`, pushed and confirmed
+live (`curl -s https://app.pbjsa.com/health` — the body's `commit` is the
+deploy check; it read `4c66113`). Suite **3341 tests / 185 files**, green.
+Voice agent re-provisioned 2026-09-21. Every tracker flip and the one
+approved prod repair from this session are DONE — there is no "first
+actions" backlog. Read the 2026-09-21 entry in §5 first (two urgent bugs
+Brittany filed that day, both real code defects reproduced against
+production before any fix, plus the owner cost rate), then 09-18, 09-15 and
+the 09-04 entries. The 09-15 session's notes on the pay window / Past due /
+`INVOICE_PAST_DUE_NOTICES=off` switch are in its §5 entry.
 
-**First actions for the next session that has production access**, in this
-order — the push is already done, so this starts at the deploy check:
+The board after this session: nothing in New; three items freshly Shipped
+awaiting Brittany's review (`featreq-4fa0e70f` Board, `featreq-0bc2437e`
+Duplicate, `featreq-6fdd9e98` owner cost rate); `featreq-79b6d974`
+engagement-to-billing parked in_progress; two `planned_not_eom` parked.
+She reviews live — re-read the board at session start.
 
-```bash
-# poll until the body's "commit" reads c175447 (two to four minutes):
-curl -s https://app.pbjsa.com/health
-# the manifest changed in eight of the eleven commits, so:
-node scripts/provision-voice-agent.mjs
-# then the five tracker flips (the dev notes are committed):
-node scripts/prod/tracker-update.mjs featreq-0c2d4ce5 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-0c2d4ce5-dev-note.txt
-node scripts/prod/tracker-update.mjs featreq-68638ed2 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-68638ed2-dev-note.txt
-node scripts/prod/tracker-update.mjs featreq-60f24838 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-60f24838-dev-note.txt
-node scripts/prod/tracker-update.mjs featreq-006f12f6 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-006f12f6-dev-note.txt
-node scripts/prod/tracker-update.mjs featreq-160e3252 --status shipped --dev-notes-file docs/prod-snapshots/2026-09-15-featreq-160e3252-dev-note.txt
-# then file a shipped record for Alex's direct ask, which never had a tracker
-# row of its own (the pay window, the durable Pay link and Past due):
-node scripts/prod/tracker-update.mjs --file-shipped --type feature \
-  --title "Invoices are due in 30 days, the Pay link keeps working, and a timed-out invoice says so" \
-  --description "<what shipped and why — see the 2026-09-15 entry in docs/HANDOFF.md>"
-```
+Then the queue / watch list:
 
-Add `--dry-run` to any of those to see the row and the planned change before it
-writes. **Expect one email on the first boot of the new build:**
-INV-2026-08-023 (Ride Right, $513.40) is the only sent invoice past due today,
-so each owner gets one `invoice_past_due` message for it. The whole burst is
-therefore two messages — one invoice × two owners. That is the feature working,
-not an incident.
-
-If it ever is an incident, **`INVOICE_PAST_DUE_NOTICES=off`** in Railway stops
-the past-due notices without touching the rest of the invoice alerts. The
-once-per-invoice marker is written only as a notice goes out, and is now written
-by the same statement that checks for it, so nothing is silently spent while the
-switch is off and two containers cannot both notify about one invoice.
-
-Then the queue:
-
-1. **Brittany's team re-pick is under way, not finished.** She re-picked 5
-   Sunset's team (Lisa) on 2026-09-15 at 14:18 UTC — the first
-   `client_team_updated` since the 09-04 reset — hitting three stale-tab
-   refusals on the way. Every other client's team is still empty, including
-   the **KLC master client**, so nobody but the owners sees the combined
-   invoice. The two TEST accounts are still explicitly on **33 / 16** teams:
-   if she tests as one of them she sees a pile of invoices and thinks it is
-   broken. Her tracker item `featreq-0c2d4ce5` is the explanation she is owed,
-   and the flip above posts it.
-2. **Two questions for Brittany from tonight** (§6): was the **preview banner**
-   up when she saw "Allison can still see clients not hers" — preview-as was
-   the leak and it is fixed, and Allison's real login shows Skyline only — and
-   do the **"[Review]" and "Test" clients**, which look retired but are active,
-   want retiring?
-3. **Three production data steps need Alex's yes at run time** (§6): the
-   cosmetic payment-terms normalization, the two client merges, and two UI
-   actions of his own (toggle Rivercity's invoicing opt-out, void
-   INV-2026-09-022).
-4. **The two Skip/Push questions for Brittany are still open** (§6): may a
-   single subtask be skipped or pushed on its own, and does a skip or a push
-   advance the next step in a sequence? Push now appears on every task the user
-   can write (`0f68aef`), still whole-checklist. Do not build past her answers.
-5. **Deliverability owner steps** (§6): safe-sender ask to flagged clients,
-   Google Postmaster Tools, DMARC reports to Cloudflare. Watch the delivery
-   badge on the invoice month run.
-6. Resilience Tier 1 is built but the backups are DORMANT — no R2 secrets in
-   GitHub or Railway, and **Alex said hold off for now** (§5 2026-09-03 entry).
-   Tier 2 waits on that.
-7. Follow-ups: remove the eight inert `grantClientVisibility` call sites;
-   share `firmDetailLines` between the PDF and the email; migrate
-   `railway.json` to `.railway/railway.ts` before 2026-12-01.
+1. **Brittany's team re-pick is still unfinished** (13 of 55 clients had an
+   empty team on 09-21; Lisa 5, Allison 1). Until a client has a team, staff
+   see none of its invoices on the Invoice Recap, and nobody but the owners
+   sees the KLC master's combined invoice. **Do NOT "fix" a Board complaint
+   by adding people to teams** — the team list is the money gate; the Board
+   now reads computed visibility (09-21 entry). The two TEST accounts are
+   still explicitly on many teams — if she tests as one she sees a pile of
+   invoices and thinks it is broken.
+2. **Open Brittany questions:** (a) the two Skip/Push questions (§6 of the
+   09-15 entry): may a single subtask be skipped/pushed on its own, and does
+   a skip/push advance the next step in a sequence — Push is on every task
+   the user can write (`0f68aef`), still whole-checklist; (b) from 09-18: a
+   gapped recipe steps by occurrence (its December task covers October) — if
+   she expects "the month before it runs", that is a different rule; (c) do
+   the "[Review]" and "Test" clients, which look retired but are active, want
+   retiring?
+3. **Alex's own UI actions still pending from 09-15** (if not done): toggle
+   Rivercity's invoicing opt-out, void INV-2026-09-022. The payment-terms
+   normalization and the two client merges WERE applied 09-15 (`adc878c`).
+4. **Deliverability owner steps** (09-04 entry): safe-sender ask to flagged
+   clients, Google Postmaster Tools, DMARC reports to Cloudflare.
+5. Resilience Tier 1 is built but the backups are DORMANT — no R2 secrets,
+   and Alex said hold off for now (09-03 entry). Tier 2 waits on that.
+6. **Watch:** September's KLC generate is the first combined invoice
+   (~$720, master `client-lamjjjc`); the first send is irreversible. The
+   Payment failed tab: INV-2026-08-031 sits in it until re-sent or paid.
+7. Follow-ups: the client-blind checklist idempotency key + 116 legacy
+   `(copy)` instances whose client differs from their template's (09-21
+   entry — a decision, not a cleanup); team picks live in a field the bulk
+   save rewrites, so a stale owner tab can clobber re-picked teams
+   (targeted-endpoint pass); remove the eight inert `grantClientVisibility`
+   call sites; share `firmDetailLines` between the PDF and the email;
+   migrate `railway.json` to `.railway/railway.ts` before 2026-12-01.
 
 **The permission classifier (2026-09-14, now mostly solved).** In a Claude Code
 desktop session running in auto mode the classifier can refuse `git push`,
@@ -239,8 +210,7 @@ already and the problem is interpretation, not code.** See §7.
    do, **re-provision the voice agent after deploying** (§3).
 
 3. **`npm run verify`** = `eslint` + `tsc -b && vite build` + `vitest`. Green
-   before every push. Currently **2864 tests / 170 files** (2026-09-11, on
-   the unmerged branch; `main` is at 2840 / 168).
+   before every push. Currently **3341 tests / 185 files** (2026-09-21).
 
 4. Prefer targeted endpoints over the bulk save. `PUT /api/app-data` (the bulk
    workspace save) is **owner-only (403 for staff)** — anything staff must do
@@ -385,6 +355,43 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-21 — two urgent Brittany bugs fixed (both were code, both
+reproduced against production first) and owners can carry a cost rate.**
+`main` = `4c66113`, deployed (health `commit` confirmed), suite **3341 tests
+/ 185 files**, voice re-provisioned, all three tracker items Shipped with
+notes in her terms. Built Fable-orchestrated / Opus-executed: two read-only
+diagnosis agents first, fixes only after the diagnoses landed.
+
+| Commit | What |
+|---|---|
+| `243fc76` | **Owner cost rate** (featreq-6fdd9e98, "I need a cost for Brittany"). One functional line: the Team page hid the Cost rate box for owner rows. Every read path was already role-agnostic and the field persisted on both backends; the rest of the diff corrects prose that claimed owner time carries no cost. Alex's row stays blank ($0) by his own ruling. |
+| `6ddd53b` | **Board "my bookkeepers"** (featreq-4fa0e70f, urgent). The rule read the EXPLICIT team — the money gate since 09-04 — so an accountant who reaches clients by task assignment (Allison: 1 explicit, 14 task-derived) could never reveal a colleague. Now it reads the computed side: assignees of live work on the clients she can see, owners excluded at the leaf (toggle, board, Completed tab, Clients badge share it). Containment pinned. **Do not "fix" this by adding Allison to teams — that re-opens the 09-04 invoice leak.** |
+| `4c66113` | **Recipe Duplicate** (featreq-0bc2437e, urgent). Duplicate was a live `{...source}` spread keeping the source's client AND createdAt; the materializer spawned Let's Eat instances in the minutes before she re-aimed the copy at I-95, and the client-blind idempotency key then owned those months for good. Now one shared clone (`src/lib/cloneChecklistTemplate.ts`) serves both copy paths; a Duplicate starts switched OFF, dated today, and opens its editor; changing a recipe's client with live instances confirms first. |
+
+**Prod write (approved by Alex, September forward):** hard-deleted the two
+misfiled instances `check-4lod9nn` / `check-5s3sv4f` (Let's Eat-stamped,
+no time entries; items cascaded) and set `template-uyfnwg1.created_at` to
+2026-09-21. Rehearsed in a rolled-back transaction first. Undo:
+`docs/prod-snapshots/2026-09-21-i95-duplicate-pre-repair.json`. The recipe
+is still OFF and `monthly` / Sep 30 exactly as Brittany left it — she turns
+it on.
+
+**Left open, deliberately:**
+- The instance `clientId` snapshot + client-blind idempotency key
+  (`lib/checklist-identity.js`) is the underlying hole; 116 legacy `(copy)`
+  instances already mismatch their template's client from the Aug 14 seed.
+  Historical, mostly worked — not touched. Repointing instances on a client
+  change is a decision, not a cleanup (time entries and invoices hang off
+  them).
+- All 55 `clients.updated_at` share one bulk-save timestamp from 09-21:
+  team picks live in a field `PUT /api/app-data` rewrites, so a stale owner
+  tab can still clobber re-picked teams. The staleness guard covers it only
+  if the tab is actually stale by fingerprint. Worth a targeted-endpoint
+  pass.
+- `activity_log` is trimmed to 200 rows per user, so "did she re-pick
+  teams since 09-04" cannot be answered from it — read the team lists.
+- Teams are still half re-picked (13 of 55 clients have an empty team).
 
 **2026-09-18 — three planned items shipped in one day (billing-email check,
 period-covered label, recipe start floor), one production write applied (17
