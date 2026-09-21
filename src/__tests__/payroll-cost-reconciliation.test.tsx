@@ -48,7 +48,9 @@ const COST_RATE = 37
 const employees = [
   { id: 'emp-1', name: 'Avery Stone', billRate: 90 },
   { id: 'emp-2', name: 'Blair Nunez', billRate: 90 },
-  // No cost rate at all — the owner. Her Cost cell must read "—", not $0.00.
+  // The owner, with no cost rate on file: her Cost cell must read "—", not
+  // $0.00. Since featreq-6fdd9e98 that is a choice she can reverse from the
+  // Team page rather than a fact about her role — see the last describe below.
   { id: 'emp-owner', name: 'Owner', billRate: 0 },
 ]
 
@@ -136,7 +138,7 @@ describe('payroll Cost column reconciles by hand', () => {
     const { body } = summaryTable(container)
 
     for (const row of body) {
-      // The owner has no pay rate, so there is no cost to reproduce.
+      // Nobody with a blank rate has a cost to reproduce.
       if (row[COST] === '—') continue
       const byHand = (hours(row[HOURS]) * COST_RATE).toFixed(2)
       expect(dollars(row[COST]).toFixed(2)).toBe(byHand)
@@ -153,7 +155,7 @@ describe('payroll Cost column reconciles by hand', () => {
 
     const costCells = body.map((row) => row[COST])
     expect(costCells).toContain('$6.29')
-    // The owner has no cost rate: "—", never "$0.00".
+    // The owner has left her cost rate blank: "—", never "$0.00".
     expect(costCells).toContain('—')
 
     const byHand = costCells
@@ -352,5 +354,38 @@ describe('payroll exports price off the hours they print', () => {
     expect(avery[costIndex]).toBe('6.29')
     expect((Number(avery[hoursIndex]) * COST_RATE).toFixed(2)).toBe(avery[costIndex])
     expect((rows.find((row) => row[0] === 'Owner') as string[])[costIndex]).toBe('')
+  })
+})
+
+/**
+ * featreq-6fdd9e98 — the owner budgets for her own time.
+ *
+ * "Yes I need to input a cost for me so I can budget." The Team page now offers
+ * the Cost rate box to every member, owners included, so an owner row stops
+ * being a permanent em dash the moment she fills it in. The report needed no
+ * change for that — it has always priced from the /api/team rate map — and this
+ * pins that, because the em dash above reads like a rule about owners and is
+ * only ever a rule about blank rates.
+ */
+describe('an owner with a cost rate is costed like anyone else', () => {
+  it('prices her hours and carries them into the printed total', async () => {
+    mockFetchTeam.mockResolvedValue({
+      users: [
+        { id: 'emp-1', costRate: COST_RATE },
+        { id: 'emp-2', costRate: COST_RATE },
+        // The one difference from every other test in this file.
+        { id: 'emp-owner', costRate: COST_RATE },
+      ],
+    } as unknown as Awaited<ReturnType<typeof fetchTeam>>)
+
+    const { container } = await renderReport()
+    const { body, footer } = summaryTable(container)
+
+    const owner = body.find((cells) => cells[0] === 'Owner') as string[]
+    expect(owner[HOURS]).toBe('0.75h') // her 45 minutes
+    expect(owner[COST]).toBe('$27.75') // 0.75 × $37, her own hours by hand
+    // Nothing is withheld any more, and the column still adds to its total.
+    expect(body.map((row) => row[COST])).not.toContain('—')
+    expect(footer[COST]).toBe('$40.33') // 6.29 + 6.29 + 27.75
   })
 })

@@ -480,7 +480,16 @@ export function TeamPage() {
                           </div>
                         </div>
                       ) : null}
-                      {ownerMode && member.staffRole !== 'Owner' ? (
+                      {/*
+                        EVERY member gets this box, owners included
+                        (featreq-6fdd9e98 — "I need to input a cost for me so I
+                        can budget"). It used to be hidden for the Owner role on
+                        the assumption that an owner draws no hourly wage; that
+                        was never a rule the cost math enforced, only a box the
+                        page withheld. An owner who leaves it blank still costs
+                        nothing, exactly as before. Same gate as Bill rate above.
+                      */}
+                      {ownerMode ? (
                         <div className="team-cost-rate">
                           <label htmlFor={`cost-${member.id}`}>
                             <strong>Cost rate</strong>

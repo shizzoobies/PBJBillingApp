@@ -41,14 +41,18 @@ const PERIOD_ADJECTIVE: Record<ClientRecapPeriodType, string> = {
 /**
  * Printed once on every panel that shows a cost or a profit.
  *
- * Labor cost counts whoever has a pay rate on file and nobody else — the owner
- * draws no hourly wage, so her time adds no cost, and a client she works alone
- * shows its full fee as profit. That is the intended reading, but it is not a
- * guessable one, so it is stated rather than left to be discovered. Kept beside
- * the other captions so the wording stays in one revisable place.
+ * Labor cost counts whoever has a pay rate on file and nobody else — ROLE has
+ * nothing to do with it. An owner can set her own cost rate on the Team page
+ * (featreq-6fdd9e98), and from then on her hours cost the firm like anyone
+ * else's; an owner who leaves it blank still adds nothing, and a client she
+ * works alone then shows its full fee as profit. That is the intended reading,
+ * but it is not a guessable one, so it is stated rather than left to be
+ * discovered. Kept beside the other captions so the wording stays in one
+ * revisable place.
  */
 const LABOR_COST_BASIS_NOTE =
-  'Labor cost counts team members who have a pay rate on file; owner time carries no hourly cost.'
+  'Labor cost counts team members who have a pay rate on file, owners included; time from ' +
+  'anyone without a rate carries no hourly cost.'
 
 /**
  * Green/red is chosen by what the row MEANS, never by the sign: hours over plan

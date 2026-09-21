@@ -2681,9 +2681,9 @@ export type ClientRecap = {
   } | null
   /**
    * `laborCost` counts only team members who have a cost rate on file — someone
-   * without one (the owner, who draws no hourly wage) contributes zero rather
-   * than making cost unknowable. Show LABOR_COST_BASIS_NOTE wherever these
-   * appear.
+   * without one contributes zero rather than making cost unknowable. Role plays
+   * no part: an owner who has set her own cost rate is counted like anyone else
+   * (featreq-6fdd9e98). Show LABOR_COST_BASIS_NOTE wherever these appear.
    */
   profitability: {
     realizedRate: number | null

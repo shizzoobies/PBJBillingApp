@@ -83,9 +83,10 @@ export function ReportsPage() {
    * team endpoint is already owner-gated (403 otherwise) and this page is
    * owner-only, so reading it here adds no new exposure.
    *
-   * A missing entry means NO cost rate, which is not an error: an owner draws
-   * no hourly wage, so their time carries no labor cost and the column shows
-   * "—" for them permanently.
+   * A missing entry means NO cost rate, which is not an error — that person's
+   * time carries no labor cost and the column shows "—" for them. Owners are in
+   * this map like everyone else (featreq-6fdd9e98): one who has entered a cost
+   * rate on the Team page is priced here, one who has not still reads "—".
    */
   const [costRates, setCostRates] = useState<Record<string, number | null>>({})
   useEffect(() => {
@@ -612,10 +613,10 @@ function PayrollHoursReport({
    * Priced by `personPeriodCost` off the person's two-decimal hours — the same
    * hours printed in the Hours cell — so the Cost cell is reproducible by hand
    * and a column of these adds up to the total printed underneath it. `null` =
-   * no cost rate, and for an OWNER that is the correct, permanent answer rather
-   * than a missing value: an owner draws no hourly wage, so her time carries no
-   * labor cost. Never render it as $0.00, and never treat the blank as
-   * something to be filled in.
+   * no cost rate, which is a real state and not a missing value: that person's
+   * time carries no labor cost. Never render it as $0.00. An owner is priced
+   * from her own cost rate when she has set one (featreq-6fdd9e98) and reads
+   * "—" when she has not.
    */
   const costFor = (employeeId: string, minutesPerRow: number[]) =>
     periodMoney(minutesPerRow, costRates[employeeId])
@@ -1103,9 +1104,10 @@ function ReportsOverview({
    * payroll tables use, via the same helper: ALL hours worked (internal
    * included) × their cost rate, cent-rounded once per person.
    *
-   * `null` = no cost rate, which for an OWNER is the correct permanent answer
-   * rather than a missing setting — she draws no hourly wage, so her time
-   * carries no labor cost. It renders "—", never "$0.00".
+   * `null` = no cost rate, which is a real state rather than a missing setting
+   * — that person's time carries no labor cost. It renders "—", never "$0.00".
+   * Owners included: one with a cost rate on file is costed here like anyone
+   * else (featreq-6fdd9e98), one without still reads "—".
    *
    * "Cent-rounded once per person" now means off that person's two-decimal
    * hours, so the Tracked hours cell beside it multiplies straight into Cost.

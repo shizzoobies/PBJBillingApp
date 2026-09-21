@@ -134,9 +134,10 @@ const roleRow = (tier: string) => screen.getByRole('row', { name: new RegExp(tie
 const totalRow = () => screen.getByRole('row', { name: /^Total/ })
 
 /**
- * Labor cost counts only people with a pay rate, so a client the owner works
- * alone shows its whole fee as profit. That is intended and it is not
- * guessable, so the note has to be on screen wherever cost or profit is.
+ * Labor cost counts only people with a pay rate — owners included since
+ * featreq-6fdd9e98 — so a client worked alone by someone with no rate shows its
+ * whole fee as profit. That is intended and it is not guessable, so the note
+ * has to be on screen wherever cost or profit is.
  */
 const LABOR_COST_NOTE = /Labor cost counts team members who have a pay rate on file/
 
@@ -401,13 +402,13 @@ describe('Time & hours — the cost columns (owner only)', () => {
     render(
       <TimeAndHoursCard time={TIME} monthsInPeriod={1} estimates={ESTIMATES_WITH_COST} />,
     )
-    expect(screen.getByText(/owner time carries no hourly cost/)).toBeInTheDocument()
+    expect(screen.getByText(LABOR_COST_NOTE)).toBeInTheDocument()
   })
 
   it('renders NO cost columns without an estimates payload — a staff table is unchanged', () => {
     render(<TimeAndHoursCard time={TIME_STAFF} monthsInPeriod={1} />)
     expect(screen.queryByText('Cost estimate')).not.toBeInTheDocument()
     expect(within(roleRow('Bookkeeper')).getAllByRole('cell')).toHaveLength(4)
-    expect(screen.queryByText(/owner time carries no hourly cost/)).not.toBeInTheDocument()
+    expect(screen.queryByText(LABOR_COST_NOTE)).not.toBeInTheDocument()
   })
 })
