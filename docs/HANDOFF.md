@@ -25,10 +25,10 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-22, night):** `main` = the invoice-rating
-model-bump commit right after `b635887` (this handoff rides in it), pushed
-and confirmed live (`curl -s https://app.pbjsa.com/health` — the body's
-`commit` is the deploy check). Suite **3458 tests / 190 files**, green.
+**State right now (2026-09-22, night):** `main` = `a197334` (+ this
+handoff), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
+— the body's `commit` is the deploy check; it read `a197334`). Suite
+**3458 tests / 190 files**, green.
 Voice agent re-provisioned 2026-09-22 (four times that day). **Every AI
 call in the app now runs on `claude-opus-5-5`** — the assistant default
 AND `INVOICE_AI_MODEL`'s default — and its stricter structured-output
@@ -43,11 +43,15 @@ production before any fix; the owner cost rate), then 09-18, 09-15 and
 the 09-04 entries. The 09-15 session's notes on the pay window / Past due /
 `INVOICE_PAST_DUE_NOTICES=off` switch are in its §5 entry.
 
-The board after this session: nothing in New or Planned; six items freshly
-Shipped awaiting Brittany's review (`featreq-4fa0e70f` Board,
-`featreq-0bc2437e` Duplicate, `featreq-6fdd9e98` owner cost rate,
-`featreq-839c9448` Team-page one-click teams, `featreq-cb1c5f95`
-Walkthrough, `featreq-f890f05b` Packages); `featreq-79b6d974`
+The board at handoff (read live at 23:30 UTC): nothing in New or Planned.
+Brittany reviewed WHILE this session ran and approved five of the day's
+items to Done (Board, Duplicate, owner cost rate, Team-page teams,
+Walkthrough). Seven sit in Shipped awaiting her: `featreq-d0ace76d`
+Britt's Brain fix + Opus 5.5, `featreq-f890f05b` Packages,
+`featreq-053fccba` period label, `featreq-284119d9` billing-email check,
+`featreq-8bd1cb0f` 30-day pay window, and the two desktop/PWA items from
+August. One `brainstorm` item ("Billing prices" — the session the Brain
+fault interrupted; hers until Alex promotes it). `featreq-79b6d974`
 engagement-to-billing parked in_progress; two `planned_not_eom` parked.
 She reviews live — re-read the board at session start.
 
