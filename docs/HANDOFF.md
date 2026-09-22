@@ -25,11 +25,15 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-22, night):** `main` = `b635887` (+ this
-handoff), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
-— the body's `commit` is the deploy check). Suite **3454 tests / 190
-files**, green. Voice agent re-provisioned 2026-09-22 (four times that
-day). The assistant default model is now **`claude-opus-5-5`**. Every
+**State right now (2026-09-22, night):** `main` = the invoice-rating
+model-bump commit right after `b635887` (this handoff rides in it), pushed
+and confirmed live (`curl -s https://app.pbjsa.com/health` — the body's
+`commit` is the deploy check). Suite **3458 tests / 190 files**, green.
+Voice agent re-provisioned 2026-09-22 (four times that day). **Every AI
+call in the app now runs on `claude-opus-5-5`** — the assistant default
+AND `INVOICE_AI_MODEL`'s default — and its stricter structured-output
+validator is documented in the 09-22 night entry (no `minimum`/`maximum`/
+`minItems`/`maxItems` in any schema; tripwires pin it). Every
 tracker flip and the one approved prod repair (09-21) are DONE — there is
 no "first actions" backlog. Read the three 2026-09-22 entries and the
 2026-09-21 entry in §5 first (Britt's Brain provider fault + model bump;
@@ -383,8 +387,21 @@ confirmed via the live models endpoint — the cached skill table predates
 it). Proven on her real session through the app's code: 3/3, no reduced
 retry needed, ~3.5 s a turn; refine also fine. Every assistant feature
 (brainstorm, refine, read-back, walkthrough, package suggestions, chat)
-follows the default; `INVOICE_AI_MODEL` (the confidence rating) stays on
-`claude-opus-5` — its plan doc pins that model and nobody asked. Opus 5-
+follows the default; `INVOICE_AI_MODEL` (the confidence rating) was bumped
+to `claude-opus-5-5` in the follow-up commit on Alex's word (plan doc
+updated). **Trap found on the way, worth remembering:** 5.5's
+structured-output validator REJECTS `minimum`/`maximum` on integers and
+`minItems`/`maxItems` on arrays (400 "properties … are not supported") —
+`claude-opus-5` accepted them. Two schemas carried them (the rating's
+`score` + arrays; the package proposals' `dueDayOfMonth` + arrays), so the
+rating would have 502'd on every Generate and "Suggest checklists" was
+broken for the ~hour the assistant default was 5.5 before this fix. The
+caps moved into the validators (which already clamped/sliced); a source-
+scan tripwire in `lib/assistant.test.mjs` and a schema walk in
+`lib/invoice-confidence.test.mjs` pin that no schema grows one back. Proven
+by running every structured function for real on 5.5 (rating: high/92 on
+INV-2026-08-058; suggestions, walkthrough, read-back, summary all OK).
+`enum` and string `minLength` are accepted. Opus 5-
 family models run adaptive thinking by default, so turns cost a little
 more than 4.8's; nothing in the request shapes needed changing (no
 prefill, no budget_tokens anywhere). The 08-28 outage and this are the

@@ -14,7 +14,7 @@ confidence-vs-corrections record becomes the case for (or against) automation
 tiers. Nothing here automates anything today.
 
 Two jobs:
-1. **Rate** — after Generate, `claude-opus-5` reviews each monthly draft and
+1. **Rate** — after Generate, `claude-opus-5-5` (was `claude-opus-5` until 2026-09-22) reviews each monthly draft and
    stores a confidence verdict: band, score, summary, per-line concerns, and up
    to 3 questions it would ask Brittany.
 2. **Learn** — the corpus that doesn't exist yet starts being recorded: the
