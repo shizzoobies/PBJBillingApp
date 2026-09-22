@@ -25,16 +25,18 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-22, evening):** `main` = `d86b6f1` (+ this
+**State right now (2026-09-22, night):** `main` = `b635887` (+ this
 handoff), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
-— the body's `commit` is the deploy check). Suite **3449 tests / 190
-files**, green. Voice agent re-provisioned 2026-09-22 (three times that
-day). Every tracker flip and the one approved prod repair (09-21) are DONE
-— there is no "first actions" backlog. Read the two 2026-09-22 entries and
-the 2026-09-21 entry in §5 first (Walkthrough + Packages; the Team page's
-one-click team rebuild; two urgent bugs Brittany filed 09-21, both real
-code defects reproduced against production before any fix; the owner cost
-rate), then 09-18, 09-15 and the 09-04 entries. The 09-15 session's notes on the pay window / Past due /
+— the body's `commit` is the deploy check). Suite **3454 tests / 190
+files**, green. Voice agent re-provisioned 2026-09-22 (four times that
+day). The assistant default model is now **`claude-opus-5-5`**. Every
+tracker flip and the one approved prod repair (09-21) are DONE — there is
+no "first actions" backlog. Read the three 2026-09-22 entries and the
+2026-09-21 entry in §5 first (Britt's Brain provider fault + model bump;
+Walkthrough + Packages; the Team page's one-click team rebuild; two urgent
+bugs Brittany filed 09-21, both real code defects reproduced against
+production before any fix; the owner cost rate), then 09-18, 09-15 and
+the 09-04 entries. The 09-15 session's notes on the pay window / Past due /
 `INVOICE_PAST_DUE_NOTICES=off` switch are in its §5 entry.
 
 The board after this session: nothing in New or Planned; six items freshly
