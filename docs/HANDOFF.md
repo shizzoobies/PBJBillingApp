@@ -359,6 +359,36 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-09-22 (night) — "Britt's Brain wasn't working": a provider-side
+fault on ONE request shape, routed around (`21b0f0d`), and the assistant
+model bumped to `claude-opus-5-5` (this commit).** Three of her brainstorm
+turns (15:06, 16:02, 16:04 UTC) came back from `claude-opus-4-8` as HTTP
+500 `api_error`; the brainstorm's deliberate no-fallback rule showed "at
+capacity". Method worth keeping: reproduce through the app's own
+`spitballChat` with the real session, then bisect with real content —
+schema floors, max_tokens, messages alone, context alone, each past
+summary alone all pass; the full request fails ~50% of raw attempts and
+the SDK's identical retries fail together; drop the past-session
+summaries block and it passes 8/8. Not the deploys (path untouched), not
+the status-page incident (hours later, other models), no bad characters.
+
+Two fixes: (1) `spitballChat` retries ONCE on the same model with
+`pastSummaries` dropped (running summary + parked titles kept) on a
+FALLBACK_STATUSES status or the transient "Invalid request data" 400, then
+the unchanged 503; `modelFallback:false` stands; five tests pin it.
+(2) The assistant default is now `claude-opus-5-5` (released 2026-09-21;
+confirmed via the live models endpoint — the cached skill table predates
+it). Proven on her real session through the app's code: 3/3, no reduced
+retry needed, ~3.5 s a turn; refine also fine. Every assistant feature
+(brainstorm, refine, read-back, walkthrough, package suggestions, chat)
+follows the default; `INVOICE_AI_MODEL` (the confidence rating) stays on
+`claude-opus-5` — its plan doc pins that model and nobody asked. Opus 5-
+family models run adaptive thinking by default, so turns cost a little
+more than 4.8's; nothing in the request shapes needed changing (no
+prefill, no budget_tokens anywhere). The 08-28 outage and this are the
+same family: the provider intermittently rejects specific prompt shapes;
+the app now degrades the REQUEST instead of the model.
+
 **2026-09-22 (later) — "Walk me through it" on the Updates page, and
 Packages (plan bundles that bring their checklists).** One commit,
 `d86b6f1`, two tracker items (featreq-cb1c5f95, featreq-f890f05b) — built
