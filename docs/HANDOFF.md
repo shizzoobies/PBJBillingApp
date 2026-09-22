@@ -25,15 +25,15 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-21):** `main` = `4c66113`, pushed and confirmed
+**State right now (2026-09-22):** `main` = `302b1a6`, pushed and confirmed
 live (`curl -s https://app.pbjsa.com/health` — the body's `commit` is the
-deploy check; it read `4c66113`). Suite **3341 tests / 185 files**, green.
-Voice agent re-provisioned 2026-09-21. Every tracker flip and the one
-approved prod repair from this session are DONE — there is no "first
-actions" backlog. Read the 2026-09-21 entry in §5 first (two urgent bugs
-Brittany filed that day, both real code defects reproduced against
-production before any fix, plus the owner cost rate), then 09-18, 09-15 and
-the 09-04 entries. The 09-15 session's notes on the pay window / Past due /
+deploy check; it read `302b1a6`). Suite **3349 tests / 186 files**, green.
+Voice agent re-provisioned 2026-09-22. Every tracker flip and the one
+approved prod repair (09-21) are DONE — there is no "first actions"
+backlog. Read the 2026-09-22 and 2026-09-21 entries in §5 first (the Team
+page's one-click team rebuild; two urgent bugs Brittany filed 09-21, both
+real code defects reproduced against production before any fix; the owner
+cost rate), then 09-18, 09-15 and the 09-04 entries. The 09-15 session's notes on the pay window / Past due /
 `INVOICE_PAST_DUE_NOTICES=off` switch are in its §5 entry.
 
 The board after this session: nothing in New; three items freshly Shipped
@@ -355,6 +355,20 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-22 — the Team page's Assigned clients control moved under the
+person's name and gained a one-click "Add all" of the clients they work
+on** (`302b1a6`, Alex's direct ask: "how can Brittany add more people for
+her team to see on the invoice recap, is there a quick and easy way … leave
+it on the team page but move it right below the name"). The Suggested
+block is `taskClientIdsForUser` minus the current team — the same rule
+task visibility uses — shown to the owner BEFORE she presses anything; it
+is a deliberate widening of the money gate and is documented in the
+component as never-to-become-an-automatic-backfill (that is what the
+09-04 split removed). Every add is still the per-client
+`setClientAssignedTeamRequest`; the add menu stays open across picks.
+Suite 3349 / 186. This is the tool for finishing the team re-pick in §0
+item 1.
 
 **2026-09-21 — two urgent Brittany bugs fixed (both were code, both
 reproduced against production first) and owners can carry a cost rate.**
