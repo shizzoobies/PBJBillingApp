@@ -2680,6 +2680,22 @@ Clients page meanwhile. Owner-only.
 - Invite bookkeeper: name, email, role (Bookkeeper / Accountant / etc.) —
   sends a sign-in link by email.
 - Roster: each member's role and last login; expand for details; reorder.
+- Assigned clients (expand a member, FIRST thing under their name): the list of
+  clients this person is on the team of. Chips for who they are already on,
+  each with an X to take one away, and a "+ Add client" menu that STAYS OPEN
+  while clients are picked — one click per client, no re-opening between them.
+  Adding a client here is what lets that person see the client's invoices on
+  the Invoice Recap: the assigned list is the money gate, and nothing else
+  opens invoices. (What they can SEE elsewhere — tasks, time, notes — is wider
+  and works out on its own: anyone holding work on a client can see it without
+  being on the team.)
+- Suggested (inside Assigned clients): when someone holds live work on clients
+  they are not on the team of, the page lists those clients — "The 4 clients
+  Lisa currently has work on:" — with each name addable in one click and an
+  "Add all 4" button that adds every one of them and confirms ("Added 4
+  clients."). Retired clients are never suggested. It is a suggestion, not an
+  automatic fill-in: nobody gains access to a client's invoices until the owner
+  clicks.
 - Resend sign-in link; revoke access.
 - Bill rate (expand a member): the $/hour charged to clients for this person's
   billable hours on Hourly-billed clients. Set for ANY member including the

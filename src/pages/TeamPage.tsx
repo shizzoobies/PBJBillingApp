@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChevronDown, ChevronUp, Eye, MailPlus, Send, Trash2, X } from 'lucide-react'
 import { useAppContext } from '../AppContext'
@@ -28,6 +28,7 @@ import {
 } from '../lib/types'
 import { describeActivityAction, formatActivityTimestamp, relativeTime } from '../lib/utils'
 import { selectableClients } from '../lib/clientLifecycle'
+import { taskClientIdsForUser } from '../../lib/data-scope.js'
 
 const STAFF_ROLES = ['Owner', 'Accountant', 'Bookkeeper'] as const
 
@@ -433,6 +434,32 @@ export function TeamPage() {
                   </div>
                   {isExpanded ? (
                     <div className="team-card-body">
+                      {/*
+                        FIRST in the panel, right under the person's name:
+                        rebuilding these lists is the job this page gets opened
+                        for since the 2026-09-04 team reset, and it used to sit
+                        below the rates, the actions and the session list.
+                      */}
+                      {member.staffRole !== 'Owner' ? (
+                        <ClientsTheyCanSeeSection
+                          memberId={member.id}
+                          memberName={member.name}
+                          clients={data.clients}
+                          taskClientIds={taskClientIdsForUser(
+                            {
+                              checklists: data.checklists,
+                              checklistTemplates: data.checklistTemplates,
+                            },
+                            member.id,
+                          )}
+                          onChangeClient={(clientId, nextIds) => {
+                            updateClient(clientId, { assignedBookkeeperIds: nextIds })
+                            void setClientAssignedTeamRequest(clientId, nextIds).catch(() => {
+                              // best-effort; the next /api/app-data refresh reconciles
+                            })
+                          }}
+                        />
+                      ) : null}
                       {member.staffRole !== 'Owner' ? (
                         <p className="muted-text" style={{ marginTop: 0 }}>
                           <strong>2FA:</strong>{' '}
@@ -623,19 +650,6 @@ export function TeamPage() {
                         )}
                       </div>
 
-                      {member.staffRole !== 'Owner' ? (
-                        <ClientsTheyCanSeeSection
-                          memberId={member.id}
-                          clients={data.clients}
-                          onChangeClient={(clientId, nextIds) => {
-                            updateClient(clientId, { assignedBookkeeperIds: nextIds })
-                            void setClientAssignedTeamRequest(clientId, nextIds).catch(() => {
-                              // best-effort; the next /api/app-data refresh reconciles
-                            })
-                          }}
-                        />
-                      ) : null}
-
                       <div className="team-activity">
                         <h4>Recent activity</h4>
                         {activityLoading === member.id ? (
@@ -702,20 +716,68 @@ function describeUserAgent(ua: string | null): string {
 }
 
 /**
- * Per-team-member view of the inverse relationship: shows every client this
- * non-owner can currently see, with chips to remove a client from their
- * visibility list and a "+ Add client" pill to grant access.
+ * Per-team-member view of the inverse relationship: every client this non-owner
+ * is on the team of, with chips to take one away and a "+ Add client" pill to
+ * put one on. It leads the expanded panel because re-picking these lists is the
+ * open job — 13 of 55 clients still had an empty team on 2026-09-21.
+ *
+ * WHAT THIS FIELD IS. `assignedBookkeeperIds` is the EXPLICIT team and the
+ * MONEY gate: since the 2026-09-04 team/visibility split it is the only thing
+ * that puts a client's invoices on this person's Invoice Recap. What they can
+ * SEE is computed separately and is deliberately wider — team ∪ every client
+ * they hold live work on (`visibleClientIdsForUser`, lib/data-scope.js).
+ *
+ * WHY "Suggested" IS A SUGGESTION. The work-derived set used to be WRITTEN into
+ * this field on every assignment, which is precisely how Lisa ended up able to
+ * read the invoices of 33 clients nobody had ever put her on. So the block
+ * below shows that set and nothing more: an owner adds each client (or all of
+ * them) with a deliberate click, and only then does the money gate move. Do NOT
+ * "optimize" this into an automatic backfill — that re-opens the leak the split
+ * was built to close (docs/HANDOFF.md 2026-09-04,
+ * docs/plans/team-visibility-split-2026-09.md).
+ *
+ * A billing master cannot turn up among the suggestions: the store refuses
+ * tasks and recurring recipes against one (`_refuseBillingMasterWrite`), so a
+ * master holds none of the work `taskClientIdsForUser` reads.
  */
 function ClientsTheyCanSeeSection({
   memberId,
+  memberName,
   clients,
+  taskClientIds,
   onChangeClient,
 }: {
   memberId: string
+  memberName: string
   clients: Client[]
+  /** Clients this person is assignee of live work on — the suggestion source. */
+  taskClientIds: Set<string>
   onChangeClient: (clientId: string, nextIds: string[]) => void
 }) {
   const [adderOpen, setAdderOpen] = useState(false)
+  const [addedNote, setAddedNote] = useState('')
+  const adderRef = useRef<HTMLDivElement | null>(null)
+
+  // The add menu no longer closes on a pick — re-picking a team is a dozen
+  // clients at a time and re-opening between each one was half the work. It
+  // still needs the ordinary ways out, so they live here: click elsewhere,
+  // Escape, or the pill itself.
+  useEffect(() => {
+    if (!adderOpen) return
+    const handlePointer = (event: MouseEvent) => {
+      if (!adderRef.current) return
+      if (!adderRef.current.contains(event.target as Node)) setAdderOpen(false)
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAdderOpen(false)
+    }
+    window.addEventListener('mousedown', handlePointer)
+    window.addEventListener('keydown', handleKey)
+    return () => {
+      window.removeEventListener('mousedown', handlePointer)
+      window.removeEventListener('keydown', handleKey)
+    }
+  }, [adderOpen])
 
   const visibleClients = clients.filter((client) =>
     (client.assignedBookkeeperIds ?? []).includes(memberId),
@@ -727,6 +789,12 @@ function ClientsTheyCanSeeSection({
   const addableClients = selectableClients(clients).filter(
     (client) => !(client.assignedBookkeeperIds ?? []).includes(memberId),
   )
+  // Work they already hold, minus whoever is already on the team. Alphabetical
+  // so the list reads the same way twice.
+  const suggestedClients = addableClients
+    .filter((client) => taskClientIds.has(client.id))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const firstName = memberName.trim().split(/\s+/)[0] || memberName
 
   const removeClient = (client: Client) => {
     const next = (client.assignedBookkeeperIds ?? []).filter((id) => id !== memberId)
@@ -735,17 +803,26 @@ function ClientsTheyCanSeeSection({
 
   const addClient = (client: Client) => {
     const current = client.assignedBookkeeperIds ?? []
-    if (current.includes(memberId)) {
-      setAdderOpen(false)
-      return
-    }
+    if (current.includes(memberId)) return
     onChangeClient(client.id, [...current, memberId])
-    setAdderOpen(false)
+  }
+
+  // One targeted save per client, in order — the same call a single add makes.
+  // There is no bulk route for this on purpose: the workspace bulk save
+  // rewrites every client, so a stale tab could clobber teams re-picked here.
+  const addAllSuggested = () => {
+    const count = suggestedClients.length
+    if (count === 0) return
+    for (const client of suggestedClients) addClient(client)
+    setAddedNote(`Added ${count} client${count === 1 ? '' : 's'}.`)
   }
 
   return (
-    <div className="sharing-control">
-      <p className="sharing-helper">Assigned clients</p>
+    <div className="sharing-control team-assigned-clients">
+      <h4>Assigned clients</h4>
+      <p className="sharing-helper">
+        Who this person can see — and whose invoices they get on the Invoice Recap.
+      </p>
       <div className="sharing-chips">
         {visibleClients.length === 0 ? (
           <span className="sharing-helper">No clients assigned yet.</span>
@@ -764,7 +841,7 @@ function ClientsTheyCanSeeSection({
           </span>
         ))}
         {addableClients.length > 0 ? (
-          <div className="sharing-add">
+          <div className="sharing-add" ref={adderRef}>
             <button
               type="button"
               className="add-person-pill"
@@ -789,6 +866,30 @@ function ClientsTheyCanSeeSection({
           </div>
         ) : null}
       </div>
+      {suggestedClients.length > 0 ? (
+        <div className="team-suggested-clients">
+          <p className="sharing-helper">
+            <strong>Suggested.</strong> The {suggestedClients.length} client
+            {suggestedClients.length === 1 ? '' : 's'} {firstName} currently has work on:
+          </p>
+          <div className="sharing-chips">
+            {suggestedClients.map((client) => (
+              <button
+                key={client.id}
+                type="button"
+                className="add-person-pill"
+                onClick={() => addClient(client)}
+              >
+                + {client.name}
+              </button>
+            ))}
+            <button type="button" className="add-person-pill" onClick={addAllSuggested}>
+              Add all {suggestedClients.length}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {addedNote ? <span className="team-success-copy">{addedNote}</span> : null}
     </div>
   )
 }

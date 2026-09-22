@@ -4280,6 +4280,25 @@ td strong {
   gap: 16px;
 }
 
+/* Assigned clients now LEADS the expanded panel, so it drops the divider and
+   top spacing `.sharing-control` wears when it sits mid-panel. */
+.team-assigned-clients {
+  border-top: none;
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.team-assigned-clients h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.team-suggested-clients {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .team-actions {
   display: flex;
   gap: 8px;
