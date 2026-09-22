@@ -25,20 +25,23 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-22):** `main` = `302b1a6`, pushed and confirmed
-live (`curl -s https://app.pbjsa.com/health` — the body's `commit` is the
-deploy check; it read `302b1a6`). Suite **3349 tests / 186 files**, green.
-Voice agent re-provisioned 2026-09-22. Every tracker flip and the one
-approved prod repair (09-21) are DONE — there is no "first actions"
-backlog. Read the 2026-09-22 and 2026-09-21 entries in §5 first (the Team
-page's one-click team rebuild; two urgent bugs Brittany filed 09-21, both
-real code defects reproduced against production before any fix; the owner
-cost rate), then 09-18, 09-15 and the 09-04 entries. The 09-15 session's notes on the pay window / Past due /
+**State right now (2026-09-22, evening):** `main` = `d86b6f1` (+ this
+handoff), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
+— the body's `commit` is the deploy check). Suite **3449 tests / 190
+files**, green. Voice agent re-provisioned 2026-09-22 (three times that
+day). Every tracker flip and the one approved prod repair (09-21) are DONE
+— there is no "first actions" backlog. Read the two 2026-09-22 entries and
+the 2026-09-21 entry in §5 first (Walkthrough + Packages; the Team page's
+one-click team rebuild; two urgent bugs Brittany filed 09-21, both real
+code defects reproduced against production before any fix; the owner cost
+rate), then 09-18, 09-15 and the 09-04 entries. The 09-15 session's notes on the pay window / Past due /
 `INVOICE_PAST_DUE_NOTICES=off` switch are in its §5 entry.
 
-The board after this session: nothing in New; three items freshly Shipped
-awaiting Brittany's review (`featreq-4fa0e70f` Board, `featreq-0bc2437e`
-Duplicate, `featreq-6fdd9e98` owner cost rate); `featreq-79b6d974`
+The board after this session: nothing in New or Planned; six items freshly
+Shipped awaiting Brittany's review (`featreq-4fa0e70f` Board,
+`featreq-0bc2437e` Duplicate, `featreq-6fdd9e98` owner cost rate,
+`featreq-839c9448` Team-page one-click teams, `featreq-cb1c5f95`
+Walkthrough, `featreq-f890f05b` Packages); `featreq-79b6d974`
 engagement-to-billing parked in_progress; two `planned_not_eom` parked.
 She reviews live — re-read the board at session start.
 
@@ -355,6 +358,38 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-22 (later) — "Walk me through it" on the Updates page, and
+Packages (plan bundles that bring their checklists).** One commit,
+`d86b6f1`, two tracker items (featreq-cb1c5f95, featreq-f890f05b) — built
+in parallel by two Opus agents that both appended to the tail of
+`lib/assistant.js` and its tests, so they could not be split cleanly.
+Suite **3449 tests / 190 files**.
+
+- **Walkthrough:** `POST /api/feature-requests/:id/walkthrough` (owner-only)
+  generates from dev_notes + a keyword-picked manifest section, stores it
+  on the row (`walkthrough`, `walkthrough_at`, both backends — never
+  cleared by a status change), returns the stored text unless
+  `{regenerate:true}`. Inline panel on shipped cards beside the approve
+  controls; approval untouched and pinned. Uses refine's plumbing INCLUDING
+  its Haiku fallback — the output is persisted, so if a degraded model ever
+  writes nonsense the fix is Regenerate (or switch it to
+  `modelFallback:false` like spitball).
+- **Packages:** `packages` table (Postgres) / auth-state slice (file backend
+  — NOT `app-data.json`, which the bulk save replaces wholesale), outside the
+  fingerprint by construction. Plans already link templates
+  (`subscription_plans.template_ids`), so a package's checklist set defaults
+  to the union of its plans' templates. Apply = union planIds via the
+  targeted client update + `copyTemplateToClient` per standard template,
+  skipping ones the client already has (`sourceTemplateId` — the server copy
+  did NOT stamp it before this; the browser clone always did). **A package
+  changes no money** (plans are labels; `lib/invoice-lines.js` untouched) —
+  Brittany's note says so; a priced package is a separate ask. AI suggest
+  = proposals only (`modelFallback:false`), created as standard templates
+  only after Create selected + confirm. Residual: `deletePlan` does not
+  strip the id from packages (FK-free idiom; apply filters unknown ids, the
+  Plans page shows "A deleted plan"), so a package can quietly fall below
+  two valid plans.
 
 **2026-09-22 — the Team page's Assigned clients control moved under the
 person's name and gained a one-click "Add all" of the clients they work
