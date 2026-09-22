@@ -21,6 +21,7 @@ import {
   spitballNewSessionRequest,
   spitballRequest,
   spitballSessionRequest,
+  walkthroughFeatureRequestRequest,
 } from '../lib/api'
 import {
   formatBacklogForClaude,
@@ -189,6 +190,15 @@ export function UpdatesPage() {
       }
     >
   >({})
+  // Per-item "Walk me through it" panel (shipped items). `text`/`at` shadow
+  // what's stored on the item so a freshly generated walkthrough shows without
+  // waiting for the tracker to reload.
+  const [walkthroughState, setWalkthroughState] = useState<
+    Record<
+      string,
+      { open: boolean; busy: boolean; error: string | null; text: string | null; at: string | null }
+    >
+  >({})
   // Clarification answers being typed in the pinned "Needs your answer" panel,
   // keyed by item id (local drafts; saved only on the Answer button).
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({})
@@ -355,6 +365,75 @@ export function UpdatesPage() {
     })
   }
 
+  // "Walk me through it": ask the AI to explain a shipped change in her terms.
+  // Nothing here touches the item's status — a walkthrough is reading material
+  // for the approve/not-approved decision sitting right beside it.
+  const fetchWalkthrough = async (item: FeatureRequest, regenerate: boolean) => {
+    setWalkthroughState((prev) => ({
+      ...prev,
+      [item.id]: {
+        open: true,
+        busy: true,
+        error: null,
+        // Regenerating clears the old text so she can't read a stale one as new.
+        text: regenerate ? null : (prev[item.id]?.text ?? null),
+        at: regenerate ? null : (prev[item.id]?.at ?? null),
+      },
+    }))
+    try {
+      const result = await walkthroughFeatureRequestRequest(
+        item.id,
+        regenerate ? { regenerate: true } : {},
+      )
+      setWalkthroughState((prev) => ({
+        ...prev,
+        [item.id]: {
+          open: true,
+          busy: false,
+          error: null,
+          text: result.walkthrough,
+          at: result.walkthroughAt,
+        },
+      }))
+    } catch (error) {
+      setWalkthroughState((prev) => ({
+        ...prev,
+        [item.id]: {
+          open: true,
+          busy: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'The AI could not put a walkthrough together right now.',
+          text: prev[item.id]?.text ?? null,
+          at: prev[item.id]?.at ?? null,
+        },
+      }))
+    }
+  }
+
+  // The button toggles the inline panel. A walkthrough already stored on the
+  // item shows instantly; only a card that has never had one costs a call.
+  const toggleWalkthrough = (item: FeatureRequest) => {
+    const current = walkthroughState[item.id]
+    if (current?.open) {
+      setWalkthroughState((prev) => ({ ...prev, [item.id]: { ...current, open: false } }))
+      return
+    }
+    const stored = current?.text ?? item.walkthrough ?? null
+    setWalkthroughState((prev) => ({
+      ...prev,
+      [item.id]: {
+        open: true,
+        busy: false,
+        error: null,
+        text: stored,
+        at: current?.at ?? item.walkthroughAt ?? null,
+      },
+    }))
+    if (!stored) void fetchWalkthrough(item, false)
+  }
+
   // "Not approved" flow: open/close the reason textarea and send the item back
   // to the developer with the rejection note.
   const openReject = (id: string) =>
@@ -444,6 +523,9 @@ export function UpdatesPage() {
   const renderCard = (item: FeatureRequest) => {
     const closed = CLOSED_STATUSES.has(item.status)
     const refine = refineState[item.id]
+    const walkthrough = walkthroughState[item.id]
+    const walkthroughText = walkthrough?.text ?? item.walkthrough ?? null
+    const walkthroughWhen = formatApprovedAt(walkthrough?.at ?? item.walkthroughAt)
     const rejectOpen = item.id in rejectDrafts
     const isEditing = editDraft?.id === item.id
     const classes = ['updates-card', `updates-priority-card-${item.priority}`]
@@ -569,6 +651,16 @@ export function UpdatesPage() {
                   >
                     <X size={13} aria-hidden="true" /> Not approved
                   </button>
+                  {/* Sits WITH the two review controls, because it exists for
+                      the same moment: deciding between them. */}
+                  <button
+                    type="button"
+                    className="updates-walkthrough-button"
+                    title="A plain-language tour of what this change did, so you can decide with the whole picture"
+                    onClick={() => toggleWalkthrough(item)}
+                  >
+                    <HelpCircle size={13} aria-hidden="true" /> Walk me through it
+                  </button>
                 </>
               ) : null}
 
@@ -601,6 +693,38 @@ export function UpdatesPage() {
                   ? `Q: ${item.clarificationQuestion} — A: ${item.clarificationAnswer}`
                   : `Owner's answer: ${item.clarificationAnswer}`}
               </p>
+            ) : null}
+
+            {walkthrough?.open ? (
+              // Inline, not a modal: she is reading this AGAINST the card —
+              // the title, the description and the two review buttons all stay
+              // on screen beside it.
+              <div className="updates-refine-panel updates-walkthrough-panel">
+                <p className="updates-refine-kicker">Walk me through it</p>
+                {walkthrough.busy ? (
+                  <p className="updates-refine-description">Preparing your walkthrough…</p>
+                ) : null}
+                {!walkthrough.busy && walkthroughText ? (
+                  <>
+                    <pre className="updates-refine-description">{walkthroughText}</pre>
+                    <div className="updates-refine-actions">
+                      {walkthroughWhen ? (
+                        <span className="updates-approved-by">Generated {walkthroughWhen}</span>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => void fetchWalkthrough(item, true)}
+                      >
+                        Regenerate
+                      </button>
+                    </div>
+                  </>
+                ) : null}
+                {walkthrough.error ? (
+                  <p className="updates-form-error">{walkthrough.error}</p>
+                ) : null}
+              </div>
             ) : null}
 
             {rejectOpen ? (

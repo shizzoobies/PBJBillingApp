@@ -13,6 +13,7 @@ import {
   InvoiceAiReviewError,
   InvoiceLockedError,
   ManualPaymentError,
+  PackageApplyError,
   RetainerCreditError,
   TimeEntrySplitError,
 } from './db/store.js'
@@ -32,8 +33,10 @@ import {
   runAssistantChat,
   sanitizeReport,
   spitballChat,
+  suggestPackageChecklists,
   summarizeSpitballSession,
   validateAssistantAction,
+  walkthroughFeatureRequest,
   SPITBALL_CONTEXT_CAPS,
 } from './lib/assistant.js'
 import { createPendingActionStore } from './lib/pending-actions.js'
@@ -5818,6 +5821,71 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/feature-requests/:id/walkthrough — "Walk me through it"
+    // (featreq-cb1c5f95). The plain-language tour of what a shipped item
+    // changed, so the owner approves or sends it back understanding it. Same
+    // guards + error contract as /refine. Body: { regenerate?: true }.
+    //
+    // The stored walkthrough wins unless she asks for a fresh one: re-reading
+    // the card should cost nothing, and — more to the point — it should say the
+    // same thing the second time she opens it as it did the first.
+    //
+    // MUST stay above the generic `/api/feature-requests/:id` matcher below.
+    // Approval is never touched by anything in here: a model outage answers
+    // with a sentence and the approve buttons carry on working.
+    const featureRequestWalkthroughMatch = normalizedPath.match(
+      /^\/api\/feature-requests\/([^/]+)\/walkthrough$/,
+    )
+    if (featureRequestWalkthroughMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The Updates tracker is owner-only' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const id = decodeURIComponent(featureRequestWalkthroughMatch[1])
+      const item = await appDataStore.getFeatureRequest(id)
+      if (!item) {
+        sendJson(response, 404, { error: 'Update not found' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const regenerate = payload?.regenerate === true
+      if (!regenerate && item.walkthrough) {
+        sendJson(response, 200, {
+          walkthrough: item.walkthrough,
+          walkthroughAt: item.walkthroughAt ?? null,
+        })
+        return
+      }
+      try {
+        const walkthrough = await walkthroughFeatureRequest(item)
+        const saved = await appDataStore.setFeatureRequestWalkthrough(id, walkthrough)
+        sendJson(response, 200, {
+          walkthrough: saved?.walkthrough ?? walkthrough,
+          walkthroughAt: saved?.walkthroughAt ?? null,
+        })
+      } catch (error) {
+        const status = error?.statusCode ?? error?.status ?? 502
+        console.error('[updates] walkthrough failed:', error?.message || error)
+        sendJson(response, status === 503 ? 503 : 502, {
+          error:
+            error?.message ||
+            'The AI could not put a walkthrough together right now. Please try again.',
+        })
+      }
+      return
+    }
+
     const featureRequestMatch = normalizedPath.match(/^\/api\/feature-requests\/([^/]+)$/)
     if (featureRequestMatch && (request.method === 'PATCH' || request.method === 'DELETE')) {
       const session = await requireSession(request, response)
@@ -7525,6 +7593,273 @@ const server = createServer(async (request, response) => {
         })`,
       )
       sendJson(response, 200, result)
+      return
+    }
+
+    // ---- Packages (featreq-f890f05b) --------------------------------------
+    //
+    // A package bundles existing PLANS plus the standard blueprint checklists
+    // that come with them, so a new client can be set up in one press instead
+    // of a plan at a time and a checklist at a time.
+    //
+    // Endpoint-managed on purpose (cardinal rule 4): packages never ride
+    // `PUT /api/app-data`, so they are outside the bulk save's wipe-and-reinsert
+    // and outside the workspace fingerprint — an owner creating a package can
+    // never stale out somebody else's open tab.
+    //
+    // Owner-only, and same-origin on every write: a package is firm setup.
+    if (normalizedPath === '/api/packages' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see packages' })
+        return
+      }
+      sendJson(response, 200, { packages: await appDataStore.listPackages() })
+      return
+    }
+
+    if (normalizedPath === '/api/packages' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can create packages' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const created = await appDataStore.createPackage({
+        name: typeof payload?.name === 'string' ? payload.name : '',
+        description: typeof payload?.description === 'string' ? payload.description : '',
+        planIds: Array.isArray(payload?.planIds) ? payload.planIds : [],
+        templateIds: Array.isArray(payload?.templateIds) ? payload.templateIds : [],
+      })
+      if (!created) {
+        // The two-plan floor is the interesting half: a package IS a
+        // combination, so one plan is not one.
+        sendJson(response, 400, {
+          error: 'A package needs a name and at least two plans to combine.',
+        })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'package_created', created.name)
+      broadcastDataChanged()
+      sendJson(response, 201, created)
+      return
+    }
+
+    const packageIdMatch = normalizedPath.match(/^\/api\/packages\/([^/]+)$/)
+    if (packageIdMatch && request.method === 'PATCH') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can edit packages' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const patch = {}
+      if (typeof payload?.name === 'string') patch.name = payload.name
+      if (typeof payload?.description === 'string') patch.description = payload.description
+      if (Array.isArray(payload?.planIds)) patch.planIds = payload.planIds
+      if (Array.isArray(payload?.templateIds)) patch.templateIds = payload.templateIds
+      const updated = await appDataStore.updatePackage(packageIdMatch[1], patch)
+      if (!updated) {
+        sendJson(response, 400, {
+          error: 'Could not save that package — it needs a name and at least two plans.',
+        })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, updated)
+      return
+    }
+
+    if (packageIdMatch && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can delete packages' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const removed = await appDataStore.deletePackage(packageIdMatch[1])
+      if (!removed) {
+        sendJson(response, 404, { error: 'Package not found' })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { removedPackageId: packageIdMatch[1] })
+      return
+    }
+
+    // ---- The AI half of packages: suggest, then (separately) create --------
+    //
+    // TWO routes on purpose. The first answers with PROPOSALS and creates
+    // nothing; the second creates, and is only ever reached from the owner's
+    // explicit confirm. "The AI can suggest checklists based on existing setup,
+    // always asks for approval first, and only creates items after the user
+    // confirms" (Brittany, featreq-f890f05b) — splitting the two makes that
+    // structural rather than a promise in the copy.
+    const suggestChecklistsMatch = normalizedPath.match(
+      /^\/api\/packages\/([^/]+)\/suggest-checklists$/,
+    )
+    if (suggestChecklistsMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can use the package assistant' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const packages = await appDataStore.listPackages()
+      const pkg = packages.find((row) => row.id === suggestChecklistsMatch[1])
+      if (!pkg) {
+        sendJson(response, 404, { error: 'Package not found' })
+        return
+      }
+      const data = await appDataStore.read()
+      const describe = (template) => ({
+        title: template.title,
+        frequency: template.frequency,
+        steps: (template.stages ?? []).flatMap((stage) =>
+          (stage.items ?? []).map((item) => item.label),
+        ),
+      })
+      const standardTemplates = (data.checklistTemplates ?? [])
+        .filter((template) => template.isStandard)
+        .map(describe)
+      const attachedTemplates = pkg.templateIds
+        .map((id) => (data.checklistTemplates ?? []).find((template) => template.id === id))
+        .filter(Boolean)
+        .map(describe)
+      let proposals
+      try {
+        proposals = await suggestPackageChecklists(
+          {
+            name: pkg.name,
+            description: pkg.description,
+            plans: pkg.planIds
+              .map((planId) => (data.plans ?? []).find((plan) => plan.id === planId))
+              .filter(Boolean)
+              .map((plan) => ({ name: plan.name, notes: plan.notes })),
+          },
+          { standardTemplates, attachedTemplates },
+        )
+      } catch (error) {
+        // The assistant's contract: a sentence and a status, never a crash.
+        const status = error?.statusCode ?? error?.status ?? 502
+        console.error('[packages] suggest-checklists failed:', error?.message || error)
+        sendJson(response, status === 503 ? 503 : 502, {
+          error: 'package_suggest_failed',
+          message: error?.message || 'The AI could not suggest checklists right now.',
+        })
+        return
+      }
+      // Proposals only. Nothing is written here — not even a draft.
+      sendJson(response, 200, { proposals })
+      return
+    }
+
+    // POST /api/packages/:id/create-suggested — body { proposals: [...] }.
+    // The confirmed half: each proposal becomes a STANDARD blueprint and is
+    // attached to the package.
+    const createSuggestedMatch = normalizedPath.match(
+      /^\/api\/packages\/([^/]+)\/create-suggested$/,
+    )
+    if (createSuggestedMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can create standard templates' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const proposals = Array.isArray(payload?.proposals) ? payload.proposals : []
+      if (proposals.length === 0) {
+        sendJson(response, 400, { error: 'Pick at least one suggested checklist to create.' })
+        return
+      }
+      const result = await appDataStore.createSuggestedPackageChecklists(
+        createSuggestedMatch[1],
+        proposals,
+      )
+      if (!result) {
+        sendJson(response, 404, { error: 'Package not found' })
+        return
+      }
+      for (const template of result.templates) {
+        await appDataStore.recordActivity(
+          session.user.id,
+          'standard_template_created',
+          template.title,
+        )
+      }
+      broadcastDataChanged()
+      sendJson(response, 201, result)
+      return
+    }
+
+    // POST /api/clients/:id/apply-package — body { packageId }. Adds the
+    // package's plans to the client and copies its blueprint checklists onto
+    // them. Nothing about the invoice amount changes: plans are labels on the
+    // service line (lib/invoice-lines.js), and the monthly rate is the client's
+    // own. Idempotent — re-applying fills in what is missing.
+    const applyPackageMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/apply-package$/)
+    if (applyPackageMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can apply packages' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const packageId = typeof payload?.packageId === 'string' ? payload.packageId : ''
+      if (!packageId) {
+        sendJson(response, 400, { error: 'A package is required' })
+        return
+      }
+      let applied
+      try {
+        applied = await appDataStore.applyPackageToClient(applyPackageMatch[1], packageId, {
+          actorUserId: session.user.id,
+        })
+      } catch (error) {
+        // A retired client refusing new work is a fact about the data, said in
+        // a sentence — the same shape as the billing-master refusal the outer
+        // handler maps (that one still reaches it from here).
+        if (error instanceof PackageApplyError) {
+          sendJson(response, 409, { error: 'package_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!applied) {
+        sendJson(response, 404, { error: 'Package or client not found' })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, applied)
       return
     }
 

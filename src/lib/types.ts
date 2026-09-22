@@ -256,6 +256,37 @@ export type SubscriptionPlan = {
 }
 
 /**
+ * A PACKAGE: a named combination of existing {@link SubscriptionPlan}s plus the
+ * standard blueprint checklists that come with them, applied to a client in one
+ * press (featreq-f890f05b).
+ *
+ * Applying one changes NO money. A plan is a label on the invoice — the service
+ * line bills the client's own `monthlyRate` and only joins the subscribed plan
+ * names into its label (`lib/invoice-lines.js`) — so a package adds labels and
+ * checklists and leaves the amount alone.
+ *
+ * Packages are ENDPOINT-MANAGED: they never ride the bulk workspace save, so
+ * they are not part of {@link AppData} and are fetched on the pages that show
+ * them.
+ */
+export type Package = {
+  id: string
+  name: string
+  description: string
+  /** The plans this package combines — at least two, by definition. */
+  planIds: string[]
+  /**
+   * Standard blueprint template ids assigned to a client when the package is
+   * applied. Defaults to the union of the chosen plans' own `templateIds` and
+   * is editable from there. FK-free, like every other id array here: a deleted
+   * blueprint is simply skipped at apply time.
+   */
+  templateIds: string[]
+  createdAt: string
+  updatedAt: string | null
+}
+
+/**
  * A reusable contact entered once and selected (via dropdown / multi-select)
  * on one or more clients. Contacts are shared across clients and managed on
  * their own owner-only Contacts page.
@@ -1457,6 +1488,14 @@ export type FeatureRequest = {
    * Shown next to the title on the Updates page while the item is Shipped.
    */
   shippedAt?: string | null
+  /**
+   * "Walk me through it" — the plain-language explanation of what this change
+   * did, generated on demand from the shipped notes and then kept, so the card
+   * reads the same every time it is opened. Never cleared by a status change:
+   * it describes what shipped, not where the item is in the queue.
+   */
+  walkthrough?: string | null
+  walkthroughAt?: string | null
   createdAt: string
   updatedAt?: string | null
 }

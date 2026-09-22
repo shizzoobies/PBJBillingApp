@@ -7304,6 +7304,49 @@ h2 {
   margin-top: 8px;
 }
 
+/* Packages (featreq-f890f05b): the builder on the Plans page, the AI's
+   suggestions inside it, and the "+ Add package" pill on a client's Billing
+   panel. Borrowed from the plan-checklist styles above so the two read as the
+   same family — a package IS a bundle of plans and their checklists. */
+.package-form {
+  gap: 12px;
+}
+
+.suggest-checklists {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+}
+
+.suggest-checklists-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.suggest-checklists-list li {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+}
+
+.suggest-checklists-list label {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+}
+
+.package-apply-field {
+  display: grid;
+  gap: 4px;
+}
+
 .plan-checklists {
   display: grid;
   gap: 16px;
@@ -11535,6 +11578,39 @@ tr.is-inactive-client .client-name-link {
 .updates-reject-button:hover {
   background: #b45309;
   color: #fff;
+}
+
+/* "Walk me through it" — the third review control. Same pill as its two
+   neighbors, in the neutral berry so it reads as neither approve nor reject:
+   it is what she presses BEFORE choosing between them. */
+.updates-walkthrough-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--berry);
+  background: color-mix(in srgb, var(--berry) 10%, var(--surface));
+  color: var(--berry);
+  cursor: pointer;
+}
+
+.updates-walkthrough-button:hover {
+  background: var(--berry);
+  color: #fff;
+}
+
+/* The inline panel reuses the refine panel's shell; only its spine differs. */
+.updates-walkthrough-panel {
+  border-color: var(--berry);
+}
+
+/* Its footer row is a caption + a link rather than two buttons, so the two
+   have to be centered against each other. */
+.updates-walkthrough-panel .updates-refine-actions {
+  align-items: center;
 }
 
 /* Inline reason textarea revealed by "Not approved" (the pop-up section). */

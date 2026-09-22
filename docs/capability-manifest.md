@@ -1201,6 +1201,24 @@ Clients page meanwhile. Owner-only.
   of entries logged this month. The tab is in the URL (`?tab=time`), so a client
   page can be linked straight to a tab, and older `#client-section-…` links open
   whichever tab now holds that section.
+- **Client detail → Billing → "+ Add package"**, sitting next to
+  "+ Add plan / service". It opens the list of packages (built on the Plans
+  page) and applies one to this client in a single press: its plans are added
+  to the client's selected services, and its checklists are set up for them.
+  - Before anything happens, a confirm names exactly what will change — which
+    plans are added, which checklists are created, which are skipped because
+    they are already set up here, and the line that matters most: **nothing on
+    the invoice changes — plans are labels; the monthly rate stays as it is.**
+  - It is safe to press twice. Plans the client is already on are not added
+    again, and a checklist already set up from that blueprint is skipped, so
+    re-applying fills in what is missing rather than making duplicates. The
+    result is reported inline ("2 plans added, 3 checklists created, 1 already
+    set up and skipped").
+  - Each new checklist starts from the day it is set up — no back-dated tasks
+    for the weeks before it (the same rule as "Set up plan checklists").
+  - The button is not offered for a **billing master** (it holds no work of its
+    own) or for a **retired** client (the app stops offering retired clients for
+    new work), and the server refuses both as well.
 - Client detail → Time tab: everything logged against this client — who logged
   it, the notes, the clock-in → clock-out times, exact hours and minutes,
   billable/internal, and the approval status (Pending / Approved / Rejected,
@@ -2606,6 +2624,33 @@ Clients page meanwhile. Owner-only.
   starts the day it is set up" under Checklists). Because templates carry a board column, the new
   checklists land in the right Active-Checklists-board column automatically —
   connecting plans → checklists → board.
+- **Packages — plans you apply together.** Under the plans list is a
+  **Packages** section. A package is a named combination of plans the firm
+  already has (two or more — one plan is just that plan), plus the standard
+  blueprint checklists that come with them. It exists so setting a client up is
+  one press instead of a plan at a time and a checklist at a time.
+  - **A package is not a price.** Applying one changes nothing on the invoice:
+    plans are LABELS on the monthly service line, and the amount billed is the
+    client's own monthly rate. A package adds labels and sets up work; it never
+    touches money. The confirm dialog says so before anything happens.
+  - Each package has a name, an optional description, its plans, and its
+    **Checklists** — which start as everything the chosen plans already bundle
+    (the union, no repeats) and are edited from there. Only the firm's standard
+    BLUEPRINT checklists can be in a package, the same rule plans follow.
+  - Deleting a package removes only the shortcut. Every client it was applied
+    to keeps their plans and their checklists.
+  - **"Suggest checklists" — the AI proposes, you decide.** Inside a saved
+    package, this asks the assistant what the package is missing. It looks at
+    the package's plans and at every standard checklist the firm already has
+    (including the ones already on the package, so it does not suggest those
+    back), and answers with up to five proposals — each with its recurrence,
+    its steps, and one sentence saying why this package needs it. **It creates
+    nothing.** The proposals arrive as tick boxes, all unticked; you pick the
+    ones you want, press "Create selected", and confirm. Only then are they
+    created — as ordinary standard blueprint checklists, attached to the
+    package, indistinguishable from ones you wrote yourself. Nothing is set up
+    on any client until the package is applied. If the AI is busy or its answer
+    doesn't hold up, the panel says so in a sentence and nothing is created.
 
 ## To 100% (owner only)
 
@@ -3001,6 +3046,20 @@ Clients page meanwhile. Owner-only.
   note plus the confirmed dev-ready rework spec. If the AI is unavailable there's
   a "send back without the read-back" fallback, so feedback is never blocked.
   An In-Progress item's whole card gently pulses.
+- **"Walk me through it"** sits beside "Mark approved" and "Not approved" on
+  every Shipped item. It opens a panel on the card itself (nothing pops up over
+  it, so the item stays readable beside the explanation) with a plain-language
+  walkthrough written for the owner, in four parts: **What changed** (a few
+  sentences), **Where to find it** (the page and the controls by name), **Try
+  it** (a short numbered list to follow right now), and **What did NOT change**
+  (so the scope of the approval is clear). It is written by the AI from the
+  developer's shipped notes plus the matching part of this manifest — never
+  from code or commit details — and it is SAVED with the item, so re-opening
+  the card shows the same walkthrough instantly instead of writing a new one; a
+  "Regenerate" link asks for a fresh one. It is reading material only: it never
+  approves, sends back, or changes an item's status, and if the AI is
+  unavailable the panel says so in one sentence while both review buttons keep
+  working exactly as before.
 - Editing an item: click the title or the "Edit" button to edit the title +
   description in place; a Save button commits the change (typing doesn't
   auto-save). Status, priority, and type still change immediately from their

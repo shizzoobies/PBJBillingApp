@@ -14,6 +14,7 @@ import {
   INVOICE_SELECT_COLUMNS,
   InvoiceLockedError,
   ManualPaymentError,
+  PackageApplyError,
   mapChecklistItemRow,
   mapClientRow,
   mapInvoiceRow,
@@ -22,6 +23,7 @@ import {
   sanitizeClientBillingLinks,
 } from './store.js'
 import {
+  BULK_SAVE_SLICES,
   BULK_SAVE_TABLES,
   StaleWorkspaceError,
   fileWorkspaceVersion,
@@ -14119,5 +14121,550 @@ describe('restampPeriodLabelsForTemplate (postgres branch)', () => {
     const fake = fakeRestampPostgres({ templateRow: null })
     expect(await postgresStore(fake).restampPeriodLabelsForTemplate('tmpl-recon')).toBe(0)
     expect(fake.statements).toHaveLength(1)
+  })
+})
+
+/**
+ * "Walk me through it" storage — featreq-cb1c5f95.
+ *
+ * The walkthrough is the explanation of what a SHIPPED item changed, written
+ * once and then read every time the owner opens that card. Two things have to
+ * hold or the feature quietly rots: it round-trips (so the second open costs
+ * nothing and says the same thing), and the ordinary status writes underneath
+ * it — approving, sending back — never wipe it, because they run against the
+ * same row seconds after she has read it.
+ *
+ * Cardinal rule 1: both backends. The file half is the real path below; the
+ * Postgres half is pinned on a fake pool, which is what this file can reach
+ * (see the note at the top).
+ */
+describe('feature-request walkthrough storage (file backend)', () => {
+  const shipItem = async () => {
+    const created = await store.createFeatureRequest(
+      'emp-patrice',
+      'Show the billing email on the Send card',
+      'I can never tell which address an invoice is about to go to.',
+    )
+    await store.updateFeatureRequest(created.id, { status: 'shipped' })
+    return created.id
+  }
+
+  it('round-trips the text and stamps when it was written', async () => {
+    const id = await shipItem()
+    expect((await store.getFeatureRequest(id)).walkthrough).toBeNull()
+
+    const saved = await store.setFeatureRequestWalkthrough(
+      id,
+      '**What changed**\nThe Send card now names the address.',
+    )
+    expect(saved.walkthrough).toContain('names the address')
+    expect(saved.walkthroughAt).toBeTruthy()
+
+    const reloaded = await store.getFeatureRequest(id)
+    expect(reloaded.walkthrough).toBe(saved.walkthrough)
+    expect(reloaded.walkthroughAt).toBe(saved.walkthroughAt)
+    // And through the list the page actually renders from.
+    const listed = (await store.listFeatureRequests()).find((row) => row.id === id)
+    expect(listed.walkthrough).toBe(saved.walkthrough)
+  })
+
+  it('survives the approval it was written to inform', async () => {
+    const id = await shipItem()
+    await store.setFeatureRequestWalkthrough(id, 'A walkthrough she read before deciding.')
+
+    // The two buttons sitting next to "Walk me through it".
+    await store.updateFeatureRequest(id, { status: 'done' }, 'emp-patrice')
+    expect((await store.getFeatureRequest(id)).walkthrough).toBe(
+      'A walkthrough she read before deciding.',
+    )
+    await store.updateFeatureRequest(id, { status: 'planned', reviewNote: 'Not quite.' })
+    expect((await store.getFeatureRequest(id)).walkthrough).toBe(
+      'A walkthrough she read before deciding.',
+    )
+  })
+
+  it('refuses an empty walkthrough and an unknown id rather than storing blanks', async () => {
+    const id = await shipItem()
+    expect(await store.setFeatureRequestWalkthrough(id, '   ')).toBeNull()
+    expect(await store.setFeatureRequestWalkthrough('featreq-nope', 'text')).toBeNull()
+    expect((await store.getFeatureRequest(id)).walkthrough).toBeNull()
+  })
+})
+
+describe('feature-request walkthrough storage (postgres branch)', () => {
+  const fakeWalkthroughPostgres = (row) => {
+    const statements = []
+    const query = async (text, params) => {
+      statements.push({ text: String(text).trim(), params })
+      if (/^update feature_requests\s+set walkthrough =/i.test(String(text).trim())) {
+        return row ? { rows: [{ ...row, walkthrough: params[1] }], rowCount: 1 } : { rows: [], rowCount: 0 }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    return { pool: { async query(text, params) { return query(text, params) } }, statements }
+  }
+
+  const row = {
+    id: 'featreq-cb1c5f95',
+    user_id: 'emp-patrice',
+    title: 'T',
+    description: 'D',
+    type: 'feature',
+    status: 'shipped',
+    priority: 'medium',
+    priority_rank: 0,
+    created_at: '2026-09-22T00:00:00.000Z',
+    walkthrough_at: '2026-09-22T12:00:00.000Z',
+  }
+
+  it('writes both columns in one statement and stamps the time in SQL', async () => {
+    const fake = fakeWalkthroughPostgres(row)
+    const saved = await postgresStore(fake).setFeatureRequestWalkthrough(
+      'featreq-cb1c5f95',
+      'The walkthrough text.',
+    )
+    expect(saved.walkthrough).toBe('The walkthrough text.')
+    expect(saved.walkthroughAt).toBe('2026-09-22T12:00:00.000Z')
+
+    const [statement] = fake.statements
+    expect(statement.text).toMatch(/set walkthrough = \$2, walkthrough_at = now\(\)/)
+    expect(statement.text).toMatch(/where id = \$1/)
+    expect(statement.params).toEqual(['featreq-cb1c5f95', 'The walkthrough text.'])
+  })
+
+  it('returns null when the row is gone, rather than inventing a record', async () => {
+    const fake = fakeWalkthroughPostgres(null)
+    expect(
+      await postgresStore(fake).setFeatureRequestWalkthrough('featreq-gone', 'text'),
+    ).toBeNull()
+  })
+
+  /**
+   * The columns have to be in the SELECT lists too — a stored walkthrough the
+   * read never asks for looks exactly like a missing one, and the route would
+   * then pay for a fresh generation on every single open.
+   */
+  it('selects the columns it stores', async () => {
+    const fake = fakeWalkthroughPostgres(row)
+    const pgStore = postgresStore(fake)
+    await pgStore.getFeatureRequest('featreq-cb1c5f95')
+    await pgStore.listFeatureRequests()
+    for (const statement of fake.statements) {
+      expect(statement.text).toMatch(/walkthrough, walkthrough_at/)
+    }
+  })
+
+  /** And the update path must never write them — that is the erase this avoids. */
+  it('leaves the columns alone on an ordinary status write', async () => {
+    const fake = fakeWalkthroughPostgres(row)
+    await postgresStore(fake).updateFeatureRequest('featreq-cb1c5f95', { status: 'done' })
+    const [statement] = fake.statements
+    expect(statement.text).toMatch(/^update feature_requests/i)
+    expect(statement.text).not.toMatch(/set[\s\S]*walkthrough =/i)
+    // Read back, though, so a caller sees what is stored.
+    expect(statement.text).toMatch(/returning[\s\S]*walkthrough, walkthrough_at/i)
+  })
+})
+
+/**
+ * PACKAGES — a named combination of existing plans plus the blueprint
+ * checklists that come with them, applied to a client in one press
+ * (featreq-f890f05b).
+ *
+ * The three things worth pinning, and why:
+ *
+ *   1. **Applying is idempotent.** Plans are UNIONED and blueprints already
+ *      copied onto the client are SKIPPED, matched on the copy's
+ *      `sourceTemplateId` stamp. Pressing it twice must not put a second
+ *      Monthly Close on a client.
+ *   2. **The client write is TARGETED.** `plan_ids` is set by one `update
+ *      clients`, never by the bulk save — cardinal rule 4, and the difference
+ *      between changing one column and re-inserting fifteen tables from
+ *      whatever snapshot the tab happened to hold.
+ *   3. **A dangling plan id is never written.** `clients.plan_ids[]` has no
+ *      foreign key; a stale id in it is the 2026-06-17 outage.
+ *
+ * Packages live OUTSIDE the bulk save on both backends — their own table on
+ * Postgres, the auth-state file (never app-data.json) on the file backend,
+ * exactly like feature requests. The file backend's `write()` replaces
+ * app-data.json wholesale, so a slice that is not in the payload is a slice
+ * the next autosave would erase.
+ */
+async function clearPackages() {
+  const authState = existsSync(localAuthPath)
+    ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+    : {}
+  authState.packages = []
+  await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+}
+
+describe('packages (file backend)', () => {
+  const blueprint = (id, title) => ({
+    id,
+    title,
+    clientId: '',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2026-01-31',
+    active: false,
+    isStandard: true,
+    stages: [
+      {
+        id: `${id}-stage`,
+        name: 'Stage 1',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: `${id}-item`, label: 'Reconcile' }],
+      },
+    ],
+  })
+
+  const roster = (overrides = {}) =>
+    workspace({
+      clients: [
+        { id: 'c1', name: 'Acme', planIds: ['plan-books'] },
+        { id: 'c-retired', name: 'Gone Co', lifecycleStage: 'inactive' },
+        { id: 'klc-master', name: 'KLC Master', isBillingMaster: true },
+      ],
+      timeEntries: [],
+      plans: [
+        { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: ['bp-close'] },
+        { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: ['bp-payroll'] },
+      ],
+      checklistTemplates: [blueprint('bp-close', 'Monthly close'), blueprint('bp-payroll', 'Payroll run')],
+      ...overrides,
+    })
+
+  beforeEach(async () => {
+    await clearPackages()
+    await store.write(roster())
+  })
+
+  const makePackage = () =>
+    store.createPackage({
+      name: 'Full service',
+      description: 'Books and payroll together.',
+      planIds: ['plan-books', 'plan-payroll'],
+      templateIds: ['bp-close', 'bp-payroll'],
+    })
+
+  it('refuses a package that does not COMBINE anything', async () => {
+    // One plan is just that plan, and there is already a way to add it.
+    expect(await store.createPackage({ name: 'Solo', planIds: ['plan-books'] })).toBeNull()
+    expect(await store.createPackage({ name: '', planIds: ['plan-books', 'plan-payroll'] })).toBeNull()
+  })
+
+  it('creates, lists, patches and deletes', async () => {
+    const created = await makePackage()
+    expect(created.planIds).toEqual(['plan-books', 'plan-payroll'])
+    expect(created.templateIds).toEqual(['bp-close', 'bp-payroll'])
+
+    expect((await store.listPackages()).map((row) => row.id)).toEqual([created.id])
+
+    const patched = await store.updatePackage(created.id, { templateIds: ['bp-close'] })
+    expect(patched.templateIds).toEqual(['bp-close'])
+    // A patch that says nothing about a field is not a statement about it.
+    expect(patched.name).toBe('Full service')
+    // And the two-plan floor is not something an edit can walk around.
+    expect(await store.updatePackage(created.id, { planIds: ['plan-books'] })).toBeNull()
+
+    expect(await store.deletePackage(created.id)).toBe(true)
+    expect(await store.listPackages()).toEqual([])
+  })
+
+  it('is invisible to the bulk save — not a table it wipes, not a slice it hashes', () => {
+    expect(BULK_SAVE_TABLES).not.toContain('packages')
+    expect(BULK_SAVE_SLICES).not.toContain('packages')
+  })
+
+  it('survives a bulk save, which is the whole reason it is not in app-data.json', async () => {
+    const created = await makePackage()
+    // An ordinary owner autosave — the payload knows nothing about packages.
+    await store.write(roster())
+    expect((await store.listPackages()).map((row) => row.id)).toEqual([created.id])
+  })
+
+  it('applying UNIONS the plans and copies the blueprints onto the client', async () => {
+    const pkg = await makePackage()
+    const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+
+    // Already on Bookkeeping — only Payroll is added, and the existing id keeps
+    // its place so the legacy scalar plan_id does not move underneath them.
+    expect(result.addedPlanIds).toEqual(['plan-payroll'])
+    expect(result.client.planIds).toEqual(['plan-books', 'plan-payroll'])
+    expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll'])
+    expect(result.skippedTemplateIds).toEqual([])
+
+    const after = await store.read()
+    const copies = after.checklistTemplates.filter((t) => t.clientId === 'c1')
+    expect(copies.map((t) => t.title).sort()).toEqual(['Monthly close', 'Payroll run'])
+    // The stamp is what makes a second press safe.
+    expect(copies.map((t) => t.sourceTemplateId).sort()).toEqual(['bp-close', 'bp-payroll'])
+    expect(copies.every((t) => t.isStandard === false)).toBe(true)
+  })
+
+  it('files ONE activity entry naming the package', async () => {
+    // The activity log lives in the auth-state file, which this suite's
+    // beforeEach does not reset — so count the delta rather than the total.
+    const appliedEntries = async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      return (authState.activityLog ?? []).filter((entry) => entry.action === 'package_applied')
+    }
+    const before = (await appliedEntries()).length
+    const pkg = await makePackage()
+    await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+
+    const after = await appliedEntries()
+    expect(after.length - before).toBe(1)
+    expect(after.at(-1).target).toContain('Full service')
+    expect(after.at(-1).target).toContain('Acme')
+  })
+
+  it('pressing it twice adds nothing twice', async () => {
+    const pkg = await makePackage()
+    await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+    const again = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+
+    expect(again.addedPlanIds).toEqual([])
+    expect(again.clonedTemplateIds).toEqual([])
+    expect(again.skippedTemplateIds).toEqual(['bp-close', 'bp-payroll'])
+    expect(again.client.planIds).toEqual(['plan-books', 'plan-payroll'])
+
+    const copies = (await store.read()).checklistTemplates.filter((t) => t.clientId === 'c1')
+    expect(copies).toHaveLength(2)
+  })
+
+  it('never writes a plan id that no longer exists', async () => {
+    const pkg = await makePackage()
+    // The plan is deleted while the package still lists it — the FK-free array
+    // idiom, and the exact shape of the 2026-06-17 outage.
+    await store.deletePlan('plan-payroll')
+    const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+    expect(result.addedPlanIds).toEqual([])
+    expect(result.client.planIds).toEqual(['plan-books'])
+  })
+
+  it('skips a blueprint that has since been deleted rather than failing the whole apply', async () => {
+    const pkg = await store.createPackage({
+      name: 'Half gone',
+      planIds: ['plan-books', 'plan-payroll'],
+      templateIds: ['bp-close', 'bp-vanished'],
+    })
+    const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+    expect(result.clonedTemplateIds).toEqual(['bp-close'])
+    expect(result.skippedTemplateIds).toEqual([])
+  })
+
+  it('refuses a BILLING MASTER — it holds no work of its own', async () => {
+    const pkg = await makePackage()
+    await expect(
+      store.applyPackageToClient('klc-master', pkg.id, { actorUserId: 'emp-1' }),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+    // And nothing was half-written on the way to the refusal.
+    expect((await store.read()).checklistTemplates.filter((t) => t.clientId === 'klc-master')).toEqual([])
+  })
+
+  it('refuses a RETIRED client — the app stops offering them for new work', async () => {
+    const pkg = await makePackage()
+    await expect(
+      store.applyPackageToClient('c-retired', pkg.id, { actorUserId: 'emp-1' }),
+    ).rejects.toBeInstanceOf(PackageApplyError)
+    const retired = (await store.read()).clients.find((c) => c.id === 'c-retired')
+    expect(retired.planIds).toEqual([])
+  })
+
+  it('returns null for a package or a client that is not there', async () => {
+    const pkg = await makePackage()
+    expect(await store.applyPackageToClient('c1', 'pkg-nope')).toBeNull()
+    expect(await store.applyPackageToClient('client-nope', pkg.id)).toBeNull()
+  })
+
+  /**
+   * The CONFIRMED half of the AI flow. `suggestPackageChecklists` writes
+   * nothing; this is the only place a proposal becomes a thing that exists, and
+   * the route behind it runs only from the owner's explicit confirm.
+   */
+  describe('creating the checklists she confirmed', () => {
+    const proposal = (over = {}) => ({
+      title: 'Sales tax filing',
+      frequency: 'quarterly',
+      steps: [{ title: 'Pull taxable sales' }, { title: 'File the return' }],
+      why: 'Both plans imply a filing obligation.',
+      ...over,
+    })
+
+    it('creates each as a STANDARD blueprint and attaches it to the package', async () => {
+      const pkg = await makePackage()
+      const result = await store.createSuggestedPackageChecklists(pkg.id, [proposal()])
+
+      expect(result.templates).toHaveLength(1)
+      const [created] = result.templates
+      expect(created.isStandard).toBe(true)
+      expect(created.clientId).toBe('')
+      expect(created.frequency).toBe('quarterly')
+      expect(created.stages[0].items.map((item) => item.label)).toEqual([
+        'Pull taxable sales',
+        'File the return',
+      ])
+      // Attached, without losing what the package already had.
+      expect(result.package.templateIds).toEqual(['bp-close', 'bp-payroll', created.id])
+      expect((await store.listPackages())[0].templateIds).toContain(created.id)
+      // And it is a blueprint like any other — nothing marks it as AI-made,
+      // because there is no second kind of template to maintain.
+      const stored = (await store.read()).checklistTemplates.find((t) => t.id === created.id)
+      expect(stored.active).toBe(false)
+    })
+
+    it('carries a proposed day of the month as the blueprint’s due date', async () => {
+      const pkg = await makePackage()
+      const result = await store.createSuggestedPackageChecklists(pkg.id, [
+        proposal({ dueDayOfMonth: 20 }),
+      ])
+      expect(result.templates[0].nextDueDate.slice(8, 10)).toBe('20')
+    })
+
+    it('skips a row she could not have ticked rather than losing the batch', async () => {
+      const pkg = await makePackage()
+      const result = await store.createSuggestedPackageChecklists(pkg.id, [
+        proposal({ title: '' }),
+        proposal({ steps: [] }),
+        proposal({ title: 'Real one' }),
+      ])
+      expect(result.templates.map((t) => t.title)).toEqual(['Real one'])
+    })
+
+    it('creates nothing for a package that is not there', async () => {
+      expect(await store.createSuggestedPackageChecklists('pkg-nope', [proposal()])).toBeNull()
+    })
+  })
+})
+
+/**
+ * The Postgres half. Cardinal rule 1: production is Postgres, so every
+ * statement this feature issues is asserted here even though the behavior
+ * above runs on the file backend.
+ */
+describe('packages (postgres branch)', () => {
+  it('writes both id arrays on create, and reads them back on list', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    await pgStore.createPackage({
+      name: 'Full service',
+      description: 'Books and payroll.',
+      planIds: ['plan-books', 'plan-payroll'],
+      templateIds: ['bp-close'],
+    })
+    const [insert] = fake.matching(/^insert into packages/i)
+    expect(insert, 'no packages INSERT was issued').toBeTruthy()
+    expect(insert.text).toMatch(/\(id, name, description, plan_ids, template_ids, created_at, updated_at\)/)
+    expect(insert.params[3]).toEqual(['plan-books', 'plan-payroll'])
+    expect(insert.params[4]).toEqual(['bp-close'])
+
+    await pgStore.listPackages()
+    const [select] = fake.matching(/from packages/i)
+    expect(select.text).toMatch(/plan_ids, template_ids/)
+  })
+
+  it('patches only the fields it was given', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).updatePackage('pkg-1', { templateIds: ['bp-close'] })
+    const [update] = fake.matching(/^update packages/i)
+    expect(update.text).toMatch(/set template_ids = \$2, updated_at = \$3/)
+    expect(update.text).not.toMatch(/plan_ids =/)
+    expect(update.params[0]).toBe('pkg-1')
+  })
+
+  it('deletes by id', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).deletePackage('pkg-1')
+    expect(fake.matching(/^delete from packages where id = \$1/i)).toHaveLength(1)
+  })
+
+  /**
+   * The rule-4 half. A package apply must touch ONE column on ONE client row —
+   * if this ever becomes a bulk save, applying a package from a tab that has
+   * been open all morning would write that tab's whole snapshot back.
+   */
+  it('sets a client’s plans with one targeted UPDATE, not the bulk save', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)._setClientPlanIds('c1', ['plan-books', 'plan-payroll'])
+    const [update] = fake.matching(/^update clients set plan_ids/i)
+    expect(update.text).toMatch(/set plan_ids = \$2, plan_id = \$3, updated_at = now\(\)/)
+    expect(update.text).toMatch(/where id = \$1/)
+    // The legacy scalar is re-derived from the first id, exactly as the bulk
+    // save derives it, so the two links can never disagree.
+    expect(update.params).toEqual(['c1', ['plan-books', 'plan-payroll'], 'plan-books'])
+    expect(fake.matching(/^delete from clients/i)).toHaveLength(0)
+  })
+
+  /**
+   * The confirmed AI half on Postgres. The blueprint itself is written through
+   * `createStandardTemplate`, which is the ordinary template path; what has to
+   * be true HERE is that the new id is attached to the package afterwards — an
+   * unattached blueprint is a checklist she confirmed and never sees again.
+   */
+  it('attaches the confirmed blueprints to the package row', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    // The package exists; the fake answers the list from the same shape the
+    // read mapper produces.
+    pgStore.listPackages = async () => [
+      { id: 'pkg-1', name: 'Full service', description: '', planIds: [], templateIds: ['bp-close'] },
+    ]
+    const result = await pgStore.createSuggestedPackageChecklists('pkg-1', [
+      { title: 'Sales tax filing', frequency: 'quarterly', steps: [{ title: 'Pull sales' }] },
+    ])
+    const [update] = fake.matching(/^update packages/i)
+    expect(update, 'the new blueprint was never attached to the package').toBeTruthy()
+    expect(update.text).toMatch(/set template_ids = \$2/)
+    expect(update.params[1]).toEqual(['bp-close', result.templates[0].id])
+  })
+})
+
+/**
+ * The origin stamp on a SERVER-side copy. The browser's clone has always set
+ * `sourceTemplateId` and the column has always existed; this path never filled
+ * it in, so "is this blueprint already on the client?" had only the title to go
+ * on — and a package deciding whether to copy again needs better than that.
+ */
+describe('copyTemplateToClient stamps where the copy came from', () => {
+  it('records the source blueprint on the copy', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        timeEntries: [],
+        checklistTemplates: [
+          {
+            id: 'bp-close',
+            title: 'Monthly close',
+            clientId: '',
+            assigneeId: 'emp-1',
+            frequency: 'monthly',
+            nextDueDate: '2026-01-31',
+            active: false,
+            isStandard: true,
+            stages: [
+              {
+                id: 'bp-close-stage',
+                name: 'Stage 1',
+                assigneeId: 'emp-1',
+                offsetDays: 0,
+                viewerIds: [],
+                editorIds: [],
+                items: [{ id: 'bp-close-item', label: 'Reconcile' }],
+              },
+            ],
+          },
+        ],
+      }),
+    )
+    const copy = await store.copyTemplateToClient('bp-close', { clientId: 'c1' })
+    expect(copy.sourceTemplateId).toBe('bp-close')
+    expect(copy.isStandard).toBe(false)
+    // And it survives the write, or the skip would only work in memory.
+    const persisted = (await store.read()).checklistTemplates.find((t) => t.id === copy.id)
+    expect(persisted.sourceTemplateId).toBe('bp-close')
   })
 })

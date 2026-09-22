@@ -10,7 +10,7 @@ import {
   Timer,
   Trash2,
 } from 'lucide-react'
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
@@ -43,10 +43,13 @@ import {
   SavingTextInput,
 } from '../components/SectionKit'
 import {
+  applyPackageRequest,
   issueRetainerInvoiceRequest,
+  listPackagesRequest,
   recordClientProfileActivity,
   setClientAssignedTeamRequest,
 } from '../lib/api'
+import { applyPackageConfirmText } from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { useSaveFlash } from '../lib/useSaveFlash'
 import {
@@ -60,6 +63,7 @@ import {
   type Client,
   type Contact,
   type Employee,
+  type Package,
   type SubscriptionPlan,
   type TimeBreakdownMode,
   type TimeEntry,
@@ -996,6 +1000,158 @@ function BillingSectionBody({
         addLabel="+ Add plan / service"
         emptyHelper="No plans/services selected yet."
       />
+      <ApplyPackageField client={client} />
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Apply a package (featreq-f890f05b)                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The "+ Add package" pill, next to "+ Add plan / service".
+ *
+ * Hidden for a BILLING MASTER (it holds no work of its own) and for a RETIRED
+ * client (the app stops offering retired clients for new work) — the same two
+ * exclusions `workableClients` makes, applied to the client in front of us
+ * rather than to a picker. The server refuses both anyway; this just stops the
+ * app presenting a choice it will not honor.
+ *
+ * Packages are endpoint-managed, so they are fetched here rather than read off
+ * the workspace snapshot.
+ */
+export function ApplyPackageField({ client }: { client: Client }) {
+  const { data, ownerMode } = useAppContext()
+  const [packages, setPackages] = useState<Package[]>([])
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [outcome, setOutcome] = useState('')
+  const [error, setError] = useState('')
+
+  const hidden = !ownerMode || client.isBillingMaster === true || isInactiveClient(client)
+
+  useEffect(() => {
+    if (hidden) return
+    let cancelled = false
+    void listPackagesRequest()
+      .then((rows) => {
+        if (!cancelled) setPackages(rows)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof ApiError ? err.message : 'Could not load packages.')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [hidden])
+
+  if (hidden) return null
+
+  // The preview matches the server's skip rule exactly — a client template
+  // stamped with this blueprint's id — so the dialog cannot promise a checklist
+  // the apply then skips.
+  const alreadyFromBlueprint = new Set(
+    data.checklistTemplates
+      .filter((template) => template.clientId === client.id && template.sourceTemplateId)
+      .map((template) => template.sourceTemplateId as string),
+  )
+
+  const apply = async (pkg: Package) => {
+    const addedPlanNames = pkg.planIds
+      .filter((planId) => !(client.planIds ?? []).includes(planId))
+      .map((planId) => data.plans.find((plan) => plan.id === planId)?.name)
+      .filter((name): name is string => Boolean(name))
+    const attached = pkg.templateIds
+      .map((id) => data.checklistTemplates.find((template) => template.id === id))
+      .filter((template): template is ChecklistTemplate => Boolean(template))
+    const newChecklistTitles = attached
+      .filter((template) => !alreadyFromBlueprint.has(template.id))
+      .map((template) => template.title)
+    const skippedCount = attached.length - newChecklistTitles.length
+
+    const confirmed = window.confirm(
+      applyPackageConfirmText({
+        packageName: pkg.name,
+        clientName: client.name,
+        addedPlanNames,
+        newChecklistTitles,
+        skippedCount,
+      }),
+    )
+    if (!confirmed) return
+    setBusy(true)
+    setError('')
+    setOutcome('')
+    try {
+      const applied = await applyPackageRequest(client.id, pkg.id)
+      setMenuOpen(false)
+      setOutcome(
+        `Applied "${pkg.name}": ${applied.addedPlanIds.length} plan${
+          applied.addedPlanIds.length === 1 ? '' : 's'
+        } added, ${applied.clonedTemplateIds.length} checklist${
+          applied.clonedTemplateIds.length === 1 ? '' : 's'
+        } created${
+          applied.skippedTemplateIds.length > 0
+            ? `, ${applied.skippedTemplateIds.length} already set up and skipped`
+            : ''
+        }. The invoice amount is unchanged.`,
+      )
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not apply the package.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="field full-row package-apply-field">
+      <span>Packages</span>
+      <small className="field-helper">
+        Apply a set of plans and their checklists in one press. The monthly rate is not touched.
+      </small>
+      {/* The same pill/menu markup ChipMultiSelect uses, so "+ Add package"
+          reads as a sibling of "+ Add plan / service" rather than a new
+          control. It picks ONE package and acts, so it is not a chip list. */}
+      <div className="sharing-control">
+        <div className="sharing-chips">
+          <div className="sharing-add">
+            <button
+              type="button"
+              className="add-person-pill"
+              disabled={busy}
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              + Add package
+            </button>
+            {menuOpen ? (
+              <div className="sharing-add-menu" role="menu">
+                {packages.length === 0 ? (
+                  <p className="sharing-add-empty">
+                    No packages yet — build one on the Plans page.
+                  </p>
+                ) : (
+                  packages.map((pkg) => (
+                    <button
+                      key={pkg.id}
+                      type="button"
+                      role="menuitem"
+                      disabled={busy}
+                      onClick={() => void apply(pkg)}
+                    >
+                      {pkg.name}
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+      {outcome ? <p className="muted-text">{outcome}</p> : null}
+      {error ? <p className="field-error">{error}</p> : null}
     </div>
   )
 }

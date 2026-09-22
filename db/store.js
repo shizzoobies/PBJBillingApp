@@ -403,6 +403,29 @@ function addDays(dateString, days) {
   return formatDateOnly(date)
 }
 
+/**
+ * The next date that falls on `day` of the month, today included.
+ *
+ * Used to turn an AI-proposed `dueDayOfMonth` into a blueprint's `nextDueDate`
+ * — a blueprint never materializes anything itself, but `copyTemplateToClient`
+ * keeps the cadence's PHASE, so a monthly recipe dated the 15th produces client
+ * copies due on the 15th. Clamped to the month's real length, so "the 31st" in
+ * a 30-day month lands on the 30th rather than overflowing into the next one
+ * (the `new Date(y, m + 1, day)` trap documented on `advanceChecklistFrequency`).
+ */
+function nextDateOnDayOfMonth(day, today = new Date()) {
+  const wanted = Math.min(Math.max(Math.trunc(day) || 1, 1), 31)
+  const clamp = (year, month) =>
+    Math.min(wanted, new Date(Date.UTC(year, month + 1, 0)).getUTCDate())
+  const year = today.getUTCFullYear()
+  const month = today.getUTCMonth()
+  const thisMonth = clamp(year, month)
+  if (thisMonth >= today.getUTCDate()) {
+    return formatDateOnly(new Date(Date.UTC(year, month, thisMonth)))
+  }
+  return formatDateOnly(new Date(Date.UTC(year, month + 1, clamp(year, month + 1))))
+}
+
 function addMonths(dateString, months) {
   const [year, month, day] = dateString.split('-').map(Number)
   const date = new Date(year, month - 1 + months, day)
@@ -997,6 +1020,22 @@ export class BillingMasterError extends Error {
   constructor(message) {
     super(message)
     this.name = 'BillingMasterError'
+  }
+}
+
+/**
+ * Applying a PACKAGE to a client that cannot take one — today that means a
+ * retired client. (A billing master is refused a step earlier, by the same
+ * `_refuseBillingMasterWrite` guard every other write goes through.)
+ *
+ * A sentence rather than a code, for the same reason the master refusal is one:
+ * the owner is standing in front of a confirm dialog and the answer has to tell
+ * her what to do about it.
+ */
+export class PackageApplyError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'PackageApplyError'
   }
 }
 
@@ -3462,6 +3501,18 @@ export class AppDataStore {
           where status = 'shipped' and shipped_at is null`,
       )
 
+      // "Walk me through it": the plain-language tour of what a shipped item
+      // changed, generated on demand and kept so the owner (and the next
+      // reviewer) reads the SAME explanation every time she opens the card.
+      // Deliberately never touched by updateFeatureRequest — it describes what
+      // shipped, so approving or sending the item back must not erase it.
+      await this.pool.query(
+        `alter table feature_requests add column if not exists walkthrough text`,
+      )
+      await this.pool.query(
+        `alter table feature_requests add column if not exists walkthrough_at timestamptz`,
+      )
+
       // Assistant suggestions the owner dismissed — keyed by a stable
       // pattern key so the same suggestion never nags twice.
       await this.pool.query(`
@@ -3839,6 +3890,29 @@ export class AppDataStore {
       await this.pool.query(
         `alter table subscription_plans add column if not exists template_ids text[] not null default '{}'`,
       )
+
+      // PACKAGES (featreq-f890f05b): a named bundle of EXISTING plans plus the
+      // standard blueprint checklists that come with them, applied to a client
+      // in one click. Deliberately NOT in the bulk-save payload — it is
+      // endpoint-managed (cardinal rule 4), which also keeps it out of the
+      // workspace fingerprint (lib/workspace-version.js enumerates only the
+      // tables `write()` wipes) so creating a package can never 409 an open tab.
+      //
+      // Both id arrays are FK-FREE, the same idiom as `subscription_plans
+      // .template_ids` and `clients.plan_ids[]`: a plan or a template may be
+      // deleted while still listed here, so every read coerces to string[] and
+      // the apply only acts on ids that still resolve.
+      await this.pool.query(`
+        create table if not exists packages (
+          id text primary key,
+          name text not null,
+          description text not null default '',
+          plan_ids text[] not null default '{}',
+          template_ids text[] not null default '{}',
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
 
       // Reusable contacts (shared across clients). Mirrors the plans/clients
       // table idioms incl. `updated_at`. Selected on clients via `contact_ids`.
@@ -8711,6 +8785,367 @@ export class AppDataStore {
     })
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return { removedPlanId: id, unlinkedClientIds }
+  }
+
+  // ---- Packages (featreq-f890f05b) ----
+  //
+  // A package is a NAMED BUNDLE of existing plans plus the standard blueprint
+  // checklists that come with them. Applying one to a client adds the plans to
+  // the client's `planIds` and copies the blueprints onto the client.
+  //
+  // WHAT A PACKAGE DOES NOT DO IS CHANGE THE MONEY. A plan is a LABEL on the
+  // invoice: `lib/invoice-lines.js` bills the client's own `monthlyRate` and
+  // only joins the subscribed plan names into the service line's label. So
+  // applying a package adds labels and checklists and leaves the amount exactly
+  // where it was — which is what the confirm sentence in the UI says, and why
+  // nothing here touches a rate.
+  //
+  // Storage mirrors the other ENDPOINT-MANAGED collections (feature requests,
+  // invoice review events): a `packages` table on Postgres, and the separate
+  // auth-state file — never `tmp/app-data.json` — on the file backend. That is
+  // not a stylistic choice: the file backend's `write()` replaces app-data.json
+  // wholesale with the bulk payload, so a slice that is not in the payload is a
+  // slice the next autosave erases.
+
+  /** Normalize a stored package (either backend's row shape) for the API. */
+  static mapPackage(row) {
+    const ids = (value) =>
+      Array.isArray(value) ? value.filter((id) => typeof id === 'string' && id) : []
+    return {
+      id: row.id,
+      name: row.name ?? '',
+      description: row.description ?? '',
+      planIds: ids(row.plan_ids ?? row.planIds),
+      templateIds: ids(row.template_ids ?? row.templateIds),
+      createdAt: row.created_at
+        ? new Date(row.created_at).toISOString()
+        : (row.createdAt ?? nowIso()),
+      updatedAt: row.updated_at
+        ? new Date(row.updated_at).toISOString()
+        : (row.updatedAt ?? null),
+    }
+  }
+
+  /** Every package, oldest first. Owner-only at the endpoint layer. */
+  async listPackages() {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select id, name, description, plan_ids, template_ids, created_at, updated_at
+           from packages
+          order by created_at asc`,
+      )
+      return rows.map((row) => AppDataStore.mapPackage(row))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.packages) ? authState.packages : []
+    return list
+      .map((row) => AppDataStore.mapPackage(row))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+
+  /**
+   * Create a package. A package is a COMBINATION, so it needs at least two
+   * plans — one plan is just that plan, and the owner already has a way to add
+   * it. Returns the created record, or null when the input can't make one.
+   */
+  async createPackage({ name, description, planIds, templateIds } = {}) {
+    const trimmedName = typeof name === 'string' ? name.trim().slice(0, 120) : ''
+    if (!trimmedName) return null
+    const plans = [...new Set((Array.isArray(planIds) ? planIds : []).filter(
+      (id) => typeof id === 'string' && id,
+    ))]
+    if (plans.length < 2) return null
+    const templates = [...new Set((Array.isArray(templateIds) ? templateIds : []).filter(
+      (id) => typeof id === 'string' && id,
+    ))]
+    const record = {
+      id: `pkg-${randomUUID().slice(0, 8)}`,
+      name: trimmedName,
+      description: typeof description === 'string' ? description.slice(0, 2000) : '',
+      planIds: plans,
+      templateIds: templates,
+      createdAt: nowIso(),
+      updatedAt: null,
+    }
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into packages (id, name, description, plan_ids, template_ids, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $6)`,
+        [record.id, record.name, record.description, record.planIds, record.templateIds, record.createdAt],
+      )
+      return AppDataStore.mapPackage(record)
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.packages)) authState.packages = []
+    authState.packages.push(record)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapPackage(record)
+  }
+
+  /**
+   * Patch a package's name / description / plans / checklists. A patch that
+   * says nothing about a field is not a statement about it. The two-plan floor
+   * is enforced here too — an edit must not be a way around it. Returns the
+   * updated record, or null when there is no such package (and throws on a
+   * patch that would leave it with fewer than two plans).
+   */
+  async updatePackage(id, patch = {}) {
+    if (!id) return null
+    const has = (key) => Object.prototype.hasOwnProperty.call(patch, key)
+    const cleanIds = (value) =>
+      [...new Set((Array.isArray(value) ? value : []).filter((v) => typeof v === 'string' && v))]
+
+    const next = {}
+    if (has('name')) {
+      const trimmed = typeof patch.name === 'string' ? patch.name.trim().slice(0, 120) : ''
+      if (!trimmed) return null
+      next.name = trimmed
+    }
+    if (has('description')) {
+      next.description = typeof patch.description === 'string' ? patch.description.slice(0, 2000) : ''
+    }
+    if (has('planIds')) {
+      const plans = cleanIds(patch.planIds)
+      if (plans.length < 2) return null
+      next.planIds = plans
+    }
+    if (has('templateIds')) next.templateIds = cleanIds(patch.templateIds)
+    const updatedAt = nowIso()
+
+    if (this.pool) {
+      const sets = []
+      const params = [id]
+      const push = (column, value) => {
+        params.push(value)
+        sets.push(`${column} = $${params.length}`)
+      }
+      if ('name' in next) push('name', next.name)
+      if ('description' in next) push('description', next.description)
+      if ('planIds' in next) push('plan_ids', next.planIds)
+      if ('templateIds' in next) push('template_ids', next.templateIds)
+      params.push(updatedAt)
+      sets.push(`updated_at = $${params.length}`)
+      const { rows } = await this.pool.query(
+        `update packages set ${sets.join(', ')}
+          where id = $1
+          returning id, name, description, plan_ids, template_ids, created_at, updated_at`,
+        params,
+      )
+      if (!rows[0]) return null
+      return AppDataStore.mapPackage(rows[0])
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.packages)) authState.packages = []
+    const target = authState.packages.find((row) => row && row.id === id)
+    if (!target) return null
+    Object.assign(target, next, { updatedAt })
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapPackage(target)
+  }
+
+  /**
+   * Delete a package. Nothing cascades: a package is a SHORTCUT, so removing it
+   * leaves every plan and every checklist it ever applied exactly where they
+   * are. Returns true when a row was removed.
+   */
+  async deletePackage(id) {
+    if (!id) return false
+    if (this.pool) {
+      const result = await this.pool.query(`delete from packages where id = $1 returning id`, [id])
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.packages) ? authState.packages : []
+    const before = list.length
+    authState.packages = list.filter((row) => !row || row.id !== id)
+    if (authState.packages.length === before) return false
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return true
+  }
+
+  /**
+   * Apply a package to a client: add its plans to the client's selected
+   * services, and copy its blueprint checklists onto the client.
+   *
+   * Three things make this safe to press twice.
+   *
+   * 1. The plan ids are UNIONED with what the client already has, and filtered
+   *    to plans that still EXIST. A dangling id in `clients.plan_ids[]` has no
+   *    foreign key to catch it and crashes every later bulk write — that is the
+   *    2026-06-17 outage, and `sanitizeClientPlanRefs` exists because of it.
+   * 2. The client write is TARGETED (cardinal rule 4): one `update clients`,
+   *    never the bulk save, so applying a package cannot carry a stale tab's
+   *    snapshot of everything else along with it.
+   * 3. A blueprint the client ALREADY has a copy of is skipped, matched on the
+   *    copy's `sourceTemplateId` stamp. Re-applying a package therefore fills
+   *    in what is missing rather than minting a second Monthly Close.
+   *
+   * Refused for a billing master (it holds no work of its own) and for a
+   * retired client (the app stops OFFERING a retired client for new work, so it
+   * must not accept new work for one through a side door either).
+   *
+   * Returns { client, addedPlanIds, clonedTemplateIds, skippedTemplateIds }, or
+   * null when the package or the client is not there.
+   */
+  async applyPackageToClient(clientId, packageId, { actorUserId = null } = {}) {
+    if (!clientId || !packageId) return null
+    // Before anything is read or written, for the same reason every other
+    // master guard runs first: the refusal is the whole of what happened.
+    await this._refuseBillingMasterWrite(clientId, 'plans or checklists')
+
+    const packages = await this.listPackages()
+    const pkg = packages.find((row) => row.id === packageId)
+    if (!pkg) return null
+
+    const data = await this.read()
+    const client = (data.clients ?? []).find((row) => row.id === clientId)
+    if (!client) return null
+    if ((client.lifecycleStage ?? 'active') === 'inactive') {
+      throw new PackageApplyError(
+        `${client.name || 'That client'} is retired, so new plans and checklists can't be added to them. Reactivate them first, then apply the package.`,
+      )
+    }
+
+    // Plans: union with what is already there, in that order, so the client's
+    // first plan (and therefore the legacy scalar `plan_id` derived from it)
+    // does not move underneath them.
+    const existingPlanIds = Array.isArray(client.planIds) ? [...client.planIds] : []
+    const knownPlanIds = new Set((data.plans ?? []).map((plan) => plan.id))
+    const addedPlanIds = pkg.planIds.filter(
+      (id) => knownPlanIds.has(id) && !existingPlanIds.includes(id),
+    )
+    if (addedPlanIds.length > 0) {
+      await this._setClientPlanIds(clientId, [...existingPlanIds, ...addedPlanIds])
+    }
+
+    // Checklists: one copy per blueprint the client does not already have.
+    const templates = data.checklistTemplates ?? []
+    const alreadyCopied = new Set(
+      templates
+        .filter((template) => template.clientId === clientId && template.sourceTemplateId)
+        .map((template) => template.sourceTemplateId),
+    )
+    const clonedTemplateIds = []
+    const skippedTemplateIds = []
+    for (const templateId of pkg.templateIds) {
+      const source = templates.find((template) => template.id === templateId)
+      // A blueprint deleted since the package was configured is simply not
+      // there to copy — the FK-free array idiom again.
+      if (!source) continue
+      if (alreadyCopied.has(templateId)) {
+        skippedTemplateIds.push(templateId)
+        continue
+      }
+      const copy = await this.copyTemplateToClient(templateId, { clientId })
+      if (!copy) continue
+      clonedTemplateIds.push(templateId)
+      // Same auto-grant the apply-to-client endpoint makes: whoever the copy
+      // hands work to can see the client it is for.
+      if (copy.assigneeId) await this.grantClientVisibility(clientId, copy.assigneeId)
+      for (const stage of copy.stages ?? []) {
+        if (stage.assigneeId) await this.grantClientVisibility(clientId, stage.assigneeId)
+      }
+    }
+
+    if (actorUserId) {
+      await this.recordActivity(actorUserId, 'package_applied', `${pkg.name} · ${client.name}`)
+    }
+
+    const after = await this.read()
+    return {
+      client: (after.clients ?? []).find((row) => row.id === clientId) ?? client,
+      addedPlanIds,
+      clonedTemplateIds,
+      skippedTemplateIds,
+    }
+  }
+
+  /**
+   * Targeted write of one client's selected plans — the half of an apply that
+   * touches the client row, modeled on `setClientAssignedTeam` rather than on
+   * the bulk save.
+   *
+   * The legacy scalar `plan_id` is re-derived from the first id, exactly as the
+   * bulk save derives it, so the two links can never disagree.
+   */
+  async _setClientPlanIds(clientId, planIds) {
+    const safe = [...new Set((planIds ?? []).filter((id) => typeof id === 'string' && id))]
+    const scalar = safe[0] ?? null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update clients set plan_ids = $2, plan_id = $3, updated_at = now()
+          where id = $1
+          returning id`,
+        [clientId, safe, scalar],
+      )
+      return (result.rowCount ?? 0) > 0
+    }
+    const data = await readJson(localDataPath)
+    let found = false
+    data.clients = (data.clients ?? []).map((client) => {
+      if (client.id !== clientId) return client
+      found = true
+      return { ...client, planId: scalar, planIds: safe }
+    })
+    if (!found) return false
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return true
+  }
+
+  /**
+   * Turn AI-proposed checklists into real STANDARD blueprints and attach them
+   * to a package.
+   *
+   * This is the ONLY place a suggestion becomes a thing that exists, and it is
+   * reached only from the owner's explicit confirm — `suggestPackageChecklists`
+   * answers with proposals and writes nothing. Brittany's wording:
+   * "always asks for approval first, and only creates items after the user
+   * confirms". Keeping the two halves in separate methods is what makes that
+   * structural rather than a promise in the copy.
+   *
+   * Each proposal becomes a blueprint through the ordinary
+   * `createStandardTemplate` path, so a suggested checklist is indistinguishable
+   * from a hand-made one afterwards — there is no second kind of template to
+   * maintain. A `dueDayOfMonth` is carried as the blueprint's `nextDueDate`:
+   * `copyTemplateToClient` keeps the cadence's phase, so a monthly blueprint
+   * dated the 15th produces client copies due on the 15th.
+   *
+   * Returns { package, templates } or null when the package is not there.
+   */
+  async createSuggestedPackageChecklists(packageId, proposals = []) {
+    if (!packageId) return null
+    const packages = await this.listPackages()
+    const pkg = packages.find((row) => row.id === packageId)
+    if (!pkg) return null
+
+    const created = []
+    for (const proposal of Array.isArray(proposals) ? proposals : []) {
+      const title = typeof proposal?.title === 'string' ? proposal.title.trim() : ''
+      const steps = (Array.isArray(proposal?.steps) ? proposal.steps : [])
+        .map((step) => (typeof step?.title === 'string' ? step.title.trim() : ''))
+        .filter(Boolean)
+      // A proposal with no name or no steps is not a checklist. Skipped rather
+      // than refused: one bad row in a batch must not lose the good ones.
+      if (!title || steps.length === 0) continue
+      const template = await this.createStandardTemplate({
+        title,
+        frequency: typeof proposal?.frequency === 'string' ? proposal.frequency : 'monthly',
+        ...(Number.isInteger(Number(proposal?.dueDayOfMonth))
+          ? { nextDueDate: nextDateOnDayOfMonth(Number(proposal.dueDayOfMonth)) }
+          : {}),
+        stages: [{ name: 'Stage 1', items: steps.map((label) => ({ label })) }],
+      })
+      created.push(template)
+    }
+    if (created.length === 0) return { package: pkg, templates: [] }
+
+    const updated = await this.updatePackage(packageId, {
+      templateIds: [...pkg.templateIds, ...created.map((template) => template.id)],
+    })
+    return { package: updated ?? pkg, templates: created }
   }
 
   /** Delete one reimbursement. Returns true when a row was removed. */
@@ -15361,6 +15796,11 @@ export class AppDataStore {
       shippedAt: row.shipped_at
         ? new Date(row.shipped_at).toISOString()
         : (row.shippedAt ?? null),
+      // The stored "Walk me through it" explanation, and when it was written.
+      walkthrough: row.walkthrough ?? null,
+      walkthroughAt: row.walkthrough_at
+        ? new Date(row.walkthrough_at).toISOString()
+        : (row.walkthroughAt ?? null),
       createdAt: row.created_at
         ? new Date(row.created_at).toISOString()
         : (row.createdAt ?? nowIso()),
@@ -15381,6 +15821,7 @@ export class AppDataStore {
                 priority_rank, dev_notes, approved_by, approved_at,
                 review_note, reviewed_by, reviewed_at,
                 clarification_question, clarification_answer, shipped_at,
+                walkthrough, walkthrough_at,
                 created_at, updated_at
            from feature_requests
           order by ${FEATURE_REQUEST_PRIORITY_WEIGHT_SQL} asc,
@@ -15608,6 +16049,7 @@ export class AppDataStore {
                   priority_rank, dev_notes, approved_by, approved_at,
                   review_note, reviewed_by, reviewed_at,
                   clarification_question, clarification_answer, shipped_at,
+                  walkthrough, walkthrough_at,
                   created_at, updated_at`,
         [
           id,
@@ -15724,14 +16166,22 @@ export class AppDataStore {
     return removed
   }
 
-  /** Load a single feature request by id (for the /refine endpoint). */
+  /**
+   * Load a single feature request by id (for the /refine, /confirm-feedback
+   * and /walkthrough endpoints). The column list is the FULL one: the
+   * walkthrough prompt is built from the shipped notes, the clarification Q&A
+   * and the ship date, so a short select here silently starves it.
+   */
   async getFeatureRequest(id) {
     if (!id) return null
     if (this.pool) {
       const result = await this.pool.query(
         `select id, user_id, title, description, type, status, urgent, priority,
                 priority_rank, dev_notes, approved_by, approved_at,
-                review_note, reviewed_by, reviewed_at, created_at, updated_at
+                review_note, reviewed_by, reviewed_at,
+                clarification_question, clarification_answer, shipped_at,
+                walkthrough, walkthrough_at,
+                created_at, updated_at
            from feature_requests where id = $1`,
         [id],
       )
@@ -15742,6 +16192,48 @@ export class AppDataStore {
     const list = Array.isArray(authState.featureRequests) ? authState.featureRequests : []
     const found = list.find((r) => r.id === id)
     return found ? AppDataStore.mapFeatureRequest(found) : null
+  }
+
+  /**
+   * Store the "Walk me through it" explanation for an item, stamping
+   * `walkthrough_at`. Returns the updated record, or null when there is no such
+   * item (or nothing to store).
+   *
+   * Its own method rather than a field on `updateFeatureRequest` on purpose: a
+   * walkthrough describes what SHIPPED, so approving the item, sending it back,
+   * or any later edit must leave it alone. `updated_at` is untouched for the
+   * same reason — generating an explanation is not an edit to the request.
+   */
+  async setFeatureRequestWalkthrough(id, text) {
+    if (!id) return null
+    const walkthrough = typeof text === 'string' ? text.trim().slice(0, 8000) : ''
+    if (!walkthrough) return null
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update feature_requests
+            set walkthrough = $2, walkthrough_at = now()
+          where id = $1
+        returning id, user_id, title, description, type, status, urgent, priority,
+                  priority_rank, dev_notes, approved_by, approved_at,
+                  review_note, reviewed_by, reviewed_at,
+                  clarification_question, clarification_answer, shipped_at,
+                  walkthrough, walkthrough_at,
+                  created_at, updated_at`,
+        [id, walkthrough],
+      )
+      if (!result.rowCount) return null
+      return AppDataStore.mapFeatureRequest(result.rows[0])
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
+    const existing = authState.featureRequests.find((r) => r.id === id)
+    if (!existing) return null
+    existing.walkthrough = walkthrough
+    existing.walkthroughAt = nowIso()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapFeatureRequest(existing)
   }
 
   /**
@@ -17683,6 +18175,13 @@ export class AppDataStore {
           : nowIso(),
       active: true,
       isStandard: false,
+      // Where this copy came from. The browser's clone
+      // (src/lib/cloneChecklistTemplate.ts) has always stamped it and the
+      // schema has always had the column; this path simply never filled it in,
+      // so a server-side copy was indistinguishable from a hand-made template
+      // and "is this blueprint already set up here?" had only the title to go
+      // on. Applying a PACKAGE twice is decided on this stamp.
+      sourceTemplateId,
       viewerIds: Array.isArray(source.viewerIds) ? [...source.viewerIds] : [],
       editorIds: Array.isArray(source.editorIds) ? [...source.editorIds] : [],
       stages: (migrated.stages ?? []).map((stage) => ({

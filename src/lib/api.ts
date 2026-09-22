@@ -19,6 +19,7 @@
   type PendingTaskEdit,
   type FirmSettings,
   type NotificationEntry,
+  type Package,
   type PublicFirmSettings,
   type ServiceCategory,
   type SessionUser,
@@ -697,6 +698,175 @@ export async function deletePlanRequest(id: string) {
     )
   }
   return (await response.json()) as { removedPlanId: string; unlinkedClientIds: string[] }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Packages (featreq-f890f05b)                                                */
+/* -------------------------------------------------------------------------- */
+/*
+ * Packages are ENDPOINT-MANAGED — they are not in the bulk workspace payload,
+ * so every page that shows them fetches them. Owner-only on the server; these
+ * helpers do not re-check the role, they just report what it said.
+ */
+
+/** Owner-only: the firm's packages. */
+export async function listPackagesRequest(): Promise<Package[]> {
+  const response = await apiFetch('/api/packages', { credentials: 'same-origin' })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to load packages (${response.status})`)
+  }
+  const body = (await response.json()) as { packages?: Package[] }
+  return Array.isArray(body.packages) ? body.packages : []
+}
+
+/** Owner-only: create a package. Needs a name and at least two plans. */
+export async function createPackageRequest(input: {
+  name: string
+  description?: string
+  planIds: string[]
+  templateIds?: string[]
+}): Promise<Package> {
+  const response = await apiFetch('/api/packages', {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to create package (${response.status})`)
+  }
+  return (await response.json()) as Package
+}
+
+/** Owner-only: patch a package. A field left out is not a statement about it. */
+export async function updatePackageRequest(
+  id: string,
+  patch: Partial<Pick<Package, 'name' | 'description' | 'planIds' | 'templateIds'>>,
+): Promise<Package> {
+  const response = await apiFetch(`/api/packages/${encodeURIComponent(id)}`, {
+    credentials: 'same-origin',
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to save package (${response.status})`)
+  }
+  return (await response.json()) as Package
+}
+
+/** Owner-only: delete a package. Nothing it ever applied is undone. */
+export async function deletePackageRequest(id: string): Promise<void> {
+  const response = await apiFetch(`/api/packages/${encodeURIComponent(id)}`, {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to delete package (${response.status})`)
+  }
+}
+
+/**
+ * One AI-proposed checklist for a package. Nothing here exists yet — a
+ * proposal is a suggestion until the owner ticks it and confirms.
+ */
+export type PackageChecklistProposal = {
+  title: string
+  frequency: string
+  dueDayOfMonth?: number
+  steps: Array<{ title: string }>
+  /** One sentence to the owner: why this package needs it. She reads it to decide. */
+  why: string
+}
+
+/**
+ * Owner-only: ask the AI what checklists this package is missing. Creates
+ * NOTHING — the answer is proposals, and `createSuggestedChecklistsRequest` is
+ * the only thing that turns one into a blueprint.
+ */
+export async function suggestPackageChecklistsRequest(
+  packageId: string,
+): Promise<PackageChecklistProposal[]> {
+  const response = await apiFetch(
+    `/api/packages/${encodeURIComponent(packageId)}/suggest-checklists`,
+    { credentials: 'same-origin', method: 'POST' },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not suggest checklists (${response.status})`,
+    )
+  }
+  const body = (await response.json()) as { proposals?: PackageChecklistProposal[] }
+  return Array.isArray(body.proposals) ? body.proposals : []
+}
+
+/**
+ * Owner-only: create the proposals she confirmed as standard blueprints and
+ * attach them to the package. This is the only write in the suggest flow.
+ */
+export async function createSuggestedChecklistsRequest(
+  packageId: string,
+  proposals: PackageChecklistProposal[],
+): Promise<{ package: Package; templates: Array<{ id: string; title: string }> }> {
+  const response = await apiFetch(
+    `/api/packages/${encodeURIComponent(packageId)}/create-suggested`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proposals }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not create those checklists (${response.status})`,
+    )
+  }
+  return (await response.json()) as {
+    package: Package
+    templates: Array<{ id: string; title: string }>
+  }
+}
+
+/** What applying a package actually did — the inline result the client page shows. */
+export type ApplyPackageResult = {
+  client: Client
+  addedPlanIds: string[]
+  clonedTemplateIds: string[]
+  skippedTemplateIds: string[]
+}
+
+/**
+ * Owner-only: apply a package to a client. Adds its plans and copies its
+ * blueprint checklists. Refused (409) for a billing master and for a retired
+ * client; the message is a sentence meant to be shown as-is.
+ */
+export async function applyPackageRequest(
+  clientId: string,
+  packageId: string,
+): Promise<ApplyPackageResult> {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/apply-package`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ packageId }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to apply package (${response.status})`)
+  }
+  return (await response.json()) as ApplyPackageResult
 }
 
 /**
@@ -3018,6 +3188,34 @@ export async function refineFeatureRequest(id: string) {
   }
   return ((await response.json()) as { suggestion: { title: string; description: string } })
     .suggestion
+}
+
+/**
+ * Owner-only: the plain-language walkthrough of a SHIPPED update — what
+ * changed, where to find it, how to try it, and what did NOT change — so the
+ * owner can approve or send back understanding the change.
+ *
+ * Cheap and consistent by default: the stored walkthrough comes straight back.
+ * `regenerate` is the "write me a new one" path behind the Regenerate link.
+ */
+export async function walkthroughFeatureRequestRequest(
+  id: string,
+  opts: { regenerate?: boolean } = {},
+) {
+  const response = await apiFetch(`/api/feature-requests/${encodeURIComponent(id)}/walkthrough`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts.regenerate ? { regenerate: true } : {}),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Could not put a walkthrough together (${response.status})`,
+    )
+  }
+  return (await response.json()) as { walkthrough: string; walkthroughAt: string | null }
 }
 
 export type SpitballSession = {
