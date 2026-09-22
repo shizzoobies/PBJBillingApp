@@ -2996,13 +2996,15 @@ Clients page meanwhile. Owner-only.
   anything in it — and starts a clean one; nothing is deleted, and the archived
   session is exactly what the AI recalls later.
 - **When the AI is at capacity, spitballing says so instead of getting worse.**
-  If the AI provider is overloaded, the brainstorm shows "The AI is at capacity
-  right now — give it a minute and try again. Your notes are safe." rather than
-  quietly answering with a weaker stand-in model — a degraded reply would be
-  saved into the conversation and drag down everything after it. Waiting a
-  minute and re-sending is the fix; nothing typed is lost. (Other AI features —
-  Refine for dev, the feedback read-back — do quietly use the stand-in, because
-  their suggestions are reviewed before anything is saved.)
+  If the AI stumbles on a turn it quietly tries that turn again without the
+  older-sessions memory — usually all it takes — before it ever says it is at
+  capacity. If the AI provider is overloaded, the brainstorm shows "The AI is
+  at capacity right now — give it a minute and try again. Your notes are safe."
+  rather than quietly answering with a weaker stand-in model — a degraded reply
+  would be saved into the conversation and drag down everything after it.
+  Waiting a minute and re-sending is the fix; nothing typed is lost. (Other AI
+  features — Refine for dev, the feedback read-back — do quietly use the
+  stand-in, because their suggestions are reviewed before anything is saved.)
 - Each item has a type (Feature / Bug / Improvement), a status (New → Planned →
   Planned (not near EOM) → In Progress → Needs answer → Shipped → Done, or
   Won't do), and a color-coded priority level — Urgent (red), High (orange),
