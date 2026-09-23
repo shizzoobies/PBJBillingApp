@@ -88,6 +88,9 @@ export function TeamPage() {
   const [costFromDraft, setCostFromDraft] = useState<Record<string, string>>({})
 
   useEffect(() => {
+    // Only an owner has rate boxes to fill, and only an owner may read the
+    // versions — a preview-as session would spend a request to be told 403.
+    if (!ownerMode) return
     const controller = new AbortController()
     void fetchRateVersions(controller.signal)
       .then(({ billRateVersions, costRateVersions }) => {
@@ -99,7 +102,7 @@ export function TeamPage() {
       // same shape — so previewing shows no history and no error either.
       .catch(() => {})
     return () => controller.abort()
-  }, [])
+  }, [ownerMode])
 
   const billVersionsFor = (userId: string) => billVersions.filter((row) => row.userId === userId)
   const costVersionsFor = (userId: string) => costVersions.filter((row) => row.userId === userId)
@@ -131,6 +134,14 @@ export function TeamPage() {
         ),
       )
       setBillDraft((current) => {
+        const next = { ...current }
+        delete next[member.id]
+        return next
+      })
+      // The month goes back to its default too. Leaving a backfilled month in
+      // the box means the NEXT save in the same session silently lands on that
+      // old month again, which is how you overwrite March while meaning today.
+      setBillFromDraft((current) => {
         const next = { ...current }
         delete next[member.id]
         return next
@@ -187,6 +198,13 @@ export function TeamPage() {
         ),
       )
       setCostDraft((current) => {
+        const next = { ...current }
+        delete next[member.id]
+        return next
+      })
+      // Same reset as the bill box: a backfilled day must not stick around and
+      // catch the next save.
+      setCostFromDraft((current) => {
         const next = { ...current }
         delete next[member.id]
         return next
@@ -612,7 +630,13 @@ export function TeamPage() {
                             <button
                               type="button"
                               className="team-icon-button"
-                              disabled={billSavingId === member.id || billDraft[member.id] === undefined}
+                              // An empty box is not "clear this rate" any more —
+                              // a version row has to carry a number — so Save
+                              // stays off rather than doing nothing when pressed.
+                              disabled={
+                                billSavingId === member.id ||
+                                (billDraft[member.id] ?? '').trim() === ''
+                              }
                               onClick={() => void handleSaveBillRate(member)}
                             >
                               {billSavingId === member.id ? 'Saving…' : 'Save'}
@@ -692,7 +716,11 @@ export function TeamPage() {
                             <button
                               type="button"
                               className="team-icon-button"
-                              disabled={costSavingId === member.id || costDraft[member.id] === undefined}
+                              // Same rule as the bill box above.
+                              disabled={
+                                costSavingId === member.id ||
+                                (costDraft[member.id] ?? '').trim() === ''
+                              }
                               onClick={() => void handleSaveCostRate(member)}
                             >
                               {costSavingId === member.id ? 'Saving…' : 'Save'}
@@ -1075,6 +1103,9 @@ function ClientsTheyCanSeeSection({
   )
 }
 
+/** What the cost-rate migration stamps on a rate that predates the history. */
+const EPOCH_DAY = '1970-01-01'
+
 /**
  * The prior versions of one rate, behind a disclosure.
  *
@@ -1108,7 +1139,12 @@ function RateHistoryList({
         <ul className="recap-list">
           {rows.map((row) => (
             <li key={row.key}>
-              <span>{row.when}</span>
+              {/*
+                The migration seeds every pre-existing cost rate at the epoch,
+                so "1970-01-01" is not a date anyone chose — it means the rate
+                has been in force for as long as the records go.
+              */}
+              <span>{row.when === EPOCH_DAY ? 'Since the start' : row.when}</span>
               <span>{currency.format(row.rate)}/hr</span>
               {row.key === newest.key ? (
                 <button

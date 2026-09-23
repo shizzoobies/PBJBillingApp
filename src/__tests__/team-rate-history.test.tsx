@@ -134,6 +134,9 @@ const dateInput = () =>
  * "Remove" button too — removing the person, not a rate.
  */
 const billHistory = () => document.querySelectorAll('.team-rate-history')[0] as HTMLElement
+const costHistory = () => document.querySelectorAll('.team-rate-history')[1] as HTMLElement
+/** The whole bill box — input, Save, month, history and its error line. */
+const billBox = () => document.querySelectorAll('.team-cost-rate')[0] as HTMLElement
 const openBillHistory = async () => {
   fireEvent.click(within(billHistory()).getByRole('button', { name: /Rate history/i }))
   await waitFor(() => expect(screen.getByText('2026-06')).toBeInTheDocument())
@@ -173,6 +176,42 @@ describe('Team page rate history', () => {
       expect(upsertBillRateVersion).toHaveBeenCalledWith(LISA, '2026-10', 60),
     )
     expect(setTeamMemberBillRate).not.toHaveBeenCalled()
+    // The headline follows the NEWEST version the server returns (2026-09 at
+    // $55), not the $60 typed: the card shows the rate in the box itself, and
+    // once the draft clears the box falls back to the member's mirrored rate.
+    await waitFor(() => expect(billInput()).toHaveValue(55))
+  })
+
+  it('puts the effective-from month back to this month after a save', async () => {
+    await renderTeamPage()
+    fireEvent.change(billInput(), { target: { value: '48' } })
+    fireEvent.change(monthInput(), { target: { value: '2026-03' } })
+    expect(monthInput()).toHaveValue('2026-03')
+    fireEvent.click(within(billBox()).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(upsertBillRateVersion).toHaveBeenCalledWith(LISA, '2026-03', 48),
+    )
+    // A backfilled March must not linger and catch the next save.
+    await waitFor(() =>
+      expect(monthInput()).toHaveValue(new Date().toISOString().slice(0, 7)),
+    )
+  })
+
+  it('keeps Save off while the rate box is empty', async () => {
+    await renderTeamPage()
+    const save = () => within(billBox()).getByRole('button', { name: 'Save' })
+    fireEvent.change(billInput(), { target: { value: '60' } })
+    expect(save()).toBeEnabled()
+    fireEvent.change(billInput(), { target: { value: '' } })
+    expect(save()).toBeDisabled()
+  })
+
+  it('names the migration’s 1970-01-01 cost row "Since the start"', async () => {
+    await renderTeamPage()
+    fireEvent.click(within(costHistory()).getByRole('button', { name: /Rate history/i }))
+    expect(await within(costHistory()).findByText('Since the start')).toBeInTheDocument()
+    expect(within(costHistory()).queryByText('1970-01-01')).not.toBeInTheDocument()
   })
 
   it('lists prior versions and offers Remove on the NEWEST only', async () => {
@@ -198,7 +237,9 @@ describe('Team page rate history', () => {
     await renderTeamPage()
     await openBillHistory()
     fireEvent.click(within(billHistory()).getByRole('button', { name: /Remove/i }))
-    expect(await screen.findByText(/Move that client first/)).toBeInTheDocument()
+    // Scoped to the bill box: the error is keyed per box, so the refusal must
+    // land here and nowhere else.
+    expect(await within(billBox()).findByText(/Move that client first/)).toBeInTheDocument()
   })
 
   it('defaults the cost rate’s effective-from to today', async () => {
