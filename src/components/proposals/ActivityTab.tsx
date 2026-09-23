@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { proposalActivity, proposalDate } from '../../lib/proposals'
 import type { Proposal } from '../../lib/types'
 
@@ -10,7 +11,8 @@ export function ActivityTab({ proposal }: { proposal: Proposal }) {
         <ul className="proposal-activity-list">
           {proposalActivity(proposal).map((entry, index) => (
             <li key={`${entry.at}-${index}`}>
-              <span className="muted-text">{proposalDate(entry.at)}</span> {entry.text}
+              <span className="muted-text">{proposalDate(entry.at)}</span>{' '}
+              {entry.href ? <Link to={entry.href}>{entry.text}</Link> : entry.text}
             </li>
           ))}
         </ul>

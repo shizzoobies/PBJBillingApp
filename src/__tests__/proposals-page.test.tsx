@@ -5,7 +5,16 @@ import type { AppContextValue } from '../AppContext'
 import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
 import { ProposalEditorPage } from '../pages/ProposalEditorPage'
 import { ProposalsPage } from '../pages/ProposalsPage'
-import type { Proposal } from '../lib/types'
+import { ApiError, type Proposal } from '../lib/types'
+
+/** A promise plus its own `resolve`, for pinning a mock's response in flight. */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
 
 /**
  * Proposals in the UI (featreq-311473e2 / featreq-ef18a38e). The server
@@ -100,6 +109,80 @@ const WITH_RECONCILIATIONS: Proposal = {
       },
     ],
     totals: { monthly: 1005, annual: 0, oneTime: 0, cleanup: 0 },
+  },
+}
+
+/** The Basic tier retired out from under a proposal that already selected it (review I2). */
+const RETIRED_TIER_PRICING = {
+  ...defaultProposalPricing(),
+  rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+  services: defaultProposalPricing().services.map((service) =>
+    service.id === 'monthly-weekly-transactions-basic' ? { ...service, active: false } : service,
+  ),
+}
+
+const RETIRED_TIER_PROPOSAL: Proposal = {
+  ...PROPOSAL,
+  id: 'prop-3',
+  pricingSnapshot: {
+    ...PROPOSAL.pricingSnapshot!,
+    lines: [
+      {
+        ...PROPOSAL.pricingSnapshot!.lines[0],
+        amount: 0,
+        computedAmount: 0,
+        formula: 'This service is retired - priced at $0.00',
+        flag: 'retired',
+      },
+    ],
+    totals: { monthly: 0, annual: 0, oneTime: 0, cleanup: 0 },
+  },
+}
+
+/** A selected per-count service, to prove a negative count is dropped (review M2). */
+const PROPOSAL_WITH_COUNT: Proposal = {
+  ...PROPOSAL,
+  selections: [...PROPOSAL.selections, { serviceId: 'reports-needed-basic', quantity: 5 }],
+  pricingSnapshot: {
+    ...PROPOSAL.pricingSnapshot!,
+    lines: [
+      ...PROPOSAL.pricingSnapshot!.lines,
+      {
+        serviceId: 'reports-needed-basic',
+        group: 'Reports',
+        name: 'Reports needed',
+        tier: 'Basic',
+        cadence: null,
+        amount: 100.8,
+        computedAmount: 100.8,
+        formula: '48 total accounts x 0.03 x 5 reports x $75/hr = $100.80',
+        flag: null,
+      },
+    ],
+  },
+}
+
+/** A line the catalog no longer has at all (review I3) — Remove is its only control. */
+const RETIRED_LINE_PROPOSAL: Proposal = {
+  ...PROPOSAL,
+  id: 'prop-4',
+  selections: [...PROPOSAL.selections, { serviceId: 'old-add-on' }],
+  pricingSnapshot: {
+    ...PROPOSAL.pricingSnapshot!,
+    lines: [
+      ...PROPOSAL.pricingSnapshot!.lines,
+      {
+        serviceId: 'old-add-on',
+        group: 'Monthly',
+        name: 'Old add-on',
+        tier: null,
+        cadence: null,
+        amount: 0,
+        computedAmount: 0,
+        formula: 'This service is retired - priced at $0.00',
+        flag: 'retired',
+      },
+    ],
   },
 }
 
@@ -203,9 +286,24 @@ describe('the proposal editor', () => {
   it('shows each priced line with its formula, and the four totals', async () => {
     renderEditor()
     expect(await screen.findByText('120 transactions x 0.07 x $75/hr = $630.00')).toBeTruthy()
+    expect(document.querySelector('.proposal-line-amount')?.textContent).toBe('$630.00')
     for (const label of ['Monthly fee', 'Annual fees', 'One-time fees', 'Clean-up']) {
       expect(screen.getByText(label, { selector: 'dt' })).toBeTruthy()
     }
+  })
+
+  it('trusts the server total even when it is not the sum of the lines (review M9)', async () => {
+    const mismatched: Proposal = {
+      ...PROPOSAL,
+      pricingSnapshot: {
+        ...PROPOSAL.pricingSnapshot!,
+        totals: { monthly: 1234.56, annual: 0, oneTime: 0, cleanup: 0 },
+      },
+    }
+    api.getProposalRequest = vi.fn(async () => mismatched)
+    renderEditor()
+    expect(await screen.findByText('$1,234.56')).toBeTruthy()
+    expect(document.querySelector('.proposal-line-amount')?.textContent).toBe('$630.00')
   })
 
   it('picking a service saves the selection and shows the line the server priced', async () => {
@@ -246,6 +344,84 @@ describe('the proposal editor', () => {
     )
   })
 
+  it('clearing an override sends the selection without the override key (review M9)', async () => {
+    const withOverride: Proposal = {
+      ...PROPOSAL,
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic', override: 600 }],
+    }
+    api.getProposalRequest = vi.fn(async () => withOverride)
+    renderEditor()
+    const override = await screen.findByLabelText('Override Monthly: Weekly transactions Basic')
+    fireEvent.change(override, { target: { value: '' } })
+    fireEvent.blur(override)
+    await waitFor(() =>
+      expect(api.updateProposalRequest).toHaveBeenCalledWith('prop-1', {
+        selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+      }),
+    )
+    const [, patch] = (api.updateProposalRequest as Mock).mock.calls[0]
+    expect(Object.keys(patch.selections[0])).toEqual(['serviceId'])
+  })
+
+  it('a negative override is dropped rather than saved (review M2)', async () => {
+    renderEditor()
+    const override = await screen.findByLabelText('Override Monthly: Weekly transactions Basic')
+    fireEvent.change(override, { target: { value: '-50' } })
+    fireEvent.blur(override)
+    await waitFor(() =>
+      expect(api.updateProposalRequest).toHaveBeenCalledWith('prop-1', {
+        selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+      }),
+    )
+  })
+
+  it('a save queued behind a pending one still carries what the pending one produced (review C1)', async () => {
+    const firstResponse = deferred<Proposal>()
+    const secondResponse = deferred<Proposal>()
+    api.updateProposalRequest = vi
+      .fn()
+      .mockReturnValueOnce(firstResponse.promise)
+      .mockReturnValueOnce(secondResponse.promise)
+    renderEditor()
+
+    const override = await screen.findByLabelText('Override Monthly: Weekly transactions Basic')
+    fireEvent.change(override, { target: { value: '600' } })
+    fireEvent.blur(override)
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalledTimes(1))
+
+    // The checkbox click is queued while the override's save is still pending.
+    fireEvent.click(await screen.findByLabelText('Reconciliations: Reconciliations'))
+    expect(api.updateProposalRequest).toHaveBeenCalledTimes(1)
+
+    firstResponse.resolve({
+      ...PROPOSAL,
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic', override: 600 }],
+    })
+
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalledTimes(2))
+    expect(api.updateProposalRequest).toHaveBeenNthCalledWith(2, 'prop-1', {
+      selections: [
+        { serviceId: 'monthly-weekly-transactions-basic', override: 600 },
+        { serviceId: 'reconciliations' },
+      ],
+    })
+    secondResponse.resolve(WITH_RECONCILIATIONS)
+  })
+
+  it('a negative count is dropped rather than saved (review M2)', async () => {
+    api.getProposalRequest = vi.fn(async () => PROPOSAL_WITH_COUNT)
+    renderEditor()
+    const count = await screen.findByLabelText('Count for Reports: Reports needed Basic')
+    fireEvent.change(count, { target: { value: '-3' } })
+    fireEvent.blur(count)
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalled())
+    const [, patch] = (api.updateProposalRequest as Mock).mock.calls[0]
+    const selection = patch.selections.find(
+      (entry: { serviceId: string }) => entry.serviceId === 'reports-needed-basic',
+    )
+    expect(selection).toEqual({ serviceId: 'reports-needed-basic' })
+  })
+
   it('a count saves as a number beside the others', async () => {
     renderEditor()
     const input = await screen.findByLabelText('Balance sheet accounts')
@@ -262,6 +438,39 @@ describe('the proposal editor', () => {
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Reprice at today’s catalog' }))
     await waitFor(() => expect(api.repriceProposalRequest).toHaveBeenCalledWith('prop-1'))
+  })
+
+  it('a retired tier stays checked and disabled in the picker; picking another tier replaces it (review I2)', async () => {
+    api.getProposalRequest = vi.fn(async () => RETIRED_TIER_PROPOSAL)
+    api.fetchFirmSettings = vi.fn(async () => ({ name: 'PB&J', proposalPricing: RETIRED_TIER_PRICING }))
+    renderEditor('/proposals/prop-3')
+
+    const row = await screen.findByRole('radiogroup', { name: 'Monthly: Weekly transactions' })
+    const basic = within(row).getByLabelText('Basic') as HTMLInputElement
+    expect(basic.checked).toBe(true)
+    expect(basic.disabled).toBe(true)
+    expect(within(row).getByText('Retired')).toBeTruthy()
+
+    fireEvent.click(within(row).getByLabelText('Advance'))
+    await waitFor(() =>
+      expect(api.updateProposalRequest).toHaveBeenCalledWith('prop-3', {
+        selections: [{ serviceId: 'monthly-weekly-transactions-advance' }],
+      }),
+    )
+  })
+
+  it('a retired line offers Remove instead of an override, and Remove drops its selection (review I3)', async () => {
+    api.getProposalRequest = vi.fn(async () => RETIRED_LINE_PROPOSAL)
+    renderEditor('/proposals/prop-4')
+    await screen.findByText('Old add-on')
+    expect(screen.queryByLabelText('Override Monthly: Old add-on')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    await waitFor(() =>
+      expect(api.updateProposalRequest).toHaveBeenCalledWith('prop-4', {
+        selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+      }),
+    )
   })
 
   it('copies to a new draft and opens it', async () => {
@@ -292,5 +501,19 @@ describe('the proposal editor', () => {
     expect(company.closest('fieldset')?.disabled).toBe(true)
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Reprice at today’s catalog' })).toBeNull()
+
+    // The override field lives outside the prospect/services fieldset — it needs its
+    // own lock (review I1).
+    const override = screen.getByLabelText('Override Monthly: Weekly transactions Basic')
+    expect(override.closest('fieldset')?.disabled).toBe(true)
+  })
+
+  it('shows an error and a way back when the proposal fails to load (review M7/M9)', async () => {
+    api.getProposalRequest = vi.fn(async () => {
+      throw new ApiError(404, 'That proposal was not found.')
+    })
+    renderEditor()
+    expect(await screen.findByText('That proposal was not found.')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Back to proposals' })).toBeTruthy()
   })
 })

@@ -2,6 +2,7 @@ import type {
   Proposal,
   ProposalGroup,
   ProposalMultiplier,
+  ProposalPatch,
   ProposalPricingKind,
   ProposalRole,
   ProposalSelection,
@@ -76,6 +77,13 @@ export function resolveProposalTab(param: string | null): ProposalTab {
   return PROPOSAL_TABS.some((tab) => tab.key === param) ? (param as ProposalTab) : 'estimate'
 }
 
+/**
+ * A save built from the SERVER'S latest proposal rather than from whatever the
+ * component last rendered (review C1) — so a save queued behind another one
+ * still starts from the state that one produced, not a stale render's.
+ */
+export type ProposalPatchBuilder = (latest: Proposal) => ProposalPatch
+
 /** The four totals, in the order the estimate and the PDF show them. */
 export const PROPOSAL_TOTAL_LABELS: Array<[keyof ProposalTotals, string]> = [
   ['monthly', 'Monthly fee'],
@@ -98,13 +106,22 @@ export type PickerRow = {
   options: ProposalService[]
 }
 
-/** The active catalog, grouped for the picker, in catalog order. */
+/**
+ * The catalog, grouped for the picker, in catalog order: every active row,
+ * PLUS any row a retired catalog change left selected on this proposal — a
+ * row a client is already committed to does not vanish from the picker just
+ * because it was retired (review I2). Its options render disabled with a
+ * "Retired" tag; `selectService` still clears it via "None" or another tier,
+ * and the Estimate table's Remove button clears it too (review I3).
+ */
 export function pickerGroups(
   services: readonly ProposalService[],
+  selections: readonly ProposalSelection[] = [],
 ): Array<{ group: ProposalGroup; rows: PickerRow[] }> {
+  const selectedIds = new Set(selections.map((entry) => entry.serviceId))
   const groups: Array<{ group: ProposalGroup; rows: PickerRow[] }> = []
   const sorted = services
-    .filter((service) => service.active)
+    .filter((service) => service.active || selectedIds.has(service.id))
     .slice()
     .sort((a, b) => a.sortOrder - b.sortOrder)
   for (const service of sorted) {
@@ -125,6 +142,11 @@ export function pickerGroups(
  * Pick one option of a picker row (or none): every option of the row is
  * removed, then the chosen one is added back — keeping its typed fields if it
  * was already selected. A client is on Basic OR Advance, never both.
+ *
+ * `rowOptions` is the row `pickerGroups` built, so it already carries every
+ * service sharing this row's `group::name` — active ones AND a retired one
+ * that is currently selected — so choosing "None" or another tier here also
+ * clears a retired selection (review I2).
  */
 export function selectService(
   selections: readonly ProposalSelection[],
@@ -177,11 +199,14 @@ const DELIVERY_WORDS: Record<string, string> = {
 }
 
 /** What happened to a proposal, oldest first: created, letter, sends, delivery, outcome. */
-export function proposalActivity(proposal: Proposal): Array<{ at: string; text: string }> {
-  const entries: Array<{ at: string; text: string }> = [
+export function proposalActivity(
+  proposal: Proposal,
+): Array<{ at: string; text: string; href?: string }> {
+  const entries: Array<{ at: string; text: string; href?: string }> = [
     {
       at: proposal.createdAt,
       text: proposal.copiedFromId ? `Created as a copy of ${proposal.copiedFromId}` : 'Created',
+      href: proposal.copiedFromId ? `/proposals/${proposal.copiedFromId}` : undefined,
     },
   ]
   if (proposal.letterAt) entries.push({ at: proposal.letterAt, text: 'Letter drafted' })

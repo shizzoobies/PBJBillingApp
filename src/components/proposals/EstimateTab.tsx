@@ -7,11 +7,11 @@ import {
   updateSelection,
   withInput,
   type PickerRow,
+  type ProposalPatchBuilder,
 } from '../../lib/proposals'
 import type {
   PayrollRun,
   Proposal,
-  ProposalPatch,
   ProposalPricing,
   ProposalProspect,
   ProposalSelection,
@@ -31,21 +31,29 @@ const PROSPECT_FIELDS: Array<[Exclude<keyof ProposalProspect, 'notes'>, string]>
 const PER_COUNT_MULTIPLIERS = new Set(['per-form', 'per-report', 'per-cleanup-month', 'per-count'])
 
 // A short note for each flag the calculator can put on a line (landed fix
-// pass to lib/proposal-pricing.js `priceLine` / `priceProposal`).
+// pass to lib/proposal-pricing.js `priceLine` / `priceProposal`). 'retired'
+// is left out — the line's own formula already says so (review M4).
 const FLAG_NOTES: Record<string, string> = {
   'needs-count': 'needs a count',
   'invalid-input': 'invalid input — priced at $0.00',
   'unknown-input': 'names an input the catalog no longer has',
-  retired: 'this service is retired',
 }
 
 const serviceLabel = (service: Pick<ProposalService, 'name' | 'tier'>) =>
   service.tier ? `${service.name} ${service.tier}` : service.name
 
+/** A negative override or quantity is not a price — treat it like blank (review M2). */
+const nonNegative = (value: number | null): number | null => (value !== null && value < 0 ? null : value)
+
 /**
  * The Estimate tab (spec §5.1): the prospect, the counts, the service picker,
  * and the lines the SERVER priced. Every change is a PATCH; the answer carries
  * the re-priced snapshot, so nothing on this page multiplies anything.
+ *
+ * `onSave` takes a BUILDER rather than a patch: it runs against the server's
+ * latest confirmed proposal when its save reaches the front of the queue, not
+ * against whatever this tab last rendered — so an override typed just before a
+ * checkbox click can't be clobbered by it (review C1).
  */
 export function EstimateTab({
   proposal,
@@ -59,12 +67,13 @@ export function EstimateTab({
   pricing: ProposalPricing
   clients: ReadonlyArray<{ id: string; name: string }>
   busy: boolean
-  onSave: (patch: ProposalPatch) => void
+  onSave: (build: ProposalPatchBuilder) => void
   onReprice: () => void
 }) {
   const locked = proposal.status === 'accepted' || proposal.status === 'declined'
   const snapshot = proposal.pricingSnapshot
-  const saveSelections = (selections: ProposalSelection[]) => onSave({ selections })
+  const saveSelections = (updater: (selections: ProposalSelection[]) => ProposalSelection[]) =>
+    onSave((latest) => ({ selections: updater(latest.selections) }))
 
   return (
     <div className="proposal-estimate">
@@ -78,7 +87,9 @@ export function EstimateTab({
                 <SavingTextInput
                   ariaLabel={label}
                   canonical={proposal.prospect[field]}
-                  onCommit={(value) => onSave({ prospect: { ...proposal.prospect, [field]: value } })}
+                  onCommit={(value) =>
+                    onSave((latest) => ({ prospect: { ...latest.prospect, [field]: value } }))
+                  }
                 />
               </label>
             ))}
@@ -88,7 +99,10 @@ export function EstimateTab({
                 className="input"
                 aria-label="Existing client"
                 value={proposal.clientId ?? ''}
-                onChange={(event) => onSave({ clientId: event.target.value || null })}
+                onChange={(event) => {
+                  const clientId = event.target.value || null
+                  onSave(() => ({ clientId }))
+                }}
               >
                 <option value="">A new prospect</option>
                 {clients.map((client) => (
@@ -103,7 +117,9 @@ export function EstimateTab({
               <SavingTextarea
                 ariaLabel="Notes"
                 canonical={proposal.prospect.notes}
-                onCommit={(value) => onSave({ prospect: { ...proposal.prospect, notes: value } })}
+                onCommit={(value) =>
+                  onSave((latest) => ({ prospect: { ...latest.prospect, notes: value } }))
+                }
               />
             </label>
           </div>
@@ -120,7 +136,9 @@ export function EstimateTab({
                   canonical={proposal.inputs[input.key] ?? null}
                   min="0"
                   step="1"
-                  onCommit={(value) => onSave({ inputs: withInput(proposal.inputs, input.key, value) })}
+                  onCommit={(value) =>
+                    onSave((latest) => ({ inputs: withInput(latest.inputs, input.key, value) }))
+                  }
                 />
               </label>
             ))}
@@ -129,7 +147,7 @@ export function EstimateTab({
 
         <section className="panel">
           <h3>Services</h3>
-          {pickerGroups(pricing.services).map(({ group, rows }) => (
+          {pickerGroups(pricing.services, proposal.selections).map(({ group, rows }) => (
             <fieldset className="proposal-picker-group" key={group}>
               <legend>{group}</legend>
               {rows.map((row) => (
@@ -155,44 +173,65 @@ export function EstimateTab({
           ) : null}
         </div>
         {snapshot && snapshot.lines.length > 0 ? (
-          <div className="table-wrap">
-            <table className="report-table proposal-lines">
-              <tbody>
-                {snapshot.lines.map((line) => {
-                  const label = `${line.group}: ${serviceLabel(line)}`
-                  const selection = proposal.selections.find(
-                    (entry) => entry.serviceId === line.serviceId,
-                  )
-                  return (
-                    <tr key={line.serviceId}>
-                      <td>
-                        <strong>{line.tier ? `${line.name} (${line.tier})` : line.name}</strong>
-                        <div className="proposal-line-formula">{line.formula}</div>
-                        {line.flag ? (
-                          <div className="form-error">{FLAG_NOTES[line.flag] ?? line.flag}</div>
-                        ) : null}
-                      </td>
-                      <td className="proposal-line-amount">{formatProposalMoney(line.amount)}</td>
-                      <td>
-                        <SavingNumberInput
-                          ariaLabel={`Override ${label}`}
-                          canonical={selection?.override ?? null}
-                          placeholder="Override"
-                          min="0"
-                          step="0.01"
-                          onCommit={(value) =>
-                            saveSelections(
-                              updateSelection(proposal.selections, line.serviceId, { override: value }),
-                            )
-                          }
-                        />
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          <fieldset className="proposal-fieldset" disabled={locked}>
+            <div className="table-wrap">
+              <table className="report-table proposal-lines">
+                <tbody>
+                  {snapshot.lines.map((line, index) => {
+                    const label = `${line.group ?? 'Retired'}: ${serviceLabel(line)}`
+                    const selection = proposal.selections.find(
+                      (entry) => entry.serviceId === line.serviceId,
+                    )
+                    const retired = line.flag === 'retired'
+                    return (
+                      <tr key={line.serviceId ?? index}>
+                        <td>
+                          <strong>{line.tier ? `${line.name} (${line.tier})` : line.name}</strong>
+                          <div className="proposal-line-formula">{line.formula}</div>
+                          {line.flag && !retired ? (
+                            <div className="form-error">{FLAG_NOTES[line.flag] ?? line.flag}</div>
+                          ) : null}
+                        </td>
+                        <td className="proposal-line-amount">{formatProposalMoney(line.amount)}</td>
+                        <td>
+                          {retired ? (
+                            <button
+                              type="button"
+                              className="ghost-action"
+                              onClick={() =>
+                                onSave((latest) => ({
+                                  selections: latest.selections.filter(
+                                    (entry) => entry.serviceId !== line.serviceId,
+                                  ),
+                                }))
+                              }
+                            >
+                              Remove
+                            </button>
+                          ) : (
+                            <SavingNumberInput
+                              ariaLabel={`Override ${label}`}
+                              canonical={selection?.override ?? null}
+                              placeholder="Override"
+                              min="0"
+                              step="0.01"
+                              onCommit={(value) =>
+                                saveSelections((selections) =>
+                                  updateSelection(selections, line.serviceId, {
+                                    override: nonNegative(value),
+                                  }),
+                                )
+                              }
+                            />
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </fieldset>
         ) : (
           <p className="muted-text">Pick services above and fill in the counts to price them.</p>
         )}
@@ -216,13 +255,14 @@ function PickerRowControl({
 }: {
   row: PickerRow
   selections: readonly ProposalSelection[]
-  onChange: (next: ProposalSelection[]) => void
+  onChange: (updater: (selections: ProposalSelection[]) => ProposalSelection[]) => void
 }) {
   const chosen = row.options.find((option) =>
     selections.some((entry) => entry.serviceId === option.id),
   )
   const selection = chosen ? selections.find((entry) => entry.serviceId === chosen.id) : undefined
-  const pick = (serviceId: string | null) => onChange(selectService(selections, row.options, serviceId))
+  const pick = (serviceId: string | null) =>
+    onChange((current) => selectService(current, row.options, serviceId))
   const rowLabel = `${row.group}: ${row.name}`
   const single = row.options.length === 1 && !row.options[0].tier
 
@@ -234,9 +274,11 @@ function PickerRowControl({
             type="checkbox"
             aria-label={rowLabel}
             checked={Boolean(chosen)}
+            disabled={!row.options[0].active}
             onChange={(event) => pick(event.target.checked ? row.options[0].id : null)}
           />
           {row.name}
+          {!row.options[0].active ? <span className="proposal-retired-tag">Retired</span> : null}
         </label>
       ) : (
         <div role="radiogroup" aria-label={rowLabel} className="proposal-picker-tiers">
@@ -249,10 +291,13 @@ function PickerRowControl({
               <input
                 type="radio"
                 name={row.key}
+                aria-label={option.tier ?? option.name}
                 checked={chosen?.id === option.id}
+                disabled={!option.active}
                 onChange={() => pick(option.id)}
               />{' '}
               {option.tier ?? option.name}
+              {!option.active ? <span className="proposal-retired-tag">Retired</span> : null}
             </label>
           ))}
         </div>
@@ -261,7 +306,7 @@ function PickerRowControl({
         <SelectionFields
           service={chosen}
           selection={selection}
-          onChange={(patch) => onChange(updateSelection(selections, chosen.id, patch))}
+          onChange={(patch) => onChange((current) => updateSelection(current, chosen.id, patch))}
         />
       ) : null}
     </div>
@@ -279,17 +324,19 @@ function SelectionFields({
   onChange: (patch: Partial<Record<Exclude<keyof ProposalSelection, 'serviceId'>, unknown>>) => void
 }) {
   const label = `${service.group}: ${serviceLabel(service)}`
+  const countLabel =
+    service.multiplier === 'per-count' ? 'Count (required)' : 'Count (blank uses the input)'
   return (
     <div className="proposal-picker-extras">
       {PER_COUNT_MULTIPLIERS.has(service.multiplier) ? (
         <label className="field">
-          <span>Count (blank uses the input)</span>
+          <span>{countLabel}</span>
           <SavingNumberInput
             ariaLabel={`Count for ${label}`}
             canonical={selection.quantity ?? null}
             min="0"
             step="1"
-            onCommit={(value) => onChange({ quantity: value })}
+            onCommit={(value) => onChange({ quantity: nonNegative(value) })}
           />
         </label>
       ) : null}
@@ -311,7 +358,7 @@ function SelectionFields({
             <span>Payroll run</span>
             <select
               className="input"
-              aria-label="Payroll run"
+              aria-label={`Payroll run for ${label}`}
               value={selection.payrollRun ?? 'monthly'}
               onChange={(event) => onChange({ payrollRun: event.target.value as PayrollRun })}
             >
@@ -323,6 +370,7 @@ function SelectionFields({
           <label className="toggle-label">
             <input
               type="checkbox"
+              aria-label={`Include bonus for ${label}`}
               checked={selection.includeBonus === true}
               onChange={(event) => onChange({ includeBonus: event.target.checked })}
             />
