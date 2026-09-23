@@ -14,6 +14,7 @@ import {
   InvoiceLockedError,
   ManualPaymentError,
   PackageApplyError,
+  ProposalStateError,
   RateVersionError,
   RetainerCreditError,
   TimeEntrySplitError,
@@ -7928,6 +7929,207 @@ const server = createServer(async (request, response) => {
       }
       broadcastDataChanged()
       sendJson(response, 200, applied)
+      return
+    }
+
+    // ---- Proposals (featreq-311473e2 / featreq-ef18a38e) -------------------
+    //
+    // docs/plans/proposals-2026-09.md. Endpoint-managed like packages: never in
+    // `PUT /api/app-data`, so outside the bulk save and the workspace
+    // fingerprint. Owner-only, and same-origin on every write. Every price in a
+    // response comes from the store's `priceProposal` snapshot.
+    if (normalizedPath === '/api/proposals' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see proposals' })
+        return
+      }
+      sendJson(response, 200, { proposals: await appDataStore.listProposals() })
+      return
+    }
+
+    if (normalizedPath === '/api/proposals' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can create proposals' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const created = await appDataStore.createProposal({
+        prospect: payload?.prospect,
+        clientId: typeof payload?.clientId === 'string' ? payload.clientId : null,
+        inputs: payload?.inputs,
+        selections: payload?.selections,
+        createdBy: session.user.id,
+      })
+      await appDataStore.recordActivity(
+        session.user.id,
+        'proposal_created',
+        created.prospect.company || created.id,
+      )
+      broadcastDataChanged()
+      sendJson(response, 201, created)
+      return
+    }
+
+    const proposalIdMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)$/)
+    if (proposalIdMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see proposals' })
+        return
+      }
+      const proposal = await appDataStore.getProposal(proposalIdMatch[1])
+      if (!proposal) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      sendJson(response, 200, proposal)
+      return
+    }
+
+    if (proposalIdMatch && request.method === 'PATCH') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can edit proposals' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = (await readJsonBody(request)) ?? {}
+      const patch = {}
+      for (const field of ['prospect', 'clientId', 'inputs', 'selections', 'letterText']) {
+        if (Object.prototype.hasOwnProperty.call(payload, field)) patch[field] = payload[field]
+      }
+      let updated
+      try {
+        updated = await appDataStore.updateProposal(proposalIdMatch[1], patch)
+      } catch (error) {
+        if (error instanceof ProposalStateError) {
+          sendJson(response, 409, { error: 'proposal_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!updated) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, updated)
+      return
+    }
+
+    if (proposalIdMatch && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can delete proposals' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      let removed
+      try {
+        removed = await appDataStore.deleteProposal(proposalIdMatch[1])
+      } catch (error) {
+        if (error instanceof ProposalStateError) {
+          sendJson(response, 409, { error: 'proposal_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!removed) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'proposal_deleted', proposalIdMatch[1])
+      broadcastDataChanged()
+      sendJson(response, 200, { removedProposalId: proposalIdMatch[1] })
+      return
+    }
+
+    // POST /api/proposals/:id/copy — a new draft from this one, priced at
+    // today's catalog (spec §5.5). How a declined prospect is reopened.
+    const proposalCopyMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/copy$/)
+    if (proposalCopyMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can copy proposals' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const copy = await appDataStore.copyProposal(proposalCopyMatch[1], {
+        createdBy: session.user.id,
+      })
+      if (!copy) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'proposal_copied',
+        `${proposalCopyMatch[1]} -> ${copy.id}`,
+      )
+      broadcastDataChanged()
+      sendJson(response, 201, copy)
+      return
+    }
+
+    // POST /api/proposals/:id/reprice — "Reprice at today's catalog": an edit
+    // that changes nothing but the snapshot.
+    const proposalRepriceMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/reprice$/)
+    if (proposalRepriceMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can reprice proposals' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      let repriced
+      try {
+        repriced = await appDataStore.updateProposal(proposalRepriceMatch[1], {})
+      } catch (error) {
+        if (error instanceof ProposalStateError) {
+          sendJson(response, 409, { error: 'proposal_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!repriced) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, repriced)
       return
     }
 

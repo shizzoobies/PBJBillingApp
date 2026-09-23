@@ -1,0 +1,116 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { describe, expect, it } from 'vitest'
+
+/**
+ * The proposal endpoints' GLUE (featreq-311473e2 / featreq-ef18a38e).
+ *
+ * Same shape as package-routes.test.ts and for the same reason: `server.js`
+ * calls `server.listen()` at module scope and exports nothing, so there is no
+ * HTTP harness. The behavior lives in the store (db/store-staleness.test.mjs,
+ * both backends) and in lib/; what is pinned here is the wiring — an owner gate
+ * deleted, an origin guard dropped, a route below the `/api/` catch-all.
+ *
+ * Treat a failure here as "the routing moved, go look".
+ */
+
+const serverSource = readFileSync(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../server.js'),
+  'utf8',
+)
+
+/** The body of a route block, from its opening guard onward. */
+function routeBlock(startPattern: RegExp, length = 2200): string {
+  const at = serverSource.search(startPattern)
+  expect(at, `route not found: ${startPattern}`).toBeGreaterThan(-1)
+  return serverSource.slice(at, at + length)
+}
+
+type Route = { name: string; pattern: RegExp; write: boolean }
+
+/** Owner-only on every route; same-origin and a broadcast on every write. */
+function pinOwnerRoutes(routes: Route[]) {
+  for (const route of routes) {
+    it(`${route.name} requires a session and refuses a non-owner`, () => {
+      const block = routeBlock(route.pattern)
+      expect(block).toContain('await requireSession(request, response)')
+      expect(block).toMatch(/session\.user\.role !== 'owner'/)
+      expect(block).toMatch(/sendJson\(response, 403,/)
+    })
+
+    if (route.write) {
+      it(`${route.name} blocks a cross-site request`, () => {
+        const block = routeBlock(route.pattern)
+        expect(block).toContain('isCrossSiteOrigin(request)')
+        expect(block).toContain("sendJson(response, 403, { error: 'Origin not allowed' })")
+      })
+
+      it(`${route.name} tells the other sessions`, () => {
+        expect(routeBlock(route.pattern, 3000)).toContain('broadcastDataChanged()')
+      })
+    }
+  }
+
+  it('every route sits above the /api/ catch-all', () => {
+    const guardAt = serverSource.indexOf("if (normalizedPath.startsWith('/api/')) {")
+    expect(guardAt, 'the /api/ catch-all guard is gone').toBeGreaterThan(-1)
+    for (const route of routes) {
+      expect(serverSource.search(route.pattern), `${route.name} is unreachable`).toBeLessThan(guardAt)
+    }
+  })
+}
+
+describe('the proposal CRUD routes are owner-only and same-origin', () => {
+  pinOwnerRoutes([
+    {
+      name: 'GET /api/proposals',
+      pattern: /normalizedPath === '\/api\/proposals' && request\.method === 'GET'/,
+      write: false,
+    },
+    {
+      name: 'POST /api/proposals',
+      pattern: /normalizedPath === '\/api\/proposals' && request\.method === 'POST'/,
+      write: true,
+    },
+    { name: 'GET /api/proposals/:id', pattern: /proposalIdMatch && request\.method === 'GET'/, write: false },
+    { name: 'PATCH /api/proposals/:id', pattern: /proposalIdMatch && request\.method === 'PATCH'/, write: true },
+    { name: 'DELETE /api/proposals/:id', pattern: /proposalIdMatch && request\.method === 'DELETE'/, write: true },
+    { name: 'POST /api/proposals/:id/copy', pattern: /proposalCopyMatch && request\.method === 'POST'/, write: true },
+    {
+      name: 'POST /api/proposals/:id/reprice',
+      pattern: /proposalRepriceMatch && request\.method === 'POST'/,
+      write: true,
+    },
+  ])
+
+  it('the :id matcher cannot swallow the sub-routes', () => {
+    const matcher = serverSource.match(/const proposalIdMatch = normalizedPath\.match\((.+)\)/)
+    expect(matcher?.[1]).toBe('/^\\/api\\/proposals\\/([^/]+)$/')
+  })
+
+  it('the PATCH whitelists its fields and never hands the raw body to the store', () => {
+    const block = routeBlock(/proposalIdMatch && request\.method === 'PATCH'/)
+    expect(block).toContain("['prospect', 'clientId', 'inputs', 'selections', 'letterText']")
+    expect(block).not.toContain('updateProposal(proposalIdMatch[1], payload)')
+  })
+
+  it('a refused edit or delete is a 409 with the sentence, not a 500', () => {
+    for (const pattern of [
+      /proposalIdMatch && request\.method === 'PATCH'/,
+      /proposalIdMatch && request\.method === 'DELETE'/,
+    ]) {
+      const block = routeBlock(pattern)
+      expect(block).toContain('error instanceof ProposalStateError')
+      expect(block).toContain("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
+    }
+  })
+
+  it('nothing here goes near the bulk save', () => {
+    const start = serverSource.indexOf("normalizedPath === '/api/proposals' && request.method === 'GET'")
+    const end = serverSource.indexOf("if (normalizedPath === '/api/reimbursements' && request.method === 'POST')")
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(serverSource.slice(start, end)).not.toContain('appDataStore.write(')
+  })
+})

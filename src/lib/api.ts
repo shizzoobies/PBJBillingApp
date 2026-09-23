@@ -22,6 +22,9 @@
   type FirmSettings,
   type NotificationEntry,
   type Package,
+  type Proposal,
+  type ProposalPatch,
+  type ProposalProspect,
   type PublicFirmSettings,
   type ServiceCategory,
   type SessionUser,
@@ -869,6 +872,96 @@ export async function applyPackageRequest(
     throw new ApiError(response.status, message || `Failed to apply package (${response.status})`)
   }
   return (await response.json()) as ApplyPackageResult
+}
+
+/* -------------------------------------------------------------------------- */
+/* Proposals (featreq-311473e2 / featreq-ef18a38e)                            */
+/* -------------------------------------------------------------------------- */
+/*
+ * Endpoint-managed like packages: never in the bulk workspace payload. Owner-
+ * only on the server. Every proposal the server hands back carries a fresh
+ * `pricingSnapshot` — the page never prices anything itself.
+ */
+
+/** One proposal call: same-origin, JSON in and out, the server's sentence on failure. */
+async function proposalRequest<T>(path: string, init: RequestInit, failure: string): Promise<T> {
+  const response = await apiFetch(path, { credentials: 'same-origin', ...init })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `${failure} (${response.status})`)
+  }
+  return (await response.json()) as T
+}
+
+const proposalJson = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
+
+const proposalPath = (id: string, action = '') =>
+  `/api/proposals/${encodeURIComponent(id)}${action ? `/${action}` : ''}`
+
+/** Owner-only: every proposal, most recently touched first. */
+export async function listProposalsRequest(): Promise<Proposal[]> {
+  const body = await proposalRequest<{ proposals?: Proposal[] }>(
+    '/api/proposals',
+    {},
+    'Failed to load proposals',
+  )
+  return Array.isArray(body.proposals) ? body.proposals : []
+}
+
+/** Owner-only: one proposal. */
+export function getProposalRequest(id: string): Promise<Proposal> {
+  return proposalRequest<Proposal>(proposalPath(id), {}, 'Failed to load the proposal')
+}
+
+/** Owner-only: start a draft. Everything is optional. */
+export function createProposalRequest(
+  input: { prospect?: Partial<ProposalProspect>; clientId?: string | null } = {},
+): Promise<Proposal> {
+  return proposalRequest<Proposal>(
+    '/api/proposals',
+    proposalJson('POST', input),
+    'Failed to create the proposal',
+  )
+}
+
+/** Owner-only: edit a proposal; the answer is re-priced at the current catalog. */
+export function updateProposalRequest(id: string, patch: ProposalPatch): Promise<Proposal> {
+  return proposalRequest<Proposal>(
+    proposalPath(id),
+    proposalJson('PATCH', patch),
+    'Failed to save the proposal',
+  )
+}
+
+/** Owner-only: delete a DRAFT (409 with a sentence for anything else). */
+export async function deleteProposalRequest(id: string): Promise<void> {
+  await proposalRequest<{ removedProposalId: string }>(
+    proposalPath(id),
+    { method: 'DELETE' },
+    'Failed to delete the proposal',
+  )
+}
+
+/** Owner-only: "Copy to new proposal" — a new draft priced at today's catalog. */
+export function copyProposalRequest(id: string): Promise<Proposal> {
+  return proposalRequest<Proposal>(
+    proposalPath(id, 'copy'),
+    { method: 'POST' },
+    'Failed to copy the proposal',
+  )
+}
+
+/** Owner-only: "Reprice at today's catalog". */
+export function repriceProposalRequest(id: string): Promise<Proposal> {
+  return proposalRequest<Proposal>(
+    proposalPath(id, 'reprice'),
+    { method: 'POST' },
+    'Failed to reprice the proposal',
+  )
 }
 
 /**

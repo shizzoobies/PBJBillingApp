@@ -1,5 +1,12 @@
 import type { RateHistoryEntry } from '../../lib/rate-history.js'
-import type { ProposalPricing } from '../../lib/proposal-pricing.js'
+import type {
+  PricedLine,
+  ProposalPricing,
+  ProposalProspect,
+  ProposalRates,
+  ProposalSelection,
+  ProposalTotals,
+} from '../../lib/proposal-pricing.js'
 
 /**
  * The proposal catalog and calculator shapes, re-exported from the calculator
@@ -15,6 +22,7 @@ export type {
   ProposalMultiplier,
   ProposalPricing,
   ProposalPricingKind,
+  ProposalProspect,
   ProposalRates,
   ProposalRole,
   ProposalSelection,
@@ -336,6 +344,87 @@ export type Package = {
   createdAt: string
   updatedAt: string | null
 }
+
+/**
+ * A PROPOSAL (featreq-311473e2 / featreq-ef18a38e) — a prospect's estimate,
+ * letter, intake chat and outcome. Endpoint-managed: never in the bulk
+ * workspace payload, fetched by the Proposals pages themselves.
+ */
+export type ProposalStatus = 'draft' | 'sent' | 'accepted' | 'declined'
+
+/** What the calculator priced, frozen on the proposal (spec §4.2). */
+export type ProposalSnapshot = {
+  rates: ProposalRates
+  lines: PricedLine[]
+  totals: ProposalTotals
+  catalogAt: string
+}
+
+export type ProposalLetter = {
+  subject: string
+  sections: Array<{ heading: string; body: string }>
+  /** The rendered letter she edits; the PDF and the email read this. */
+  text: string
+}
+
+/** What one intake-chat turn changed, after the server's validator. */
+export type ProposalChatPatch = {
+  prospect?: Partial<ProposalProspect>
+  inputs?: Record<string, number>
+  selections?: { add: ProposalSelection[]; remove: string[] }
+}
+
+export type ProposalMessage = {
+  role: 'user' | 'assistant'
+  text: string
+  at: string
+  patch?: ProposalChatPatch | null
+}
+
+/** One send or provider delivery event — the invoice email log's shape. */
+export type ProposalEmailEvent = {
+  kind: 'send' | 'delivery'
+  at: string
+  providerId: string | null
+  to: string[]
+  ok?: boolean
+  subject?: string
+  error?: string | null
+  event?: string
+  detail?: string
+}
+
+export type Proposal = {
+  id: string
+  status: ProposalStatus
+  prospect: ProposalProspect
+  /** The client it was written for, or the one Accept created. */
+  clientId: string | null
+  inputs: Record<string, number>
+  selections: ProposalSelection[]
+  pricingSnapshot: ProposalSnapshot | null
+  letter: ProposalLetter | null
+  letterAt: string | null
+  messages: ProposalMessage[]
+  emailLog: ProposalEmailEvent[]
+  sentAt: string | null
+  acceptedAt: string | null
+  declinedAt: string | null
+  declineNote: string | null
+  copiedFromId: string | null
+  createdBy: string | null
+  createdAt: string
+  updatedAt: string | null
+}
+
+/** What `PATCH /api/proposals/:id` accepts. A field left out is not a statement about it. */
+export type ProposalPatch = Partial<{
+  prospect: ProposalProspect
+  clientId: string | null
+  inputs: Record<string, number>
+  selections: ProposalSelection[]
+  letterText: string
+}>
 
 /**
  * A reusable contact entered once and selected (via dropdown / multi-select)
