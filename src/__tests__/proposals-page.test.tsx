@@ -31,6 +31,7 @@ vi.mock('../lib/api', () => ({
   repriceProposalRequest: (...args: unknown[]) => api.repriceProposalRequest(...args),
   copyProposalRequest: (...args: unknown[]) => api.copyProposalRequest(...args),
   deleteProposalRequest: (...args: unknown[]) => api.deleteProposalRequest(...args),
+  draftProposalLetterRequest: (...args: unknown[]) => api.draftProposalLetterRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}
@@ -205,6 +206,7 @@ beforeEach(() => {
   api.repriceProposalRequest = vi.fn(async () => PROPOSAL)
   api.copyProposalRequest = vi.fn(async () => ({ ...PROPOSAL, id: 'prop-copy' }))
   api.deleteProposalRequest = vi.fn(async () => undefined)
+  api.draftProposalLetterRequest = vi.fn(async () => WITH_LETTER)
 })
 
 afterEach(() => {
@@ -515,5 +517,60 @@ describe('the proposal editor', () => {
     renderEditor()
     expect(await screen.findByText('That proposal was not found.')).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Back to proposals' })).toBeTruthy()
+  })
+})
+
+const WITH_LETTER: Proposal = {
+  ...PROPOSAL,
+  letter: {
+    subject: 'Your bookkeeping proposal',
+    sections: [{ heading: 'Opening', body: 'Thank you for meeting with us.' }],
+    text: 'Opening\n\nThank you for meeting with us.',
+  },
+  letterAt: '2026-09-23T13:00:00.000Z',
+}
+
+describe('the Letter tab', () => {
+  it('drafts the letter and shows the text to edit', async () => {
+    renderEditor('/proposals/prop-1?tab=letter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Draft the proposal' }))
+    await waitFor(() => expect(api.draftProposalLetterRequest).toHaveBeenCalledWith('prop-1'))
+    expect(((await screen.findByLabelText('Letter text')) as HTMLTextAreaElement).value).toBe(
+      'Opening\n\nThank you for meeting with us.',
+    )
+    expect(screen.getByText('Subject: Your bookkeeping proposal')).toBeTruthy()
+  })
+
+  it('regenerates only after a confirm', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    const confirm = vi.fn(() => false)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor('/proposals/prop-1?tab=letter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Regenerate' }))
+    expect(confirm).toHaveBeenCalled()
+    expect(api.draftProposalLetterRequest).not.toHaveBeenCalled()
+  })
+
+  it('saves an edit to the letter text', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    renderEditor('/proposals/prop-1?tab=letter')
+    const text = await screen.findByLabelText('Letter text')
+    fireEvent.change(text, { target: { value: 'Opening\n\nThanks, Pat.' } })
+    fireEvent.blur(text)
+    await waitFor(() =>
+      expect(api.updateProposalRequest).toHaveBeenCalledWith('prop-1', {
+        letterText: 'Opening\n\nThanks, Pat.',
+      }),
+    )
+  })
+
+  it('copies the text', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    renderEditor('/proposals/prop-1?tab=letter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy text' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('Opening\n\nThank you for meeting with us.'))
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeTruthy()
   })
 })

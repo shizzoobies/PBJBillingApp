@@ -114,3 +114,28 @@ describe('the proposal CRUD routes are owner-only and same-origin', () => {
     expect(serverSource.slice(start, end)).not.toContain('appDataStore.write(')
   })
 })
+
+describe('drafting the letter', () => {
+  pinOwnerRoutes([
+    {
+      name: 'POST /api/proposals/:id/letter',
+      pattern: /proposalLetterMatch && request\.method === 'POST'/,
+      write: true,
+    },
+  ])
+
+  const block = () => routeBlock(/proposalLetterMatch && request\.method === 'POST'/, 2600)
+
+  it('asks the model, then saves through the store', () => {
+    const text = block()
+    expect(text).toContain('draftProposalLetter(proposal, await appDataStore.getFirmSettings())')
+    expect(text).toContain('appDataStore.setProposalLetter(proposal.id, letter)')
+    expect(text.indexOf('draftProposalLetter(')).toBeLessThan(text.indexOf('setProposalLetter('))
+  })
+
+  it('turns a model failure into a sentence, never a crash', () => {
+    const text = block()
+    expect(text).toMatch(/status === 503 \? 503 : 502/)
+    expect(text).toContain("error: 'proposal_letter_failed'")
+  })
+})

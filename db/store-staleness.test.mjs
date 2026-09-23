@@ -17262,3 +17262,33 @@ describe('proposals: the status check constraint (Postgres)', () => {
     )
   })
 })
+
+describe('proposal letters (both backends)', () => {
+  beforeEach(async () => {
+    await clearProposals()
+  })
+
+  const drafted = {
+    subject: 'Your bookkeeping proposal',
+    sections: [{ heading: 'Opening', body: 'Thank you for meeting with us.' }],
+    text: 'Opening\n\nThank you for meeting with us.',
+  }
+
+  it('saves the drafted letter with its timestamp, and she can edit the text', async () => {
+    const created = await store.createProposal({ prospect: { company: 'Acme Books' } })
+    const saved = await store.setProposalLetter(created.id, drafted)
+    expect(saved.letter).toEqual(drafted)
+    expect(saved.letterAt).toBeTruthy()
+
+    const edited = await store.updateProposal(created.id, { letterText: 'Opening\n\nThanks, Pat.' })
+    expect(edited.letter).toEqual({ ...drafted, text: 'Opening\n\nThanks, Pat.' })
+  })
+
+  it('writes the letter and letter_at in one statement on Postgres', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).setProposalLetter('prop-1', drafted)
+    const update = fake.matching(/^update proposals/i)[0]
+    expect(update.text).toMatch(/set letter = \$2::jsonb, letter_at = now\(\)/)
+    expect(JSON.parse(update.params[1]).text).toBe(drafted.text)
+  })
+})

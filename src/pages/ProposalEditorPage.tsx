@@ -8,6 +8,7 @@ import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
 import {
   copyProposalRequest,
   deleteProposalRequest,
+  draftProposalLetterRequest,
   fetchFirmSettings,
   getProposalRequest,
   repriceProposalRequest,
@@ -228,7 +229,14 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           onReprice={reprice}
         />
       ) : null}
-      {tab === 'letter' ? <LetterTab proposal={proposal} /> : null}
+      {tab === 'letter' ? (
+        <LetterTab
+          proposal={proposal}
+          busy={busy}
+          onDraft={() => enqueue(() => draftProposalLetterRequest(proposalId))}
+          onSaveText={(text) => save(() => ({ letterText: text }))}
+        />
+      ) : null}
       {tab === 'activity' ? <ActivityTab proposal={proposal} /> : null}
     </section>
   )

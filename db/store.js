@@ -10395,6 +10395,44 @@ export class AppDataStore {
   }
 
   /**
+   * Save an AI-drafted letter (spec §5.3): subject, sections and the rendered
+   * text she edits, stamped `letter_at`. Replaces whatever letter was there —
+   * the page asks before regenerating over an edited one. Returns the
+   * proposal, or null when there is none.
+   */
+  async setProposalLetter(id, letter) {
+    const clean = {
+      subject: String(letter?.subject ?? '').slice(0, 200),
+      sections: (Array.isArray(letter?.sections) ? letter.sections : []).slice(0, 8).map((section) => ({
+        heading: String(section?.heading ?? '').slice(0, 120),
+        body: String(section?.body ?? '').slice(0, 4000),
+      })),
+      text: String(letter?.text ?? '').slice(0, 20000),
+    }
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposals
+            set letter = $2::jsonb, letter_at = now(), updated_at = now()
+          where id = $1
+          returning ${PROPOSAL_COLUMNS}`,
+        [id, JSON.stringify(clean)],
+      )
+      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+    }
+    const authState = await readJson(localAuthPath)
+    const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+      (row) => row && row.id === id,
+    )
+    if (!target) return null
+    const now = nowIso()
+    target.letter = clean
+    target.letterAt = now
+    target.updatedAt = now
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapProposal(target)
+  }
+
+  /**
    * Apply a package to a client: add its plans to the client's selected
    * services, and copy its blueprint checklists onto the client.
    *

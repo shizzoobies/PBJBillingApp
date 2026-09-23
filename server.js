@@ -35,6 +35,8 @@ import {
   runAssistantChat,
   sanitizeReport,
   spitballChat,
+  allowedLetterCents,
+  draftProposalLetter,
   suggestPackageChecklists,
   summarizeSpitballSession,
   validateAssistantAction,
@@ -8130,6 +8132,63 @@ const server = createServer(async (request, response) => {
       }
       broadcastDataChanged()
       sendJson(response, 200, repriced)
+      return
+    }
+
+    // POST /api/proposals/:id/letter — Opus 5.5 drafts the letter from the
+    // priced snapshot (spec §5.3). The AI writes; the validator in
+    // `draftProposalLetter` refuses any dollar figure the snapshot lacks.
+    const proposalLetterMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/letter$/)
+    if (proposalLetterMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can draft proposal letters' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const proposal = await appDataStore.getProposal(proposalLetterMatch[1])
+      if (!proposal) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      if (proposal.status === 'accepted' || proposal.status === 'declined') {
+        sendJson(response, 409, {
+          error: 'proposal_refused',
+          message: `This proposal is ${proposal.status} — copy it to write a new letter.`,
+        })
+        return
+      }
+      if (allowedLetterCents(proposal.pricingSnapshot).size === 0) {
+        sendJson(response, 409, {
+          error: 'proposal_refused',
+          message: 'Price at least one line before drafting the letter.',
+        })
+        return
+      }
+      let letter
+      try {
+        letter = await draftProposalLetter(proposal, await appDataStore.getFirmSettings())
+      } catch (error) {
+        const status = error?.statusCode ?? error?.status ?? 502
+        console.error('[proposals] letter draft failed:', error?.message || error)
+        sendJson(response, status === 503 ? 503 : 502, {
+          error: 'proposal_letter_failed',
+          message: error?.message || 'The AI could not draft the letter right now.',
+        })
+        return
+      }
+      const saved = await appDataStore.setProposalLetter(proposal.id, letter)
+      await appDataStore.recordActivity(
+        session.user.id,
+        'proposal_letter_drafted',
+        proposal.prospect.company || proposal.id,
+      )
+      broadcastDataChanged()
+      sendJson(response, 200, saved)
       return
     }
 

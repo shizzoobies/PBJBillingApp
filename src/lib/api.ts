@@ -964,6 +964,15 @@ export function repriceProposalRequest(id: string): Promise<Proposal> {
   )
 }
 
+/** Owner-only: the AI drafts (or redrafts) the letter from the priced estimate. */
+export function draftProposalLetterRequest(id: string): Promise<Proposal> {
+  return proposalRequest<Proposal>(
+    proposalPath(id, 'letter'),
+    { method: 'POST' },
+    'The letter could not be drafted',
+  )
+}
+
 /**
  * The covered-date half of a recurring reimbursement, as the setup form sends
  * it. Every field optional: an expense that does not name its covered period
