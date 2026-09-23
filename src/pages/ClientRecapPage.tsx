@@ -52,7 +52,8 @@ const PERIOD_ADJECTIVE: Record<ClientRecapPeriodType, string> = {
  */
 const LABOR_COST_BASIS_NOTE =
   'Labor cost counts team members who have a pay rate on file, owners included; time from ' +
-  'anyone without a rate carries no hourly cost.'
+  'anyone without a rate carries no hourly cost. Each hour is costed at the rate they were ' +
+  'paid on the day they worked it, so a raise never changes a past recap.'
 
 /**
  * Green/red is chosen by what the row MEANS, never by the sign: hours over plan
@@ -397,19 +398,31 @@ export function ClientRecapPage() {
                   ))}
                 </ul>
               ) : null}
-              {/* A multi-month period reprices every month at the client's
-                  CURRENT rates and plans — no rate history is kept — so a rate
-                  change part-way through will not reconcile against the
-                  invoices that were actually issued. Say it rather than let her
-                  find it. */}
+              {/* A multi-month period used to reprice every month at the
+                  client's CURRENT rates, because no rate history was kept.
+                  For an HOURLY client that is no longer true: each month is
+                  priced at the pin that applied in it (hourly_rate_history),
+                  so the figure reconciles against the invoices actually
+                  issued. A MONTHLY or ANNUAL client still has no history —
+                  its fee and its plans are single live values — so the old
+                  warning stands for them, unchanged. */}
               {recap.monthsInPeriod > 1 ? (
-                <p className="recap-estimate-caption">
-                  Priced at the client's current rates and plans, not the rates in force each
-                  month. A rate or plan change part-way through the{' '}
-                  {recap.periodType === 'year' ? 'year' : 'quarter'} is applied to all{' '}
-                  {recap.monthsInPeriod} months, so this can differ from the invoices actually
-                  issued.
-                </p>
+                recap.billing.billingMode === 'hourly' ? (
+                  <p className="recap-estimate-caption">
+                    Priced at the rates in force each month — the rate month this client was on
+                    at the time, not today's. A rate change part-way through the{' '}
+                    {recap.periodType === 'year' ? 'year' : 'quarter'} shows up where it
+                    happened, so this reconciles against the invoices actually issued.
+                  </p>
+                ) : (
+                  <p className="recap-estimate-caption">
+                    Priced at the client's current rates and plans, not the rates in force each
+                    month. A rate or plan change part-way through the{' '}
+                    {recap.periodType === 'year' ? 'year' : 'quarter'} is applied to all{' '}
+                    {recap.monthsInPeriod} months, so this can differ from the invoices actually
+                    issued.
+                  </p>
+                )
               ) : null}
             </section>
           ) : null}

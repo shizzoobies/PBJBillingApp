@@ -2850,7 +2850,8 @@ export type ClientRecap = {
     reimbursementTotal: number
   } | null
   /**
-   * `laborCost` counts only team members who have a cost rate on file — someone
+   * `laborCost` counts only team members who have a cost rate on file for the
+   * day each entry was worked — someone
    * without one contributes zero rather than making cost unknowable. Role plays
    * no part: an owner who has set her own cost rate is counted like anyone else
    * (featreq-6fdd9e98). Show LABOR_COST_BASIS_NOTE wherever these appear.

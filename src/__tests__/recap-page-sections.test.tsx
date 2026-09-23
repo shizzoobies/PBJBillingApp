@@ -156,17 +156,31 @@ describe('Client Recap page layout', () => {
 })
 
 /**
- * A multi-month recap prices every month at the client's rates and plans AS
- * THEY STAND NOW — the snapshot keeps no rate history. So a client whose rate
- * moved in March has January repriced at the new rate, and the quarter's or
- * year's revenue will NOT reconcile against the invoices actually issued. That
- * is a real trap for a firm owner reading a yearly recap next to her books, so
- * it is said on the panel rather than left to be discovered.
+ * A multi-month recap of a MONTHLY or ANNUAL client prices every month at the
+ * client's fee and plan list AS THEY STAND NOW — those are single live values
+ * and no history is kept of them. So a client whose fee moved in March has
+ * January repriced at the new fee, and the quarter's or year's revenue will NOT
+ * reconcile against the invoices actually issued. That is a real trap for a
+ * firm owner reading a yearly recap next to her books, so it is said on the
+ * panel rather than left to be discovered.
+ *
+ * An HOURLY client outgrew this warning once rate history landed — see the
+ * 'after rate history' block at the foot of this file — so these fixtures name
+ * a monthly client, which is who the warning is still for.
  */
 describe('Client Recap page — Billing says when it is a restatement', () => {
+  const MONTHLY_RECAP: ClientRecap = {
+    ...RECAP,
+    client: { ...RECAP.client, billingMode: 'subscription' },
+    billing: {
+      ...(RECAP.billing as NonNullable<ClientRecap['billing']>),
+      billingMode: 'subscription',
+    },
+  }
+
   beforeEach(() => {
     mockFetch.mockReset()
-    mockFetch.mockResolvedValue(RECAP)
+    mockFetch.mockResolvedValue(MONTHLY_RECAP)
   })
 
   it('warns on a quarterly recap that the rates are today’s', async () => {
@@ -179,7 +193,7 @@ describe('Client Recap page — Billing says when it is a restatement', () => {
 
   it('warns on a yearly recap, naming the year and all twelve months', async () => {
     mockFetch.mockResolvedValue({
-      ...RECAP,
+      ...MONTHLY_RECAP,
       periodType: 'year',
       period: '2026',
       periodLabel: '2026',
@@ -193,7 +207,7 @@ describe('Client Recap page — Billing says when it is a restatement', () => {
 
   it('says nothing of the sort on a MONTHLY recap, where the figure IS the invoice', async () => {
     mockFetch.mockResolvedValue({
-      ...RECAP,
+      ...MONTHLY_RECAP,
       periodType: 'month',
       period: '2026-01',
       periodLabel: 'January 2026',
@@ -242,5 +256,59 @@ describe('Client Recap page — the Yearly period', () => {
         String(new Date().getFullYear() - 1),
       ]),
     )
+  })
+})
+
+/**
+ * Rate history (docs/plans/rate-history-2026-09.md §5) made half of the caption
+ * above a lie. An HOURLY client's months are now each priced at the pin that
+ * applied IN that month, so a quarterly or yearly figure reconciles against the
+ * invoices actually issued — the old warning would send the owner hunting for a
+ * discrepancy that no longer exists. A MONTHLY or ANNUAL client still has one
+ * live fee and one live plan list and no history at all, so for them the
+ * warning is still true and must survive untouched.
+ */
+describe('the multi-month caption after rate history', () => {
+  const RECAP_BILLING = RECAP.billing as NonNullable<ClientRecap['billing']>
+
+  const renderRecap = async ({
+    billingMode,
+    monthsInPeriod,
+    periodType,
+  }: {
+    billingMode: string
+    monthsInPeriod: number
+    periodType: ClientRecap['periodType']
+  }) => {
+    mockFetch.mockReset()
+    mockFetch.mockResolvedValue({
+      ...RECAP,
+      client: { ...RECAP.client, billingMode },
+      periodType,
+      monthsInPeriod,
+      billing: { ...RECAP_BILLING, billingMode, monthsInPeriod },
+    })
+    render(<ClientRecapPage />)
+    await waitFor(() => expect(screen.getByText('Actual invoice')).toBeInTheDocument())
+  }
+
+  it('tells an HOURLY client the months were priced at the rates in force each month', async () => {
+    await renderRecap({ billingMode: 'hourly', monthsInPeriod: 3, periodType: 'quarter' })
+    expect(screen.getByText(/the rates in force each month/i)).toBeInTheDocument()
+    expect(screen.queryByText(/current rates and plans/i)).not.toBeInTheDocument()
+  })
+
+  it('still warns a MONTHLY client that plans are restated at today’s', async () => {
+    await renderRecap({ billingMode: 'subscription', monthsInPeriod: 3, periodType: 'quarter' })
+    expect(screen.getByText(/current rates and plans/i)).toBeInTheDocument()
+  })
+
+  it('says cost uses the rate on the day worked', async () => {
+    await renderRecap({ billingMode: 'hourly', monthsInPeriod: 1, periodType: 'month' })
+    // The note prints twice — once under the hours table, once inside the
+    // profit definition — so this asks for every copy, not the only one.
+    expect(
+      screen.getAllByText(/the rate they were paid on the day they worked it/i).length,
+    ).toBeGreaterThan(0)
   })
 })
