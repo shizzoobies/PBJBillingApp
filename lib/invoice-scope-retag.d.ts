@@ -4,18 +4,25 @@
  */
 
 import type { AdhocMode } from './invoice-lines'
-import type { BillRateVersion } from './rate-history'
+import type { BillRateVersion, PinnedClient } from './rate-history'
 
 /**
- * How a NEW line is priced: the dated bill rates and the client's pin for the
- * invoice's period (`ratePeriodAsOf(client, period)`), resolved through
- * `billRateAt` exactly as the generator resolves them. Both optional — no
- * versions prices at each person's live `billRate`, as before.
+ * How a NEW line is priced: the dated bill rates, resolved through `billRateAt`
+ * exactly as the generator resolves them, at the pin of the ENTRY's own client
+ * — found on `clients`, so a sub's entry on a billing master's invoice prices
+ * at that sub's pin (`ratePeriodAsOf(sub, period)`) and not at the invoice
+ * month. `ratePeriod` is the invoice's own pin, used only for an entry whose
+ * client is not on the roster. All optional — no versions prices at each
+ * person's live `billRate`, as before.
  */
 type ScopeRates = {
   billRateVersions?: readonly BillRateVersion[]
+  clients?: readonly (ScopePinnedClient | null | undefined)[]
   ratePeriod?: string | null
 }
+
+/** A client as the pin rule reads it: its id, plus the pin and its ledger. */
+type ScopePinnedClient = PinnedClient & { id?: string }
 
 /** The three things one piece of time can be, as the invoicing panel words them. */
 export type ScopeTag = 'in-scope' | 'out-of-scope' | 'adhoc'
@@ -53,12 +60,12 @@ type ScopeEntry = {
 
 type ScopeEmployee = { id: string; name?: string; role?: string; billRate?: number | null }
 
-type ScopeClient = {
+type ScopeClient = ({
   id?: string
   billingMode?: string
   isBillingMaster?: boolean
   hourlyRate?: number
-} | null
+} & PinnedClient) | null
 
 /** Can re-tagging move money on this invoice at all? */
 export function scopeRetagApplies(client: ScopeClient, period: string): boolean
@@ -116,12 +123,7 @@ export function applyScopeRetag<
     role?: string
     billRate?: number | null
   }>
-  client?: {
-    id?: string
-    billingMode?: string
-    isBillingMaster?: boolean
-    hourlyRate?: number
-  } | null
+  client?: ScopeClient
   period?: string
   defaultHourlyRate?: number
 } & ScopeRates): {

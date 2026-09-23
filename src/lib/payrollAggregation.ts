@@ -16,6 +16,7 @@ export type { PayrollSlice } from '../../lib/payroll-cost.js'
 export {
   allocatePersonCost,
   billableMinutes,
+  billableRevenue,
   displayHours,
   duplicateFullSliceIds,
   internalMinutes,

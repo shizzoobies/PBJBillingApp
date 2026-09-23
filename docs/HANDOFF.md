@@ -371,6 +371,52 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-09-23 (evening) — rate-history follow-ups 1 and 2: a re-tag on a
+billing master prices at each sub's pin, and every Billable $ on Reports
+and the Dashboard's Projected billing price at the pin.** One commit on
+`main`, from the final review of the rate-history build.
+
+- **Re-tag on a master** (`lib/invoice-scope-retag.js`): `scopeLineTools`
+  now takes the `clients` roster and resolves the rate period PER ENTRY —
+  `ratePeriodAsOf(entry's own client, period)` — through all three exports
+  (`applyScopeRetag`, `savedAdhocModesForEntries`,
+  `unaccountedScopeEntries`; `.d.ts` in step). `ratePeriod` stays as the
+  fallback for an entry whose client is not on the roster. The editor
+  (`InvoiceMonthRun.tsx`) passes `clients` on `ScopePanelData` and no
+  longer computes the invoice-level pin. The store never calls these (it
+  only applies the tag flags; the lines come from the editor), so nothing
+  server-side changed. Tests: a master with two subs on June/August pins,
+  re-tagged to in-scope and to ad hoc on each, plus a ledger case and the
+  un-stamped ad hoc match at the sub's rate.
+- **Reports Billable $** (`ReportsPage.tsx`, the four reads at the old
+  192/459/636/1234): a `billRateOn(entry)` resolver — `billRateAt` at
+  `ratePeriodAsOf(entry's client, entry month)` — and `periodBillableOf`,
+  which is the new `billableRevenue(entries, billRateOf)` in
+  `lib/payroll-cost.js`: `laborCost`'s twin (shared `groupedMoney`
+  helper), grouped by person AND rate, billable rows only, NOT deduped
+  (full mode bills each client the block). The payroll summary's `amount`
+  moved out of the `rows` memo (it would have gone stale when the versions
+  landed after mount) — `amountFor(id)` mirrors `costFor`; the detail's
+  per-row split groups by (person, rate) like the Cost split so the column
+  still ties; the hours-by-month CSV prices each row at its own pin.
+  "—" vs $0.00 semantics unchanged: "—" when the person has no rate on
+  file at all (newest version, else the live mirror), like `periodCostOf`.
+- **Dashboard Projected billing** (`DashboardPage.tsx`): the owner view
+  now fetches `/api/rate-versions` and prices each hourly client's entries
+  at `billRateAt(..., ratePeriodAsOf(client, billingPeriod), billingPeriod)`,
+  firm default as the fallback, as before. The two existing Dashboard
+  suites mock the api module wholesale, so they gained `fetchRateVersions`.
+- Page tests: `reports-page-rate-pin.test.tsx` (Employee report row, two
+  pins add to $100, payroll summary row and detail row + footer at the
+  pin; the payroll cases date the entry today because the window is
+  anchored to today) and new `dashboard-projected-billing.test.tsx`. All
+  five FAIL against the pre-change pages (checked by swapping the old
+  files in) and pass on the new ones. Manifest: the two "known follow-up"
+  sentences now say the pin is used; the hours-panel and previews
+  paragraphs name the master/sub case and the Dashboard.
+- Nothing persists; both backends untouched. Follow-ups (3)–(7) of the
+  entry below are still open.
+
 **2026-09-23 — Rate history shipped (`cae6ad0`; 30 commits on
 `feat/rate-history`, fast-forwarded to main): rates that change without
 rewriting the past.** From Brittany's 09-22 Brain session, spec
@@ -433,11 +479,10 @@ pins or ledgers (`loadRateVersions` → empty lists; redaction in
 tolerates the 403).
 
 *Follow-ups, in priority order:* (1) re-tag on a billing MASTER prices a
-new line at the invoice month, not each sub's pin — thread a per-entry
-`ratePeriodAsOf(sub, period)` into `scopeLineTools` before the first
-post-June raise; (2) the Employee report's Billable $ (`ReportsPage.tsx`
-192/459/636/1234) and the Dashboard revenue estimate still read the newest
-mirror — move them to `billRateAt` (planner open item 2); (3) deleting a
+new line at the invoice month, not each sub's pin — **SHIPPED** in the
+evening follow-up (entry above); (2) the Employee report's Billable $ and
+the Dashboard revenue estimate read the newest mirror — **SHIPPED** in the
+same follow-up; (3) deleting a
 person's only version un-prices earlier-pinned clients that reached it
 via the first-rate step — widen the guard; (4) the Hourly rates block
 lists everyone with a started rate, not the assigned team — ask Brittany;

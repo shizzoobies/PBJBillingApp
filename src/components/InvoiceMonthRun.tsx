@@ -61,7 +61,6 @@ import {
   type ScopeTag,
   type ScopeTagEdits,
 } from '../../lib/invoice-scope-retag.js'
-import { ratePeriodAsOf } from '../../lib/rate-history.js'
 import { InvoiceScopePanel } from './InvoiceScopePanel'
 import {
   ApiError,
@@ -231,6 +230,11 @@ type PatchResult =
  */
 type ScopePanelData = {
   client: Client | null
+  /**
+   * The roster, so a re-tag can find each ENTRY's own client — on a billing
+   * master, the sub — and price a new line at that client's pin.
+   */
+  clients: Client[]
   /** This invoice's entries: its client (or its subs), in its period. */
   entries: TimeEntry[]
   employees: Employee[]
@@ -580,6 +584,7 @@ export function InvoiceMonthRun({
       }
       return {
         client,
+        clients,
         entries: timeEntries.filter(
           (entry) =>
             owning.has(entry.clientId) && String(entry.date ?? '').startsWith(invoice.period),
@@ -2228,19 +2233,19 @@ function InvoiceEditor({
    * underneath the controls she is using. The table stays the lines she is
    * editing; the total, and the save, are what the tags would make of them.
    */
-  // The client's pin for THIS invoice's month, so a line the re-tag creates
-  // bills at the rate the generator would have used.
-  const ratePeriod = ratePeriodAsOf(scope.client, invoice.period)
+  // The roster rides along so a line the re-tag creates bills at the pin of
+  // the ENTRY's client — on a billing master, the sub's — exactly as the
+  // generator priced the hours beside it. The master itself holds no pin.
   const retag = applyScopeRetag({
     lines,
     entries: scope.entries,
     tagEdits,
     employees: scope.employees,
     client: scope.client,
+    clients: scope.clients,
     period: invoice.period,
     defaultHourlyRate: Number(scope.client?.hourlyRate) || 0,
     billRateVersions: scope.billRateVersions,
-    ratePeriod,
   })
   const previewLines = retag.lines
 
@@ -2256,10 +2261,10 @@ function InvoiceEditor({
     entries: scope.entries,
     employees: scope.employees,
     client: scope.client,
+    clients: scope.clients,
     period: invoice.period,
     defaultHourlyRate: Number(scope.client?.hourlyRate) || 0,
     billRateVersions: scope.billRateVersions,
-    ratePeriod,
   }) as Record<string, AdhocMode>
 
   /**
@@ -2276,10 +2281,10 @@ function InvoiceEditor({
         entries: scope.entries,
         employees: scope.employees,
         client: scope.client,
+        clients: scope.clients,
         period: invoice.period,
         defaultHourlyRate: Number(scope.client?.hourlyRate) || 0,
         billRateVersions: scope.billRateVersions,
-        ratePeriod,
       }),
     ]),
   ]

@@ -61,3 +61,14 @@ export declare function laborCost(
   costRateOf: (employeeId: string, entryDate?: string) => number | null | undefined,
   duplicates?: ReadonlySet<string>,
 ): number
+
+/**
+ * What the BILLABLE slices bill for, grouped by person and resolved rate the
+ * way `laborCost` is, not deduped (full mode bills each client the block).
+ * `billRateOf` gets the whole row: the rate depends on the entry's client's
+ * pin as well as the person.
+ */
+export declare function billableRevenue<T extends PayrollSlice>(
+  entries: readonly T[],
+  billRateOf: (entry: T) => number | null | undefined,
+): number

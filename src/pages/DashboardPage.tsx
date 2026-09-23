@@ -21,14 +21,24 @@ import {
   pendingSkipReviews,
   skipReasonLabel,
 } from '../../lib/checklist-skip.js'
+// THE bill-rate chain the invoice is priced with, and the pin rule, so the
+// revenue estimate below says what the month run will.
+import { billRateAt, ratePeriodAsOf } from '../../lib/rate-history.js'
 import { useAppContext } from '../AppContext'
 import {
   fetchGlobalActivity,
+  fetchRateVersions,
   fetchTeam,
   fetchTeamActivity,
   listInvoicesRequest,
 } from '../lib/api'
-import type { ActivityEntry, Checklist, PastDueInvoiceRow, TeamMember } from '../lib/types'
+import type {
+  ActivityEntry,
+  BillRateVersion,
+  Checklist,
+  PastDueInvoiceRow,
+  TeamMember,
+} from '../lib/types'
 import {
   clientName,
   currency,
@@ -258,6 +268,24 @@ function OwnerDashboardView() {
   const [activity, setActivity] = useState<ActivityEntry[]>([])
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
 
+  /**
+   * The dated bill rates, so Projected billing below prices each hourly
+   * client at the month it is pinned to rather than at each person's live
+   * `billRate` — which mirrors the NEWEST version, a raise dated ahead
+   * included, and used to inflate this figure past what the invoice will say
+   * for every client still on older rates. Owner-only, like this whole view;
+   * a 403 answers empty lists and the fallback chain prices as before.
+   */
+  const [billRateVersions, setBillRateVersions] = useState<BillRateVersion[]>([])
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchRateVersions(controller.signal)
+      .then((versions) => setBillRateVersions(versions.billRateVersions))
+      // Non-fatal: the estimate falls back to live rates, exactly as before.
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
+
   // Fetch team once so we can show lastActiveAt per member.
   useEffect(() => {
     const controller = new AbortController()
@@ -435,15 +463,22 @@ function OwnerDashboardView() {
       return total + (periodMonth === billingMonth ? annualRate : 0)
     }
     // Hourly billing is per-employee: each person's billable hours for this
-    // client are charged at their own bill rate (or the firm default).
+    // client are charged at their bill rate AT THIS CLIENT'S PIN for the month
+    // (`billRateAt` at `ratePeriodAsOf`, the chain the invoice lines are priced
+    // through), or the firm default. A client still on June's rates is priced
+    // at June's here, the same as its invoice will be.
+    const ratePeriod = ratePeriodAsOf(client, billingPeriod)
     const hourlyTotal = monthEntries
       .filter((entry) => entry.clientId === client.id && entry.billable)
       .reduce((sum, entry) => {
         const employee = data.employees.find((e) => e.id === entry.employeeId)
         const rate =
-          employee && typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
-            ? employee.billRate
-            : defaultHourlyRate
+          billRateAt(
+            billRateVersions,
+            employee ?? { id: entry.employeeId },
+            ratePeriod,
+            billingPeriod,
+          ) ?? defaultHourlyRate
         return sum + (entry.minutes / 60) * rate
       }, 0)
     return total + hourlyTotal

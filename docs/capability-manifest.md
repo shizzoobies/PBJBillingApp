@@ -1517,9 +1517,12 @@ Clients page meanwhile. Owner-only.
   on screen — on both the per-member summary and the day-and-job detail, with
   totals.
   - **Billable $** = billable hours × that person's BILL rate — what the work
-    bills at (revenue). It uses each person's newest bill rate on file (which
-    can be a raise dated ahead), not each client's rate month, so for a client
-    still on older rates it can differ from the invoice (a known follow-up).
+    bills at (revenue). Each hour is priced at the person's rate for the RATE
+    MONTH of the client it was worked for — the same figure that client's
+    invoice carries — so a client still on older rates bills at those here and
+    one moved to the current rates bills at these; a raise dated ahead reaches
+    a client only once it is moved. The per-person figure adds up the rows at
+    each rate, and the detail rows below split it, so the column ties.
   - **Cost** = ALL hours worked × that person's COST rate — what the firm pays
     for the time. It deliberately covers internal hours too, not just billable
     ones, because the firm pays for those as well. Set a person's cost rate on
@@ -1665,8 +1668,8 @@ Clients page meanwhile. Owner-only.
   billing (each hourly client priced at its pinned rate month, as its invoice
   would be), employee coverage.
 - Employee report (hours by person, including billable $ = each person's
-  billable hours × their newest bill rate on file — the same caveat as the
-  payroll Billable $ above, a known follow-up — and **Cost** = their tracked
+  billable hours, each at their bill rate for that client's rate month — the
+  same figure the invoice and the payroll Billable $ above carry — and **Cost** = their tracked
   hours, each at the COST rate in force on the day it was worked, so it matches
   the payroll report; owners are included) and Client report (hours by
   client), each with Download CSV. Print-friendly output — the Cost column is on the printed
@@ -1940,7 +1943,9 @@ Clients page meanwhile. Owner-only.
 > tag the entry ALREADY has from logging or review, so this is an override, not
 > a fresh decision. **Ad hoc** offers the same three options as the ad hoc block
 > above (Invoice it / Show detail only / Leave off the invoice), and billed ad
-> hoc work is charged at that person's own bill rate. It is the last catch
+> hoc work is charged at that person's bill rate for the client's rate month
+> — on a billing master, each company's own rate month, exactly as Generate
+> priced the hours beside it. It is the last catch
 > before an invoice goes out: out-of-scope or one-off work that slipped into
 > the ordinary hours can be moved without leaving the invoice.
 >
@@ -2390,9 +2395,11 @@ Clients page meanwhile. Owner-only.
   months keep computing at the client's prior per-client hourly rate, so already
   -sent historical invoices stay exact and never change retroactively. Nothing
   already sent is ever repriced — a sent invoice carries its own rates.
-  The on-screen previews — this per-client view and Projected billing on the
-  Reports page — price a pinned client's hours at its pin too, so for everyone
-  with a bill rate on file they match the invoice the month run generates.
+  The on-screen previews — this per-client view, Projected billing on the
+  Reports page and on the Dashboard, and the Billable $ columns on the
+  Employee report and the payroll Hours report — price a pinned client's hours
+  at its pin too, so for everyone with a bill rate on file they match the
+  invoice the month run generates.
 - **TIME BREAKDOWN ON THE INVOICE — OFF UNLESS YOU TURN IT ON, PER CLIENT.**
   By default an invoice says what the client is paying and nothing about the
   hours behind it: a monthly client sees the subscription line and any expense

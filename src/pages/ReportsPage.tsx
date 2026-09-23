@@ -3,17 +3,23 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
-import { costRateFor, latestCostRate } from '../../lib/rate-history.js'
+import {
+  billRateAt,
+  costRateFor,
+  latestBillRate,
+  latestCostRate,
+  ratePeriodAsOf,
+} from '../../lib/rate-history.js'
 import { fetchRateVersions } from '../lib/api'
 import {
   allocatePersonCost,
   billableMinutes as sumBillableMinutes,
+  billableRevenue,
   displayHours,
   duplicateFullSliceIds,
   internalMinutes as sumInternalMinutes,
   laborCost,
   periodDisplayHours,
-  periodMoney,
   sumDisplayHours,
   sumPersonCosts,
   trackedMinutes as sumTrackedMinutes,
@@ -147,6 +153,49 @@ export function ReportsPage() {
     : [...data.employees, ...inactiveEmployees]
   const employeesForNameLookup = [...data.employees, ...inactiveEmployees]
 
+  /**
+   * THE BILL RATE FOR ONE ENTRY — the person's version at the pin of the
+   * client the hour was worked for, for the entry's month: `billRateAt` at
+   * `ratePeriodAsOf(client, month)`, the chain every invoice line is priced
+   * through. This used to read `employee.billRate`, which mirrors the NEWEST
+   * version — a raise dated ahead, or one a still-pinned client has not been
+   * moved to — so every Billable $ column disagreed with the invoice for any
+   * client on older rates. A pinned client's hour now bills here at its pin.
+   * A sub of a billing master carries its own pin, so it resolves like any
+   * other client. `null` = no bill rate on file for this person at all.
+   */
+  const billRateOn = (entry: Pick<TimeEntry, 'employeeId' | 'clientId' | 'date'>) => {
+    const client = data.clients.find((candidate) => candidate.id === entry.clientId) ?? null
+    const employee = employeesForNameLookup.find(
+      (candidate) => candidate.id === entry.employeeId,
+    ) ?? { id: entry.employeeId }
+    const month = typeof entry.date === 'string' && entry.date ? entry.date.slice(0, 7) : null
+    return billRateAt(billRateVersions, employee, ratePeriodAsOf(client, month), month)
+  }
+  /**
+   * One person's Billable $ over a PERIOD: their billable rows, each at the
+   * rate above, grouped by person AND rate (`billableRevenue`) exactly as
+   * Cost is by `laborCost` — so the per-person figure ties to the per-entry
+   * cells under it, and a client on older rates prices at those rates while
+   * one moved to the current rates prices at these. `null` ("—", never
+   * $0.00) when the person has no bill rate on file at all — the newest
+   * version, or the live mirror for someone with no versions.
+   */
+  const periodBillableOf = (employeeId: string, entries: TimeEntry[]) => {
+    const employee = employeesForNameLookup.find((candidate) => candidate.id === employeeId)
+    const onFile =
+      latestBillRate(billRateVersions, employeeId) ??
+      (typeof employee?.billRate === 'number' && !Number.isNaN(employee.billRate)
+        ? employee.billRate
+        : null)
+    return onFile === null
+      ? null
+      : billableRevenue(
+          entries.filter((entry) => entry.employeeId === employeeId),
+          billRateOn,
+        )
+  }
+
   const billingPeriodEntries = data.timeEntries.filter((entry) =>
     isInBillingPeriod(entry, billingPeriod),
   )
@@ -189,7 +238,6 @@ export function ReportsPage() {
       // Tracked is WALL TIME (full-mode group blocks counted once); billable is
       // not deduped, so tracked is no longer billable + internal by definition.
       const totalMinutes = sumTrackedMinutes(entries)
-      const billRate = typeof employee.billRate === 'number' ? employee.billRate : 0
       // THE ROWS, kept. Hours and money are both built from these — the sum of
       // the rows' two-decimal hours — so the printed Hours cell multiplies
       // straight into the money beside it (featreq-7c8f64d7).
@@ -212,7 +260,10 @@ export function ReportsPage() {
         internalMinutes: sumInternalMinutes(entries),
         entryCount: entries.length,
         clientCount: new Set(entries.map((entry) => entry.clientId)).size,
-        billableAmount: periodMoney(billableRowMinutes, billRate) ?? 0,
+        // Each billable row at its client's pin, grouped by rate — the same
+        // rows, so the printed hours still multiply into the money at each
+        // rate in force. 0, not "—", on this table: it has always read that way.
+        billableAmount: periodBillableOf(employee.id, entries) ?? 0,
       }
     })
     .sort((left, right) => right.minutes - left.minutes)
@@ -306,6 +357,8 @@ export function ReportsPage() {
         employees={employeesForReport}
         periodCostOf={periodCostOf}
         costRateOn={costRateOn}
+        periodBillableOf={periodBillableOf}
+        billRateOn={billRateOn}
         timeEntries={data.timeEntries}
       />
       <ReportsOverview
@@ -318,6 +371,7 @@ export function ReportsPage() {
         clientRows={clientReportRows}
         clients={data.clients}
         periodCostOf={periodCostOf}
+        billRateOn={billRateOn}
         employeeRows={employeeReportRows}
         employees={employeesForNameLookup}
         ownerBillableMinutes={ownerBillableMinutes}
@@ -365,6 +419,8 @@ type PayrollEntryRow = {
   date: string
   /** Kept so the row can resolve its own person's bill/cost rate. */
   employeeId: string
+  /** Kept so the row can resolve its own client's rate month (its pin). */
+  clientId: string
   member: string
   job: string
   task: string
@@ -402,6 +458,8 @@ function PayrollHoursReport({
   employees,
   periodCostOf,
   costRateOn,
+  periodBillableOf,
+  billRateOn,
   timeEntries,
 }: {
   checklists: Checklist[]
@@ -417,6 +475,13 @@ function PayrollHoursReport({
    * have a date, so a raise mid-period costs each side of it at its own rate.
    */
   costRateOn: (employeeId: string, entryDate?: string) => number | null
+  /**
+   * One person's Billable $ over the given entries, each billable row at its
+   * client's pin, grouped by rate like Cost; null = no bill rate on file.
+   */
+  periodBillableOf: (employeeId: string, entries: TimeEntry[]) => number | null
+  /** The bill rate ONE entry bills at — its person, at its client's pin. */
+  billRateOn: (entry: Pick<TimeEntry, 'employeeId' | 'clientId' | 'date'>) => number | null
   timeEntries: TimeEntry[]
 }) {
   const [periodType, setPeriodType] = useState<'weekly' | 'biweekly'>('biweekly')
@@ -454,11 +519,6 @@ function PayrollHoursReport({
           // up to each other and `minutes` is computed on its own.
           const billable = sumBillableMinutes(entries)
           const internal = sumInternalMinutes(entries)
-          // null = no rate configured, rendered as "—" rather than "$0.00".
-          const rate =
-            typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
-              ? employee.billRate
-              : null
           // Row minutes, not just their sum: the costing hours are the sum of
           // the ROWS' two-decimal hours (featreq-7c8f64d7), which is also the
           // figure this table prints.
@@ -479,7 +539,6 @@ function PayrollHoursReport({
             billableRowMinutes,
             hours: periodDisplayHours(trackedRowMinutes),
             billableHours: periodDisplayHours(billableRowMinutes),
-            amount: periodMoney(billableRowMinutes, rate),
             count: entries.length,
           }
         })
@@ -499,7 +558,15 @@ function PayrollHoursReport({
    */
   const totalHours = sumDisplayHours(rows.map((row) => row.hours))
   const totalBillableHours = sumDisplayHours(rows.map((row) => row.billableHours))
-  const totalAmount = rows.reduce((sum, row) => sum + (row.amount ?? 0), 0)
+  /**
+   * Billable $ for one person: their billable rows in the window, each at the
+   * rate its client's pin gives that month, grouped by rate — outside the memo
+   * above so the figure follows the rate history when it lands after mount,
+   * exactly as `costFor` below does. null = no bill rate, rendered "—".
+   */
+  const amountFor = (employeeId: string) => periodBillableOf(employeeId, inRange)
+  // The sum of the cent-rounded per-person cells, like every cost total.
+  const totalAmount = sumPersonCosts(rows.map((row) => amountFor(row.id)))
   const fmtDay = (iso: string) => shortDate.format(new Date(`${iso}T12:00:00`))
   const rangeLabel = `${fmtDay(start)} – ${fmtDay(end)}`
 
@@ -545,6 +612,7 @@ function PayrollHoursReport({
         id: entry.id,
         date: entry.date,
         employeeId: entry.employeeId,
+        clientId: entry.clientId,
         member: employeeName(employees, entry.employeeId),
         job: jobOf(entry),
         task: taskOf(entry),
@@ -627,16 +695,11 @@ function PayrollHoursReport({
   // Columns before Hours: Day/job, [Team member], Task, Clock in, Clock out, Sessions.
   const labelSpan = showMemberColumn ? 6 : 5
 
-  // Billable $ from the person's bill rate — the SAME basis the overview's
-  // `billableAmount` already uses, so the two reports can't disagree. It is
-  // revenue, not what the firm pays out: there is no pay-rate field, which is
-  // exactly why the column is labeled "Billable $" and not "Cost".
-  const billRateOf = (employeeId: string) => {
-    const employee = employees.find((candidate) => candidate.id === employeeId)
-    return typeof employee?.billRate === 'number' && !Number.isNaN(employee.billRate)
-      ? employee.billRate
-      : null
-  }
+  // Billable $ is each row's person at its CLIENT'S pin — the SAME basis the
+  // overview's `billableAmount` and the invoice lines use, so no two surfaces
+  // can put a different dollar figure on the same hour. It is revenue, not
+  // what the firm pays out: there is no pay-rate field, which is exactly why
+  // the column is labeled "Billable $" and not "Cost".
   /**
    * `null` = this person has NO bill rate configured, which is different from
    * earning $0 and must not be printed as "$0.00". Half the roster has no rate
@@ -724,23 +787,30 @@ function PayrollHoursReport({
    *
    * Pricing each row off its own raw minutes is what put $1,631.69 under a
    * billable-hours column reading 14.16 (14.16 x 115 = $1,628.40). The person's
-   * period total is the half that has to be right, so it is `periodMoney` off
-   * the displayed hours, and the rows are a largest-remainder split of it.
+   * period total is the half that has to be right, so it is `billableRevenue`
+   * off the displayed hours at each rate, and the rows are a largest-remainder
+   * split of it, one split per (person, rate) group.
    */
   const detailAmountByRowId = (() => {
-    const rowsByEmployee = new Map<string, { id: string; minutes: number }[]>()
+    // Grouped by person AND the rate the row's client pins that month — the
+    // same grouping `billableRevenue` uses for the person's period figure, so
+    // the column sums to the total under it even when two clients bill the
+    // same person at two rates in one window.
+    const groups = new Map<string, { rate: number | null; rows: { id: string; minutes: number }[] }>()
     for (const row of detailRows) {
-      const mine = rowsByEmployee.get(row.employeeId) ?? []
-      mine.push({ id: row.id, minutes: row.billableMinutes })
-      rowsByEmployee.set(row.employeeId, mine)
+      const rate = billRateOn(row)
+      const key = `${row.employeeId} ${rate ?? ''}`
+      const found = groups.get(key)
+      if (found) found.rows.push({ id: row.id, minutes: row.billableMinutes })
+      else groups.set(key, { rate, rows: [{ id: row.id, minutes: row.billableMinutes }] })
     }
     const byRowId = new Map<string, number | null>()
-    for (const [employeeId, mine] of rowsByEmployee) {
+    for (const group of groups.values()) {
       const amounts = allocatePersonCost(
-        mine.map((row) => row.minutes),
-        billRateOf(employeeId),
+        group.rows.map((row) => row.minutes),
+        group.rate,
       )
-      mine.forEach((row, index) => byRowId.set(row.id, amounts[index]))
+      group.rows.forEach((row, index) => byRowId.set(row.id, amounts[index]))
     }
     return byRowId
   })()
@@ -948,7 +1018,7 @@ function PayrollHoursReport({
                       hours — so each cell is hours x rate by hand. */}
                   <td>{row.hours.toFixed(2)}h</td>
                   <td>{row.billableHours.toFixed(2)}h</td>
-                  <td>{money(row.amount)}</td>
+                  <td>{money(amountFor(row.id))}</td>
                   {/* Cost is on HOURS WORKED, not billable hours — the firm
                       pays for internal time too. "—" for the owner. */}
                   <td>{money(costFor(row.id))}</td>
@@ -1118,6 +1188,7 @@ function ReportsOverview({
   clientRows,
   clients,
   periodCostOf,
+  billRateOn,
   employeeRows,
   employees,
   ownerBillableMinutes,
@@ -1136,6 +1207,8 @@ function ReportsOverview({
   clients: Client[]
   /** One person's cost, each entry at the rate on its day; null = no cost rate. */
   periodCostOf: (employeeId: string, entries: TimeEntry[]) => number | null
+  /** The bill rate ONE entry bills at — its person, at its client's pin. */
+  billRateOn: (entry: Pick<TimeEntry, 'employeeId' | 'clientId' | 'date'>) => number | null
   employeeRows: EmployeeReportRow[]
   employees: Employee[]
   ownerBillableMinutes: number
@@ -1226,15 +1299,12 @@ function ReportsOverview({
     )
 
   // Same bill-rate basis as the payroll report and the overview's
-  // billableAmount, so no two surfaces can put a different dollar figure on the
-  // same hour. Revenue, not payroll cost — there is no pay-rate field.
-  const overviewAmountFor = (employeeId: string, billableMinutes: number) => {
-    const employee = employees.find((candidate: Employee) => candidate.id === employeeId)
-    const rate =
-      typeof employee?.billRate === 'number' && !Number.isNaN(employee.billRate)
-        ? employee.billRate
-        : null
-    return rate === null ? null : (billableMinutes / 60) * rate
+  // billableAmount — the person at the ENTRY'S client's pin — so no two
+  // surfaces can put a different dollar figure on the same hour. Revenue, not
+  // payroll cost — there is no pay-rate field.
+  const overviewAmountFor = (entry: TimeEntry) => {
+    const rate = billRateOn(entry)
+    return rate === null ? null : ((entry.billable ? entry.minutes : 0) / 60) * rate
   }
 
   const exportHoursByMonth = () => {
@@ -1278,7 +1348,7 @@ function ReportsOverview({
           decimalHours(entry.minutes),
           entry.billable ? 'Yes' : 'No',
           entry.billable ? decimalHours(entry.minutes) : '0.00',
-          overviewAmountFor(entry.employeeId, entry.billable ? entry.minutes : 0)?.toFixed(2) ?? '',
+          overviewAmountFor(entry)?.toFixed(2) ?? '',
           entry.description,
         ]
       }),

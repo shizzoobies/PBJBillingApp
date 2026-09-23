@@ -20,6 +20,7 @@ vi.mock('../lib/api', () => ({
   // two, and an array would hand React `Array.prototype.entries` as a state
   // updater and take the whole view down.
   fetchGlobalActivity: vi.fn().mockResolvedValue({ entries: [] }),
+  fetchRateVersions: vi.fn().mockResolvedValue({ billRateVersions: [], costRateVersions: [] }),
   fetchTeam: vi.fn().mockResolvedValue({ users: [] }),
   fetchTeamActivity: vi.fn().mockResolvedValue({ entries: [] }),
   // The owner dashboard also asks for the past-due invoices; that section has

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   allocatePersonCost,
   billableMinutes,
+  billableRevenue,
   displayHours,
   duplicateFullSliceIds,
   internalMinutes,
@@ -183,6 +184,64 @@ describe('laborCost', () => {
   it('accepts a precomputed duplicate set so callers can reuse one pass', () => {
     const duplicates = duplicateFullSliceIds(fullTriple)
     expect(laborCost(fullTriple, rateOf, duplicates)).toBe(30)
+  })
+})
+
+/**
+ * The bill side of the same rule. The resolver gets the WHOLE row because the
+ * rate depends on the entry's client's pin as well as the person — two clients
+ * on two pins bill the same hour at two figures — and the rows are grouped by
+ * (person, rate) exactly as `laborCost` groups them, so the per-person figure
+ * ties to per-entry cells split the same way.
+ */
+describe('billableRevenue', () => {
+  type Priced = PayrollSlice & { clientId?: string }
+  const priced = (over: Partial<Priced> & { id: string }): Priced => ({
+    ...slice(over),
+    ...over,
+  })
+  // Acme is still on June's $40; Birch was moved to September's $60.
+  const pinRate = (entry: Priced) => (entry.clientId === 'client-birch' ? 60 : 40)
+
+  it('bills each client’s hour at that client’s own rate', () => {
+    const entries = [
+      priced({ id: 'a', clientId: 'client-acme', minutes: 60 }),
+      priced({ id: 'b', clientId: 'client-birch', minutes: 60 }),
+    ]
+    expect(billableRevenue(entries, pinRate)).toBe(100)
+  })
+
+  it('counts billable rows only — internal time bills for nothing', () => {
+    const entries = [
+      priced({ id: 'a', clientId: 'client-acme', minutes: 60 }),
+      priced({ id: 'b', clientId: 'client-acme', minutes: 60, billable: false }),
+    ]
+    expect(billableRevenue(entries, pinRate)).toBe(40)
+  })
+
+  it('is NOT deduped: a full-mode split bills each client the whole block', () => {
+    expect(billableRevenue(fullTriple, () => 30)).toBe(90)
+  })
+
+  it('groups by rate before rounding, so rows at one rate are one two-decimal sum', () => {
+    // Three 10-minute rows at $40 are 0.17h + 0.17h + 0.17h = 0.51h → $20.40,
+    // the figure the printed hours multiply into — not 30 minutes → $20.00.
+    const entries = [
+      priced({ id: 'a', clientId: 'client-acme', minutes: 10 }),
+      priced({ id: 'b', clientId: 'client-acme', minutes: 10 }),
+      priced({ id: 'c', clientId: 'client-acme', minutes: 10 }),
+    ]
+    expect(billableRevenue(entries, pinRate)).toBe(20.4)
+  })
+
+  it('contributes nothing for a row with no rate', () => {
+    const entries = [
+      priced({ id: 'a', clientId: 'client-acme', minutes: 60 }),
+      priced({ id: 'b', employeeId: 'owner', minutes: 120 }),
+    ]
+    expect(billableRevenue(entries, (entry) => (entry.employeeId === 'owner' ? null : 40))).toBe(
+      40,
+    )
   })
 })
 
