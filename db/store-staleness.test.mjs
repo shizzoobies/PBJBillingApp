@@ -15,6 +15,7 @@ import {
   InvoiceLockedError,
   ManualPaymentError,
   PackageApplyError,
+  RateVersionError,
   mapChecklistItemRow,
   mapClientRow,
   mapInvoiceRow,
@@ -14838,5 +14839,170 @@ describe('rate history: the Postgres statements', () => {
     expect(snapshot, 'the bulk save never snapshotted the stored pin').toBeTruthy()
     const [insert] = fake.matching(/^insert into clients/i)
     expect(insert.text).toMatch(/hourly_rate_period, hourly_rate_history/)
+    // Naming the columns proves nothing about what was BOUND to them. The pin
+    // is `$43` in that insert, so `params[42]` has to be the STORED '2026-06'
+    // — if the payload's '2020-01' reached the bind list, a stale owner tab
+    // would silently reprice the client and this assertion is what catches it.
+    expect(insert.params[42]).toBe('2026-06')
+  })
+})
+
+/**
+ * BILL-RATE VERSIONS — the write side of the rate history (spec §2.1).
+ *
+ * The file half drives the real `tmp/auth-state.json`, so the mirror onto
+ * `users.billRate` is proved end to end rather than asserted about SQL; the
+ * Postgres half proves the two statements only a database would run (the
+ * `on conflict` upsert and the composite-key delete), which is cardinal
+ * rule 1 in practice — a Postgres-only bug would otherwise pass CI in silence.
+ */
+describe('bill rate versions (file backend)', () => {
+  beforeEach(async () => {
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.billRateVersions = []
+    authState.users = [{ id: 'emp-lisa', name: 'Lisa', role: 'employee' }]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        timeEntries: [],
+      }),
+    )
+  })
+
+  const pin = async (period) => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients[0].hourlyRatePeriod = period
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('adds a version and mirrors the newest onto the user record', async () => {
+    await store.upsertBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2026-06',
+      rate: 40,
+      actingUserId: 'emp-patrice',
+    })
+    const versions = await store.upsertBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2027-01',
+      rate: 55,
+      actingUserId: 'emp-patrice',
+    })
+    expect(versions.map((row) => row.effectivePeriod)).toEqual(['2026-06', '2027-01'])
+    expect(versions[1].createdBy).toBe('emp-patrice')
+    const members = await store.getTeamMembers()
+    expect(members.find((member) => member.id === 'emp-lisa').billRate).toBe(55)
+  })
+
+  it('REPLACES the row when the same month is saved again — a correction', async () => {
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-06', rate: 40 })
+    const versions = await store.upsertBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2026-06',
+      rate: 42,
+    })
+    expect(versions).toHaveLength(1)
+    expect(versions[0].rate).toBe(42)
+  })
+
+  it('backfills an EARLIER month in order without moving the mirror', async () => {
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2027-01', rate: 55 })
+    const versions = await store.upsertBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2026-06',
+      rate: 40,
+    })
+    expect(versions.map((row) => row.effectivePeriod)).toEqual(['2026-06', '2027-01'])
+    const members = await store.getTeamMembers()
+    expect(members.find((member) => member.id === 'emp-lisa').billRate).toBe(55)
+  })
+
+  it('deletes the newest version and re-mirrors', async () => {
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-06', rate: 40 })
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2027-01', rate: 55 })
+    await pin('2026-06')
+    const versions = await store.deleteBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2027-01',
+    })
+    expect(versions.map((row) => row.effectivePeriod)).toEqual(['2026-06'])
+    const members = await store.getTeamMembers()
+    expect(members.find((member) => member.id === 'emp-lisa').billRate).toBe(40)
+  })
+
+  it('REFUSES to delete anything but the newest version', async () => {
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-06', rate: 40 })
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2027-01', rate: 55 })
+    await pin('2026-06')
+    await expect(
+      store.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-06' }),
+    ).rejects.toBeInstanceOf(RateVersionError)
+  })
+
+  it('REFUSES to delete a version a client is pinned at or after', async () => {
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-06', rate: 40 })
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2027-01', rate: 55 })
+    await pin('2027-01')
+    await expect(
+      store.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2027-01' }),
+    ).rejects.toThrow(/pinned/i)
+  })
+
+  it('setEmployeeBillRate still works and now writes this month’s version', async () => {
+    const rate = await store.setEmployeeBillRate('emp-lisa', 48)
+    expect(rate).toBe(48)
+    const versions = await store.listBillRateVersions()
+    expect(versions).toHaveLength(1)
+    expect(versions[0].effectivePeriod).toMatch(/^\d{4}-\d{2}$/)
+    expect(versions[0].rate).toBe(48)
+    const members = await store.getTeamMembers()
+    expect(members.find((member) => member.id === 'emp-lisa').billRate).toBe(48)
+  })
+
+  it('setEmployeeBillRate(null) clears the mirror and every version', async () => {
+    await store.setEmployeeBillRate('emp-lisa', 48)
+    expect(await store.setEmployeeBillRate('emp-lisa', null)).toBeNull()
+    expect(await store.listBillRateVersions()).toEqual([])
+    const members = await store.getTeamMembers()
+    expect(members.find((member) => member.id === 'emp-lisa').billRate).toBeNull()
+  })
+})
+
+describe('bill rate versions (postgres branch)', () => {
+  it('upserts with ON CONFLICT and mirrors onto users in one pass', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).upsertBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2026-06',
+      rate: 40,
+      actingUserId: 'emp-patrice',
+    })
+    const [upsert] = fake.matching(/^insert into bill_rate_versions/i)
+    expect(upsert.text).toMatch(
+      /on conflict \(user_id, effective_period\) do update set rate = excluded\.rate/i,
+    )
+    expect(upsert.params).toEqual(['emp-lisa', '2026-06', 40, 'emp-patrice'])
+    expect(fake.matching(/^update users set bill_rate/i)).toHaveLength(1)
+  })
+
+  it('deletes by the composite key', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.listBillRateVersions = async () => [
+      { userId: 'emp-lisa', effectivePeriod: '2026-06', rate: 40 },
+    ]
+    pgStore.read = async () => ({ clients: [] })
+    await pgStore.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-06' })
+    const [remove] = fake.matching(/^delete from bill_rate_versions/i)
+    expect(remove.text).toMatch(/where user_id = \$1 and effective_period = \$2/i)
+    expect(remove.params).toEqual(['emp-lisa', '2026-06'])
+  })
+
+  it('lists in user then period order', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).listBillRateVersions()
+    const [select] = fake.matching(/from bill_rate_versions/i)
+    expect(select.text).toMatch(/order by user_id asc, effective_period asc/i)
   })
 })

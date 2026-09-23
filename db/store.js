@@ -17,6 +17,7 @@ import {
   findChecklistInstance,
 } from '../lib/checklist-identity.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
+import { latestBillRate } from '../lib/rate-history.js'
 import { isWaitingOnOpen, waitingOnStage } from '../lib/waiting-on-state.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
@@ -1026,6 +1027,22 @@ export class BillingMasterError extends Error {
   constructor(message) {
     super(message)
     this.name = 'BillingMasterError'
+  }
+}
+
+/**
+ * A rate version that may not be deleted.
+ *
+ * A sentence rather than a code, like `BillingMasterError`: the endpoint maps
+ * it to 409 and prints `message` verbatim, because the person pressing Delete
+ * needs to know WHICH rule stopped them — "that is not the newest one" and
+ * "a client is still billing at it" are different problems with different
+ * fixes.
+ */
+export class RateVersionError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'RateVersionError'
   }
 }
 
@@ -5209,44 +5226,172 @@ export class AppDataStore {
   }
 
   /**
-   * Every bill-rate version on file, ordered by person then period.
+   * Every bill-rate version, every person, oldest first per person.
    *
-   * READ-ONLY for now, deliberately: this is the plumbing the migration above
-   * needs to be provable, and the shape (`{ userId, effectivePeriod, rate,
-   * createdAt, createdBy }`) every later reader speaks. The Team-page editor
-   * that ADDS and replaces versions arrives with its own task; nothing here
-   * writes.
+   * Owner-only at the endpoint layer — this is what the firm charges, and it
+   * is redacted for staff the same way every other rate is.
    *
-   * The date columns are formatted in SQL rather than through `Date`, so a
-   * server in a positive UTC offset cannot hand back yesterday's day.
+   * The five fields are PROJECTED rather than spread, so both backends hand
+   * back the same object: Postgres answers `created_at` as a `Date` and the
+   * file backend as a string, and an ISO string on both is what a caller can
+   * compare or send over the wire without knowing which one it is talking to.
    */
   async listBillRateVersions() {
     if (this.pool) {
       const { rows } = await this.pool.query(
         `select user_id, effective_period, rate, created_at, created_by
            from bill_rate_versions
-          order by user_id, effective_period`,
+          order by user_id asc, effective_period asc`,
       )
       return rows.map((row) => ({
         userId: row.user_id,
         effectivePeriod: row.effective_period,
         rate: Number(row.rate),
-        createdAt: row.created_at ?? null,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
         createdBy: row.created_by ?? null,
       }))
     }
 
     if (!existsSync(localAuthPath)) return []
     const authState = await readJson(localAuthPath)
-    const versions = Array.isArray(authState.billRateVersions) ? authState.billRateVersions : []
-    return [...versions]
+    const list = Array.isArray(authState.billRateVersions) ? authState.billRateVersions : []
+    return list
       .filter((row) => row && typeof row.userId === 'string')
+      .map((row) => ({
+        userId: row.userId,
+        effectivePeriod: row.effectivePeriod,
+        rate: Number(row.rate),
+        createdAt: row.createdAt ?? null,
+        createdBy: row.createdBy ?? null,
+      }))
       .sort(
         (left, right) =>
           left.userId.localeCompare(right.userId) ||
           String(left.effectivePeriod ?? '').localeCompare(String(right.effectivePeriod ?? '')),
       )
-      .map((row) => ({ ...row, rate: Number(row.rate) }))
+  }
+
+  /**
+   * Save one person's bill rate for one month.
+   *
+   * REPLACE on the same month (a correction), INSERT otherwise — including a
+   * month EARLIER than the newest, which is a legitimate backfill of a change
+   * she forgot to record and simply sorts into place.
+   *
+   * Then `users.bill_rate` is re-mirrored from the NEWEST version, which is
+   * what keeps every reader that has not moved to the resolver correct.
+   * Backfilling an old month therefore leaves the mirror alone, which is right
+   * — it did not change what this person bills today.
+   *
+   * Returns this user's versions, oldest first.
+   */
+  async upsertBillRateVersion({ userId, effectivePeriod, rate, actingUserId = null } = {}) {
+    if (typeof userId !== 'string' || !userId) return []
+    if (!/^\d{4}-\d{2}$/.test(String(effectivePeriod ?? ''))) return []
+    const amount = Number(rate)
+    if (!Number.isFinite(amount) || amount < 0) return []
+    const normalized = Math.round(amount * 100) / 100
+
+    if (this.pool) {
+      await this.pool.query(
+        `insert into bill_rate_versions (user_id, effective_period, rate, created_by)
+         values ($1, $2, $3, $4)
+         on conflict (user_id, effective_period) do update set rate = excluded.rate,
+           created_by = excluded.created_by, created_at = now()`,
+        [userId, effectivePeriod, normalized, actingUserId],
+      )
+    } else {
+      const authState = await readJson(localAuthPath)
+      if (!Array.isArray(authState.billRateVersions)) authState.billRateVersions = []
+      const existing = authState.billRateVersions.find(
+        (row) => row && row.userId === userId && row.effectivePeriod === effectivePeriod,
+      )
+      if (existing) {
+        existing.rate = normalized
+        existing.createdAt = nowIso()
+        existing.createdBy = actingUserId
+      } else {
+        authState.billRateVersions.push({
+          userId,
+          effectivePeriod,
+          rate: normalized,
+          createdAt: nowIso(),
+          createdBy: actingUserId,
+        })
+      }
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+
+    await this._mirrorLatestBillRate(userId)
+    return (await this.listBillRateVersions()).filter((row) => row.userId === userId)
+  }
+
+  /**
+   * Remove one bill-rate version.
+   *
+   * TWO GUARDS, and both are about not rewriting history. Only the NEWEST
+   * version may go — deleting an older one would silently reprice every month
+   * it covered. And it may not go while any client is pinned at or after it,
+   * because that client is billing at this exact row; removing it would drop
+   * the person back to an earlier rate on an invoice already being prepared.
+   *
+   * Throws `RateVersionError`, which the endpoint maps to 409.
+   */
+  async deleteBillRateVersion({ userId, effectivePeriod } = {}) {
+    if (typeof userId !== 'string' || !userId) return []
+    const mine = (await this.listBillRateVersions()).filter((row) => row.userId === userId)
+    const target = mine.find((row) => row.effectivePeriod === effectivePeriod)
+    if (!target) return mine
+    const newest = mine[mine.length - 1]
+    if (newest.effectivePeriod !== effectivePeriod) {
+      throw new RateVersionError(
+        'Only the newest rate can be removed — an older one is what past months were billed at.',
+      )
+    }
+    const data = await this.read()
+    const pinnedAtOrAfter = (data.clients ?? []).some(
+      (clientRecord) =>
+        typeof clientRecord?.hourlyRatePeriod === 'string' &&
+        clientRecord.hourlyRatePeriod >= effectivePeriod,
+    )
+    if (pinnedAtOrAfter) {
+      throw new RateVersionError(
+        'A client is pinned at or after this month, so it is still billing at this rate. Move that client first.',
+      )
+    }
+
+    if (this.pool) {
+      await this.pool.query(
+        `delete from bill_rate_versions where user_id = $1 and effective_period = $2`,
+        [userId, effectivePeriod],
+      )
+    } else {
+      const authState = await readJson(localAuthPath)
+      authState.billRateVersions = (
+        Array.isArray(authState.billRateVersions) ? authState.billRateVersions : []
+      ).filter((row) => !(row && row.userId === userId && row.effectivePeriod === effectivePeriod))
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+
+    await this._mirrorLatestBillRate(userId)
+    return (await this.listBillRateVersions()).filter((row) => row.userId === userId)
+  }
+
+  /** `users.bill_rate` = the newest version, or null when there is none. */
+  async _mirrorLatestBillRate(userId) {
+    const versions = await this.listBillRateVersions()
+    const mirror = latestBillRate(versions, userId)
+    if (this.pool) {
+      await this.pool.query(`update users set bill_rate = $2 where id = $1`, [userId, mirror])
+      return mirror
+    }
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((entry) => entry.id === userId)
+    if (!user) return mirror
+    if (mirror === null) delete user.billRate
+    else user.billRate = mirror
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return mirror
   }
 
   /** Every cost-rate version on file, ordered by person then date. See above. */
@@ -15336,32 +15481,40 @@ export class AppDataStore {
   }
 
   /**
-   * Owner-only: set or clear a team member's BILL rate ($/hour charged to
-   * clients for this person's time). `rate` is a non-negative number, or null
-   * to clear. Unlike cost_rate this DOES feed invoices (hourly clients are
-   * billed off each employee's bill rate). Returns the normalized rate (or null).
+   * Owner-only: set or clear a team member's BILL rate.
+   *
+   * NOW A THIN WRAPPER over the version list: saving a rate with no month
+   * attached means "from this month on", which is what this control has always
+   * meant and is the default the Team page's effective-from input offers.
+   * Clearing removes EVERY version — there is no rate on file any more, so
+   * there is no history of one either.
+   *
+   * Kept so the existing endpoint, the existing tests and any old client keep
+   * working while the Team page moves to the dated control.
    */
   async setEmployeeBillRate(userId, rate) {
     if (!userId) return null
-    let normalized = null
-    if (rate !== null && rate !== undefined && rate !== '') {
-      const n = Number(rate)
-      if (!Number.isFinite(n) || n < 0) return null
-      normalized = Math.round(n * 100) / 100
+    if (rate === null || rate === undefined || rate === '') {
+      if (this.pool) {
+        await this.pool.query(`delete from bill_rate_versions where user_id = $1`, [userId])
+      } else {
+        const authState = await readJson(localAuthPath)
+        authState.billRateVersions = (
+          Array.isArray(authState.billRateVersions) ? authState.billRateVersions : []
+        ).filter((row) => !(row && row.userId === userId))
+        await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      }
+      return this._mirrorLatestBillRate(userId)
     }
-
-    if (this.pool) {
-      await this.pool.query(`update users set bill_rate = $2 where id = $1`, [userId, normalized])
-      return normalized
-    }
-
-    const authState = await readJson(localAuthPath)
-    const user = (authState.users ?? []).find((u) => u.id === userId)
-    if (!user) return null
-    if (normalized === null) delete user.billRate
-    else user.billRate = normalized
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return normalized
+    const n = Number(rate)
+    if (!Number.isFinite(n) || n < 0) return null
+    await this.upsertBillRateVersion({
+      userId,
+      effectivePeriod: nowIso().slice(0, 7),
+      rate: n,
+      actingUserId: null,
+    })
+    return Math.round(n * 100) / 100
   }
 
   /**
