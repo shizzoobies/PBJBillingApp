@@ -293,7 +293,7 @@ describe('the Recap branches to the roll-up for a master and to nothing else', (
   it('leaves the ordinary answer exactly as it was', () => {
     const text = block()
     expect(text).toMatch(
-      /const recap = buildClientRecap\(data, \{\s*clientId,\s*periodType,\s*period,\s*today: todayIso\(\),\s*includeFinancials,\s*costRates,\s*salesTaxRecord,\s*\}\)/,
+      /const recap = buildClientRecap\(data, \{\s*clientId,\s*periodType,\s*period,\s*today: todayIso\(\),\s*includeFinancials,\s*billRateVersions,\s*costRateVersions,\s*salesTaxRecord,\s*\}\)/,
     )
     expect(text).toContain("sendJson(response, 404, { error: 'Client not found' })")
     expect(text).toContain('sendJson(response, 200, recap)')

@@ -14,6 +14,7 @@ import {
   InvoiceLockedError,
   ManualPaymentError,
   PackageApplyError,
+  RateVersionError,
   RetainerCreditError,
   TimeEntrySplitError,
 } from './db/store.js'
@@ -590,15 +591,44 @@ function todayIso() {
   return new Date().toISOString().slice(0, 10)
 }
 
-// Cost rates live on the user record (owner-only, informational). Analytics
-// keys them by employee id, which matches user id in both backends.
-async function buildCostRateMap() {
-  const members = await appDataStore.getTeamMembers()
-  const map = {}
-  for (const member of members) {
-    map[member.id] = typeof member.costRate === 'number' ? member.costRate : null
+/**
+ * The rate history the caller is allowed to see.
+ *
+ * Replaces the old cost-rate map, which returned one live cost rate per person
+ * and so repriced every past month the moment anybody got a raise. Everything
+ * downstream now takes the VERSIONS and resolves them through
+ * `lib/rate-history.js`.
+ *
+ * RATES ARE OWNER-ONLY. A staff session gets two empty lists rather than a
+ * filtered set: with no versions, `billRateFor` and `costRateFor` answer null,
+ * the recap's cost is zero and the invoice falls back exactly as it does for a
+ * person with no rate on file. That is the same stance
+ * `scopeAppDataForSession` takes with `hourlyRate`, and it means no caller
+ * needs a role branch of its own.
+ */
+async function loadRateVersions(session) {
+  if (session?.user?.role !== 'owner') {
+    return { billRateVersions: [], costRateVersions: [] }
   }
-  return map
+  const [billRateVersions, costRateVersions] = await Promise.all([
+    appDataStore.listBillRateVersions(),
+    appDataStore.listCostRateVersions(),
+  ])
+  return { billRateVersions, costRateVersions }
+}
+
+/**
+ * Is this id a real team member?
+ *
+ * Only asked when a version upsert came back EMPTY. The store validates the
+ * user itself and answers `[]` for an id that names nobody rather than writing
+ * an orphan row, but `[]` is also the honest answer for a real person whose
+ * history is empty — so the roster is what separates "nobody" from "nothing
+ * yet", and only a genuine miss becomes a 404.
+ */
+async function isKnownTeamMemberId(userId) {
+  const members = await appDataStore.getTeamMembers()
+  return members.some((member) => member.id === userId)
 }
 
 // Read-only analytics tools handed to the assistant loop (Phase 4, Track A).
@@ -611,7 +641,11 @@ function assistantReadTools() {
       const month = /^\d{4}-\d{2}$/.test(String(input.month || ''))
         ? input.month
         : todayIso().slice(0, 7)
-      return clientProfitability(data, { month, costRates: await buildCostRateMap() })
+      // The chat endpoint is owner-only, so the full history is in scope here.
+      const { billRateVersions, costRateVersions } = await loadRateVersions({
+        user: { role: 'owner' },
+      })
+      return clientProfitability(data, { month, billRateVersions, costRateVersions })
     },
     get_time_summary: async (input) => {
       const data = await appDataStore.read()
@@ -1099,6 +1133,12 @@ function scopeAppDataForSession(session, data) {
       // rates rather than being shipped to every phone by accident.
       stripeCustomerId: undefined,
       hourlyRate: 0,
+      // The pin and its ledger are rate data: the pin names the month whose
+      // bill rates this client is charged at, and the ledger is a record of
+      // every price change. Blanked beside the rate itself, for the same
+      // reason — what PB&J charges is between the owner and the client.
+      hourlyRatePeriod: null,
+      hourlyRateHistory: [],
       monthlyRate: undefined,
       customMonthlyFee: null,
       planId: null,
@@ -3472,7 +3512,7 @@ const server = createServer(async (request, response) => {
         ? periodParam
         : currentPeriod(periodType, todayIso())
       const includeFinancials = session.user.role === 'owner'
-      const costRates = includeFinancials ? await buildCostRateMap() : {}
+      const { billRateVersions, costRateVersions } = await loadRateVersions(session)
       const salesTaxRecord = includeFinancials
         ? await appDataStore.getSalesTaxRecord(clientId, period)
         : null
@@ -3510,7 +3550,8 @@ const server = createServer(async (request, response) => {
             period,
             today: todayIso(),
             includeFinancials,
-            costRates,
+            billRateVersions,
+            costRateVersions,
             salesTaxRecord: includeFinancials
               ? await appDataStore.getSalesTaxRecord(sub.id, period)
               : null,
@@ -3539,7 +3580,8 @@ const server = createServer(async (request, response) => {
         period,
         today: todayIso(),
         includeFinancials,
-        costRates,
+        billRateVersions,
+        costRateVersions,
         salesTaxRecord,
       })
       if (!recap) {
@@ -10437,6 +10479,74 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // PUT /api/clients/:id/hourly-rate-period — owner-only. "Move to current
+    // rates from <month>". A TARGETED endpoint rather than part of the bulk
+    // save, so a stale owner tab can never clobber a pin (cardinal rule 4).
+    const clientRatePeriodMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/hourly-rate-period$/,
+    )
+    if (clientRatePeriodMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'PUT') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can move a client’s rates' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const clientId = clientRatePeriodMatch[1]
+      const payload = await readJsonBody(request)
+      const period = String(payload?.period ?? '')
+      if (!/^\d{4}-\d{2}$/.test(period)) {
+        sendJson(response, 400, { error: 'period must be YYYY-MM' })
+        return
+      }
+      const data = await appDataStore.read()
+      const target = (data.clients ?? []).find((entry) => entry.id === clientId)
+      if (!target) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      // Only Hourly clients bill off a person's rate, so only they have a pin.
+      // Refused out loud rather than silently stored, because a pin on a
+      // monthly client would be a setting that never does anything.
+      if (target.billingMode !== 'hourly') {
+        sendJson(response, 400, {
+          error: 'not_hourly',
+          message:
+            'Only Hourly clients bill at a person’s rate, so only they have a rate month.',
+        })
+        return
+      }
+      const updated = await appDataStore.setClientHourlyRatePeriod({
+        clientId,
+        period,
+        actingUserId: session.user.id,
+      })
+      if (!updated) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'client_rate_period_moved',
+        updated.name ?? clientId,
+      )
+      sendJson(response, 200, updated)
+      return
+    }
+
     const clientActivityMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/activity$/)
     if (clientActivityMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
@@ -10574,6 +10684,189 @@ const server = createServer(async (request, response) => {
       }
       const billRate = await appDataStore.setEmployeeBillRate(userId, raw === '' ? null : raw)
       sendJson(response, 200, { ok: true, userId, billRate })
+      return
+    }
+
+    // Owner-only: the whole rate history, both sides. The Team page's history
+    // disclosures and the Client page's "Hourly rates" block read from here
+    // rather than from the workspace blob — `read()` deliberately does not
+    // select rate data, so it never reaches a staff session at all.
+    if (normalizedPath === '/api/rate-versions' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see rate history' })
+        return
+      }
+      sendJson(response, 200, await loadRateVersions(session))
+      return
+    }
+
+    // Owner-only: save one person's BILL rate for one month. Saving a month
+    // that already has a row replaces it (a correction); any other month is a
+    // new version. `users.bill_rate` re-mirrors the newest afterwards.
+    if (normalizedPath === '/api/team/bill-rate-version' && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can set rate versions' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const userId = String(payload?.userId ?? '')
+      const effectivePeriod = String(payload?.effectivePeriod ?? '')
+      const rate = Number(payload?.rate)
+      if (!userId) {
+        sendJson(response, 400, { error: 'userId is required' })
+        return
+      }
+      if (!/^\d{4}-\d{2}$/.test(effectivePeriod)) {
+        sendJson(response, 400, { error: 'effectivePeriod must be YYYY-MM' })
+        return
+      }
+      if (!Number.isFinite(rate) || rate < 0) {
+        sendJson(response, 400, { error: 'rate must be a non-negative number' })
+        return
+      }
+      const versions = await appDataStore.upsertBillRateVersion({
+        userId,
+        effectivePeriod,
+        rate,
+        actingUserId: session.user.id,
+      })
+      // The store REFUSES SILENTLY for an id that names nobody — it returns an
+      // empty list rather than writing an orphan row. An empty list is also
+      // what a real person with no history would get back, so the id is only
+      // called missing once the roster says it is.
+      if (versions.length === 0 && !(await isKnownTeamMemberId(userId))) {
+        sendJson(response, 404, { error: 'User not found' })
+        return
+      }
+      sendJson(response, 200, { ok: true, userId, versions })
+      return
+    }
+
+    // Owner-only: remove one BILL rate version. The store refuses anything but
+    // the newest, and refuses that while a client is still pinned at or after
+    // it — both come back as a sentence, which is what 409 carries.
+    if (normalizedPath === '/api/team/bill-rate-version' && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can set rate versions' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const userId = String(payload?.userId ?? '')
+      const effectivePeriod = String(payload?.effectivePeriod ?? '')
+      if (!userId || !/^\d{4}-\d{2}$/.test(effectivePeriod)) {
+        sendJson(response, 400, { error: 'userId and effectivePeriod (YYYY-MM) are required' })
+        return
+      }
+      try {
+        const versions = await appDataStore.deleteBillRateVersion({ userId, effectivePeriod })
+        sendJson(response, 200, { ok: true, userId, versions })
+      } catch (error) {
+        if (error instanceof RateVersionError) {
+          sendJson(response, 409, { error: 'rate_version_locked', message: error.message })
+          return
+        }
+        throw error
+      }
+      return
+    }
+
+    // Owner-only: save one person's COST rate from one day on. Same rules as
+    // the bill side, keyed by date rather than month.
+    if (normalizedPath === '/api/team/cost-rate-version' && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can set rate versions' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const userId = String(payload?.userId ?? '')
+      const effectiveDate = String(payload?.effectiveDate ?? '')
+      const rate = Number(payload?.rate)
+      if (!userId) {
+        sendJson(response, 400, { error: 'userId is required' })
+        return
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) {
+        sendJson(response, 400, { error: 'effectiveDate must be YYYY-MM-DD' })
+        return
+      }
+      if (!Number.isFinite(rate) || rate < 0) {
+        sendJson(response, 400, { error: 'rate must be a non-negative number' })
+        return
+      }
+      const versions = await appDataStore.upsertCostRateVersion({
+        userId,
+        effectiveDate,
+        rate,
+        actingUserId: session.user.id,
+      })
+      // Same silent refusal as the bill side — see the note there.
+      if (versions.length === 0 && !(await isKnownTeamMemberId(userId))) {
+        sendJson(response, 404, { error: 'User not found' })
+        return
+      }
+      sendJson(response, 200, { ok: true, userId, versions })
+      return
+    }
+
+    // Owner-only: remove one COST rate version — the newest only.
+    if (normalizedPath === '/api/team/cost-rate-version' && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can set rate versions' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const userId = String(payload?.userId ?? '')
+      const effectiveDate = String(payload?.effectiveDate ?? '')
+      if (!userId || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) {
+        sendJson(response, 400, { error: 'userId and effectiveDate (YYYY-MM-DD) are required' })
+        return
+      }
+      try {
+        const versions = await appDataStore.deleteCostRateVersion({ userId, effectiveDate })
+        sendJson(response, 200, { ok: true, userId, versions })
+      } catch (error) {
+        if (error instanceof RateVersionError) {
+          sendJson(response, 409, { error: 'rate_version_locked', message: error.message })
+          return
+        }
+        throw error
+      }
       return
     }
 
