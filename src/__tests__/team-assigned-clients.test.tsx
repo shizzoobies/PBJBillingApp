@@ -27,6 +27,14 @@ import type { AppData, Client, TeamMember } from '../lib/types'
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
 
 vi.mock('../lib/api', () => ({
+  // The rate-history calls are not this suite's subject; they are here because
+  // the page now loads its rate versions on mount and the module is mocked
+  // wholesale, so an absent export is a crash rather than a no-op.
+  deleteBillRateVersion: vi.fn(),
+  deleteCostRateVersion: vi.fn(),
+  fetchRateVersions: vi.fn(async () => ({ billRateVersions: [], costRateVersions: [] })),
+  upsertBillRateVersion: vi.fn(),
+  upsertCostRateVersion: vi.fn(),
   fetchTeam: vi.fn(async () => ({ users: members })),
   fetchTeamActivity: vi.fn(async () => ({ entries: [] })),
   fetchTeamSessions: vi.fn(async () => ({ sessions: [] })),

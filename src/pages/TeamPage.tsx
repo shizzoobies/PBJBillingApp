@@ -6,6 +6,9 @@ import { highlightMatch } from '../lib/highlight'
 import { ListSearch } from '../components/ListSearch'
 import { CollapsibleSection } from '../components/SectionKit'
 import {
+  deleteBillRateVersion,
+  deleteCostRateVersion,
+  fetchRateVersions,
   fetchTeam,
   fetchTeamActivity,
   fetchTeamSessions,
@@ -15,18 +18,25 @@ import {
   revokeAllTeamSessions,
   revokeTeamSession,
   setClientAssignedTeamRequest,
-  setTeamMemberBillRate,
-  setTeamMemberCostRate,
   teamTotpReset,
+  upsertBillRateVersion,
+  upsertCostRateVersion,
 } from '../lib/api'
 import {
   ApiError,
   type ActivityEntry,
+  type BillRateVersion,
   type Client,
+  type CostRateVersion,
   type TeamMember,
   type TeamSession,
 } from '../lib/types'
-import { describeActivityAction, formatActivityTimestamp, relativeTime } from '../lib/utils'
+import {
+  currency,
+  describeActivityAction,
+  formatActivityTimestamp,
+  relativeTime,
+} from '../lib/utils'
 import { selectableClients } from '../lib/clientLifecycle'
 import { taskClientIdsForUser } from '../../lib/data-scope.js'
 
@@ -59,17 +69,65 @@ export function TeamPage() {
   const [billDraft, setBillDraft] = useState<Record<string, string>>({})
   const [billSavingId, setBillSavingId] = useState<string | null>(null)
 
+  /**
+   * THE RATE HISTORY, fetched rather than read off the workspace snapshot:
+   * `read()` deliberately does not select rate data, so it never reaches a
+   * staff session at all. Same reasoning as ReportsPage's cost-rate map.
+   */
+  const [billVersions, setBillVersions] = useState<BillRateVersion[]>([])
+  const [costVersions, setCostVersions] = useState<CostRateVersion[]>([])
+  const [historyOpen, setHistoryOpen] = useState<Record<string, boolean>>({})
+  /** Keyed `bill-<id>` / `cost-<id>`, so one box's refusal never blanks the other. */
+  const [rateError, setRateError] = useState<Record<string, string>>({})
+  // The common edit is a raise starting NOW, so the default is this month /
+  // today and the owner types one number, exactly as before. Picking a
+  // different month is the rarer case and costs one extra glance.
+  const thisMonth = new Date().toISOString().slice(0, 7)
+  const todayIso = new Date().toISOString().slice(0, 10)
+  const [billFromDraft, setBillFromDraft] = useState<Record<string, string>>({})
+  const [costFromDraft, setCostFromDraft] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void fetchRateVersions(controller.signal)
+      .then(({ billRateVersions, costRateVersions }) => {
+        setBillVersions(billRateVersions)
+        setCostVersions(costRateVersions)
+      })
+      // Non-fatal: the boxes still save, the history list is simply empty.
+      // A preview-as session 403s here and gets two empty lists, which is the
+      // same shape — so previewing shows no history and no error either.
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
+
+  const billVersionsFor = (userId: string) => billVersions.filter((row) => row.userId === userId)
+  const costVersionsFor = (userId: string) => costVersions.filter((row) => row.userId === userId)
+  /** Replace one person's slice wholesale — the endpoint returns their list. */
+  const replaceBillVersions = (userId: string, rows: BillRateVersion[]) =>
+    setBillVersions((current) => [...current.filter((row) => row.userId !== userId), ...rows])
+  const replaceCostVersions = (userId: string, rows: CostRateVersion[]) =>
+    setCostVersions((current) => [...current.filter((row) => row.userId !== userId), ...rows])
+
   const handleSaveBillRate = async (member: TeamMember) => {
     const raw = billDraft[member.id]
     const value = raw === undefined ? '' : raw.trim()
     const billRate = value === '' ? null : Number(value)
-    if (billRate !== null && (!Number.isFinite(billRate) || billRate < 0)) return
+    if (billRate === null || !Number.isFinite(billRate) || billRate < 0) return
+    const effectivePeriod = billFromDraft[member.id] ?? thisMonth
+    if (!/^\d{4}-\d{2}$/.test(effectivePeriod)) return
     setBillSavingId(member.id)
+    setRateError((current) => ({ ...current, [`bill-${member.id}`]: '' }))
     try {
-      const result = await setTeamMemberBillRate(member.id, billRate)
+      const result = await upsertBillRateVersion(member.id, effectivePeriod, billRate)
+      replaceBillVersions(member.id, result.versions)
+      // `users.bill_rate` mirrors the NEWEST version, which a backfill does not
+      // move — so the card reads the mirror off the list rather than assuming
+      // the rate just typed is now the current one.
+      const newest = result.versions[result.versions.length - 1] ?? null
       setMembers((current) =>
         current.map((entry) =>
-          entry.id === member.id ? { ...entry, billRate: result.billRate } : entry,
+          entry.id === member.id ? { ...entry, billRate: newest?.rate ?? null } : entry,
         ),
       )
       setBillDraft((current) => {
@@ -77,10 +135,34 @@ export function TeamPage() {
         delete next[member.id]
         return next
       })
-    } catch {
-      // Keep the draft so the owner can retry.
+    } catch (error) {
+      setRateError((current) => ({
+        ...current,
+        [`bill-${member.id}`]:
+          error instanceof ApiError ? error.message : 'Could not save the rate.',
+      }))
     } finally {
       setBillSavingId(null)
+    }
+  }
+
+  const handleRemoveBillVersion = async (member: TeamMember, effectivePeriod: string) => {
+    setRateError((current) => ({ ...current, [`bill-${member.id}`]: '' }))
+    try {
+      const result = await deleteBillRateVersion(member.id, effectivePeriod)
+      replaceBillVersions(member.id, result.versions)
+      const newest = result.versions[result.versions.length - 1] ?? null
+      setMembers((current) =>
+        current.map((entry) =>
+          entry.id === member.id ? { ...entry, billRate: newest?.rate ?? null } : entry,
+        ),
+      )
+    } catch (error) {
+      setRateError((current) => ({
+        ...current,
+        [`bill-${member.id}`]:
+          error instanceof ApiError ? error.message : 'Could not remove the rate.',
+      }))
     }
   }
 
@@ -88,13 +170,20 @@ export function TeamPage() {
     const raw = costDraft[member.id]
     const value = raw === undefined ? '' : raw.trim()
     const costRate = value === '' ? null : Number(value)
-    if (costRate !== null && (!Number.isFinite(costRate) || costRate < 0)) return
+    if (costRate === null || !Number.isFinite(costRate) || costRate < 0) return
+    const effectiveDate = costFromDraft[member.id] ?? todayIso
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) return
     setCostSavingId(member.id)
+    setRateError((current) => ({ ...current, [`cost-${member.id}`]: '' }))
     try {
-      const result = await setTeamMemberCostRate(member.id, costRate)
+      const result = await upsertCostRateVersion(member.id, effectiveDate, costRate)
+      replaceCostVersions(member.id, result.versions)
+      // Same mirror rule as the bill rate: the headline follows the newest
+      // version, so backfilling an older day leaves the card alone.
+      const newest = result.versions[result.versions.length - 1] ?? null
       setMembers((current) =>
         current.map((entry) =>
-          entry.id === member.id ? { ...entry, costRate: result.costRate } : entry,
+          entry.id === member.id ? { ...entry, costRate: newest?.rate ?? null } : entry,
         ),
       )
       setCostDraft((current) => {
@@ -102,10 +191,34 @@ export function TeamPage() {
         delete next[member.id]
         return next
       })
-    } catch {
-      // Keep the draft so the owner can retry.
+    } catch (error) {
+      setRateError((current) => ({
+        ...current,
+        [`cost-${member.id}`]:
+          error instanceof ApiError ? error.message : 'Could not save the rate.',
+      }))
     } finally {
       setCostSavingId(null)
+    }
+  }
+
+  const handleRemoveCostVersion = async (member: TeamMember, effectiveDate: string) => {
+    setRateError((current) => ({ ...current, [`cost-${member.id}`]: '' }))
+    try {
+      const result = await deleteCostRateVersion(member.id, effectiveDate)
+      replaceCostVersions(member.id, result.versions)
+      const newest = result.versions[result.versions.length - 1] ?? null
+      setMembers((current) =>
+        current.map((entry) =>
+          entry.id === member.id ? { ...entry, costRate: newest?.rate ?? null } : entry,
+        ),
+      )
+    } catch (error) {
+      setRateError((current) => ({
+        ...current,
+        [`cost-${member.id}`]:
+          error instanceof ApiError ? error.message : 'Could not remove the rate.',
+      }))
     }
   }
 
@@ -505,6 +618,40 @@ export function TeamPage() {
                               {billSavingId === member.id ? 'Saving…' : 'Save'}
                             </button>
                           </div>
+                          <div className="team-cost-input-row team-rate-from">
+                            <label htmlFor={`bill-from-${member.id}`} className="team-cost-hint">
+                              Effective from
+                            </label>
+                            <input
+                              id={`bill-from-${member.id}`}
+                              type="month"
+                              value={billFromDraft[member.id] ?? thisMonth}
+                              onChange={(event) =>
+                                setBillFromDraft((current) => ({
+                                  ...current,
+                                  [member.id]: event.target.value,
+                                }))
+                              }
+                            />
+                          </div>
+                          <RateHistoryList
+                            open={historyOpen[`bill-${member.id}`] === true}
+                            onToggle={() =>
+                              setHistoryOpen((current) => ({
+                                ...current,
+                                [`bill-${member.id}`]: !current[`bill-${member.id}`],
+                              }))
+                            }
+                            rows={billVersionsFor(member.id).map((row) => ({
+                              key: row.effectivePeriod,
+                              when: row.effectivePeriod,
+                              rate: row.rate,
+                            }))}
+                            onRemoveNewest={(key) => void handleRemoveBillVersion(member, key)}
+                          />
+                          {rateError[`bill-${member.id}`] ? (
+                            <p className="team-error">{rateError[`bill-${member.id}`]}</p>
+                          ) : null}
                         </div>
                       ) : null}
                       {/*
@@ -551,6 +698,40 @@ export function TeamPage() {
                               {costSavingId === member.id ? 'Saving…' : 'Save'}
                             </button>
                           </div>
+                          <div className="team-cost-input-row team-rate-from">
+                            <label htmlFor={`cost-from-${member.id}`} className="team-cost-hint">
+                              Effective from
+                            </label>
+                            <input
+                              id={`cost-from-${member.id}`}
+                              type="date"
+                              value={costFromDraft[member.id] ?? todayIso}
+                              onChange={(event) =>
+                                setCostFromDraft((current) => ({
+                                  ...current,
+                                  [member.id]: event.target.value,
+                                }))
+                              }
+                            />
+                          </div>
+                          <RateHistoryList
+                            open={historyOpen[`cost-${member.id}`] === true}
+                            onToggle={() =>
+                              setHistoryOpen((current) => ({
+                                ...current,
+                                [`cost-${member.id}`]: !current[`cost-${member.id}`],
+                              }))
+                            }
+                            rows={costVersionsFor(member.id).map((row) => ({
+                              key: row.effectiveDate,
+                              when: row.effectiveDate,
+                              rate: row.rate,
+                            }))}
+                            onRemoveNewest={(key) => void handleRemoveCostVersion(member, key)}
+                          />
+                          {rateError[`cost-${member.id}`] ? (
+                            <p className="team-error">{rateError[`cost-${member.id}`]}</p>
+                          ) : null}
                         </div>
                       ) : null}
 
@@ -890,6 +1071,58 @@ function ClientsTheyCanSeeSection({
         </div>
       ) : null}
       {addedNote ? <span className="team-success-copy">{addedNote}</span> : null}
+    </div>
+  )
+}
+
+/**
+ * The prior versions of one rate, behind a disclosure.
+ *
+ * REMOVE IS OFFERED ON THE NEWEST ROW ONLY, because that is the only one the
+ * server will delete: an older version is what past months were billed or
+ * costed at, and removing it would silently reprice them. The server refuses
+ * regardless — this just stops the page offering a button that cannot work.
+ *
+ * `rows` arrive from the server already sorted oldest-first per person, so
+ * nothing here re-sorts them.
+ */
+function RateHistoryList({
+  open,
+  onToggle,
+  rows,
+  onRemoveNewest,
+}: {
+  open: boolean
+  onToggle: () => void
+  rows: Array<{ key: string; when: string; rate: number }>
+  onRemoveNewest: (key: string) => void
+}) {
+  if (rows.length === 0) return null
+  const newest = rows[rows.length - 1]
+  return (
+    <div className="team-rate-history">
+      <button type="button" className="team-icon-button" onClick={onToggle}>
+        Rate history ({rows.length})
+      </button>
+      {open ? (
+        <ul className="recap-list">
+          {rows.map((row) => (
+            <li key={row.key}>
+              <span>{row.when}</span>
+              <span>{currency.format(row.rate)}/hr</span>
+              {row.key === newest.key ? (
+                <button
+                  type="button"
+                  className="team-icon-button"
+                  onClick={() => onRemoveNewest(row.key)}
+                >
+                  Remove
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   )
 }

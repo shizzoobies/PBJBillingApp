@@ -4343,6 +4343,25 @@ td strong {
   width: 96px;
 }
 
+/* The "Effective from" row. A month or date picker needs more room than the
+   96px a bare number gets, or the browser clips its own spinner. */
+.team-rate-from input {
+  width: auto;
+  min-width: 150px;
+}
+
+/* The disclosure holding one rate's prior versions, under its box. */
+.team-rate-history {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.team-rate-history .recap-list {
+  align-self: stretch;
+}
+
 .team-icon-button {
   display: inline-flex;
   align-items: center;
