@@ -18,7 +18,13 @@ import {
 } from '../lib/checklist-identity.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import { latestBillRate, latestCostRate, ratePeriodAsOf } from '../lib/rate-history.js'
-import { sanitizeProposalPricing } from '../lib/proposal-pricing.js'
+import {
+  cleanProposalInputs,
+  cleanProposalProspect,
+  cleanProposalSelections,
+  priceProposal,
+  sanitizeProposalPricing,
+} from '../lib/proposal-pricing.js'
 import { isWaitingOnOpen, waitingOnStage } from '../lib/waiting-on-state.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
@@ -1069,6 +1075,41 @@ export class PackageApplyError extends Error {
     super(message)
     this.name = 'PackageApplyError'
   }
+}
+
+/**
+ * A proposal write the proposal's own state refuses: editing an accepted or
+ * declined proposal, deleting one that is not a draft, accepting twice. A
+ * sentence, for the same reason `PackageApplyError` is one — the route answers
+ * 409 with it and the page shows it as-is.
+ */
+export class ProposalStateError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'ProposalStateError'
+  }
+}
+
+export const PROPOSAL_STATUSES = ['draft', 'sent', 'accepted', 'declined']
+
+/** Every `proposals` column, in the order `mapProposal` reads them. */
+const PROPOSAL_COLUMNS = `id, status, prospect, client_id, inputs, selections, pricing_snapshot,
+  letter, letter_at, messages, email_log, sent_at, accepted_at, declined_at, decline_note,
+  copied_from_id, created_by, created_at, updated_at`
+
+/**
+ * The priced snapshot a proposal carries (spec §4.2). Always the CURRENT
+ * catalog: the snapshot moves only when the proposal itself is edited or
+ * repriced, never because the catalog changed underneath it.
+ */
+function proposalSnapshot(pricing, inputs, selections, at) {
+  const { lines, totals } = priceProposal({
+    catalog: pricing,
+    rates: pricing.rates,
+    inputs,
+    selections,
+  })
+  return { rates: { ...pricing.rates }, lines, totals, catalogAt: at }
 }
 
 /**
@@ -4040,6 +4081,37 @@ export class AppDataStore {
           description text not null default '',
           plan_ids text[] not null default '{}',
           template_ids text[] not null default '{}',
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+
+      // PROPOSALS (featreq-311473e2 / featreq-ef18a38e, spec §4.2): one row per
+      // prospect estimate, with its letter, intake chat and email log. Outside
+      // the bulk save and the workspace fingerprint exactly like `packages` and
+      // `spitball_sessions` — endpoint-managed, so a stale tab can never rewrite
+      // a proposal and editing one can never 409 another tab. `client_id` has NO
+      // foreign key (the `plan_ids` idiom): a proposal outlives a deleted
+      // client, and the clients wipe in `write()` must never cascade into it.
+      await this.pool.query(`
+        create table if not exists proposals (
+          id text primary key,
+          status text not null default 'draft',
+          prospect jsonb not null default '{}'::jsonb,
+          client_id text,
+          inputs jsonb not null default '{}'::jsonb,
+          selections jsonb not null default '[]'::jsonb,
+          pricing_snapshot jsonb,
+          letter jsonb,
+          letter_at timestamptz,
+          messages jsonb not null default '[]'::jsonb,
+          email_log jsonb not null default '[]'::jsonb,
+          sent_at timestamptz,
+          accepted_at timestamptz,
+          declined_at timestamptz,
+          decline_note text,
+          copied_from_id text,
+          created_by text,
           created_at timestamptz not null default now(),
           updated_at timestamptz not null default now()
         )
@@ -9834,6 +9906,381 @@ export class AppDataStore {
     if (authState.packages.length === before) return false
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return true
+  }
+
+  // ---- Proposals (featreq-311473e2 / featreq-ef18a38e) ----
+  //
+  // docs/plans/proposals-2026-09.md §4.2. A proposal is a prospect's estimate,
+  // letter, intake chat and outcome. Storage mirrors `packages`: a `proposals`
+  // table on Postgres, the auth-state file (never app-data.json, which the bulk
+  // save replaces wholesale) on the file backend.
+  //
+  // Every write that changes inputs or selections re-prices through
+  // `priceProposal` with the firm's CURRENT catalog, so `pricing_snapshot` is
+  // always the calculator's answer — the letter, the PDF and the list read it
+  // and nothing else ever computes a price.
+
+  /** Normalize a stored proposal (either backend's row shape) for the API. */
+  static mapProposal(row) {
+    if (!row) return null
+    const json = (value) => (typeof value === 'string' ? safeJsonParse(value) : value)
+    const iso = (value) => (value ? new Date(value).toISOString() : null)
+    const list = (value) => {
+      const parsed = json(value)
+      return Array.isArray(parsed) ? parsed : []
+    }
+    return {
+      id: row.id,
+      status: PROPOSAL_STATUSES.includes(row.status) ? row.status : 'draft',
+      prospect: cleanProposalProspect(json(row.prospect)),
+      clientId: row.client_id ?? row.clientId ?? null,
+      inputs: cleanProposalInputs(json(row.inputs)),
+      selections: cleanProposalSelections(json(row.selections)),
+      pricingSnapshot: json(row.pricing_snapshot ?? row.pricingSnapshot) ?? null,
+      letter: json(row.letter) ?? null,
+      letterAt: iso(row.letter_at ?? row.letterAt),
+      messages: list(row.messages),
+      emailLog: list(row.email_log ?? row.emailLog),
+      sentAt: iso(row.sent_at ?? row.sentAt),
+      acceptedAt: iso(row.accepted_at ?? row.acceptedAt),
+      declinedAt: iso(row.declined_at ?? row.declinedAt),
+      declineNote: row.decline_note ?? row.declineNote ?? null,
+      copiedFromId: row.copied_from_id ?? row.copiedFromId ?? null,
+      createdBy: row.created_by ?? row.createdBy ?? null,
+      createdAt: iso(row.created_at ?? row.createdAt) ?? nowIso(),
+      updatedAt: iso(row.updated_at ?? row.updatedAt),
+    }
+  }
+
+  /** Every proposal, most recently touched first. Owner-only at the endpoint. */
+  async listProposals() {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${PROPOSAL_COLUMNS} from proposals order by updated_at desc`,
+      )
+      return rows.map((row) => AppDataStore.mapProposal(row))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.proposals) ? authState.proposals : []
+    return list
+      .map((row) => AppDataStore.mapProposal(row))
+      .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
+  }
+
+  /** One proposal, or null. */
+  async getProposal(id) {
+    if (!id) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${PROPOSAL_COLUMNS} from proposals where id = $1`,
+        [id],
+      )
+      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+    }
+    const authState = await readJson(localAuthPath)
+    const found = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+      (row) => row && row.id === id,
+    )
+    return found ? AppDataStore.mapProposal(found) : null
+  }
+
+  /**
+   * Start a proposal. Everything is optional — "New proposal" opens an empty
+   * draft — and the snapshot is priced from the firm's catalog at creation.
+   */
+  async createProposal({
+    prospect = {},
+    clientId = null,
+    inputs = {},
+    selections = [],
+    createdBy = null,
+    copiedFromId = null,
+  } = {}) {
+    const pricing = (await this.getFirmSettings()).proposalPricing
+    const cleanInputs = cleanProposalInputs(
+      inputs,
+      pricing.inputs.map((input) => input.key),
+    )
+    const cleanSelections = cleanProposalSelections(selections)
+    const now = nowIso()
+    const record = {
+      id: `prop-${randomUUID().slice(0, 8)}`,
+      status: 'draft',
+      prospect: cleanProposalProspect(prospect),
+      clientId: typeof clientId === 'string' && clientId ? clientId : null,
+      inputs: cleanInputs,
+      selections: cleanSelections,
+      pricingSnapshot: proposalSnapshot(pricing, cleanInputs, cleanSelections, now),
+      letter: null,
+      letterAt: null,
+      messages: [],
+      emailLog: [],
+      sentAt: null,
+      acceptedAt: null,
+      declinedAt: null,
+      declineNote: null,
+      copiedFromId: typeof copiedFromId === 'string' && copiedFromId ? copiedFromId : null,
+      createdBy: typeof createdBy === 'string' && createdBy ? createdBy : null,
+      createdAt: now,
+      updatedAt: now,
+    }
+
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `insert into proposals (id, status, prospect, client_id, inputs, selections,
+            pricing_snapshot, copied_from_id, created_by, created_at, updated_at)
+         values ($1, 'draft', $2::jsonb, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $9)
+         returning ${PROPOSAL_COLUMNS}`,
+        [
+          record.id,
+          JSON.stringify(record.prospect),
+          record.clientId,
+          JSON.stringify(record.inputs),
+          JSON.stringify(record.selections),
+          JSON.stringify(record.pricingSnapshot),
+          record.copiedFromId,
+          record.createdBy,
+          now,
+        ],
+      )
+      return AppDataStore.mapProposal(rows[0] ?? record)
+    }
+
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.proposals)) authState.proposals = []
+    authState.proposals.push(record)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapProposal(record)
+  }
+
+  /**
+   * Edit a proposal's prospect, client link, inputs, selections or letter
+   * text, and RE-PRICE it at the current catalog. A patch that says nothing
+   * about a field is not a statement about it; an empty patch is exactly
+   * "Reprice at today's catalog".
+   *
+   * An accepted or declined proposal is a record of what happened and is
+   * refused (copy it to change it). Returns null when there is no such proposal.
+   */
+  async updateProposal(id, patch = {}) {
+    const current = await this.getProposal(id)
+    if (!current) return null
+    if (current.status === 'accepted' || current.status === 'declined') {
+      throw new ProposalStateError(
+        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+      )
+    }
+    const has = (key) => Object.prototype.hasOwnProperty.call(patch ?? {}, key)
+    const pricing = (await this.getFirmSettings()).proposalPricing
+    const next = {
+      prospect: has('prospect') ? cleanProposalProspect(patch.prospect) : current.prospect,
+      clientId: has('clientId')
+        ? typeof patch.clientId === 'string' && patch.clientId
+          ? patch.clientId
+          : null
+        : current.clientId,
+      inputs: has('inputs')
+        ? cleanProposalInputs(
+            patch.inputs,
+            pricing.inputs.map((input) => input.key),
+          )
+        : current.inputs,
+      selections: has('selections') ? cleanProposalSelections(patch.selections) : current.selections,
+      letter: has('letterText')
+        ? {
+            subject: current.letter?.subject ?? '',
+            sections: current.letter?.sections ?? [],
+            text: typeof patch.letterText === 'string' ? patch.letterText.slice(0, 20000) : '',
+          }
+        : current.letter,
+    }
+    const updatedAt = nowIso()
+    const pricingSnapshot = proposalSnapshot(pricing, next.inputs, next.selections, updatedAt)
+
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposals
+            set prospect = $2::jsonb, client_id = $3, inputs = $4::jsonb,
+                selections = $5::jsonb, pricing_snapshot = $6::jsonb, letter = $7::jsonb,
+                updated_at = now()
+          where id = $1
+          returning ${PROPOSAL_COLUMNS}`,
+        [
+          id,
+          JSON.stringify(next.prospect),
+          next.clientId,
+          JSON.stringify(next.inputs),
+          JSON.stringify(next.selections),
+          JSON.stringify(pricingSnapshot),
+          next.letter ? JSON.stringify(next.letter) : null,
+        ],
+      )
+      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+    }
+
+    const authState = await readJson(localAuthPath)
+    const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+      (row) => row && row.id === id,
+    )
+    if (!target) return null
+    Object.assign(target, next, { pricingSnapshot, updatedAt })
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapProposal(target)
+  }
+
+  /**
+   * Delete a DRAFT. A proposal that went out is part of the record — decline
+   * it instead. Throws ProposalStateError for a non-draft; false when missing.
+   */
+  async deleteProposal(id) {
+    const current = await this.getProposal(id)
+    if (!current) return false
+    if (current.status !== 'draft') {
+      throw new ProposalStateError('Only a draft can be deleted — decline a sent proposal instead.')
+    }
+    if (this.pool) {
+      const result = await this.pool.query(
+        `delete from proposals where id = $1 and status = 'draft' returning id`,
+        [id],
+      )
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.proposals) ? authState.proposals : []
+    authState.proposals = list.filter((row) => !row || row.id !== id)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return true
+  }
+
+  /**
+   * "Copy to new proposal" (spec §5.5): a new DRAFT with the same prospect,
+   * client link, inputs and selections, priced at today's catalog, pointing
+   * back at the one it came from. How a declined prospect is reopened.
+   */
+  async copyProposal(id, { createdBy = null } = {}) {
+    const source = await this.getProposal(id)
+    if (!source) return null
+    return this.createProposal({
+      prospect: source.prospect,
+      clientId: source.clientId,
+      inputs: source.inputs,
+      selections: source.selections,
+      createdBy,
+      copiedFromId: source.id,
+    })
+  }
+
+  /**
+   * Move a proposal's status and stamp when: `sent_at` on the FIRST send only,
+   * `accepted_at` / `declined_at` (+ the decline note) on those. `clientId`
+   * links the client Accept created or used. Returns the proposal, or null.
+   */
+  async setProposalStatus(id, status, { note = null, clientId = null } = {}) {
+    if (!id || !PROPOSAL_STATUSES.includes(status)) return null
+    const cleanNote = typeof note === 'string' ? note.trim().slice(0, 2000) : null
+    const linkClient = typeof clientId === 'string' && clientId ? clientId : null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposals
+            set status = $2,
+                sent_at = case when $2 = 'sent' then coalesce(sent_at, now()) else sent_at end,
+                accepted_at = case when $2 = 'accepted' then now() else accepted_at end,
+                declined_at = case when $2 = 'declined' then now() else declined_at end,
+                decline_note = case when $2 = 'declined' then $3 else decline_note end,
+                client_id = coalesce($4, client_id),
+                updated_at = now()
+          where id = $1
+          returning ${PROPOSAL_COLUMNS}`,
+        [id, status, cleanNote, linkClient],
+      )
+      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+    }
+    const authState = await readJson(localAuthPath)
+    const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+      (row) => row && row.id === id,
+    )
+    if (!target) return null
+    const now = nowIso()
+    target.status = status
+    if (status === 'sent') target.sentAt = target.sentAt ?? now
+    if (status === 'accepted') target.acceptedAt = now
+    if (status === 'declined') {
+      target.declinedAt = now
+      target.declineNote = cleanNote
+    }
+    if (linkClient) target.clientId = linkClient
+    target.updatedAt = now
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapProposal(target)
+  }
+
+  /**
+   * Append one entry to a proposal's email log — a send (`kind: 'send'`) or a
+   * provider delivery event (`kind: 'delivery'`), the same shapes as
+   * `invoices.email_log`. NEVER touches status: a bounce does not un-send a
+   * proposal. Idempotent on (kind, event, providerId), because Resend retries
+   * until it gets a 200. Returns the proposal, or null when there is none.
+   */
+  async appendProposalEmailEvent(id, entry = {}) {
+    const current = await this.getProposal(id)
+    if (!current) return null
+    const kind = entry.kind === 'delivery' ? 'delivery' : 'send'
+    const event = kind === 'delivery' ? String(entry.event ?? '').trim().slice(0, 40) : null
+    if (kind === 'delivery' && !event) return null
+    const providerId = entry.providerId ? String(entry.providerId) : null
+    const duplicate =
+      providerId !== null &&
+      current.emailLog.some(
+        (logged) =>
+          logged?.kind === kind &&
+          (logged?.event ?? null) === event &&
+          logged?.providerId === providerId,
+      )
+    if (duplicate) return current
+
+    const at =
+      entry.at && !Number.isNaN(new Date(entry.at).getTime())
+        ? new Date(entry.at).toISOString()
+        : nowIso()
+    const clean = {
+      kind,
+      at,
+      providerId,
+      to: (Array.isArray(entry.to) ? entry.to : [entry.to])
+        .filter(Boolean)
+        .map((address) => String(address).slice(0, 320))
+        .slice(0, 10),
+      ...(kind === 'send'
+        ? {
+            ok: entry.ok === true,
+            subject: String(entry.subject ?? '').slice(0, 200),
+            error: entry.error ? String(entry.error).slice(0, 300) : null,
+          }
+        : { event, detail: String(entry.detail ?? '').slice(0, 300) }),
+    }
+
+    if (this.pool) {
+      // Appended IN the row, like the invoice log: two events about one
+      // proposal can land at once. `status` is deliberately absent.
+      const { rows } = await this.pool.query(
+        `update proposals
+            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                updated_at = now()
+          where id = $1
+          returning ${PROPOSAL_COLUMNS}`,
+        [id, JSON.stringify([clean])],
+      )
+      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+    }
+    const authState = await readJson(localAuthPath)
+    const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+      (row) => row && row.id === id,
+    )
+    if (!target) return null
+    target.emailLog = [...(Array.isArray(target.emailLog) ? target.emailLog : []), clean]
+    target.updatedAt = nowIso()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapProposal(target)
   }
 
   /**

@@ -15,6 +15,7 @@ import {
   InvoiceLockedError,
   ManualPaymentError,
   PackageApplyError,
+  ProposalStateError,
   RateVersionError,
   mapChecklistItemRow,
   mapClientRow,
@@ -16743,5 +16744,266 @@ describe('firm settings catalog seeding via read() and a fresh-file bulk save (f
     const after = await store.getFirmSettings()
     expect(after.name).not.toBe('Injected')
     expect(after.proposalPricing.rates.bookkeeper).not.toBe(999)
+  })
+})
+
+/**
+ * Proposals (featreq-311473e2, spec §4.2) — their own table on Postgres, the
+ * auth-state file on the file backend, outside the bulk save and the workspace
+ * fingerprint like packages and spitball sessions.
+ */
+async function clearProposals() {
+  const authState = existsSync(localAuthPath)
+    ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+    : {}
+  authState.proposals = []
+  await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+}
+
+/** Firm rates for the proposal tests: B 75 / A 115 / C 125. */
+async function setProposalRates(target) {
+  const seed = (await target.getFirmSettings()).proposalPricing
+  await target.updateFirmSettings({
+    proposalPricing: { ...seed, rates: { bookkeeper: 75, accountant: 115, controller: 125 } },
+  })
+}
+
+describe('proposals (file backend)', () => {
+  beforeEach(async () => {
+    await clearProposals()
+    await setProposalRates(store)
+  })
+
+  it('creates a draft priced by the calculator', async () => {
+    const created = await store.createProposal({
+      prospect: { company: 'Acme Books', contactName: 'Pat', email: 'pat@acme.test' },
+      inputs: { transactions: 120, notAnInput: 5 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+      createdBy: 'emp-patrice',
+    })
+    expect(created.id).toMatch(/^prop-/)
+    expect(created.status).toBe('draft')
+    expect(created.inputs).toEqual({ transactions: 120 })
+    expect(created.pricingSnapshot.lines[0]).toMatchObject({ amount: 630 })
+    expect(created.pricingSnapshot.totals.monthly).toBe(630)
+    expect(created.pricingSnapshot.rates).toEqual({ bookkeeper: 75, accountant: 115, controller: 125 })
+  })
+
+  it('re-prices on every edit and survives a fresh store instance', async () => {
+    const created = await store.createProposal({ inputs: { transactions: 120 } })
+    await store.updateProposal(created.id, {
+      selections: [{ serviceId: 'reconciliations' }],
+      inputs: { balanceSheetAccounts: 20 },
+    })
+    const reopened = new AppDataStore()
+    await reopened.initialize()
+    const loaded = await reopened.getProposal(created.id)
+    expect(loaded.inputs).toEqual({ balanceSheetAccounts: 20 })
+    expect(loaded.pricingSnapshot.totals.monthly).toBe(375)
+  })
+
+  it('reprices at today’s catalog only when asked', async () => {
+    const created = await store.createProposal({
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: { ...seed, rates: { ...seed.rates, bookkeeper: 100 } },
+    })
+    // A catalog change rewrites nothing on its own…
+    expect((await store.getProposal(created.id)).pricingSnapshot.totals.monthly).toBe(630)
+    // …an empty patch is "Reprice at today's catalog".
+    expect((await store.updateProposal(created.id, {})).pricingSnapshot.totals.monthly).toBe(840)
+  })
+
+  it('lists the most recently touched first', async () => {
+    const first = await store.createProposal({ prospect: { company: 'First' } })
+    const second = await store.createProposal({ prospect: { company: 'Second' } })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await store.updateProposal(first.id, { prospect: { company: 'First again' } })
+    expect((await store.listProposals()).map((row) => row.id)).toEqual([first.id, second.id])
+  })
+
+  it('deletes a draft, and refuses anything else', async () => {
+    const draft = await store.createProposal({})
+    expect(await store.deleteProposal(draft.id)).toBe(true)
+    expect(await store.getProposal(draft.id)).toBeNull()
+
+    const sent = await store.createProposal({})
+    await store.setProposalStatus(sent.id, 'sent')
+    await expect(store.deleteProposal(sent.id)).rejects.toBeInstanceOf(ProposalStateError)
+  })
+
+  it('refuses to edit an accepted or declined proposal', async () => {
+    const created = await store.createProposal({})
+    await store.setProposalStatus(created.id, 'declined', { note: 'Went with a friend' })
+    const declined = await store.getProposal(created.id)
+    expect(declined.declineNote).toBe('Went with a friend')
+    expect(declined.declinedAt).toBeTruthy()
+    await expect(
+      store.updateProposal(created.id, { inputs: { transactions: 1 } }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+  })
+
+  it('copies into a new draft that points back at the original', async () => {
+    const source = await store.createProposal({
+      prospect: { company: 'Acme Books' },
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic', override: 600 }],
+    })
+    await store.setProposalStatus(source.id, 'declined', { note: 'Not this year' })
+    const copy = await store.copyProposal(source.id, { createdBy: 'emp-patrice' })
+    expect(copy.id).not.toBe(source.id)
+    expect(copy.status).toBe('draft')
+    expect(copy.copiedFromId).toBe(source.id)
+    expect(copy.prospect.company).toBe('Acme Books')
+    expect(copy.pricingSnapshot.totals.monthly).toBe(600)
+  })
+
+  it('stamps sent_at once, on the first send', async () => {
+    const created = await store.createProposal({})
+    const first = await store.setProposalStatus(created.id, 'sent')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const again = await store.setProposalStatus(created.id, 'sent')
+    expect(again.sentAt).toBe(first.sentAt)
+  })
+
+  it('appends email events idempotently and never touches the status', async () => {
+    const created = await store.createProposal({})
+    await store.appendProposalEmailEvent(created.id, {
+      kind: 'send',
+      ok: true,
+      to: 'pat@acme.test',
+      providerId: 're_1',
+      subject: 'Your proposal',
+    })
+    const bounced = { kind: 'delivery', event: 'bounced', providerId: 're_1', to: ['pat@acme.test'] }
+    await store.appendProposalEmailEvent(created.id, bounced)
+    const after = await store.appendProposalEmailEvent(created.id, bounced)
+    expect(after.emailLog.map((entry) => `${entry.kind}:${entry.event ?? ''}`)).toEqual([
+      'send:',
+      'delivery:bounced',
+    ])
+    expect(after.status).toBe('draft')
+  })
+
+  it('survives a bulk save and is not part of the staleness fingerprint', async () => {
+    const before = await store.computeWorkspaceVersion()
+    const created = await store.createProposal({ prospect: { company: 'Acme Books' } })
+    expect(await store.computeWorkspaceVersion()).toBe(before)
+    await store.write(workspace())
+    expect((await store.getProposal(created.id)).prospect.company).toBe('Acme Books')
+    expect(BULK_SAVE_TABLES).not.toContain('proposals')
+    expect(BULK_SAVE_SLICES).not.toContain('proposals')
+    expect(workspaceVersionSql()).not.toMatch(/proposals/i)
+  })
+})
+
+/** A recorder pool that answers the firm-settings read and echoes one proposal row. */
+function fakeProposalPostgres(row = null) {
+  const statements = []
+  const pool = {
+    async query(text, params) {
+      const trimmed = String(text).trim()
+      statements.push({ text: trimmed, params })
+      if (/from firm_settings where id = 'singleton'/i.test(trimmed)) {
+        return { rows: [{ name: 'PB&J', proposal_pricing: null }] }
+      }
+      if (/proposals/i.test(trimmed) && row) return { rows: [row], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    },
+  }
+  return { pool, statements, matching: (pattern) => statements.filter((s) => pattern.test(s.text)) }
+}
+
+const proposalRow = (overrides = {}) => ({
+  id: 'prop-1',
+  status: 'draft',
+  prospect: { company: 'Acme Books' },
+  client_id: null,
+  inputs: { transactions: 120 },
+  selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+  pricing_snapshot: { lines: [], totals: { monthly: 0, annual: 0, oneTime: 0, cleanup: 0 } },
+  letter: null,
+  letter_at: null,
+  messages: [],
+  email_log: [],
+  sent_at: null,
+  accepted_at: null,
+  declined_at: null,
+  decline_note: null,
+  copied_from_id: null,
+  created_by: 'emp-patrice',
+  created_at: new Date('2026-09-23T12:00:00.000Z'),
+  updated_at: new Date('2026-09-23T12:00:00.000Z'),
+  ...overrides,
+})
+
+describe('proposals (postgres branch)', () => {
+  it('maps a row to the API shape', () => {
+    const mapped = AppDataStore.mapProposal(proposalRow())
+    expect(mapped).toMatchObject({
+      id: 'prop-1',
+      status: 'draft',
+      clientId: null,
+      createdAt: '2026-09-23T12:00:00.000Z',
+    })
+    expect(mapped.prospect.company).toBe('Acme Books')
+  })
+
+  it('inserts a priced snapshot', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).createProposal({
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const insert = fake.matching(/^insert into proposals/i)[0]
+    const snapshot = JSON.parse(insert.params[5])
+    expect(snapshot.lines).toHaveLength(1)
+    expect(snapshot.totals).toHaveProperty('monthly')
+  })
+
+  it('updates with a fresh snapshot, and refuses a declined row', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).updateProposal('prop-1', { inputs: { transactions: 10 } })
+    const update = fake.matching(/^update proposals/i)[0]
+    expect(update.text).toMatch(/pricing_snapshot = \$6::jsonb/)
+
+    const declined = fakeProposalPostgres(proposalRow({ status: 'declined' }))
+    await expect(postgresStore(declined).updateProposal('prop-1', {})).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+  })
+
+  it('deletes drafts only, in the statement itself', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).deleteProposal('prop-1')
+    expect(fake.matching(/^delete from proposals/i)[0].text).toMatch(/status = 'draft'/)
+  })
+
+  it('appends email events in SQL and never writes status', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).appendProposalEmailEvent('prop-1', {
+      kind: 'delivery',
+      event: 'delivered',
+      providerId: 're_9',
+    })
+    const update = fake.matching(/^update proposals/i)[0]
+    expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    // The SET list, not the returning list: status is read back, never written.
+    expect(update.text.split(/\bwhere\b/)[0]).not.toMatch(/status/)
+  })
+
+  it('stamps sent_at only when it is empty', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).setProposalStatus('prop-1', 'sent')
+    expect(fake.matching(/^update proposals/i)[0].text).toMatch(/coalesce\(sent_at, now\(\)\)/)
+  })
+
+  it('the bulk save never touches the table', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace())
+    expect(fake.matching(/proposals/i)).toHaveLength(0)
   })
 })

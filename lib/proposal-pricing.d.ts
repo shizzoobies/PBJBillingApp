@@ -109,3 +109,21 @@ export declare function priceProposal(args: {
 
 /** Owner-edited catalog in, a safe catalog out; anything not an object is the seed. */
 export declare function sanitizeProposalPricing(raw: unknown): ProposalPricing
+
+export type ProposalProspect = {
+  company: string
+  contactName: string
+  email: string
+  phone: string
+  notes: string
+}
+
+/** The prospect block, every field a capped string. */
+export declare function cleanProposalProspect(raw: unknown): ProposalProspect
+/** Finite, non-negative counts; with `allowedKeys`, only the catalog's own inputs. */
+export declare function cleanProposalInputs(
+  raw: unknown,
+  allowedKeys?: Iterable<string> | null,
+): Record<string, number>
+/** One entry per service (the last wins), numbers finite and non-negative. */
+export declare function cleanProposalSelections(raw: unknown): ProposalSelection[]
