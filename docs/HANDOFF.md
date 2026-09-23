@@ -25,7 +25,7 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-23, afternoon):** `main` = `258309e` (+ this
+**State right now (2026-09-23, evening):** `main` = `d16581a` (+ this
 handoff; the manifest was condensed under the voice agent's ~216 KB cap), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
 — the body's `commit` is the deploy check). Suite **3615 tests / 200
 files**, green. Voice agent re-provisioned after the deploy. **Rate history
@@ -51,11 +51,13 @@ client's share keeps the task and the others show its name (a checklist task
 belongs to ONE client — never put one taskId on every share), the
 multi-client Add time form has an optional Task box, and Adjust split keeps
 each client's own task. Rows split before 09-23 are not backfilled. Group
-TIMER still has no task box. **Also: a separate session finished rate-history
-follow-ups 1+2 (master re-tag at each sub's pin; Reports Billable $ and the
-Dashboard estimate at the pin) as `27a645c` on `claude/modest-wozniak-3caf97`,
-based on a47f633 and UNPUSHED — it edited the manifest too, so rebase it onto
-main before pushing, then re-provision the voice agent.**
+TIMER still has no task box. **Rate-history follow-ups 1+2 (master re-tag at each sub's pin; Reports
+Billable $ and the Dashboard estimate at the pin) are IN: rebased and pushed
+2026-09-23 as `d16581a`, deployed, health 200, voice re-provisioned. Suite
+3647 tests / 202 files. The PRIMARY checkout on the Windows PC was left at
+`826e7a7` — run `git pull --ff-only` there before working in it; the
+worktree `.claude/worktrees/modest-wozniak-3caf97` is at main and can be
+removed.**
 
 Then the queue / watch list:
 
