@@ -4125,6 +4125,13 @@ export class AppDataStore {
           updated_at timestamptz not null default now()
         )
       `)
+      // The status CHECK above only applies to a table created fresh — an
+      // existing `proposals` table never picks it up. Drop and re-add it
+      // (idempotently, every boot) the same way as `clients_billing_mode_check`.
+      await this.pool.query(`alter table proposals drop constraint if exists proposals_status_check`)
+      await this.pool.query(
+        `alter table proposals add constraint proposals_status_check check (status in ('draft', 'sent', 'accepted', 'declined'))`,
+      )
 
       // Reusable contacts (shared across clients). Mirrors the plans/clients
       // table idioms incl. `updated_at`. Selected on clients via `contact_ids`.
@@ -9974,18 +9981,33 @@ export class AppDataStore {
     }
   }
 
+  /**
+   * `mapProposal`, but a row this version can't make sense of (e.g. an
+   * unknown status left by a newer build or a bad write) is logged and
+   * skipped instead of throwing — one bad row must never take down a read.
+   */
+  static mapProposalSafe(row) {
+    try {
+      return AppDataStore.mapProposal(row)
+    } catch (error) {
+      console.error('proposal row skipped', row?.id, error.message)
+      return null
+    }
+  }
+
   /** Every proposal, most recently touched first. Owner-only at the endpoint. */
   async listProposals() {
     if (this.pool) {
       const { rows } = await this.pool.query(
         `select ${PROPOSAL_COLUMNS} from proposals order by updated_at desc`,
       )
-      return rows.map((row) => AppDataStore.mapProposal(row))
+      return rows.map((row) => AppDataStore.mapProposalSafe(row)).filter(Boolean)
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.proposals) ? authState.proposals : []
     return list
-      .map((row) => AppDataStore.mapProposal(row))
+      .map((row) => AppDataStore.mapProposalSafe(row))
+      .filter(Boolean)
       .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
   }
 
@@ -9997,13 +10019,13 @@ export class AppDataStore {
         `select ${PROPOSAL_COLUMNS} from proposals where id = $1`,
         [id],
       )
-      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+      return rows[0] ? AppDataStore.mapProposalSafe(rows[0]) : null
     }
     const authState = await readJson(localAuthPath)
     const found = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
       (row) => row && row.id === id,
     )
-    return found ? AppDataStore.mapProposal(found) : null
+    return found ? AppDataStore.mapProposalSafe(found) : null
   }
 
   /**
@@ -10228,6 +10250,13 @@ export class AppDataStore {
     if (!id || !PROPOSAL_STATUSES.includes(status)) return null
     const current = await this.getProposal(id)
     if (!current) return null
+    // A decided proposal is a closed record — there is no reopen path out of
+    // accepted/declined, to any status, ever. Copy is how she starts again.
+    if (current.status === 'accepted' || current.status === 'declined') {
+      throw new ProposalStateError(
+        `This proposal is already ${current.status} — it can't be ${status} again.`,
+      )
+    }
     const isDecision = status === 'accepted' || status === 'declined'
     if (isDecision && current.status !== 'draft' && current.status !== 'sent') {
       throw new ProposalStateError(
@@ -10247,6 +10276,7 @@ export class AppDataStore {
                 client_id = coalesce($4, client_id),
                 updated_at = now()
           where id = $1
+            and status not in ('accepted', 'declined')
             and ($2 not in ('accepted', 'declined') or status in ('draft', 'sent'))
           returning ${PROPOSAL_COLUMNS}`,
         [id, status, cleanNote, linkClient],

@@ -16825,6 +16825,17 @@ describe('proposals (file backend)', () => {
     expect((await store.listProposals()).map((row) => row.id)).toEqual([first.id, second.id])
   })
 
+  it('skips a row with an unrecognized status instead of failing the whole list, and getProposal of it returns null (M3)', async () => {
+    const good = await store.createProposal({ prospect: { company: 'Good Co' } })
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    const goodRow = authState.proposals.find((row) => row.id === good.id)
+    authState.proposals.push({ ...goodRow, id: 'prop-bogus', status: 'bogus' })
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    expect((await store.listProposals()).map((row) => row.id)).toEqual([good.id])
+    expect(await store.getProposal('prop-bogus')).toBeNull()
+  })
+
   it('deletes a draft, and refuses anything else', async () => {
     const draft = await store.createProposal({})
     expect(await store.deleteProposal(draft.id)).toBe(true)
@@ -16961,6 +16972,19 @@ describe('proposals (file backend)', () => {
     await expect(store.setProposalStatus(created.id, 'accepted')).rejects.toBeInstanceOf(
       ProposalStateError,
     )
+  })
+
+  it('refuses ANY move out of a decided proposal, not just re-deciding it, while draft -> sent still works (I2)', async () => {
+    const accepted = await store.createProposal({})
+    await store.setProposalStatus(accepted.id, 'accepted')
+    await expect(store.setProposalStatus(accepted.id, 'sent')).rejects.toBeInstanceOf(ProposalStateError)
+
+    const declined = await store.createProposal({})
+    await store.setProposalStatus(declined.id, 'declined', { note: 'Not this year' })
+    await expect(store.setProposalStatus(declined.id, 'draft')).rejects.toBeInstanceOf(ProposalStateError)
+
+    const draft = await store.createProposal({})
+    expect((await store.setProposalStatus(draft.id, 'sent')).status).toBe('sent')
   })
 
   // ---- M5 ----
@@ -17121,6 +17145,32 @@ describe('proposals (postgres branch)', () => {
     expect(fake.matching(/^update proposals/i)).toHaveLength(0)
   })
 
+  it('refuses ANY move out of a decided proposal, not just re-deciding it, while draft -> sent still works (I2)', async () => {
+    const accepted = fakeProposalPostgres(proposalRow({ status: 'accepted' }))
+    await expect(postgresStore(accepted).setProposalStatus('prop-1', 'sent')).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+    expect(accepted.matching(/^update proposals/i)).toHaveLength(0)
+
+    const declined = fakeProposalPostgres(proposalRow({ status: 'declined' }))
+    await expect(postgresStore(declined).setProposalStatus('prop-1', 'draft')).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+    expect(declined.matching(/^update proposals/i)).toHaveLength(0)
+
+    const draft = fakeProposalPostgres(proposalRow({ status: 'draft' }))
+    await postgresStore(draft).setProposalStatus('prop-1', 'sent')
+    expect(draft.matching(/^update proposals/i)).toHaveLength(1)
+  })
+
+  it('the WHERE clause also refuses a transition out of accepted/declined, combined with the decision guard (I2)', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'sent' }))
+    await postgresStore(fake).setProposalStatus('prop-1', 'accepted')
+    expect(fake.matching(/^update proposals/i)[0].text).toMatch(
+      /and status not in \('accepted', 'declined'\)/,
+    )
+  })
+
   it('a decline without a note does not overwrite an earlier one, in the statement itself', async () => {
     const fake = fakeProposalPostgres(proposalRow({ status: 'sent', decline_note: 'Went with a friend' }))
     await postgresStore(fake).setProposalStatus('prop-1', 'declined', {})
@@ -17190,5 +17240,25 @@ describe('proposals (postgres branch)', () => {
     const fake = fakePostgres()
     await postgresStore(fake).write(workspace())
     expect(fake.matching(/proposals/i)).toHaveLength(0)
+  })
+})
+
+describe('proposals: the status check constraint (Postgres)', () => {
+  it('drops and re-adds proposals_status_check on every boot, in that order, so an existing table picks it up', async () => {
+    const fake = fakePostgres()
+    // `initialize()` ends by seeding users, which the fake cannot answer (it
+    // returns no rows for a count). The proposals DDL runs long before that
+    // and is already recorded — same idiom as the rate-history DDL tests.
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    const statements = fake.matching(/proposals_status_check/i)
+    expect(statements).toHaveLength(2)
+    expect(statements[0].text).toMatch(
+      /^alter table proposals drop constraint if exists proposals_status_check$/i,
+    )
+    expect(statements[1].text).toMatch(
+      /^alter table proposals add constraint proposals_status_check check \(status in \('draft', 'sent', 'accepted', 'declined'\)\)$/i,
+    )
   })
 })
