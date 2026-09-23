@@ -1,5 +1,6 @@
 import { Check, Package as PackageIcon, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { AddModal } from '../components/AddModal'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
@@ -7,6 +8,7 @@ import { FloatingAddButton } from '../components/FloatingAddButton'
 import { highlightMatch } from '../lib/highlight'
 import { ListSearch } from '../components/ListSearch'
 import { CollapsibleSection } from '../components/SectionKit'
+import { PLANS_TAB_KEYS, PLANS_TAB_LABELS, resolvePlansTab } from '../lib/plansTabs'
 import {
   createPackageRequest,
   createSuggestedChecklistsRequest,
@@ -29,22 +31,66 @@ import { planTemplates, templatePickerLabel } from '../lib/utils'
 export function PlansPage() {
   const { data, addPlan, updatePlan, deletePlan, ownerMode } = useAppContext()
   const [addOpen, setAddOpen] = useState(false)
+  const [packageCount, setPackageCount] = useState(0)
+
+  // Two tabs, URL-driven (featreq-f890f05b): Plans and Packages, in place of
+  // the Packages section that used to sit below the plans list.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeTab = resolvePlansTab(searchParams.get('tab'))
+  const setTab = (next: (typeof PLANS_TAB_KEYS)[number]) => {
+    const params = new URLSearchParams(searchParams)
+    params.set('tab', next)
+    setSearchParams(params, { replace: true })
+  }
+  const tabCounts = { plans: data.plans.length, packages: packageCount }
+
   return (
     <section className="panel" id="plans">
-      <PlanLibrary
-        plans={data.plans}
-        clients={data.clients}
-        templates={data.checklistTemplates}
-        ownerMode={ownerMode}
-        onUpdate={updatePlan}
-        onDelete={deletePlan}
-        onAddClick={() => setAddOpen(true)}
-      />
-      <PackageLibrary
-        plans={data.plans}
-        templates={data.checklistTemplates}
-        ownerMode={ownerMode}
-      />
+      <div className="task-area-tabs" role="tablist" aria-label="Plans sections">
+        {PLANS_TAB_KEYS.map((tabKey) => {
+          const isActive = tabKey === activeTab
+          const count = tabCounts[tabKey]
+          const classes = ['task-area-tab', isActive ? 'is-active' : '']
+            .filter(Boolean)
+            .join(' ')
+          return (
+            <button
+              key={tabKey}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              className={classes}
+              onClick={() => setTab(tabKey)}
+            >
+              {PLANS_TAB_LABELS[tabKey]}
+              <span className="task-area-tab-count">{count}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Both tabs stay MOUNTED and are only hidden — Packages fetches its own
+          list on mount, and switching tabs must not re-fetch it. */}
+      <div className="client-tab-panel" role="tabpanel" hidden={activeTab !== 'plans'}>
+        <PlanLibrary
+          plans={data.plans}
+          clients={data.clients}
+          templates={data.checklistTemplates}
+          ownerMode={ownerMode}
+          onUpdate={updatePlan}
+          onDelete={deletePlan}
+          onAddClick={() => setAddOpen(true)}
+        />
+      </div>
+      <div className="client-tab-panel" role="tabpanel" hidden={activeTab !== 'packages'}>
+        <PackageLibrary
+          plans={data.plans}
+          templates={data.checklistTemplates}
+          ownerMode={ownerMode}
+          onCountChange={setPackageCount}
+        />
+      </div>
+
       {addOpen ? (
         <AddModal title="Create plan" onClose={() => setAddOpen(false)}>
           <PlanBuilder
@@ -655,16 +701,23 @@ export function PackageLibrary({
   plans,
   templates,
   ownerMode,
+  onCountChange,
 }: {
   plans: SubscriptionPlan[]
   templates: ChecklistTemplate[]
   ownerMode: boolean
+  /** Reports the loaded package count up to the Plans page tab badge. */
+  onCountChange?: (count: number) => void
 }) {
   const [packages, setPackages] = useState<Package[]>([])
   const [loadError, setLoadError] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [pendingId, setPendingId] = useState<string | null>(null)
+
+  useEffect(() => {
+    onCountChange?.(packages.length)
+  }, [packages, onCountChange])
 
   useEffect(() => {
     if (!ownerMode) return

@@ -1147,9 +1147,9 @@ Clients page meanwhile. Owner-only.
   in the URL (`?tab=time`), so a page can be linked straight to a tab, and older
   `#client-section-…` links open whichever tab now holds that section.
 - **Client detail → Billing → "+ Add package"**, next to "+ Add plan /
-  service", lists the packages (built on the Plans page) and applies one to
-  this client in a single press: its plans are added to the client's selected
-  services and its checklists set up for them.
+  service", lists the packages (built on the Plans page, Packages tab) and
+  applies one to this client in a single press: its plans are added to the
+  client's selected services and its checklists set up for them.
   - First, a confirm names exactly what will change — plans added, checklists
     created, ones skipped as already set up here, and the line that matters
     most: **nothing on the invoice changes — plans are labels; the monthly rate
@@ -2544,11 +2544,13 @@ Clients page meanwhile. Owner-only.
   is set up" under Checklists). Templates carry a board column, so the new
   checklists land in the right Board column automatically — connecting plans →
   checklists → board.
-- **Packages — plans you apply together.** A **Packages** section under the
-  plans list. A package is a named combination of plans the firm already has
-  (two or more — one plan is just that plan), plus the standard blueprint
-  checklists that come with them, so setting a client up is one press instead
-  of a plan and a checklist at a time.
+- **Packages — plans you apply together.** A **Packages** tab at the top of
+  the Plans page, next to the **Plans** tab (Plans opens by default; the tab
+  is in the URL as `?tab=packages`, so a link can open straight to it). A
+  package is a named combination of plans the firm already has (two or more —
+  one plan is just that plan), plus the standard blueprint checklists that
+  come with them, so setting a client up is one press instead of a plan and a
+  checklist at a time.
   - **A package is not a price.** Applying one changes nothing on the invoice:
     plans are LABELS on the monthly service line, and the amount billed is the
     client's own monthly rate. It adds labels and sets up work, never touches

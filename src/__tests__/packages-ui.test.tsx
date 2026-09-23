@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PackageLibrary } from '../pages/PlansPage'
+import { PackageLibrary, PlansPage } from '../pages/PlansPage'
 import { ApplyPackageField } from '../pages/ClientDetailPage'
 import { applyPackageConfirmText, defaultPackageTemplateIds } from '../lib/packages'
 import type { AppContextValue } from '../AppContext'
@@ -140,7 +141,7 @@ function pickChip(addLabel: string, optionLabel: string) {
   fireEvent.click(screen.getByRole('menuitem', { name: new RegExp(optionLabel) }))
 }
 
-describe('the Packages section on the Plans page', () => {
+describe('the Packages tab', () => {
   it('refuses a package that combines fewer than two plans, without asking the server', async () => {
     render(<PackageLibrary plans={PLANS} templates={TEMPLATES} ownerMode />)
     await waitFor(() => expect(listPackagesRequest).toHaveBeenCalled())
@@ -191,6 +192,73 @@ describe('the Packages section on the Plans page', () => {
     expect(
       await screen.findByText(/Nothing on the invoice changes — plans are labels/),
     ).toBeTruthy()
+  })
+})
+
+/**
+ * The Plans page itself (featreq-f890f05b): Plans and Packages as two tabs at
+ * the top, in place of the Packages section that used to sit below the plans
+ * list. `PackageLibrary` fetches its own list on mount, so the tabs must keep
+ * it MOUNTED and only hide it — switching tabs is never a re-fetch.
+ */
+describe('the Plans page tabs', () => {
+  const renderPlansPage = (initialEntry = '/plans') => {
+    contextValue = {
+      ownerMode: true,
+      data: { plans: PLANS, clients: [], checklistTemplates: TEMPLATES },
+      addPlan: vi.fn(),
+      updatePlan: vi.fn(),
+      deletePlan: vi.fn(async () => undefined),
+    } as unknown as AppContextValue
+    return render(
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <PlansPage />
+      </MemoryRouter>,
+    )
+  }
+
+  beforeEach(() => {
+    listPackagesRequest = vi.fn(async () => [FULL_SERVICE])
+  })
+
+  it('defaults to the Plans tab, with Packages mounted but hidden', async () => {
+    renderPlansPage()
+
+    expect(screen.getByRole('tab', { name: /Plans/ })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: /Packages/ })).toHaveAttribute('aria-selected', 'false')
+    expect(screen.getByText('Bookkeeping')).toBeVisible()
+
+    await waitFor(() => expect(listPackagesRequest).toHaveBeenCalledTimes(1))
+    expect(screen.getByText('Full service')).not.toBeVisible()
+  })
+
+  it('shows only Packages after a click, without re-fetching', async () => {
+    renderPlansPage()
+    await waitFor(() => expect(listPackagesRequest).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('tab', { name: /Packages/ }))
+
+    expect(screen.getByRole('tab', { name: /Packages/ })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('Full service')).toBeVisible()
+    expect(screen.getByText('Bookkeeping')).not.toBeVisible()
+    expect(listPackagesRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens straight to Packages from ?tab=packages', async () => {
+    renderPlansPage('/plans?tab=packages')
+
+    expect(screen.getByRole('tab', { name: /Packages/ })).toHaveAttribute('aria-selected', 'true')
+    await waitFor(() => expect(screen.getByText('Full service')).toBeVisible())
+    expect(screen.getByText('Bookkeeping')).not.toBeVisible()
+  })
+
+  it('shows counts on each tab matching the fixtures', async () => {
+    renderPlansPage()
+
+    expect(screen.getByRole('tab', { name: /Plans/ })).toHaveTextContent(String(PLANS.length))
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: /Packages/ })).toHaveTextContent('1'),
+    )
   })
 })
 

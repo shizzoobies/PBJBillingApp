@@ -1336,7 +1336,8 @@ export function ApplyPackageField({ client }: { client: Client }) {
               <div className="sharing-add-menu" role="menu">
                 {packages.length === 0 ? (
                   <p className="sharing-add-empty">
-                    No packages yet — build one on the Plans page.
+                    No packages yet — build one on the{' '}
+                    <Link to="/plans?tab=packages">Plans page</Link>.
                   </p>
                 ) : (
                   packages.map((pkg) => (
