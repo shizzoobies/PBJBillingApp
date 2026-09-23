@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-09-15. Everything below is committed on
+Written 2026-07-21, last updated 2026-09-23. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -25,35 +25,32 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-22, night):** `main` = `a197334` (+ this
+**State right now (2026-09-23, afternoon):** `main` = `cae6ad0` (+ this
 handoff), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
-— the body's `commit` is the deploy check; it read `a197334`). Suite
-**3458 tests / 190 files**, green.
-Voice agent re-provisioned 2026-09-22 (four times that day). **Every AI
-call in the app now runs on `claude-opus-5-5`** — the assistant default
-AND `INVOICE_AI_MODEL`'s default — and its stricter structured-output
-validator is documented in the 09-22 night entry (no `minimum`/`maximum`/
-`minItems`/`maxItems` in any schema; tripwires pin it). Every
-tracker flip and the one approved prod repair (09-21) are DONE — there is
-no "first actions" backlog. Read the three 2026-09-22 entries and the
-2026-09-21 entry in §5 first (Britt's Brain provider fault + model bump;
-Walkthrough + Packages; the Team page's one-click team rebuild; two urgent
-bugs Brittany filed 09-21, both real code defects reproduced against
-production before any fix; the owner cost rate), then 09-18, 09-15 and
-the 09-04 entries. The 09-15 session's notes on the pay window / Past due /
-`INVOICE_PAST_DUE_NOTICES=off` switch are in its §5 entry.
+— the body's `commit` is the deploy check). Suite **3615 tests / 200
+files**, green. Voice agent re-provisioned after the deploy. **Rate history
+shipped today** (featreq-23351561, the "Billing prices and cost" brainstorm):
+bill and cost rates are dated versions, every hourly client is pinned to a
+rate month, cost resolves by the day worked — read the 2026-09-23 entry in
+§5 FIRST; it holds the resolver rules, the migration proof and the
+follow-ups. Every AI call still runs on `claude-opus-5-5`. Subagent
+dispatches from Claude Code now default to Opus 5.5 too
+(`CLAUDE_CODE_SUBAGENT_MODEL` in ~/.claude/settings.json; omit the model
+alias — `opus` means Opus 5).
 
-The board at handoff (read live at 23:30 UTC): nothing in New or Planned.
-Brittany reviewed WHILE this session ran and approved five of the day's
-items to Done (Board, Duplicate, owner cost rate, Team-page teams,
-Walkthrough). Seven sit in Shipped awaiting her: `featreq-d0ace76d`
-Britt's Brain fix + Opus 5.5, `featreq-f890f05b` Packages,
-`featreq-053fccba` period label, `featreq-284119d9` billing-email check,
-`featreq-8bd1cb0f` 30-day pay window, and the two desktop/PWA items from
-August. One `brainstorm` item ("Billing prices" — the session the Brain
-fault interrupted; hers until Alex promotes it). `featreq-79b6d974`
-engagement-to-billing parked in_progress; two `planned_not_eom` parked.
-She reviews live — re-read the board at session start.
+The board at handoff: `featreq-23351561` flipped to Shipped with the
+plain-language note in `docs/plans/rate-history-2026-09.md` §8. Still in
+Shipped awaiting Brittany from 09-22: Britt's Brain fix + Opus 5.5,
+Packages, period label, billing-email check, 30-day pay window, and the
+two desktop/PWA items. `featreq-79b6d974` engagement-to-billing parked
+in_progress; two `planned_not_eom` parked. She reviews live — re-read the
+board at session start. **Unfiled from Brittany (email 09-23, "time
+reports"):** split-across-clients rows export with no clock in/out and
+"Unassigned" task — diagnosed, not a clock bug: the split writes the
+shares with no session span when the SOURCE was a manual block, and sets
+the task to null on every share (all 174 split rows since August are
+"Unassigned"). Proposed fix: carry the source's task and span onto every
+share. Needs a tracker item or Alex's go.
 
 Then the queue / watch list:
 
@@ -368,6 +365,92 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-23 — Rate history shipped (`cae6ad0`; 30 commits on
+`feat/rate-history`, fast-forwarded to main): rates that change without
+rewriting the past.** From Brittany's 09-22 Brain session, spec
+`docs/plans/rate-history-2026-09.md`, plan `…-plan.md`. Built Fable
+orchestrating / Opus 5.5 executing, one reviewer per task plus a final
+whole-branch review; the reviews changed real behavior (below), so read the
+rules here, not the plan.
+
+*The model.* `bill_rate_versions(user_id, effective_period 'YYYY-MM', rate)`
+and `cost_rate_versions(user_id, effective_date, rate)` on both backends
+(file backend: slices in the auth store, NOT app-data.json).
+`users.bill_rate` / `cost_rate` stay as a mirror of the NEWEST version
+(date-blind — a raise dated ahead shows there). Each hourly client carries
+`hourly_rate_period` (its rate month) and an append-only
+`hourly_rate_history` `{from,to,changedAt,changedBy}`; both are
+endpoint-owned — the bulk save restores what is stored and ignores the
+payload, on both backends, for stored / stored-null / never-seen clients.
+New hourly clients pin to their creation month; the boot migration pinned
+every existing hourly client at 2026-06 and seeded one version per rated
+user (2026-06 for bill, 1970-01-01 for cost) so nothing repriced — proven
+read-only against production twice (29 hourly clients, 58 client-months,
+627 entries, 0 differences; a +$1 mutation gives 86).
+
+*The resolver (`lib/rate-history.js`) — every money surface goes through it:*
+`billRateAt(versions, employee, pin, billingPeriod)` = the version at or
+before the pin → else the person's EARLIEST version if it has started by
+the billing month (a new hire's first rate holds until the client's review)
+→ else `employee.billRate` only when the person has NO versions → else the
+client's own (legacy, often $0) hourly rate. `ratePeriodAsOf(client, month)`
+replays the ledger in WRITTEN order: a later move supersedes any earlier
+move whose `to` is at/after its own, and cancels an earlier move that had
+not started yet — so a correction or an undo takes effect (the first cut
+read the ledger by month and never undid anything; the final review caught
+it). Cost: `costRateFor(versions, id, entryDate)` by the DAY worked,
+everywhere (recap, payroll summary AND detail, analytics); `laborCost`
+groups rows by person AND rate so totals tie. Consequences the manifest
+now states: a rate saved for month M reaches every client pinned at M or
+later (the default month is the current one → every client created this
+month); a person's first rate reaches earlier-pinned clients from its start
+month; pre-June-2026 months keep the legacy per-client rule everywhere,
+including the assistant's profitability tool (which used to price at the
+retired client rate for ALL months — closed).
+
+*Surfaces.* Team page: effective-from month/date on each rate box (local
+time), history disclosure with Remove on the newest only (server refuses
+otherwise, 409 with a sentence; also refused while any client is pinned at
+or after that month, ledger `to`/`from` included), Save disabled on an
+empty box (the old blank-to-clear path on `PUT /api/team/bill-rate` /
+`cost-rate` now answers 409 `rate_history_kept` so a stale tab cannot wipe
+a history). Client page → Billing → Hourly rates (hourly, owner only):
+each person at the pin, "Rates from June 2026 — 3 months ago" / "this
+month" / "starts in N months", Move to current rates from (default next
+month; refuses months outside 01–12 or before 2026-06), history as "June
+2026 → October 2026". Invoices/Reports previews, the draft generator (subs
+of a master at their own pin), Client Recap (hourly multi-month now
+reconciles; monthly/annual still restated), the AI hours summary, and
+invoice scope re-tag all price at the pin. Staff never receive versions,
+pins or ledgers (`loadRateVersions` → empty lists; redaction in
+`scopeAppDataForSession`; the six new routes are not preview-aware, the UI
+tolerates the 403).
+
+*Follow-ups, in priority order:* (1) re-tag on a billing MASTER prices a
+new line at the invoice month, not each sub's pin — thread a per-entry
+`ratePeriodAsOf(sub, period)` into `scopeLineTools` before the first
+post-June raise; (2) the Employee report's Billable $ (`ReportsPage.tsx`
+192/459/636/1234) and the Dashboard revenue estimate still read the newest
+mirror — move them to `billRateAt` (planner open item 2); (3) deleting a
+person's only version un-prices earlier-pinned clients that reached it
+via the first-rate step — widen the guard; (4) the Hourly rates block
+lists everyone with a started rate, not the assigned team — ask Brittany;
+(5) `resolve()` turns a `rate: null` row into 0 (unreachable via the
+endpoints; add `Number.isFinite`); (6) the file-backend pin move and the
+migration do two-slot read/writes (dev only); (7) `memberFilter` narrows
+the payroll detail but not the summary (pre-existing).
+
+*Process notes worth keeping.* The Plan agent type cannot write files —
+have it return the plan in chunks under ~40k chars and assemble; scoped
+reviewers repeatedly caught brief-inherited defects (a test asserting
+nothing, a fixture that could never pass, UTC dates) — the brief is a
+starting point, not evidence; two writers on one branch collide on git's
+index, so one implementer at a time with reviewers in parallel. The visual
+check ran against the file backend at http://127.0.0.1:5173 (the API serves
+`dist/`; vite proxies to a foreign 4173 process on this machine) with the
+demo owner enrolled in TOTP locally; the pane would not paint, so it was
+DOM-level.
 
 **2026-09-22 (night) — "Britt's Brain wasn't working": a provider-side
 fault on ONE request shape, routed around (`21b0f0d`), and the assistant
