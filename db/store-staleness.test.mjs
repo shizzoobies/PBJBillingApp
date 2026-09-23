@@ -15705,3 +15705,73 @@ describe('the cost-rate refusal talks about days (file backend)', () => {
     ).rejects.toThrow(/past days/i)
   })
 })
+
+/**
+ * THE MONTH RUN PRICES EACH CLIENT AT ITS OWN PIN.
+ *
+ * Two hourly clients, one person, one hour each, one generate. The only thing
+ * that differs between them is the rate month they are pinned to, and that is
+ * the whole feature: a long-standing client stays on the rates she agreed to
+ * while a new one starts on today's.
+ */
+describe('the month run bills each client at its own pin (file backend)', () => {
+  beforeEach(async () => {
+    const authState = existsSync(localAuthPath)
+      ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+      : {}
+    authState.billRateVersions = [
+      { userId: 'emp-lisa', effectivePeriod: '2026-06', rate: 40 },
+      { userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 55 },
+    ]
+    authState.users = [{ id: 'emp-lisa', name: 'Lisa', role: 'employee', billRate: 55 }]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await store.write(
+      workspace({
+        employees: [{ id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' }],
+        clients: [
+          {
+            id: 'c-old',
+            name: 'Old Pin Co',
+            billingMode: 'hourly',
+            hourlyRate: 100,
+            lifecycleStage: 'active',
+          },
+          {
+            id: 'c-new',
+            name: 'New Pin Co',
+            billingMode: 'hourly',
+            hourlyRate: 100,
+            lifecycleStage: 'active',
+          },
+        ],
+        timeEntries: [
+          { id: 't-old', clientId: 'c-old', employeeId: 'emp-lisa', minutes: 60, billable: true, date: '2026-09-10' },
+          { id: 't-new', clientId: 'c-new', employeeId: 'emp-lisa', minutes: 60, billable: true, date: '2026-09-10' },
+        ],
+      }),
+    )
+    // The pins go STRAIGHT TO THE FILE, after the save. `write()` deliberately
+    // refuses to take a pin from the payload — a bulk save must not be able to
+    // move a client's rate month — so seeding them through it would hand both
+    // clients today's month and the two would be indistinguishable. Invoices
+    // are cleared for the same reason the consolidated-billing suite clears
+    // them: an earlier test's invoice would make this run skip with
+    // 'already-generated'.
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    for (const client of data.clients ?? []) {
+      client.hourlyRatePeriod = client.id === 'c-old' ? '2026-06' : '2026-09'
+      client.hourlyRateHistory = []
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  })
+
+  it('prices the same person’s hour differently on two clients in one run', async () => {
+    const result = await store.generateInvoicesForPeriod('2026-09')
+    const byClient = new Map(result.created.map((invoice) => [invoice.clientId, invoice]))
+    expect(byClient.get('c-old').lineItems[0].rate).toBe(40)
+    expect(byClient.get('c-old').total).toBe(40)
+    expect(byClient.get('c-new').lineItems[0].rate).toBe(55)
+    expect(byClient.get('c-new').total).toBe(55)
+  })
+})

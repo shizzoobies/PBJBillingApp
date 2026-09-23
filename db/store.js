@@ -17,7 +17,7 @@ import {
   findChecklistInstance,
 } from '../lib/checklist-identity.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
-import { latestBillRate, latestCostRate } from '../lib/rate-history.js'
+import { latestBillRate, latestCostRate, ratePeriodAsOf } from '../lib/rate-history.js'
 import { isWaitingOnOpen, waitingOnStage } from '../lib/waiting-on-state.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
@@ -10921,6 +10921,11 @@ export class AppDataStore {
       subs.sort((left, right) => String(left.name ?? '').localeCompare(String(right.name ?? '')))
     }
 
+    // ONE read for the whole run. Every client resolves its own pin against
+    // this same list, which is what lets a single generate bill the same
+    // person at two rates for two companies without two lookups disagreeing.
+    const billRateVersions = await this.listBillRateVersions()
+
     const created = []
     const skipped = []
     const scoped = clientId
@@ -11012,6 +11017,12 @@ export class AppDataStore {
           ),
           employees: data.employees ?? [],
           defaultHourlyRate: Number(target.hourlyRate) || 0,
+          billRateVersions,
+          // THIS company's pin, resolved for THIS month. A sub on a master's
+          // consolidated invoice is priced here, at its own pin, before the
+          // merge — which is the same way the merge already refuses to blend
+          // rates.
+          ratePeriod: ratePeriodAsOf(target, period),
           priorInvoice: prior ?? null,
           issueDate,
           windowDays,

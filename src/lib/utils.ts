@@ -574,6 +574,7 @@ export {
 } from '../../lib/group-allocation.js'
 
 import { buildInvoiceLines, PER_EMPLOYEE_BILLING_START as SHARED_CUTOVER } from '../../lib/invoice-lines.js'
+import { ratePeriodAsOf, type BillRateVersion, type PinnedClient } from '../../lib/rate-history.js'
 import {
   buildChecklistInstanceKeys,
   checklistInstanceKey,
@@ -1646,6 +1647,13 @@ export function recurringReimbursementAppliesToPeriod(
  */
 export const PER_EMPLOYEE_BILLING_START = SHARED_CUTOVER
 
+/**
+ * The two rate-history row shapes, re-exported so a page can hold a version
+ * list without importing across the `src/` boundary into `lib/` itself — the
+ * same courtesy this module already does for the billing cutover above.
+ */
+export type { BillRateVersion, CostRateVersion } from '../../lib/rate-history.js'
+
 export function getInvoice(
   client: Client,
   entries: TimeEntry[],
@@ -1655,11 +1663,17 @@ export function getInvoice(
   recurringReimbursements: RecurringReimbursement[] = [],
   employees: Employee[] = [],
   defaultHourlyRate = 0,
+  billRateVersions: BillRateVersion[] = [],
 ): Invoice {
   // Thin wrapper. The lines themselves are built by the SHARED builder in
   // `lib/invoice-lines.js`, which the server-side draft generator and Client
   // Recap also call — so what the UI shows, what gets invoiced, and what the
   // profit figure is measured against can no longer drift apart.
+  //
+  // The PIN is resolved here rather than passed in, so every caller of this
+  // function gets the client's own rate month without having to know the rule.
+  // Staff sessions receive no versions (they are owner-only), so the fallback
+  // chain lands them exactly where it always has.
   const built = buildInvoiceLines({
     client,
     entries,
@@ -1669,6 +1683,13 @@ export function getInvoice(
     recurringReimbursements,
     employees,
     defaultHourlyRate,
+    billRateVersions,
+    // The pin fields are not on the `Client` TYPE yet — they arrive with the
+    // rest of the client-side rate shapes — but they ARE on the object the
+    // store sends, which is why this reads them through the pin's own shape
+    // rather than pretending they are absent. Drop the assertion the moment
+    // `Client` declares `hourlyRatePeriod`/`hourlyRateHistory`.
+    ratePeriod: ratePeriodAsOf(client as PinnedClient, billingPeriod),
   })
   return {
     client,
