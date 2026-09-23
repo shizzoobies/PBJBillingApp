@@ -168,7 +168,7 @@ import { SetupChecklistPage } from './pages/SetupChecklistPage'
 import { UpdatesPage } from './pages/UpdatesPage'
 import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
-import { EngagementsPage } from './pages/EngagementsPage'
+import { ProposalsPage } from './pages/ProposalsPage'
 import { InvoiceRecapPage } from './pages/InvoiceRecapPage'
 import { InvoicesPage } from './pages/InvoicesPage'
 import { NotificationsPage } from './pages/NotificationsPage'
@@ -4218,11 +4218,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           }
         />
         <Route path="/gantt" element={<GanttPage />} />
+        {/* The Engagements placeholder became Proposals (featreq-311473e2);
+            an old bookmark lands on the list. */}
+        <Route path="/engagements" element={<Navigate to="/proposals" replace />} />
         <Route
-          path="/engagements"
+          path="/proposals"
           element={
             <OwnerOnly ownerMode={ownerMode}>
-              <EngagementsPage />
+              <ProposalsPage />
             </OwnerOnly>
           }
         />

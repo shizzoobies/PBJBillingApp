@@ -1,7 +1,9 @@
 import type {
+  Proposal,
   ProposalMultiplier,
   ProposalPricingKind,
   ProposalRole,
+  ProposalStatus,
 } from './types'
 
 /**
@@ -31,4 +33,26 @@ export const PROPOSAL_PRICING_LABELS: Record<ProposalPricingKind, string> = {
   flat: 'Flat amount',
   payroll: 'Payroll block',
   'sales-tax': 'Sales tax block',
+}
+
+export const PROPOSAL_STATUS_LABELS: Record<ProposalStatus, string> = {
+  draft: 'Draft',
+  sent: 'Sent',
+  accepted: 'Accepted',
+  declined: 'Declined',
+}
+
+/** The name a proposal goes by in a list or a heading. */
+export function proposalTitle(proposal: Pick<Proposal, 'prospect'>): string {
+  return (
+    proposal.prospect.company.trim() || proposal.prospect.contactName.trim() || 'Untitled prospect'
+  )
+}
+
+/** "Sep 23, 2026" from an ISO timestamp; '' for anything else. */
+export function proposalDate(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }

@@ -32,7 +32,7 @@ export type NavItem = {
 
 /**
  * A run of nav links. A section with no `label` renders its items bare, with no
- * heading — that is how the standalone entries (Dashboard, Engagements, Team,
+ * heading — that is how the standalone entries (Dashboard, Proposals, Team,
  * Updates) appear. Grouping a lone link under its own heading is more chrome
  * than content, so single-item sections deliberately have no label.
  */
@@ -54,9 +54,11 @@ const CHECKLISTS: NavItem = { to: '/checklists', label: 'Checklists', icon: List
 const BOARD: NavItem = { to: '/board', label: 'Board', icon: Kanban }
 const DELAYED: NavItem = { to: '/delayed', label: 'Delayed', icon: AlarmClock }
 const GANTT: NavItem = { to: '/gantt', label: 'Gantt', icon: BarChart3 }
-const ENGAGEMENTS: NavItem = {
-  to: '/engagements',
-  label: 'Engagements',
+// Proposals took the Engagements placeholder's slot (featreq-311473e2); the old
+// /engagements route redirects here.
+const PROPOSALS: NavItem = {
+  to: '/proposals',
+  label: 'Proposals',
   icon: Handshake,
   ownerOnly: true,
 }
@@ -104,7 +106,7 @@ export const navItems: NavItem[] = [
   CHECKLISTS,
   BOARD,
   DELAYED,
-  ENGAGEMENTS,
+  PROPOSALS,
   CLIENTS,
   CLIENT_RECAP,
   CONTACTS,
@@ -131,10 +133,8 @@ export const navItems: NavItem[] = [
  */
 export const navSections: NavSection[] = [
   { items: [DASHBOARD] },
-  // Nothing lives here until the intake form and proposals ship (P2/P3); the
-  // page itself explains that, so the section is visible rather than a
-  // surprise appearing later.
-  { items: [ENGAGEMENTS] },
+  // The Engagements slot: winning new work, before a client is a client.
+  { items: [PROPOSALS] },
   { label: 'Clients', items: [CLIENTS, CONTACTS, CLIENT_RECAP] },
   { label: 'Billing', items: [INVOICES, INVOICE_RECAP, PLANS] },
   {
