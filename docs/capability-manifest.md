@@ -1221,22 +1221,35 @@ Clients page meanwhile. Owner-only.
     new work), and the server refuses both as well.
 - **Client detail → Billing → Hourly rates (Hourly clients, owner only).** Lists
   what this client is billed for each team member's time — everyone with a
-  bill rate on file, not only the client's assigned team — at the same rates
-  the invoice would charge. Underneath, the **rate month** those rates date
-  from and how long ago that was ("Rates from June 2026 — 15 months ago", or
-  "this month" for the current month), so a client overdue a rate review is
-  visible at a glance. Hourly clients that existed when rate history arrived
-  are on June 2026; a new client (or one switched to Hourly) starts on the
-  current month's rates automatically. A client with no rate month on file yet
-  reads **"Current rates (not pinned)"** and shows today's rates.
+  bill rate on file, not only the client's assigned team — at the rates the
+  client is on from its rate month. After a move to a future month those are
+  the upcoming rates; this month's invoice still prices at the earlier rate
+  month until the new one starts. Underneath, the **rate month** those rates
+  date from and how long ago that was ("Rates from June 2026 — 3 months ago",
+  or "this month" for the current month), so a client overdue a rate review
+  is visible at a glance. Hourly clients that existed when rate history
+  arrived are on June 2026; a new client (or one switched to Hourly) starts on
+  the current month's rates automatically. A client with no rate month on file
+  yet reads **"Current rates (not pinned)"** and shows today's rates.
   - **Move to current rates from (month)** — defaulting to next month — puts
     the client on that month's rates from that month on; earlier months keep
     billing at the old ones. After a move to a future month the line reads
     "Rates from October 2026 — starts in 1 month".
   - Every move is kept: **"Rate month history"** lists each one as "June 2026 →
     September 2026" with the date it was made.
-  - Raising someone's rate on the Team page never moves a client by itself.
-    Monthly and Annual clients show nothing here — they bill a fee, not a
+  - Saving someone's bill rate on the Team page never moves a client's rate
+    month, but it can still change what a client is billed. A rate saved for a
+    month prices every hourly client whose rate month is that month or later
+    (up to the next month that person already has a rate saved for). The
+    "effective from" month defaults to the current month, so a raise saved
+    with the default raises every client on the current month's rates —
+    including any client created or switched to Hourly this month — and every
+    client already moved to this month or later. Correcting or backfilling a
+    month likewise reprices every client whose rate month is that month or
+    later, for any month whose invoice has not been generated yet. To leave
+    those clients alone, date the raise after their rate month — this block
+    shows each client's rate month.
+  - Monthly and Annual clients show nothing here — they bill a fee, not a
     person's rate.
 - Client detail → Time tab: everything logged against this client — who logged
   it, the notes, the clock-in → clock-out times, exact hours and minutes,
@@ -1578,16 +1591,20 @@ Clients page meanwhile. Owner-only.
   (total and billable are the sum of the by-staff list, and Total − vs-prior
   lands exactly on the printed delta) and in the assistant's hours summaries.
 - **Hours is the costing column.** Cost is that figure × the pay rate — nothing
-  else is needed to check it. An exact "Minutes" column used to sit between
+  else is needed to check it, with one exception: when a person's cost rate
+  changed inside the period, their Cost is each side's hours at its own rate,
+  so a single Hours × rate check will not match; the day-level rows, which
+  each carry one rate, do. An exact "Minutes" column used to sit between
   Hours and Billable to explain why the two would not multiply out; that gap is
   gone and so is the column.
 - **Billable time, Billable $ and Cost appear on the PRINTED report**, not just
   on screen — on both the per-member summary and the day-and-job detail, with
   totals.
   - **Billable $** = billable hours × that person's BILL rate — what the work
-    bills at (revenue). This is each person's CURRENT bill rate, not the rate
-    month each client is pinned to, so for a client still on older rates it
-    can differ from what the invoice charges (a known follow-up).
+    bills at (revenue). This is each person's newest bill rate on file (which
+    can be a raise dated ahead), not the rate month each client is pinned to,
+    so for a client still on older rates it can differ from what the invoice
+    charges (a known follow-up).
   - **Cost** = ALL hours worked × that person's COST rate — what the firm pays
     for the time. It deliberately covers internal hours too, not just billable
     ones, because the firm pays for those as well. Set a person's cost rate on
@@ -1630,8 +1647,10 @@ Clients page meanwhile. Owner-only.
   - **Per person, per period, off the ROWS the report prints.** Take that
     person's entries for the period, round EACH ONE to two-decimal hours, add
     those up — that sum is the Hours figure on the report — then multiply by
-    their cost rate and settle the cent. A cost TOTAL is the sum of those
-    per-person amounts.
+    their cost rate and settle the cent. When their cost rate changed inside
+    the period, the rows on each side of the change are summed and priced at
+    their own rate, and the two amounts are added. A cost TOTAL is the sum of
+    those per-person amounts.
   - **Why each row and not the period's raw minutes:** those two are not the
     same number, and the report prints the first while the money used to be
     built from the second. On the 8/8–8/22 run, Allison's 31 rows added to
@@ -1643,6 +1662,10 @@ Clients page meanwhile. Owner-only.
     **multiplying a visible Hours cell by the pay rate gives the Cost cell
     beside it**, and **adding up the visible Cost column lands exactly on the
     total printed underneath it.** A line under the summary totals says so.
+    The one exception to the first: when a person's cost rate changed inside
+    the period, their Cost is each side's hours at its own rate, so a single
+    Hours × rate check on their summary row will not match; the day-level
+    rows, which each carry one rate, do.
   - It is the same rule EVERYWHERE — payroll Hours report (summary, detail and
     all three exports), the Employee report, the Client Recap's labor cost and
     margin, estimated-vs-actual cost, and the assistant's client profitability
@@ -1737,8 +1760,9 @@ Clients page meanwhile. Owner-only.
   billing (each hourly client priced at its pinned rate month, as its invoice
   would be), employee coverage.
 - Employee report (hours by person, including billable $ = each person's
-  billable hours × their current bill rate — NOT the rate month each client is
-  pinned to, so it can differ from the invoices (a known follow-up) — and
+  billable hours × their newest bill rate on file, which can be a raise dated
+  ahead — NOT the rate month each client is pinned to, so it can differ from
+  the invoices (a known follow-up) — and
   **Cost** = their tracked hours, each at the COST rate in force on the day it
   was worked, so it matches the payroll report; owners are included) and
   Client report (hours by client), each with
@@ -2509,19 +2533,25 @@ Clients page meanwhile. Owner-only.
   Hourly clients, billable hours are charged per team member at that person's
   own bill rate **as it stood in the rate month that client is pinned to** —
   the invoice shows one "Billable hours — <name>" line each. So raising
-  someone's bill rate does NOT raise every hourly client next month: a new
-  client starts on the current rates while existing clients stay where they are
-  until you move them at their review (Client page → Billing → Hourly rates).
+  someone's bill rate does NOT raise every hourly client next month: it
+  reaches only clients whose rate month is its effective-from month or later
+  (a new client starts on the current month's rates), and every other client
+  stays where it is until you move it at its review (Client page → Billing →
+  Hourly rates).
   Someone with no rate on file as of that month (for example, hired after it)
-  bills at their current rate, and someone with no bill rate at all bills at
-  the client's own hourly rate on file.
+  bills at their newest bill rate on file (which can be a raise dated ahead).
+  Someone with no bill rate on file at all bills the generated invoice at the
+  client's legacy hourly rate — a per-client rate that no longer has a field
+  on the Client page and is $0 for any client created since it left — while
+  the on-screen previews show the firm default rate instead. So give everyone
+  who logs billable time a bill rate.
   This per-employee billing applies from June 2026 onward; invoices for earlier
   months keep computing at the client's prior per-client hourly rate, so already
   -sent historical invoices stay exact and never change retroactively. Nothing
   already sent is ever repriced — a sent invoice carries its own rates.
   The on-screen previews — this per-client view and Projected billing on the
-  Reports page — price a pinned client's hours at its pin too, so they match
-  the invoice the month run generates.
+  Reports page — price a pinned client's hours at its pin too, so for everyone
+  with a bill rate on file they match the invoice the month run generates.
 - **TIME BREAKDOWN ON THE INVOICE — OFF UNLESS YOU TURN IT ON, PER CLIENT.**
   By default an invoice says what the client is paying and nothing about the
   hours behind it: a monthly client sees the subscription line and its price
@@ -2795,13 +2825,24 @@ Clients page meanwhile. Owner-only.
 - Bill rate (expand a member): the $/hour charged to clients for this person's
   billable hours on Hourly-billed clients. Set for ANY member including the
   owner (so the owner's own hours bill). A member with no bill rate on file
-  bills at the client's own hourly rate. Owner-only to edit. **Every saved rate
+  bills the generated invoice at the client's legacy hourly rate — $0 for any
+  client created since that rate left the Client page — while the on-screen
+  previews show the firm default rate instead, so give everyone who logs
+  billable time a bill rate. Owner-only to edit. **Every saved rate
   carries an "effective from" month**, defaulting to the current month — so a
   raise starts the month you pick and leaves every earlier month alone. Saving
   a month that already has a rate corrects it; saving an earlier month
-  backfills a change you forgot to record. Raising a rate does not move any
-  existing client onto it — each hourly client stays on its rate month until
-  you move it (Client page → Billing → Hourly rates).
+  backfills a change you forgot to record. Saving a rate never moves a
+  client's rate month, but it reaches every hourly client whose rate month is
+  the effective-from month or later (up to the next month this person already
+  has a rate saved for). With the default — the current month — that is every
+  client on the current month's rates, including any client created or
+  switched to Hourly this month, and every client already moved to this month
+  or later. A correction or backfill likewise reprices every client whose rate
+  month is that month or later, for any month whose invoice has not been
+  generated yet. To leave those clients alone, date the raise after their
+  rate month; the Client page (Billing → Hourly rates) shows each client's
+  rate month.
 - Cost rate (expand a member): optional $/hour pay/cost rate per member. Set
   for ANY member including an owner — an owner who wants her own hours in the
   firm's labor cost (for budgeting) enters her rate here, and from then on her
@@ -3004,7 +3045,7 @@ Clients page meanwhile. Owner-only.
     person's bill rate in the rate month the client was pinned to that month;
     before June 2026, the client's old single hourly rate × billable hours.
     Cost is each person's cost rate on the DAY the entry was worked — the same
-    rule as the Client Recap and the payroll report's detail.
+    rule as the Client Recap and the payroll report.
   - Hours logged by client and/or staff over any date range (billable vs
     administrative).
   - What's overdue or due soon, with the client and assignee.
