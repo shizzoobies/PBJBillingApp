@@ -275,6 +275,8 @@ Clients page meanwhile. Owner-only.
   - Each split entry KEEPS the block's clock-in / clock-out (manual group entries
     too) and its task — a checklist task stays on its own client's entry, the
     others show its name — while billing only its own share of the minutes.
+    (Entries split from 2026-09-23 on; earlier split rows keep what they had.)
+    Adjusting a split keeps each client's own task.
   - Every split is written to the activity log (who split what, how many
     clients, how many hours).
   - HOW THE SPLIT IS DIVIDED — the modal leads with the two easy answers:

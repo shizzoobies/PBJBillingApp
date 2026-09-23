@@ -3171,6 +3171,129 @@ describe('split shares keep the task and clock in/out (file backend)', () => {
     expect(byClient.c3.minutes).toBe(7)
     for (const each of created) expect(each.sessions).toEqual(ENVELOPE)
   })
+
+  it('keeps each client its own task when an adjustment re-divides a split', async () => {
+    // After splitting a timer block the owner set a DIFFERENT checklist on each
+    // share. Re-dividing the minutes must not relabel one client's share with
+    // the other client's task; only a newly added client gets a fallback.
+    const share = (id, clientId, overrides) => ({
+      id,
+      employeeId: 'emp-1',
+      clientId,
+      isAdministrative: false,
+      date: '2026-08-12',
+      minutes: 9.5,
+      category: 'General',
+      description: 'Month-end close',
+      billable: true,
+      approvalStatus: 'approved',
+      entryMethod: 'timer',
+      startAt: START,
+      endAt: STOP,
+      sessions: ENVELOPE,
+      groupId: 'grp-own',
+      groupClientIds: [],
+      groupAllocation: 'even',
+      ...overrides,
+    })
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+          { id: 'c3', name: 'Initech' },
+        ],
+        checklists: [
+          CHECKLIST,
+          { ...CHECKLIST, id: 'task-payroll', clientId: 'c2', title: 'Payroll' },
+        ],
+        timeEntries: [
+          share('s1', 'c1', { taskId: 'task-close' }),
+          share('s2', 'c2', { taskId: 'task-payroll' }),
+        ],
+      }),
+    )
+
+    const { created } = await store.adjustSplitGroup(
+      'grp-own',
+      [
+        { clientId: 'c1', minutes: 5 },
+        { clientId: 'c2', minutes: 10 },
+        { clientId: 'c3', minutes: 4 },
+      ],
+      'owner-1',
+      'custom',
+    )
+    const byClient = Object.fromEntries(created.map((each) => [each.clientId, each]))
+    expect(byClient.c1.taskId).toBe('task-close')
+    expect(byClient.c1.taskLabel).toBeUndefined()
+    expect(byClient.c2.taskId).toBe('task-payroll')
+    expect(byClient.c2.taskLabel).toBeUndefined()
+    // New to the split: the group's task (the first share that kept one), by name.
+    expect(byClient.c3.taskId).toBeNull()
+    expect(byClient.c3.taskLabel).toBe('Monthly close')
+  })
+
+  it('keeps a typed per-client task name through an adjustment', async () => {
+    await seed([
+      {
+        id: 's1',
+        employeeId: 'emp-1',
+        clientId: 'c1',
+        isAdministrative: false,
+        date: '2026-08-12',
+        minutes: 9.5,
+        category: 'General',
+        description: 'Month-end close',
+        billable: true,
+        taskId: null,
+        taskLabel: 'Bank reconciliation',
+        approvalStatus: 'approved',
+        entryMethod: 'manual',
+        manualReason: 'Worked offline.',
+        startAt: START,
+        endAt: STOP,
+        sessions: ENVELOPE,
+        groupId: 'grp-typed',
+        groupClientIds: [],
+        groupAllocation: 'even',
+      },
+      {
+        id: 's2',
+        employeeId: 'emp-1',
+        clientId: 'c2',
+        isAdministrative: false,
+        date: '2026-08-12',
+        minutes: 9.5,
+        category: 'General',
+        description: 'Month-end close',
+        billable: true,
+        taskId: null,
+        taskLabel: 'Payroll',
+        approvalStatus: 'approved',
+        entryMethod: 'manual',
+        manualReason: 'Worked offline.',
+        startAt: START,
+        endAt: STOP,
+        sessions: ENVELOPE,
+        groupId: 'grp-typed',
+        groupClientIds: [],
+        groupAllocation: 'even',
+      },
+    ])
+    const { created } = await store.adjustSplitGroup(
+      'grp-typed',
+      [
+        { clientId: 'c2', minutes: 12 },
+        { clientId: 'c1', minutes: 7 },
+      ],
+      'owner-1',
+      'custom',
+    )
+    const byClient = Object.fromEntries(created.map((each) => [each.clientId, each]))
+    expect(byClient.c1.taskLabel).toBe('Bank reconciliation')
+    expect(byClient.c2.taskLabel).toBe('Payroll')
+  })
 })
 
 /**
@@ -3304,6 +3427,33 @@ describe('split shares keep the task and clock in/out (postgres branch)', () => 
     expect(inserts.map((each) => each.params[8])).toEqual([null, 'task-close'])
     expect(inserts.map((each) => each.params[20])).toEqual(['Monthly close', null])
     expect(inserts.map((each) => each.params[4])).toEqual([7, 12])
+  })
+
+  it('adjustSplitGroup keeps each client its own task and falls back only for a new client', async () => {
+    const groupRow = (id, clientId, overrides) =>
+      sourceRow({ id, client_id: clientId, minutes: 9.5, ...overrides })
+    const fake = fakePostgres({
+      groupSlices: [
+        groupRow('s1', 'c1', { task_id: 'task-close', task_label: null }),
+        groupRow('s2', 'c2', { task_id: 'task-payroll', task_label: null }),
+      ],
+      checklistRows: [CHECKLIST_ROW, { id: 'task-payroll', client_id: 'c2', title: 'Payroll' }],
+    })
+    await postgresStore(fake).adjustSplitGroup(
+      'grp-own',
+      [
+        { clientId: 'c2', minutes: 10 },
+        { clientId: 'c1', minutes: 5 },
+        { clientId: 'c3', minutes: 4 },
+      ],
+      'owner-1',
+      'custom',
+    )
+    const inserts = fake.matching(/^insert into time_entries/i)
+    expect(inserts.map((each) => each.params[2])).toEqual(['c2', 'c1', 'c3'])
+    expect(inserts.map((each) => each.params[8])).toEqual(['task-payroll', 'task-close', null])
+    expect(inserts.map((each) => each.params[20])).toEqual([null, null, 'Monthly close'])
+    expect(inserts.map((each) => each.params[4])).toEqual([10, 5, 4])
   })
 })
 

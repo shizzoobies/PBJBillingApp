@@ -2364,6 +2364,36 @@ function splitSourceTaskFromFile(checklists, taskId, ownerClientId) {
   }
 }
 
+/**
+ * The task each client's EXISTING share of a split carries, for an adjustment:
+ * clientId → `{taskId, taskLabel}`, first share per client, and only shares
+ * that have a task. Both backends pass their rows in as camelCase.
+ */
+function sharesTaskByClient(shares) {
+  const byClient = new Map()
+  for (const share of Array.isArray(shares) ? shares : []) {
+    if (!share?.clientId || byClient.has(share.clientId)) continue
+    const taskLabel = typeof share.taskLabel === 'string' ? share.taskLabel.trim() : ''
+    if (!share.taskId && !taskLabel) continue
+    byClient.set(share.clientId, { taskId: share.taskId || null, taskLabel })
+  }
+  return byClient
+}
+
+/**
+ * The task one share of an ADJUSTED split carries. A client that already had a
+ * share keeps that share's own task, because the owner may have set a different
+ * checklist on each share after splitting, and an adjustment re-divides the
+ * minutes, not the work. Only a client new to the split gets the group's task
+ * through {@link splitShareTask}.
+ */
+function adjustShareTask(clientId, ownTasks, task, fallbackLabel) {
+  const own = ownTasks?.get(clientId)
+  if (own?.taskId) return { taskId: own.taskId }
+  if (own?.taskLabel) return { taskId: null, taskLabel: own.taskLabel }
+  return splitShareTask(clientId, task, fallbackLabel)
+}
+
 /** {@link splitSourceTaskFromFile}, read inside the split's Postgres transaction. */
 async function splitSourceTaskFromPg(client, taskId, ownerClientId) {
   if (!taskId) return null
@@ -8495,8 +8525,8 @@ export class AppDataStore {
    * (they are identical across a group by construction: same user, date,
    * description, category, billable flag, capture method + manual reason, and
    * the source block's `sessions` and start/stop envelope verbatim). The task
-   * is re-placed per client by `splitShareTask`: the share that kept the
-   * checklist names it, and it lands on whichever new share bills that client.
+   * is per client (`adjustShareTask`): a client that already had a share keeps
+   * that share's own task, and a newly added client gets the group's task.
    * What changes is the per-client split: which clients, and how many minutes
    * each. Every slice lands `approval_status: 'pending'` — an adjustment is an
    * edit, and an edit re-enters the daily queue.
@@ -8543,7 +8573,7 @@ export class AppDataStore {
     // Every field but the client and the minutes comes from the slices already
     // in the group — they all carry the same values, so the first one is the
     // template for the replacements.
-    const buildSlices = (template, task) =>
+    const buildSlices = (template, task, ownTasks) =>
       rows.map((row) => ({
         id: `time-${randomUUID().slice(0, 8)}`,
         employeeId: template.employeeId,
@@ -8556,9 +8586,10 @@ export class AppDataStore {
         category: template.category ?? 'General',
         description: template.description ?? '',
         billable: Boolean(template.billable),
-        // The group's task follows the new distribution: its own client's share
-        // keeps the checklist, the rest name it (see `splitShareTask`).
-        ...splitShareTask(row.clientId, task, template.taskLabel),
+        // A client that already had a share keeps that share's own task (it may
+        // have been set per client after the split). Only a newly added client
+        // falls back to the group's task (see `adjustShareTask`).
+        ...adjustShareTask(row.clientId, ownTasks, task, template.taskLabel),
         // An adjustment is an edit: back through approval, like any other.
         approvalStatus: 'pending',
         entryMethod: template.entryMethod === 'manual' ? 'manual' : 'timer',
@@ -8624,6 +8655,13 @@ export class AppDataStore {
         const slices = buildSlices(
           template,
           await splitSourceTaskFromPg(client, taskShare?.task_id, taskShare?.client_id),
+          sharesTaskByClient(
+            held.rows.map((each) => ({
+              clientId: each.client_id,
+              taskId: each.task_id,
+              taskLabel: each.task_label,
+            })),
+          ),
         )
 
         await client.query(`delete from time_entries where group_id = $1`, [sharedGroupId])
@@ -8711,6 +8749,7 @@ export class AppDataStore {
         taskLabel: existing.find((entry) => entry.taskLabel)?.taskLabel,
       },
       splitSourceTaskFromFile(data.checklists, taskShare?.taskId, taskShare?.clientId),
+      sharesTaskByClient(existing),
     )
     data.timeEntries = [
       ...slices,
