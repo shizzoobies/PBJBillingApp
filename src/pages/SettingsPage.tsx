@@ -23,9 +23,30 @@ import {
   DEFAULT_FIRM_SETTINGS,
   type BillingMode,
   type FirmSettings,
+  type ProposalGroup,
+  type ProposalMultiplier,
+  type ProposalPricing,
+  type ProposalPricingKind,
+  type ProposalRole,
+  type ProposalService,
+  type ProposalTier,
   type TotpStatus,
 } from '../lib/types'
 import { isSafeImageSrc } from '../lib/utils'
+import {
+  ANNUAL_GROUP,
+  PROPOSAL_GROUPS,
+  PROPOSAL_MULTIPLIERS,
+  PROPOSAL_PRICING_KINDS,
+  PROPOSAL_ROLES,
+  PROPOSAL_TIERS,
+  defaultProposalPricing,
+} from '../../lib/proposal-pricing.js'
+import {
+  PROPOSAL_MULTIPLIER_LABELS,
+  PROPOSAL_PRICING_LABELS,
+  PROPOSAL_ROLE_LABELS,
+} from '../lib/proposals'
 
 export function SettingsPage() {
   const { ownerMode, sessionUser, setFirmSettings } = useAppContext()
@@ -114,6 +135,7 @@ export function SettingsPage() {
       <ContactSection settings={settings} onCommit={commit} />
       <BusinessSection settings={settings} onCommit={commit} />
       <ClientDefaultsSection settings={settings} onCommit={commit} />
+      <ProposalPricingSection settings={settings} onCommit={commit} />
       <AuthenticationSection />
       <EmailNotificationPrefsSection />
       <SecuritySection />
@@ -722,6 +744,278 @@ function ClientDefaultsSection({
           </span>
         </label>
       </div>
+    </CollapsibleSection>
+  )
+}
+
+/**
+ * The proposal pricing catalog (featreq-311473e2, spec §4.1): the three role
+ * rates, the labels of the counts she collects, and one row per service. Every
+ * edit saves the WHOLE catalog through `PUT /api/firm-settings`, where
+ * `sanitizeProposalPricing` has the last word — a row whose input is gone comes
+ * back retired rather than refusing the save.
+ */
+export function ProposalPricingSection({
+  settings,
+  onCommit,
+}: {
+  settings: FirmSettings
+  onCommit: (patch: Partial<FirmSettings>) => void | Promise<void>
+}) {
+  const pricing = settings.proposalPricing ?? defaultProposalPricing()
+  const save = (next: ProposalPricing) => {
+    void onCommit({ proposalPricing: next })
+  }
+  const setRate = (role: ProposalRole, value: number | null) =>
+    save({ ...pricing, rates: { ...pricing.rates, [role]: value ?? 0 } })
+  const setInputLabel = (key: string, label: string) =>
+    save({
+      ...pricing,
+      inputs: pricing.inputs.map((input) => (input.key === key ? { ...input, label } : input)),
+    })
+  const setService = (id: string, patch: Partial<ProposalService>) =>
+    save({
+      ...pricing,
+      services: pricing.services.map((service) =>
+        service.id === id ? { ...service, ...patch } : service,
+      ),
+    })
+  const addRow = (group: ProposalGroup) => {
+    const sortOrder = Math.max(0, ...pricing.services.map((service) => service.sortOrder)) + 1
+    save({
+      ...pricing,
+      services: [
+        ...pricing.services,
+        {
+          id: `custom-${Date.now().toString(36)}`,
+          group,
+          name: 'New service',
+          tier: null,
+          pricing: 'formula',
+          inputKey: pricing.inputs[0]?.key ?? null,
+          factor: 0,
+          role: 'bookkeeper',
+          multiplier: 'none',
+          cadence: group === ANNUAL_GROUP ? 'annual' : null,
+          active: true,
+          sortOrder,
+        },
+      ],
+    })
+  }
+  const rowLabel = (service: ProposalService) =>
+    service.tier ? `${service.name} ${service.tier}` : service.name
+
+  return (
+    <CollapsibleSection kicker="Proposals" title="Proposal pricing" lockable>
+      <p className="muted-text" style={{ marginTop: 0 }}>
+        Every proposal line is a count from their books × a factor × one of these rates × a
+        multiplier. These rates are for proposals only — they are not your team’s bill rates.
+        Changing the catalog never reprices a proposal you already wrote; open it and choose
+        “Reprice at today’s catalog”.
+      </p>
+      <div className="form-grid two-col">
+        {PROPOSAL_ROLES.map((role) => (
+          <label className="field" key={role}>
+            <span>{PROPOSAL_ROLE_LABELS[role]} rate ($/hr)</span>
+            <SavingNumberInput
+              ariaLabel={`${PROPOSAL_ROLE_LABELS[role]} rate`}
+              canonical={pricing.rates[role]}
+              min="0"
+              step="0.01"
+              onCommit={(value) => setRate(role, value)}
+            />
+          </label>
+        ))}
+      </div>
+
+      <h3>What you collect</h3>
+      <div className="form-grid two-col">
+        {pricing.inputs.map((input) => (
+          <label className="field" key={input.key}>
+            <span>{input.help || input.key}</span>
+            <SavingTextInput
+              ariaLabel={`Label for ${input.key}`}
+              canonical={input.label}
+              onCommit={(value) => setInputLabel(input.key, value)}
+            />
+          </label>
+        ))}
+      </div>
+
+      {PROPOSAL_GROUPS.map((group) => {
+        const rows = pricing.services
+          .filter((service) => service.group === group)
+          .sort((a, b) => a.sortOrder - b.sortOrder)
+        return (
+          <div className="proposal-catalog-group" key={group}>
+            <h3>{group}</h3>
+            <div className="table-wrap">
+              <table className="report-table proposal-catalog-table">
+                <thead>
+                  <tr>
+                    <th>Service</th>
+                    <th>Tier</th>
+                    <th>Input</th>
+                    <th>Factor</th>
+                    <th>Role</th>
+                    <th>Multiplier</th>
+                    <th>Pricing</th>
+                    {group === ANNUAL_GROUP ? <th>Billed</th> : null}
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((service) => {
+                    const label = rowLabel(service)
+                    return (
+                      <tr key={service.id} className={service.active ? '' : 'is-retired'}>
+                        <td>
+                          <SavingTextInput
+                            ariaLabel={`Name for ${label}`}
+                            canonical={service.name}
+                            onCommit={(value) => setService(service.id, { name: value })}
+                          />
+                        </td>
+                        <td>
+                          <select
+                            className="input"
+                            aria-label={`Tier for ${label}`}
+                            value={service.tier ?? ''}
+                            onChange={(event) =>
+                              setService(service.id, {
+                                tier: (event.target.value || null) as ProposalTier | null,
+                              })
+                            }
+                          >
+                            <option value="">None</option>
+                            {PROPOSAL_TIERS.map((tier) => (
+                              <option key={tier} value={tier}>
+                                {tier}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          <select
+                            className="input"
+                            aria-label={`Input for ${label}`}
+                            value={service.inputKey ?? ''}
+                            onChange={(event) =>
+                              setService(service.id, { inputKey: event.target.value || null })
+                            }
+                          >
+                            <option value="">None</option>
+                            {pricing.inputs.map((input) => (
+                              <option key={input.key} value={input.key}>
+                                {input.label}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          <SavingNumberInput
+                            ariaLabel={`Factor for ${label}`}
+                            canonical={service.factor}
+                            min="0"
+                            step="0.01"
+                            onCommit={(value) => setService(service.id, { factor: value ?? 0 })}
+                          />
+                        </td>
+                        <td>
+                          <select
+                            className="input"
+                            aria-label={`Role for ${label}`}
+                            value={service.role ?? ''}
+                            onChange={(event) =>
+                              setService(service.id, {
+                                role: (event.target.value || null) as ProposalRole | null,
+                              })
+                            }
+                          >
+                            <option value="">None</option>
+                            {PROPOSAL_ROLES.map((role) => (
+                              <option key={role} value={role}>
+                                {PROPOSAL_ROLE_LABELS[role]}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          <select
+                            className="input"
+                            aria-label={`Multiplier for ${label}`}
+                            value={service.multiplier}
+                            onChange={(event) =>
+                              setService(service.id, {
+                                multiplier: event.target.value as ProposalMultiplier,
+                              })
+                            }
+                          >
+                            {PROPOSAL_MULTIPLIERS.map((multiplier) => (
+                              <option key={multiplier} value={multiplier}>
+                                {PROPOSAL_MULTIPLIER_LABELS[multiplier]}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          <select
+                            className="input"
+                            aria-label={`Pricing for ${label}`}
+                            value={service.pricing}
+                            onChange={(event) =>
+                              setService(service.id, {
+                                pricing: event.target.value as ProposalPricingKind,
+                              })
+                            }
+                          >
+                            {PROPOSAL_PRICING_KINDS.map((kind) => (
+                              <option key={kind} value={kind}>
+                                {PROPOSAL_PRICING_LABELS[kind]}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        {group === ANNUAL_GROUP ? (
+                          <td>
+                            <select
+                              className="input"
+                              aria-label={`Billed for ${label}`}
+                              value={service.cadence ?? 'annual'}
+                              onChange={(event) =>
+                                setService(service.id, {
+                                  cadence: event.target.value === 'one-time' ? 'one-time' : 'annual',
+                                })
+                              }
+                            >
+                              <option value="annual">Annual</option>
+                              <option value="one-time">One-time</option>
+                            </select>
+                          </td>
+                        ) : null}
+                        <td>
+                          <button
+                            type="button"
+                            className="ghost-action"
+                            aria-label={`${service.active ? 'Retire' : 'Restore'} ${label}`}
+                            onClick={() => setService(service.id, { active: !service.active })}
+                          >
+                            {service.active ? 'Retire' : 'Restore'}
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <button type="button" className="secondary-action" onClick={() => addRow(group)}>
+              Add row to {group}
+            </button>
+          </div>
+        )
+      })}
     </CollapsibleSection>
   )
 }

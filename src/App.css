@@ -13085,3 +13085,16 @@ details.invoice-run-sent ul,
   background: color-mix(in srgb, var(--brand, #7d2a4d) 7%, transparent);
   border-color: var(--brand, #7d2a4d);
 }
+
+/* Proposal pricing catalog in Settings (featreq-311473e2). */
+.proposal-catalog-group {
+  margin-top: 18px;
+}
+
+.proposal-catalog-table .input {
+  min-width: 90px;
+}
+
+.proposal-catalog-table tr.is-retired td {
+  opacity: 0.55;
+}
