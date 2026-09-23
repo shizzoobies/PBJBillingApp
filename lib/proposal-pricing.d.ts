@@ -77,7 +77,7 @@ export type PricedLine = {
   amount: number
   computedAmount: number
   formula: string
-  flag: 'unknown-input' | 'needs-count' | 'invalid-input' | null
+  flag: 'unknown-input' | 'needs-count' | 'invalid-input' | 'retired' | null
 }
 
 export type ProposalTotals = { monthly: number; annual: number; oneTime: number; cleanup: number }
