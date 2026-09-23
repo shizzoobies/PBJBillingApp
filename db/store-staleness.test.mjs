@@ -1204,6 +1204,29 @@ function fakePostgres({
         .map((row) => ({ id: row.id, billing_mode: row.billing_mode ?? null }))
       return { rows, rowCount: rows.length }
     }
+    // `setClientHourlyRatePeriod`'s targeted update. Anchored on `= $2` so the
+    // migration's literal `set hourly_rate_period = '2026-06'` backfill falls
+    // through to the default below and keeps its own test honest. The row is
+    // updated in place and answered with a rowCount, or the store reads its own
+    // write as a miss and hands the caller null.
+    if (/^update clients set hourly_rate_period = \$2/i.test(trimmed)) {
+      const found = clientRows.find((row) => row.id === params?.[0])
+      if (!found) return { rows: [], rowCount: 0 }
+      found.hourly_rate_period = params?.[1]
+      found.hourly_rate_history = JSON.parse(params?.[2] ?? '[]')
+      return { rows: [{ id: found.id }], rowCount: 1 }
+    }
+    // `setClientHourlyRatePeriod`'s single-row read of the pin it is about to
+    // append to. It has to FILTER: answering every row would let a move against
+    // a client that is not there append to somebody else's ledger, and the
+    // "answers null for a client that is not there" assertion would pass
+    // against a store that never checked.
+    if (
+      /^select hourly_rate_period, hourly_rate_history from clients where id = \$1$/i.test(trimmed)
+    ) {
+      const found = clientRows.find((row) => row.id === params?.[0])
+      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
+    }
     // The rate-history pin snapshot the bulk save takes before the wipe — the
     // same idiom as `priorStripeCustomerIds`. Anchored on its exact shape so a
     // rewrite that stopped reading it falls through to the empty default and
@@ -14715,6 +14738,17 @@ describe('rate history: migration + client pin (file backend)', () => {
         timeEntries: [],
       }),
     )
+    // `write()` now DEFAULTS an hourly client with no pin to the current month
+    // (a client that becomes hourly must never bill at the June 2026 cutover's
+    // rates), which would leave the boot backfill nothing to do. Clear the pin
+    // on disk so these tests still exercise the migration they are about — the
+    // pre-cutover workspace it actually runs against.
+    const seeded = JSON.parse(await readFile(localDataPath, 'utf8'))
+    for (const clientRecord of seeded.clients ?? []) {
+      delete clientRecord.hourlyRatePeriod
+      delete clientRecord.hourlyRateHistory
+    }
+    await writeFile(localDataPath, JSON.stringify(seeded, null, 2))
     await store.initialize()
   })
 
@@ -15209,5 +15243,351 @@ describe('cost rate versions (postgres branch)', () => {
     await postgresStore(fake).setEmployeeCostRate('emp-lisa', null)
     const [remove] = fake.matching(/^delete from cost_rate_versions where user_id = \$1$/i)
     expect(remove.params).toEqual(['emp-lisa'])
+  })
+})
+
+/**
+ * MOVING A CLIENT TO CURRENT RATES — the client page's one-press review action
+ * (spec §2.2).
+ *
+ * The pin is ENDPOINT-OWNED: `setClientHourlyRatePeriod` is its only writer, and
+ * the bulk save restores what is stored rather than what a payload carried. That
+ * is also why these fixtures seed the starting pin straight into the workspace
+ * file instead of passing it to `write()` — a payload's pin is ignored outright,
+ * so a fixture that set it that way would be testing nothing.
+ */
+describe('moving a client to current rates (file backend)', () => {
+  const seedPin = async (period, history = []) => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients[0].hourlyRatePeriod = period
+    data.clients[0].hourlyRateHistory = history
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  beforeEach(async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        timeEntries: [],
+      }),
+    )
+    await seedPin('2026-06')
+  })
+
+  it('sets the pin and appends the move to the ledger', async () => {
+    const updated = await store.setClientHourlyRatePeriod({
+      clientId: 'c1',
+      period: '2026-10',
+      actingUserId: 'emp-patrice',
+    })
+    expect(updated.hourlyRatePeriod).toBe('2026-10')
+    expect(updated.hourlyRateHistory).toHaveLength(1)
+    expect(updated.hourlyRateHistory[0]).toMatchObject({
+      from: '2026-06',
+      to: '2026-10',
+      changedBy: 'emp-patrice',
+    })
+    expect(updated.hourlyRateHistory[0].changedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  })
+
+  it('appends rather than replaces, so the ledger reads as a history', async () => {
+    await store.setClientHourlyRatePeriod({ clientId: 'c1', period: '2026-10', actingUserId: 'u' })
+    const updated = await store.setClientHourlyRatePeriod({
+      clientId: 'c1',
+      period: '2027-10',
+      actingUserId: 'u',
+    })
+    expect(updated.hourlyRateHistory.map((entry) => entry.to)).toEqual(['2026-10', '2027-10'])
+    expect(updated.hourlyRateHistory[1].from).toBe('2026-10')
+  })
+
+  it('survives a bulk save afterwards — the pin is endpoint-owned', async () => {
+    await store.setClientHourlyRatePeriod({ clientId: 'c1', period: '2026-10', actingUserId: 'u' })
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        timeEntries: [],
+      }),
+    )
+    const data = await store.read()
+    const client = data.clients.find((entry) => entry.id === 'c1')
+    expect(client.hourlyRatePeriod).toBe('2026-10')
+    expect(client.hourlyRateHistory).toHaveLength(1)
+  })
+
+  it('answers null for a client that is not there', async () => {
+    expect(
+      await store.setClientHourlyRatePeriod({ clientId: 'nope', period: '2026-10' }),
+    ).toBeNull()
+  })
+
+  it('refuses a period that is not a month and writes nothing', async () => {
+    expect(await store.setClientHourlyRatePeriod({ clientId: 'c1', period: 'soon' })).toBeNull()
+    const data = await store.read()
+    expect(data.clients.find((entry) => entry.id === 'c1').hourlyRatePeriod).toBe('2026-06')
+  })
+})
+
+describe('moving a client to current rates (postgres branch)', () => {
+  it('writes both columns in ONE targeted update, never the bulk save', async () => {
+    const fake = fakePostgres({
+      clientRows: [{ id: 'c1', hourly_rate_period: '2026-06', hourly_rate_history: [] }],
+    })
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({ clients: [{ id: 'c1', hourlyRatePeriod: '2026-10' }] })
+    await pgStore.setClientHourlyRatePeriod({
+      clientId: 'c1',
+      period: '2026-10',
+      actingUserId: 'emp-patrice',
+    })
+    const [update] = fake.matching(/^update clients set hourly_rate_period/i)
+    expect(update.text).toMatch(/hourly_rate_history = \$3::jsonb/)
+    expect(update.text).toMatch(/updated_at = now\(\)/)
+    expect(update.text).toMatch(/where id = \$1/)
+    expect(update.params[1]).toBe('2026-10')
+    expect(JSON.parse(update.params[2])[0]).toMatchObject({ from: '2026-06', to: '2026-10' })
+    expect(fake.matching(/^delete from clients/i)).toHaveLength(0)
+  })
+
+  it('answers null for a client that is not there, and writes nothing', async () => {
+    const fake = fakePostgres({ clientRows: [] })
+    expect(
+      await postgresStore(fake).setClientHourlyRatePeriod({ clientId: 'nope', period: '2026-10' }),
+    ).toBeNull()
+    expect(fake.matching(/^update clients set hourly_rate_period/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * CARRIED ITEM 1 — the delete guard reads the LEDGER, not just the live pin.
+ *
+ * `ratePeriodAsOf` prices a past month from `hourlyRateHistory[].to`, so a
+ * client moved onto January 2027 in August and moved back afterwards still
+ * bills those months at January 2027's rates. A guard that only looked at the
+ * live pin would let that version be deleted and silently reprice them.
+ */
+describe('removing a bill rate version the ledger still points at (file backend)', () => {
+  beforeEach(async () => {
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.billRateVersions = []
+    authState.users = [{ id: 'emp-lisa', name: 'Lisa', role: 'employee' }]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        timeEntries: [],
+      }),
+    )
+    // The pin and its ledger are endpoint-owned and STORED WINS on a bulk save,
+    // so whatever the previous test left on this client would carry into this
+    // one. Reset both on disk, which is also the only way to set a starting pin
+    // at all — a payload's copy is ignored outright.
+    const seeded = JSON.parse(await readFile(localDataPath, 'utf8'))
+    seeded.clients[0].hourlyRatePeriod = '2025-01'
+    seeded.clients[0].hourlyRateHistory = []
+    await writeFile(localDataPath, JSON.stringify(seeded, null, 2))
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-06', rate: 40 })
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2027-01', rate: 55 })
+  })
+
+  it('REFUSES while a past month is still priced at it, though the live pin is older', async () => {
+    await store.setClientHourlyRatePeriod({ clientId: 'c1', period: '2027-01', actingUserId: 'u' })
+    await store.setClientHourlyRatePeriod({ clientId: 'c1', period: '2025-01', actingUserId: 'u' })
+    const data = await store.read()
+    const client = data.clients.find((entry) => entry.id === 'c1')
+    expect(client.hourlyRatePeriod).toBe('2025-01')
+    await expect(
+      store.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2027-01' }),
+    ).rejects.toThrow(/pinned/i)
+    expect((await store.listBillRateVersions()).map((row) => row.effectivePeriod)).toEqual([
+      '2026-06',
+      '2027-01',
+    ])
+  })
+
+  it('allows it when neither the live pin nor the ledger reaches that month', async () => {
+    await store.setClientHourlyRatePeriod({ clientId: 'c1', period: '2025-01', actingUserId: 'u' })
+    const versions = await store.deleteBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2027-01',
+    })
+    expect(versions.map((row) => row.effectivePeriod)).toEqual(['2026-06'])
+  })
+})
+
+describe('removing a bill rate version the ledger still points at (postgres branch)', () => {
+  it('issues no delete when a ledger entry still prices a month at it', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.listBillRateVersions = async () => [
+      { userId: 'emp-lisa', effectivePeriod: '2027-01', rate: 55 },
+    ]
+    pgStore.read = async () => ({
+      clients: [
+        {
+          id: 'c1',
+          hourlyRatePeriod: '2025-01',
+          hourlyRateHistory: [{ from: '2026-06', to: '2027-01' }, { from: '2027-01', to: '2025-01' }],
+        },
+      ],
+    })
+    await expect(
+      pgStore.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2027-01' }),
+    ).rejects.toThrow(/pinned/i)
+    expect(fake.matching(/^delete from bill_rate_versions/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * CARRIED ITEM 2 — a client that BECOMES Hourly is pinned at save time.
+ *
+ * The boot backfill pins any unpinned hourly client at the June 2026 cutover, so
+ * a subscription client switched to Hourly through the bulk save would bill at
+ * rates a year and a half old. `write()` defaults the null to THIS month on both
+ * backends. It is a default for a null, not the payload's value — a pin that is
+ * stored still wins outright.
+ */
+describe('a client that becomes Hourly is pinned at save time (file backend)', () => {
+  const thisMonth = () => new Date().toISOString().slice(0, 7)
+
+  it('pins a subscription client that is saved again as Hourly', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-sub', name: 'Sub Co', billingMode: 'subscription', monthlyRate: 500 }],
+        timeEntries: [],
+      }),
+    )
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-sub', name: 'Sub Co', billingMode: 'hourly', hourlyRate: 100 }],
+        timeEntries: [],
+      }),
+    )
+    const data = await store.read()
+    const client = data.clients.find((entry) => entry.id === 'c-sub')
+    expect(client.hourlyRatePeriod).toBe(thisMonth())
+    expect(client.hourlyRateHistory).toEqual([])
+  })
+
+  it('leaves a client that is not Hourly unpinned', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-sub', name: 'Sub Co', billingMode: 'subscription', monthlyRate: 500 }],
+        timeEntries: [],
+      }),
+    )
+    const data = await store.read()
+    expect(data.clients.find((entry) => entry.id === 'c-sub').hourlyRatePeriod ?? null).toBeNull()
+  })
+
+  it('never overwrites a pin that is already stored', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        timeEntries: [],
+      }),
+    )
+    await store.setClientHourlyRatePeriod({ clientId: 'c1', period: '2025-03', actingUserId: 'u' })
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 110 }],
+        timeEntries: [],
+      }),
+    )
+    const data = await store.read()
+    expect(data.clients.find((entry) => entry.id === 'c1').hourlyRatePeriod).toBe('2025-03')
+  })
+})
+
+describe('a client that becomes Hourly is pinned at save time (postgres branch)', () => {
+  const thisMonth = () => new Date().toISOString().slice(0, 7)
+
+  it('binds this month for an Hourly client with no stored pin', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [{ id: 'c-new', name: 'New Co', billingMode: 'hourly', hourlyRate: 100 }],
+      }),
+    )
+    const [insert] = fake.matching(/^insert into clients/i)
+    // The pin is `$43` in that insert — see the stored-pin test above.
+    expect(insert.params[42]).toBe(thisMonth())
+    expect(insert.params[43]).toBe('[]')
+  })
+
+  it('binds null for a client that is not Hourly', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [{ id: 'c-new', name: 'New Co', billingMode: 'subscription', monthlyRate: 500 }],
+      }),
+    )
+    const [insert] = fake.matching(/^insert into clients/i)
+    expect(insert.params[42]).toBeNull()
+  })
+})
+
+/**
+ * CARRIED ITEM 3 — the user-exists guard, proved on the backend whose foreign
+ * key is the reason it exists. Without it an unknown id turns a stale tab's save
+ * into a 500 where it used to quietly no-op.
+ */
+describe('rate versions refuse a user who is not on the roster (postgres branch)', () => {
+  it('writes no bill-rate version for an unknown id', async () => {
+    const fake = fakePostgres({ userRows: [{ id: 'emp-lisa' }] })
+    expect(
+      await postgresStore(fake).upsertBillRateVersion({
+        userId: 'emp-ghost',
+        effectivePeriod: '2026-06',
+        rate: 40,
+      }),
+    ).toEqual([])
+    expect(fake.matching(/^insert into bill_rate_versions/i)).toHaveLength(0)
+  })
+
+  it('writes no cost-rate version for an unknown id', async () => {
+    const fake = fakePostgres({ userRows: [{ id: 'emp-lisa' }] })
+    expect(
+      await postgresStore(fake).upsertCostRateVersion({
+        userId: 'emp-ghost',
+        effectiveDate: '2026-09-15',
+        rate: 24,
+      }),
+    ).toEqual([])
+    expect(fake.matching(/^insert into cost_rate_versions/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * CARRIED ITEM 4 — the undated wrappers mirror ONCE. The upsert has already
+ * mirrored and already handed back this person's versions; re-reading them to
+ * compute the same number again was a second full pass over both tables (and, on
+ * Postgres, a second `update users`).
+ */
+describe('the undated rate wrappers mirror once (postgres branch)', () => {
+  it('setEmployeeBillRate issues a single bill-rate mirror', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).setEmployeeBillRate('emp-lisa', 48)
+    expect(fake.matching(/^update users set bill_rate/i)).toHaveLength(1)
+  })
+
+  it('setEmployeeCostRate issues a single cost-rate mirror', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).setEmployeeCostRate('emp-lisa', 22)
+    expect(fake.matching(/^update users set cost_rate/i)).toHaveLength(1)
+  })
+})
+
+describe('the cost-rate refusal talks about days (file backend)', () => {
+  it('says past DAYS, because cost is resolved by the day the work was done', async () => {
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.costRateVersions = []
+    authState.users = [{ id: 'emp-lisa', name: 'Lisa', role: 'employee' }]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await store.upsertCostRateVersion({ userId: 'emp-lisa', effectiveDate: '1970-01-01', rate: 20 })
+    await store.upsertCostRateVersion({ userId: 'emp-lisa', effectiveDate: '2026-09-15', rate: 24 })
+    await expect(
+      store.deleteCostRateVersion({ userId: 'emp-lisa', effectiveDate: '1970-01-01' }),
+    ).rejects.toThrow(/past days/i)
   })
 })

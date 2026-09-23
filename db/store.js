@@ -5345,6 +5345,13 @@ export class AppDataStore {
    * because that client is billing at this exact row; removing it would drop
    * the person back to an earlier rate on an invoice already being prepared.
    *
+   * The second guard reads the LEDGER as well as the live pin, because
+   * `ratePeriodAsOf` prices a past month from `hourlyRateHistory[].to`. A
+   * client moved onto January 2027 in August and moved back to January 2025
+   * afterwards has an OLDER live pin and still bills March through July at
+   * January 2027's rates — so a guard that looked only at `hourlyRatePeriod`
+   * would let that version go and silently reprice every one of those months.
+   *
    * Throws `RateVersionError`, which the endpoint maps to 409.
    */
   async deleteBillRateVersion({ userId, effectivePeriod } = {}) {
@@ -5359,14 +5366,21 @@ export class AppDataStore {
       )
     }
     const data = await this.read()
-    const pinnedAtOrAfter = (data.clients ?? []).some(
-      (clientRecord) =>
+    const pinnedAtOrAfter = (data.clients ?? []).some((clientRecord) => {
+      if (
         typeof clientRecord?.hourlyRatePeriod === 'string' &&
-        clientRecord.hourlyRatePeriod >= effectivePeriod,
-    )
+        clientRecord.hourlyRatePeriod >= effectivePeriod
+      ) {
+        return true
+      }
+      const history = Array.isArray(clientRecord?.hourlyRateHistory)
+        ? clientRecord.hourlyRateHistory
+        : []
+      return history.some((entry) => typeof entry?.to === 'string' && entry.to >= effectivePeriod)
+    })
     if (pinnedAtOrAfter) {
       throw new RateVersionError(
-        'A client is pinned at or after this month, so it is still billing at this rate. Move that client first.',
+        'A client is pinned at or after this month — now, or in a past month its ledger still prices — so it is still billing at this rate. Move that client first.',
       )
     }
 
@@ -5536,7 +5550,7 @@ export class AppDataStore {
     const newest = mine[mine.length - 1]
     if (newest.effectiveDate !== effectiveDate) {
       throw new RateVersionError(
-        'Only the newest cost rate can be removed — an older one is what past months were costed at.',
+        'Only the newest cost rate can be removed — an older one is what past days were costed at.',
       )
     }
 
@@ -6879,6 +6893,16 @@ export class AppDataStore {
           ]),
         )
 
+        // …and what an hourly client with NO stored pin falls back to. Not the
+        // payload's pin — still ignored outright — but a default for the null,
+        // because the boot backfill pins an unpinned hourly client at the
+        // '2026-06' cutover. A client that BECOMES hourly later (a subscription
+        // client switched through this very save, or one introduced by some
+        // path other than `createClient`) would then bill at rates a year and a
+        // half old. The month it turns hourly in is the honest answer, and it
+        // is the same one `createClient` gives a brand-new hourly client.
+        const currentRatePeriod = nowIso().slice(0, 7)
+
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
         await client.query('delete from checklist_template_items')
@@ -7117,10 +7141,12 @@ export class AppDataStore {
               clientRecord.billToClientId ?? null,
               clientRecord.isBillingMaster === true,
               clientRecord.invoiceRecipientClientId ?? null,
-              // Stored wins outright (see the snapshot above). A brand-new
-              // client has no entry and gets null / [] — right, because it has
-              // no pin until the create path or the migration gives it one.
-              priorRatePins.get(clientRecord.id)?.period ?? null,
+              // Stored wins outright (see the snapshot above). A client with
+              // nothing stored falls back to THIS month when it is hourly, and
+              // to null otherwise — a client that is not hourly has no pin to
+              // price off, and `ratePeriodAsOf` answers null for it.
+              priorRatePins.get(clientRecord.id)?.period ??
+                (clientRecord.billingMode === 'hourly' ? currentRatePeriod : null),
               JSON.stringify(priorRatePins.get(clientRecord.id)?.history ?? []),
               createdAtFor('clients', clientRecord.id),
             ],
@@ -7874,6 +7900,23 @@ export class AppDataStore {
       } catch {
         // A malformed prior file must never block a legitimate save. Fall
         // through and persist the incoming data unchanged.
+      }
+
+      // Cardinal rule 1 mirror of `currentRatePeriod` in the Postgres branch:
+      // an hourly client with no pin gets THIS month rather than the '2026-06'
+      // the boot backfill would give it. Outside the block above on purpose —
+      // the stored pin has already won by here, and a workspace with no prior
+      // file at all has to reach the same answer Postgres does.
+      const currentRatePeriod = nowIso().slice(0, 7)
+      if (Array.isArray(data.clients)) {
+        data.clients = data.clients.map((clientRecord) => {
+          if (!clientRecord || typeof clientRecord !== 'object') return clientRecord
+          if (clientRecord.billingMode !== 'hourly') return clientRecord
+          if (typeof clientRecord.hourlyRatePeriod === 'string' && clientRecord.hourlyRatePeriod) {
+            return clientRecord
+          }
+          return { ...clientRecord, hourlyRatePeriod: currentRatePeriod, hourlyRateHistory: [] }
+        })
       }
 
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
@@ -10437,6 +10480,84 @@ export class AppDataStore {
     if (!updated) return null
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return updated
+  }
+
+  /**
+   * "Move to current rates from <month>" — the client page's one-press review
+   * action (spec §2.2).
+   *
+   * A TARGETED ENDPOINT, deliberately, and this is the whole reason the pin is
+   * not in the bulk-save clamp list: a stale owner tab autosaving yesterday's
+   * snapshot must not be able to drag a client back onto rates she moved it
+   * off this morning. Same call the team-picker fix made, for the same reason.
+   *
+   * The move is also APPENDED to `hourly_rate_history` as
+   * `{from, to, changedAt, changedBy}`. That ledger is what lets
+   * `ratePeriodAsOf` price a PAST month at the pin that was in force then — a
+   * client moved in August still has July billed at June's rates, which is the
+   * guarantee Brittany asked for. Appending rather than replacing is the whole
+   * mechanism; nothing here ever rewrites an entry.
+   *
+   * Returns the updated client in read shape, or null when there is no such
+   * client. Callers validate that the client is Hourly and that `period` is
+   * 'YYYY-MM' before getting here (the endpoint answers 400 otherwise).
+   */
+  async setClientHourlyRatePeriod({ clientId, period, actingUserId = null } = {}) {
+    if (typeof clientId !== 'string' || !clientId) return null
+    if (!/^\d{4}-\d{2}$/.test(String(period ?? ''))) return null
+    const changedAt = nowIso()
+
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select hourly_rate_period, hourly_rate_history from clients where id = $1`,
+        [clientId],
+      )
+      if (!rows[0]) return null
+      const history = Array.isArray(rows[0].hourly_rate_history) ? rows[0].hourly_rate_history : []
+      const next = [
+        ...history,
+        {
+          from: rows[0].hourly_rate_period ?? null,
+          to: period,
+          changedAt,
+          changedBy: actingUserId,
+        },
+      ]
+      const result = await this.pool.query(
+        `update clients set hourly_rate_period = $2, hourly_rate_history = $3::jsonb,
+                updated_at = now()
+          where id = $1
+          returning id`,
+        [clientId, period, JSON.stringify(next)],
+      )
+      if (!result.rowCount) return null
+      const data = await this.read()
+      return data.clients.find((entry) => entry.id === clientId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updated = null
+    data.clients = (data.clients ?? []).map((entry) => {
+      if (entry.id !== clientId) return entry
+      const history = Array.isArray(entry.hourlyRateHistory) ? entry.hourlyRateHistory : []
+      updated = {
+        ...entry,
+        hourlyRatePeriod: period,
+        hourlyRateHistory: [
+          ...history,
+          {
+            from: entry.hourlyRatePeriod ?? null,
+            to: period,
+            changedAt,
+            changedBy: actingUserId,
+          },
+        ],
+      }
+      return updated
+    })
+    if (!updated) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return normalizeClientProfile(updated)
   }
 
   /**
@@ -15617,7 +15738,10 @@ export class AppDataStore {
    *
    * Returns the MIRROR rather than the number it was handed: once a
    * future-dated version is on file the two differ, and what the caller is
-   * about to show is what this person costs TODAY.
+   * about to show is what this person costs TODAY. It is read off the list the
+   * upsert already came back with — that call has mirrored the newest version
+   * onto the user record itself, so asking again would be a second full pass
+   * over both stores (and, on Postgres, a second `update users`).
    */
   async setEmployeeCostRate(userId, rate) {
     if (!userId) return null
@@ -15635,13 +15759,13 @@ export class AppDataStore {
     }
     const n = Number(rate)
     if (!Number.isFinite(n) || n < 0) return null
-    await this.upsertCostRateVersion({
+    const versions = await this.upsertCostRateVersion({
       userId,
       effectiveDate: nowIso().slice(0, 10),
       rate: n,
       actingUserId: null,
     })
-    return this._mirrorLatestCostRate(userId)
+    return latestCostRate(versions, userId)
   }
 
   /**
@@ -15658,7 +15782,9 @@ export class AppDataStore {
    *
    * Returns the MIRROR rather than the number it was handed: once a
    * future-dated version is on file the two differ, and what the caller is
-   * about to show is what this person bills TODAY.
+   * about to show is what this person bills TODAY. Read off the list the
+   * upsert already came back with, for the same reason as the cost twin: that
+   * call has already mirrored, and asking again would only re-read both stores.
    */
   async setEmployeeBillRate(userId, rate) {
     if (!userId) return null
@@ -15676,13 +15802,13 @@ export class AppDataStore {
     }
     const n = Number(rate)
     if (!Number.isFinite(n) || n < 0) return null
-    await this.upsertBillRateVersion({
+    const versions = await this.upsertBillRateVersion({
       userId,
       effectivePeriod: nowIso().slice(0, 7),
       rate: n,
       actingUserId: null,
     })
-    return this._mirrorLatestBillRate(userId)
+    return latestBillRate(versions, userId)
   }
 
   /**
