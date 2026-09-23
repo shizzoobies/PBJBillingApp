@@ -23,6 +23,7 @@ export const PROPOSAL_MULTIPLIER_LABELS: Record<ProposalMultiplier, string> = {
   'per-cleanup-month': 'Per clean-up month',
   'per-report': 'Per report',
   'per-form': 'Per form',
+  'per-count': 'Per count',
 }
 
 export const PROPOSAL_PRICING_LABELS: Record<ProposalPricingKind, string> = {

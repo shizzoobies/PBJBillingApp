@@ -27,6 +27,8 @@ export type ProposalMultiplier =
   | 'per-cleanup-month'
   | 'per-report'
   | 'per-form'
+  /** Like per-form, but reads ONLY the selection's typed quantity - no input fallback. */
+  | 'per-count'
 export type ProposalCadence = 'annual' | 'one-time'
 export type PayrollRun = 'weekly' | 'biweekly' | 'monthly'
 
@@ -75,7 +77,7 @@ export type PricedLine = {
   amount: number
   computedAmount: number
   formula: string
-  flag: 'unknown-input' | null
+  flag: 'unknown-input' | 'needs-count' | 'invalid-input' | null
 }
 
 export type ProposalTotals = { monthly: number; annual: number; oneTime: number; cleanup: number }
