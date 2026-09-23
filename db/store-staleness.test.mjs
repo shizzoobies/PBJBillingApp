@@ -1204,16 +1204,28 @@ function fakePostgres({
         .map((row) => ({ id: row.id, billing_mode: row.billing_mode ?? null }))
       return { rows, rowCount: rows.length }
     }
-    // `setClientHourlyRatePeriod`'s targeted update. Anchored on `= $2` so the
-    // migration's literal `set hourly_rate_period = '2026-06'` backfill falls
-    // through to the default below and keeps its own test honest. The row is
-    // updated in place and answered with a rowCount, or the store reads its own
-    // write as a miss and hands the caller null.
-    if (/^update clients set hourly_rate_period = \$2/i.test(trimmed)) {
+    // `setClientHourlyRatePeriod`'s ONE atomic update: it appends the move to
+    // the ledger from the row's own OLD pin (the right-hand side of a SET reads
+    // the pre-update row) and moves the pin in the same statement. Anchored on
+    // its opening so the migration's literal `set hourly_rate_period =
+    // '2026-06'` backfill falls through to the default below and keeps its own
+    // test honest. Emulated here — old pin into `from`, then the new pin — and
+    // answered with a rowCount, or the store reads its own write as a miss and
+    // hands the caller null.
+    if (/^update clients set hourly_rate_history = coalesce\(hourly_rate_history/i.test(trimmed)) {
       const found = clientRows.find((row) => row.id === params?.[0])
       if (!found) return { rows: [], rowCount: 0 }
+      const history = Array.isArray(found.hourly_rate_history) ? found.hourly_rate_history : []
+      found.hourly_rate_history = [
+        ...history,
+        {
+          from: found.hourly_rate_period ?? null,
+          to: params?.[1],
+          changedAt: params?.[2],
+          changedBy: params?.[3] ?? null,
+        },
+      ]
       found.hourly_rate_period = params?.[1]
-      found.hourly_rate_history = JSON.parse(params?.[2] ?? '[]')
       return { rows: [{ id: found.id }], rowCount: 1 }
     }
     // `setClientHourlyRatePeriod`'s single-row read of the pin it is about to
@@ -15340,12 +15352,27 @@ describe('moving a client to current rates (postgres branch)', () => {
       period: '2026-10',
       actingUserId: 'emp-patrice',
     })
-    const [update] = fake.matching(/^update clients set hourly_rate_period/i)
-    expect(update.text).toMatch(/hourly_rate_history = \$3::jsonb/)
+    // ONE statement, so two moves racing each other can never both read the
+    // same ledger and drop one another's entry: the append reads the row's
+    // own old pin, server-side, in the same UPDATE that moves it.
+    const updates = fake.matching(/^update clients set hourly_rate_history/i)
+    expect(updates).toHaveLength(1)
+    const [update] = updates
+    expect(update.text).toMatch(
+      /hourly_rate_history = coalesce\(hourly_rate_history, *'\[\]'::jsonb\) \|\| jsonb_build_array\(/,
+    )
+    expect(update.text).toMatch(
+      /jsonb_build_object\('from', hourly_rate_period, 'to', \$2::text, 'changedAt', \$3::text, 'changedBy', \$4::text\)/,
+    )
+    expect(update.text).toMatch(/hourly_rate_period = \$2/)
     expect(update.text).toMatch(/updated_at = now\(\)/)
     expect(update.text).toMatch(/where id = \$1/)
+    expect(update.params).toHaveLength(4)
+    expect(update.params[0]).toBe('c1')
     expect(update.params[1]).toBe('2026-10')
-    expect(JSON.parse(update.params[2])[0]).toMatchObject({ from: '2026-06', to: '2026-10' })
+    expect(update.params[2]).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(update.params[3]).toBe('emp-patrice')
+    expect(fake.matching(/^select hourly_rate_period, hourly_rate_history from clients/i)).toHaveLength(0)
     expect(fake.matching(/^delete from clients/i)).toHaveLength(0)
   })
 

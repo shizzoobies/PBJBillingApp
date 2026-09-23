@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { TeamPage } from '../pages/TeamPage'
 import type { AppContextValue } from '../AppContext'
 import { ApiError, type AppData, type TeamMember } from '../lib/types'
+import { localDateOnly } from '../lib/utils'
 
 /**
  * The Team page's rate boxes, once a rate stopped being a single number and
@@ -163,7 +164,9 @@ beforeEach(() => {
 describe('Team page rate history', () => {
   it('defaults the bill rate’s effective-from to the current month', async () => {
     await renderTeamPage()
-    expect(monthInput()).toHaveValue(new Date().toISOString().slice(0, 7))
+    // The OWNER's local month — on the last evening of a month in the US, UTC
+    // is already in the next one.
+    expect(monthInput()).toHaveValue(localDateOnly().slice(0, 7))
   })
 
   it('saves the rate through the version endpoint, not the old one', async () => {
@@ -194,7 +197,7 @@ describe('Team page rate history', () => {
     )
     // A backfilled March must not linger and catch the next save.
     await waitFor(() =>
-      expect(monthInput()).toHaveValue(new Date().toISOString().slice(0, 7)),
+      expect(monthInput()).toHaveValue(localDateOnly().slice(0, 7)),
     )
   })
 
@@ -244,6 +247,6 @@ describe('Team page rate history', () => {
 
   it('defaults the cost rate’s effective-from to today', async () => {
     await renderTeamPage()
-    expect(dateInput()).toHaveValue(new Date().toISOString().slice(0, 10))
+    expect(dateInput()).toHaveValue(localDateOnly())
   })
 })

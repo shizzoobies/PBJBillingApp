@@ -897,6 +897,9 @@ export function InvoicesPage() {
           // context, and its tests mock only the API.
           timeEntries={data.timeEntries}
           employees={data.employees}
+          // The same dated rates the preview above prices with, so a re-tag
+          // that creates a line bills it at the client's pin.
+          billRateVersions={billRateVersions}
           checklists={data.checklists}
           timesheetLocks={data.timesheetLocks}
           previewMode={previewMode}

@@ -35,6 +35,7 @@ import {
   currency,
   describeActivityAction,
   formatActivityTimestamp,
+  localDateOnly,
   relativeTime,
 } from '../lib/utils'
 import { selectableClients } from '../lib/clientLifecycle'
@@ -81,9 +82,11 @@ export function TeamPage() {
   const [rateError, setRateError] = useState<Record<string, string>>({})
   // The common edit is a raise starting NOW, so the default is this month /
   // today and the owner types one number, exactly as before. Picking a
-  // different month is the rarer case and costs one extra glance.
-  const thisMonth = new Date().toISOString().slice(0, 7)
-  const todayIso = new Date().toISOString().slice(0, 10)
+  // different month is the rarer case and costs one extra glance. LOCAL, not
+  // UTC: on the last evening of a month `toISOString()` is already in the next
+  // one, and would default a raise to a month the owner never picked.
+  const todayIso = localDateOnly()
+  const thisMonth = todayIso.slice(0, 7)
   const [billFromDraft, setBillFromDraft] = useState<Record<string, string>>({})
   const [costFromDraft, setCostFromDraft] = useState<Record<string, string>>({})
 

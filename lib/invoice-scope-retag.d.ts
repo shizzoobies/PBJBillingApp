@@ -4,6 +4,18 @@
  */
 
 import type { AdhocMode } from './invoice-lines'
+import type { BillRateVersion } from './rate-history'
+
+/**
+ * How a NEW line is priced: the dated bill rates and the client's pin for the
+ * invoice's period (`ratePeriodAsOf(client, period)`), resolved through
+ * `billRateAt` exactly as the generator resolves them. Both optional — no
+ * versions prices at each person's live `billRate`, as before.
+ */
+type ScopeRates = {
+  billRateVersions?: readonly BillRateVersion[]
+  ratePeriod?: string | null
+}
 
 /** The three things one piece of time can be, as the invoicing panel words them. */
 export type ScopeTag = 'in-scope' | 'out-of-scope' | 'adhoc'
@@ -60,8 +72,9 @@ export function savedAdhocModesForEntries(args: {
   entries?: ScopeEntry[]
   employees?: ScopeEmployee[]
   client?: ScopeClient
+  period?: string
   defaultHourlyRate?: number
-}): Record<string, AdhocMode>
+} & ScopeRates): Record<string, AdhocMode>
 
 /**
  * Entry ids whose ALREADY SAVED tag the invoice's lines do not carry — the
@@ -75,7 +88,7 @@ export function unaccountedScopeEntries(args: {
   client?: ScopeClient
   period?: string
   defaultHourlyRate?: number
-}): string[]
+} & ScopeRates): string[]
 
 /**
  * Generic in the LINE type for the same reason `renderedInvoiceLines` is: the
@@ -111,7 +124,7 @@ export function applyScopeRetag<
   } | null
   period?: string
   defaultHourlyRate?: number
-}): {
+} & ScopeRates): {
   lines: T[]
   /** False on subscription / annual / pre-cutover invoices — lines untouched. */
   applicable: boolean

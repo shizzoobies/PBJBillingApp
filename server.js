@@ -76,7 +76,7 @@ import {
 // THE rate resolver, the same one `buildInvoiceLines` prices from. The AI
 // review's hours summary has to read a person's rate exactly as the lines did,
 // or the model reports a correctly-priced line as an arithmetic error.
-import { billRateFor, ratePeriodAsOf } from './lib/rate-history.js'
+import { billRateAt, ratePeriodAsOf } from './lib/rate-history.js'
 import { previousPeriod } from './lib/invoice-draft.js'
 import { pastDueInvoice } from './lib/invoice-overdue.js'
 import { rateInvoiceDraft } from './lib/invoice-confidence.js'
@@ -1562,19 +1562,15 @@ function buildInvoiceHoursSummary(data, client, period, billRateVersions = []) {
   const employees = data.employees ?? []
   const employeeById = new Map(employees.map((employee) => [employee.id, employee]))
   const defaultHourlyRate = Number(client.hourlyRate) || 0
-  // The SAME three-step chain `buildInvoiceLines.rateFor` uses, in the same
-  // order, resolved at THIS client's own pin. A summary that resolved rates
-  // differently from the lines would have the model reporting real lines as
-  // arithmetic errors — which is the one thing this function exists not to do.
+  // The SAME chain `buildInvoiceLines.rateFor` uses — the shared `billRateAt`,
+  // then the client's own rate — resolved at THIS client's own pin. A summary
+  // that resolved rates differently from the lines would have the model
+  // reporting real lines as arithmetic errors — which is the one thing this
+  // function exists not to do.
   const ratePeriod = ratePeriodAsOf(client, period)
-  const rateFor = (employeeId) => {
-    const versioned = billRateFor(billRateVersions, employeeId, ratePeriod ?? period)
-    if (versioned !== null) return versioned
-    const employee = employeeById.get(employeeId)
-    return employee && typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
-      ? employee.billRate
-      : defaultHourlyRate
-  }
+  const rateFor = (employeeId) =>
+    billRateAt(billRateVersions, employeeById.get(employeeId) ?? { id: employeeId }, ratePeriod, period) ??
+    defaultHourlyRate
 
   const byEmployee = new Map()
   for (const entry of data.timeEntries ?? []) {
@@ -10537,6 +10533,17 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'period must be YYYY-MM' })
         return
       }
+      // A real month, and not before per-person billing began: an invoice for
+      // a month before the cutover bills one aggregate line at the client's
+      // own rate, so a pin there would name rates nothing ever billed at.
+      const month = Number(period.slice(5, 7))
+      if (month < 1 || month > 12 || period < PER_EMPLOYEE_BILLING_START) {
+        sendJson(response, 400, {
+          error: 'bad_period',
+          message: `The rate month must be a real month, ${PER_EMPLOYEE_BILLING_START} or later.`,
+        })
+        return
+      }
       const data = await appDataStore.read()
       const target = (data.clients ?? []).find((entry) => entry.id === clientId)
       if (!target) {
@@ -10643,8 +10650,11 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // Owner-only: set/clear a team member's cost rate (assistant Phase 4
-    // analytics). Informational — never affects invoices. costRate null clears.
+    // Owner-only: set a team member's cost rate (assistant Phase 4 analytics),
+    // written as TODAY's dated version. A blank or null rate is REFUSED: it
+    // used to clear every version at once, bypassing the Rate history guards,
+    // and a tab still running the pre-rate-history bundle would send exactly
+    // that by saving an emptied box.
     if (normalizedPath === '/api/team/cost-rate' && request.method === 'PUT') {
       const session = await requireSession(request, response)
       if (!session) return
@@ -10668,18 +10678,27 @@ const server = createServer(async (request, response) => {
         return
       }
       const raw = payload?.costRate
-      if (raw !== null && raw !== '' && !(Number.isFinite(Number(raw)) && Number(raw) >= 0)) {
-        sendJson(response, 400, { error: 'costRate must be a non-negative number or null' })
+      if (raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+        sendJson(response, 409, {
+          error: 'rate_history_kept',
+          message:
+            'Rates are now kept as dated versions. Remove the newest version from Rate history instead.',
+        })
         return
       }
-      const costRate = await appDataStore.setEmployeeCostRate(userId, raw === '' ? null : raw)
+      if (!(Number.isFinite(Number(raw)) && Number(raw) >= 0)) {
+        sendJson(response, 400, { error: 'costRate must be a non-negative number' })
+        return
+      }
+      const costRate = await appDataStore.setEmployeeCostRate(userId, raw)
       sendJson(response, 200, { ok: true, userId, costRate })
       return
     }
 
-    // Owner-only: set/clear a team member's BILL rate ($/hour charged to
-    // clients for this person's time). Unlike cost rate this DOES feed
-    // invoices. billRate null clears.
+    // Owner-only: set a team member's BILL rate ($/hour charged to clients for
+    // this person's time), written as THIS MONTH's dated version. Unlike cost
+    // rate this DOES feed invoices. A blank or null rate is REFUSED, for the
+    // same reason as the cost-rate route above: it would delete every version.
     if (normalizedPath === '/api/team/bill-rate' && request.method === 'PUT') {
       const session = await requireSession(request, response)
       if (!session) return
@@ -10703,11 +10722,19 @@ const server = createServer(async (request, response) => {
         return
       }
       const raw = payload?.billRate
-      if (raw !== null && raw !== '' && !(Number.isFinite(Number(raw)) && Number(raw) >= 0)) {
-        sendJson(response, 400, { error: 'billRate must be a non-negative number or null' })
+      if (raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+        sendJson(response, 409, {
+          error: 'rate_history_kept',
+          message:
+            'Rates are now kept as dated versions. Remove the newest version from Rate history instead.',
+        })
         return
       }
-      const billRate = await appDataStore.setEmployeeBillRate(userId, raw === '' ? null : raw)
+      if (!(Number.isFinite(Number(raw)) && Number(raw) >= 0)) {
+        sendJson(response, 400, { error: 'billRate must be a non-negative number' })
+        return
+      }
+      const billRate = await appDataStore.setEmployeeBillRate(userId, raw)
       sendJson(response, 200, { ok: true, userId, billRate })
       return
     }

@@ -61,10 +61,12 @@ import {
   type ScopeTag,
   type ScopeTagEdits,
 } from '../../lib/invoice-scope-retag.js'
+import { ratePeriodAsOf } from '../../lib/rate-history.js'
 import { InvoiceScopePanel } from './InvoiceScopePanel'
 import {
   ApiError,
   type AdhocMode,
+  type BillRateVersion,
   type Checklist,
   type Client,
   type Contact,
@@ -232,6 +234,8 @@ type ScopePanelData = {
   /** This invoice's entries: its client (or its subs), in its period. */
   entries: TimeEntry[]
   employees: Employee[]
+  /** Dated bill rates, so a re-tag's NEW line prices at the client's pin. */
+  billRateVersions: BillRateVersion[]
   checklists: Checklist[]
   timesheetLocks: TimesheetLock[]
   /** Preview, or an invoice past the point where its lines may change. */
@@ -401,6 +405,7 @@ export function InvoiceMonthRun({
   contacts = [],
   timeEntries = [],
   employees = [],
+  billRateVersions = [],
   checklists = [],
   timesheetLocks = [],
   previewMode = false,
@@ -428,6 +433,12 @@ export function InvoiceMonthRun({
    */
   timeEntries?: TimeEntry[]
   employees?: Employee[]
+  /**
+   * Dated bill rates (owner-only; empty for anyone else), so a re-tag that
+   * creates a line prices it at the client's pin — the rate the generator
+   * would have used — rather than the person's newest rate.
+   */
+  billRateVersions?: BillRateVersion[]
   checklists?: Checklist[]
   /** Signed-off months — a note on the row, not a block: owners are exempt. */
   timesheetLocks?: TimesheetLock[]
@@ -574,6 +585,7 @@ export function InvoiceMonthRun({
             owning.has(entry.clientId) && String(entry.date ?? '').startsWith(invoice.period),
         ),
         employees,
+        billRateVersions,
         checklists,
         timesheetLocks,
         readOnly:
@@ -585,6 +597,7 @@ export function InvoiceMonthRun({
       clients,
       timeEntries,
       employees,
+      billRateVersions,
       checklists,
       timesheetLocks,
       previewMode,
@@ -2215,6 +2228,9 @@ function InvoiceEditor({
    * underneath the controls she is using. The table stays the lines she is
    * editing; the total, and the save, are what the tags would make of them.
    */
+  // The client's pin for THIS invoice's month, so a line the re-tag creates
+  // bills at the rate the generator would have used.
+  const ratePeriod = ratePeriodAsOf(scope.client, invoice.period)
   const retag = applyScopeRetag({
     lines,
     entries: scope.entries,
@@ -2223,6 +2239,8 @@ function InvoiceEditor({
     client: scope.client,
     period: invoice.period,
     defaultHourlyRate: Number(scope.client?.hourlyRate) || 0,
+    billRateVersions: scope.billRateVersions,
+    ratePeriod,
   })
   const previewLines = retag.lines
 
@@ -2238,7 +2256,10 @@ function InvoiceEditor({
     entries: scope.entries,
     employees: scope.employees,
     client: scope.client,
+    period: invoice.period,
     defaultHourlyRate: Number(scope.client?.hourlyRate) || 0,
+    billRateVersions: scope.billRateVersions,
+    ratePeriod,
   }) as Record<string, AdhocMode>
 
   /**
@@ -2257,6 +2278,8 @@ function InvoiceEditor({
         client: scope.client,
         period: invoice.period,
         defaultHourlyRate: Number(scope.client?.hourlyRate) || 0,
+        billRateVersions: scope.billRateVersions,
+        ratePeriod,
       }),
     ]),
   ]

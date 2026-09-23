@@ -1237,6 +1237,13 @@ Clients page meanwhile. Owner-only.
     "Rates from October 2026 — starts in 1 month".
   - Every move is kept: **"Rate month history"** lists each one as "June 2026 →
     September 2026" with the date it was made.
+  - A later move REPLACES an earlier one it overlaps. Moving to a month that
+    has not started yet and then moving again (a correction — say October,
+    then November, both chosen in September) means the first move never took
+    effect: October still bills at the old rates. Moving back to the earlier
+    month undoes the move for every month. Moving to an earlier month than
+    the current one (say, in November, back to September) reprices every
+    month from then on whose invoice has not been generated yet.
   - Saving someone's bill rate on the Team page never moves a client's rate
     month, but it can still change what a client is billed. A rate saved for a
     month prices every hourly client whose rate month is that month or later
@@ -2538,8 +2545,11 @@ Clients page meanwhile. Owner-only.
   (a new client starts on the current month's rates), and every other client
   stays where it is until you move it at its review (Client page → Billing →
   Hourly rates).
-  Someone with no rate on file as of that month (for example, hired after it)
-  bills at their newest bill rate on file (which can be a raise dated ahead).
+  Someone with no rate on file as of that month (for example, hired after it,
+  or given their first rate later) bills at the FIRST bill rate they were
+  given, once it has started — never a later raise — until the client's rate
+  month moves. For a month before their first rate starts, their hours bill
+  like someone with no bill rate on file.
   Someone with no bill rate on file at all bills the generated invoice at the
   client's legacy hourly rate — a per-client rate that no longer has a field
   on the Client page and is $0 for any client created since it left — while

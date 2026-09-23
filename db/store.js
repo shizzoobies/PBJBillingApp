@@ -10569,27 +10569,17 @@ export class AppDataStore {
     const changedAt = nowIso()
 
     if (this.pool) {
-      const { rows } = await this.pool.query(
-        `select hourly_rate_period, hourly_rate_history from clients where id = $1`,
-        [clientId],
-      )
-      if (!rows[0]) return null
-      const history = Array.isArray(rows[0].hourly_rate_history) ? rows[0].hourly_rate_history : []
-      const next = [
-        ...history,
-        {
-          from: rows[0].hourly_rate_period ?? null,
-          to: period,
-          changedAt,
-          changedBy: actingUserId,
-        },
-      ]
+      // ONE statement: the append reads the row's own OLD pin (the right-hand
+      // side of a SET sees the pre-update row) in the same UPDATE that moves
+      // it. A read-then-write pair let two moves racing each other both read
+      // the same ledger, and the second write dropped the first move's entry.
       const result = await this.pool.query(
-        `update clients set hourly_rate_period = $2, hourly_rate_history = $3::jsonb,
+        `update clients set hourly_rate_history = coalesce(hourly_rate_history, '[]'::jsonb) || jsonb_build_array(jsonb_build_object('from', hourly_rate_period, 'to', $2::text, 'changedAt', $3::text, 'changedBy', $4::text)),
+                hourly_rate_period = $2,
                 updated_at = now()
           where id = $1
           returning id`,
-        [clientId, period, JSON.stringify(next)],
+        [clientId, period, changedAt, actingUserId],
       )
       if (!result.rowCount) return null
       const data = await this.read()

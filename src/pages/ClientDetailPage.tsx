@@ -77,7 +77,7 @@ import { normalizeTimeBreakdownMode } from '../../lib/invoice-lines.js'
 // The one resolver for "what did this person's hour bill at back then" —
 // shared with the invoice, so the block below can never quote a rate the
 // invoice would not charge.
-import { billRateFor } from '../../lib/rate-history.js'
+import { billRateAt } from '../../lib/rate-history.js'
 import {
   addDays,
   clientName,
@@ -1026,7 +1026,7 @@ function BillingSectionBody({
  * between the owner and the client, and a staff session receives a null pin
  * and an empty ledger anyway (`scopeAppDataForSession`).
  *
- * The rates are resolved CLIENT-SIDE through `billRateFor` — the same function
+ * The rates are resolved CLIENT-SIDE through `billRateAt` — the same function
  * the invoice prices with — rather than asking the server for a computed list.
  * Two implementations of "what does this client pay for Lisa's hour" is the
  * thing this whole build exists to avoid.
@@ -1088,16 +1088,13 @@ export function HourlyRatesField({ client }: { client: Client }) {
 
   const rows = (data.employees ?? [])
     .map((employee) => {
-      // Same fallback chain as the invoice: the versioned rate at the month,
-      // then the person's live `billRate` (the mirror of their newest
-      // version). Only someone with neither is left off — their hours fall
-      // through to the client's own rate.
-      const versioned = billRateFor(billRateVersions, employee.id, resolveAt)
-      const live =
-        typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
-          ? employee.billRate
-          : null
-      return { id: employee.id, name: employee.name, rate: versioned ?? live }
+      // The invoice's own chain (`billRateAt`): the versioned rate at the
+      // month, else the person's first rate once it has started, else — only
+      // for someone with no versions — their live `billRate`. Only someone
+      // with none of those is left off; their hours fall through to the
+      // client's own rate.
+      const rate = billRateAt(billRateVersions, employee, pin, currentPeriod)
+      return { id: employee.id, name: employee.name, rate }
     })
     .filter((row) => row.rate !== null)
     .sort((a, b) => a.name.localeCompare(b.name))
