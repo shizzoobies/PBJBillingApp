@@ -25,8 +25,8 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-23, evening):** `main` = `d16581a` (+ this
-handoff; the manifest was condensed under the voice agent's ~216 KB cap), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
+**State right now (2026-09-23, late evening):** `main` = `8537d9b` (rate-history
+follow-ups 3 and 5 rebased from the `elastic-germain` worktree and pushed; the manifest was condensed under the voice agent's ~216 KB cap), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
 — the body's `commit` is the deploy check). Suite **3615 tests / 200
 files**, green. Voice agent re-provisioned after the deploy. **Rate history
 shipped today** (featreq-23351561, the "Billing prices and cost" brainstorm):
@@ -54,10 +54,10 @@ each client's own task. Rows split before 09-23 are not backfilled. Group
 TIMER still has no task box. **Rate-history follow-ups 1+2 (master re-tag at each sub's pin; Reports
 Billable $ and the Dashboard estimate at the pin) are IN: rebased and pushed
 2026-09-23 as `d16581a`, deployed, health 200, voice re-provisioned. Suite
-3647 tests / 202 files. The PRIMARY checkout on the Windows PC was left at
-`826e7a7` — run `git pull --ff-only` there before working in it; the
-worktree `.claude/worktrees/modest-wozniak-3caf97` is at main and can be
-removed.**
+3647 tests / 202 files. **Follow-ups 3 (only-version delete guard) and 5
+(`rateOf()` null guard) are LIVE as `8537d9b`, deployed, health 200, voice
+re-provisioned; the `elastic-germain` and `modest-wozniak` worktrees were removed.
+Open rate-history follow-ups: 4, 6, 7.**
 
 Then the queue / watch list:
 
