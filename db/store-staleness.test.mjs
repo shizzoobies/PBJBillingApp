@@ -16565,6 +16565,19 @@ describe('proposal pricing in firm settings (file backend)', () => {
     await store.updateFirmSettings({ name: 'PB&J' })
     expect((await store.getFirmSettings()).proposalPricing.rates.bookkeeper).toBe(80)
   })
+
+  // Code review fix: a partial patch used to REPLACE the whole catalog (missing
+  // keys fell back to the seed). It must merge over the stored value instead.
+  it('merges a partial rates patch over the stored catalog instead of resetting it', async () => {
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: { ...seed, rates: { bookkeeper: 60, accountant: 90, controller: 100 } },
+    })
+    await store.updateFirmSettings({ proposalPricing: { rates: { bookkeeper: 80 } } })
+    const pricing = (await store.getFirmSettings()).proposalPricing
+    expect(pricing.rates).toEqual({ bookkeeper: 80, accountant: 90, controller: 100 })
+    expect(pricing.services).toHaveLength(41)
+  })
 })
 
 describe('proposal pricing in firm settings (postgres branch)', () => {
@@ -16597,12 +16610,83 @@ describe('proposal pricing in firm settings (postgres branch)', () => {
     })
     const insert = fake.statements.find((s) => /^insert into firm_settings/i.test(s.text))
     expect(insert.text).toMatch(/\$17::jsonb/)
-    expect(insert.text).toMatch(/proposal_pricing = excluded\.proposal_pricing/)
+    expect(insert.text).toMatch(
+      /proposal_pricing = coalesce\(excluded\.proposal_pricing, firm_settings\.proposal_pricing\)/,
+    )
     expect(JSON.parse(insert.params[16]).rates).toEqual({
       bookkeeper: 75,
       accountant: 115,
       controller: 0,
     })
+  })
+
+  // Code review fix: an unrelated save used to write the current (often seed)
+  // catalog into `proposal_pricing` every time, permanently overwriting NULL —
+  // so a later seed correction could never reach production. Now it binds NULL
+  // and the upsert's `coalesce` leaves the stored column alone.
+  it('binds NULL for the catalog column on an unrelated save', async () => {
+    const fake = firmSettingsPool({ name: 'PB&J', proposal_pricing: null })
+    await postgresStore(fake).updateFirmSettings({ name: 'New Name' })
+    const insert = fake.statements.find((s) => /^insert into firm_settings/i.test(s.text))
+    expect(insert.params[16]).toBeNull()
+  })
+
+  /**
+   * A stateful fake: unlike `firmSettingsPool` (a fixed row), this one applies
+   * each insert to the row it hands back next, including the same
+   * `coalesce(excluded, current)` the real upsert does for `proposal_pricing` —
+   * so it can prove a stored catalog actually SURVIVES a later unrelated save,
+   * not just that one query bound the right params.
+   */
+  function statefulFirmSettingsPool(initialRow) {
+    let row = initialRow
+    const statements = []
+    return {
+      statements,
+      pool: {
+        async query(text, params) {
+          statements.push({ text: String(text).trim(), params })
+          if (/from firm_settings where id = 'singleton'/i.test(text)) {
+            return { rows: row ? [row] : [] }
+          }
+          if (/^insert into firm_settings/i.test(text)) {
+            row = {
+              ...row,
+              name: params[0],
+              client_defaults: params[15],
+              proposal_pricing: params[16] ?? row?.proposal_pricing ?? null,
+            }
+          }
+          return { rows: [], rowCount: 1 }
+        },
+      },
+    }
+  }
+
+  it('merges a partial rates patch over the stored catalog instead of resetting it', async () => {
+    const fake = statefulFirmSettingsPool({ name: 'PB&J', proposal_pricing: null })
+    const store2 = postgresStore(fake)
+    const seed = (await store2.getFirmSettings()).proposalPricing
+    await store2.updateFirmSettings({
+      proposalPricing: { ...seed, rates: { bookkeeper: 60, accountant: 90, controller: 100 } },
+    })
+    await store2.updateFirmSettings({ proposalPricing: { rates: { bookkeeper: 80 } } })
+    const pricing = (await store2.getFirmSettings()).proposalPricing
+    expect(pricing.rates).toEqual({ bookkeeper: 80, accountant: 90, controller: 100 })
+    expect(pricing.services).toHaveLength(41)
+  })
+
+  it('preserves a stored catalog across an unrelated save', async () => {
+    const fake = statefulFirmSettingsPool({ name: 'PB&J', proposal_pricing: null })
+    const store2 = postgresStore(fake)
+    const seed = (await store2.getFirmSettings()).proposalPricing
+    await store2.updateFirmSettings({
+      proposalPricing: { ...seed, rates: { bookkeeper: 90, accountant: 100, controller: 110 } },
+    })
+    await store2.updateFirmSettings({ name: 'New Name' })
+    const after = await store2.getFirmSettings()
+    expect(after.proposalPricing.rates).toEqual({ bookkeeper: 90, accountant: 100, controller: 110 })
+    expect(after.name).toBe('New Name')
   })
 })
 
@@ -16622,5 +16706,42 @@ describe('firm settings survive a bulk save (file backend)', () => {
     const after = await store.getFirmSettings()
     expect(after.proposalPricing.rates.bookkeeper).toBe(75)
     expect(after.name).not.toBe('Stale tab')
+  })
+})
+
+/**
+ * Code review fix: `read()` (which backs `/api/app-data`) did not seed or
+ * sanitize `proposalPricing`, so file-mode differed from Postgres — and the
+ * file bulk save persisted whatever `firmSettings` a payload carried even when
+ * nothing was stored yet, where Postgres ignores the payload entirely.
+ */
+describe('firm settings catalog seeding via read() and a fresh-file bulk save (file backend)', () => {
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    delete data.firmSettings
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  })
+
+  it('read() seeds and sanitizes the catalog on an empty file, matching Postgres', async () => {
+    const data = await store.read()
+    expect(data.firmSettings.proposalPricing.rates).toEqual({
+      bookkeeper: 0,
+      accountant: 0,
+      controller: 0,
+    })
+    expect(data.firmSettings.proposalPricing.services).toHaveLength(41)
+  })
+
+  it('a fresh-file bulk save does not persist the payload copy of firm settings', async () => {
+    await store.write({
+      ...workspace(),
+      firmSettings: {
+        name: 'Injected',
+        proposalPricing: { rates: { bookkeeper: 999, accountant: 999, controller: 999 } },
+      },
+    })
+    const after = await store.getFirmSettings()
+    expect(after.name).not.toBe('Injected')
+    expect(after.proposalPricing.rates.bookkeeper).not.toBe(999)
   })
 })

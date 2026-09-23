@@ -6591,7 +6591,13 @@ export class AppDataStore {
     if (Array.isArray(data.clients)) {
       data.clients = data.clients.map(normalizeClientProfile)
     }
-    data.firmSettings = { ...DEFAULT_FIRM_SETTINGS, ...(data.firmSettings || {}) }
+    data.firmSettings = {
+      ...DEFAULT_FIRM_SETTINGS,
+      ...(data.firmSettings || {}),
+      // Same seed-and-sanitize as `getFirmSettings()`, so file-mode
+      // `/api/app-data` never disagrees with Postgres about the catalog.
+      proposalPricing: sanitizeProposalPricing(data.firmSettings?.proposalPricing),
+    }
 
     // Carry each employee's BILL rate onto `data.employees` so it reaches the
     // client (getInvoice needs it), mirroring the Postgres employees mapping
@@ -8112,11 +8118,21 @@ export class AppDataStore {
       // as on Postgres, where the bulk save never touches `firm_settings`. What
       // is stored wins over the payload's copy, so an autosave — or a stale
       // tab's — can never roll back the proposal catalog or any firm setting.
+      // When nothing is stored yet, Postgres has nothing to ignore either — so
+      // the payload's copy is dropped from what gets PERSISTED. This builds a
+      // separate object for the file rather than mutating `data` in place:
+      // `read()`'s materializer write-back passes its own freshly-seeded
+      // `data.firmSettings` through this same path and returns that same
+      // object to its caller afterward, so it must not lose the field here.
+      let toPersist = data
       if (previous?.firmSettings && typeof previous.firmSettings === 'object') {
-        data.firmSettings = previous.firmSettings
+        toPersist = { ...data, firmSettings: previous.firmSettings }
+      } else if (Object.prototype.hasOwnProperty.call(data, 'firmSettings')) {
+        const { firmSettings: _dropped, ...rest } = data
+        toPersist = rest
       }
 
-      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      await fsWriteFile(localDataPath, JSON.stringify(toPersist, null, 2))
     })
   }
 
@@ -19527,9 +19543,23 @@ export class AppDataStore {
 
     // The proposal catalog is saved WHOLE — the Settings table sends the full
     // catalog back — and always through the sanitizer, so a crafted payload
-    // can only ever store a catalog the calculator can price.
-    if (patch && Object.prototype.hasOwnProperty.call(patch, 'proposalPricing')) {
-      next.proposalPricing = sanitizeProposalPricing(patch.proposalPricing)
+    // can only ever store a catalog the calculator can price. A PARTIAL patch
+    // (just a role rate, say) is merged over the stored catalog first, so it
+    // never resets the rest of it back to the seed.
+    const patchTouchesPricing = Boolean(
+      patch && Object.prototype.hasOwnProperty.call(patch, 'proposalPricing'),
+    )
+    if (patchTouchesPricing) {
+      const p = patch.proposalPricing
+      const merged =
+        p && typeof p === 'object' && !Array.isArray(p)
+          ? {
+              ...current.proposalPricing,
+              ...p,
+              rates: { ...current.proposalPricing.rates, ...(p.rates ?? {}) },
+            }
+          : p
+      next.proposalPricing = sanitizeProposalPricing(merged)
     }
 
     if (this.pool) {
@@ -19556,7 +19586,7 @@ export class AppDataStore {
             website = excluded.website,
             ein = excluded.ein,
             client_defaults = excluded.client_defaults,
-            proposal_pricing = excluded.proposal_pricing,
+            proposal_pricing = coalesce(excluded.proposal_pricing, firm_settings.proposal_pricing),
             updated_at = now()`,
         [
           next.name,
@@ -19575,7 +19605,11 @@ export class AppDataStore {
           next.website || null,
           next.ein || null,
           JSON.stringify(next.clientDefaults ?? DEFAULT_FIRM_SETTINGS.clientDefaults),
-          JSON.stringify(sanitizeProposalPricing(next.proposalPricing)),
+          // Only bind a value when this save actually touches the catalog — an
+          // unrelated save (just the firm name, say) binds NULL, and the
+          // coalesce above keeps whatever is already stored rather than
+          // permanently writing the seed the first time someone saves anything.
+          patchTouchesPricing ? JSON.stringify(sanitizeProposalPricing(next.proposalPricing)) : null,
         ],
       )
       return next
