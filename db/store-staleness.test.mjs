@@ -15405,6 +15405,35 @@ describe('removing a bill rate version the ledger still points at (file backend)
     ])
   })
 
+  it('REFUSES over a ledger entry\u2019s FROM, not just its to', async () => {
+    // The shape `to` alone cannot see: this client was created at September
+    // 2026 and moved BACK to March. Its live pin is 2026-03 and the only `to`
+    // in its ledger is 2026-03 — both below September — but `ratePeriodAsOf`
+    // prices every month before the first move from the EARLIEST entry's
+    // `from`, which is still 2026-09. February 2026 therefore bills at
+    // September's rate, and dropping that version would silently reprice it.
+    const seeded = JSON.parse(await readFile(localDataPath, 'utf8'))
+    seeded.clients[0].hourlyRatePeriod = '2026-09'
+    seeded.clients[0].hourlyRateHistory = []
+    await writeFile(localDataPath, JSON.stringify(seeded, null, 2))
+    await store.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2027-01' })
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 50 })
+    await store.setClientHourlyRatePeriod({ clientId: 'c1', period: '2026-03', actingUserId: 'u' })
+
+    const client = (await store.read()).clients.find((entry) => entry.id === 'c1')
+    expect(client.hourlyRatePeriod).toBe('2026-03')
+    expect(client.hourlyRateHistory.map((entry) => entry.from)).toEqual(['2026-09'])
+    expect(client.hourlyRateHistory.map((entry) => entry.to)).toEqual(['2026-03'])
+
+    await expect(
+      store.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-09' }),
+    ).rejects.toThrow(/pinned/i)
+    expect((await store.listBillRateVersions()).map((row) => row.effectivePeriod)).toEqual([
+      '2026-06',
+      '2026-09',
+    ])
+  })
+
   it('allows it when neither the live pin nor the ledger reaches that month', async () => {
     await store.setClientHourlyRatePeriod({ clientId: 'c1', period: '2025-01', actingUserId: 'u' })
     const versions = await store.deleteBillRateVersion({
@@ -15465,6 +15494,41 @@ describe('a client that becomes Hourly is pinned at save time (file backend)', (
     )
     const data = await store.read()
     const client = data.clients.find((entry) => entry.id === 'c-sub')
+    expect(client.hourlyRatePeriod).toBe(thisMonth())
+    expect(client.hourlyRateHistory).toEqual([])
+  })
+
+  it('discards a pin and a ledger a save invented for a client it has never seen', async () => {
+    // FILE BACKEND ONLY by nature: Postgres never reads the payload's copy of
+    // either column, so there is nothing to discard over there. Here the merge
+    // used to restore the stored value only for ids already on disk, which let
+    // a bulk save carrying a brand-new client id persist whatever pin and
+    // ledger it had invented. Both are endpoint-owned; a client this file has
+    // never seen gets the save-time default, exactly as the Postgres insert
+    // binds it.
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c-invented',
+            name: 'Invented Co',
+            billingMode: 'hourly',
+            hourlyRate: 100,
+            hourlyRatePeriod: '2030-01',
+            hourlyRateHistory: [
+              {
+                from: '2030-01',
+                to: '2030-01',
+                changedAt: '2030-01-01T00:00:00.000Z',
+                changedBy: 'nobody',
+              },
+            ],
+          },
+        ],
+        timeEntries: [],
+      }),
+    )
+    const client = (await store.read()).clients.find((entry) => entry.id === 'c-invented')
     expect(client.hourlyRatePeriod).toBe(thisMonth())
     expect(client.hourlyRateHistory).toEqual([])
   })

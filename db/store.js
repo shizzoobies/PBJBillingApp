@@ -5352,6 +5352,14 @@ export class AppDataStore {
    * January 2027's rates — so a guard that looked only at `hourlyRatePeriod`
    * would let that version go and silently reprice every one of those months.
    *
+   * It reads BOTH ends of every entry, `to` and `from`. `ratePeriodAsOf`
+   * falls back to the EARLIEST entry's `from` for any month that precedes
+   * every move, so a client created at September 2026 and moved back to March
+   * 2026 still prices February 2026 and earlier at September 2026's rates —
+   * even though its live pin and every `to` in its ledger sit below that. A
+   * guard that read only `to` would let September's version go and reprice
+   * all of those months, so `from` is refused as well.
+   *
    * Throws `RateVersionError`, which the endpoint maps to 409.
    */
   async deleteBillRateVersion({ userId, effectivePeriod } = {}) {
@@ -5376,11 +5384,15 @@ export class AppDataStore {
       const history = Array.isArray(clientRecord?.hourlyRateHistory)
         ? clientRecord.hourlyRateHistory
         : []
-      return history.some((entry) => typeof entry?.to === 'string' && entry.to >= effectivePeriod)
+      return history.some(
+        (entry) =>
+          (typeof entry?.to === 'string' && entry.to >= effectivePeriod) ||
+          (typeof entry?.from === 'string' && entry.from >= effectivePeriod),
+      )
     })
     if (pinnedAtOrAfter) {
       throw new RateVersionError(
-        'A client is pinned at or after this month — now, or in a past month its ledger still prices — so it is still billing at this rate. Move that client first.',
+        'A client is pinned at or after this month, now or in a past month its ledger still prices, so it is still billing at this rate. Move that client first.',
       )
     }
 
@@ -7684,6 +7696,10 @@ export class AppDataStore {
     // behind this very slot and would deadlock.
     await enqueueFileOperation(localDataPath, async () => {
       let previous = null
+      // Declared out here so the one merge pass below runs even when there is
+      // no prior file at all — an empty map then means "nothing stored", which
+      // is exactly what Postgres sees for a client that is not in `clients`.
+      const priorPinById = new Map()
       if (existsSync(localDataPath)) {
         try {
           previous = JSON.parse(await readFile(localDataPath, 'utf8'))
@@ -7870,30 +7886,17 @@ export class AppDataStore {
             })
           }
 
-          // Cardinal rule 1 mirror of `priorRatePins` in the Postgres branch.
-          // The pin and its ledger are endpoint-owned; what is stored wins and
-          // the payload's copy is ignored outright. A client this file has
-          // never seen keeps whatever the payload carried — the create path is
-          // what pins a genuinely new client.
-          const priorPinById = new Map(
-            (Array.isArray(previous.clients) ? previous.clients : [])
-              .filter((entry) => entry && typeof entry.id === 'string')
-              .map((entry) => [
-                entry.id,
-                {
-                  hourlyRatePeriod: entry.hourlyRatePeriod ?? null,
-                  hourlyRateHistory: Array.isArray(entry.hourlyRateHistory)
-                    ? entry.hourlyRateHistory
-                    : [],
-                },
-              ]),
-          )
-          if (Array.isArray(data.clients)) {
-            data.clients = data.clients.map((clientRecord) => {
-              if (!clientRecord || typeof clientRecord.id !== 'string') return clientRecord
-              const prior = priorPinById.get(clientRecord.id)
-              if (!prior) return clientRecord
-              return { ...clientRecord, ...prior }
+          // Cardinal rule 1 mirror of `priorRatePins` in the Postgres branch:
+          // snapshot what is STORED for the pin and its ledger. The merge is one
+          // pass below, outside this block, so an unknown client id reaches it
+          // too.
+          for (const entry of Array.isArray(previous.clients) ? previous.clients : []) {
+            if (!entry || typeof entry.id !== 'string') continue
+            priorPinById.set(entry.id, {
+              hourlyRatePeriod: entry.hourlyRatePeriod ?? null,
+              hourlyRateHistory: Array.isArray(entry.hourlyRateHistory)
+                ? entry.hourlyRateHistory
+                : [],
             })
           }
         }
@@ -7902,20 +7905,41 @@ export class AppDataStore {
         // through and persist the incoming data unchanged.
       }
 
-      // Cardinal rule 1 mirror of `currentRatePeriod` in the Postgres branch:
-      // an hourly client with no pin gets THIS month rather than the '2026-06'
-      // the boot backfill would give it. Outside the block above on purpose —
-      // the stored pin has already won by here, and a workspace with no prior
-      // file at all has to reach the same answer Postgres does.
+      // Cardinal rule 1 mirror of the two `priorRatePins` params in the
+      // Postgres branch, as ONE pass and with the same two expressions:
+      //
+      //   period  = stored ?? (billingMode === 'hourly' ? this month : null)
+      //   history = stored ?? []
+      //
+      // The payload's own pin and ledger are discarded in EVERY case, including
+      // for a client id this file has never seen. They are endpoint-owned
+      // (`setClientHourlyRatePeriod` is the only writer), so a bulk save that
+      // introduces a client carrying a fabricated pin and ledger — a stale tab,
+      // or anything posting a hand-built payload — must not be able to persist
+      // either; it gets the save-time default instead, exactly as the Postgres
+      // insert does. A stored ledger survives even when the stored pin is null
+      // and the default fires, again matching `history ?? []` over there.
+      //
+      // The default itself: an hourly client with no stored pin gets THIS month
+      // rather than the '2026-06' the boot backfill would give it, because a
+      // client that BECOMES hourly now would otherwise bill at rates a year and
+      // a half old. A client that is not hourly has no pin to price off.
+      //
+      // Outside the prior-file block on purpose — a workspace with no prior file
+      // at all has to reach the same answer Postgres does.
       const currentRatePeriod = nowIso().slice(0, 7)
       if (Array.isArray(data.clients)) {
         data.clients = data.clients.map((clientRecord) => {
           if (!clientRecord || typeof clientRecord !== 'object') return clientRecord
-          if (clientRecord.billingMode !== 'hourly') return clientRecord
-          if (typeof clientRecord.hourlyRatePeriod === 'string' && clientRecord.hourlyRatePeriod) {
-            return clientRecord
+          const prior =
+            typeof clientRecord.id === 'string' ? priorPinById.get(clientRecord.id) : undefined
+          return {
+            ...clientRecord,
+            hourlyRatePeriod:
+              prior?.hourlyRatePeriod ??
+              (clientRecord.billingMode === 'hourly' ? currentRatePeriod : null),
+            hourlyRateHistory: prior?.hourlyRateHistory ?? [],
           }
-          return { ...clientRecord, hourlyRatePeriod: currentRatePeriod, hourlyRateHistory: [] }
         })
       }
 
