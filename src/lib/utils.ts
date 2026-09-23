@@ -574,7 +574,7 @@ export {
 } from '../../lib/group-allocation.js'
 
 import { buildInvoiceLines, PER_EMPLOYEE_BILLING_START as SHARED_CUTOVER } from '../../lib/invoice-lines.js'
-import { ratePeriodAsOf, type BillRateVersion, type PinnedClient } from '../../lib/rate-history.js'
+import { ratePeriodAsOf, type BillRateVersion } from '../../lib/rate-history.js'
 import {
   buildChecklistInstanceKeys,
   checklistInstanceKey,
@@ -1651,8 +1651,12 @@ export const PER_EMPLOYEE_BILLING_START = SHARED_CUTOVER
  * The two rate-history row shapes, re-exported so a page can hold a version
  * list without importing across the `src/` boundary into `lib/` itself — the
  * same courtesy this module already does for the billing cutover above.
+ *
+ * Forwarded from `./types`, which is the canonical door onto `lib/`'s
+ * definitions, so this convenience alias can never come to mean something
+ * different from the one the rest of `src/` imports.
  */
-export type { BillRateVersion, CostRateVersion } from '../../lib/rate-history.js'
+export type { BillRateVersion, CostRateVersion } from './types'
 
 export function getInvoice(
   client: Client,
@@ -1684,12 +1688,7 @@ export function getInvoice(
     employees,
     defaultHourlyRate,
     billRateVersions,
-    // The pin fields are not on the `Client` TYPE yet — they arrive with the
-    // rest of the client-side rate shapes — but they ARE on the object the
-    // store sends, which is why this reads them through the pin's own shape
-    // rather than pretending they are absent. Drop the assertion the moment
-    // `Client` declares `hourlyRatePeriod`/`hourlyRateHistory`.
-    ratePeriod: ratePeriodAsOf(client as PinnedClient, billingPeriod),
+    ratePeriod: ratePeriodAsOf(client, billingPeriod),
   })
   return {
     client,

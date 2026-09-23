@@ -1,3 +1,18 @@
+import type { RateHistoryEntry } from '../../lib/rate-history.js'
+
+/**
+ * The rate-history row shapes, re-exported from the resolver that defines them
+ * so there is ONE definition of a version and a page never has to import
+ * across the `src/` boundary into `lib/` itself. This module is the canonical
+ * door; `src/lib/utils.ts` re-exports these from here rather than from `lib/`,
+ * so the two can never drift.
+ */
+export type {
+  BillRateVersion,
+  CostRateVersion,
+  RateHistoryEntry,
+} from '../../lib/rate-history.js'
+
 export type Role = 'employee' | 'owner'
 export type BillingMode = 'hourly' | 'subscription' | 'annual'
 
@@ -71,6 +86,19 @@ export type Client = {
   contact: string
   billingMode: BillingMode
   hourlyRate: number
+  /**
+   * THE PIN: the month whose bill rates this client is charged at. Only
+   * meaningful when `billingMode` is 'hourly'; null on every other client and
+   * on every client a STAFF session receives (rates are owner-only, blanked in
+   * `scopeAppDataForSession`).
+   */
+  hourlyRatePeriod?: string | null
+  /**
+   * Every time the owner moved this client to current rates. Append-only —
+   * `ratePeriodAsOf` reads it to price a PAST month at the pin that applied
+   * then. Blanked for staff alongside the pin.
+   */
+  hourlyRateHistory?: RateHistoryEntry[]
   /**
    * Plans/services this client subscribes to. A client may select MULTIPLE
    * plans (rendered as chips in the UI). Plans are now just name + notes

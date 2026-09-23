@@ -2,6 +2,8 @@
   ApiError,
   type ActivityEntry,
   type AppData,
+  type BillRateVersion,
+  type CostRateVersion,
   type Checklist,
   type ChecklistSkip,
   type ChecklistTemplate,
@@ -1220,6 +1222,129 @@ export async function setTeamMemberBillRate(userId: string, billRate: number | n
     throw new ApiError(response.status, message || `Failed to set bill rate (${response.status})`)
   }
   return (await response.json()) as { ok: boolean; userId: string; billRate: number | null }
+}
+
+/**
+ * Owner-only: the whole rate history, both sides.
+ *
+ * A 403 answers two EMPTY LISTS rather than throwing. Rates are owner-only and
+ * every caller of this is an owner-gated surface, so a 403 here means a staff
+ * session reached a page it should not have — and the resolver's answer for an
+ * empty list is exactly the fallback that session already gets. A thrown error
+ * would turn that into a broken page instead of a redacted one.
+ */
+export async function fetchRateVersions(signal?: AbortSignal) {
+  const response = await apiFetch('/api/rate-versions', { credentials: 'same-origin', signal })
+  if (response.status === 403) return { billRateVersions: [], costRateVersions: [] }
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to load rate history (${response.status})`,
+    )
+  }
+  return (await response.json()) as {
+    billRateVersions: BillRateVersion[]
+    costRateVersions: CostRateVersion[]
+  }
+}
+
+/** Owner-only: save one person's bill rate for one month ('YYYY-MM'). */
+export async function upsertBillRateVersion(
+  userId: string,
+  effectivePeriod: string,
+  rate: number,
+) {
+  const response = await apiFetch('/api/team/bill-rate-version', {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, effectivePeriod, rate }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to save the rate (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; userId: string; versions: BillRateVersion[] }
+}
+
+/**
+ * Owner-only: remove one bill-rate version. 409 means the store refused —
+ * either it is not the newest, or a client is still pinned at or after it. The
+ * SENTENCE is what the page prints; `safeErrorMessage` already prefers
+ * `message` over `error`.
+ */
+export async function deleteBillRateVersion(userId: string, effectivePeriod: string) {
+  const response = await apiFetch('/api/team/bill-rate-version', {
+    credentials: 'same-origin',
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, effectivePeriod }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to remove the rate (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; userId: string; versions: BillRateVersion[] }
+}
+
+/** Owner-only: save one person's cost rate from one day on ('YYYY-MM-DD'). */
+export async function upsertCostRateVersion(
+  userId: string,
+  effectiveDate: string,
+  rate: number,
+) {
+  const response = await apiFetch('/api/team/cost-rate-version', {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, effectiveDate, rate }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to save the rate (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; userId: string; versions: CostRateVersion[] }
+}
+
+/** Owner-only: remove one cost-rate version — the newest only. */
+export async function deleteCostRateVersion(userId: string, effectiveDate: string) {
+  const response = await apiFetch('/api/team/cost-rate-version', {
+    credentials: 'same-origin',
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId, effectiveDate }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to remove the rate (${response.status})`)
+  }
+  return (await response.json()) as { ok: boolean; userId: string; versions: CostRateVersion[] }
+}
+
+/**
+ * Owner-only: "Move to current rates from <month>".
+ *
+ * A TARGETED endpoint, not part of the bulk save — which is the point. The
+ * owner tab autosaves the whole workspace; if the pin rode that payload, a tab
+ * left open since yesterday would put a client back on the rates she moved it
+ * off this morning.
+ */
+export async function setClientHourlyRatePeriod(clientId: string, period: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/hourly-rate-period`,
+    {
+      credentials: 'same-origin',
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ period }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to move the rates (${response.status})`)
+  }
+  return (await response.json()) as Client
 }
 
 export async function inviteTeamMember(payload: { name: string; email: string; role: string }) {
