@@ -3,7 +3,8 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
-import { fetchRateVersions, fetchTeam } from '../lib/api'
+import { costRateFor, latestCostRate } from '../../lib/rate-history.js'
+import { fetchRateVersions } from '../lib/api'
 import {
   allocatePersonCost,
   billableMinutes as sumBillableMinutes,
@@ -22,6 +23,7 @@ import type {
   Checklist,
   Client,
   ClientReportRow,
+  CostRateVersion,
   Employee,
   EmployeeReportRow,
   TaskReportRow,
@@ -76,48 +78,56 @@ export function ReportsPage() {
   const [currentTeamOnly, setCurrentTeamOnly] = useState(true)
 
   /**
-   * Cost/pay rates, keyed by team member id.
+   * THE RATE HISTORY — dated bill rates AND dated cost rates — in one read.
    *
-   * Sourced from /api/team rather than app-data ON PURPOSE. `cost_rate` is
-   * owner-only pay data and `read()` deliberately does not select it, so it
-   * never enters the shared workspace blob that staff sessions receive. The
-   * team endpoint is already owner-gated (403 otherwise) and this page is
-   * owner-only, so reading it here adds no new exposure.
+   * Sourced from /api/rate-versions rather than app-data ON PURPOSE, for the
+   * same reason the old /api/team read was: rate data is owner-only pay and
+   * billing data and `read()` deliberately does not select it, so it never
+   * enters the workspace blob a staff session receives. This page is
+   * owner-only and the endpoint is owner-gated, so reading it here adds no new
+   * exposure.
    *
-   * A missing entry means NO cost rate, which is not an error — that person's
-   * time carries no labor cost and the column shows "—" for them. Owners are in
-   * this map like everyone else (featreq-6fdd9e98): one who has entered a cost
-   * rate on the Team page is priced here, one who has not still reads "—".
-   */
-  const [costRates, setCostRates] = useState<Record<string, number | null>>({})
-  useEffect(() => {
-    const controller = new AbortController()
-    fetchTeam(controller.signal)
-      .then(({ users }) =>
-        setCostRates(
-          Object.fromEntries(users.map((member) => [member.id, member.costRate ?? null])),
-        ),
-      )
-      // Non-fatal: the Cost column simply reads "—" if rates can't be loaded.
-      .catch(() => {})
-    return () => controller.abort()
-  }, [])
-
-  /**
-   * Dated bill rates, so Projected billing below prices each client at the
-   * month it is pinned to rather than at today's rates. Owner-only like the
-   * rest of this page; an empty list is not an error, it is the old behavior
-   * (`getInvoice` falls back to the person's live rate).
+   * The bill rates let Projected billing below price each client at the month
+   * it is pinned to rather than at today's rates; an empty list is the old
+   * behavior (`getInvoice` falls back to the person's live rate). An empty cost
+   * list means NO cost rates loaded, which is not an error either — every Cost
+   * cell reads "—", exactly as it did for a person with no rate on file.
+   * Owners are costed like anyone else (featreq-6fdd9e98): one who has entered
+   * a cost rate on the Team page is priced here, one who has not reads "—".
    */
   const [billRateVersions, setBillRateVersions] = useState<BillRateVersion[]>([])
+  const [costRateVersions, setCostRateVersions] = useState<CostRateVersion[]>([])
   useEffect(() => {
     const controller = new AbortController()
     fetchRateVersions(controller.signal)
-      .then((versions) => setBillRateVersions(versions.billRateVersions))
-      // Non-fatal: pricing falls back to today's rates, exactly as before.
+      .then((versions) => {
+        setBillRateVersions(versions.billRateVersions)
+        setCostRateVersions(versions.costRateVersions)
+      })
+      // Non-fatal: pricing falls back to today's rates and the Cost column
+      // simply reads "—", exactly as before.
       .catch(() => {})
     return () => controller.abort()
   }, [])
+  /**
+   * The cost rate on the DAY each entry was worked — the rule the Client Recap
+   * and the assistant's margin analytics share. A raise lands on a payday, so
+   * the per-entry and per-day figures below, which have dates, resolve here.
+   */
+  const costRateOn = (employeeId: string, entryDate?: string) =>
+    costRateFor(costRateVersions, employeeId, entryDate ?? null)
+  /**
+   * A PERIOD figure has no single day, so the per-person period columns price
+   * at that person's CURRENT (newest) cost rate — which is what this page has
+   * always shown. The per-entry and per-day figures use `costRateOn` and are
+   * the ones a raise actually moves.
+   */
+  const costRates: Record<string, number | null> = Object.fromEntries(
+    [...new Set(costRateVersions.map((row) => row.userId))].map((userId) => [
+      userId,
+      latestCostRate(costRateVersions, userId),
+    ]),
+  )
 
   if (!ownerMode) {
     return null
@@ -290,6 +300,7 @@ export function ReportsPage() {
         clients={data.clients}
         employees={employeesForReport}
         costRates={costRates}
+        costRateOn={costRateOn}
         timeEntries={data.timeEntries}
       />
       <ReportsOverview
@@ -385,13 +396,22 @@ function PayrollHoursReport({
   clients,
   employees,
   costRates,
+  costRateOn,
   timeEntries,
 }: {
   checklists: Checklist[]
   clients: Client[]
   employees: Employee[]
-  /** Cost/pay rate by member id; missing or null = no cost rate (see below). */
+  /**
+   * CURRENT cost/pay rate by member id, for the per-person PERIOD columns;
+   * missing or null = no cost rate (see below).
+   */
   costRates: Record<string, number | null>
+  /**
+   * The cost rate in force on a given day, for the per-entry figures — which
+   * have a date, so a raise mid-period costs each side of it at its own rate.
+   */
+  costRateOn: (employeeId: string, entryDate?: string) => number | null
   timeEntries: TimeEntry[]
 }) {
   const [periodType, setPeriodType] = useState<'weekly' | 'biweekly'>('biweekly')
@@ -646,8 +666,9 @@ function PayrollHoursReport({
 
   // Cost counts a full-mode group's wall time once — the firm pays for the
   // block, not for each client it was billed to — and `laborCost` groups by
-  // person before rounding, so this lands on the same rule as the table above.
-  const detailCost = laborCost(detailRows, (employeeId) => costRates[employeeId])
+  // person AND the rate in force on each entry's day before rounding, so a
+  // raise mid-period costs each side of it at its own rate.
+  const detailCost = laborCost(detailRows, costRateOn)
 
   /**
    * Per-ENTRY Cost cells, by row id.
@@ -660,20 +681,25 @@ function PayrollHoursReport({
    * excluded and render "—": the firm pays for the block once.
    */
   const detailCostByRowId = (() => {
-    const rowsByEmployee = new Map<string, { id: string; minutes: number }[]>()
+    // Grouped by person AND the rate that applied on the day — the same
+    // grouping `laborCost` uses, so the column sums to the total under it
+    // even when a raise lands mid-period.
+    const groups = new Map<string, { rate: number | null; rows: { id: string; minutes: number }[] }>()
     for (const row of detailRows) {
       if (row.countedElsewhere) continue
-      const mine = rowsByEmployee.get(row.employeeId) ?? []
-      mine.push({ id: row.id, minutes: row.minutes })
-      rowsByEmployee.set(row.employeeId, mine)
+      const rate = costRateOn(row.employeeId, row.date)
+      const key = `${row.employeeId} ${rate ?? ''}`
+      const found = groups.get(key)
+      if (found) found.rows.push({ id: row.id, minutes: row.minutes })
+      else groups.set(key, { rate, rows: [{ id: row.id, minutes: row.minutes }] })
     }
     const byRowId = new Map<string, number | null>()
-    for (const [employeeId, mine] of rowsByEmployee) {
+    for (const group of groups.values()) {
       const costs = allocatePersonCost(
-        mine.map((row) => row.minutes),
-        costRates[employeeId],
+        group.rows.map((row) => row.minutes),
+        group.rate,
       )
-      mine.forEach((row, index) => byRowId.set(row.id, costs[index]))
+      group.rows.forEach((row, index) => byRowId.set(row.id, costs[index]))
     }
     return byRowId
   })()

@@ -26,16 +26,22 @@ import type { AppContextValue } from '../AppContext'
 
 vi.mock('../lib/api', () => ({
   fetchRateVersions: vi.fn(async () => ({ billRateVersions: [], costRateVersions: [] })),
-  fetchTeam: vi.fn(),
 }))
 vi.mock('../lib/csv', () => ({ downloadCsv: vi.fn() }))
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
 
-import { fetchTeam } from '../lib/api'
+import { fetchRateVersions } from '../lib/api'
 import { downloadCsv } from '../lib/csv'
 
-const mockFetchTeam = vi.mocked(fetchTeam)
+const mockFetchRateVersions = vi.mocked(fetchRateVersions)
 const mockDownloadCsv = vi.mocked(downloadCsv)
+
+/** One cost rate in force since the epoch — a person who has never had a raise. */
+const costSince1970 = (userId: string, rate: number) => ({
+  userId,
+  effectiveDate: '1970-01-01',
+  rate,
+})
 
 /** A day inside the default (bi-weekly) window once the anchor is set to it. */
 const DAY = '2026-08-05'
@@ -81,14 +87,12 @@ let contextValue: AppContextValue
 
 beforeEach(() => {
   mockDownloadCsv.mockReset()
-  mockFetchTeam.mockReset()
-  mockFetchTeam.mockResolvedValue({
-    users: [
-      { id: 'emp-1', costRate: COST_RATE },
-      { id: 'emp-2', costRate: COST_RATE },
-      { id: 'emp-owner', costRate: null },
-    ],
-  } as unknown as Awaited<ReturnType<typeof fetchTeam>>)
+  mockFetchRateVersions.mockReset()
+  mockFetchRateVersions.mockResolvedValue({
+    billRateVersions: [],
+    // The owner has no cost-rate row at all: no rate on file.
+    costRateVersions: [costSince1970('emp-1', COST_RATE), costSince1970('emp-2', COST_RATE)],
+  })
 
   contextValue = {
     ownerMode: true,
@@ -111,8 +115,8 @@ beforeEach(() => {
 async function renderReport() {
   const view = render(<ReportsPage />)
   fireEvent.change(screen.getByLabelText('Period start date'), { target: { value: DAY } })
-  // The Cost column only fills in once /api/team resolves the pay rates.
-  await waitFor(() => expect(mockFetchTeam).toHaveBeenCalled())
+  // The Cost column only fills in once /api/rate-versions resolves the pay rates.
+  await waitFor(() => expect(mockFetchRateVersions).toHaveBeenCalled())
   await screen.findAllByText('$6.29')
   return view
 }
@@ -366,20 +370,21 @@ describe('payroll exports price off the hours they print', () => {
  * "Yes I need to input a cost for me so I can budget." The Team page now offers
  * the Cost rate box to every member, owners included, so an owner row stops
  * being a permanent em dash the moment she fills it in. The report needed no
- * change for that — it has always priced from the /api/team rate map — and this
+ * change for that — it prices from whatever cost rates are on file — and this
  * pins that, because the em dash above reads like a rule about owners and is
  * only ever a rule about blank rates.
  */
 describe('an owner with a cost rate is costed like anyone else', () => {
   it('prices her hours and carries them into the printed total', async () => {
-    mockFetchTeam.mockResolvedValue({
-      users: [
-        { id: 'emp-1', costRate: COST_RATE },
-        { id: 'emp-2', costRate: COST_RATE },
+    mockFetchRateVersions.mockResolvedValue({
+      billRateVersions: [],
+      costRateVersions: [
+        costSince1970('emp-1', COST_RATE),
+        costSince1970('emp-2', COST_RATE),
         // The one difference from every other test in this file.
-        { id: 'emp-owner', costRate: COST_RATE },
+        costSince1970('emp-owner', COST_RATE),
       ],
-    } as unknown as Awaited<ReturnType<typeof fetchTeam>>)
+    })
 
     const { container } = await renderReport()
     const { body, footer } = summaryTable(container)
@@ -390,5 +395,55 @@ describe('an owner with a cost rate is costed like anyone else', () => {
     // Nothing is withheld any more, and the column still adds to its total.
     expect(body.map((row) => row[COST])).not.toContain('—')
     expect(footer[COST]).toBe('$40.33') // 6.29 + 6.29 + 27.75
+  })
+})
+
+/**
+ * Rate history (docs/plans/rate-history-2026-09.md §2.3): a raise lands on a
+ * payday, so an entry is costed at the rate in force on the DAY it was worked.
+ * One hour either side of a 2026-09-15 raise from $20 to $24 is $20 + $24 =
+ * $44.00 in the detail total — not $48.00, which is both hours at the rate the
+ * person's record mirrors today.
+ */
+describe('Reports costs a raise on the day it landed', () => {
+  it('splits one person’s period across the raise in the detail total', async () => {
+    mockFetchRateVersions.mockResolvedValue({
+      billRateVersions: [],
+      costRateVersions: [
+        { userId: 'emp-lisa', effectiveDate: '1970-01-01', rate: 20 },
+        { userId: 'emp-lisa', effectiveDate: '2026-09-15', rate: 24 },
+      ],
+    })
+    contextValue = {
+      ...contextValue,
+      billingPeriod: '2026-09',
+      data: {
+        ...contextValue.data,
+        employees: [{ id: 'emp-lisa', name: 'Lisa Park', billRate: 90 }],
+        timeEntries: [
+          { ...entry({ id: 'a', employeeId: 'emp-lisa', minutes: 60 }), date: '2026-09-14' },
+          { ...entry({ id: 'b', employeeId: 'emp-lisa', minutes: 60 }), date: '2026-09-16' },
+        ],
+      },
+    } as unknown as AppContextValue
+
+    const { container } = render(<ReportsPage />)
+    // The bi-weekly window holding the 14th covers both sides of the raise.
+    fireEvent.change(screen.getByLabelText('Period start date'), {
+      target: { value: '2026-09-14' },
+    })
+    expect(await screen.findByText('$44.00')).toBeInTheDocument()
+
+    // Each entry at its own day's rate, and the column still adds to $44.00.
+    const table = container.querySelectorAll('#payroll-hours table')[1]
+    const entryCosts = [...table.querySelectorAll('tbody tr:not(.payroll-day-row)')].map(
+      (row) => [...row.querySelectorAll('td')].map((td) => td.textContent ?? '').at(-1),
+    )
+    expect(entryCosts).toEqual(['$20.00', '$24.00'])
+
+    // The per-person PERIOD column has no single day, so it stays at her
+    // current rate: 2.00h x $24.
+    const lisa = summaryTable(container).body.find((cells) => cells[0] === 'Lisa Park')
+    expect(lisa?.[COST]).toBe('$48.00')
   })
 })
