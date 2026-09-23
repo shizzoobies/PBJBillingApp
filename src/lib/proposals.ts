@@ -1,9 +1,13 @@
 import type {
   Proposal,
+  ProposalGroup,
   ProposalMultiplier,
   ProposalPricingKind,
   ProposalRole,
+  ProposalSelection,
+  ProposalService,
   ProposalStatus,
+  ProposalTotals,
 } from './types'
 
 /**
@@ -55,4 +59,150 @@ export function proposalDate(iso: string | null | undefined): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return ''
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+/* ---- The editor's tabs ------------------------------------------------- */
+
+export type ProposalTab = 'estimate' | 'letter' | 'activity'
+
+export const PROPOSAL_TABS: Array<{ key: ProposalTab; label: string }> = [
+  { key: 'estimate', label: 'Estimate' },
+  { key: 'letter', label: 'Letter' },
+  { key: 'activity', label: 'Activity' },
+]
+
+/** `?tab=` wins when it names a tab; anything else is the Estimate. */
+export function resolveProposalTab(param: string | null): ProposalTab {
+  return PROPOSAL_TABS.some((tab) => tab.key === param) ? (param as ProposalTab) : 'estimate'
+}
+
+/** The four totals, in the order the estimate and the PDF show them. */
+export const PROPOSAL_TOTAL_LABELS: Array<[keyof ProposalTotals, string]> = [
+  ['monthly', 'Monthly fee'],
+  ['annual', 'Annual fees'],
+  ['oneTime', 'One-time fees'],
+  ['cleanup', 'Clean-up'],
+]
+
+/* ---- The service picker ------------------------------------------------ */
+
+/**
+ * One line of the picker: a service NAME within a group, with every tier of it
+ * as an option. "Weekly transactions" is one row with Basic / Classes /
+ * Advance; "Reconciliations" is one row with a single option.
+ */
+export type PickerRow = {
+  key: string
+  group: ProposalGroup
+  name: string
+  options: ProposalService[]
+}
+
+/** The active catalog, grouped for the picker, in catalog order. */
+export function pickerGroups(
+  services: readonly ProposalService[],
+): Array<{ group: ProposalGroup; rows: PickerRow[] }> {
+  const groups: Array<{ group: ProposalGroup; rows: PickerRow[] }> = []
+  const sorted = services
+    .filter((service) => service.active)
+    .slice()
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+  for (const service of sorted) {
+    let bucket = groups.find((entry) => entry.group === service.group)
+    if (!bucket) {
+      bucket = { group: service.group, rows: [] }
+      groups.push(bucket)
+    }
+    const key = `${service.group}::${service.name}`
+    const row = bucket.rows.find((entry) => entry.key === key)
+    if (row) row.options.push(service)
+    else bucket.rows.push({ key, group: service.group, name: service.name, options: [service] })
+  }
+  return groups
+}
+
+/**
+ * Pick one option of a picker row (or none): every option of the row is
+ * removed, then the chosen one is added back — keeping its typed fields if it
+ * was already selected. A client is on Basic OR Advance, never both.
+ */
+export function selectService(
+  selections: readonly ProposalSelection[],
+  rowOptions: readonly ProposalService[],
+  serviceId: string | null,
+): ProposalSelection[] {
+  const optionIds = new Set(rowOptions.map((option) => option.id))
+  const previous = serviceId ? selections.find((entry) => entry.serviceId === serviceId) : undefined
+  const rest = selections.filter((entry) => !optionIds.has(entry.serviceId))
+  return serviceId ? [...rest, previous ?? { serviceId }] : rest
+}
+
+/** Merge fields into one selection; a null or undefined value removes the field. */
+export function updateSelection(
+  selections: readonly ProposalSelection[],
+  serviceId: string,
+  patch: Partial<Record<Exclude<keyof ProposalSelection, 'serviceId'>, unknown>>,
+): ProposalSelection[] {
+  return selections.map((entry) => {
+    if (entry.serviceId !== serviceId) return entry
+    const next: Record<string, unknown> = { ...entry }
+    for (const [field, value] of Object.entries(patch)) {
+      if (value === null || value === undefined) delete next[field]
+      else next[field] = value
+    }
+    return next as ProposalSelection
+  })
+}
+
+/** A count typed into the inputs panel; blank removes it. */
+export function withInput(
+  inputs: Readonly<Record<string, number>>,
+  key: string,
+  value: number | null,
+): Record<string, number> {
+  const next = { ...inputs }
+  if (value === null) delete next[key]
+  else next[key] = value
+  return next
+}
+
+/* ---- Activity ------------------------------------------------------------ */
+
+const DELIVERY_WORDS: Record<string, string> = {
+  sent: 'Accepted by the mail provider',
+  delivered: 'Delivered',
+  delayed: 'Delivery delayed',
+  bounced: 'Bounced',
+  complained: 'Marked as spam',
+}
+
+/** What happened to a proposal, oldest first: created, letter, sends, delivery, outcome. */
+export function proposalActivity(proposal: Proposal): Array<{ at: string; text: string }> {
+  const entries: Array<{ at: string; text: string }> = [
+    {
+      at: proposal.createdAt,
+      text: proposal.copiedFromId ? `Created as a copy of ${proposal.copiedFromId}` : 'Created',
+    },
+  ]
+  if (proposal.letterAt) entries.push({ at: proposal.letterAt, text: 'Letter drafted' })
+  for (const entry of proposal.emailLog) {
+    const to = entry.to.join(', ')
+    if (entry.kind === 'send') {
+      entries.push({
+        at: entry.at,
+        text: entry.ok ? `Sent to ${to}` : `Send to ${to} failed: ${entry.error ?? 'unknown error'}`,
+      })
+    } else {
+      const word = DELIVERY_WORDS[entry.event ?? ''] ?? entry.event ?? 'Delivery event'
+      entries.push({ at: entry.at, text: `${word}${to ? ` (${to})` : ''}` })
+    }
+  }
+  if (proposal.acceptedAt) entries.push({ at: proposal.acceptedAt, text: 'Accepted' })
+  if (proposal.declinedAt) {
+    entries.push({
+      at: proposal.declinedAt,
+      text: `Declined${proposal.declineNote ? `: ${proposal.declineNote}` : ''}`,
+    })
+  }
+  return entries.sort((a, b) => a.at.localeCompare(b.at))
 }

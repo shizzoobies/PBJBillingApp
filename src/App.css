@@ -13098,3 +13098,91 @@ details.invoice-run-sent ul,
 .proposal-catalog-table tr.is-retired td {
   opacity: 0.55;
 }
+
+/* The proposal editor (featreq-311473e2). */
+.proposal-estimate,
+.proposal-fieldset,
+.proposal-activity {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.proposal-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.proposal-picker-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  margin: 0 0 12px;
+  padding: 8px 12px;
+}
+
+.proposal-picker-row {
+  padding: 6px 0;
+}
+
+.proposal-picker-tiers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.proposal-picker-name {
+  font-weight: 700;
+}
+
+.proposal-picker-extras {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  padding: 6px 0 0 24px;
+}
+
+.proposal-line-formula {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.proposal-line-amount {
+  font-weight: 700;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.proposal-totals {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  margin: 12px 0 0;
+}
+
+.proposal-totals dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.proposal-totals dd {
+  font-size: 18px;
+  font-weight: 760;
+  margin: 0;
+}
+
+.proposal-letter-text {
+  font-family: inherit;
+  white-space: pre-wrap;
+}
+
+.proposal-activity-list,
+.proposal-transcript {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}

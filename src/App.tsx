@@ -168,6 +168,7 @@ import { SetupChecklistPage } from './pages/SetupChecklistPage'
 import { UpdatesPage } from './pages/UpdatesPage'
 import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
+import { ProposalEditorPage } from './pages/ProposalEditorPage'
 import { ProposalsPage } from './pages/ProposalsPage'
 import { InvoiceRecapPage } from './pages/InvoiceRecapPage'
 import { InvoicesPage } from './pages/InvoicesPage'
@@ -4226,6 +4227,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           element={
             <OwnerOnly ownerMode={ownerMode}>
               <ProposalsPage />
+            </OwnerOnly>
+          }
+        />
+        <Route
+          path="/proposals/:proposalId"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <ProposalEditorPage />
             </OwnerOnly>
           }
         />
