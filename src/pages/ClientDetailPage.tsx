@@ -44,10 +44,12 @@ import {
 } from '../components/SectionKit'
 import {
   applyPackageRequest,
+  fetchRateVersions,
   issueRetainerInvoiceRequest,
   listPackagesRequest,
   recordClientProfileActivity,
   setClientAssignedTeamRequest,
+  setClientHourlyRatePeriod,
 } from '../lib/api'
 import { applyPackageConfirmText } from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
@@ -57,6 +59,7 @@ import {
   MONTHLY_SERVICE_TIERS,
   type AppData,
   type BillingMode,
+  type BillRateVersion,
   type Checklist,
   type ChecklistFrequency,
   type ChecklistTemplate,
@@ -71,6 +74,10 @@ import {
 // The one place 'off' is decided, shared with the generator and the invoice
 // preview so all three agree about what an unset client means.
 import { normalizeTimeBreakdownMode } from '../../lib/invoice-lines.js'
+// The one resolver for "what did this person's hour bill at back then" —
+// shared with the invoice, so the block below can never quote a rate the
+// invoice would not charge.
+import { billRateFor } from '../../lib/rate-history.js'
 import {
   addDays,
   clientName,
@@ -81,6 +88,7 @@ import {
   formatAuditStamp,
   formatDecimalHours,
   formatHoursMinutes,
+  getBillingPeriodLabel,
   getChecklistFrequencyLabel,
   isDueThisMonth,
   isSafeImageSrc,
@@ -991,6 +999,7 @@ function BillingSectionBody({
           ]}
         />
       ) : null}
+      <HourlyRatesField client={client} />
       <EstimatedRoleHours client={client} onCommit={onCommit} />
       <ChipField
         label="Plans / services"
@@ -1001,6 +1010,177 @@ function BillingSectionBody({
         emptyHelper="No plans/services selected yet."
       />
       <ApplyPackageField client={client} />
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Hourly rates — the client's pin (docs/plans/rate-history-2026-09.md §5)     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What this client bills each person at, and the one control that changes it.
+ *
+ * Hourly clients only: Monthly and Annual bill a fee, so a person's rate says
+ * nothing about them and the block is simply absent. Owner-only: rates are
+ * between the owner and the client, and a staff session receives a null pin
+ * and an empty ledger anyway (`scopeAppDataForSession`).
+ *
+ * The rates are resolved CLIENT-SIDE through `billRateFor` — the same function
+ * the invoice prices with — rather than asking the server for a computed list.
+ * Two implementations of "what does this client pay for Lisa's hour" is the
+ * thing this whole build exists to avoid.
+ *
+ * The AGE line is the feature Brittany actually asked for: she does a yearly
+ * rate review per client and wants to see, at a glance, which ones are overdue
+ * one. An anniversary reminder engine is explicitly out of scope (spec §6).
+ */
+export function HourlyRatesField({ client }: { client: Client }) {
+  const { data, ownerMode } = useAppContext()
+  const [billRateVersions, setBillRateVersions] = useState<BillRateVersion[]>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [moveTo, setMoveTo] = useState('')
+  // The client as the MOVE endpoint just returned it, stamped with the pin the
+  // prop carried when the move was made. The pin has its own endpoint
+  // precisely so the bulk autosave cannot carry it, so this is a
+  // component-local echo rather than a workspace edit: it shows the owner the
+  // move she just made without marking anything dirty, and it is dropped
+  // during render the moment the next /api/app-data refresh moves the prop.
+  type MoveEcho = { clientId: string; was: string | null; client: Client }
+  const [moved, setMoved] = useState<MoveEcho | null>(null)
+
+  const hidden = !ownerMode || client.billingMode !== 'hourly'
+
+  useEffect(() => {
+    if (hidden) return
+    const controller = new AbortController()
+    // A staff session 403s and gets empty lists back rather than an error —
+    // the block is hidden for them anyway, this just keeps it quiet.
+    void fetchRateVersions(controller.signal)
+      .then(({ billRateVersions: rows }) => setBillRateVersions(rows))
+      .catch(() => {})
+    return () => controller.abort()
+  }, [hidden])
+
+  if (hidden) return null
+
+  // The next /api/app-data refresh is the authority: the echo only stands
+  // while the prop still shows the pin the move was made against.
+  const echoing =
+    moved && moved.clientId === client.id && moved.was === (client.hourlyRatePeriod ?? null)
+  const shown = echoing ? moved.client : client
+  const pin = shown.hourlyRatePeriod ?? null
+  const history = shown.hourlyRateHistory ?? []
+  // NEXT month, because a rate change the owner agrees with a client almost
+  // always starts at the next billing period — moving the CURRENT month would
+  // reprice work already done at the old rate. Local, not UTC: on the last
+  // evening of a month `toISOString()` would offer the month we are in.
+  const now = new Date()
+  const nextMonth = localDateOnly(new Date(now.getFullYear(), now.getMonth() + 1, 1)).slice(0, 7)
+  const chosen = moveTo || nextMonth
+
+  const rows = (data.employees ?? [])
+    .map((employee) => ({
+      id: employee.id,
+      name: employee.name,
+      rate: billRateFor(billRateVersions, employee.id, pin),
+    }))
+    .filter((row) => row.rate !== null)
+    .sort((a, b) => a.name.localeCompare(b.name))
+
+  const monthsOld = (() => {
+    if (!pin) return null
+    const [year, month] = pin.split('-').map(Number)
+    if (!Number.isFinite(year) || !Number.isFinite(month)) return null
+    return (now.getFullYear() - year) * 12 + (now.getMonth() + 1 - month)
+  })()
+
+  const move = async () => {
+    if (!/^\d{4}-\d{2}$/.test(chosen)) return
+    setBusy(true)
+    setError('')
+    try {
+      const updated = await setClientHourlyRatePeriod(client.id, chosen)
+      setMoved({ clientId: client.id, was: client.hourlyRatePeriod ?? null, client: updated })
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not move the rates.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="field full-row">
+      <span>Hourly rates</span>
+      <small className="field-helper">
+        What this client is billed for each person&rsquo;s time. Changing a person&rsquo;s rate on
+        the Team page does not move this client &mdash; press Move to current rates at their
+        review.
+      </small>
+      {rows.length === 0 ? (
+        <p className="muted-text">
+          Nobody has a bill rate on file for {pin ? getBillingPeriodLabel(pin) : 'this client'}{' '}
+          &mdash; hours bill at the client&rsquo;s own rate instead.
+        </p>
+      ) : (
+        <ul className="recap-list">
+          {rows.map((row) => (
+            <li key={row.id}>
+              <span>{row.name}</span>
+              <span>{currency.format(row.rate as number)}/hr</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {pin ? (
+        <p className="muted-text">
+          Rates from {getBillingPeriodLabel(pin)}
+          {monthsOld === null ? '' : ` — ${monthsOld} ${monthsOld === 1 ? 'month' : 'months'} ago`}
+        </p>
+      ) : null}
+      <div className="team-cost-input-row team-rate-from">
+        <label htmlFor={`rate-move-${client.id}`} className="team-cost-hint">
+          Move to current rates from
+        </label>
+        <input
+          id={`rate-move-${client.id}`}
+          type="month"
+          value={chosen}
+          onChange={(event) => setMoveTo(event.target.value)}
+        />
+        <button
+          type="button"
+          className="team-icon-button"
+          disabled={busy}
+          onClick={() => void move()}
+        >
+          {busy ? 'Moving…' : 'Move to current rates'}
+        </button>
+      </div>
+      {error ? <p className="form-error">{error}</p> : null}
+      {history.length > 0 ? (
+        <div className="team-rate-history">
+          <button
+            type="button"
+            className="team-icon-button"
+            onClick={() => setHistoryOpen((open) => !open)}
+          >
+            Rate month history ({history.length})
+          </button>
+          {historyOpen ? (
+            <ul className="recap-list">
+              {history.map((entry, index) => (
+                <li key={`${entry.to}-${index}`}>
+                  <span>{entry.from ? `${entry.from} → ${entry.to}` : entry.to}</span>
+                  <span>{String(entry.changedAt).slice(0, 10)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   )
 }
