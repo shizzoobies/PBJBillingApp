@@ -85,6 +85,7 @@ import {
   listBlockingWeeks,
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
+  resolveCreatedEntryTiming,
   validateTimeEntryEdit,
   adhocAfterEntryEdit,
   editRequiresReapproval,
@@ -6496,25 +6497,20 @@ const server = createServer(async (request, response) => {
 
         // Work sessions. When the client sends them, they're authoritative for
         // minutes + the start/stop envelope. Otherwise, synthesize a single
-        // session from the start/stop pair so every timed entry has one.
+        // session from the start/stop pair and KEEP the typed minutes — a split
+        // share carries its block's clock in/out but bills only its allocation.
+        // See `resolveCreatedEntryTiming`.
         const sessionsResult = normalizeWorkSessions(payload?.sessions)
         if (sessionsResult.error) {
           sendJson(response, 400, { error: sessionsResult.error })
           return
         }
-        let finalSessions = sessionsResult.sessions
-        let finalMinutes = minutes
-        let finalStartAt = startAt
-        let finalEndAt = endAt
-        if (finalSessions && finalSessions.length > 0) {
-          finalMinutes = sessionsResult.minutes
-          finalStartAt = sessionsResult.startAt
-          finalEndAt = sessionsResult.endAt
-        } else if (startAt && endAt) {
-          finalSessions = [{ startAt, endAt }]
-        } else {
-          finalSessions = []
-        }
+        const {
+          minutes: finalMinutes,
+          startAt: finalStartAt,
+          endAt: finalEndAt,
+          sessions: finalSessions,
+        } = resolveCreatedEntryTiming({ minutes, startAt, endAt, sessionsResult })
 
         // Month-end lock enforcement: a bookkeeper cannot log time dated within
         // a locked period. Owners are exempt (they're the approver/adjuster).

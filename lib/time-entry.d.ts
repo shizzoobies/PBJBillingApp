@@ -84,6 +84,22 @@ export declare function normalizeWorkSessions(rawSessions?: unknown): {
   error?: string | null
 }
 
+/**
+ * The minutes, spans and envelope a new entry is stored with. Sent sessions
+ * are the record; an envelope alone keeps the typed minutes.
+ */
+export declare function resolveCreatedEntryTiming(input: {
+  minutes: number
+  startAt?: string
+  endAt?: string
+  sessionsResult: ReturnType<typeof normalizeWorkSessions>
+}): {
+  minutes: number | undefined
+  startAt: string | undefined
+  endAt: string | undefined
+  sessions: { startAt: string; endAt: string }[]
+}
+
 /** The Sunday ('YYYY-MM-DD') that anchors the Sun–Sat week containing `dateStr`. */
 export declare function weekStartOf(dateStr: string): string
 

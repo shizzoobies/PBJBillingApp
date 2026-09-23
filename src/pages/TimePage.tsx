@@ -153,6 +153,7 @@ function TaskPickField({
   datalistId,
   placeholder,
   disabled,
+  hint,
   onTyped,
 }: {
   value: string
@@ -160,6 +161,8 @@ function TaskPickField({
   datalistId: string
   placeholder: string
   disabled?: boolean
+  /** Replaces the per-client caption, for a box that is not about one client. */
+  hint?: string
   onTyped: (typed: string) => void
 }) {
   const ownCount = options.filter((option) => option.checklistId).length
@@ -183,16 +186,20 @@ function TaskPickField({
           <option key={option.label} value={option.label} />
         ))}
       </datalist>
-      <span className="task-pick-hint">
-        {ownCount > 0
-          ? `${ownCount} open task${ownCount === 1 ? '' : 's'} for this client`
-          : 'No open tasks for this client'}
-        {upcomingCount > 0 ? `, ${upcomingCount} upcoming` : ''}
-        {options.length - ownCount - upcomingCount > 0
-          ? `, plus every standard task`
-          : ''}
-        . Anything you type that isn&rsquo;t in the list is used exactly as typed.
-      </span>
+      {hint ? (
+        <span className="task-pick-hint">{hint}</span>
+      ) : (
+        <span className="task-pick-hint">
+          {ownCount > 0
+            ? `${ownCount} open task${ownCount === 1 ? '' : 's'} for this client`
+            : 'No open tasks for this client'}
+          {upcomingCount > 0 ? `, ${upcomingCount} upcoming` : ''}
+          {options.length - ownCount - upcomingCount > 0
+            ? `, plus every standard task`
+            : ''}
+          . Anything you type that isn&rsquo;t in the list is used exactly as typed.
+        </span>
+      )}
     </>
   )
 }
@@ -1333,6 +1340,14 @@ export function ManualEntryModal({
   // full duration to each. No separate "split later" step.
   const groupMode = canGroup && billTo === 'group' && !isAdministrative
 
+  // The group's task: one name every share carries, so the reports say what the
+  // work was instead of "Unassigned". A checklist task belongs to one client, so
+  // the box offers the firm's standard tasks plus free typing. Held apart from
+  // the single-client task above so a task picked there never rides along hidden.
+  // Optional, like the server's group exemption.
+  const [groupTaskLabel, setGroupTaskLabel] = useState('')
+  const groupTaskOptions = useMemo(() => buildTimeTaskOptions([], templates, []), [templates])
+
   const toggleGroupClient = (id: string) => {
     setGroupClientIds((current) =>
       current.includes(id) ? current.filter((existing) => existing !== id) : [...current, id],
@@ -1424,6 +1439,7 @@ export function ManualEntryModal({
       setSubmitPending(true)
       setSubmitError('')
       const groupId = makeId('grp')
+      const shareTaskLabel = groupTaskLabel.trim() || undefined
       try {
         for (const row of allocated) {
           await onLog({
@@ -1431,16 +1447,23 @@ export function ManualEntryModal({
             clientId: row.id,
             isAdministrative: false,
             date: startLocal.slice(0, 10),
-            // Allocated minutes only (no session span) so the server keeps each
-            // client's split amount instead of recomputing the full duration.
+            // Each share bills its allocation, never the whole block.
             minutes: row.minutes,
             description: description.trim(),
             billable: true,
             // Every slice of one out-of-scope block is out-of-scope work.
             isAdhoc,
             taskId: null,
+            taskLabel: shareTaskLabel,
             entryMethod: 'manual',
             manualReason: reason.trim(),
+            // The block's clock in/out, as the envelope ONLY. With no `sessions`
+            // the server keeps the typed minutes and records one span from this
+            // pair (`resolveCreatedEntryTiming`), which is the shape the server's
+            // own split gives a timer block's shares. Sending `sessions` would
+            // make the server re-derive the minutes as the whole block.
+            startAt: localInputToIso(startLocal),
+            endAt: localInputToIso(stopLocal),
             groupId,
           })
         }
@@ -1642,6 +1665,17 @@ export function ManualEntryModal({
                       })}
                     </div>
                   </div>
+                  <label className="field full-span">
+                    <span>Task</span>
+                    <TaskPickField
+                      value={groupTaskLabel}
+                      options={groupTaskOptions}
+                      datalistId="time-manual-group-task-options"
+                      placeholder="Pick a standard task or type your own"
+                      hint="Every client's share gets this task name. Pick a standard task, or type your own."
+                      onTyped={setGroupTaskLabel}
+                    />
+                  </label>
                   <label className="field full-span">
                     <span>How should the time be split?</span>
                     <select

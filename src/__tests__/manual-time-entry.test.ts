@@ -3,6 +3,8 @@ import {
   findBlockingWeek,
   listBlockingWeeks,
   normalizeTimeEntryMethod,
+  normalizeWorkSessions,
+  resolveCreatedEntryTiming,
 } from '../../lib/time-entry.js'
 
 /**
@@ -273,5 +275,52 @@ describe('listBlockingWeeks', () => {
     expect(listBlockingWeeks(entryWeek, prior, subs, undefined, today)[0]).toEqual(
       findBlockingWeek(entryWeek, prior, subs, undefined, today),
     )
+  })
+})
+
+/**
+ * `resolveCreatedEntryTiming` is what `POST /api/time-entries` stores for a new
+ * entry's minutes, spans and envelope. The case that matters is a SPLIT SHARE
+ * (Brittany, 2026-09-23): it carries the block's clock in/out so the reports
+ * print Clock in / Clock out, and it must still bill only its allocation. Sent
+ * alone, the envelope keeps the typed minutes. Sessions are the record when
+ * they are sent, so they re-derive the minutes, which is why the split form
+ * never sends them.
+ */
+describe('resolveCreatedEntryTiming', () => {
+  const START = '2026-08-12T13:00:00.000Z'
+  const STOP = '2026-08-12T13:19:00.000Z'
+
+  it('keeps a split share at its allocation when only the block envelope is sent', () => {
+    const timing = resolveCreatedEntryTiming({
+      minutes: 9.5,
+      startAt: START,
+      endAt: STOP,
+      sessionsResult: normalizeWorkSessions(undefined),
+    })
+    expect(timing.minutes).toBe(9.5)
+    expect(timing.startAt).toBe(START)
+    expect(timing.endAt).toBe(STOP)
+    // One span from the envelope, as the server's own split writes it: the
+    // clock in/out the reports print, not the minutes billed.
+    expect(timing.sessions).toEqual([{ startAt: START, endAt: STOP }])
+  })
+
+  it('re-derives the minutes from sessions when sessions are sent', () => {
+    const timing = resolveCreatedEntryTiming({
+      minutes: 9.5,
+      startAt: START,
+      endAt: STOP,
+      sessionsResult: normalizeWorkSessions([{ startAt: START, endAt: STOP }]),
+    })
+    expect(timing.minutes).toBe(19)
+  })
+
+  it('stores minutes only, with no spans, when neither is sent', () => {
+    const timing = resolveCreatedEntryTiming({
+      minutes: 30,
+      sessionsResult: normalizeWorkSessions(undefined),
+    })
+    expect(timing).toEqual({ minutes: 30, startAt: undefined, endAt: undefined, sessions: [] })
   })
 })

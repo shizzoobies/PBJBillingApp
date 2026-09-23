@@ -985,6 +985,8 @@ function fakePostgres({
   aiReviewRows = [],
   aiReviewUpdateRowCount = 1,
   timeEntryRows = [],
+  holdingRows = [],
+  checklistRows = [],
 } = {}) {
   const statements = []
   const record = (text, params) => {
@@ -1140,6 +1142,17 @@ function fakePostgres({
     if (/^select id, name, contact, billing_mode\b[\s\S]*from clients where id = \$1$/i.test(trimmed)) {
       const found = clientRows.find((row) => row.id === params?.[0])
       return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
+    }
+    // The `for update` read `splitTimeEntry` starts with: the one source row.
+    if (/^select\b[\s\S]*\bfrom time_entries where id = \$1 for update$/i.test(trimmed)) {
+      const found = holdingRows.filter((row) => row.id === params?.[0])
+      return { rows: found, rowCount: found.length }
+    }
+    // The split's task read: the source checklist's client and title, so the
+    // share billed to another client can still name the task.
+    if (/^select id, client_id, title from checklists where id = \$1$/i.test(trimmed)) {
+      const found = checklistRows.filter((row) => row.id === params?.[0])
+      return { rows: found, rowCount: found.length }
     }
     // The `for update` read a split adjustment starts with.
     if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
@@ -2941,6 +2954,356 @@ describe('adjustSplitGroup (postgres branch)', () => {
     expect(fake.matching(/^rollback$/i)).toHaveLength(1)
     expect(fake.matching(/^insert into time_entries/i)).toHaveLength(0)
     expect(fake.matching(/^commit$/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * Split shares keep the source's task and clock in/out (Brittany, 2026-09-23:
+ * split rows exported with no Clock in / Clock out and the task "Unassigned").
+ *
+ * What this pins, on BOTH backends (cardinal rule 1):
+ *   - a share's minutes are its ALLOCATION even though it carries the whole
+ *     block's start/stop. A 9.5-minute share of a 19-minute block reads back
+ *     as 9.5, never 19 (the 08-14 day-total fix);
+ *   - a checklist task stays on the share billed to its own client, and every
+ *     other share carries the task's title as its free-text label, because a
+ *     checklist belongs to one client and the endpoints refuse a cross-client
+ *     task id;
+ *   - an adjustment keeps doing the same for the new distribution.
+ */
+describe('split shares keep the task and clock in/out (file backend)', () => {
+  const START = '2026-08-12T13:00:00.000Z'
+  const STOP = '2026-08-12T13:19:00.000Z'
+  const ENVELOPE = [{ startAt: START, endAt: STOP }]
+  const CHECKLIST = {
+    id: 'task-close',
+    clientId: 'c1',
+    title: 'Monthly close',
+    assigneeId: 'emp-1',
+    dueDate: '2026-08-31',
+    items: [],
+  }
+
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  const seed = async (timeEntries) => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+          { id: 'c3', name: 'Initech' },
+        ],
+        checklists: [CHECKLIST],
+        timeEntries,
+      }),
+    )
+  }
+
+  it('reads a 9.5-minute share of a 19-minute block back as 9.5, through a bulk save too', async () => {
+    await seed([])
+    const created = await store.createTimeEntry({
+      employeeId: 'emp-1',
+      clientId: 'c1',
+      isAdministrative: false,
+      date: '2026-08-12',
+      minutes: 9.5,
+      description: 'Month-end close for both books.',
+      billable: true,
+      taskId: null,
+      taskLabel: 'Monthly close',
+      entryMethod: 'manual',
+      manualReason: 'Worked offline.',
+      startAt: START,
+      endAt: STOP,
+      sessions: ENVELOPE,
+      groupId: 'grp-manual',
+    })
+    expect(created.minutes).toBe(9.5)
+
+    const stored = (await persisted()).timeEntries.find((entry) => entry.id === created.id)
+    expect(stored.minutes).toBe(9.5)
+    expect(stored.startAt).toBe(START)
+    expect(stored.endAt).toBe(STOP)
+    expect(stored.sessions).toEqual(ENVELOPE)
+    expect(stored.taskLabel).toBe('Monthly close')
+
+    // An owner tab's bulk save re-writes every entry; the share must survive it.
+    const current = await store.read()
+    await store.write(current)
+    const afterSave = (await persisted()).timeEntries.find((entry) => entry.id === created.id)
+    expect(afterSave.minutes).toBe(9.5)
+    expect(afterSave.sessions).toEqual(ENVELOPE)
+  })
+
+  it('keeps a checklist task on its own client share and names it on the others', async () => {
+    await seed([
+      {
+        id: 'reg-task',
+        employeeId: 'emp-1',
+        clientId: 'c1',
+        isAdministrative: false,
+        date: '2026-08-12',
+        minutes: 19,
+        category: 'General',
+        description: 'Month-end close',
+        billable: true,
+        taskId: 'task-close',
+        approvalStatus: 'approved',
+        entryMethod: 'timer',
+        startAt: START,
+        endAt: STOP,
+        sessions: ENVELOPE,
+        groupClientIds: [],
+      },
+    ])
+
+    const { created } = await store.splitTimeEntry(
+      'reg-task',
+      [
+        { clientId: 'c1', minutes: 9.5 },
+        { clientId: 'c2', minutes: 9.5 },
+      ],
+      'owner-1',
+      'grp-task',
+      'even',
+    )
+
+    const byClient = Object.fromEntries(created.map((share) => [share.clientId, share]))
+    expect(byClient.c1.taskId).toBe('task-close')
+    expect(byClient.c1.taskLabel).toBeUndefined()
+    expect(byClient.c2.taskId).toBeNull()
+    expect(byClient.c2.taskLabel).toBe('Monthly close')
+    for (const share of created) {
+      expect(share.minutes).toBe(9.5)
+      expect(share.sessions).toEqual(ENVELOPE)
+      expect(share.startAt).toBe(START)
+    }
+    const stored = (await persisted()).timeEntries.filter((entry) => entry.groupId === 'grp-task')
+    expect(stored.map((entry) => [entry.clientId, entry.taskId, entry.taskLabel ?? null]).sort()).toEqual([
+      ['c1', 'task-close', null],
+      ['c2', null, 'Monthly close'],
+    ])
+  })
+
+  it('carries a typed task name onto every share', async () => {
+    await seed([
+      {
+        id: 'reg-label',
+        employeeId: 'emp-1',
+        clientId: 'c1',
+        isAdministrative: false,
+        date: '2026-08-12',
+        minutes: 19,
+        category: 'General',
+        description: 'Payroll run',
+        billable: true,
+        taskId: null,
+        taskLabel: 'Payroll',
+        approvalStatus: 'approved',
+        entryMethod: 'manual',
+        manualReason: 'Worked offline.',
+        startAt: START,
+        endAt: STOP,
+        sessions: ENVELOPE,
+        groupClientIds: [],
+      },
+    ])
+    const { created } = await store.splitTimeEntry(
+      'reg-label',
+      [
+        { clientId: 'c1', minutes: 9.5 },
+        { clientId: 'c2', minutes: 9.5 },
+      ],
+      'owner-1',
+      'grp-label',
+      'even',
+    )
+    for (const share of created) {
+      expect(share.taskId).toBeNull()
+      expect(share.taskLabel).toBe('Payroll')
+    }
+  })
+
+  it('moves the checklist task with its client when a split is adjusted', async () => {
+    const share = (id, clientId, overrides) => ({
+      id,
+      employeeId: 'emp-1',
+      clientId,
+      isAdministrative: false,
+      date: '2026-08-12',
+      minutes: 9.5,
+      category: 'General',
+      description: 'Month-end close',
+      billable: true,
+      approvalStatus: 'approved',
+      entryMethod: 'timer',
+      startAt: START,
+      endAt: STOP,
+      sessions: ENVELOPE,
+      groupId: 'grp-adj',
+      groupClientIds: [],
+      groupAllocation: 'even',
+      ...overrides,
+    })
+    // The first share (the adjustment's template) is the OTHER client's, so
+    // the task has to be found on whichever share kept it.
+    await seed([
+      share('s2', 'c2', { taskId: null, taskLabel: 'Monthly close' }),
+      share('s1', 'c1', { taskId: 'task-close' }),
+    ])
+
+    const { created } = await store.adjustSplitGroup(
+      'grp-adj',
+      [
+        { clientId: 'c1', minutes: 12 },
+        { clientId: 'c3', minutes: 7 },
+      ],
+      'owner-1',
+      'custom',
+    )
+    const byClient = Object.fromEntries(created.map((each) => [each.clientId, each]))
+    expect(byClient.c1.taskId).toBe('task-close')
+    expect(byClient.c1.taskLabel).toBeUndefined()
+    expect(byClient.c3.taskId).toBeNull()
+    expect(byClient.c3.taskLabel).toBe('Monthly close')
+    expect(byClient.c1.minutes).toBe(12)
+    expect(byClient.c3.minutes).toBe(7)
+    for (const each of created) expect(each.sessions).toEqual(ENVELOPE)
+  })
+})
+
+/**
+ * The Postgres half of the same contract: what the split transaction inserts.
+ * Insert parameters: $5 minutes, $9 task_id, $15 started_at, $16 ended_at,
+ * $17 sessions, $21 task_label.
+ */
+describe('split shares keep the task and clock in/out (postgres branch)', () => {
+  const START = '2026-08-12T13:00:00.000Z'
+  const STOP = '2026-08-12T13:19:00.000Z'
+  const CHECKLIST_ROW = { id: 'task-close', client_id: 'c1', title: 'Monthly close' }
+
+  const sourceRow = (overrides = {}) => ({
+    id: 'reg-task',
+    user_id: 'emp-1',
+    client_id: 'c1',
+    entry_date: new Date('2026-08-12T00:00:00.000Z'),
+    minutes: 19,
+    category: 'General',
+    description: 'Month-end close',
+    billable: true,
+    entry_method: 'timer',
+    manual_reason: null,
+    is_administrative: false,
+    is_adhoc: false,
+    started_at: new Date(START),
+    ended_at: new Date(STOP),
+    sessions: [{ startAt: START, endAt: STOP }],
+    group_client_ids: [],
+    task_label: null,
+    task_id: 'task-close',
+    ...overrides,
+  })
+
+  it('inserts a 9.5-minute share with the block span as 9.5 (createTimeEntry)', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createTimeEntry({
+      employeeId: 'emp-1',
+      clientId: 'c1',
+      isAdministrative: false,
+      date: '2026-08-12',
+      minutes: 9.5,
+      description: 'Month-end close for both books.',
+      billable: true,
+      taskId: null,
+      taskLabel: 'Monthly close',
+      entryMethod: 'manual',
+      manualReason: 'Worked offline.',
+      startAt: START,
+      endAt: STOP,
+      sessions: [{ startAt: START, endAt: STOP }],
+      groupId: 'grp-manual',
+    })
+    const [insert] = fake.matching(/^insert into time_entries/i)
+    expect(insert.params[4]).toBe(9.5)
+    expect(insert.params[14]).toBe(START)
+    expect(insert.params[15]).toBe(STOP)
+    expect(JSON.parse(insert.params[16])).toEqual([{ startAt: START, endAt: STOP }])
+    expect(insert.params[20]).toBe('Monthly close')
+  })
+
+  it('splitTimeEntry keeps the checklist on its own client and names it on the others', async () => {
+    const fake = fakePostgres({ holdingRows: [sourceRow()], checklistRows: [CHECKLIST_ROW] })
+    await postgresStore(fake).splitTimeEntry(
+      'reg-task',
+      [
+        { clientId: 'c1', minutes: 9.5 },
+        { clientId: 'c2', minutes: 9.5 },
+      ],
+      'owner-1',
+      'grp-task',
+      'even',
+    )
+
+    expect(fake.matching(/^select id, client_id, title from checklists where id = \$1$/i)).toHaveLength(1)
+    const inserts = fake.matching(/^insert into time_entries/i)
+    expect(inserts.map((each) => each.params[2])).toEqual(['c1', 'c2'])
+    expect(inserts.map((each) => each.params[8])).toEqual(['task-close', null])
+    expect(inserts.map((each) => each.params[20])).toEqual([null, 'Monthly close'])
+    // Allocation minutes, whole-block span.
+    expect(inserts.map((each) => each.params[4])).toEqual([9.5, 9.5])
+    for (const each of inserts) {
+      expect(each.params[14]).toBe(START)
+      expect(each.params[15]).toBe(STOP)
+      expect(JSON.parse(each.params[16])).toEqual([{ startAt: START, endAt: STOP }])
+    }
+    expect(fake.matching(/^commit$/i)).toHaveLength(1)
+  })
+
+  it('splitTimeEntry carries a typed task name onto every share without a checklist read', async () => {
+    const fake = fakePostgres({
+      holdingRows: [sourceRow({ task_id: null, task_label: 'Payroll' })],
+    })
+    await postgresStore(fake).splitTimeEntry(
+      'reg-task',
+      [
+        { clientId: 'c1', minutes: 9.5 },
+        { clientId: 'c2', minutes: 9.5 },
+      ],
+      'owner-1',
+      'grp-label',
+      'even',
+    )
+    expect(fake.matching(/from checklists/i)).toHaveLength(0)
+    const inserts = fake.matching(/^insert into time_entries/i)
+    expect(inserts.map((each) => each.params[8])).toEqual([null, null])
+    expect(inserts.map((each) => each.params[20])).toEqual(['Payroll', 'Payroll'])
+  })
+
+  it('adjustSplitGroup finds the task on whichever share kept it', async () => {
+    const groupRow = (id, clientId, overrides) =>
+      sourceRow({ id, client_id: clientId, minutes: 9.5, ...overrides })
+    const fake = fakePostgres({
+      groupSlices: [
+        groupRow('s2', 'c2', { task_id: null, task_label: 'Monthly close' }),
+        groupRow('s1', 'c1', { task_id: 'task-close', task_label: null }),
+      ],
+      checklistRows: [CHECKLIST_ROW],
+    })
+    await postgresStore(fake).adjustSplitGroup(
+      'grp-adj',
+      [
+        { clientId: 'c3', minutes: 7 },
+        { clientId: 'c1', minutes: 12 },
+      ],
+      'owner-1',
+      'custom',
+    )
+    const inserts = fake.matching(/^insert into time_entries/i)
+    expect(inserts.map((each) => each.params[2])).toEqual(['c3', 'c1'])
+    expect(inserts.map((each) => each.params[8])).toEqual([null, 'task-close'])
+    expect(inserts.map((each) => each.params[20])).toEqual(['Monthly close', null])
+    expect(inserts.map((each) => each.params[4])).toEqual([7, 12])
   })
 })
 

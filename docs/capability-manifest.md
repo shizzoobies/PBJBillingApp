@@ -164,8 +164,7 @@ Clients page meanwhile. Owner-only.
   - Administrative time has no client or task by definition, but **still needs a
     note** describing the work.
   - A group block (one block spanning several clients) is covered by its member
-    clients and needs no single task — its slices get tasks when it is split —
-    but it does need a detail.
+    clients and needs no task, but it does need a detail.
   - **The client field starts on "Choose client"** — a placeholder, not a real
     client (it used to open on whichever client sorted first, so time could be
     logged against the wrong one by someone who never looked). The placeholder
@@ -220,18 +219,19 @@ Clients page meanwhile. Owner-only.
     divide the block (evenly, a custom minutes-per-client amount, or the full
     duration to each). Saving creates one billable entry per client in a single
     action (a live preview shows each client's share) — a true one-step split,
-    no leftover "un-split" entry.
+    no leftover "un-split" entry. An optional Task box (a standard task or your
+    own words) names every entry.
   - **A tracked group block can be EDITED before it is split** — change the
     start/stop times, duration, date, description or billable, and it stays a
     group block across all its clients. You do NOT have to pick a single client
     first: the client box offers "Keep as group time (N clients) — split it
     below", and picking an actual client is optional and collapses the block to
-    that one client. Split it after editing, as usual. (The form used to refuse
-    to save unless you chose one client or marked it administrative, forcing a
-    group block to be collapsed just to correct its clock in/out.)
+    that one client. Split it after editing, as usual.
   - Live timer → pick "A group" and the clients, track the block, then "Split
     across clients" on the saved entry (in Recent time) to divide it the same
-    ways. (Splitting a running timer happens after stop.)
+    ways. (Splitting a running timer happens after stop.) A multi-client timer
+    block has no task until it is split; then pick each entry's task in its
+    edit form.
   - ANY client time entry can be split after the fact — it need not have
     started as a "group". Every entry in Sent back / Recent time has a "Split
     across clients" action (also in its edit form, next to Save): a checkbox
@@ -272,9 +272,9 @@ Clients page meanwhile. Owner-only.
   - Splitting is ATOMIC: the per-client entries are created and the source
     entry removed in ONE step, so a failure can never leave both behind
     double-counting the same time.
-  - Each split entry KEEPS the original block's clock-in / clock-out times, so
-    the Raw report shows the real start and stop for split time instead of
-    leaving those columns blank.
+  - Each split entry KEEPS the block's clock-in / clock-out (manual group entries
+    too) and its task — a checklist task stays on its own client's entry, the
+    others show its name — while billing only its own share of the minutes.
   - Every split is written to the activity log (who split what, how many
     clients, how many hours).
   - HOW THE SPLIT IS DIVIDED — the modal leads with the two easy answers:

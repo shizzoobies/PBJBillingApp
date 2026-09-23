@@ -2324,6 +2324,61 @@ export function normalizeGroupAllocation(value) {
 }
 
 /**
+ * The task one share of a split carries. Both split paths (`splitTimeEntry`,
+ * `adjustSplitGroup`) and both backends build shares through this.
+ *
+ * A checklist task belongs to ONE client, and the time-entry endpoints refuse a
+ * `taskId` whose checklist is another client's. So the share billed to the
+ * task's own client keeps the `taskId`. Every other share gets the task's
+ * title as its free-text `taskLabel`, so each share still says what the work
+ * was on the reports instead of "Unassigned" (Brittany, 2026-09-23). With no
+ * checklist task, every share keeps the source's typed `taskLabel`.
+ *
+ * @param {string} clientId - the share's client.
+ * @param {{id: string, clientId: string, title: string} | null} task - the
+ *   source's checklist task, or null when it has none.
+ * @param {string | null | undefined} fallbackLabel - the source's typed label.
+ * @returns {{taskId: string | null, taskLabel?: string}}
+ */
+export function splitShareTask(clientId, task, fallbackLabel) {
+  if (task && task.id && task.clientId === clientId) return { taskId: task.id }
+  const label =
+    (typeof task?.title === 'string' ? task.title.trim() : '') ||
+    (typeof fallbackLabel === 'string' ? fallbackLabel.trim() : '')
+  return label ? { taskId: null, taskLabel: label.slice(0, 200) } : { taskId: null }
+}
+
+/**
+ * The split source's checklist task for {@link splitShareTask}, file backend.
+ * A checklist that is gone still keeps its id on the share billed to the
+ * client the source was logged against (`ownerClientId`), which is what the
+ * source itself stored; there is just no title to hand the other shares.
+ */
+function splitSourceTaskFromFile(checklists, taskId, ownerClientId) {
+  if (!taskId) return null
+  const found = (Array.isArray(checklists) ? checklists : []).find((each) => each?.id === taskId)
+  return {
+    id: taskId,
+    clientId: found?.clientId ?? ownerClientId ?? '',
+    title: typeof found?.title === 'string' ? found.title : '',
+  }
+}
+
+/** {@link splitSourceTaskFromFile}, read inside the split's Postgres transaction. */
+async function splitSourceTaskFromPg(client, taskId, ownerClientId) {
+  if (!taskId) return null
+  const result = await client.query(`select id, client_id, title from checklists where id = $1`, [
+    taskId,
+  ])
+  const found = result.rows?.[0]
+  return {
+    id: taskId,
+    clientId: found?.client_id ?? ownerClientId ?? '',
+    title: typeof found?.title === 'string' ? found.title : '',
+  }
+}
+
+/**
  * Why a `splitTimeEntry` call could not proceed. `code` is one of:
  *   - `not_found`  — no such entry (someone deleted it first).
  *   - `not_holding` — the entry has neither a client nor group members, which
@@ -8167,8 +8222,9 @@ export class AppDataStore {
    * gone for good and the Raw report showed blank in/out for split time.
    *
    * Here the whole thing is one unit of work. Each slice INHERITS the source
-   * entry's date, description, capture method + manual reason, task label,
-   * category, its `sessions` verbatim and its started_at/ended_at envelope, and
+   * entry's date, description, capture method + manual reason, task (see
+   * `splitShareTask`), category, its `sessions` verbatim and its
+   * started_at/ended_at envelope (the minutes stay each slice's own), and
    * the employee. Each slice gets its own client, `isAdministrative: false`,
    * the shared `groupId`, and `groupAllocation` set to the mode that produced
    * it.
@@ -8244,8 +8300,9 @@ export class AppDataStore {
     }
 
     // Build every slice from the source entry. Shared by both backends so the
-    // two can never disagree on what a slice inherits.
-    const buildSlices = (holding) =>
+    // two can never disagree on what a slice inherits. `task` is the source's
+    // checklist task (id, client, title) or null — see `splitShareTask`.
+    const buildSlices = (holding, task) =>
       rows.map((row) => ({
         id: `time-${randomUUID().slice(0, 8)}`,
         employeeId: holding.employeeId,
@@ -8264,7 +8321,9 @@ export class AppDataStore {
         // user's own Billable/Internal choice — dividing it across clients must
         // not silently start billing internal time.
         billable: holding.clientId ? Boolean(holding.billable) : true,
-        taskId: null,
+        // The source's task rides along: its own client's share keeps the
+        // checklist, every other share names it (see `splitShareTask`).
+        ...splitShareTask(row.clientId, task, holding.taskLabel),
         // Typed time → the daily pending queue. See the doc comment above.
         approvalStatus: 'pending',
         entryMethod: holding.entryMethod === 'manual' ? 'manual' : 'timer',
@@ -8277,7 +8336,6 @@ export class AppDataStore {
         groupId: sharedGroupId,
         groupClientIds: [],
         groupAllocation: mode,
-        ...(holding.taskLabel ? { taskLabel: holding.taskLabel } : {}),
         createdAt: nowIso(),
       }))
 
@@ -8297,7 +8355,7 @@ export class AppDataStore {
         const held = await client.query(
           `select id, user_id, client_id, entry_date, minutes, category, description, billable,
                   entry_method, manual_reason, is_administrative, is_adhoc, started_at, ended_at, sessions,
-                  group_client_ids, task_label
+                  group_client_ids, task_label, task_id
            from time_entries where id = $1 for update`,
           [entryId],
         )
@@ -8324,13 +8382,17 @@ export class AppDataStore {
           endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
           sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
           taskLabel: row.task_label ?? undefined,
+          taskId: row.task_id ?? null,
         }
         const targetError = splitTargetError(holding)
         if (targetError) {
           await client.query('rollback')
           throw targetError
         }
-        const slices = buildSlices(holding)
+        const slices = buildSlices(
+          holding,
+          await splitSourceTaskFromPg(client, holding.taskId, holding.clientId),
+        )
 
         for (const slice of slices) {
           await client.query(
@@ -8409,7 +8471,10 @@ export class AppDataStore {
     }
     const targetError = splitTargetError(holding)
     if (targetError) throw targetError
-    const slices = buildSlices(holding)
+    const slices = buildSlices(
+      holding,
+      splitSourceTaskFromFile(data.checklists, holding.taskId, holding.clientId),
+    )
     data.timeEntries = [...slices, ...entries.filter((entry) => entry.id !== entryId)]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     await this.recordActivity(actorUserId, 'time_entry_split', auditTarget(holding, slices))
@@ -8428,8 +8493,10 @@ export class AppDataStore {
    *
    * The new slices INHERIT the group's invariant fields from the existing ones
    * (they are identical across a group by construction: same user, date,
-   * description, category, billable flag, capture method + manual reason, task
-   * label, and the source block's `sessions` and start/stop envelope verbatim).
+   * description, category, billable flag, capture method + manual reason, and
+   * the source block's `sessions` and start/stop envelope verbatim). The task
+   * is re-placed per client by `splitShareTask`: the share that kept the
+   * checklist names it, and it lands on whichever new share bills that client.
    * What changes is the per-client split: which clients, and how many minutes
    * each. Every slice lands `approval_status: 'pending'` — an adjustment is an
    * edit, and an edit re-enters the daily queue.
@@ -8476,7 +8543,7 @@ export class AppDataStore {
     // Every field but the client and the minutes comes from the slices already
     // in the group — they all carry the same values, so the first one is the
     // template for the replacements.
-    const buildSlices = (template) =>
+    const buildSlices = (template, task) =>
       rows.map((row) => ({
         id: `time-${randomUUID().slice(0, 8)}`,
         employeeId: template.employeeId,
@@ -8489,7 +8556,9 @@ export class AppDataStore {
         category: template.category ?? 'General',
         description: template.description ?? '',
         billable: Boolean(template.billable),
-        taskId: null,
+        // The group's task follows the new distribution: its own client's share
+        // keeps the checklist, the rest name it (see `splitShareTask`).
+        ...splitShareTask(row.clientId, task, template.taskLabel),
         // An adjustment is an edit: back through approval, like any other.
         approvalStatus: 'pending',
         entryMethod: template.entryMethod === 'manual' ? 'manual' : 'timer',
@@ -8502,7 +8571,6 @@ export class AppDataStore {
         groupId: sharedGroupId,
         groupClientIds: [],
         groupAllocation: mode,
-        ...(template.taskLabel ? { taskLabel: template.taskLabel } : {}),
         createdAt: nowIso(),
       }))
 
@@ -8524,7 +8592,7 @@ export class AppDataStore {
         // one slice) waits here and then sees the group as this one left it.
         const held = await client.query(
           `select id, user_id, client_id, entry_date, minutes, category, description, billable,
-                  entry_method, manual_reason, is_adhoc, started_at, ended_at, sessions, task_label
+                  entry_method, manual_reason, is_adhoc, started_at, ended_at, sessions, task_label, task_id
            from time_entries where group_id = $1 order by created_at, id for update`,
           [sharedGroupId],
         )
@@ -8546,11 +8614,17 @@ export class AppDataStore {
           startAt: row.started_at ? row.started_at.toISOString() : undefined,
           endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
           sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
-          taskLabel: row.task_label ?? undefined,
+          // Any share's label: the one that kept the checklist has none.
+          taskLabel: held.rows.find((each) => each.task_label)?.task_label ?? undefined,
         }
         const previousMinutes = held.rows.reduce((sum, each) => sum + Number(each.minutes), 0)
         const deletedIds = held.rows.map((each) => each.id)
-        const slices = buildSlices(template)
+        // The share that kept the checklist (at most one) names the group's task.
+        const taskShare = held.rows.find((each) => each.task_id)
+        const slices = buildSlices(
+          template,
+          await splitSourceTaskFromPg(client, taskShare?.task_id, taskShare?.client_id),
+        )
 
         await client.query(`delete from time_entries where group_id = $1`, [sharedGroupId])
 
@@ -8629,7 +8703,15 @@ export class AppDataStore {
     }
     const previousMinutes = existing.reduce((sum, entry) => sum + Number(entry.minutes), 0)
     const deletedIds = existing.map((entry) => entry.id)
-    const slices = buildSlices(existing[0])
+    const taskShare = existing.find((entry) => entry.taskId)
+    const slices = buildSlices(
+      {
+        ...existing[0],
+        // Any share's label: the one that kept the checklist has none.
+        taskLabel: existing.find((entry) => entry.taskLabel)?.taskLabel,
+      },
+      splitSourceTaskFromFile(data.checklists, taskShare?.taskId, taskShare?.clientId),
+    )
     data.timeEntries = [
       ...slices,
       ...entries.filter((entry) => entry.groupId !== sharedGroupId),
