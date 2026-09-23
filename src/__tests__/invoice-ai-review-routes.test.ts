@@ -48,7 +48,7 @@ function functionSource(declaration: string, length: number): string {
 /** The background rating loop. */
 const schedulerSource = () => functionSource('function scheduleInvoiceRatings(', 2000)
 /** The one place the rating inputs are assembled. */
-const helperSource = () => functionSource('async function rateInvoiceAndPersist(', 2000)
+const helperSource = () => functionSource('async function rateInvoiceAndPersist(', 2600)
 
 describe('the three AI-review routes exist and are owner-only', () => {
   it('lists a month’s ratings behind the owner check, validating the period', () => {
@@ -70,7 +70,7 @@ describe('the three AI-review routes exist and are owner-only', () => {
     expect(block).toContain("sendJson(response, 403, { error: 'Only owners can rate invoices' })")
     expect(block).toContain("sendJson(response, 403, { error: 'Origin not allowed' })")
     expect(block).toContain("sendJson(response, 415, { error: 'application/json required' })")
-    expect(block).toContain('rateInvoiceAndPersist(invoiceToRate)')
+    expect(block).toContain('rateInvoiceAndPersist(invoiceToRate, session)')
     expect(block).toContain('sendJson(response, 200, { review })')
   })
 
@@ -148,7 +148,7 @@ describe('the re-rate route refuses before it pays for a verdict', () => {
   // Below it they still answer correctly and still cost thirty seconds of Opus.
   it('runs every refusal before the rating call', () => {
     const text = block()
-    const modelAt = text.indexOf('rateInvoiceAndPersist(invoiceToRate)')
+    const modelAt = text.indexOf('rateInvoiceAndPersist(invoiceToRate, session)')
     expect(modelAt).toBeGreaterThan(-1)
     expect(text.indexOf('process.env.ANTHROPIC_API_KEY')).toBeLessThan(modelAt)
     expect(text.indexOf("invoiceToRate.kind === 'retainer'")).toBeLessThan(modelAt)
@@ -218,7 +218,7 @@ describe('generate and regenerate both rate the month without waiting for it', (
     const fn = schedulerSource()
     expect(fn).toContain('if (!process.env.ANTHROPIC_API_KEY) return')
     expect(fn).toContain("invoice.kind !== 'retainer'")
-    expect(fn).toContain('await rateInvoiceAndPersist(invoice, preloaded)')
+    expect(fn).toContain('await rateInvoiceAndPersist(invoice, session, preloaded)')
     expect(fn).toContain('broadcastDataChanged()')
     expect(fn).toContain('console.warn(')
     // Sequential, not Promise.all — forty invoices are forty Opus calls and
@@ -251,7 +251,8 @@ describe('generate and regenerate both rate the month without waiting for it', (
 
   it('the shared context carries the workspace and the prior period’s invoices', () => {
     const fn = schedulerSource()
-    expect(fn).toContain('preloaded = { data, priorInvoicesByPeriod }')
+    expect(fn).toContain('preloaded = { data, priorInvoicesByPeriod, billRateVersions }')
+    expect(fn).toContain('await loadRateVersions(session)')
     expect(fn).toContain('appDataStore.listInvoices({ period: prior })')
   })
 

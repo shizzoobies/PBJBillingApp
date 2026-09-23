@@ -73,6 +73,10 @@ import {
   isInBillingPeriod,
   PER_EMPLOYEE_BILLING_START,
 } from './lib/invoice-lines.js'
+// THE rate resolver, the same one `buildInvoiceLines` prices from. The AI
+// review's hours summary has to read a person's rate exactly as the lines did,
+// or the model reports a correctly-priced line as an arithmetic error.
+import { billRateFor, ratePeriodAsOf } from './lib/rate-history.js'
 import { previousPeriod } from './lib/invoice-draft.js'
 import { pastDueInvoice } from './lib/invoice-overdue.js'
 import { rateInvoiceDraft } from './lib/invoice-confidence.js'
@@ -1540,11 +1544,12 @@ const INVOICE_RATING_CAPACITY_MESSAGE =
  *
  * READ-ONLY SUMMARY. No money is computed here: hours and bill rates only, the
  * two inputs `buildInvoiceLines` multiplies. Its entry filter and its bill-rate
- * fallback are mirrored exactly (billable, in-period, this client; the
- * employee's own `billRate` or the client's hourly rate) so a mismatch the
- * model reports is a real one rather than two different definitions of "hours".
+ * fallback are mirrored exactly (billable, in-period, this client; the rate
+ * the RESOLVER gives for this client's pin, then the employee's own
+ * `billRate`, then the client's hourly rate) so a mismatch the model reports
+ * is a real one rather than two different definitions of "hours".
  */
-function buildInvoiceHoursSummary(data, client, period) {
+function buildInvoiceHoursSummary(data, client, period, billRateVersions = []) {
   if (!client) return null
   // A BILLING MASTER holds no time of its own, so asking for ITS rows would
   // return an empty list and have every hourly line on the consolidated invoice
@@ -1552,12 +1557,19 @@ function buildInvoiceHoursSummary(data, client, period) {
   // hours it is checked against are theirs. Branching HERE rather than at the
   // one call site keeps a single entry point for "this invoice's hours".
   if (client.isBillingMaster === true) {
-    return buildMasterInvoiceHoursSummary(data, client, period)
+    return buildMasterInvoiceHoursSummary(data, client, period, billRateVersions)
   }
   const employees = data.employees ?? []
   const employeeById = new Map(employees.map((employee) => [employee.id, employee]))
   const defaultHourlyRate = Number(client.hourlyRate) || 0
+  // The SAME three-step chain `buildInvoiceLines.rateFor` uses, in the same
+  // order, resolved at THIS client's own pin. A summary that resolved rates
+  // differently from the lines would have the model reporting real lines as
+  // arithmetic errors — which is the one thing this function exists not to do.
+  const ratePeriod = ratePeriodAsOf(client, period)
   const rateFor = (employeeId) => {
+    const versioned = billRateFor(billRateVersions, employeeId, ratePeriod ?? period)
+    if (versioned !== null) return versioned
     const employee = employeeById.get(employeeId)
     return employee && typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
       ? employee.billRate
@@ -1614,7 +1626,7 @@ function buildInvoiceHoursSummary(data, client, period) {
  * not itself be billed elsewhere (the store refuses the link), so nothing
  * `activeSubsOfMaster` returns is ever a master.
  */
-function buildMasterInvoiceHoursSummary(data, master, period) {
+function buildMasterInvoiceHoursSummary(data, master, period, billRateVersions = []) {
   if (!master) return null
   const subs = activeSubsOfMaster(data.clients ?? [], master.id)
 
@@ -1622,7 +1634,7 @@ function buildMasterInvoiceHoursSummary(data, master, period) {
   // pairs behind it.
   const byName = new Map()
   for (const sub of subs) {
-    for (const row of buildInvoiceHoursSummary(data, sub, period)?.employees ?? []) {
+    for (const row of buildInvoiceHoursSummary(data, sub, period, billRateVersions)?.employees ?? []) {
       if (!byName.has(row.name)) byName.set(row.name, [])
       byName.get(row.name).push({ ...row, subName: String(sub.name ?? '') })
     }
@@ -1678,7 +1690,7 @@ function buildMasterInvoiceHoursSummary(data, master, period) {
  * Throws whatever the lib throws (503 unconfigured / overloaded, 502 unusable
  * output); each caller decides what that means for its own reply.
  */
-async function rateInvoiceAndPersist(invoice, preloaded = null) {
+async function rateInvoiceAndPersist(invoice, session, preloaded = null) {
   // `appDataStore.read()` is NOT a cheap pure read — it runs the recurring
   // checklist materializer and can enter a guarded bulk-save write-back. One
   // per invoice would mean forty full workspace reads and up to forty
@@ -1704,10 +1716,20 @@ async function rateInvoiceAndPersist(invoice, preloaded = null) {
         entry.status !== 'void',
     ) ?? null
 
+  // Owner-only by construction — every route that reaches here is owner-gated,
+  // and `loadRateVersions` hands anyone else two empty lists anyway, in which
+  // case the summary falls back exactly as it did before rate history existed.
+  // The SESSION IS THREADED IN from the route rather than synthesized: an owner
+  // session invented here would be a second, unguarded way to read the firm's
+  // rate history. Shared across a batch for the reason `data` is — a
+  // forty-invoice run wants one copy of the history, not forty.
+  const billRateVersions =
+    preloaded?.billRateVersions ?? (await loadRateVersions(session)).billRateVersions
+
   const verdict = await rateInvoiceDraft({
     invoice,
     client,
-    hoursSummary: buildInvoiceHoursSummary(data, client, invoice.period),
+    hoursSummary: buildInvoiceHoursSummary(data, client, invoice.period, billRateVersions),
     priorInvoice,
     // Stays per-invoice: it is scoped to the client, and the firm-wide slice it
     // adds deliberately EXCLUDES that client, so no two invoices want the same
@@ -1742,7 +1764,7 @@ async function rateInvoiceAndPersist(invoice, preloaded = null) {
  * slightly stale across the batch is the right trade: these invoices were
  * generated from it moments ago.
  */
-function scheduleInvoiceRatings(invoices) {
+function scheduleInvoiceRatings(invoices, session) {
   // No key means no rating anywhere — including local development, where
   // Generate must still work. Silent, because there is nobody to tell.
   if (!process.env.ANTHROPIC_API_KEY) return
@@ -1764,7 +1786,10 @@ function scheduleInvoiceRatings(invoices) {
       )) {
         priorInvoicesByPeriod.set(prior, await appDataStore.listInvoices({ period: prior }))
       }
-      preloaded = { data, priorInvoicesByPeriod }
+      // Once for the whole run, beside the other shared context: the summary
+      // needs it per invoice and it does not change across a batch.
+      const { billRateVersions } = await loadRateVersions(session)
+      preloaded = { data, priorInvoicesByPeriod, billRateVersions }
     } catch (error) {
       // Nothing to rate against, and nobody is waiting on this. Say so once
       // rather than failing the same way forty times below.
@@ -1774,7 +1799,7 @@ function scheduleInvoiceRatings(invoices) {
 
     for (const invoice of queue) {
       try {
-        await rateInvoiceAndPersist(invoice, preloaded)
+        await rateInvoiceAndPersist(invoice, session, preloaded)
         broadcastDataChanged()
       } catch (error) {
         console.warn(
@@ -5199,7 +5224,7 @@ const server = createServer(async (request, response) => {
 
       let review
       try {
-        review = await rateInvoiceAndPersist(invoiceToRate)
+        review = await rateInvoiceAndPersist(invoiceToRate, session)
       } catch (error) {
         const status = error?.statusCode ?? error?.status ?? 502
         console.error('[invoices] ai review failed:', error?.message || error)
@@ -5344,7 +5369,7 @@ const server = createServer(async (request, response) => {
       )
       // Deliberately NOT awaited: rating is minutes of model time and Generate
       // has to answer now. The badges arrive behind her over the next minute.
-      scheduleInvoiceRatings(result.created)
+      scheduleInvoiceRatings(result.created, session)
       sendJson(response, 200, result)
       return
     }
@@ -5417,7 +5442,7 @@ const server = createServer(async (request, response) => {
       )
       // Same fire-and-forget as Generate. The voided drafts' ratings go with
       // them: a rating is keyed to an invoice id, and these are new ones.
-      scheduleInvoiceRatings(rebuilt.created)
+      scheduleInvoiceRatings(rebuilt.created, session)
       sendJson(response, 200, {
         period: regenPeriod,
         voided: voided.voided,

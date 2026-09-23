@@ -373,17 +373,17 @@ describe('the AI rating checks a master’s invoice against its subs’ hours', 
   it('branches inside the one hours helper, not at the call site', () => {
     const fn = functionSource('function buildInvoiceHoursSummary(', 900)
     expect(fn).toMatch(
-      /if \(client\.isBillingMaster === true\) \{\s*return buildMasterInvoiceHoursSummary\(data, client, period\)\s*\}/,
+      /if \(client\.isBillingMaster === true\) \{\s*return buildMasterInvoiceHoursSummary\(data, client, period, billRateVersions\)\s*\}/,
     )
     expect(functionSource('async function rateInvoiceAndPersist(', 2600)).toContain(
-      'hoursSummary: buildInvoiceHoursSummary(data, client, invoice.period),',
+      'hoursSummary: buildInvoiceHoursSummary(data, client, invoice.period, billRateVersions),',
     )
   })
 
   it('runs the SAME per-client helper once per active sub', () => {
     const fn = helper()
     expect(fn).toContain('activeSubsOfMaster(data.clients ?? [], master.id)')
-    expect(fn).toContain('buildInvoiceHoursSummary(data, sub, period)?.employees')
+    expect(fn).toContain('buildInvoiceHoursSummary(data, sub, period, billRateVersions)?.employees')
   })
 
   it('merges rows by employee and adds the hours', () => {
