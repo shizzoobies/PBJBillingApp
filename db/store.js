@@ -5208,6 +5208,12 @@ export class AppDataStore {
       await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     }
 
+    // The client pin, backfilled at the June 2026 cutover. Since `write()`
+    // pins an unpinned hourly client at SAVE time (this month, matching the
+    // Postgres insert), this loop can only ever fire for a workspace that has
+    // never been saved through that code — a file restored from before the
+    // feature, or one hand-edited on disk. Left in place because that is
+    // precisely the workspace it is for, and because it is idempotent.
     if (!existsSync(localDataPath)) return
     const data = await readJson(localDataPath)
     let dataMutated = false
@@ -7696,10 +7702,13 @@ export class AppDataStore {
     // behind this very slot and would deadlock.
     await enqueueFileOperation(localDataPath, async () => {
       let previous = null
-      // Declared out here so the one merge pass below runs even when there is
-      // no prior file at all — an empty map then means "nothing stored", which
-      // is exactly what Postgres sees for a client that is not in `clients`.
+      // The rate-history snapshot, declared out here because the merge that
+      // applies it is one pass at the very END of this slot. Empty means
+      // "nothing stored", which is what Postgres sees for a client that is not
+      // in `clients`; the flag means "could not look", which is a different
+      // answer — see where they are filled, just below.
       const priorPinById = new Map()
+      let ratePinSnapshotOk = true
       if (existsSync(localDataPath)) {
         try {
           previous = JSON.parse(await readFile(localDataPath, 'utf8'))
@@ -7716,6 +7725,40 @@ export class AppDataStore {
         if (currentVersion !== expectedVersion) {
           throw new StaleWorkspaceError(currentVersion)
         }
+      }
+
+      // Cardinal rule 1 mirror of `priorRatePins` in the Postgres branch:
+      // snapshot the STORED pin and ledger of every client on disk.
+      //
+      // ITS OWN try/catch, and deliberately BEFORE the best-effort block below
+      // rather than inside it. The merge that applies this map runs at the very
+      // end of the slot, OUTSIDE that block, so that a client id this file has
+      // never seen reaches it too. Take the snapshot inside the block instead
+      // and the two come apart: anything in there throwing — and all of it is
+      // driven by payload data (`normalizeRecurringReimbursement`,
+      // `newTemplateCreatedAt`, `preservedNodeWaits`, `rollUpItemDone`) —
+      // leaves this map EMPTY while the merge still runs, which resets every
+      // hourly client's pin to this month and wipes every ledger. That is the
+      // exact data loss rate history exists to prevent, and it would happen
+      // quietly, on the save that was already having a bad day.
+      //
+      // This loop reads nothing but `previous.clients`, so it can only fail if
+      // `previous` itself is malformed. When it does the flag turns the merge
+      // OFF altogether and both fields persist exactly as the payload carried
+      // them — the same "persist the incoming data unchanged" answer a
+      // malformed prior file has always produced here.
+      try {
+        for (const entry of Array.isArray(previous?.clients) ? previous.clients : []) {
+          if (!entry || typeof entry.id !== 'string') continue
+          priorPinById.set(entry.id, {
+            hourlyRatePeriod: entry.hourlyRatePeriod ?? null,
+            hourlyRateHistory: Array.isArray(entry.hourlyRateHistory)
+              ? entry.hourlyRateHistory
+              : [],
+          })
+        }
+      } catch {
+        ratePinSnapshotOk = false
       }
 
       // SECURITY (H4) — file-fallback mirror. In file mode the auth-sensitive
@@ -7885,24 +7928,15 @@ export class AppDataStore {
               return next
             })
           }
-
-          // Cardinal rule 1 mirror of `priorRatePins` in the Postgres branch:
-          // snapshot what is STORED for the pin and its ledger. The merge is one
-          // pass below, outside this block, so an unknown client id reaches it
-          // too.
-          for (const entry of Array.isArray(previous.clients) ? previous.clients : []) {
-            if (!entry || typeof entry.id !== 'string') continue
-            priorPinById.set(entry.id, {
-              hourlyRatePeriod: entry.hourlyRatePeriod ?? null,
-              hourlyRateHistory: Array.isArray(entry.hourlyRateHistory)
-                ? entry.hourlyRateHistory
-                : [],
-            })
-          }
         }
       } catch {
         // A malformed prior file must never block a legitimate save. Fall
         // through and persist the incoming data unchanged.
+        //
+        // The rate-history pin and its ledger are NOT among the things this
+        // catch gives up on: their snapshot is taken ABOVE, outside this block,
+        // exactly so that a throw in here cannot turn the merge at the end of
+        // the slot into a ledger wipe.
       }
 
       // Cardinal rule 1 mirror of the two `priorRatePins` params in the
@@ -7926,9 +7960,12 @@ export class AppDataStore {
       // a half old. A client that is not hourly has no pin to price off.
       //
       // Outside the prior-file block on purpose — a workspace with no prior file
-      // at all has to reach the same answer Postgres does.
+      // at all has to reach the same answer Postgres does. `ratePinSnapshotOk`
+      // is what keeps that safe: the merge runs only when the snapshot above
+      // actually got to look at what is stored. It never runs off an empty map
+      // it could not fill.
       const currentRatePeriod = nowIso().slice(0, 7)
-      if (Array.isArray(data.clients)) {
+      if (ratePinSnapshotOk && Array.isArray(data.clients)) {
         data.clients = data.clients.map((clientRecord) => {
           if (!clientRecord || typeof clientRecord !== 'object') return clientRecord
           const prior =

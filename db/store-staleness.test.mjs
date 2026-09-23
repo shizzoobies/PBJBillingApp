@@ -15544,6 +15544,56 @@ describe('a client that becomes Hourly is pinned at save time (file backend)', (
     expect(data.clients.find((entry) => entry.id === 'c-sub').hourlyRatePeriod ?? null).toBeNull()
   })
 
+  it('keeps the stored pin and ledger when the best-effort block throws', async () => {
+    // The merge that applies the stored pin runs OUTSIDE the best-effort
+    // try/catch, so its snapshot has to be taken outside it too. A checklist
+    // item whose `subItems` carries a null makes `rollUpItemDone` throw inside
+    // that block — the cheapest deterministic trip there is. With the snapshot
+    // still inside, the map would be empty by the time the merge ran and this
+    // client would come back out re-pinned at this month with its ledger gone,
+    // which is the data loss the whole feature exists to prevent.
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        timeEntries: [],
+      }),
+    )
+    const seeded = JSON.parse(await readFile(localDataPath, 'utf8'))
+    seeded.clients[0].hourlyRatePeriod = '2025-01'
+    seeded.clients[0].hourlyRateHistory = [
+      { from: '2024-06', to: '2025-01', changedAt: '2025-01-02T00:00:00.000Z', changedBy: 'u' },
+    ]
+    await writeFile(localDataPath, JSON.stringify(seeded, null, 2))
+
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            billingMode: 'hourly',
+            hourlyRate: 110,
+            hourlyRatePeriod: '2030-01',
+            hourlyRateHistory: [],
+          },
+        ],
+        timeEntries: [],
+        checklists: [
+          {
+            id: 'ck1',
+            clientId: 'c1',
+            title: 'Monthly',
+            items: [{ id: 'i1', label: 'Step', subItems: [null] }],
+          },
+        ],
+      }),
+    )
+
+    const client = (await store.read()).clients.find((entry) => entry.id === 'c1')
+    expect(client.hourlyRatePeriod).toBe('2025-01')
+    expect(client.hourlyRateHistory.map((entry) => entry.to)).toEqual(['2025-01'])
+  })
+
   it('never overwrites a pin that is already stored', async () => {
     await store.write(
       workspace({
