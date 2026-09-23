@@ -763,36 +763,55 @@ export function ProposalPricingSection({
   onCommit: (patch: Partial<FirmSettings>) => void | Promise<void>
 }) {
   const pricing = settings.proposalPricing ?? defaultProposalPricing()
+  // `SavingNumberInput`/`SavingTextInput` debounce 700ms and fire a closure
+  // captured at keystroke time. Two edits inside that window used to each
+  // build their save from the per-render `pricing` const, so the second save
+  // silently dropped the first edit (locally and on the server). The setters
+  // below read `pricingRef.current` instead, so every save builds on the
+  // latest known catalog regardless of which render created the closure. The
+  // ref stays in an effect (same pattern as `dataRef` in App.tsx) — a
+  // render-phase write would be wrong under StrictMode's double render.
+  const pricingRef = useRef(pricing)
+  useEffect(() => {
+    pricingRef.current = pricing
+  }, [pricing])
   const save = (next: ProposalPricing) => {
     void onCommit({ proposalPricing: next })
   }
   const setRate = (role: ProposalRole, value: number | null) =>
-    save({ ...pricing, rates: { ...pricing.rates, [role]: value ?? 0 } })
+    save({
+      ...pricingRef.current,
+      rates: { ...pricingRef.current.rates, [role]: value ?? 0 },
+    })
   const setInputLabel = (key: string, label: string) =>
     save({
-      ...pricing,
-      inputs: pricing.inputs.map((input) => (input.key === key ? { ...input, label } : input)),
+      ...pricingRef.current,
+      inputs: pricingRef.current.inputs.map((input) =>
+        input.key === key ? { ...input, label } : input,
+      ),
     })
   const setService = (id: string, patch: Partial<ProposalService>) =>
     save({
-      ...pricing,
-      services: pricing.services.map((service) =>
+      ...pricingRef.current,
+      services: pricingRef.current.services.map((service) =>
         service.id === id ? { ...service, ...patch } : service,
       ),
     })
   const addRow = (group: ProposalGroup) => {
-    const sortOrder = Math.max(0, ...pricing.services.map((service) => service.sortOrder)) + 1
+    const current = pricingRef.current
+    const sortOrder = Math.max(0, ...current.services.map((service) => service.sortOrder)) + 1
     save({
-      ...pricing,
+      ...current,
       services: [
-        ...pricing.services,
+        ...current.services,
         {
-          id: `custom-${Date.now().toString(36)}`,
+          // `Date.now().toString(36)` could collide on a double-click; a UUID can't.
+          id: `custom-${crypto.randomUUID()}`,
           group,
           name: 'New service',
           tier: null,
           pricing: 'formula',
-          inputKey: pricing.inputs[0]?.key ?? null,
+          inputKey: current.inputs[0]?.key ?? null,
           factor: 0,
           role: 'bookkeeper',
           multiplier: 'none',
@@ -803,8 +822,11 @@ export function ProposalPricingSection({
       ],
     })
   }
-  const rowLabel = (service: ProposalService) =>
-    service.tier ? `${service.name} ${service.tier}` : service.name
+  // Group-qualified: the same name+tier (e.g. "Reconciliations", "Monthly
+  // transactions Basic") appears in both its home group and Clean-up, so the
+  // group name has to be part of the label or the two rows share one aria-label.
+  const rowLabel = (group: ProposalGroup, service: ProposalService) =>
+    `${group} ${service.tier ? `${service.name} ${service.tier}` : service.name}`
 
   return (
     <CollapsibleSection kicker="Proposals" title="Proposal pricing" lockable>
@@ -867,7 +889,7 @@ export function ProposalPricingSection({
                 </thead>
                 <tbody>
                   {rows.map((service) => {
-                    const label = rowLabel(service)
+                    const label = rowLabel(group, service)
                     return (
                       <tr key={service.id} className={service.active ? '' : 'is-retired'}>
                         <td>
