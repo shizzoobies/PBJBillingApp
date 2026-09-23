@@ -24,7 +24,10 @@ import type { AppContextValue } from '../AppContext'
  *     existed to explain no longer happens.
  */
 
-vi.mock('../lib/api', () => ({ fetchTeam: vi.fn() }))
+vi.mock('../lib/api', () => ({
+  fetchRateVersions: vi.fn(async () => ({ billRateVersions: [], costRateVersions: [] })),
+  fetchTeam: vi.fn(),
+}))
 vi.mock('../lib/csv', () => ({ downloadCsv: vi.fn() }))
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
 

@@ -3,7 +3,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
-import { fetchTeam } from '../lib/api'
+import { fetchRateVersions, fetchTeam } from '../lib/api'
 import {
   allocatePersonCost,
   billableMinutes as sumBillableMinutes,
@@ -18,6 +18,7 @@ import {
   trackedMinutes as sumTrackedMinutes,
 } from '../lib/payrollAggregation'
 import type {
+  BillRateVersion,
   Checklist,
   Client,
   ClientReportRow,
@@ -102,6 +103,22 @@ export function ReportsPage() {
     return () => controller.abort()
   }, [])
 
+  /**
+   * Dated bill rates, so Projected billing below prices each client at the
+   * month it is pinned to rather than at today's rates. Owner-only like the
+   * rest of this page; an empty list is not an error, it is the old behavior
+   * (`getInvoice` falls back to the person's live rate).
+   */
+  const [billRateVersions, setBillRateVersions] = useState<BillRateVersion[]>([])
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchRateVersions(controller.signal)
+      .then((versions) => setBillRateVersions(versions.billRateVersions))
+      // Non-fatal: pricing falls back to today's rates, exactly as before.
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
+
   if (!ownerMode) {
     return null
   }
@@ -131,6 +148,7 @@ export function ReportsPage() {
         data.recurringReimbursements ?? [],
         data.employees,
         defaultHourlyRate,
+        billRateVersions,
       ).total,
     0,
   )
@@ -208,6 +226,7 @@ export function ReportsPage() {
           data.recurringReimbursements ?? [],
           data.employees,
           defaultHourlyRate,
+          billRateVersions,
         ).total,
       }
     })

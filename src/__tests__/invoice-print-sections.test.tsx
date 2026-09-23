@@ -32,6 +32,7 @@ vi.mock('../lib/api', () => ({
   answerInvoiceAiReviewQuestionRequest: vi.fn(),
   confirmInvoiceCoverageRequest: vi.fn(),
   createInvoicePaymentLinkRequest: vi.fn(),
+  fetchRateVersions: vi.fn(async () => ({ billRateVersions: [], costRateVersions: [] })),
   generateInvoicesRequest: vi.fn(),
   listInvoiceAiReviewsRequest: vi.fn(async () => []),
   listInvoicesRequest: vi.fn(),

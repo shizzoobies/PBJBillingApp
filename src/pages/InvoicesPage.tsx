@@ -6,6 +6,7 @@ import { InvoiceHistory } from '../components/InvoiceHistory'
 import { InvoiceMonthRun, type InvoiceMonthRunHandle } from '../components/InvoiceMonthRun'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import type {
+  BillRateVersion,
   Client,
   Employee,
   Invoice,
@@ -46,7 +47,12 @@ import { paymentTermsLabel } from '../../lib/invoice-draft.js'
 import type { InvoiceLineOut, InvoiceRoleTier } from '../../lib/invoice-lines.js'
 import { InvoiceDeliveryBadge } from '../components/InvoiceDeliveryBadge'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
-import { generateInvoicesRequest, listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
+import {
+  fetchRateVersions,
+  generateInvoicesRequest,
+  listInvoicesRequest,
+  sendInvoiceRequest,
+} from '../lib/api'
 import { selectableClients } from '../lib/clientLifecycle'
 import { generateSkipMessage } from '../lib/invoiceSkipMessage'
 
@@ -460,6 +466,22 @@ export function InvoicesPage() {
     firmSettings,
   } = useAppContext()
 
+  /**
+   * Dated bill rates, so a pinned client PREVIEWS at its pin — the same rate the
+   * generated invoice bills it at. Owner-only data; the endpoint 403s in a
+   * preview-as session and the helper hands back empty lists, which is not an
+   * error: `getInvoice` then falls back to today's rates as it always did.
+   */
+  const [billRateVersions, setBillRateVersions] = useState<BillRateVersion[]>([])
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchRateVersions(controller.signal)
+      .then((versions) => setBillRateVersions(versions.billRateVersions))
+      // Non-fatal: the preview simply prices at today's rates.
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
+
   // The billing queue and its client picker are a to-do list for THIS month's
   // invoicing, so retired clients drop out — the monthly run skips them too, and
   // a queue row you can never action is just a row you learn to ignore. Their
@@ -485,6 +507,7 @@ export function InvoicesPage() {
             data.recurringReimbursements ?? [],
             data.employees,
             firmSettings.clientDefaults?.hourlyRate ?? 0,
+            billRateVersions,
           )
         : null,
     [
@@ -496,6 +519,7 @@ export function InvoicesPage() {
       data.recurringReimbursements,
       data.employees,
       firmSettings.clientDefaults?.hourlyRate,
+      billRateVersions,
     ],
   )
   const display = useMemo(
@@ -997,6 +1021,7 @@ export function InvoicesPage() {
             recurringReimbursements={data.recurringReimbursements ?? []}
             employees={data.employees}
             defaultHourlyRate={firmSettings.clientDefaults?.hourlyRate ?? 0}
+            billRateVersions={billRateVersions}
           />
         </section>
       </div>
@@ -1296,6 +1321,7 @@ function BillingQueue({
   recurringReimbursements,
   employees,
   defaultHourlyRate,
+  billRateVersions,
 }: {
   selectedClientId: string | null
   /** Picking a row drives the invoice shown above - the rows looked
@@ -1309,6 +1335,7 @@ function BillingQueue({
   recurringReimbursements: RecurringReimbursement[]
   employees: Employee[]
   defaultHourlyRate: number
+  billRateVersions: BillRateVersion[]
 }) {
   return (
     <section className="panel">
@@ -1329,6 +1356,7 @@ function BillingQueue({
             recurringReimbursements,
             employees,
             defaultHourlyRate,
+            billRateVersions,
           )
           return (
             <button

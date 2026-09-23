@@ -23,6 +23,7 @@ const printInvoice = vi.hoisted(() => vi.fn())
 
 vi.mock('../lib/api', () => ({
   createInvoicePaymentLinkRequest: vi.fn(),
+  fetchRateVersions: vi.fn(async () => ({ billRateVersions: [], costRateVersions: [] })),
   generateInvoicesRequest: vi.fn(),
   listInvoicesRequest: vi.fn(),
   regenerateInvoicesRequest: vi.fn(),
