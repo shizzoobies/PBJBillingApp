@@ -379,7 +379,8 @@ function isJsonContentType(request) {
 }
 
 // The fields `PUT /api/firm-settings` accepts (audit L2). The store whitelists
-// too — `FIRM_SETTINGS_FIELDS` + `clientDefaults` in db/store.js — but the
+// too — `FIRM_SETTINGS_FIELDS` + `clientDefaults` + `proposalPricing` in
+// db/store.js — but the
 // handler must not DEPEND on that: passing the raw body through leaves the only
 // guard one refactor away from persisting whatever a caller sends.
 //
@@ -407,6 +408,9 @@ const FIRM_SETTINGS_PATCH_FIELDS = [
   'website',
   'ein',
   'clientDefaults',
+  // The proposal pricing catalog (featreq-311473e2). Owner-only like the rest
+  // of this route; `/api/firm-settings/public` never carries it.
+  'proposalPricing',
 ]
 
 function pickFirmSettingsPatch(payload) {
@@ -1189,9 +1193,14 @@ function scopeAppDataForSession(session, data) {
   const recurringReimbursements = (data.recurringReimbursements ?? []).filter((recurring) =>
     allowedClientIds.has(recurring.clientId),
   )
+  // The proposal pricing catalog is the firm's pricing, owner-only
+  // (featreq-311473e2, spec §6). `read()` carries the whole firm settings row,
+  // so it is stripped here rather than trusting every page not to show it.
+  const { proposalPricing: _proposalPricing, ...firmSettings } = data.firmSettings ?? {}
 
   return {
     ...data,
+    ...(data.firmSettings ? { firmSettings } : {}),
     clients,
     checklists,
     checklistTemplates,

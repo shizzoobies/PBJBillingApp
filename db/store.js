@@ -18,6 +18,7 @@ import {
 } from '../lib/checklist-identity.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import { latestBillRate, latestCostRate, ratePeriodAsOf } from '../lib/rate-history.js'
+import { sanitizeProposalPricing } from '../lib/proposal-pricing.js'
 import { isWaitingOnOpen, waitingOnStage } from '../lib/waiting-on-state.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
@@ -162,7 +163,7 @@ const FIRM_SETTINGS_FIELDS = [
 ]
 
 function rowToFirmSettings(row) {
-  if (!row) return { ...DEFAULT_FIRM_SETTINGS }
+  if (!row) return { ...DEFAULT_FIRM_SETTINGS, proposalPricing: sanitizeProposalPricing(null) }
   const settings = { ...DEFAULT_FIRM_SETTINGS }
   for (const [appKey, dbCol] of FIRM_SETTINGS_FIELDS) {
     if (row[dbCol] !== null && row[dbCol] !== undefined) {
@@ -180,6 +181,14 @@ function rowToFirmSettings(row) {
       ...sanitizeClientDefaults(raw),
     }
   }
+  // The proposal catalog (featreq-311473e2). A null column is the SEED — her
+  // sheet with zero rates — so the Settings page always has a catalog to edit
+  // and nothing has to be written to production to get one.
+  const rawPricing =
+    typeof row.proposal_pricing === 'string'
+      ? safeJsonParse(row.proposal_pricing)
+      : row.proposal_pricing
+  settings.proposalPricing = sanitizeProposalPricing(rawPricing)
   return settings
 }
 
@@ -3470,6 +3479,12 @@ export class AppDataStore {
       // extend without a column per field. Additive + idempotent.
       await this.pool.query(
         `alter table firm_settings add column if not exists client_defaults jsonb`,
+      )
+      // The proposal pricing catalog (featreq-311473e2): rates, the counts she
+      // collects, and the service rows. NULL reads as the seed catalog, so the
+      // column needs no backfill. Additive + idempotent.
+      await this.pool.query(
+        `alter table firm_settings add column if not exists proposal_pricing jsonb`,
       )
 
       // Phase 5: notifications (in-app bell + email-ready).
@@ -8091,6 +8106,14 @@ export class AppDataStore {
             hourlyRateHistory: prior?.hourlyRateHistory ?? [],
           }
         })
+      }
+
+      // Firm settings are endpoint-managed (`PUT /api/firm-settings`), exactly
+      // as on Postgres, where the bulk save never touches `firm_settings`. What
+      // is stored wins over the payload's copy, so an autosave — or a stale
+      // tab's — can never roll back the proposal catalog or any firm setting.
+      if (previous?.firmSettings && typeof previous.firmSettings === 'object') {
+        data.firmSettings = previous.firmSettings
       }
 
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
@@ -19448,7 +19471,7 @@ export class AppDataStore {
                 sidebar_active_text_color,
                 address_line1, address_line2,
                 city, state, postal_code, phone, email, website, ein,
-                client_defaults
+                client_defaults, proposal_pricing
            from firm_settings where id = 'singleton'`,
       )
       return rowToFirmSettings(result.rows[0])
@@ -19462,6 +19485,7 @@ export class AppDataStore {
         ...DEFAULT_FIRM_SETTINGS.clientDefaults,
         ...sanitizeClientDefaults(stored.clientDefaults),
       },
+      proposalPricing: sanitizeProposalPricing(stored.proposalPricing),
     }
   }
 
@@ -19501,13 +19525,20 @@ export class AppDataStore {
       }
     }
 
+    // The proposal catalog is saved WHOLE — the Settings table sends the full
+    // catalog back — and always through the sanitizer, so a crafted payload
+    // can only ever store a catalog the calculator can price.
+    if (patch && Object.prototype.hasOwnProperty.call(patch, 'proposalPricing')) {
+      next.proposalPricing = sanitizeProposalPricing(patch.proposalPricing)
+    }
+
     if (this.pool) {
       await this.pool.query(
         `insert into firm_settings (id, name, tagline, logo_url, brand_color, sidebar_text_color,
             sidebar_active_text_color,
             address_line1, address_line2, city, state, postal_code,
-            phone, email, website, ein, client_defaults, updated_at)
-         values ('singleton', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, now())
+            phone, email, website, ein, client_defaults, proposal_pricing, updated_at)
+         values ('singleton', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb, now())
          on conflict (id) do update set
             name = excluded.name,
             tagline = excluded.tagline,
@@ -19525,6 +19556,7 @@ export class AppDataStore {
             website = excluded.website,
             ein = excluded.ein,
             client_defaults = excluded.client_defaults,
+            proposal_pricing = excluded.proposal_pricing,
             updated_at = now()`,
         [
           next.name,
@@ -19543,6 +19575,7 @@ export class AppDataStore {
           next.website || null,
           next.ein || null,
           JSON.stringify(next.clientDefaults ?? DEFAULT_FIRM_SETTINGS.clientDefaults),
+          JSON.stringify(sanitizeProposalPricing(next.proposalPricing)),
         ],
       )
       return next

@@ -111,9 +111,32 @@ describe('PUT /api/firm-settings whitelists in the handler (L2)', () => {
       ?.map((pair) => (pair.match(/\['([^']+)'/) as RegExpMatchArray)[1])
 
     expect(storeList?.length).toBeGreaterThan(0)
-    // Plus `clientDefaults`, which the store merges separately rather than listing
-    // beside the flat columns.
-    expect(handlerList?.slice().sort()).toEqual([...(storeList ?? []), 'clientDefaults'].sort())
+    // Plus `clientDefaults` and `proposalPricing`, which the store merges
+    // separately rather than listing beside the flat columns.
+    expect(handlerList?.slice().sort()).toEqual(
+      [...(storeList ?? []), 'clientDefaults', 'proposalPricing'].sort(),
+    )
+  })
+
+  // The proposal rates and catalog are the firm's pricing. The public route is
+  // read before sign-in, so it must never grow a field that carries them.
+  it('never exposes the proposal catalog on the public settings route', () => {
+    const publicBlock = routeBlock(
+      /if \(normalizedPath === '\/api\/firm-settings\/public' && request\.method === 'GET'\)/,
+      900,
+    )
+    expect(publicBlock).not.toContain('proposalPricing')
+    expect(publicBlock).not.toContain('...settings')
+  })
+
+  // `read()` carries the whole firm settings row inside /api/app-data, so the
+  // staff-scoped copy has to drop the catalog explicitly.
+  it('strips the proposal catalog from the workspace a non-owner receives', () => {
+    const scope = functionSource('function scopeAppDataForSession(', 6000)
+    expect(scope).toContain(
+      'const { proposalPricing: _proposalPricing, ...firmSettings } = data.firmSettings ?? {}',
+    )
+    expect(scope).toContain('...(data.firmSettings ? { firmSettings } : {}),')
   })
 })
 

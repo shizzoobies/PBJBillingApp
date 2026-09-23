@@ -1,4 +1,27 @@
 import type { RateHistoryEntry } from '../../lib/rate-history.js'
+import type { ProposalPricing } from '../../lib/proposal-pricing.js'
+
+/**
+ * The proposal catalog and calculator shapes, re-exported from the calculator
+ * that defines them (lib/proposal-pricing.js) — the same one-door rule as the
+ * rate-history types below.
+ */
+export type {
+  PayrollRun,
+  PricedLine,
+  ProposalCadence,
+  ProposalGroup,
+  ProposalInput,
+  ProposalMultiplier,
+  ProposalPricing,
+  ProposalPricingKind,
+  ProposalRates,
+  ProposalRole,
+  ProposalSelection,
+  ProposalService,
+  ProposalTier,
+  ProposalTotals,
+} from '../../lib/proposal-pricing.js'
 
 /**
  * The rate-history row shapes, re-exported from the resolver that defines them
@@ -1567,6 +1590,11 @@ export type FirmSettings = {
   brandColor?: string
   /** Defaults pre-filled on the Add-client form. */
   clientDefaults?: ClientDefaults
+  /**
+   * The proposal pricing catalog (owner-only; never on the public settings).
+   * The server always answers with one — the seed when nothing is saved.
+   */
+  proposalPricing?: ProposalPricing
   /**
    * Color used for text rendered on top of the brand color (sidebar, etc).
    * Defaults to white so any brand color picked still has legible text.

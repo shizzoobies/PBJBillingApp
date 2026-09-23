@@ -16514,3 +16514,113 @@ describe('the month run bills each client at its own pin (file backend)', () => 
     expect(merged.total).toBe(100)
   })
 })
+
+/**
+ * The proposal pricing catalog in firm settings (featreq-311473e2, spec §4.1).
+ * A missing catalog reads as the seed; a saved one always goes through
+ * `sanitizeProposalPricing`, on both backends.
+ */
+describe('proposal pricing in firm settings (file backend)', () => {
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    delete data.firmSettings
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  })
+
+  it('reads the seed catalog, with zero rates, before anything is saved', async () => {
+    const settings = await store.getFirmSettings()
+    expect(settings.proposalPricing.rates).toEqual({ bookkeeper: 0, accountant: 0, controller: 0 })
+    expect(settings.proposalPricing.services).toHaveLength(41)
+  })
+
+  it('saves the catalog through the sanitizer and reads it back', async () => {
+    const seed = (await store.getFirmSettings()).proposalPricing
+    const edited = {
+      ...seed,
+      rates: { bookkeeper: 75, accountant: -4, controller: 5e9 },
+      services: [
+        { ...seed.services[0], factor: 0.08 },
+        { ...seed.services[0], name: 'Duplicate id' },
+        { ...seed.services[1], inputKey: 'widgets' },
+      ],
+    }
+    await store.updateFirmSettings({ proposalPricing: edited })
+
+    const reopened = new AppDataStore()
+    await reopened.initialize()
+    const pricing = (await reopened.getFirmSettings()).proposalPricing
+    expect(pricing.rates).toEqual({ bookkeeper: 75, accountant: 0, controller: 1e6 })
+    expect(pricing.services.map((row) => row.id)).toEqual([
+      'monthly-weekly-transactions-basic',
+      'monthly-weekly-transactions-classes',
+    ])
+    expect(pricing.services[0].factor).toBe(0.08)
+    // An unknown input retires the row instead of failing the save.
+    expect(pricing.services[1].active).toBe(false)
+  })
+
+  it('leaves the catalog alone when a settings save does not mention it', async () => {
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({ proposalPricing: { ...seed, rates: { bookkeeper: 80, accountant: 110, controller: 130 } } })
+    await store.updateFirmSettings({ name: 'PB&J' })
+    expect((await store.getFirmSettings()).proposalPricing.rates.bookkeeper).toBe(80)
+  })
+})
+
+describe('proposal pricing in firm settings (postgres branch)', () => {
+  function firmSettingsPool(row) {
+    const statements = []
+    return {
+      statements,
+      pool: {
+        async query(text, params) {
+          statements.push({ text: String(text).trim(), params })
+          if (/from firm_settings where id = 'singleton'/i.test(text)) return { rows: row ? [row] : [] }
+          return { rows: [], rowCount: 1 }
+        },
+      },
+    }
+  }
+
+  it('selects the column and reads a NULL column as the seed', async () => {
+    const fake = firmSettingsPool({ name: 'PB&J', proposal_pricing: null })
+    const settings = await postgresStore(fake).getFirmSettings()
+    expect(fake.statements[0].text).toMatch(/client_defaults, proposal_pricing/)
+    expect(settings.proposalPricing.services).toHaveLength(41)
+  })
+
+  it('writes the sanitized catalog as $17 jsonb', async () => {
+    const fake = firmSettingsPool({ name: 'PB&J', proposal_pricing: null })
+    const seed = (await postgresStore(fake).getFirmSettings()).proposalPricing
+    await postgresStore(fake).updateFirmSettings({
+      proposalPricing: { ...seed, rates: { bookkeeper: 75, accountant: 115, controller: -1 } },
+    })
+    const insert = fake.statements.find((s) => /^insert into firm_settings/i.test(s.text))
+    expect(insert.text).toMatch(/\$17::jsonb/)
+    expect(insert.text).toMatch(/proposal_pricing = excluded\.proposal_pricing/)
+    expect(JSON.parse(insert.params[16]).rates).toEqual({
+      bookkeeper: 75,
+      accountant: 115,
+      controller: 0,
+    })
+  })
+})
+
+describe('firm settings survive a bulk save (file backend)', () => {
+  // Postgres never touches `firm_settings` from the bulk save; the file
+  // backend used to take whatever the payload carried — or drop the settings
+  // entirely when the payload had none. Cardinal rule 1: same answer on both.
+  it('keeps the stored catalog when an autosave carries none, or a stale one', async () => {
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: { ...seed, rates: { bookkeeper: 75, accountant: 115, controller: 125 } },
+    })
+    await store.write(workspace())
+    expect((await store.getFirmSettings()).proposalPricing.rates.bookkeeper).toBe(75)
+
+    await store.write({ ...workspace(), firmSettings: { name: 'Stale tab', proposalPricing: seed } })
+    const after = await store.getFirmSettings()
+    expect(after.proposalPricing.rates.bookkeeper).toBe(75)
+    expect(after.name).not.toBe('Stale tab')
+  })
+})

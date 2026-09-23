@@ -104,3 +104,6 @@ export declare function priceProposal(args: {
   inputs: Record<string, number> | null | undefined
   selections: readonly ProposalSelection[] | null | undefined
 }): { lines: PricedLine[]; totals: ProposalTotals }
+
+/** Owner-edited catalog in, a safe catalog out; anything not an object is the seed. */
+export declare function sanitizeProposalPricing(raw: unknown): ProposalPricing
