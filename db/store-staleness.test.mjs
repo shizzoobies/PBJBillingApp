@@ -1192,6 +1192,13 @@ function fakePostgres({
         .map((row) => ({ id: row.id, billing_mode: row.billing_mode ?? null }))
       return { rows, rowCount: rows.length }
     }
+    // The rate-history pin snapshot the bulk save takes before the wipe — the
+    // same idiom as `priorStripeCustomerIds`. Anchored on its exact shape so a
+    // rewrite that stopped reading it falls through to the empty default and
+    // the test fails loudly rather than passing on a stale answer.
+    if (/^select id, hourly_rate_period, hourly_rate_history from clients$/i.test(trimmed)) {
+      return { rows: clientRows }
+    }
     return { rows: [] }
   }
   const client = {
@@ -14666,5 +14673,170 @@ describe('copyTemplateToClient stamps where the copy came from', () => {
     // And it survives the write, or the skip would only work in memory.
     const persisted = (await store.read()).checklistTemplates.find((t) => t.id === copy.id)
     expect(persisted.sourceTemplateId).toBe('bp-close')
+  })
+})
+
+
+/**
+ * RATE HISTORY — the migration and the two client fields.
+ *
+ * Spec §4: after the migration every price and every cost must equal today's
+ * numbers exactly, which is only true if every user with a rate gets a floor
+ * version and every hourly client gets a pin at the cutover.
+ */
+describe('rate history: migration + client pin (file backend)', () => {
+  beforeEach(async () => {
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.billRateVersions = []
+    authState.costRateVersions = []
+    authState.users = [
+      { id: 'emp-lisa', name: 'Lisa', role: 'employee', billRate: 40, costRate: 20 },
+      { id: 'emp-no-rates', name: 'Nobody', role: 'employee' },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c-hourly', name: 'Hourly Co', billingMode: 'hourly', hourlyRate: 100 },
+          { id: 'c-monthly', name: 'Monthly Co', billingMode: 'subscription', monthlyRate: 500 },
+        ],
+        timeEntries: [],
+      }),
+    )
+    await store.initialize()
+  })
+
+  it('seeds a bill-rate version at the cutover for every user with a bill rate', async () => {
+    const versions = await store.listBillRateVersions()
+    expect(versions).toEqual([
+      expect.objectContaining({ userId: 'emp-lisa', effectivePeriod: '2026-06', rate: 40 }),
+    ])
+  })
+
+  it('seeds a cost-rate version at the 1970 floor for every user with a cost rate', async () => {
+    const versions = await store.listCostRateVersions()
+    expect(versions).toEqual([
+      expect.objectContaining({ userId: 'emp-lisa', effectiveDate: '1970-01-01', rate: 20 }),
+    ])
+  })
+
+  it('pins every hourly client at the cutover and leaves monthly clients alone', async () => {
+    const data = await store.read()
+    const hourly = data.clients.find((client) => client.id === 'c-hourly')
+    const monthly = data.clients.find((client) => client.id === 'c-monthly')
+    expect(hourly.hourlyRatePeriod).toBe('2026-06')
+    expect(hourly.hourlyRateHistory).toEqual([])
+    expect(monthly.hourlyRatePeriod).toBeNull()
+  })
+
+  it('is idempotent — a second boot adds nothing and moves no pin', async () => {
+    await store.initialize()
+    await store.initialize()
+    expect(await store.listBillRateVersions()).toHaveLength(1)
+    expect(await store.listCostRateVersions()).toHaveLength(1)
+    const data = await store.read()
+    expect(data.clients.find((client) => client.id === 'c-hourly').hourlyRatePeriod).toBe('2026-06')
+  })
+
+  it('does not move a pin a bulk save is stale about — the payload is ignored outright', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c-hourly',
+            name: 'Hourly Co',
+            billingMode: 'hourly',
+            hourlyRate: 100,
+            // A stale owner tab still thinks this client is on the old pin.
+            hourlyRatePeriod: '2020-01',
+            hourlyRateHistory: [{ from: null, to: '2020-01', changedAt: 'x', changedBy: 'y' }],
+          },
+        ],
+        timeEntries: [],
+      }),
+    )
+    const data = await store.read()
+    const hourly = data.clients.find((client) => client.id === 'c-hourly')
+    expect(hourly.hourlyRatePeriod).toBe('2026-06')
+    expect(hourly.hourlyRateHistory).toEqual([])
+  })
+})
+
+describe('rate history: the Postgres statements', () => {
+  it('creates both version tables and both client columns on initialize', async () => {
+    const fake = fakePostgres()
+    // `initialize()` ends by seeding users, which the fake cannot answer (it
+    // returns no rows for a count). The rate-history DDL is issued long before
+    // that and is already recorded, so the seed's failure is swallowed — the
+    // same idiom every other `initialize()` test in this file uses.
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    expect(fake.matching(/create table if not exists bill_rate_versions/i)).toHaveLength(1)
+    expect(fake.matching(/create table if not exists cost_rate_versions/i)).toHaveLength(1)
+    expect(
+      fake.matching(/alter table clients add column if not exists hourly_rate_period text/i),
+    ).toHaveLength(1)
+    expect(
+      fake.matching(
+        /alter table clients add column if not exists hourly_rate_history jsonb not null default '\[\]'/i,
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('backfills both version tables and the pin, each guarded so a re-run is a no-op', async () => {
+    const fake = fakePostgres()
+    // Same reason as above: run for the statements it ISSUES, which all land
+    // before the user seed the fake cannot answer.
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    const [billSeed] = fake.matching(/^insert into bill_rate_versions/i)
+    expect(billSeed.text).toMatch(/where u\.bill_rate is not null/i)
+    expect(billSeed.text).toMatch(/on conflict \(user_id, effective_period\) do nothing/i)
+    expect(billSeed.text).toMatch(/'2026-06'/)
+    const [costSeed] = fake.matching(/^insert into cost_rate_versions/i)
+    expect(costSeed.text).toMatch(/where u\.cost_rate is not null/i)
+    expect(costSeed.text).toMatch(/'1970-01-01'/)
+    const [pinSeed] = fake.matching(/^update clients set hourly_rate_period/i)
+    expect(pinSeed.text).toMatch(/where billing_mode = 'hourly' and hourly_rate_period is null/i)
+  })
+
+  it('selects both new client columns and maps them', async () => {
+    expect(CLIENT_SELECT_COLUMNS).toMatch(/hourly_rate_period/)
+    expect(CLIENT_SELECT_COLUMNS).toMatch(/hourly_rate_history/)
+    const mapped = mapClientRow({
+      id: 'c1',
+      name: 'Acme',
+      billing_mode: 'hourly',
+      hourly_rate: 100,
+      plan_ids: [],
+      contact_ids: [],
+      assigned_bookkeeper_ids: [],
+      hourly_rate_period: '2026-06',
+      hourly_rate_history: [{ from: null, to: '2026-06', changedAt: 'x', changedBy: 'y' }],
+    })
+    expect(mapped.hourlyRatePeriod).toBe('2026-06')
+    expect(mapped.hourlyRateHistory).toEqual([
+      { from: null, to: '2026-06', changedAt: 'x', changedBy: 'y' },
+    ])
+    expect(mapClientRow({ id: 'c2', name: 'B', plan_ids: [], contact_ids: [] }).hourlyRateHistory).toEqual([])
+  })
+
+  it('restores the STORED pin on a bulk save rather than the payload’s', async () => {
+    const fake = fakePostgres({
+      clientRows: [
+        { id: 'c1', hourly_rate_period: '2026-06', hourly_rate_history: [] },
+      ],
+    })
+    await postgresStore(fake).write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme', hourlyRatePeriod: '2020-01' }] }),
+    )
+    const [snapshot] = fake.matching(
+      /^select id, hourly_rate_period, hourly_rate_history from clients$/i,
+    )
+    expect(snapshot, 'the bulk save never snapshotted the stored pin').toBeTruthy()
+    const [insert] = fake.matching(/^insert into clients/i)
+    expect(insert.text).toMatch(/hourly_rate_period, hourly_rate_history/)
   })
 })

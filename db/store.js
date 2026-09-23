@@ -606,6 +606,12 @@ export function normalizeClientProfile(client) {
       typeof client.invoiceRecipientClientId === 'string' && client.invoiceRecipientClientId
         ? client.invoiceRecipientClientId
         : null,
+    // Rate history, mirroring the Postgres read map exactly (cardinal rule 1).
+    hourlyRatePeriod:
+      typeof client.hourlyRatePeriod === 'string' && client.hourlyRatePeriod
+        ? client.hourlyRatePeriod
+        : null,
+    hourlyRateHistory: Array.isArray(client.hourlyRateHistory) ? client.hourlyRateHistory : [],
   }
 }
 
@@ -1448,7 +1454,8 @@ export const CLIENT_SELECT_COLUMNS = `id, name, contact, billing_mode, hourly_ra
           stripe_customer_id,
           assigned_bookkeeper_ids, monthly_service_tier,
           annual_rate, annual_billing_month, lifecycle_stage,
-          bill_to_client_id, is_billing_master, invoice_recipient_client_id`
+          bill_to_client_id, is_billing_master, invoice_recipient_client_id,
+          hourly_rate_period, hourly_rate_history`
 
 /** One `clients` row -> the camelCase shape the app and the API speak. */
 export function mapClientRow(row) {
@@ -1540,6 +1547,13 @@ export function mapClientRow(row) {
     billToClientId: row.bill_to_client_id ?? null,
     isBillingMaster: row.is_billing_master === true,
     invoiceRecipientClientId: row.invoice_recipient_client_id ?? null,
+    // Rate history. The pin is null for a client that has never had one (every
+    // monthly and annual client, by design — only Hourly uses it), and the
+    // ledger is an empty array rather than undefined so every reader can
+    // iterate without a null check. Same shape `normalizeClientProfile`
+    // produces for the file backend — cardinal rule 1.
+    hourlyRatePeriod: row.hourly_rate_period ?? null,
+    hourlyRateHistory: Array.isArray(row.hourly_rate_history) ? row.hourly_rate_history : [],
   }
 }
 
@@ -4878,6 +4892,78 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists stripe_customer_id text`,
       )
+      // ---- RATE HISTORY (docs/plans/rate-history-2026-09.md) ----
+      //
+      // Brittany raises rates one client at a time, at that client's yearly
+      // review, and a raise must never change what a past Client Recap says the
+      // work cost. One firm-wide number per person cannot do either, so the
+      // rates become dated VERSIONS and each hourly client is PINNED to the
+      // month whose bill rates it bills at.
+      //
+      // `users.bill_rate` / `users.cost_rate` stay and mirror the newest
+      // version after every edit, so every reader that has not yet moved to the
+      // resolver keeps working and nothing has to change in one step.
+      //
+      // `on delete cascade` on the user FK matches `sessions`: deleting a user
+      // is a hard delete that takes their rows with it. The ordinary removal
+      // path is a SOFT delete (`inactive_at`), which touches nothing here — an
+      // inactive person's historical rates still price their historical hours.
+      await this.pool.query(`
+        create table if not exists bill_rate_versions (
+          user_id text not null references users(id) on delete cascade,
+          effective_period text not null,
+          rate numeric(12, 2) not null,
+          created_at timestamptz not null default now(),
+          created_by text,
+          primary key (user_id, effective_period)
+        )
+      `)
+      await this.pool.query(`
+        create table if not exists cost_rate_versions (
+          user_id text not null references users(id) on delete cascade,
+          effective_date date not null,
+          rate numeric(12, 2) not null,
+          created_at timestamptz not null default now(),
+          created_by text,
+          primary key (user_id, effective_date)
+        )
+      `)
+      // The client's pin, and the ledger of its moves. `hourly_rate_history` is
+      // an ARRAY of {from, to, changedAt, changedBy} — the nearest relative in
+      // this schema is `recurring_reimbursements.coverage_history`, a stored
+      // idempotent ledger read by a pure resolver rather than re-derived.
+      await this.pool.query(
+        `alter table clients add column if not exists hourly_rate_period text`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists hourly_rate_history jsonb not null default '[]'`,
+      )
+      // MIGRATION (spec §4), idempotent — every statement is guarded, so a boot
+      // that has already run it writes nothing. The floors are chosen so that
+      // after the migration every price and every cost equals today's numbers
+      // exactly: '2026-06' is the per-employee billing cutover
+      // (PER_EMPLOYEE_BILLING_START), and '1970-01-01' predates every time
+      // entry the app has ever held.
+      await this.pool.query(`
+        insert into bill_rate_versions (user_id, effective_period, rate, created_by)
+        select u.id, '2026-06', u.bill_rate, 'migration'
+          from users u
+         where u.bill_rate is not null
+           and not exists (select 1 from bill_rate_versions v where v.user_id = u.id)
+        on conflict (user_id, effective_period) do nothing
+      `)
+      await this.pool.query(`
+        insert into cost_rate_versions (user_id, effective_date, rate, created_by)
+        select u.id, '1970-01-01', u.cost_rate, 'migration'
+          from users u
+         where u.cost_rate is not null
+           and not exists (select 1 from cost_rate_versions v where v.user_id = u.id)
+        on conflict (user_id, effective_date) do nothing
+      `)
+      await this.pool.query(`
+        update clients set hourly_rate_period = '2026-06', hourly_rate_history = '[]'::jsonb
+         where billing_mode = 'hourly' and hourly_rate_period is null
+      `)
       // `invoice_drafts` was the placeholder for this and was never written to
       // (0 rows in production, confirmed before dropping). `invoices`
       // supersedes it; keeping both would mean two tables carrying the same
@@ -5046,6 +5132,152 @@ export class AppDataStore {
       }
     }
     await this.syncOwnerEmailInFile()
+    await this.migrateRateHistoryInFile()
+  }
+
+  /**
+   * Spec §4 on the FILE backend: the same four migration steps the Postgres
+   * branch runs inline, idempotent, so a developer's workspace and production
+   * agree about what a fresh boot produces (cardinal rule 1).
+   *
+   * The version slices live in the AUTH store beside `billRate`/`costRate`,
+   * never in `tmp/app-data.json` — the bulk save replaces that file wholesale,
+   * so a slice that is not in the payload is a slice the next autosave erases.
+   * The client pin does live in the workspace blob, because it is a client
+   * field; `write()` preserves it from what is stored (see `priorPinById`).
+   */
+  async migrateRateHistoryInFile() {
+    const authState = await readJson(localAuthPath)
+    let authMutated = false
+    if (!Array.isArray(authState.billRateVersions)) {
+      authState.billRateVersions = []
+      authMutated = true
+    }
+    if (!Array.isArray(authState.costRateVersions)) {
+      authState.costRateVersions = []
+      authMutated = true
+    }
+    const createdAt = nowIso()
+    for (const user of authState.users ?? []) {
+      if (!user || typeof user.id !== 'string') continue
+      if (
+        typeof user.billRate === 'number' &&
+        !authState.billRateVersions.some((row) => row && row.userId === user.id)
+      ) {
+        authState.billRateVersions.push({
+          userId: user.id,
+          effectivePeriod: '2026-06',
+          rate: user.billRate,
+          createdAt,
+          createdBy: 'migration',
+        })
+        authMutated = true
+      }
+      if (
+        typeof user.costRate === 'number' &&
+        !authState.costRateVersions.some((row) => row && row.userId === user.id)
+      ) {
+        authState.costRateVersions.push({
+          userId: user.id,
+          effectiveDate: '1970-01-01',
+          rate: user.costRate,
+          createdAt,
+          createdBy: 'migration',
+        })
+        authMutated = true
+      }
+    }
+    if (authMutated) {
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+
+    if (!existsSync(localDataPath)) return
+    const data = await readJson(localDataPath)
+    let dataMutated = false
+    for (const clientRecord of data.clients ?? []) {
+      if (!clientRecord || clientRecord.billingMode !== 'hourly') continue
+      if (typeof clientRecord.hourlyRatePeriod === 'string' && clientRecord.hourlyRatePeriod) {
+        continue
+      }
+      clientRecord.hourlyRatePeriod = '2026-06'
+      clientRecord.hourlyRateHistory = []
+      dataMutated = true
+    }
+    if (dataMutated) {
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+  }
+
+  /**
+   * Every bill-rate version on file, ordered by person then period.
+   *
+   * READ-ONLY for now, deliberately: this is the plumbing the migration above
+   * needs to be provable, and the shape (`{ userId, effectivePeriod, rate,
+   * createdAt, createdBy }`) every later reader speaks. The Team-page editor
+   * that ADDS and replaces versions arrives with its own task; nothing here
+   * writes.
+   *
+   * The date columns are formatted in SQL rather than through `Date`, so a
+   * server in a positive UTC offset cannot hand back yesterday's day.
+   */
+  async listBillRateVersions() {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select user_id, effective_period, rate, created_at, created_by
+           from bill_rate_versions
+          order by user_id, effective_period`,
+      )
+      return rows.map((row) => ({
+        userId: row.user_id,
+        effectivePeriod: row.effective_period,
+        rate: Number(row.rate),
+        createdAt: row.created_at ?? null,
+        createdBy: row.created_by ?? null,
+      }))
+    }
+
+    if (!existsSync(localAuthPath)) return []
+    const authState = await readJson(localAuthPath)
+    const versions = Array.isArray(authState.billRateVersions) ? authState.billRateVersions : []
+    return [...versions]
+      .filter((row) => row && typeof row.userId === 'string')
+      .sort(
+        (left, right) =>
+          left.userId.localeCompare(right.userId) ||
+          String(left.effectivePeriod ?? '').localeCompare(String(right.effectivePeriod ?? '')),
+      )
+      .map((row) => ({ ...row, rate: Number(row.rate) }))
+  }
+
+  /** Every cost-rate version on file, ordered by person then date. See above. */
+  async listCostRateVersions() {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select user_id, to_char(effective_date, 'YYYY-MM-DD') as effective_date,
+                rate, created_at, created_by
+           from cost_rate_versions
+          order by user_id, effective_date`,
+      )
+      return rows.map((row) => ({
+        userId: row.user_id,
+        effectiveDate: row.effective_date,
+        rate: Number(row.rate),
+        createdAt: row.created_at ?? null,
+        createdBy: row.created_by ?? null,
+      }))
+    }
+
+    if (!existsSync(localAuthPath)) return []
+    const authState = await readJson(localAuthPath)
+    const versions = Array.isArray(authState.costRateVersions) ? authState.costRateVersions : []
+    return [...versions]
+      .filter((row) => row && typeof row.userId === 'string')
+      .sort(
+        (left, right) =>
+          left.userId.localeCompare(right.userId) ||
+          String(left.effectiveDate ?? '').localeCompare(String(right.effectiveDate ?? '')),
+      )
+      .map((row) => ({ ...row, rate: Number(row.rate) }))
   }
 
   /**
@@ -6334,6 +6566,25 @@ export class AppDataStore {
           ]),
         )
 
+        // The rate-history pin and its ledger, by the same rule as the Stripe
+        // customer id above: they are ENDPOINT-OWNED
+        // (`setClientHourlyRatePeriod` is the only writer) and the bulk-save
+        // payload must not be consulted at all. Without this the re-insert
+        // writes NULL and the next owner autosave un-pins every hourly client —
+        // silently repricing the whole book at today's rates, which is exactly
+        // the thing this feature exists to prevent. Stored wins outright.
+        const priorRatePins = new Map(
+          (
+            await client.query(`select id, hourly_rate_period, hourly_rate_history from clients`)
+          ).rows.map((row) => [
+            row.id,
+            {
+              period: row.hourly_rate_period ?? null,
+              history: Array.isArray(row.hourly_rate_history) ? row.hourly_rate_history : [],
+            },
+          ]),
+        )
+
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
         await client.query('delete from checklist_template_items')
@@ -6484,9 +6735,10 @@ export class AppDataStore {
                 stripe_customer_id,
                 invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
                 bill_to_client_id, is_billing_master, invoice_recipient_client_id,
+                hourly_rate_period, hourly_rate_history,
                 created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44::jsonb, $45, now())
             `,
             [
               clientRecord.id,
@@ -6571,6 +6823,11 @@ export class AppDataStore {
               clientRecord.billToClientId ?? null,
               clientRecord.isBillingMaster === true,
               clientRecord.invoiceRecipientClientId ?? null,
+              // Stored wins outright (see the snapshot above). A brand-new
+              // client has no entry and gets null / [] — right, because it has
+              // no pin until the create path or the migration gives it one.
+              priorRatePins.get(clientRecord.id)?.period ?? null,
+              JSON.stringify(priorRatePins.get(clientRecord.id)?.history ?? []),
               createdAtFor('clients', clientRecord.id),
             ],
           )
@@ -7290,6 +7547,33 @@ export class AppDataStore {
               if (typeof stored === 'string' && stored) next.createdAt = stored
               else delete next.createdAt
               return next
+            })
+          }
+
+          // Cardinal rule 1 mirror of `priorRatePins` in the Postgres branch.
+          // The pin and its ledger are endpoint-owned; what is stored wins and
+          // the payload's copy is ignored outright. A client this file has
+          // never seen keeps whatever the payload carried — the create path is
+          // what pins a genuinely new client.
+          const priorPinById = new Map(
+            (Array.isArray(previous.clients) ? previous.clients : [])
+              .filter((entry) => entry && typeof entry.id === 'string')
+              .map((entry) => [
+                entry.id,
+                {
+                  hourlyRatePeriod: entry.hourlyRatePeriod ?? null,
+                  hourlyRateHistory: Array.isArray(entry.hourlyRateHistory)
+                    ? entry.hourlyRateHistory
+                    : [],
+                },
+              ]),
+          )
+          if (Array.isArray(data.clients)) {
+            data.clients = data.clients.map((clientRecord) => {
+              if (!clientRecord || typeof clientRecord.id !== 'string') return clientRecord
+              const prior = priorPinById.get(clientRecord.id)
+              if (!prior) return clientRecord
+              return { ...clientRecord, ...prior }
             })
           }
         }
@@ -12780,6 +13064,14 @@ export class AppDataStore {
       // Never let a bad value land in the stage column — absent/garbage is
       // 'active', matching write() and the read mappers.
       lifecycleStage: coerceLifecycleStage(client.lifecycleStage),
+      // A NEW client starts on the current rates: pinned to the month it is
+      // created in, with an empty ledger. Only Hourly clients use a pin, so
+      // Monthly and Annual get null — `ratePeriodAsOf` then answers null and
+      // nothing prices off it. Server-side, deliberately: nothing visible
+      // changes in the Add-client modal (spec §5).
+      hourlyRatePeriod:
+        (client.billingMode ?? 'hourly') === 'hourly' ? nowIso().slice(0, 7) : null,
+      hourlyRateHistory: [],
     })
 
     // Consolidated billing, checked OUT LOUD. A create is one deliberate act
@@ -12860,9 +13152,10 @@ export class AppDataStore {
              annual_rate, annual_billing_month, lifecycle_stage,
              card_payments_enabled, platform_invoicing_opt_out,
              invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
-             bill_to_client_id, is_billing_master, invoice_recipient_client_id, updated_at
+             bill_to_client_id, is_billing_master, invoice_recipient_client_id,
+             hourly_rate_period, hourly_rate_history, updated_at
            )
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40, now())`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42::jsonb, now())`,
           [
             record.id,
             record.name,
@@ -12911,6 +13204,8 @@ export class AppDataStore {
             record.billToClientId ?? null,
             record.isBillingMaster === true,
             record.invoiceRecipientClientId ?? null,
+            record.hourlyRatePeriod,
+            JSON.stringify(record.hourlyRateHistory ?? []),
           ],
         )
         await dbClient.query('commit')
