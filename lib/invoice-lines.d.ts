@@ -109,6 +109,16 @@ export type BuildInvoiceLinesArgs = {
   >
   employees?: Array<{ id: string; name?: string; billRate?: number | null }>
   defaultHourlyRate?: number
+  /**
+   * Dated bill rates (lib/rate-history.js). Absent or empty means "no history
+   * passed", and every rate falls back to the employee's own `billRate`.
+   */
+  billRateVersions?: readonly import('./rate-history.js').BillRateVersion[]
+  /**
+   * The client's PIN — the month whose bill rates this client is charged at.
+   * Null (or absent) prices at `billingPeriod`, i.e. today's rates.
+   */
+  ratePeriod?: string | null
 }
 
 export const PER_EMPLOYEE_BILLING_START: string
