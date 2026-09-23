@@ -138,4 +138,27 @@ describe('drafting the letter', () => {
     expect(text).toMatch(/status === 503 \? 503 : 502/)
     expect(text).toContain("error: 'proposal_letter_failed'")
   })
+
+  it('refuses before ever calling the AI when the snapshot has no priced line', () => {
+    const text = block()
+    expect(text).toContain('allowedLetterCents(proposal.pricingSnapshot).size === 0')
+    expect(text).toContain("error: 'proposal_refused'")
+    expect(text.indexOf('allowedLetterCents(')).toBeLessThan(text.indexOf('draftProposalLetter('))
+  })
+
+  it('a decision landing during drafting is a 409 or 404, not a 200 with an overwritten letter', () => {
+    const text = block()
+    expect(text).toContain('error instanceof ProposalStateError')
+    expect(text).toContain("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
+    expect(text).toContain('if (!saved)')
+    expect(text).toContain("sendJson(response, 404, { error: 'Proposal not found' })")
+    // The refusal/gone checks on the save must come before recordActivity and
+    // the broadcast, so a refused or vanished write never announces itself.
+    const savedAt = text.indexOf('appDataStore.setProposalLetter(proposal.id, letter)')
+    const recordAt = text.indexOf('recordActivity(')
+    const broadcastAt = text.indexOf('broadcastDataChanged()')
+    expect(savedAt).toBeGreaterThan(-1)
+    expect(savedAt).toBeLessThan(recordAt)
+    expect(recordAt).toBeLessThan(broadcastAt)
+  })
 })

@@ -17291,4 +17291,31 @@ describe('proposal letters (both backends)', () => {
     expect(update.text).toMatch(/set letter = \$2::jsonb, letter_at = now\(\)/)
     expect(JSON.parse(update.params[1]).text).toBe(drafted.text)
   })
+
+  it('refuses to write a letter onto an accepted proposal, and the stored letter is unchanged (file backend)', async () => {
+    const created = await store.createProposal({ prospect: { company: 'Acme Books' } })
+    const saved = await store.setProposalLetter(created.id, drafted)
+    await store.setProposalStatus(created.id, 'sent')
+    await store.setProposalStatus(created.id, 'accepted')
+    await expect(
+      store.setProposalLetter(created.id, { ...drafted, text: 'Overwritten mid-draft' }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    expect((await store.getProposal(created.id)).letter).toEqual(saved.letter)
+  })
+
+  it('refuses a declined proposal on Postgres too, without ever issuing the update', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'declined' }))
+    await expect(postgresStore(fake).setProposalLetter('prop-1', drafted)).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+    expect(fake.matching(/^update proposals/i)).toHaveLength(0)
+  })
+
+  it('the accepted/declined guard lives in the update WHERE clause too, for a race that lands mid-draft', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).setProposalLetter('prop-1', drafted)
+    expect(fake.matching(/^update proposals/i)[0].text).toMatch(
+      /where id = \$1 and status not in \('accepted', 'declined'\)/,
+    )
+  })
 })

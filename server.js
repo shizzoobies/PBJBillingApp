@@ -8181,7 +8181,20 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      const saved = await appDataStore.setProposalLetter(proposal.id, letter)
+      let saved
+      try {
+        saved = await appDataStore.setProposalLetter(proposal.id, letter)
+      } catch (error) {
+        if (error instanceof ProposalStateError) {
+          sendJson(response, 409, { error: 'proposal_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!saved) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
       await appDataStore.recordActivity(
         session.user.id,
         'proposal_letter_drafted',

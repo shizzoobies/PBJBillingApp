@@ -10397,10 +10397,22 @@ export class AppDataStore {
   /**
    * Save an AI-drafted letter (spec §5.3): subject, sections and the rendered
    * text she edits, stamped `letter_at`. Replaces whatever letter was there —
-   * the page asks before regenerating over an edited one. Returns the
-   * proposal, or null when there is none.
+   * the page asks before regenerating over an edited one.
+   *
+   * An accepted or declined proposal is a closed record and refuses
+   * (ProposalStateError), same convention as updateProposal — the route only
+   * checks status BEFORE handing the draft to the AI, so a decision landing
+   * during that slow call must not let the letter overwrite it afterward.
+   * Returns the proposal, or null when there is no such proposal.
    */
   async setProposalLetter(id, letter) {
+    const current = await this.getProposal(id)
+    if (!current) return null
+    if (current.status === 'accepted' || current.status === 'declined') {
+      throw new ProposalStateError(
+        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+      )
+    }
     const clean = {
       subject: String(letter?.subject ?? '').slice(0, 200),
       sections: (Array.isArray(letter?.sections) ? letter.sections : []).slice(0, 8).map((section) => ({
@@ -10413,17 +10425,27 @@ export class AppDataStore {
       const { rows } = await this.pool.query(
         `update proposals
             set letter = $2::jsonb, letter_at = now(), updated_at = now()
-          where id = $1
+          where id = $1 and status not in ('accepted', 'declined')
           returning ${PROPOSAL_COLUMNS}`,
         [id, JSON.stringify(clean)],
       )
-      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+      if (rows[0]) return AppDataStore.mapProposal(rows[0])
+      // Zero rows for an id we just confirmed exists and was writable: a
+      // concurrent accept/decline moved it in between.
+      throw new ProposalStateError(
+        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+      )
     }
     const authState = await readJson(localAuthPath)
     const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
       (row) => row && row.id === id,
     )
     if (!target) return null
+    if (target.status === 'accepted' || target.status === 'declined') {
+      throw new ProposalStateError(
+        `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+      )
+    }
     const now = nowIso()
     target.letter = clean
     target.letterAt = now
