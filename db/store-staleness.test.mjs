@@ -1145,6 +1145,17 @@ function fakePostgres({
     if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
       return { rows: groupSlices, rowCount: groupSlices.length }
     }
+    // The user-exists probe both rate-version upserts issue before writing.
+    // An unknown id must never reach the insert — in Postgres the foreign key
+    // would raise and the endpoint would 500 where it used to quietly no-op.
+    // The fake answers "this person exists" by default so every other test
+    // keeps its write; a test that supplies `userRows` gets the real
+    // membership check, which is what proves the guard actually filters.
+    if (/^select 1 from users where id = \$1$/i.test(trimmed)) {
+      if (userRows.length === 0) return { rows: [{}], rowCount: 1 }
+      const found = userRows.some((row) => row.id === params?.[0])
+      return { rows: found ? [{}] : [], rowCount: found ? 1 : 0 }
+    }
     // The bare id-validation query `setClientAssignedTeam` issues. Anchored to
     // the exact bare statement (no trailing `where`) so a reintroduced
     // `where role <> 'owner'` filter falls through to the empty default below
@@ -14967,6 +14978,27 @@ describe('bill rate versions (file backend)', () => {
     const members = await store.getTeamMembers()
     expect(members.find((member) => member.id === 'emp-lisa').billRate).toBeNull()
   })
+
+  // The two carried items from the Task 3 review, proved on the backend that
+  // actually keeps the rows.
+  it('writes NOTHING for a user who is not on the roster', async () => {
+    expect(
+      await store.upsertBillRateVersion({
+        userId: 'emp-ghost',
+        effectivePeriod: '2026-06',
+        rate: 40,
+      }),
+    ).toEqual([])
+    expect(await store.listBillRateVersions()).toEqual([])
+  })
+
+  it('setEmployeeBillRate answers the MIRROR, not the number it was handed', async () => {
+    // A rate that starts in the future is still the newest version, so saving
+    // "from this month on" does not change what this person bills at the top
+    // of the list — and the caller has to be told the number that won.
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2099-01', rate: 90 })
+    expect(await store.setEmployeeBillRate('emp-lisa', 48)).toBe(90)
+  })
 })
 
 describe('bill rate versions (postgres branch)', () => {
@@ -15004,5 +15036,178 @@ describe('bill rate versions (postgres branch)', () => {
     await postgresStore(fake).listBillRateVersions()
     const [select] = fake.matching(/from bill_rate_versions/i)
     expect(select.text).toMatch(/order by user_id asc, effective_period asc/i)
+  })
+
+  it('asks whether the user exists BEFORE inserting', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).upsertBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2026-06',
+      rate: 40,
+    })
+    const probe = /^select 1 from users where id = \$1$/i
+    expect(fake.matching(probe)[0].params).toEqual(['emp-lisa'])
+    expect(fake.indexOf(probe)).toBeLessThan(fake.indexOf(/^insert into bill_rate_versions/i))
+  })
+
+  it('clears every version with one delete when the rate is cleared', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).setEmployeeBillRate('emp-lisa', null)
+    const [remove] = fake.matching(/^delete from bill_rate_versions where user_id = \$1$/i)
+    expect(remove.params).toEqual(['emp-lisa'])
+  })
+})
+
+/**
+ * COST-RATE VERSIONS — the same write side, keyed by the DAY the rate starts
+ * (spec §2.3), because a raise lands on a payday and the payroll report's
+ * windows are semi-monthly date ranges rather than months.
+ *
+ * Same split as the bill half: the file backend proves the mirror end to end
+ * against the real `tmp/auth-state.json`, and the Postgres branch proves the
+ * statements only a database would run — cardinal rule 1, since a
+ * Postgres-only bug here would otherwise pass CI in silence.
+ */
+describe('cost rate versions (file backend)', () => {
+  beforeEach(async () => {
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.costRateVersions = []
+    authState.users = [{ id: 'emp-lisa', name: 'Lisa', role: 'employee' }]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  })
+
+  it('adds versions and mirrors the newest onto the user record', async () => {
+    await store.upsertCostRateVersion({
+      userId: 'emp-lisa',
+      effectiveDate: '1970-01-01',
+      rate: 20,
+    })
+    const versions = await store.upsertCostRateVersion({
+      userId: 'emp-lisa',
+      effectiveDate: '2026-09-15',
+      rate: 24,
+      actingUserId: 'emp-patrice',
+    })
+    expect(versions.map((row) => row.effectiveDate)).toEqual(['1970-01-01', '2026-09-15'])
+    expect(versions[1].createdBy).toBe('emp-patrice')
+    const members = await store.getTeamMembers()
+    expect(members.find((member) => member.id === 'emp-lisa').costRate).toBe(24)
+  })
+
+  it('REPLACES the row when the same day is saved again', async () => {
+    await store.upsertCostRateVersion({
+      userId: 'emp-lisa',
+      effectiveDate: '2026-09-15',
+      rate: 24,
+    })
+    const versions = await store.upsertCostRateVersion({
+      userId: 'emp-lisa',
+      effectiveDate: '2026-09-15',
+      rate: 25,
+    })
+    expect(versions).toHaveLength(1)
+    expect(versions[0].rate).toBe(25)
+  })
+
+  it('deletes the newest version and re-mirrors', async () => {
+    await store.upsertCostRateVersion({ userId: 'emp-lisa', effectiveDate: '1970-01-01', rate: 20 })
+    await store.upsertCostRateVersion({ userId: 'emp-lisa', effectiveDate: '2026-09-15', rate: 24 })
+    const versions = await store.deleteCostRateVersion({
+      userId: 'emp-lisa',
+      effectiveDate: '2026-09-15',
+    })
+    expect(versions.map((row) => row.effectiveDate)).toEqual(['1970-01-01'])
+    const members = await store.getTeamMembers()
+    expect(members.find((member) => member.id === 'emp-lisa').costRate).toBe(20)
+  })
+
+  it('REFUSES to delete anything but the newest version', async () => {
+    await store.upsertCostRateVersion({ userId: 'emp-lisa', effectiveDate: '1970-01-01', rate: 20 })
+    await store.upsertCostRateVersion({ userId: 'emp-lisa', effectiveDate: '2026-09-15', rate: 24 })
+    await expect(
+      store.deleteCostRateVersion({ userId: 'emp-lisa', effectiveDate: '1970-01-01' }),
+    ).rejects.toBeInstanceOf(RateVersionError)
+  })
+
+  it('setEmployeeCostRate still works and now writes today’s version', async () => {
+    expect(await store.setEmployeeCostRate('emp-lisa', 22)).toBe(22)
+    const versions = await store.listCostRateVersions()
+    expect(versions).toHaveLength(1)
+    expect(versions[0].effectiveDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(await store.setEmployeeCostRate('emp-lisa', null)).toBeNull()
+    expect(await store.listCostRateVersions()).toEqual([])
+  })
+
+  it('writes NOTHING for a user who is not on the roster', async () => {
+    expect(
+      await store.upsertCostRateVersion({
+        userId: 'emp-ghost',
+        effectiveDate: '2026-09-15',
+        rate: 24,
+      }),
+    ).toEqual([])
+    expect(await store.listCostRateVersions()).toEqual([])
+  })
+
+  it('setEmployeeCostRate answers the MIRROR, not the number it was handed', async () => {
+    await store.upsertCostRateVersion({ userId: 'emp-lisa', effectiveDate: '2099-01-01', rate: 30 })
+    expect(await store.setEmployeeCostRate('emp-lisa', 22)).toBe(30)
+  })
+})
+
+describe('cost rate versions (postgres branch)', () => {
+  it('upserts with ON CONFLICT and mirrors onto users', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).upsertCostRateVersion({
+      userId: 'emp-lisa',
+      effectiveDate: '2026-09-15',
+      rate: 24,
+      actingUserId: 'emp-patrice',
+    })
+    const [upsert] = fake.matching(/^insert into cost_rate_versions/i)
+    expect(upsert.text).toMatch(
+      /on conflict \(user_id, effective_date\) do update set rate = excluded\.rate/i,
+    )
+    expect(upsert.params).toEqual(['emp-lisa', '2026-09-15', 24, 'emp-patrice'])
+    expect(fake.matching(/^update users set cost_rate/i)).toHaveLength(1)
+  })
+
+  it('reads the date as a plain YYYY-MM-DD string, never a Date', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).listCostRateVersions()
+    const [select] = fake.matching(/from cost_rate_versions/i)
+    expect(select.text).toMatch(/to_char\(effective_date, 'YYYY-MM-DD'\)/i)
+    expect(select.text).toMatch(/order by user_id asc, effective_date asc/i)
+  })
+
+  it('deletes by the composite key', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.listCostRateVersions = async () => [
+      { userId: 'emp-lisa', effectiveDate: '2026-09-15', rate: 24 },
+    ]
+    await pgStore.deleteCostRateVersion({ userId: 'emp-lisa', effectiveDate: '2026-09-15' })
+    const [remove] = fake.matching(/^delete from cost_rate_versions/i)
+    expect(remove.text).toMatch(/where user_id = \$1 and effective_date = \$2/i)
+    expect(remove.params).toEqual(['emp-lisa', '2026-09-15'])
+  })
+
+  it('asks whether the user exists BEFORE inserting', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).upsertCostRateVersion({
+      userId: 'emp-lisa',
+      effectiveDate: '2026-09-15',
+      rate: 24,
+    })
+    const probe = /^select 1 from users where id = \$1$/i
+    expect(fake.matching(probe)[0].params).toEqual(['emp-lisa'])
+    expect(fake.indexOf(probe)).toBeLessThan(fake.indexOf(/^insert into cost_rate_versions/i))
+  })
+
+  it('clears every version with one delete when the rate is cleared', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).setEmployeeCostRate('emp-lisa', null)
+    const [remove] = fake.matching(/^delete from cost_rate_versions where user_id = \$1$/i)
+    expect(remove.params).toEqual(['emp-lisa'])
   })
 })

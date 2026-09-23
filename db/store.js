@@ -17,7 +17,7 @@ import {
   findChecklistInstance,
 } from '../lib/checklist-identity.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
-import { latestBillRate } from '../lib/rate-history.js'
+import { latestBillRate, latestCostRate } from '../lib/rate-history.js'
 import { isWaitingOnOpen, waitingOnStage } from '../lib/waiting-on-state.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
@@ -5283,6 +5283,13 @@ export class AppDataStore {
    * Backfilling an old month therefore leaves the mirror alone, which is right
    * — it did not change what this person bills today.
    *
+   * A user who is not on the roster is a NO-OP that returns `[]`, on both
+   * backends and for the same reason on each: in Postgres the foreign key
+   * would raise and turn a stale tab's save into a 500, and in the file
+   * backend nothing would stop an orphan version row being written for an id
+   * that names nobody. Refusing early is the one answer that reads the same
+   * either way.
+   *
    * Returns this user's versions, oldest first.
    */
   async upsertBillRateVersion({ userId, effectivePeriod, rate, actingUserId = null } = {}) {
@@ -5293,6 +5300,8 @@ export class AppDataStore {
     const normalized = Math.round(amount * 100) / 100
 
     if (this.pool) {
+      const { rows } = await this.pool.query(`select 1 from users where id = $1`, [userId])
+      if (rows.length === 0) return []
       await this.pool.query(
         `insert into bill_rate_versions (user_id, effective_period, rate, created_by)
          values ($1, $2, $3, $4)
@@ -5302,6 +5311,7 @@ export class AppDataStore {
       )
     } else {
       const authState = await readJson(localAuthPath)
+      if (!(authState.users ?? []).some((entry) => entry.id === userId)) return []
       if (!Array.isArray(authState.billRateVersions)) authState.billRateVersions = []
       const existing = authState.billRateVersions.find(
         (row) => row && row.userId === userId && row.effectivePeriod === effectivePeriod,
@@ -5394,35 +5404,174 @@ export class AppDataStore {
     return mirror
   }
 
-  /** Every cost-rate version on file, ordered by person then date. See above. */
+  /**
+   * Every cost-rate version, every person, oldest first per person.
+   *
+   * The date comes back as a plain 'YYYY-MM-DD' STRING, never a Date: the
+   * resolver compares lexicographically, and a Date would drag the server's
+   * time zone into what a person was paid on a given day. Same discipline as
+   * `time_entries.entry_date` everywhere else in this file.
+   *
+   * The five fields are PROJECTED rather than spread, for the same reason as
+   * the bill twin: Postgres answers `created_at` as a `Date` and the file
+   * backend as a string, and an ISO string on both is what a caller can
+   * compare or send over the wire without knowing which one it is talking to.
+   */
   async listCostRateVersions() {
     if (this.pool) {
       const { rows } = await this.pool.query(
         `select user_id, to_char(effective_date, 'YYYY-MM-DD') as effective_date,
                 rate, created_at, created_by
            from cost_rate_versions
-          order by user_id, effective_date`,
+          order by user_id asc, effective_date asc`,
       )
       return rows.map((row) => ({
         userId: row.user_id,
         effectiveDate: row.effective_date,
         rate: Number(row.rate),
-        createdAt: row.created_at ?? null,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
         createdBy: row.created_by ?? null,
       }))
     }
 
     if (!existsSync(localAuthPath)) return []
     const authState = await readJson(localAuthPath)
-    const versions = Array.isArray(authState.costRateVersions) ? authState.costRateVersions : []
-    return [...versions]
+    const list = Array.isArray(authState.costRateVersions) ? authState.costRateVersions : []
+    return list
       .filter((row) => row && typeof row.userId === 'string')
+      .map((row) => ({
+        userId: row.userId,
+        effectiveDate: row.effectiveDate,
+        rate: Number(row.rate),
+        createdAt: row.createdAt ?? null,
+        createdBy: row.createdBy ?? null,
+      }))
       .sort(
         (left, right) =>
           left.userId.localeCompare(right.userId) ||
           String(left.effectiveDate ?? '').localeCompare(String(right.effectiveDate ?? '')),
       )
-      .map((row) => ({ ...row, rate: Number(row.rate) }))
+  }
+
+  /**
+   * Save one person's cost rate from one DAY on.
+   *
+   * Keyed by the day rather than by the month the bill side uses, because a
+   * raise lands on a payday and the payroll report's windows are semi-monthly
+   * date ranges (spec §2.3).
+   *
+   * Same edit rule otherwise: REPLACE on the same day (a correction), INSERT
+   * otherwise — including a day EARLIER than the newest, which is a legitimate
+   * backfill and simply sorts into place — then re-mirror `users.cost_rate`
+   * from the NEWEST version. Backfilling an old day therefore leaves the
+   * mirror alone, which is right: it did not change what this person costs
+   * today.
+   *
+   * A user who is not on the roster is the same no-op as on the bill side,
+   * for the same two backend-specific reasons.
+   *
+   * Returns this user's versions, oldest first.
+   */
+  async upsertCostRateVersion({ userId, effectiveDate, rate, actingUserId = null } = {}) {
+    if (typeof userId !== 'string' || !userId) return []
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(effectiveDate ?? ''))) return []
+    const amount = Number(rate)
+    if (!Number.isFinite(amount) || amount < 0) return []
+    const normalized = Math.round(amount * 100) / 100
+
+    if (this.pool) {
+      const { rows } = await this.pool.query(`select 1 from users where id = $1`, [userId])
+      if (rows.length === 0) return []
+      await this.pool.query(
+        `insert into cost_rate_versions (user_id, effective_date, rate, created_by)
+         values ($1, $2, $3, $4)
+         on conflict (user_id, effective_date) do update set rate = excluded.rate,
+           created_by = excluded.created_by, created_at = now()`,
+        [userId, effectiveDate, normalized, actingUserId],
+      )
+    } else {
+      const authState = await readJson(localAuthPath)
+      if (!(authState.users ?? []).some((entry) => entry.id === userId)) return []
+      if (!Array.isArray(authState.costRateVersions)) authState.costRateVersions = []
+      const existing = authState.costRateVersions.find(
+        (row) => row && row.userId === userId && row.effectiveDate === effectiveDate,
+      )
+      if (existing) {
+        existing.rate = normalized
+        existing.createdAt = nowIso()
+        existing.createdBy = actingUserId
+      } else {
+        authState.costRateVersions.push({
+          userId,
+          effectiveDate,
+          rate: normalized,
+          createdAt: nowIso(),
+          createdBy: actingUserId,
+        })
+      }
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+
+    await this._mirrorLatestCostRate(userId)
+    return (await this.listCostRateVersions()).filter((row) => row.userId === userId)
+  }
+
+  /**
+   * Remove one cost-rate version — the NEWEST only, for the same reason the
+   * bill side refuses an older one: an old version is what past months were
+   * costed at, and a recap that changes after the fact is the thing this whole
+   * feature exists to stop.
+   *
+   * ONE guard here rather than two: cost is resolved by the DAY the work was
+   * done, so no client is pointing at a particular row and there is no pin to
+   * strand.
+   *
+   * Throws `RateVersionError`, which the endpoint maps to 409.
+   */
+  async deleteCostRateVersion({ userId, effectiveDate } = {}) {
+    if (typeof userId !== 'string' || !userId) return []
+    const mine = (await this.listCostRateVersions()).filter((row) => row.userId === userId)
+    const target = mine.find((row) => row.effectiveDate === effectiveDate)
+    if (!target) return mine
+    const newest = mine[mine.length - 1]
+    if (newest.effectiveDate !== effectiveDate) {
+      throw new RateVersionError(
+        'Only the newest cost rate can be removed — an older one is what past months were costed at.',
+      )
+    }
+
+    if (this.pool) {
+      await this.pool.query(
+        `delete from cost_rate_versions where user_id = $1 and effective_date = $2`,
+        [userId, effectiveDate],
+      )
+    } else {
+      const authState = await readJson(localAuthPath)
+      authState.costRateVersions = (
+        Array.isArray(authState.costRateVersions) ? authState.costRateVersions : []
+      ).filter((row) => !(row && row.userId === userId && row.effectiveDate === effectiveDate))
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+
+    await this._mirrorLatestCostRate(userId)
+    return (await this.listCostRateVersions()).filter((row) => row.userId === userId)
+  }
+
+  /** `users.cost_rate` = the newest version, or null when there is none. */
+  async _mirrorLatestCostRate(userId) {
+    const versions = await this.listCostRateVersions()
+    const mirror = latestCostRate(versions, userId)
+    if (this.pool) {
+      await this.pool.query(`update users set cost_rate = $2 where id = $1`, [userId, mirror])
+      return mirror
+    }
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((entry) => entry.id === userId)
+    if (!user) return mirror
+    if (mirror === null) delete user.costRate
+    else user.costRate = mirror
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return mirror
   }
 
   /**
@@ -15455,29 +15604,44 @@ export class AppDataStore {
   /**
    * Owner-only: set or clear a team member's cost/pay rate (assistant Phase 4).
    * `rate` is a non-negative number, or null to clear. Informational only —
-   * never affects invoices. Returns the normalized rate (or null).
+   * never affects invoices.
+   *
+   * NOW A THIN WRAPPER over the version list: saving a rate with no date
+   * attached means "from today on", which is what this control has always
+   * meant and is the default the Team page's effective-from input offers.
+   * Clearing removes EVERY version — there is no rate on file any more, so
+   * there is no history of one either.
+   *
+   * Kept so the existing endpoint, the existing tests and any old client keep
+   * working while the Team page moves to the dated control.
+   *
+   * Returns the MIRROR rather than the number it was handed: once a
+   * future-dated version is on file the two differ, and what the caller is
+   * about to show is what this person costs TODAY.
    */
   async setEmployeeCostRate(userId, rate) {
     if (!userId) return null
-    let normalized = null
-    if (rate !== null && rate !== undefined && rate !== '') {
-      const n = Number(rate)
-      if (!Number.isFinite(n) || n < 0) return null
-      normalized = Math.round(n * 100) / 100
+    if (rate === null || rate === undefined || rate === '') {
+      if (this.pool) {
+        await this.pool.query(`delete from cost_rate_versions where user_id = $1`, [userId])
+      } else {
+        const authState = await readJson(localAuthPath)
+        authState.costRateVersions = (
+          Array.isArray(authState.costRateVersions) ? authState.costRateVersions : []
+        ).filter((row) => !(row && row.userId === userId))
+        await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      }
+      return this._mirrorLatestCostRate(userId)
     }
-
-    if (this.pool) {
-      await this.pool.query(`update users set cost_rate = $2 where id = $1`, [userId, normalized])
-      return normalized
-    }
-
-    const authState = await readJson(localAuthPath)
-    const user = (authState.users ?? []).find((u) => u.id === userId)
-    if (!user) return null
-    if (normalized === null) delete user.costRate
-    else user.costRate = normalized
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return normalized
+    const n = Number(rate)
+    if (!Number.isFinite(n) || n < 0) return null
+    await this.upsertCostRateVersion({
+      userId,
+      effectiveDate: nowIso().slice(0, 10),
+      rate: n,
+      actingUserId: null,
+    })
+    return this._mirrorLatestCostRate(userId)
   }
 
   /**
@@ -15491,6 +15655,10 @@ export class AppDataStore {
    *
    * Kept so the existing endpoint, the existing tests and any old client keep
    * working while the Team page moves to the dated control.
+   *
+   * Returns the MIRROR rather than the number it was handed: once a
+   * future-dated version is on file the two differ, and what the caller is
+   * about to show is what this person bills TODAY.
    */
   async setEmployeeBillRate(userId, rate) {
     if (!userId) return null
@@ -15514,7 +15682,7 @@ export class AppDataStore {
       rate: n,
       actingUserId: null,
     })
-    return Math.round(n * 100) / 100
+    return this._mirrorLatestBillRate(userId)
   }
 
   /**
