@@ -1679,15 +1679,15 @@ Clients page meanwhile. Owner-only.
     there are; a muted note under the detail totals says so on the page. A
     full-mode repeat shows no cost, on screen and in the export alike (the firm
     pays for the block once).
-  - **WHICH cost rate, now that rates are dated.** Every figure that has a
-    date — each per-entry Cost cell, each day's subtotal and the detail table's
-    total, and the "Raw hours" export — uses the cost rate in force on that
-    entry's date, so a raise mid-period costs each side of it at its own rate.
-    The per-person PERIOD figures — the payroll summary's Cost column and its
-    total, the Summary CSV, and the Employee report's Cost — have no single
-    day, so they use each person's CURRENT cost rate. When a raise lands inside
-    the period, the summary and the detail total can therefore differ; the
-    detail is the one that follows the pay history.
+  - **WHICH cost rate, now that rates are dated.** Every cost figure on the
+    payroll and Employee reports — each per-entry Cost cell and the "Raw hours"
+    export, each person's PERIOD Cost (the payroll summary's Cost column, the
+    Summary CSV, the Employee report's Cost and its CSV), and every total under
+    them — uses the cost rate the person was paid on the DAY each entry was
+    worked. A person's period Cost is their pre-raise rows at the old rate plus
+    their post-raise rows at the new one, so the summary, the detail and their
+    totals always agree: a raise mid-period shows up only in the rows it
+    landed on, and the hours worked before it are never paid at the new rate.
   - **Anyone with no cost rate** reads "—" on their rows and contributes
     nothing to any cost total. That is a correct, finished state, not a gap.
     Owners are in the same boat as everyone else: an owner who has entered a
@@ -1739,8 +1739,9 @@ Clients page meanwhile. Owner-only.
 - Employee report (hours by person, including billable $ = each person's
   billable hours × their current bill rate — NOT the rate month each client is
   pinned to, so it can differ from the invoices (a known follow-up) — and
-  **Cost** = their tracked hours × their current COST rate; owners are
-  included) and Client report (hours by client), each with
+  **Cost** = their tracked hours, each at the COST rate in force on the day it
+  was worked, so it matches the payroll report; owners are included) and
+  Client report (hours by client), each with
   Download CSV. Print-friendly output — the Cost column is on the printed
   employee table and in its CSV, matching the payroll tables: "—" (never
   "$0.00") for anyone with no cost rate on file, owners included — and an owner

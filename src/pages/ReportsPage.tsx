@@ -117,17 +117,22 @@ export function ReportsPage() {
   const costRateOn = (employeeId: string, entryDate?: string) =>
     costRateFor(costRateVersions, employeeId, entryDate ?? null)
   /**
-   * A PERIOD figure has no single day, so the per-person period columns price
-   * at that person's CURRENT (newest) cost rate — which is what this page has
-   * always shown. The per-entry and per-day figures use `costRateOn` and are
-   * the ones a raise actually moves.
+   * One person's labor cost over a PERIOD, priced by the day each entry was
+   * worked. `laborCost` groups that person's rows by the rate in force on
+   * their day, so a raise mid-period costs each side of it at its own rate and
+   * the per-person figure ties exactly to the per-entry cells and the detail
+   * total — the summary is what she pays people from, so it cannot disagree.
+   *
+   * `entries` may be the whole window; only this person's rows are priced.
+   * `null` ("—", never $0.00) when the person has no cost rate on file at all.
    */
-  const costRates: Record<string, number | null> = Object.fromEntries(
-    [...new Set(costRateVersions.map((row) => row.userId))].map((userId) => [
-      userId,
-      latestCostRate(costRateVersions, userId),
-    ]),
-  )
+  const periodCostOf = (employeeId: string, entries: TimeEntry[]) =>
+    latestCostRate(costRateVersions, employeeId) === null
+      ? null
+      : laborCost(
+          entries.filter((entry) => entry.employeeId === employeeId),
+          costRateOn,
+        )
 
   if (!ownerMode) {
     return null
@@ -299,7 +304,7 @@ export function ReportsPage() {
         checklists={data.checklists}
         clients={data.clients}
         employees={employeesForReport}
-        costRates={costRates}
+        periodCostOf={periodCostOf}
         costRateOn={costRateOn}
         timeEntries={data.timeEntries}
       />
@@ -312,7 +317,7 @@ export function ReportsPage() {
         taskRows={taskReportRows}
         clientRows={clientReportRows}
         clients={data.clients}
-        costRates={costRates}
+        periodCostOf={periodCostOf}
         employeeRows={employeeReportRows}
         employees={employeesForNameLookup}
         ownerBillableMinutes={ownerBillableMinutes}
@@ -395,7 +400,7 @@ function PayrollHoursReport({
   checklists,
   clients,
   employees,
-  costRates,
+  periodCostOf,
   costRateOn,
   timeEntries,
 }: {
@@ -403,10 +408,10 @@ function PayrollHoursReport({
   clients: Client[]
   employees: Employee[]
   /**
-   * CURRENT cost/pay rate by member id, for the per-person PERIOD columns;
-   * missing or null = no cost rate (see below).
+   * One person's cost over the given entries, each priced at the rate on the
+   * day it was worked — the per-person PERIOD columns; null = no cost rate.
    */
-  costRates: Record<string, number | null>
+  periodCostOf: (employeeId: string, entries: TimeEntry[]) => number | null
   /**
    * The cost rate in force on a given day, for the per-entry figures — which
    * have a date, so a raise mid-period costs each side of it at its own rate.
@@ -649,20 +654,21 @@ function PayrollHoursReport({
    *  - it applies to ALL hours worked, not just billable ones. You pay for
    *    internal time too, which is the whole point of comparing the two.
    *
-   * Priced by `personPeriodCost` off the person's two-decimal hours — the same
-   * hours printed in the Hours cell — so the Cost cell is reproducible by hand
-   * and a column of these adds up to the total printed underneath it. `null` =
+   * Priced by `laborCost` off the person's two-decimal row hours, grouped by
+   * the rate in force on each entry's day — so with one rate in the period the
+   * Hours cell times that rate reproduces the Cost cell, a raise mid-period
+   * costs each side of it at its own rate, and this figure always equals the
+   * sum of the person's per-entry Cost cells in the detail below. `null` =
    * no cost rate, which is a real state and not a missing value: that person's
    * time carries no labor cost. Never render it as $0.00. An owner is priced
    * from her own cost rate when she has set one (featreq-6fdd9e98) and reads
    * "—" when she has not.
    */
-  const costFor = (employeeId: string, minutesPerRow: number[]) =>
-    periodMoney(minutesPerRow, costRates[employeeId])
+  const costFor = (employeeId: string) => periodCostOf(employeeId, inRange)
 
   // Every cost total is the SUM OF THE PER-PERSON CENTS, never a float sum of
   // the parts — that is what lets the owner add the Cost column up by hand.
-  const totalCost = sumPersonCosts(rows.map((row) => costFor(row.id, row.trackedRowMinutes)))
+  const totalCost = sumPersonCosts(rows.map((row) => costFor(row.id)))
 
   // Cost counts a full-mode group's wall time once — the firm pays for the
   // block, not for each client it was billed to — and `laborCost` groups by
@@ -762,7 +768,7 @@ function PayrollHoursReport({
           decimalHours(row.internal),
           row.count,
           // Blank, not 0.00, when the person has no cost rate.
-          costFor(row.id, row.trackedRowMinutes)?.toFixed(2) ?? '',
+          costFor(row.id)?.toFixed(2) ?? '',
         ]),
         // Same summed-rows total the on-screen footer shows, so the CSV and the
         // printout can never hand her two different numbers.
@@ -945,7 +951,7 @@ function PayrollHoursReport({
                   <td>{money(row.amount)}</td>
                   {/* Cost is on HOURS WORKED, not billable hours — the firm
                       pays for internal time too. "—" for the owner. */}
-                  <td>{money(costFor(row.id, row.trackedRowMinutes))}</td>
+                  <td>{money(costFor(row.id))}</td>
                   <td className="no-print">{formatDecimalHours(row.internal)}</td>
                   <td className="no-print">{row.count}</td>
                 </tr>
@@ -1111,7 +1117,7 @@ function ReportsOverview({
   taskRows,
   clientRows,
   clients,
-  costRates,
+  periodCostOf,
   employeeRows,
   employees,
   ownerBillableMinutes,
@@ -1128,8 +1134,8 @@ function ReportsOverview({
   taskRows: TaskReportRow[]
   clientRows: ClientReportRow[]
   clients: Client[]
-  /** Cost/pay rate by member id; missing or null = no cost rate. */
-  costRates: Record<string, number | null>
+  /** One person's cost, each entry at the rate on its day; null = no cost rate. */
+  periodCostOf: (employeeId: string, entries: TimeEntry[]) => number | null
   employeeRows: EmployeeReportRow[]
   employees: Employee[]
   ownerBillableMinutes: number
@@ -1155,10 +1161,12 @@ function ReportsOverview({
    * else (featreq-6fdd9e98), one without still reads "—".
    *
    * "Cent-rounded once per person" now means off that person's two-decimal
-   * hours, so the Tracked hours cell beside it multiplies straight into Cost.
+   * row hours at each rate in force during the period (`laborCost`), so with
+   * one rate the Tracked hours cell beside it multiplies straight into Cost,
+   * and a raise mid-period lands only on the rows worked after it.
    */
-  const overviewCostFor = (employeeId: string, minutesPerRow: number[]) =>
-    periodMoney(minutesPerRow, costRates[employeeId])
+  const overviewCostFor = (employeeId: string) =>
+    periodCostOf(employeeId, billingPeriodEntries)
 
   const periodSlug = billingPeriod || 'period'
   const exportEmployees = () =>
@@ -1182,7 +1190,7 @@ function ReportsOverview({
         row.billableHours.toFixed(2),
         row.billableAmount.toFixed(2),
         // Blank, not 0.00, when the person has no cost rate.
-        overviewCostFor(row.employeeId, row.trackedRowMinutes)?.toFixed(2) ?? '',
+        overviewCostFor(row.employeeId)?.toFixed(2) ?? '',
         decimalHours(row.internalMinutes),
         row.entryCount,
         row.clientCount,
@@ -1338,7 +1346,7 @@ function ReportsOverview({
             'Clients',
           ]}
           rows={employeeRows.map((row) => {
-            const cost = overviewCostFor(row.employeeId, row.trackedRowMinutes)
+            const cost = overviewCostFor(row.employeeId)
             return [
               employeeName(employees, row.employeeId),
               `${row.hours.toFixed(2)}h`,

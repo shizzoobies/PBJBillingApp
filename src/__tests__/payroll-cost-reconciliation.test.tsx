@@ -406,7 +406,7 @@ describe('an owner with a cost rate is costed like anyone else', () => {
  * person's record mirrors today.
  */
 describe('Reports costs a raise on the day it landed', () => {
-  it('splits one person’s period across the raise in the detail total', async () => {
+  it('splits one person’s period across the raise in the summary and the detail alike', async () => {
     mockFetchRateVersions.mockResolvedValue({
       billRateVersions: [],
       costRateVersions: [
@@ -432,7 +432,8 @@ describe('Reports costs a raise on the day it landed', () => {
     fireEvent.change(screen.getByLabelText('Period start date'), {
       target: { value: '2026-09-14' },
     })
-    expect(await screen.findByText('$44.00')).toBeInTheDocument()
+    // $44.00 shows in the summary cell, the summary total and the detail total.
+    expect((await screen.findAllByText('$44.00')).length).toBeGreaterThan(0)
 
     // Each entry at its own day's rate, and the column still adds to $44.00.
     const table = container.querySelectorAll('#payroll-hours table')[1]
@@ -441,9 +442,18 @@ describe('Reports costs a raise on the day it landed', () => {
     )
     expect(entryCosts).toEqual(['$20.00', '$24.00'])
 
-    // The per-person PERIOD column has no single day, so it stays at her
-    // current rate: 2.00h x $24.
-    const lisa = summaryTable(container).body.find((cells) => cells[0] === 'Lisa Park')
-    expect(lisa?.[COST]).toBe('$48.00')
+    // The per-person PERIOD column is priced by the day worked too — 1.00h at
+    // $20 + 1.00h at $24 — never 2.00h at her current rate ($48.00), which
+    // would overpay the hours worked before the raise.
+    const { body, footer } = summaryTable(container)
+    const lisa = body.find((cells) => cells[0] === 'Lisa Park')
+    expect(lisa?.[COST]).toBe('$44.00')
+
+    // The summary total and the detail total are the same figure.
+    const detailFooter = [
+      ...(table.querySelector('tfoot tr') as Element).querySelectorAll('td'),
+    ].map((td) => td.textContent ?? '')
+    expect(detailFooter.at(-1)).toBe('$44.00')
+    expect(footer[COST]).toBe(detailFooter.at(-1))
   })
 })
