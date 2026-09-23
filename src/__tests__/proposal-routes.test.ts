@@ -162,3 +162,20 @@ describe('drafting the letter', () => {
     expect(recordAt).toBeLessThan(broadcastAt)
   })
 })
+
+describe('previewing the PDF', () => {
+  pinOwnerRoutes([
+    {
+      name: 'GET /api/proposals/:id/pdf',
+      pattern: /proposalPdfMatch && request\.method === 'GET'/,
+      write: false,
+    },
+  ])
+
+  it('renders the stored proposal as a PDF, never cached', () => {
+    const block = routeBlock(/proposalPdfMatch && request\.method === 'GET'/, 1400)
+    expect(block).toContain('buildProposalPdf({')
+    expect(block).toContain("'Content-Type': 'application/pdf'")
+    expect(block).toContain("'Cache-Control': 'no-store'")
+  })
+})

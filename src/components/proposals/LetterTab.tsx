@@ -63,6 +63,14 @@ export function LetterTab({
           >
             {copied ? 'Copied' : 'Copy text'}
           </button>
+          <a
+            className="secondary-action"
+            href={`/api/proposals/${encodeURIComponent(proposal.id)}/pdf`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Preview PDF
+          </a>
         </div>
       </div>
       {proposal.letter?.subject ? (

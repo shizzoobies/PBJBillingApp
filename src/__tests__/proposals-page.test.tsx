@@ -721,3 +721,12 @@ describe('the Letter tab', () => {
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeTruthy()
   })
 })
+
+describe('Preview PDF', () => {
+  it('links to the server-rendered PDF in a new tab', async () => {
+    renderEditor('/proposals/prop-1?tab=letter')
+    const link = await screen.findByRole('link', { name: 'Preview PDF' })
+    expect(link.getAttribute('href')).toBe('/api/proposals/prop-1/pdf')
+    expect(link.getAttribute('target')).toBe('_blank')
+  })
+})

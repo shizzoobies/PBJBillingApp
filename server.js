@@ -71,6 +71,7 @@ import {
   verifyResendWebhook,
 } from './lib/resend-webhook.js'
 import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
+import { buildProposalPdf, proposalPdfFilename } from './lib/proposal-pdf.js'
 import {
   cardProcessingFeeLine,
   isInBillingPeriod,
@@ -8202,6 +8203,34 @@ const server = createServer(async (request, response) => {
       )
       broadcastDataChanged()
       sendJson(response, 200, saved)
+      return
+    }
+
+    // GET /api/proposals/:id/pdf — "Preview PDF": exactly the document Send
+    // attaches, rendered from the stored snapshot and the edited letter.
+    const proposalPdfMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/pdf$/)
+    if (proposalPdfMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see proposals' })
+        return
+      }
+      const proposal = await appDataStore.getProposal(proposalPdfMatch[1])
+      if (!proposal) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      const pdf = await buildProposalPdf({
+        proposal,
+        firmSettings: await appDataStore.getFirmSettings(),
+      })
+      response.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `inline; filename="${proposalPdfFilename(proposal)}"`,
+        'Cache-Control': 'no-store',
+      })
+      response.end(pdf)
       return
     }
 
