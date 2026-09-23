@@ -80,6 +80,10 @@ const CHILD_TABLES = [
   'invoices',
   'invoice_review_events',
   'invoice_ai_reviews',
+  // Not a foreign key (a proposal outlives a deleted client - db/store.js
+  // ProposalStateError block); production does not have this table yet, so
+  // `touchedTables()` prints a NOTE and skips it until it does.
+  'proposals',
 ]
 
 // checklist_items / checklist_template_items / checklist_template_stages key on

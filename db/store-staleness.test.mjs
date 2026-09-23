@@ -16898,6 +16898,80 @@ describe('proposals (file backend)', () => {
     expect(BULK_SAVE_SLICES).not.toContain('proposals')
     expect(workspaceVersionSql()).not.toMatch(/proposals/i)
   })
+
+  // ---- I1: reprice scope ----
+
+  it('a prospect edit after a catalog rate change keeps the old pricing snapshot (I1)', async () => {
+    const created = await store.createProposal({
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: { ...seed, rates: { ...seed.rates, bookkeeper: 100 } },
+    })
+    const edited = await store.updateProposal(created.id, { prospect: { company: 'New Co' } })
+    expect(edited.prospect.company).toBe('New Co')
+    expect(edited.pricingSnapshot.totals.monthly).toBe(630)
+  })
+
+  it('an inputs edit reprices, even without touching selections (I1)', async () => {
+    const created = await store.createProposal({
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const edited = await store.updateProposal(created.id, { inputs: { transactions: 200 } })
+    expect(edited.pricingSnapshot.totals.monthly).toBe(1050)
+  })
+
+  it('an empty patch on a draft reprices at today’s catalog (I1)', async () => {
+    const created = await store.createProposal({
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: { ...seed, rates: { ...seed.rates, bookkeeper: 100 } },
+    })
+    const repriced = await store.updateProposal(created.id, {})
+    expect(repriced.pricingSnapshot.totals.monthly).toBe(840)
+  })
+
+  it('an empty patch on a sent proposal is refused (I1)', async () => {
+    const created = await store.createProposal({})
+    await store.setProposalStatus(created.id, 'sent')
+    await expect(store.updateProposal(created.id, {})).rejects.toBeInstanceOf(ProposalStateError)
+  })
+
+  // ---- I2: accept/decline transition guard ----
+
+  it('refuses a second accept, and keeps the first accepted_at (I2)', async () => {
+    const created = await store.createProposal({})
+    const first = await store.setProposalStatus(created.id, 'accepted')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await expect(store.setProposalStatus(created.id, 'accepted')).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+    expect((await store.getProposal(created.id)).acceptedAt).toBe(first.acceptedAt)
+  })
+
+  it('refuses declined -> accepted (I2)', async () => {
+    const created = await store.createProposal({})
+    await store.setProposalStatus(created.id, 'declined', { note: 'Not this year' })
+    await expect(store.setProposalStatus(created.id, 'accepted')).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+  })
+
+  // ---- M5 ----
+
+  it('a delivery event with no event name is a no-op that returns the proposal, not null (M5)', async () => {
+    const created = await store.createProposal({})
+    const result = await store.appendProposalEmailEvent(created.id, { kind: 'delivery' })
+    expect(result).not.toBeNull()
+    expect(result.id).toBe(created.id)
+    expect(result.emailLog).toEqual([])
+  })
 })
 
 /** A recorder pool that answers the firm-settings read and echoes one proposal row. */
@@ -16964,16 +17038,127 @@ describe('proposals (postgres branch)', () => {
     expect(snapshot.totals).toHaveProperty('monthly')
   })
 
-  it('updates with a fresh snapshot, and refuses a declined row', async () => {
+  it('updates with a fresh snapshot, binding the actual inputs and totals, and refuses a declined row', async () => {
     const fake = fakeProposalPostgres(proposalRow())
     await postgresStore(fake).updateProposal('prop-1', { inputs: { transactions: 10 } })
     const update = fake.matching(/^update proposals/i)[0]
     expect(update.text).toMatch(/pricing_snapshot = \$6::jsonb/)
+    expect(JSON.parse(update.params[3])).toEqual({ transactions: 10 })
+    const boundSnapshot = JSON.parse(update.params[5])
+    expect(boundSnapshot.totals).toHaveProperty('monthly')
+    expect(boundSnapshot.lines[0]).toMatchObject({ serviceId: 'monthly-weekly-transactions-basic' })
 
     const declined = fakeProposalPostgres(proposalRow({ status: 'declined' }))
     await expect(postgresStore(declined).updateProposal('prop-1', {})).rejects.toBeInstanceOf(
       ProposalStateError,
     )
+  })
+
+  it('the accepted/declined guard lives in the update WHERE clause too (M2)', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).updateProposal('prop-1', {})
+    expect(fake.matching(/^update proposals/i)[0].text).toMatch(/status not in \('accepted', 'declined'\)/)
+  })
+
+  it('an empty patch on a sent proposal is refused before any update runs (I1)', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'sent' }))
+    await expect(postgresStore(fake).updateProposal('prop-1', {})).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+    expect(fake.matching(/^update proposals/i)).toHaveLength(0)
+  })
+
+  it('lists via a plain select, and gets one proposal by id or null (listProposals / getProposal)', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    const list = await postgresStore(fake).listProposals()
+    expect(list).toHaveLength(1)
+    expect(list[0].id).toBe('prop-1')
+    const selects = fake.matching(/^select/i)
+    expect(
+      selects.some((s) => /from proposals/i.test(s.text) && /order by updated_at desc/i.test(s.text)),
+    ).toBe(true)
+
+    expect((await postgresStore(fake).getProposal('prop-1')).id).toBe('prop-1')
+
+    const empty = fakeProposalPostgres(null)
+    expect(await postgresStore(empty).getProposal('nope')).toBeNull()
+  })
+
+  it('copies via a fresh insert: copied_from_id set, priced at today’s catalog, letter/messages not carried over', async () => {
+    const fake = fakeProposalPostgres(
+      proposalRow({
+        inputs: { transactions: 120 },
+        selections: [{ serviceId: 'monthly-weekly-transactions-basic', override: 600 }],
+      }),
+    )
+    await postgresStore(fake).copyProposal('prop-1', { createdBy: 'emp-2' })
+    const insert = fake.matching(/^insert into proposals/i)[0]
+    expect(insert.params[6]).toBe('prop-1') // copied_from_id
+    expect(insert.params[7]).toBe('emp-2') // created_by
+    expect(JSON.parse(insert.params[5]).totals.monthly).toBe(600)
+    // The insert's own column/values list never names letter or messages -
+    // Postgres defaults them (null / '[]'), so a copy never carries the
+    // source's. (The `returning` clause lists every column, letter and
+    // messages included, so only the part before it is checked here.)
+    const columnsAndValues = insert.text.split(/\breturning\b/i)[0]
+    expect(columnsAndValues).not.toMatch(/\bletter\b/)
+    expect(columnsAndValues).not.toMatch(/\bmessages\b/)
+  })
+
+  it('accept/decline: the transition guard lives in the WHERE clause too (I2)', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'sent' }))
+    await postgresStore(fake).setProposalStatus('prop-1', 'accepted')
+    expect(fake.matching(/^update proposals/i)[0].text).toMatch(
+      /and \(\$2 not in \('accepted', 'declined'\) or status in \('draft', 'sent'\)\)/,
+    )
+  })
+
+  it('refuses to move an already-decided proposal, without ever issuing the update (I2)', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'declined' }))
+    await expect(postgresStore(fake).setProposalStatus('prop-1', 'accepted')).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+    expect(fake.matching(/^update proposals/i)).toHaveLength(0)
+  })
+
+  it('a decline without a note does not overwrite an earlier one, in the statement itself', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'sent', decline_note: 'Went with a friend' }))
+    await postgresStore(fake).setProposalStatus('prop-1', 'declined', {})
+    expect(fake.matching(/^update proposals/i)[0].text).toMatch(
+      /decline_note = case when \$2 = 'declined' then coalesce\(\$3, decline_note\) else decline_note end/,
+    )
+  })
+
+  it('updateProposal, setProposalStatus and deleteProposal all answer not-found with null/false', async () => {
+    const fake = fakeProposalPostgres(null)
+    const missing = postgresStore(fake)
+    expect(await missing.updateProposal('nope', {})).toBeNull()
+    expect(await missing.setProposalStatus('nope', 'sent')).toBeNull()
+    expect(await missing.deleteProposal('nope')).toBe(false)
+  })
+
+  it('an unknown status throws on read rather than silently mapping to draft (M3)', () => {
+    expect(() => AppDataStore.mapProposal(proposalRow({ status: 'archived' }))).toThrow()
+  })
+
+  it('a missing createdAt stays null, and an unparseable timestamp maps to null (M9)', () => {
+    const mapped = AppDataStore.mapProposal(proposalRow({ created_at: null, sent_at: 'not-a-date' }))
+    expect(mapped.createdAt).toBeNull()
+    expect(mapped.sentAt).toBeNull()
+  })
+
+  it('the email-log guard is a jsonb-containment probe, so a concurrent retry cannot double-append (M4)', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).appendProposalEmailEvent('prop-1', {
+      kind: 'delivery',
+      event: 'delivered',
+      providerId: 're_9',
+    })
+    const update = fake.matching(/^update proposals/i)[0]
+    expect(update.text).toMatch(
+      /where id = \$1 and not \(coalesce\(email_log, '\[\]'::jsonb\) @> \$3::jsonb\)/,
+    )
+    expect(JSON.parse(update.params[2])).toEqual([{ kind: 'delivery', providerId: 're_9', event: 'delivered' }])
   })
 
   it('deletes drafts only, in the statement itself', async () => {

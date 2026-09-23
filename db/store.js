@@ -1112,6 +1112,14 @@ function proposalSnapshot(pricing, inputs, selections, at) {
   return { rates: { ...pricing.rates }, lines, totals, catalogAt: at }
 }
 
+/** Trim and cap an id-like proposal field (clientId / createdBy / copiedFromId)
+ *  to 64 chars; anything else that is not a non-empty string is null. */
+function cleanProposalId(value) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed ? trimmed.slice(0, 64) : null
+}
+
 /**
  * An answer aimed at a rating or a question that isn't there — a re-rate landed
  * between the page loading and the owner typing, or the id is simply wrong.
@@ -4096,7 +4104,8 @@ export class AppDataStore {
       await this.pool.query(`
         create table if not exists proposals (
           id text primary key,
-          status text not null default 'draft',
+          status text not null default 'draft'
+            check (status in ('draft', 'sent', 'accepted', 'declined')),
           prospect jsonb not null default '{}'::jsonb,
           client_id text,
           inputs jsonb not null default '{}'::jsonb,
@@ -9923,15 +9932,28 @@ export class AppDataStore {
   /** Normalize a stored proposal (either backend's row shape) for the API. */
   static mapProposal(row) {
     if (!row) return null
+    // An unknown status is a data problem, not a draft - mapping it to
+    // 'draft' would make an accepted/declined row editable again by accident.
+    if (!PROPOSAL_STATUSES.includes(row.status)) {
+      throw new Error(
+        `Proposal ${row.id ?? '(unknown id)'} has an unrecognized status ${JSON.stringify(row.status)}`,
+      )
+    }
     const json = (value) => (typeof value === 'string' ? safeJsonParse(value) : value)
-    const iso = (value) => (value ? new Date(value).toISOString() : null)
+    // A timestamp column can hold junk from an older shape; that is not
+    // grounds to throw on a plain read - map it to null like "never happened".
+    const iso = (value) => {
+      if (!value) return null
+      const date = new Date(value)
+      return Number.isNaN(date.getTime()) ? null : date.toISOString()
+    }
     const list = (value) => {
       const parsed = json(value)
       return Array.isArray(parsed) ? parsed : []
     }
     return {
       id: row.id,
-      status: PROPOSAL_STATUSES.includes(row.status) ? row.status : 'draft',
+      status: row.status,
       prospect: cleanProposalProspect(json(row.prospect)),
       clientId: row.client_id ?? row.clientId ?? null,
       inputs: cleanProposalInputs(json(row.inputs)),
@@ -9947,7 +9969,7 @@ export class AppDataStore {
       declineNote: row.decline_note ?? row.declineNote ?? null,
       copiedFromId: row.copied_from_id ?? row.copiedFromId ?? null,
       createdBy: row.created_by ?? row.createdBy ?? null,
-      createdAt: iso(row.created_at ?? row.createdAt) ?? nowIso(),
+      createdAt: iso(row.created_at ?? row.createdAt),
       updatedAt: iso(row.updated_at ?? row.updatedAt),
     }
   }
@@ -10007,7 +10029,7 @@ export class AppDataStore {
       id: `prop-${randomUUID().slice(0, 8)}`,
       status: 'draft',
       prospect: cleanProposalProspect(prospect),
-      clientId: typeof clientId === 'string' && clientId ? clientId : null,
+      clientId: cleanProposalId(clientId),
       inputs: cleanInputs,
       selections: cleanSelections,
       pricingSnapshot: proposalSnapshot(pricing, cleanInputs, cleanSelections, now),
@@ -10019,8 +10041,8 @@ export class AppDataStore {
       acceptedAt: null,
       declinedAt: null,
       declineNote: null,
-      copiedFromId: typeof copiedFromId === 'string' && copiedFromId ? copiedFromId : null,
-      createdBy: typeof createdBy === 'string' && createdBy ? createdBy : null,
+      copiedFromId: cleanProposalId(copiedFromId),
+      createdBy: cleanProposalId(createdBy),
       createdAt: now,
       updatedAt: now,
     }
@@ -10055,12 +10077,22 @@ export class AppDataStore {
 
   /**
    * Edit a proposal's prospect, client link, inputs, selections or letter
-   * text, and RE-PRICE it at the current catalog. A patch that says nothing
-   * about a field is not a statement about it; an empty patch is exactly
-   * "Reprice at today's catalog".
+   * text. `inputs` and `selections` REPLACE what is stored — a caller that
+   * wants to add one selection must merge it onto the current list itself
+   * (the chat patch in a later task is partial and does its own merge).
+   *
+   * The snapshot re-prices ONLY when the patch carries `inputs` or
+   * `selections`, or when the patch carries none of the recognized fields at
+   * all — that empty-patch shape is the explicit "Reprice at today's
+   * catalog" button, and it is refused (ProposalStateError) unless the
+   * proposal is still a draft: a sent proposal's letter was already
+   * validated against its snapshot, so nothing reprices it out from under
+   * the letter. A prospect / clientId / letterText-only edit leaves the
+   * existing `pricingSnapshot` untouched.
    *
    * An accepted or declined proposal is a record of what happened and is
-   * refused (copy it to change it). Returns null when there is no such proposal.
+   * refused entirely (copy it to change it). Returns null when there is no
+   * such proposal.
    */
   async updateProposal(id, patch = {}) {
     const current = await this.getProposal(id)
@@ -10071,14 +10103,18 @@ export class AppDataStore {
       )
     }
     const has = (key) => Object.prototype.hasOwnProperty.call(patch ?? {}, key)
+    const recognizedFields = ['prospect', 'clientId', 'inputs', 'selections', 'letterText']
+    const isExplicitReprice = !recognizedFields.some((key) => has(key))
+    if (isExplicitReprice && current.status !== 'draft') {
+      throw new ProposalStateError(
+        `Only a draft can be repriced — this proposal is ${current.status}.`,
+      )
+    }
+    const shouldReprice = has('inputs') || has('selections') || isExplicitReprice
     const pricing = (await this.getFirmSettings()).proposalPricing
     const next = {
       prospect: has('prospect') ? cleanProposalProspect(patch.prospect) : current.prospect,
-      clientId: has('clientId')
-        ? typeof patch.clientId === 'string' && patch.clientId
-          ? patch.clientId
-          : null
-        : current.clientId,
+      clientId: has('clientId') ? cleanProposalId(patch.clientId) : current.clientId,
       inputs: has('inputs')
         ? cleanProposalInputs(
             patch.inputs,
@@ -10095,7 +10131,9 @@ export class AppDataStore {
         : current.letter,
     }
     const updatedAt = nowIso()
-    const pricingSnapshot = proposalSnapshot(pricing, next.inputs, next.selections, updatedAt)
+    const pricingSnapshot = shouldReprice
+      ? proposalSnapshot(pricing, next.inputs, next.selections, updatedAt)
+      : current.pricingSnapshot
 
     if (this.pool) {
       const { rows } = await this.pool.query(
@@ -10103,7 +10141,7 @@ export class AppDataStore {
             set prospect = $2::jsonb, client_id = $3, inputs = $4::jsonb,
                 selections = $5::jsonb, pricing_snapshot = $6::jsonb, letter = $7::jsonb,
                 updated_at = now()
-          where id = $1
+          where id = $1 and status not in ('accepted', 'declined')
           returning ${PROPOSAL_COLUMNS}`,
         [
           id,
@@ -10115,7 +10153,12 @@ export class AppDataStore {
           next.letter ? JSON.stringify(next.letter) : null,
         ],
       )
-      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+      if (rows[0]) return AppDataStore.mapProposal(rows[0])
+      // Zero rows for an id we just confirmed exists and was editable: a
+      // concurrent write moved it to accepted/declined in between.
+      throw new ProposalStateError(
+        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+      )
     }
 
     const authState = await readJson(localAuthPath)
@@ -10147,7 +10190,9 @@ export class AppDataStore {
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.proposals) ? authState.proposals : []
-    authState.proposals = list.filter((row) => !row || row.id !== id)
+    const next = list.filter((row) => !row || row.id !== id || row.status !== 'draft')
+    if (next.length === list.length) return false
+    authState.proposals = next
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return true
   }
@@ -10174,11 +10219,23 @@ export class AppDataStore {
    * Move a proposal's status and stamp when: `sent_at` on the FIRST send only,
    * `accepted_at` / `declined_at` (+ the decline note) on those. `clientId`
    * links the client Accept created or used. Returns the proposal, or null.
+   *
+   * `accepted` and `declined` are each reachable only from `draft` or `sent`
+   * — a proposal already accepted or declined is a closed record, so a
+   * second accept, or declined -> accepted, is refused (ProposalStateError).
    */
   async setProposalStatus(id, status, { note = null, clientId = null } = {}) {
     if (!id || !PROPOSAL_STATUSES.includes(status)) return null
+    const current = await this.getProposal(id)
+    if (!current) return null
+    const isDecision = status === 'accepted' || status === 'declined'
+    if (isDecision && current.status !== 'draft' && current.status !== 'sent') {
+      throw new ProposalStateError(
+        `This proposal is already ${current.status} — it can't be ${status} again.`,
+      )
+    }
     const cleanNote = typeof note === 'string' ? note.trim().slice(0, 2000) : null
-    const linkClient = typeof clientId === 'string' && clientId ? clientId : null
+    const linkClient = cleanProposalId(clientId)
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update proposals
@@ -10186,14 +10243,20 @@ export class AppDataStore {
                 sent_at = case when $2 = 'sent' then coalesce(sent_at, now()) else sent_at end,
                 accepted_at = case when $2 = 'accepted' then now() else accepted_at end,
                 declined_at = case when $2 = 'declined' then now() else declined_at end,
-                decline_note = case when $2 = 'declined' then $3 else decline_note end,
+                decline_note = case when $2 = 'declined' then coalesce($3, decline_note) else decline_note end,
                 client_id = coalesce($4, client_id),
                 updated_at = now()
           where id = $1
+            and ($2 not in ('accepted', 'declined') or status in ('draft', 'sent'))
           returning ${PROPOSAL_COLUMNS}`,
         [id, status, cleanNote, linkClient],
       )
-      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+      if (rows[0]) return AppDataStore.mapProposal(rows[0])
+      // We just confirmed this id exists and was in a state that allows this
+      // transition; zero rows here means a concurrent write raced us to it.
+      throw new ProposalStateError(
+        `This proposal is already ${current.status} — it can't be ${status} again.`,
+      )
     }
     const authState = await readJson(localAuthPath)
     const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
@@ -10206,7 +10269,7 @@ export class AppDataStore {
     if (status === 'accepted') target.acceptedAt = now
     if (status === 'declined') {
       target.declinedAt = now
-      target.declineNote = cleanNote
+      target.declineNote = cleanNote ?? target.declineNote ?? null
     }
     if (linkClient) target.clientId = linkClient
     target.updatedAt = now
@@ -10226,7 +10289,9 @@ export class AppDataStore {
     if (!current) return null
     const kind = entry.kind === 'delivery' ? 'delivery' : 'send'
     const event = kind === 'delivery' ? String(entry.event ?? '').trim().slice(0, 40) : null
-    if (kind === 'delivery' && !event) return null
+    // A delivery event with no event name says nothing - a no-op, not a
+    // failure, so the caller still gets the proposal back.
+    if (kind === 'delivery' && !event) return current
     const providerId = entry.providerId ? String(entry.providerId) : null
     const duplicate =
       providerId !== null &&
@@ -10262,15 +10327,31 @@ export class AppDataStore {
     if (this.pool) {
       // Appended IN the row, like the invoice log: two events about one
       // proposal can land at once. `status` is deliberately absent.
+      //
+      // With a providerId, the WHERE carries a jsonb-containment probe
+      // (M4) so two concurrent retries of the same webhook (Resend resends
+      // until it gets a 200) cannot both append: the second one's UPDATE
+      // matches zero rows because the first one's entry is already there.
+      const probe = providerId !== null ? { kind, providerId, ...(kind === 'delivery' ? { event } : {}) } : null
       const { rows } = await this.pool.query(
-        `update proposals
-            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
-                updated_at = now()
-          where id = $1
-          returning ${PROPOSAL_COLUMNS}`,
-        [id, JSON.stringify([clean])],
+        probe
+          ? `update proposals
+                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                    updated_at = now()
+              where id = $1 and not (coalesce(email_log, '[]'::jsonb) @> $3::jsonb)
+              returning ${PROPOSAL_COLUMNS}`
+          : `update proposals
+                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                    updated_at = now()
+              where id = $1
+              returning ${PROPOSAL_COLUMNS}`,
+        probe ? [id, JSON.stringify([clean]), JSON.stringify([probe])] : [id, JSON.stringify([clean])],
       )
-      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+      if (rows[0]) return AppDataStore.mapProposal(rows[0])
+      // Zero rows: the guard refused (already logged by a concurrent retry),
+      // or the row is gone. Read back whatever is there now.
+      if (probe) return (await this.getProposal(id)) ?? current
+      return null
     }
     const authState = await readJson(localAuthPath)
     const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
