@@ -1080,13 +1080,25 @@ export function HourlyRatesField({ client }: { client: Client }) {
   const now = new Date()
   const nextMonth = localDateOnly(new Date(now.getFullYear(), now.getMonth() + 1, 1)).slice(0, 7)
   const chosen = moveTo || nextMonth
+  // The month the invoice would price at: the pin, or — for an UNPINNED
+  // client — today's billing period, exactly as `rateFor` in
+  // lib/invoice-lines.js resolves `ratePeriod ?? billingPeriod`.
+  const currentPeriod = localDateOnly(now).slice(0, 7)
+  const resolveAt = pin ?? currentPeriod
 
   const rows = (data.employees ?? [])
-    .map((employee) => ({
-      id: employee.id,
-      name: employee.name,
-      rate: billRateFor(billRateVersions, employee.id, pin),
-    }))
+    .map((employee) => {
+      // Same fallback chain as the invoice: the versioned rate at the month,
+      // then the person's live `billRate` (the mirror of their newest
+      // version). Only someone with neither is left off — their hours fall
+      // through to the client's own rate.
+      const versioned = billRateFor(billRateVersions, employee.id, resolveAt)
+      const live =
+        typeof employee.billRate === 'number' && !Number.isNaN(employee.billRate)
+          ? employee.billRate
+          : null
+      return { id: employee.id, name: employee.name, rate: versioned ?? live }
+    })
     .filter((row) => row.rate !== null)
     .sort((a, b) => a.name.localeCompare(b.name))
 
@@ -1096,6 +1108,17 @@ export function HourlyRatesField({ client }: { client: Client }) {
     if (!Number.isFinite(year) || !Number.isFinite(month)) return null
     return (now.getFullYear() - year) * 12 + (now.getMonth() + 1 - month)
   })()
+  // After the default forward move the pin is AHEAD of today, so the age is
+  // negative — say when the new rates start rather than "-1 months ago".
+  const plural = (count: number) => `${count} ${count === 1 ? 'month' : 'months'}`
+  const ageText =
+    monthsOld === null
+      ? ''
+      : monthsOld < 0
+        ? ` — starts in ${plural(-monthsOld)}`
+        : monthsOld === 0
+          ? ' — this month'
+          : ` — ${plural(monthsOld)} ago`
 
   const move = async () => {
     if (!/^\d{4}-\d{2}$/.test(chosen)) return
@@ -1121,8 +1144,8 @@ export function HourlyRatesField({ client }: { client: Client }) {
       </small>
       {rows.length === 0 ? (
         <p className="muted-text">
-          Nobody has a bill rate on file for {pin ? getBillingPeriodLabel(pin) : 'this client'}{' '}
-          &mdash; hours bill at the client&rsquo;s own rate instead.
+          Nobody has a bill rate on file for {getBillingPeriodLabel(resolveAt)} &mdash; hours
+          bill at the client&rsquo;s own rate instead.
         </p>
       ) : (
         <ul className="recap-list">
@@ -1137,9 +1160,11 @@ export function HourlyRatesField({ client }: { client: Client }) {
       {pin ? (
         <p className="muted-text">
           Rates from {getBillingPeriodLabel(pin)}
-          {monthsOld === null ? '' : ` — ${monthsOld} ${monthsOld === 1 ? 'month' : 'months'} ago`}
+          {ageText}
         </p>
-      ) : null}
+      ) : (
+        <p className="muted-text">Current rates (not pinned)</p>
+      )}
       <div className="team-cost-input-row team-rate-from">
         <label htmlFor={`rate-move-${client.id}`} className="team-cost-hint">
           Move to current rates from
@@ -1173,7 +1198,11 @@ export function HourlyRatesField({ client }: { client: Client }) {
             <ul className="recap-list">
               {history.map((entry, index) => (
                 <li key={`${entry.to}-${index}`}>
-                  <span>{entry.from ? `${entry.from} → ${entry.to}` : entry.to}</span>
+                  <span>
+                    {entry.from
+                      ? `${getBillingPeriodLabel(entry.from)} → ${getBillingPeriodLabel(entry.to)}`
+                      : getBillingPeriodLabel(entry.to)}
+                  </span>
                   <span>{String(entry.changedAt).slice(0, 10)}</span>
                 </li>
               ))}

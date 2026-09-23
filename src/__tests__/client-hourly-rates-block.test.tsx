@@ -70,14 +70,18 @@ let contextValue: AppContextValue
 
 async function renderBilling(
   client: Client,
-  { today = TODAY, ownerMode = true }: { today?: string; ownerMode?: boolean } = {},
+  {
+    today = TODAY,
+    ownerMode = true,
+    employees = [{ id: LISA, name: 'Lisa', role: 'Bookkeeper' }],
+  }: { today?: string; ownerMode?: boolean; employees?: unknown[] } = {},
 ) {
   vi.setSystemTime(new Date(`${today}T12:00:00`))
   contextValue = {
     ownerMode,
     data: {
       clients: [client],
-      employees: [{ id: LISA, name: 'Lisa', role: 'Bookkeeper' }],
+      employees,
     } as unknown as AppData,
   } as unknown as AppContextValue
   return render(<HourlyRatesField client={client} />)
@@ -90,9 +94,20 @@ beforeEach(() => {
     billRateVersions: BILL_VERSIONS,
     costRateVersions: [],
   }))
+  // The server's answer to a move: the new pin AND the history entry it
+  // appended, so the echo test can see both land.
   setClientHourlyRatePeriod = vi.fn(async (_id: string, period: string) => ({
     ...hourly,
     hourlyRatePeriod: period,
+    hourlyRateHistory: [
+      ...(hourly.hourlyRateHistory ?? []),
+      {
+        from: hourly.hourlyRatePeriod,
+        to: period,
+        changedAt: `${TODAY}T12:00:00.000Z`,
+        changedBy: 'emp-patrice',
+      },
+    ],
   }))
 })
 
@@ -125,7 +140,91 @@ describe('the Hourly rates block', () => {
   it('lists the moves', async () => {
     await renderBilling(hourly)
     fireEvent.click(await screen.findByText(/Rate month history/i))
-    expect(screen.getByText('2026-06')).toBeInTheDocument()
+    // Through the same label the "Rates from" line uses — the owner never
+    // sees a raw YYYY-MM.
+    expect(screen.getByText('June 2026')).toBeInTheDocument()
+    expect(screen.queryByText('2026-06')).not.toBeInTheDocument()
+  })
+
+  it('labels a move row "June 2026 → September 2026"', async () => {
+    await renderBilling({
+      ...hourly,
+      hourlyRatePeriod: '2026-09',
+      hourlyRateHistory: [
+        ...(hourly.hourlyRateHistory ?? []),
+        {
+          from: '2026-06',
+          to: '2026-09',
+          changedAt: '2026-09-01T00:00:00.000Z',
+          changedBy: 'emp-patrice',
+        },
+      ],
+    } as Client)
+    fireEvent.click(await screen.findByText(/Rate month history \(2\)/i))
+    expect(screen.getByText('June 2026 → September 2026')).toBeInTheDocument()
+  })
+
+  it('an UNPINNED client shows today’s rates, as the invoice would charge them', async () => {
+    await renderBilling(
+      { ...hourly, hourlyRatePeriod: null, hourlyRateHistory: [] } as unknown as Client,
+      { today: '2026-09-22' },
+    )
+    expect(await screen.findByText('$55.00/hr')).toBeInTheDocument()
+    expect(screen.queryByText('$40.00/hr')).not.toBeInTheDocument()
+    expect(screen.getByText('Current rates (not pinned)')).toBeInTheDocument()
+    expect(screen.queryByText(/Nobody has a bill rate/i)).not.toBeInTheDocument()
+  })
+
+  it('falls back to the person’s live bill rate when no version covers the month', async () => {
+    await renderBilling(hourly, {
+      employees: [
+        { id: LISA, name: 'Lisa', role: 'Bookkeeper' },
+        { id: 'emp-mo', name: 'Mo', role: 'Bookkeeper', billRate: 70 },
+      ],
+    })
+    expect(await screen.findByText('Mo')).toBeInTheDocument()
+    expect(screen.getByText('$70.00/hr')).toBeInTheDocument()
+  })
+
+  it('says "starts in 1 month" for a pin ahead of today', async () => {
+    await renderBilling({ ...hourly, hourlyRatePeriod: '2026-10' } as Client, {
+      today: '2026-09-22',
+    })
+    expect(await screen.findByText(/Rates from October 2026/i)).toBeInTheDocument()
+    expect(screen.getByText(/starts in 1 month\b/)).toBeInTheDocument()
+    expect(screen.queryByText(/-1 month/)).not.toBeInTheDocument()
+  })
+
+  it('says "this month" for a pin on the current month', async () => {
+    await renderBilling({ ...hourly, hourlyRatePeriod: '2026-09' } as Client, {
+      today: '2026-09-22',
+    })
+    expect(await screen.findByText(/Rates from September 2026/i)).toBeInTheDocument()
+    expect(screen.getByText(/this month/)).toBeInTheDocument()
+    expect(screen.queryByText(/0 months ago/)).not.toBeInTheDocument()
+  })
+
+  it('shows the move it just made: the new month and one more history entry', async () => {
+    await renderBilling(hourly)
+    expect(await screen.findByText(/Rate month history \(1\)/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Move to current rates/i }))
+    expect(await screen.findByText(/Rates from October 2026/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Rates from June 2026/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/Rate month history \(2\)/i)).toBeInTheDocument()
+  })
+
+  it('a REFUSED move leaves the old month in place', async () => {
+    setClientHourlyRatePeriod = vi.fn(async () => {
+      throw new ApiError(409, 'Lisa has no bill rate on file for October 2026.')
+    })
+    await renderBilling(hourly)
+    fireEvent.click(await screen.findByRole('button', { name: /Move to current rates/i }))
+    expect(
+      await screen.findByText('Lisa has no bill rate on file for October 2026.'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Rates from June 2026/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Rates from October 2026/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/Rate month history \(1\)/i)).toBeInTheDocument()
   })
 
   it('shows the server’s own sentence when the move is refused', async () => {
