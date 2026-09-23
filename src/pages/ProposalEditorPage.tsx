@@ -98,11 +98,17 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const enqueue = (action: (latest: Proposal) => Promise<Proposal>) => {
     beginBusy()
     const previous = queueRef.current
+    // Wrap the WHOLE body in try/finally, including the `current` guard —
+    // an early return there used to skip endBusy() and leave busy stuck on
+    // (fix batch 2, E-b).
     const run = previous.then(async () => {
-      const current = latestRef.current
-      if (!current) return
       try {
+        const current = latestRef.current
+        if (!current) return
         const response = await action(current)
+        // Drop a response for a proposal that is no longer the one on
+        // screen — a Copy navigated away while this save was still in
+        // flight (fix batch 2, E-c).
         if (response.id === proposalId) {
           latestRef.current = response
           setProposal(response)
@@ -135,6 +141,10 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     setBusy(true)
     setError('')
     try {
+      // Wait for any save already in flight so the copy carries what it
+      // produced, rather than the state as it stood before that save landed
+      // (fix batch 2, E-a).
+      await queueRef.current
       const created = await copyProposalRequest(proposalId)
       navigate(`/proposals/${created.id}`)
     } catch (err) {
@@ -149,6 +159,9 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     setBusy(true)
     setError('')
     try {
+      // Wait for any save already in flight so it cannot land after the
+      // delete (fix batch 2, E-a).
+      await queueRef.current
       await deleteProposalRequest(proposalId)
       navigate('/proposals')
     } catch (err) {

@@ -187,6 +187,61 @@ const RETIRED_LINE_PROPOSAL: Proposal = {
   },
 }
 
+/** A single-checkbox (non-tiered) service the catalog retired while it was already chosen (fix batch 2, E-d). */
+const RETIRED_SINGLE_PRICING = {
+  ...defaultProposalPricing(),
+  rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+  services: defaultProposalPricing().services.map((service) =>
+    service.id === 'reconciliations' ? { ...service, active: false } : service,
+  ),
+}
+
+const RETIRED_SINGLE_PROPOSAL: Proposal = {
+  ...PROPOSAL,
+  id: 'prop-5',
+  selections: [...PROPOSAL.selections, { serviceId: 'reconciliations' }],
+  pricingSnapshot: {
+    ...PROPOSAL.pricingSnapshot!,
+    lines: [
+      ...PROPOSAL.pricingSnapshot!.lines,
+      {
+        serviceId: 'reconciliations',
+        group: 'Reconciliations',
+        name: 'Reconciliations',
+        tier: null,
+        cadence: null,
+        amount: 0,
+        computedAmount: 0,
+        formula: 'This service is retired - priced at $0.00',
+        flag: 'retired',
+      },
+    ],
+  },
+}
+
+/** A selected flat-priced service, to prove a negative flat amount is dropped (fix batch 2, E-e). */
+const PROPOSAL_WITH_FLAT_AMOUNT: Proposal = {
+  ...PROPOSAL,
+  selections: [...PROPOSAL.selections, { serviceId: 'payroll-setup', flatAmount: 500 }],
+  pricingSnapshot: {
+    ...PROPOSAL.pricingSnapshot!,
+    lines: [
+      ...PROPOSAL.pricingSnapshot!.lines,
+      {
+        serviceId: 'payroll-setup',
+        group: 'Annual and one-time',
+        name: 'Payroll setup',
+        tier: null,
+        cadence: 'one-time',
+        amount: 500,
+        computedAmount: 500,
+        formula: 'Flat $500.00',
+        flag: null,
+      },
+    ],
+  },
+}
+
 beforeEach(() => {
   contextValue = {
     ownerMode: true,
@@ -377,6 +432,32 @@ describe('the proposal editor', () => {
     )
   })
 
+  it('a rejected negative override resets the field display, not just the save (fix batch 2, E-e)', async () => {
+    renderEditor()
+    const override = await screen.findByLabelText('Override Monthly: Weekly transactions Basic')
+    fireEvent.change(override, { target: { value: '-50' } })
+    fireEvent.blur(override)
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalled())
+    const refreshed = screen.getByLabelText(
+      'Override Monthly: Weekly transactions Basic',
+    ) as HTMLInputElement
+    expect(refreshed.value).toBe('')
+  })
+
+  it('a negative flat amount is dropped rather than saved (fix batch 2, E-e)', async () => {
+    api.getProposalRequest = vi.fn(async () => PROPOSAL_WITH_FLAT_AMOUNT)
+    renderEditor()
+    const amount = await screen.findByLabelText('Amount for Annual and one-time: Payroll setup')
+    fireEvent.change(amount, { target: { value: '-200' } })
+    fireEvent.blur(amount)
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalled())
+    const [, patch] = (api.updateProposalRequest as Mock).mock.calls[0]
+    const selection = patch.selections.find(
+      (entry: { serviceId: string }) => entry.serviceId === 'payroll-setup',
+    )
+    expect(selection).toEqual({ serviceId: 'payroll-setup' })
+  })
+
   it('a save queued behind a pending one still carries what the pending one produced (review C1)', async () => {
     const firstResponse = deferred<Proposal>()
     const secondResponse = deferred<Proposal>()
@@ -408,6 +489,72 @@ describe('the proposal editor', () => {
       ],
     })
     secondResponse.resolve(WITH_RECONCILIATIONS)
+  })
+
+  it('a rejected save does not block the next queued save (fix batch 2, E-g)', async () => {
+    api.updateProposalRequest = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('network blip'))
+      .mockResolvedValueOnce(WITH_RECONCILIATIONS)
+    renderEditor()
+
+    const override = await screen.findByLabelText('Override Monthly: Weekly transactions Basic')
+    fireEvent.change(override, { target: { value: '600' } })
+    fireEvent.blur(override)
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('That did not save — try again.')).toBeTruthy()
+
+    fireEvent.click(await screen.findByLabelText('Reconciliations: Reconciliations'))
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalledTimes(2))
+    expect(api.updateProposalRequest).toHaveBeenNthCalledWith(2, 'prop-1', {
+      selections: [
+        { serviceId: 'monthly-weekly-transactions-basic' },
+        { serviceId: 'reconciliations' },
+      ],
+    })
+  })
+
+  it('a reprice request goes through the same save queue, preserving order (fix batch 2, E-g)', async () => {
+    const repriceResponse = deferred<Proposal>()
+    api.repriceProposalRequest = vi.fn().mockReturnValueOnce(repriceResponse.promise)
+    renderEditor()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Reprice at today’s catalog' }))
+    await waitFor(() => expect(api.repriceProposalRequest).toHaveBeenCalledTimes(1))
+
+    // The checkbox click is queued while the reprice above is still pending.
+    fireEvent.click(await screen.findByLabelText('Reconciliations: Reconciliations'))
+    expect(api.updateProposalRequest).not.toHaveBeenCalled()
+
+    repriceResponse.resolve(PROPOSAL)
+
+    await waitFor(() =>
+      expect(api.updateProposalRequest).toHaveBeenCalledWith('prop-1', {
+        selections: [
+          { serviceId: 'monthly-weekly-transactions-basic' },
+          { serviceId: 'reconciliations' },
+        ],
+      }),
+    )
+  })
+
+  it('a retired single-option service stays checked and clickable; an unchosen retired option is disabled (fix batch 2, E-d)', async () => {
+    api.getProposalRequest = vi.fn(async () => RETIRED_SINGLE_PROPOSAL)
+    api.fetchFirmSettings = vi.fn(async () => ({ name: 'PB&J', proposalPricing: RETIRED_SINGLE_PRICING }))
+    renderEditor('/proposals/prop-5')
+
+    const checkbox = (await screen.findByLabelText(
+      'Reconciliations: Reconciliations',
+    )) as HTMLInputElement
+    expect(checkbox.checked).toBe(true)
+    expect(checkbox.disabled).toBe(false)
+
+    fireEvent.click(checkbox)
+    await waitFor(() =>
+      expect(api.updateProposalRequest).toHaveBeenCalledWith('prop-5', {
+        selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+      }),
+    )
   })
 
   it('a negative count is dropped rather than saved (review M2)', async () => {

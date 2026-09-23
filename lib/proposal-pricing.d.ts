@@ -69,8 +69,10 @@ export type ProposalSelection = {
 }
 
 export type PricedLine = {
-  serviceId: string
-  group: ProposalGroup
+  /** null for a retired/unknown selection the catalog no longer names (priceProposal). */
+  serviceId: string | null
+  /** null for a retired/unknown selection the catalog no longer names (priceProposal). */
+  group: ProposalGroup | null
   name: string
   tier: ProposalTier | null
   cadence: ProposalCadence | null

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { formatProposalMoney } from '../../../lib/proposal-pricing.js'
 import { SavingNumberInput, SavingTextarea, SavingTextInput } from '../SectionKit'
 import {
@@ -44,6 +45,47 @@ const serviceLabel = (service: Pick<ProposalService, 'name' | 'tier'>) =>
 
 /** A negative override or quantity is not a price — treat it like blank (review M2). */
 const nonNegative = (value: number | null): number | null => (value !== null && value < 0 ? null : value)
+
+/**
+ * A `SavingNumberInput` for a count/amount field that must never hold a
+ * negative value. `SavingNumberInput` only resets its own draft text when its
+ * `canonical` prop actually changes — but a rejected negative commit maps to
+ * `null`, which the canonical often already was, so nothing would change and
+ * the field would keep showing what she typed (e.g. "-3"). Bumping a local
+ * key on rejection remounts the input so its draft reinitializes from
+ * `canonical` instead (fix batch 2, E-e).
+ */
+function NonNegativeNumberInput({
+  ariaLabel,
+  canonical,
+  placeholder,
+  min,
+  step,
+  onCommit,
+}: {
+  ariaLabel: string
+  canonical: number | null
+  placeholder?: string
+  min?: string
+  step?: string
+  onCommit: (value: number | null) => void
+}) {
+  const [resetNonce, setResetNonce] = useState(0)
+  return (
+    <SavingNumberInput
+      key={resetNonce}
+      ariaLabel={ariaLabel}
+      canonical={canonical}
+      placeholder={placeholder}
+      min={min}
+      step={step}
+      onCommit={(value) => {
+        if (value !== null && value < 0) setResetNonce((n) => n + 1)
+        onCommit(nonNegative(value))
+      }}
+    />
+  )
+}
 
 /**
  * The Estimate tab (spec §5.1): the prospect, the counts, the service picker,
@@ -209,7 +251,7 @@ export function EstimateTab({
                               Remove
                             </button>
                           ) : (
-                            <SavingNumberInput
+                            <NonNegativeNumberInput
                               ariaLabel={`Override ${label}`}
                               canonical={selection?.override ?? null}
                               placeholder="Override"
@@ -217,8 +259,8 @@ export function EstimateTab({
                               step="0.01"
                               onCommit={(value) =>
                                 saveSelections((selections) =>
-                                  updateSelection(selections, line.serviceId, {
-                                    override: nonNegative(value),
+                                  updateSelection(selections, line.serviceId ?? '', {
+                                    override: value,
                                   }),
                                 )
                               }
@@ -274,7 +316,10 @@ function PickerRowControl({
             type="checkbox"
             aria-label={rowLabel}
             checked={Boolean(chosen)}
-            disabled={!row.options[0].active}
+            // A retired option that is currently chosen stays clickable so
+            // she can un-choose it; only an unchosen retired option is
+            // disabled (fix batch 2, E-d).
+            disabled={!row.options[0].active && !chosen}
             onChange={(event) => pick(event.target.checked ? row.options[0].id : null)}
           />
           {row.name}
@@ -331,19 +376,19 @@ function SelectionFields({
       {PER_COUNT_MULTIPLIERS.has(service.multiplier) ? (
         <label className="field">
           <span>{countLabel}</span>
-          <SavingNumberInput
+          <NonNegativeNumberInput
             ariaLabel={`Count for ${label}`}
             canonical={selection.quantity ?? null}
             min="0"
             step="1"
-            onCommit={(value) => onChange({ quantity: nonNegative(value) })}
+            onCommit={(value) => onChange({ quantity: value })}
           />
         </label>
       ) : null}
       {service.pricing === 'flat' ? (
         <label className="field">
           <span>Amount</span>
-          <SavingNumberInput
+          <NonNegativeNumberInput
             ariaLabel={`Amount for ${label}`}
             canonical={selection.flatAmount ?? null}
             min="0"
