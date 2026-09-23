@@ -25,7 +25,7 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-23, afternoon):** `main` = `81cbade` (+ this
+**State right now (2026-09-23, afternoon):** `main` = `258309e` (+ this
 handoff; the manifest was condensed under the voice agent's ~216 KB cap), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
 — the body's `commit` is the deploy check). Suite **3615 tests / 200
 files**, green. Voice agent re-provisioned after the deploy. **Rate history
@@ -44,13 +44,18 @@ Shipped awaiting Brittany from 09-22: Britt's Brain fix + Opus 5.5,
 Packages, period label, billing-email check, 30-day pay window, and the
 two desktop/PWA items. `featreq-79b6d974` engagement-to-billing parked
 in_progress; two `planned_not_eom` parked. She reviews live — re-read the
-board at session start. **Unfiled from Brittany (email 09-23, "time
-reports"):** split-across-clients rows export with no clock in/out and
-"Unassigned" task — diagnosed, not a clock bug: the split writes the
-shares with no session span when the SOURCE was a manual block, and sets
-the task to null on every share (all 174 split rows since August are
-"Unassigned"). Proposed fix: carry the source's task and span onto every
-share. Needs a tracker item or Alex's go.
+board at session start. **Brittany's 09-23 "time reports" email — SHIPPED the same day as
+`featreq-751ddc64` (595a07a + 258309e):** split shares keep the block's clock
+in/out and their allocated minutes (day totals unchanged), the task's own
+client's share keeps the task and the others show its name (a checklist task
+belongs to ONE client — never put one taskId on every share), the
+multi-client Add time form has an optional Task box, and Adjust split keeps
+each client's own task. Rows split before 09-23 are not backfilled. Group
+TIMER still has no task box. **Also: a separate session finished rate-history
+follow-ups 1+2 (master re-tag at each sub's pin; Reports Billable $ and the
+Dashboard estimate at the pin) as `27a645c` on `claude/modest-wozniak-3caf97`,
+based on a47f633 and UNPUSHED — it edited the manifest too, so rebase it onto
+main before pushing, then re-provision the voice agent.**
 
 Then the queue / watch list:
 
