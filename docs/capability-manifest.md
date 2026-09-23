@@ -2715,6 +2715,12 @@ Clients page meanwhile. Owner-only.
     after its month** — including a month a client's rate history still bills
     a past period at. The page shows the reason as a sentence; move that client
     first.
+  - **A person's only bill-rate version also cannot be removed while any hourly
+    client is pinned before its month** (live, or in a month that client's rate
+    history still prices) — that client bills the person's first rate from its
+    start month until the client's review, so removing it would drop the client
+    to its own hourly rate (often $0) on invoices not yet generated. To change a
+    person's only rate, save its month again with the new amount instead.
 - Roles: owner has everything; staff see their assigned clients, their own
   time, and ALL tasks for those clients (logging time against any of them),
   while editing/completing stays limited to tasks assigned to them. There is

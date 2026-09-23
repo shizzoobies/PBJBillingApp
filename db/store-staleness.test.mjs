@@ -15976,6 +15976,129 @@ describe('removing a bill rate version the ledger still points at (file backend)
   })
 })
 
+/**
+ * The delete guard also covers the FIRST-RATE step of `billRateAt`.
+ *
+ * A person's EARLIEST version reaches every hourly client pinned BEFORE it -
+ * "a new hire's first rate holds until the client's review". So deleting a
+ * person's only version while such a client exists would silently drop that
+ * client to its own legacy hourly rate (often $0) on every invoice not yet
+ * generated, and the at-or-after guard above cannot see it: those pins are
+ * all BELOW the month being removed.
+ */
+describe('removing a person’s earliest version an earlier-pinned client reaches (file backend)', () => {
+  beforeEach(async () => {
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.billRateVersions = []
+    authState.users = [{ id: 'emp-lisa', name: 'Lisa', role: 'employee' }]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 0 }],
+        timeEntries: [],
+      }),
+    )
+  })
+
+  const seedClient = async (patch) => {
+    const seeded = JSON.parse(await readFile(localDataPath, 'utf8'))
+    Object.assign(seeded.clients[0], { hourlyRateHistory: [], ...patch })
+    await writeFile(localDataPath, JSON.stringify(seeded, null, 2))
+  }
+
+  it('REFUSES the only version while an hourly client is pinned BEFORE it', async () => {
+    await seedClient({ hourlyRatePeriod: '2026-06' })
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 50 })
+    await expect(
+      store.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-09' }),
+    ).rejects.toThrow(/first rate/i)
+    expect((await store.listBillRateVersions()).map((row) => row.effectivePeriod)).toEqual([
+      '2026-09',
+    ])
+  })
+
+  it('allows it when no HOURLY client is pinned before it', async () => {
+    // A subscription client carrying a stale pin is not priced by the hour, so
+    // it does not hold the version.
+    await seedClient({ billingMode: 'subscription', hourlyRatePeriod: '2026-06' })
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 50 })
+    const versions = await store.deleteBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2026-09',
+    })
+    expect(versions).toEqual([])
+  })
+
+  it('allows the newest to go when a still-older version keeps serving the earlier pin', async () => {
+    await seedClient({ hourlyRatePeriod: '2026-06' })
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-08', rate: 45 })
+    await store.upsertBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 50 })
+    const versions = await store.deleteBillRateVersion({
+      userId: 'emp-lisa',
+      effectivePeriod: '2026-09',
+    })
+    expect(versions.map((row) => row.effectivePeriod)).toEqual(['2026-08'])
+  })
+})
+
+describe('removing a person’s earliest version an earlier-pinned client reaches (postgres branch)', () => {
+  it('issues no delete while an hourly client is pinned before the only version', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.listBillRateVersions = async () => [
+      { userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 50 },
+    ]
+    pgStore.read = async () => ({
+      clients: [{ id: 'c1', billingMode: 'hourly', hourlyRatePeriod: '2026-06', hourlyRateHistory: [] }],
+    })
+    await expect(
+      pgStore.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-09' }),
+    ).rejects.toThrow(/first rate/i)
+    expect(fake.matching(/^delete from bill_rate_versions/i)).toHaveLength(0)
+  })
+
+  it('issues no delete when only a ledger entry sits before it, though the live pin is null', async () => {
+    // A live pin at or after the version is refused by the older guard, and
+    // the store pins an unpinned hourly client on every write, so the ledger
+    // path can only be isolated here, with a read that answers a null pin and
+    // the earlier month only in the ledger's `from`/`to`.
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.listBillRateVersions = async () => [
+      { userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 50 },
+    ]
+    pgStore.read = async () => ({
+      clients: [
+        {
+          id: 'c1',
+          billingMode: 'hourly',
+          hourlyRatePeriod: null,
+          hourlyRateHistory: [
+            { from: '2026-03', to: '2026-05', changedAt: '2026-05-01T00:00:00.000Z' },
+          ],
+        },
+      ],
+    })
+    await expect(
+      pgStore.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-09' }),
+    ).rejects.toThrow(/first rate/i)
+    expect(fake.matching(/^delete from bill_rate_versions/i)).toHaveLength(0)
+  })
+
+  it('still deletes when the earlier-pinned client is not hourly', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.listBillRateVersions = async () => [
+      { userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 50 },
+    ]
+    pgStore.read = async () => ({
+      clients: [{ id: 'c1', billingMode: 'subscription', hourlyRatePeriod: '2026-06' }],
+    })
+    await pgStore.deleteBillRateVersion({ userId: 'emp-lisa', effectivePeriod: '2026-09' })
+    expect(fake.matching(/^delete from bill_rate_versions/i)).toHaveLength(1)
+  })
+})
+
 describe('removing a bill rate version the ledger still points at (postgres branch)', () => {
   it('issues no delete when a ledger entry still prices a month at it', async () => {
     const fake = fakePostgres()

@@ -5451,6 +5451,18 @@ export class AppDataStore {
    * guard that read only `to` would let September's version go and reprice
    * all of those months, so `from` is refused as well.
    *
+   * A THIRD GUARD covers the first-rate step of `billRateAt`: a person's
+   * EARLIEST version reaches every hourly client pinned BEFORE it and holds
+   * until that client's review. Only the newest may go, so the target is also
+   * the earliest exactly when it is the person's ONLY version — and then every
+   * hourly client pinned earlier (live, or in any month its ledger still
+   * prices) bills this person through that step. Removing the row would drop
+   * them to the client's own legacy hourly rate (often $0) on every invoice not
+   * yet generated. With an older version still on file the first-rate step
+   * reads that one instead, so the guard steps aside. Non-hourly clients are
+   * never priced by the hour and do not hold a version. The way to change a
+   * person's only rate is to save its month again, which replaces the row.
+   *
    * Throws `RateVersionError`, which the endpoint maps to 409.
    */
   async deleteBillRateVersion({ userId, effectivePeriod } = {}) {
@@ -5485,6 +5497,22 @@ export class AppDataStore {
       throw new RateVersionError(
         'A client is pinned at or after this month, now or in a past month its ledger still prices, so it is still billing at this rate. Move that client first.',
       )
+    }
+    if (mine.length === 1) {
+      const before = (month) => typeof month === 'string' && month < effectivePeriod
+      const hourlyPinnedBefore = (data.clients ?? []).some((clientRecord) => {
+        if (clientRecord?.billingMode !== 'hourly') return false
+        if (before(clientRecord.hourlyRatePeriod)) return true
+        const history = Array.isArray(clientRecord.hourlyRateHistory)
+          ? clientRecord.hourlyRateHistory
+          : []
+        return history.some((entry) => before(entry?.to) || before(entry?.from))
+      })
+      if (hourlyPinnedBefore) {
+        throw new RateVersionError(
+          'This is the first rate on file for this person, and an hourly client pinned before its month bills at it (now, or in a past month its ledger still prices) until that client is moved forward. Removing it would drop that client to its own hourly rate for this person; save the month again to correct it instead.',
+        )
+      }
     }
 
     if (this.pool) {

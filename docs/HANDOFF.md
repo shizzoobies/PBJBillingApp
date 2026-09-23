@@ -484,12 +484,15 @@ tolerates the 403).
 new line at the invoice month, not each sub's pin — **SHIPPED** in the
 evening follow-up (entry above); (2) the Employee report's Billable $ and
 the Dashboard revenue estimate read the newest mirror — **SHIPPED** in the
-same follow-up; (3) deleting a
-person's only version un-prices earlier-pinned clients that reached it
-via the first-rate step — widen the guard; (4) the Hourly rates block
-lists everyone with a started rate, not the assigned team — ask Brittany;
-(5) `resolve()` turns a `rate: null` row into 0 (unreachable via the
-endpoints; add `Number.isFinite`); (6) the file-backend pin move and the
+same follow-up; (3) DONE 09-23
+(third delete guard: a person's only version is refused while any hourly
+client is pinned before it, live or ledger `to`/`from`; manifest says so);
+(4) the Hourly rates block lists everyone with a started rate, not the
+assigned team — ask Brittany; (5) DONE 09-23 (`rateOf()` in the resolver:
+only a finite `number` is a rate, so a `rate: null` row reads as no
+rate — note the store's list paths still `Number()` the column, so a null
+would reach the resolver as 0; unreachable while the columns are NOT
+NULL); (6) the file-backend pin move and the
 migration do two-slot read/writes (dev only); (7) `memberFilter` narrows
 the payroll detail but not the summary (pre-existing).
 
