@@ -1228,17 +1228,6 @@ function fakePostgres({
       found.hourly_rate_period = params?.[1]
       return { rows: [{ id: found.id }], rowCount: 1 }
     }
-    // `setClientHourlyRatePeriod`'s single-row read of the pin it is about to
-    // append to. It has to FILTER: answering every row would let a move against
-    // a client that is not there append to somebody else's ledger, and the
-    // "answers null for a client that is not there" assertion would pass
-    // against a store that never checked.
-    if (
-      /^select hourly_rate_period, hourly_rate_history from clients where id = \$1$/i.test(trimmed)
-    ) {
-      const found = clientRows.find((row) => row.id === params?.[0])
-      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
-    }
     // The rate-history pin snapshot the bulk save takes before the wipe — the
     // same idiom as `priorStripeCustomerIds`. Anchored on its exact shape so a
     // rewrite that stopped reading it falls through to the empty default and
@@ -15381,6 +15370,9 @@ describe('moving a client to current rates (postgres branch)', () => {
     expect(
       await postgresStore(fake).setClientHourlyRatePeriod({ clientId: 'nope', period: '2026-10' }),
     ).toBeNull()
+    // The store issues its ONE targeted update and reads rowCount 0 as the
+    // miss; the fake changes nothing for an id it does not hold.
+    expect(fake.matching(/^update clients set hourly_rate_history/i)).toHaveLength(1)
     expect(fake.matching(/^update clients set hourly_rate_period/i)).toHaveLength(0)
   })
 })

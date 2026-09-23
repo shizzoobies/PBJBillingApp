@@ -1220,8 +1220,8 @@ Clients page meanwhile. Owner-only.
     own) or for a **retired** client (the app stops offering retired clients for
     new work), and the server refuses both as well.
 - **Client detail → Billing → Hourly rates (Hourly clients, owner only).** Lists
-  what this client is billed for each team member's time — everyone with a
-  bill rate on file, not only the client's assigned team — at the rates the
+  what this client is billed for each team member's time — everyone whose
+  bill rate has started by that month, not only the client's assigned team — at the rates the
   client is on from its rate month. After a move to a future month those are
   the upcoming rates; this month's invoice still prices at the earlier rate
   month until the new one starts. Underneath, the **rate month** those rates
@@ -1255,7 +1255,11 @@ Clients page meanwhile. Owner-only.
     month likewise reprices every client whose rate month is that month or
     later, for any month whose invoice has not been generated yet. To leave
     those clients alone, date the raise after their rate month — this block
-    shows each client's rate month.
+    shows each client's rate month. One exception: a person's FIRST rate on
+    file reaches every hourly client from the month it starts, including
+    clients whose rate month is earlier — a person with no rate at the
+    client's rate month is billed at the rate they started on, held there
+    until the client's review.
   - Monthly and Annual clients show nothing here — they bill a fee, not a
     person's rate.
 - Client detail → Time tab: everything logged against this client — who logged
