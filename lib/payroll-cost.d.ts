@@ -12,6 +12,7 @@ export type PayrollSlice = {
   employeeId: string
   minutes: number
   billable: boolean
+  date?: string
   groupId?: string
   groupAllocation?: 'even' | 'full' | 'custom'
 }
@@ -57,6 +58,6 @@ export declare function allocatePersonCost(
 
 export declare function laborCost(
   entries: readonly PayrollSlice[],
-  costRateOf: (employeeId: string) => number | null | undefined,
+  costRateOf: (employeeId: string, entryDate?: string) => number | null | undefined,
   duplicates?: ReadonlySet<string>,
 ): number
