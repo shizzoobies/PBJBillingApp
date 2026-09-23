@@ -75,7 +75,12 @@ describe('duplicating a repeating task', () => {
     const source = makeTemplate()
     const copy = duplicateTemplateDraft(source)
 
-    expect(copy.createdAt?.slice(0, 10)).toBe(localDateOnly())
+    // A template's creation stamp is a UTC ISO timestamp, like the one App.tsx
+    // puts on a brand-new recipe and the one the server stores and reads back;
+    // the start floor is its first ten characters, the UTC day. So the expected
+    // day is the UTC one (`dateOffset(0)`), not the local calendar date, which
+    // is a day behind after 8pm Eastern.
+    expect(copy.createdAt?.slice(0, 10)).toBe(dateOffset(0))
     expect(copy.createdAt).not.toBe(source.createdAt)
   })
 
@@ -167,7 +172,8 @@ describe('the shared clone', () => {
     expect(copy.active).toBe(true)
     expect(copy.clientId).toBe('client-i95')
     expect(copy.title).toBe('Monthly bookkeeping')
-    expect(copy.createdAt?.slice(0, 10)).toBe(localDateOnly())
+    // UTC day, for the reason given on the Duplicate test above.
+    expect(copy.createdAt?.slice(0, 10)).toBe(dateOffset(0))
   })
 
   it('gives the copy fresh ids at every level', () => {
