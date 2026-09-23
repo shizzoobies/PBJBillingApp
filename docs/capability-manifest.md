@@ -431,7 +431,7 @@ Clients page meanwhile. Owner-only.
 - **TABBED sections.** The page's three areas — **Weekly submissions**,
   **Approval queue** and **Timesheet locks** — used to be stacked (signing off a
   month meant scrolling past every submitted week and pending entry); each is
-  now one click away, on the Checklists page's tab bar. Each tab label shows its
+  now one click away, using the same tab bar as the Checklists page. Each tab label shows its
   pending count: weeks awaiting review, entries awaiting approval, and people
   not yet locked for the month shown in the locks table (0 for a month that
   hasn't ended, since those can't be locked). The page OPENS on the first tab
@@ -1074,8 +1074,8 @@ Clients page meanwhile. Owner-only.
 - An older free-text wait with nobody attached still shows to the step's
   assignee (or to everyone if the step has none), so nothing predating the
   two-step hand-off silently vanishes from the page.
-- **Two tabs: "Waiting on me" and "I'm waiting on others,"** on Time Approvals'
-  underline tab bar with a live count in each label; the page opens on whichever
+- **Two tabs: "Waiting on me" and "I'm waiting on others."** Same underline tab
+  bar as Time Approvals, with a live count in each label; the page opens on whichever
   has work (clicking the quiet one sticks — it won't bounce back).
   - **Waiting on me** — someone is blocked on you. Each wait has two buttons.
     **Done** says "my part is finished": the wait leaves this list and goes back
@@ -1592,8 +1592,8 @@ Clients page meanwhile. Owner-only.
     while the Hours column showed the sum of the rows. Cost, Billable $ and the
     hours beside them now all come from the same figure, on the payroll
     summary, the day-and-job detail, the Employee report and every export. Each
-    change moved figures by a few cents to a couple of dimes per person per
-    period, in either direction (across the whole firm for August 2026, the
+    change moved figures (typically) by a few cents to a couple of dimes per
+    person per period, in either direction (across the whole firm for August 2026, the
     08-26 fix moved total labor cost by $1.52); the 08-19 difference is because
     the RULE changed, not because anything was wrong before. Nothing stored
     changed either time — every report, past and present, recomputes under the

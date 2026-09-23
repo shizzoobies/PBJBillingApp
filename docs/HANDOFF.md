@@ -25,8 +25,8 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-23, afternoon):** `main` = `cae6ad0` (+ this
-handoff), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
+**State right now (2026-09-23, afternoon):** `main` = `81cbade` (+ this
+handoff; the manifest was condensed under the voice agent's ~216 KB cap), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
 — the body's `commit` is the deploy check). Suite **3615 tests / 200
 files**, green. Voice agent re-provisioned after the deploy. **Rate history
 shipped today** (featreq-23351561, the "Billing prices and cost" brainstorm):
