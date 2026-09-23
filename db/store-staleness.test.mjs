@@ -15719,9 +15719,14 @@ describe('the month run bills each client at its own pin (file backend)', () => 
     const authState = existsSync(localAuthPath)
       ? JSON.parse(await readFile(localAuthPath, 'utf8'))
       : {}
+    // September's VERSION is 60 while the live mirror below stays 55, on
+    // purpose. If the two agreed, a September-pinned client would bill 55
+    // whether the generator read the version, the mirror or the client's own
+    // `hourlyRate` fallback — the assertion would pass through all three and
+    // prove none of them. 60 is reachable only through the version lookup.
     authState.billRateVersions = [
       { userId: 'emp-lisa', effectivePeriod: '2026-06', rate: 40 },
-      { userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 55 },
+      { userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 60 },
     ]
     authState.users = [{ id: 'emp-lisa', name: 'Lisa', role: 'employee', billRate: 55 }]
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
@@ -15771,7 +15776,86 @@ describe('the month run bills each client at its own pin (file backend)', () => 
     const byClient = new Map(result.created.map((invoice) => [invoice.clientId, invoice]))
     expect(byClient.get('c-old').lineItems[0].rate).toBe(40)
     expect(byClient.get('c-old').total).toBe(40)
-    expect(byClient.get('c-new').lineItems[0].rate).toBe(55)
-    expect(byClient.get('c-new').total).toBe(55)
+    expect(byClient.get('c-new').lineItems[0].rate).toBe(60)
+    expect(byClient.get('c-new').total).toBe(60)
+  })
+
+  /**
+   * THE SAME CLAIM, ONE LEVEL DOWN: on a billing master's consolidated invoice
+   * each sub is priced at ITS OWN pin, before the merge.
+   *
+   * The generator resolves `ratePeriodAsOf(target, period)` per sub inside
+   * `draftFor`, and `buildConsolidatedInvoiceDraft` carries every line across
+   * UNCHANGED — it never blends two subs' rates into one line. Until now that
+   * was only a comment in `db/store.js`; KLC consolidated billing is live, so
+   * it is worth a test. Resolving the pin from the MASTER instead would price
+   * both subs the same and collapse this to two lines at one rate.
+   */
+  it('prices each sub of a billing master at its own pin before the merge', async () => {
+    await store.write(
+      workspace({
+        employees: [{ id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' }],
+        clients: [
+          {
+            id: 'klc-master',
+            name: 'KLC Master',
+            isBillingMaster: true,
+            billingMode: 'hourly',
+            hourlyRate: 0,
+            lifecycleStage: 'active',
+          },
+          {
+            id: 'sub-old',
+            name: 'Alpha Sub',
+            billToClientId: 'klc-master',
+            billingMode: 'hourly',
+            hourlyRate: 100,
+            lifecycleStage: 'active',
+          },
+          {
+            id: 'sub-new',
+            name: 'Beta Sub',
+            billToClientId: 'klc-master',
+            billingMode: 'hourly',
+            hourlyRate: 100,
+            lifecycleStage: 'active',
+          },
+        ],
+        timeEntries: [
+          { id: 't-sub-old', clientId: 'sub-old', employeeId: 'emp-lisa', minutes: 60, billable: true, date: '2026-09-10' },
+          { id: 't-sub-new', clientId: 'sub-new', employeeId: 'emp-lisa', minutes: 60, billable: true, date: '2026-09-10' },
+        ],
+      }),
+    )
+    // Pins straight to the file for the reason the describe's `beforeEach`
+    // gives: a bulk save deliberately refuses to carry one.
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    for (const client of data.clients ?? []) {
+      if (client.id === 'sub-old') client.hourlyRatePeriod = '2026-06'
+      if (client.id === 'sub-new') client.hourlyRatePeriod = '2026-09'
+      client.hourlyRateHistory = []
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.generateInvoicesForPeriod('2026-09')
+
+    const merged = result.created.find((invoice) => invoice.clientId === 'klc-master')
+    expect(merged).toBeDefined()
+    // Neither sub got an invoice of its own — the rates below are the ones on
+    // the combined document, not on some second copy of the work.
+    expect(result.created.map((invoice) => invoice.clientId)).toEqual(['klc-master'])
+
+    const hourly = merged.lineItems.filter((line) => line.kind === 'hourly')
+    // Two lines, not one blended line: same person, same month, two rates,
+    // because the rate belongs to the COMPANY being billed.
+    expect(hourly).toHaveLength(2)
+    const bySub = new Map(hourly.map((line) => [line.sourceClientId, line]))
+    expect(bySub.get('sub-old').rate).toBe(40)
+    expect(bySub.get('sub-old').amount).toBe(40)
+    expect(bySub.get('sub-new').rate).toBe(60)
+    expect(bySub.get('sub-new').amount).toBe(60)
+    expect(merged.subtotal).toBe(100)
+    expect(merged.total).toBe(100)
   })
 })
