@@ -37,6 +37,7 @@ import {
   spitballChat,
   allowedLetterCents,
   draftProposalLetter,
+  proposalChat,
   suggestPackageChecklists,
   summarizeSpitballSession,
   validateAssistantAction,
@@ -73,6 +74,7 @@ import {
 import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
 import { buildProposalPdf, proposalPdfFilename } from './lib/proposal-pdf.js'
 import { buildProposalEmail } from './lib/proposal-email.js'
+import { applyProposalPatch } from './lib/proposal-pricing.js'
 import {
   cardProcessingFeeLine,
   isInBillingPeriod,
@@ -8497,6 +8499,85 @@ const server = createServer(async (request, response) => {
       )
       broadcastDataChanged()
       sendJson(response, 200, declined)
+      return
+    }
+
+    // POST /api/proposals/:id/chat — { text } (spec §5.2). One intake turn:
+    // Opus 5.5 answers and proposes a patch; ONLY the validated patch reaches
+    // the store, through the same re-pricing write the form uses. The chat
+    // never sends email and never changes a status.
+    const proposalChatMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/chat$/)
+    if (proposalChatMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can use the proposal assistant' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const text = typeof payload?.text === 'string' ? payload.text.trim().slice(0, 8000) : ''
+      if (!text) {
+        sendJson(response, 400, { error: 'Say something about the prospect first.' })
+        return
+      }
+      const proposal = await appDataStore.getProposal(proposalChatMatch[1])
+      if (!proposal) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      if (proposal.status === 'accepted' || proposal.status === 'declined') {
+        sendJson(response, 409, {
+          error: 'proposal_refused',
+          message: `This proposal is ${proposal.status} — copy it to keep working on it.`,
+        })
+        return
+      }
+      const pricing = (await appDataStore.getFirmSettings()).proposalPricing
+      let turn
+      try {
+        turn = await proposalChat(proposal, text, { catalog: pricing })
+      } catch (error) {
+        const status = error?.statusCode ?? error?.status ?? 502
+        console.error('[proposals] chat failed:', error?.message || error)
+        sendJson(response, status === 503 ? 503 : status === 400 ? 400 : 502, {
+          error: 'proposal_chat_failed',
+          message: error?.message || 'The AI could not answer right now.',
+        })
+        return
+      }
+      try {
+        if (turn.patch) {
+          await appDataStore.updateProposal(
+            proposal.id,
+            applyProposalPatch(proposal, turn.patch, pricing.services),
+          )
+        }
+      } catch (error) {
+        if (error instanceof ProposalStateError) {
+          sendJson(response, 409, { error: 'proposal_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      const saved = await appDataStore.appendProposalMessages(proposal.id, [
+        { role: 'user', text },
+        { role: 'assistant', text: turn.reply, patch: turn.patch },
+      ])
+      broadcastDataChanged()
+      sendJson(response, 200, {
+        reply: turn.reply,
+        applied: turn.patch,
+        snapshot: saved?.pricingSnapshot ?? null,
+        proposal: saved,
+      })
       return
     }
 

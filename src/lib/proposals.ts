@@ -1,5 +1,6 @@
 import type {
   Proposal,
+  ProposalChatPatch,
   ProposalGroup,
   ProposalMultiplier,
   ProposalPatch,
@@ -230,6 +231,18 @@ export function proposalActivity(
     })
   }
   return entries.sort((a, b) => a.at.localeCompare(b.at))
+}
+
+/**
+ * What one chat turn changed, as the keys the Estimate tab highlights:
+ * `prospect:<field>`, `input:<key>`, `service:<id>`.
+ */
+export function changedKeys(patch: ProposalChatPatch | null | undefined): Set<string> {
+  const keys = new Set<string>()
+  for (const field of Object.keys(patch?.prospect ?? {})) keys.add(`prospect:${field}`)
+  for (const key of Object.keys(patch?.inputs ?? {})) keys.add(`input:${key}`)
+  for (const entry of patch?.selections?.add ?? []) keys.add(`service:${entry.serviceId}`)
+  return keys
 }
 
 /**

@@ -36,6 +36,7 @@ vi.mock('../lib/api', () => ({
   listPackagesRequest: (...args: unknown[]) => api.listPackagesRequest(...args),
   acceptProposalRequest: (...args: unknown[]) => api.acceptProposalRequest(...args),
   declineProposalRequest: (...args: unknown[]) => api.declineProposalRequest(...args),
+  proposalChatRequest: (...args: unknown[]) => api.proposalChatRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}
@@ -904,5 +905,54 @@ describe('Accept and Decline', () => {
     await waitFor(() =>
       expect(api.declineProposalRequest).toHaveBeenCalledWith('prop-1', 'Went with a friend'),
     )
+  })
+})
+
+describe('the intake chat', () => {
+  const AFTER_CHAT: Proposal = {
+    ...PROPOSAL,
+    inputs: { transactions: 120, employees: 10 },
+    messages: [
+      { role: 'user', text: 'They have 10 employees.', at: '2026-09-23T15:00:00.000Z' },
+      {
+        role: 'assistant',
+        text: 'Ten on payroll — noted. How often do they run it?',
+        at: '2026-09-23T15:00:01.000Z',
+        patch: { inputs: { employees: 10 } },
+      },
+    ],
+  }
+
+  it('sends her message, shows the reply, and marks what the chat changed', async () => {
+    api.proposalChatRequest = vi.fn(async () => ({
+      reply: 'Ten on payroll — noted. How often do they run it?',
+      applied: { inputs: { employees: 10 } },
+      snapshot: AFTER_CHAT.pricingSnapshot,
+      proposal: AFTER_CHAT,
+    }))
+    renderEditor()
+    const box = await screen.findByLabelText('Message to the intake assistant')
+    fireEvent.change(box, { target: { value: 'They have 10 employees.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() =>
+      expect(api.proposalChatRequest).toHaveBeenCalledWith('prop-1', 'They have 10 employees.'),
+    )
+    expect(await screen.findByText('Ten on payroll — noted. How often do they run it?')).toBeTruthy()
+    expect(screen.getByLabelText('Employees').closest('label')?.className).toContain('proposal-changed')
+    expect(screen.getByLabelText('Transactions').closest('label')?.className).not.toContain(
+      'proposal-changed',
+    )
+  })
+
+  it('shows the error sentence when the AI cannot answer', async () => {
+    api.proposalChatRequest = vi.fn(async () => {
+      throw new ApiError(503, 'The AI is at capacity right now — give it a minute and try again.')
+    })
+    renderEditor()
+    fireEvent.change(await screen.findByLabelText('Message to the intake assistant'), {
+      target: { value: 'Hello' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(await screen.findByText(/at capacity/)).toBeTruthy()
   })
 })

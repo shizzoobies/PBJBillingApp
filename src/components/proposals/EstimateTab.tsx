@@ -30,6 +30,10 @@ const PROSPECT_FIELDS: Array<[Exclude<keyof ProposalProspect, 'notes'>, string]>
 // catalog's role rate math. 'per-count' (budget / forecast) never falls back
 // to an input — landed fix pass, lib/proposal-pricing.js `multiplierOf`.
 const PER_COUNT_MULTIPLIERS = new Set(['per-form', 'per-report', 'per-cleanup-month', 'per-count'])
+const NOTHING_CHANGED: ReadonlySet<string> = new Set()
+
+/** The field's class, marked when the last chat turn changed it. */
+const fieldClass = (base: string, changed: boolean) => (changed ? `${base} proposal-changed` : base)
 
 // A short note for each flag the calculator can put on a line (landed fix
 // pass to lib/proposal-pricing.js `priceLine` / `priceProposal`). 'retired'
@@ -104,6 +108,7 @@ export function EstimateTab({
   busy,
   onSave,
   onReprice,
+  highlight = NOTHING_CHANGED,
 }: {
   proposal: Proposal
   pricing: ProposalPricing
@@ -111,6 +116,8 @@ export function EstimateTab({
   busy: boolean
   onSave: (build: ProposalPatchBuilder) => void
   onReprice: () => void
+  /** What the last chat turn changed (`changedKeys`), marked for her to see. */
+  highlight?: ReadonlySet<string>
 }) {
   const locked = proposal.status === 'accepted' || proposal.status === 'declined'
   const snapshot = proposal.pricingSnapshot
@@ -124,7 +131,7 @@ export function EstimateTab({
           <h3>Prospect</h3>
           <div className="form-grid two-col">
             {PROSPECT_FIELDS.map(([field, label]) => (
-              <label className="field" key={field}>
+              <label className={fieldClass('field', highlight.has(`prospect:${field}`))} key={field}>
                 <span>{label}</span>
                 <SavingTextInput
                   ariaLabel={label}
@@ -171,7 +178,7 @@ export function EstimateTab({
           <h3>What they told you</h3>
           <div className="form-grid two-col">
             {pricing.inputs.map((input) => (
-              <label className="field" key={input.key}>
+              <label className={fieldClass('field', highlight.has(`input:${input.key}`))} key={input.key}>
                 <span>{input.label}</span>
                 <SavingNumberInput
                   ariaLabel={input.label}
@@ -198,6 +205,7 @@ export function EstimateTab({
                   row={row}
                   selections={proposal.selections}
                   onChange={saveSelections}
+                  changed={row.options.some((option) => highlight.has(`service:${option.id}`))}
                 />
               ))}
             </fieldset>
@@ -294,10 +302,12 @@ function PickerRowControl({
   row,
   selections,
   onChange,
+  changed,
 }: {
   row: PickerRow
   selections: readonly ProposalSelection[]
   onChange: (updater: (selections: ProposalSelection[]) => ProposalSelection[]) => void
+  changed: boolean
 }) {
   const chosen = row.options.find((option) =>
     selections.some((entry) => entry.serviceId === option.id),
@@ -309,7 +319,7 @@ function PickerRowControl({
   const single = row.options.length === 1 && !row.options[0].tier
 
   return (
-    <div className="proposal-picker-row">
+    <div className={fieldClass('proposal-picker-row', changed)}>
       {single ? (
         <label className="toggle-label">
           <input

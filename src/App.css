@@ -13198,3 +13198,29 @@ details.invoice-run-sent ul,
   padding: 1px 6px;
   text-transform: uppercase;
 }
+
+/* The intake chat beside the estimate (featreq-311473e2). */
+.proposal-estimate-layout {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+@media (min-width: 1100px) {
+  .proposal-estimate-layout {
+    align-items: start;
+    grid-template-columns: minmax(280px, 1fr) 2fr;
+  }
+}
+
+.proposal-chat-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.proposal-changed {
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}

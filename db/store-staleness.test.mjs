@@ -17798,3 +17798,29 @@ describe('accepting a proposal: the lost-link race retires the orphan (postgres 
     expect(err.createdClientId).not.toBe('client-concurrent')
   })
 })
+
+describe('proposal chat turns (both backends)', () => {
+  beforeEach(async () => {
+    await clearProposals()
+  })
+
+  it('appends both turns on the proposal, the reply carrying its patch', async () => {
+    const created = await store.createProposal({ prospect: { company: 'Acme Books' } })
+    await store.appendProposalMessages(created.id, [
+      { role: 'user', text: 'They have 10 employees.' },
+      { role: 'assistant', text: 'Noted.', patch: { inputs: { employees: 10 } } },
+      { role: 'system', text: 'ignored' },
+    ])
+    const loaded = await store.getProposal(created.id)
+    expect(loaded.messages.map((message) => message.role)).toEqual(['user', 'assistant'])
+    expect(loaded.messages[1].patch).toEqual({ inputs: { employees: 10 } })
+    expect(loaded.messages[0].at).toBeTruthy()
+  })
+
+  it('appends IN the row on Postgres', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).appendProposalMessages('prop-1', [{ role: 'user', text: 'hello' }])
+    const update = fake.matching(/^update proposals/i)[0]
+    expect(update.text).toMatch(/set messages = coalesce\(messages, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+  })
+})

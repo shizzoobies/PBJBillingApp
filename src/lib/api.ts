@@ -23,8 +23,10 @@
   type NotificationEntry,
   type Package,
   type Proposal,
+  type ProposalChatPatch,
   type ProposalPatch,
   type ProposalProspect,
+  type ProposalSnapshot,
   type PublicFirmSettings,
   type ServiceCategory,
   type SessionUser,
@@ -1002,6 +1004,23 @@ export function acceptProposalRequest(
     proposalPath(id, 'accept'),
     proposalJson('POST', input),
     'The proposal could not be accepted',
+  )
+}
+
+/** One intake-chat turn: the reply, the validated patch the server applied, and the result. */
+export type ProposalChatResult = {
+  reply: string
+  applied: ProposalChatPatch | null
+  snapshot: ProposalSnapshot | null
+  proposal: Proposal
+}
+
+/** Owner-only: one turn of the intake chat. The server applies and prices the patch. */
+export function proposalChatRequest(id: string, text: string): Promise<ProposalChatResult> {
+  return proposalRequest<ProposalChatResult>(
+    proposalPath(id, 'chat'),
+    proposalJson('POST', { text }),
+    'The AI could not answer right now',
   )
 }
 

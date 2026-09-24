@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ActivityTab } from '../components/proposals/ActivityTab'
+import { ChatPanel } from '../components/proposals/ChatPanel'
 import { EstimateTab } from '../components/proposals/EstimateTab'
 import { LetterTab } from '../components/proposals/LetterTab'
 import { defaultProposalPricing, formatProposalMoney } from '../../lib/proposal-pricing.js'
@@ -17,10 +18,12 @@ import {
   repriceProposalRequest,
   sendProposalRequest,
   updateProposalRequest,
+  type ProposalChatResult,
 } from '../lib/api'
 import {
   PROPOSAL_STATUS_LABELS,
   PROPOSAL_TABS,
+  changedKeys,
   proposalTitle,
   resolveProposalTab,
   type ProposalPatchBuilder,
@@ -62,6 +65,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const [busy, setBusy] = useState(false)
   const [packages, setPackages] = useState<Package[]>([])
   const [packageId, setPackageId] = useState('')
+  const [highlight, setHighlight] = useState<ReadonlySet<string>>(new Set())
 
   // Packages are endpoint-managed; Accept can apply one. A failed list just
   // means Accept offers none.
@@ -150,10 +154,20 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   }
 
   const save = (build: ProposalPatchBuilder) => {
+    // Her own edit ends the "what the chat just changed" marking.
+    setHighlight(new Set())
     enqueue((latest) => updateProposalRequest(proposalId, build(latest)))
   }
   const reprice = () => {
     enqueue(() => repriceProposalRequest(proposalId))
+  }
+
+  /** The chat applies and saves its own turn; swap in what it answered with. */
+  const applyChatReply = (result: ProposalChatResult) => {
+    if (result.proposal.id !== proposalId) return
+    latestRef.current = result.proposal
+    setProposal(result.proposal)
+    setHighlight(changedKeys(result.applied))
   }
 
   const tab = resolveProposalTab(searchParams.get('tab'))
@@ -338,14 +352,18 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       </div>
 
       {tab === 'estimate' ? (
-        <EstimateTab
-          proposal={proposal}
-          pricing={pricing}
-          clients={data.clients}
-          busy={busy}
-          onSave={save}
-          onReprice={reprice}
-        />
+        <div className="proposal-estimate-layout">
+          <ChatPanel proposal={proposal} onReply={applyChatReply} />
+          <EstimateTab
+            proposal={proposal}
+            pricing={pricing}
+            clients={data.clients}
+            busy={busy}
+            highlight={highlight}
+            onSave={save}
+            onReprice={reprice}
+          />
+        </div>
       ) : null}
       {tab === 'letter' ? (
         <LetterTab

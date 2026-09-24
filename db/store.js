@@ -10703,6 +10703,49 @@ export class AppDataStore {
   }
 
   /**
+   * Append intake-chat turns (spec §5.2) — the owner's message and the AI's
+   * reply, the reply carrying the validated patch it applied. Persisted on the
+   * proposal itself (not one active session per user, unlike the brainstorm).
+   * Postgres appends IN the row, like the email log. Returns the proposal.
+   */
+  async appendProposalMessages(id, turns) {
+    const clean = (Array.isArray(turns) ? turns : [])
+      .filter(
+        (turn) =>
+          turn &&
+          (turn.role === 'user' || turn.role === 'assistant') &&
+          typeof turn.text === 'string' &&
+          turn.text.trim(),
+      )
+      .map((turn) => ({
+        role: turn.role,
+        text: turn.text.trim().slice(0, 8000),
+        at: turn.at ?? nowIso(),
+        ...(turn.role === 'assistant' ? { patch: turn.patch ?? null } : {}),
+      }))
+    if (clean.length === 0) return this.getProposal(id)
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposals
+            set messages = coalesce(messages, '[]'::jsonb) || $2::jsonb, updated_at = now()
+          where id = $1
+          returning ${PROPOSAL_COLUMNS}`,
+        [id, JSON.stringify(clean)],
+      )
+      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+    }
+    const authState = await readJson(localAuthPath)
+    const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+      (row) => row && row.id === id,
+    )
+    if (!target) return null
+    target.messages = [...(Array.isArray(target.messages) ? target.messages : []), ...clean]
+    target.updatedAt = nowIso()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapProposal(target)
+  }
+
+  /**
    * Apply a package to a client: add its plans to the client's selected
    * services, and copy its blueprint checklists onto the client.
    *

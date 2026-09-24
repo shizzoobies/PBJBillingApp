@@ -306,3 +306,35 @@ describe('accepting and declining', () => {
     expect(savedAt).toBeLessThan(catchAt)
   })
 })
+
+describe('the intake chat route', () => {
+  pinOwnerRoutes([
+    {
+      name: 'POST /api/proposals/:id/chat',
+      pattern: /proposalChatMatch && request\.method === 'POST'/,
+      write: true,
+    },
+  ])
+
+  const block = () => routeBlock(/proposalChatMatch && request\.method === 'POST'/, 3600)
+
+  it('applies only the validated patch, through the same re-pricing write the form uses', () => {
+    const text = block()
+    expect(text).toContain('proposalChat(proposal, text, { catalog: pricing })')
+    expect(text).toContain('applyProposalPatch(proposal, turn.patch, pricing.services)')
+    expect(text).toContain('appDataStore.updateProposal(')
+    expect(text).toContain('appDataStore.appendProposalMessages(proposal.id, [')
+  })
+
+  it('never sends email and never changes a status', () => {
+    const text = block()
+    expect(text).not.toContain('sendInvoiceEmail')
+    expect(text).not.toContain('setProposalStatus')
+    expect(text).not.toContain('acceptProposal')
+  })
+
+  it('turns a model failure into a sentence, never a crash', () => {
+    const text = block()
+    expect(text).toContain("error: 'proposal_chat_failed'")
+  })
+})
