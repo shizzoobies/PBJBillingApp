@@ -8528,7 +8528,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'Say something about the prospect first.' })
         return
       }
-      const proposal = await appDataStore.getProposal(proposalChatMatch[1])
+      let proposal = await appDataStore.getProposal(proposalChatMatch[1])
       if (!proposal) {
         sendJson(response, 404, { error: 'Proposal not found' })
         return
@@ -8549,10 +8549,28 @@ const server = createServer(async (request, response) => {
         console.error('[proposals] chat failed:', error?.message || error)
         sendJson(response, status === 503 ? 503 : status === 400 ? 400 : 502, {
           error: 'proposal_chat_failed',
-          message: error?.message || 'The AI could not answer right now.',
+          message: error?.statusCode ? error.message : 'The AI could not answer right now.',
         })
         return
       }
+      // `proposalChat` takes seconds — a manual save, or an accept/decline,
+      // may have landed on this proposal while it ran. Re-read so the patch
+      // applies to whatever is there NOW, never the stale copy read before
+      // the AI call, and a proposal decided in the meantime refuses the
+      // whole turn rather than silently losing either side's change.
+      proposal = await appDataStore.getProposal(proposal.id)
+      if (!proposal) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      if (proposal.status === 'accepted' || proposal.status === 'declined') {
+        sendJson(response, 409, {
+          error: 'proposal_refused',
+          message: `This proposal is ${proposal.status} — copy it to keep working on it.`,
+        })
+        return
+      }
+      let saved
       try {
         if (turn.patch) {
           await appDataStore.updateProposal(
@@ -8560,6 +8578,10 @@ const server = createServer(async (request, response) => {
             applyProposalPatch(proposal, turn.patch, pricing.services),
           )
         }
+        saved = await appDataStore.appendProposalMessages(proposal.id, [
+          { role: 'user', text },
+          { role: 'assistant', text: turn.reply, patch: turn.patch },
+        ])
       } catch (error) {
         if (error instanceof ProposalStateError) {
           sendJson(response, 409, { error: 'proposal_refused', message: error.message })
@@ -8567,15 +8589,15 @@ const server = createServer(async (request, response) => {
         }
         throw error
       }
-      const saved = await appDataStore.appendProposalMessages(proposal.id, [
-        { role: 'user', text },
-        { role: 'assistant', text: turn.reply, patch: turn.patch },
-      ])
+      if (!saved) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
       broadcastDataChanged()
       sendJson(response, 200, {
         reply: turn.reply,
         applied: turn.patch,
-        snapshot: saved?.pricingSnapshot ?? null,
+        snapshot: saved.pricingSnapshot ?? null,
         proposal: saved,
       })
       return

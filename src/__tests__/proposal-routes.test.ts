@@ -27,7 +27,7 @@ function routeBlock(startPattern: RegExp, length = 2200): string {
   return serverSource.slice(at, at + length)
 }
 
-type Route = { name: string; pattern: RegExp; write: boolean }
+type Route = { name: string; pattern: RegExp; write: boolean; broadcastLength?: number }
 
 /** Owner-only on every route; same-origin and a broadcast on every write. */
 function pinOwnerRoutes(routes: Route[]) {
@@ -47,7 +47,9 @@ function pinOwnerRoutes(routes: Route[]) {
       })
 
       it(`${route.name} tells the other sessions`, () => {
-        expect(routeBlock(route.pattern, 3000)).toContain('broadcastDataChanged()')
+        expect(routeBlock(route.pattern, route.broadcastLength ?? 3000)).toContain(
+          'broadcastDataChanged()',
+        )
       })
     }
   }
@@ -313,6 +315,9 @@ describe('the intake chat route', () => {
       name: 'POST /api/proposals/:id/chat',
       pattern: /proposalChatMatch && request\.method === 'POST'/,
       write: true,
+      // The re-read + decided-proposal guards (fix batch 3, item 1) push
+      // `broadcastDataChanged()` past the shared 3000-char default.
+      broadcastLength: 3700,
     },
   ])
 
@@ -326,6 +331,37 @@ describe('the intake chat route', () => {
     expect(text).toContain('appDataStore.appendProposalMessages(proposal.id, [')
   })
 
+  it('re-reads the proposal after the AI answers and applies the patch to THAT copy, not the one read before the call (fix batch 3, item 1)', () => {
+    const text = block()
+    const chatAt = text.indexOf('proposalChat(proposal, text, { catalog: pricing })')
+    const rereadAt = text.indexOf('proposal = await appDataStore.getProposal(proposal.id)')
+    const patchAt = text.indexOf('applyProposalPatch(proposal, turn.patch, pricing.services)')
+    expect(chatAt).toBeGreaterThan(-1)
+    expect(rereadAt).toBeGreaterThan(chatAt)
+    expect(patchAt).toBeGreaterThan(rereadAt)
+  })
+
+  it('refuses with 409 if the re-read proposal was decided while the AI was answering (fix batch 3, item 1)', () => {
+    const text = block()
+    const rereadAt = text.indexOf('proposal = await appDataStore.getProposal(proposal.id)')
+    const after = text.slice(rereadAt, rereadAt + 400)
+    expect(after).toMatch(/status === 'accepted' \|\| proposal\.status === 'declined'/)
+    expect(after).toContain("error: 'proposal_refused'")
+  })
+
+  it('a re-read (or store write) that finds nothing sends 404, never 200 with proposal: null (fix batch 3, item 4)', () => {
+    const text = block()
+    const rereadAt = text.indexOf('proposal = await appDataStore.getProposal(proposal.id)')
+    expect(text.slice(rereadAt, rereadAt + 200)).toMatch(
+      /if \(!proposal\) \{\s*sendJson\(response, 404, \{ error: 'Proposal not found' \}\)/,
+    )
+    const savedAt = text.indexOf('saved = await appDataStore.appendProposalMessages(proposal.id, [')
+    const afterSaved = text.slice(savedAt, savedAt + 600)
+    expect(afterSaved).toMatch(
+      /if \(!saved\) \{\s*sendJson\(response, 404, \{ error: 'Proposal not found' \}\)/,
+    )
+  })
+
   it('never sends email and never changes a status', () => {
     const text = block()
     expect(text).not.toContain('sendInvoiceEmail')
@@ -333,8 +369,9 @@ describe('the intake chat route', () => {
     expect(text).not.toContain('acceptProposal')
   })
 
-  it('turns a model failure into a sentence, never a crash', () => {
+  it('turns a model failure into a sentence, never a crash, and only hides the raw message when there is no statusCode (fix batch 3, item 7)', () => {
     const text = block()
     expect(text).toContain("error: 'proposal_chat_failed'")
+    expect(text).toContain("message: error?.statusCode ? error.message : 'The AI could not answer right now.'")
   })
 })

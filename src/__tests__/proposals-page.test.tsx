@@ -942,17 +942,62 @@ describe('the intake chat', () => {
     expect(screen.getByLabelText('Transactions').closest('label')?.className).not.toContain(
       'proposal-changed',
     )
+    // The textarea only clears on success (fix batch 3, item 2).
+    expect((await screen.findByLabelText('Message to the intake assistant') as HTMLTextAreaElement).value).toBe(
+      '',
+    )
   })
 
-  it('shows the error sentence when the AI cannot answer', async () => {
+  it('shows the error sentence — once, not also as the page-level banner — and keeps her draft text (fix batch 3, item 2)', async () => {
     api.proposalChatRequest = vi.fn(async () => {
       throw new ApiError(503, 'The AI is at capacity right now — give it a minute and try again.')
     })
     renderEditor()
-    fireEvent.change(await screen.findByLabelText('Message to the intake assistant'), {
-      target: { value: 'Hello' },
-    })
+    const box = (await screen.findByLabelText(
+      'Message to the intake assistant',
+    )) as HTMLTextAreaElement
+    fireEvent.change(box, { target: { value: 'Hello' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     expect(await screen.findByText(/at capacity/)).toBeTruthy()
+    expect(screen.getAllByText(/at capacity/)).toHaveLength(1)
+    expect(box.value).toBe('Hello')
+  })
+
+  it('a chat turn and a field edit queued together apply in order — the field edit is built from the chat’s result (fix batch 3, item 2)', async () => {
+    const chatResult = {
+      reply: 'Ten on payroll — noted. How often do they run it?',
+      applied: { inputs: { employees: 10 } },
+      snapshot: AFTER_CHAT.pricingSnapshot,
+      proposal: {
+        ...AFTER_CHAT,
+        selections: [{ serviceId: 'monthly-weekly-transactions-basic', override: 900 }],
+      },
+    }
+    const chatResponse = deferred<typeof chatResult>()
+    api.proposalChatRequest = vi.fn().mockReturnValueOnce(chatResponse.promise)
+    api.updateProposalRequest = vi.fn().mockResolvedValueOnce(WITH_RECONCILIATIONS)
+    renderEditor()
+
+    fireEvent.change(await screen.findByLabelText('Message to the intake assistant'), {
+      target: { value: 'They have 10 employees.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(api.proposalChatRequest).toHaveBeenCalledTimes(1))
+
+    // Queued while the chat turn above is still pending — it must not fire yet.
+    fireEvent.click(await screen.findByLabelText('Reconciliations: Reconciliations'))
+    expect(api.updateProposalRequest).not.toHaveBeenCalled()
+
+    chatResponse.resolve(chatResult)
+
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalledTimes(1))
+    // The override the chat applied is still there — the queued save was built
+    // from the chat's result, not from the proposal as it stood before it.
+    expect(api.updateProposalRequest).toHaveBeenCalledWith('prop-1', {
+      selections: [
+        { serviceId: 'monthly-weekly-transactions-basic', override: 900 },
+        { serviceId: 'reconciliations' },
+      ],
+    })
   })
 })

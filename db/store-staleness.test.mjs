@@ -16825,6 +16825,15 @@ describe('proposals (file backend)', () => {
     expect((await store.listProposals()).map((row) => row.id)).toEqual([first.id, second.id])
   })
 
+  it('leaves messages off list rows — getProposal still carries the full transcript (file backend)', async () => {
+    const created = await store.createProposal({ prospect: { company: 'Acme Books' } })
+    await store.appendProposalMessages(created.id, [{ role: 'user', text: 'They have 10 employees.' }])
+    const [row] = await store.listProposals()
+    expect(row.id).toBe(created.id)
+    expect(row.messages).toEqual([])
+    expect((await store.getProposal(created.id)).messages).toHaveLength(1)
+  })
+
   it('skips a row with an unrecognized status instead of failing the whole list, and getProposal of it returns null (M3)', async () => {
     const good = await store.createProposal({ prospect: { company: 'Good Co' } })
     const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
@@ -17123,9 +17132,14 @@ describe('proposals (postgres branch)', () => {
     expect(list).toHaveLength(1)
     expect(list[0].id).toBe('prop-1')
     const selects = fake.matching(/^select/i)
-    expect(
-      selects.some((s) => /from proposals/i.test(s.text) && /order by updated_at desc/i.test(s.text)),
-    ).toBe(true)
+    const listSelect = selects.find(
+      (s) => /from proposals/i.test(s.text) && /order by updated_at desc/i.test(s.text),
+    )
+    expect(listSelect).toBeTruthy()
+    // The full chat transcript is left off list rows — the editor loads it
+    // for the one proposal on screen through getProposal (fix batch 3, item 5).
+    expect(listSelect.text).not.toMatch(/\bmessages\b/)
+    expect(listSelect.text).toMatch(/\bemail_log\b/)
 
     expect((await postgresStore(fake).getProposal('prop-1')).id).toBe('prop-1')
 
@@ -17817,10 +17831,60 @@ describe('proposal chat turns (both backends)', () => {
     expect(loaded.messages[0].at).toBeTruthy()
   })
 
-  it('appends IN the row on Postgres', async () => {
+  it('appends IN the row on Postgres, capped to the last 200 turns in the same statement', async () => {
     const fake = fakeProposalPostgres(proposalRow())
     await postgresStore(fake).appendProposalMessages('prop-1', [{ role: 'user', text: 'hello' }])
     const update = fake.matching(/^update proposals/i)[0]
-    expect(update.text).toMatch(/set messages = coalesce\(messages, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    expect(update.text).toMatch(
+      /set messages = coalesce\(\(\s*select jsonb_agg\(t\.elem order by t\.ord\)\s*from jsonb_array_elements\(coalesce\(messages, '\[\]'::jsonb\) \|\| \$2::jsonb\)/,
+    )
+    expect(update.text).toMatch(/where id = \$1 and status not in \('accepted', 'declined'\)/)
+    expect(update.params[2]).toBe(200)
+  })
+
+  it('the second parameter is the cleaned turns — role filtered, text capped at 8000', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).appendProposalMessages('prop-1', [
+      { role: 'user', text: 'a'.repeat(9000) },
+      { role: 'system', text: 'ignored — not user or assistant' },
+      { role: 'assistant', text: 'Noted.', patch: { inputs: { employees: 10 } } },
+    ])
+    const update = fake.matching(/^update proposals/i)[0]
+    const sent = JSON.parse(update.params[1])
+    expect(sent.map((turn) => turn.role)).toEqual(['user', 'assistant'])
+    expect(sent[0].text).toHaveLength(8000)
+    expect(sent[1].patch).toEqual({ inputs: { employees: 10 } })
+  })
+
+  it('refuses to append onto an accepted proposal, and never issues the update (Postgres)', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'accepted' }))
+    await expect(
+      postgresStore(fake).appendProposalMessages('prop-1', [{ role: 'user', text: 'hello' }]),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    expect(fake.matching(/^update proposals/i)).toHaveLength(0)
+  })
+
+  it('refuses to append onto an accepted or declined proposal (file backend)', async () => {
+    const created = await store.createProposal({ prospect: { company: 'Acme Books' } })
+    await store.setProposalStatus(created.id, 'sent')
+    await store.setProposalStatus(created.id, 'declined')
+    await expect(
+      store.appendProposalMessages(created.id, [{ role: 'user', text: 'hello' }]),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    expect((await store.getProposal(created.id)).messages).toHaveLength(0)
+  })
+
+  it('caps stored messages at the last 200 turns (file backend)', async () => {
+    const created = await store.createProposal({ prospect: { company: 'Acme Books' } })
+    for (let i = 0; i < 105; i += 1) {
+      await store.appendProposalMessages(created.id, [
+        { role: 'user', text: `turn ${i}` },
+        { role: 'assistant', text: `reply ${i}` },
+      ])
+    }
+    const loaded = await store.getProposal(created.id)
+    expect(loaded.messages).toHaveLength(200)
+    expect(loaded.messages[0].text).toBe('turn 5')
+    expect(loaded.messages[loaded.messages.length - 1].text).toBe('reply 104')
   })
 })

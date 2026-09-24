@@ -15,6 +15,7 @@ import {
   fetchFirmSettings,
   getProposalRequest,
   listPackagesRequest,
+  proposalChatRequest,
   repriceProposalRequest,
   sendProposalRequest,
   updateProposalRequest,
@@ -159,16 +160,37 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     enqueue((latest) => updateProposalRequest(proposalId, build(latest)))
   }
   const reprice = () => {
+    // A reprice is her own action ending the "what the chat just changed"
+    // marking, same as a manual save.
+    setHighlight(new Set())
     enqueue(() => repriceProposalRequest(proposalId))
   }
 
-  /** The chat applies and saves its own turn; swap in what it answered with. */
-  const applyChatReply = (result: ProposalChatResult) => {
-    if (result.proposal.id !== proposalId) return
-    latestRef.current = result.proposal
-    setProposal(result.proposal)
-    setHighlight(changedKeys(result.applied))
-  }
+  /**
+   * A chat turn runs through the SAME queue as a manual save (fix batch 3,
+   * item 2) — the server applies the patch to whatever it reads at that
+   * point, never to a copy this page hands it. ChatPanel gets its own error
+   * display (right next to the textarea), so a failed turn is handled here
+   * without touching the page-level `error` banner: the action catches its
+   * own rejection and hands back `latest` unchanged, keeping `enqueue`'s own
+   * try/catch quiet. The promise ChatPanel awaits is separate from that —
+   * settled from inside the action — so it can show the error and only clear
+   * the textarea on success.
+   */
+  const sendChat = (text: string) =>
+    new Promise<void>((resolve, reject) => {
+      enqueue(async (latest) => {
+        try {
+          const result: ProposalChatResult = await proposalChatRequest(proposalId, text)
+          setHighlight(changedKeys(result.applied))
+          resolve()
+          return result.proposal
+        } catch (err) {
+          reject(err)
+          return latest
+        }
+      })
+    })
 
   const tab = resolveProposalTab(searchParams.get('tab'))
   const setTab = (next: ProposalTab) => {
@@ -353,7 +375,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
 
       {tab === 'estimate' ? (
         <div className="proposal-estimate-layout">
-          <ChatPanel proposal={proposal} onReply={applyChatReply} />
+          <ChatPanel proposal={proposal} onSend={sendChat} />
           <EstimateTab
             proposal={proposal}
             pricing={pricing}

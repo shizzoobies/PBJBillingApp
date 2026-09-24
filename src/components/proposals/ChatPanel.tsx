@@ -1,19 +1,21 @@
 import { useState, type FormEvent } from 'react'
-import { proposalChatRequest, type ProposalChatResult } from '../../lib/api'
 import { ApiError, type Proposal } from '../../lib/types'
 
 /**
- * The intake chat (spec §5.2), beside the estimate. Each turn goes to the
- * server, which applies only the validated patch and re-prices — the page
- * swaps in the proposal it answers with. Prices come from the estimate, never
- * from the AI.
+ * The intake chat (spec §5.2), beside the estimate. Each turn goes through
+ * `onSend`, which the page runs in its own save queue (the same one a manual
+ * edit uses) so a turn and a save can never race each other or clobber the
+ * proposal the other one just wrote. The textarea clears, and the turn shows
+ * up in the transcript below, only once that promise resolves — a rejection
+ * leaves the draft text in place so nothing typed is lost. Prices come from
+ * the estimate, never from the AI.
  */
 export function ChatPanel({
   proposal,
-  onReply,
+  onSend,
 }: {
   proposal: Proposal
-  onReply: (result: ProposalChatResult) => void
+  onSend: (text: string) => Promise<void>
 }) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
@@ -27,9 +29,8 @@ export function ChatPanel({
     setSending(true)
     setError('')
     try {
-      const result = await proposalChatRequest(proposal.id, message)
+      await onSend(message)
       setText('')
-      onReply(result)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'The AI could not answer right now.')
     } finally {

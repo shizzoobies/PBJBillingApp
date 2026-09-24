@@ -1098,6 +1098,17 @@ const PROPOSAL_COLUMNS = `id, status, prospect, client_id, inputs, selections, p
   copied_from_id, created_by, created_at, updated_at`
 
 /**
+ * `PROPOSAL_COLUMNS` without `messages` — what `listProposals` selects. The
+ * editor loads the one proposal on screen (with its full chat transcript)
+ * through `getProposal`; the list has nothing that reads a turn, so it never
+ * carries every proposal's whole conversation over the wire.
+ */
+const PROPOSAL_LIST_COLUMNS = PROPOSAL_COLUMNS.replace(/,\s*messages/, '')
+
+/** Turns kept per proposal (spec §5.2) — oldest dropped past this. */
+const MAX_PROPOSAL_MESSAGES = 200
+
+/**
  * The priced snapshot a proposal carries (spec §4.2). Always the CURRENT
  * catalog: the snapshot moves only when the proposal itself is edited or
  * repriced, never because the catalog changed underneath it.
@@ -9995,18 +10006,22 @@ export class AppDataStore {
     }
   }
 
-  /** Every proposal, most recently touched first. Owner-only at the endpoint. */
+  /**
+   * Every proposal, most recently touched first. Owner-only at the endpoint.
+   * Rows leave `messages` out (see `PROPOSAL_LIST_COLUMNS`) — `mapProposal`
+   * treats a missing column as no messages, same as a proposal with none.
+   */
   async listProposals() {
     if (this.pool) {
       const { rows } = await this.pool.query(
-        `select ${PROPOSAL_COLUMNS} from proposals order by updated_at desc`,
+        `select ${PROPOSAL_LIST_COLUMNS} from proposals order by updated_at desc`,
       )
       return rows.map((row) => AppDataStore.mapProposalSafe(row)).filter(Boolean)
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.proposals) ? authState.proposals : []
     return list
-      .map((row) => AppDataStore.mapProposalSafe(row))
+      .map(({ messages, ...row }) => AppDataStore.mapProposalSafe(row))
       .filter(Boolean)
       .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
   }
@@ -10705,8 +10720,18 @@ export class AppDataStore {
   /**
    * Append intake-chat turns (spec §5.2) — the owner's message and the AI's
    * reply, the reply carrying the validated patch it applied. Persisted on the
-   * proposal itself (not one active session per user, unlike the brainstorm).
-   * Postgres appends IN the row, like the email log. Returns the proposal.
+   * proposal itself (not one active session per user, unlike the brainstorm),
+   * capped at `MAX_PROPOSAL_MESSAGES` turns — the oldest drop off, same
+   * "nothing silently forgotten past the cap" tradeoff as the spitball
+   * compaction, just without a running summary. Postgres appends IN the row,
+   * like the email log.
+   *
+   * An accepted or declined proposal is a closed record and refuses
+   * (ProposalStateError), same convention as `updateProposal` /
+   * `setProposalLetter` — the chat route re-reads and checks status itself
+   * before calling this, but a direct caller (or a decision landing in the
+   * gap between that check and this write) still needs this guard. Returns
+   * the proposal, or null when there is no such proposal.
    */
   async appendProposalMessages(id, turns) {
     const clean = (Array.isArray(turns) ? turns : [])
@@ -10724,22 +10749,47 @@ export class AppDataStore {
         ...(turn.role === 'assistant' ? { patch: turn.patch ?? null } : {}),
       }))
     if (clean.length === 0) return this.getProposal(id)
+    const current = await this.getProposal(id)
+    if (!current) return null
+    if (current.status === 'accepted' || current.status === 'declined') {
+      throw new ProposalStateError(
+        `This proposal is ${current.status} — copy it to keep working on it.`,
+      )
+    }
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update proposals
-            set messages = coalesce(messages, '[]'::jsonb) || $2::jsonb, updated_at = now()
-          where id = $1
+            set messages = coalesce((
+                  select jsonb_agg(t.elem order by t.ord)
+                    from jsonb_array_elements(coalesce(messages, '[]'::jsonb) || $2::jsonb)
+                         with ordinality as t(elem, ord)
+                   where t.ord > jsonb_array_length(coalesce(messages, '[]'::jsonb) || $2::jsonb) - $3::int
+                ), '[]'::jsonb),
+                updated_at = now()
+          where id = $1 and status not in ('accepted', 'declined')
           returning ${PROPOSAL_COLUMNS}`,
-        [id, JSON.stringify(clean)],
+        [id, JSON.stringify(clean), MAX_PROPOSAL_MESSAGES],
       )
-      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+      if (rows[0]) return AppDataStore.mapProposal(rows[0])
+      // Zero rows for an id we just confirmed exists and was open: a
+      // concurrent accept/decline moved it in between.
+      throw new ProposalStateError(
+        `This proposal is ${current.status} — copy it to keep working on it.`,
+      )
     }
     const authState = await readJson(localAuthPath)
     const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
       (row) => row && row.id === id,
     )
     if (!target) return null
-    target.messages = [...(Array.isArray(target.messages) ? target.messages : []), ...clean]
+    if (target.status === 'accepted' || target.status === 'declined') {
+      throw new ProposalStateError(
+        `This proposal is ${target.status} — copy it to keep working on it.`,
+      )
+    }
+    target.messages = [...(Array.isArray(target.messages) ? target.messages : []), ...clean].slice(
+      -MAX_PROPOSAL_MESSAGES,
+    )
     target.updatedAt = nowIso()
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return AppDataStore.mapProposal(target)
