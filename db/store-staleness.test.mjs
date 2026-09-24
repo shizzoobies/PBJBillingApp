@@ -17319,3 +17319,99 @@ describe('proposal letters (both backends)', () => {
     )
   })
 })
+
+describe('accepting a proposal (file backend)', () => {
+  beforeEach(async () => {
+    await clearProposals()
+    await setProposalRates(store)
+    await store.write(
+      workspace({
+        plans: [{ id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [] }],
+      }),
+    )
+  })
+
+  const prospectProposal = () =>
+    store.createProposal({
+      prospect: {
+        company: 'Acme Books',
+        contactName: 'Pat Doe',
+        email: 'pat@acme.test',
+        phone: '615-555-0101',
+      },
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+
+  it('creates the client in Onboarding, billed monthly at the proposal total', async () => {
+    const proposal = await prospectProposal()
+    const result = await store.acceptProposal(proposal.id, {
+      actorUserId: 'emp-patrice',
+      planIds: ['plan-books', 'plan-gone'],
+    })
+    expect(result.createdClient).toBe(true)
+    expect(result.proposal.status).toBe('accepted')
+    expect(result.proposal.clientId).toBe(result.clientId)
+    expect(result.proposal.acceptedAt).toBeTruthy()
+
+    const client = (await store.read()).clients.find((row) => row.id === result.clientId)
+    expect(client).toMatchObject({
+      name: 'Acme Books',
+      contactName: 'Pat Doe',
+      email: 'pat@acme.test',
+      lifecycleStage: 'onboarding',
+      billingMode: 'subscription',
+      monthlyRate: 630,
+      planIds: ['plan-books'],
+    })
+  })
+
+  it('never accepts twice', async () => {
+    const proposal = await prospectProposal()
+    await store.acceptProposal(proposal.id, {})
+    await expect(store.acceptProposal(proposal.id, {})).rejects.toBeInstanceOf(ProposalStateError)
+    expect((await store.read()).clients.filter((row) => row.name === 'Acme Books')).toHaveLength(1)
+  })
+
+  it('an upsell leaves the client’s monthly rate alone unless she confirmed it', async () => {
+    const upsell = await store.createProposal({
+      clientId: 'c1',
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const kept = await store.acceptProposal(upsell.id, { updateMonthlyRate: false })
+    expect(kept.createdClient).toBe(false)
+    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate ?? 0).not.toBe(630)
+
+    const again = await store.createProposal({
+      clientId: 'c1',
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    await store.acceptProposal(again.id, { updateMonthlyRate: true })
+    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(630)
+  })
+
+  it('refuses a prospect with no name to put on the client', async () => {
+    const nameless = await store.createProposal({})
+    await expect(store.acceptProposal(nameless.id, {})).rejects.toBeInstanceOf(ProposalStateError)
+  })
+})
+
+describe('accepting a proposal (postgres branch)', () => {
+  it('changes an upsell client’s rate with one targeted statement', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).setClientMonthlyRate('c1', 630)
+    const update = fake.matching(/^update clients/i)[0]
+    expect(update.text).toMatch(/set monthly_rate = \$2/)
+    expect(update.params).toEqual(['c1', 630])
+  })
+
+  it('refuses an accepted proposal before writing anything', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'accepted' }))
+    await expect(postgresStore(fake).acceptProposal('prop-1', {})).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+    expect(fake.matching(/^(insert|update)/i)).toHaveLength(0)
+  })
+})

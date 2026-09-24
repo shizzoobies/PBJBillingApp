@@ -4,13 +4,16 @@ import { useAppContext } from '../AppContext'
 import { ActivityTab } from '../components/proposals/ActivityTab'
 import { EstimateTab } from '../components/proposals/EstimateTab'
 import { LetterTab } from '../components/proposals/LetterTab'
-import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
+import { defaultProposalPricing, formatProposalMoney } from '../../lib/proposal-pricing.js'
 import {
+  acceptProposalRequest,
   copyProposalRequest,
+  declineProposalRequest,
   deleteProposalRequest,
   draftProposalLetterRequest,
   fetchFirmSettings,
   getProposalRequest,
+  listPackagesRequest,
   repriceProposalRequest,
   sendProposalRequest,
   updateProposalRequest,
@@ -23,7 +26,7 @@ import {
   type ProposalPatchBuilder,
   type ProposalTab,
 } from '../lib/proposals'
-import { ApiError, type Proposal, type ProposalPricing } from '../lib/types'
+import { ApiError, type Package, type Proposal, type ProposalPricing } from '../lib/types'
 
 /**
  * Keyed on the proposal id (review M1): a Copy navigation swaps the URL to a
@@ -53,6 +56,24 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const [pricing, setPricing] = useState<ProposalPricing | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [packages, setPackages] = useState<Package[]>([])
+  const [packageId, setPackageId] = useState('')
+
+  // Packages are endpoint-managed; Accept can apply one. A failed list just
+  // means Accept offers none.
+  useEffect(() => {
+    let cancelled = false
+    void listPackagesRequest()
+      .then((rows) => {
+        if (!cancelled) setPackages(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setPackages([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // The last server-CONFIRMED proposal. A queued save's patch is built from
   // this, not from `proposal` as it stood when the save was requested.
@@ -171,6 +192,40 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     }
   }
 
+  // Accept says what it will do before it does it (spec §5.5). A prospect
+  // becomes a client; an existing client's fee moves only on a second yes.
+  const accept = () => {
+    if (!proposal) return
+    const monthly = formatProposalMoney(proposal.pricingSnapshot?.totals.monthly ?? 0)
+    const chosenPackage = packageId || null
+    if (!proposal.clientId) {
+      const ok = window.confirm(
+        `Accept this proposal? This adds ${proposalTitle(proposal)} as a client in Onboarding, ` +
+          `billed monthly at ${monthly}. Nothing about any invoice changes.`,
+      )
+      if (!ok) return
+      enqueue(async () => (await acceptProposalRequest(proposalId, { packageId: chosenPackage })).proposal)
+      return
+    }
+    const clientName =
+      data.clients.find((client) => client.id === proposal.clientId)?.name ?? 'this client'
+    if (!window.confirm(`Accept this proposal for ${clientName}?`)) return
+    const updateMonthlyRate = window.confirm(
+      `Also change ${clientName}’s monthly fee to ${monthly}? Cancel keeps their current fee.`,
+    )
+    enqueue(
+      async () =>
+        (await acceptProposalRequest(proposalId, { packageId: chosenPackage, updateMonthlyRate }))
+          .proposal,
+    )
+  }
+
+  const decline = () => {
+    const note = window.prompt('Why did they decline? (optional — saved on the proposal)', '')
+    if (note === null) return
+    enqueue(() => declineProposalRequest(proposalId, note))
+  }
+
   if (!proposal || !pricing) {
     return (
       <section className="panel">
@@ -201,6 +256,34 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           <span className="status-pill">{PROPOSAL_STATUS_LABELS[proposal.status]}</span>
         </div>
         <div className="button-row">
+          {proposal.status === 'draft' || proposal.status === 'sent' ? (
+            <>
+              <select
+                className="input"
+                aria-label="Package to apply on accept"
+                value={packageId}
+                onChange={(event) => setPackageId(event.target.value)}
+              >
+                <option value="">No package</option>
+                {packages.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="primary-action" disabled={busy} onClick={accept}>
+                Accept
+              </button>
+              <button type="button" className="ghost-action" disabled={busy} onClick={decline}>
+                Decline
+              </button>
+            </>
+          ) : null}
+          {proposal.status === 'accepted' && proposal.clientId ? (
+            <Link className="secondary-action" to={`/clients/${proposal.clientId}`}>
+              Open the client
+            </Link>
+          ) : null}
           <button type="button" className="secondary-action" disabled={busy} onClick={() => void copy()}>
             Copy to new proposal
           </button>

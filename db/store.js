@@ -10455,6 +10455,119 @@ export class AppDataStore {
   }
 
   /**
+   * Targeted write of one client's monthly rate — Accept's upsell path, and
+   * only after the owner confirmed it in the page. Never the bulk save
+   * (cardinal rule 4). Returns true when a client row changed.
+   */
+  async setClientMonthlyRate(clientId, monthlyRate) {
+    if (!clientId) return false
+    const rate = clampMoney(monthlyRate ?? 0)
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update clients set monthly_rate = $2, updated_at = now() where id = $1 returning id`,
+        [clientId, rate],
+      )
+      return (result.rowCount ?? 0) > 0
+    }
+    const data = await readJson(localDataPath)
+    let found = false
+    data.clients = (data.clients ?? []).map((client) => {
+      if (client.id !== clientId) return client
+      found = true
+      return { ...client, monthlyRate: rate }
+    })
+    if (!found) return false
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return true
+  }
+
+  /**
+   * Accept a proposal (spec §5.5).
+   *
+   * A PROSPECT (no `client_id`) becomes a client: company, contact fields,
+   * Onboarding, Monthly billing at the proposal's monthly total, the firm's
+   * default payment terms. The new client is linked to the proposal at once, so
+   * a second press after a later failure can never create it twice.
+   *
+   * An UPSELL (`client_id` set) changes that client's monthly rate only when
+   * `updateMonthlyRate` is true — the page asks first.
+   *
+   * Chosen plans are unioned in through the targeted plan write and a chosen
+   * package through `applyPackageToClient`, the same paths the client page
+   * uses. Nothing about any existing invoice changes.
+   *
+   * @returns {{ proposal, clientId, createdClient, packageApplied } | null}
+   */
+  async acceptProposal(
+    id,
+    { actorUserId = null, packageId = null, planIds = [], updateMonthlyRate = false } = {},
+  ) {
+    const proposal = await this.getProposal(id)
+    if (!proposal) return null
+    if (proposal.status === 'accepted' || proposal.status === 'declined') {
+      throw new ProposalStateError(`This proposal is already ${proposal.status}.`)
+    }
+    const monthlyRate = Number(proposal.pricingSnapshot?.totals?.monthly) || 0
+    let clientId = proposal.clientId
+    let createdClient = false
+
+    if (!clientId) {
+      const { company, contactName, email, phone } = proposal.prospect
+      const name = company || contactName
+      if (!name) {
+        throw new ProposalStateError('Give the prospect a company or contact name before accepting.')
+      }
+      const firm = await this.getFirmSettings()
+      const client = await this.createClient({
+        name,
+        contact: contactName,
+        contactName,
+        email,
+        phone,
+        lifecycleStage: 'onboarding',
+        billingMode: 'subscription',
+        monthlyRate,
+        paymentTerms: firm.clientDefaults?.paymentTerms ?? '',
+        ...(contactName ? { newPrimaryContact: { name: contactName, email, phone } } : {}),
+      })
+      if (!client) throw new ProposalStateError('The client could not be created.')
+      clientId = client.id
+      createdClient = true
+      await this.setProposalStatus(id, proposal.status, { clientId })
+    } else if (updateMonthlyRate === true) {
+      await this.setClientMonthlyRate(clientId, monthlyRate)
+    }
+
+    const wantedPlans = [
+      ...new Set(
+        (Array.isArray(planIds) ? planIds : []).filter((planId) => typeof planId === 'string' && planId),
+      ),
+    ]
+    if (wantedPlans.length > 0) {
+      const data = await this.read()
+      const client = (data.clients ?? []).find((row) => row.id === clientId)
+      const known = new Set((data.plans ?? []).map((plan) => plan.id))
+      const existing = Array.isArray(client?.planIds) ? client.planIds : []
+      const added = wantedPlans.filter((planId) => known.has(planId) && !existing.includes(planId))
+      if (client && added.length > 0) await this._setClientPlanIds(clientId, [...existing, ...added])
+    }
+    const packageResult =
+      typeof packageId === 'string' && packageId
+        ? await this.applyPackageToClient(clientId, packageId, { actorUserId })
+        : null
+
+    const accepted = await this.setProposalStatus(id, 'accepted', { clientId })
+    if (actorUserId) {
+      await this.recordActivity(
+        actorUserId,
+        'proposal_accepted',
+        `${proposal.prospect.company || proposal.prospect.contactName || 'Proposal'} · ${proposal.id}`,
+      )
+    }
+    return { proposal: accepted, clientId, createdClient, packageApplied: Boolean(packageResult) }
+  }
+
+  /**
    * Apply a package to a client: add its plans to the client's selected
    * services, and copy its blueprint checklists onto the client.
    *

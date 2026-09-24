@@ -241,3 +241,38 @@ describe('the Resend webhook proposal branch', () => {
     expect(helper).not.toMatch(/status:\s*'/)
   })
 })
+
+describe('accepting and declining', () => {
+  pinOwnerRoutes([
+    {
+      name: 'POST /api/proposals/:id/accept',
+      pattern: /proposalAcceptMatch && request\.method === 'POST'/,
+      write: true,
+    },
+    {
+      name: 'POST /api/proposals/:id/decline',
+      pattern: /proposalDeclineMatch && request\.method === 'POST'/,
+      write: true,
+    },
+  ])
+
+  const accept = () => routeBlock(/proposalAcceptMatch && request\.method === 'POST'/, 2400)
+
+  it('Accept goes through the store, which alone decides whether a client is created', () => {
+    const text = accept()
+    expect(text).toContain('appDataStore.acceptProposal(proposalAcceptMatch[1], {')
+    expect(text).not.toContain('appDataStore.createClient(')
+    expect(text).toContain('updateMonthlyRate: payload.updateMonthlyRate === true')
+  })
+
+  it('a refusal is a 409 with the sentence', () => {
+    const text = accept()
+    expect(text).toContain('error instanceof ProposalStateError || error instanceof PackageApplyError')
+    expect(text).toContain("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
+  })
+
+  it('Decline records the note through the status write', () => {
+    const text = routeBlock(/proposalDeclineMatch && request\.method === 'POST'/, 2400)
+    expect(text).toContain("appDataStore.setProposalStatus(current.id, 'declined', {")
+  })
+})

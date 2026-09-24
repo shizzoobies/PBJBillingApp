@@ -982,6 +982,38 @@ export function sendProposalRequest(id: string, to: string): Promise<Proposal> {
   )
 }
 
+/** What Accept did: the proposal, the client it created or used, and whether a package went on. */
+export type AcceptProposalResult = {
+  proposal: Proposal
+  clientId: string
+  createdClient: boolean
+  packageApplied: boolean
+}
+
+/**
+ * Owner-only: accept. A prospect becomes a client in Onboarding; an existing
+ * client's monthly fee moves only with `updateMonthlyRate: true`.
+ */
+export function acceptProposalRequest(
+  id: string,
+  input: { packageId?: string | null; planIds?: string[]; updateMonthlyRate?: boolean } = {},
+): Promise<AcceptProposalResult> {
+  return proposalRequest<AcceptProposalResult>(
+    proposalPath(id, 'accept'),
+    proposalJson('POST', input),
+    'The proposal could not be accepted',
+  )
+}
+
+/** Owner-only: decline, with her note. The proposal stays on the list. */
+export function declineProposalRequest(id: string, note: string): Promise<Proposal> {
+  return proposalRequest<Proposal>(
+    proposalPath(id, 'decline'),
+    proposalJson('POST', { note }),
+    'The proposal could not be declined',
+  )
+}
+
 /**
  * The covered-date half of a recurring reimbursement, as the setup form sends
  * it. Every field optional: an expense that does not name its covered period

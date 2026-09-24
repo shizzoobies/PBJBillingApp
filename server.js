@@ -8395,6 +8395,94 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/proposals/:id/accept — { packageId?, planIds?, updateMonthlyRate? }
+    // (spec §5.5). The store decides: a prospect becomes a client in Onboarding;
+    // an existing client's monthly rate moves only when the page confirmed it.
+    const proposalAcceptMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/accept$/)
+    if (proposalAcceptMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can accept proposals' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = (await readJsonBody(request)) ?? {}
+      let result
+      try {
+        result = await appDataStore.acceptProposal(proposalAcceptMatch[1], {
+          actorUserId: session.user.id,
+          packageId: typeof payload.packageId === 'string' ? payload.packageId : null,
+          planIds: Array.isArray(payload.planIds) ? payload.planIds : [],
+          updateMonthlyRate: payload.updateMonthlyRate === true,
+        })
+      } catch (error) {
+        if (error instanceof ProposalStateError || error instanceof PackageApplyError) {
+          sendJson(response, 409, { error: 'proposal_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!result) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, result)
+      return
+    }
+
+    // POST /api/proposals/:id/decline — { note } (spec §5.5). A declined
+    // proposal stays on the list and is reopened as a copy.
+    const proposalDeclineMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/decline$/)
+    if (proposalDeclineMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can decline proposals' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const current = await appDataStore.getProposal(proposalDeclineMatch[1])
+      if (!current) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      if (current.status === 'accepted' || current.status === 'declined') {
+        sendJson(response, 409, {
+          error: 'proposal_refused',
+          message: `This proposal is already ${current.status}.`,
+        })
+        return
+      }
+      const declined = await appDataStore.setProposalStatus(current.id, 'declined', {
+        note: typeof payload?.note === 'string' ? payload.note : '',
+      })
+      await appDataStore.recordActivity(
+        session.user.id,
+        'proposal_declined',
+        current.prospect.company || current.id,
+      )
+      broadcastDataChanged()
+      sendJson(response, 200, declined)
+      return
+    }
+
     if (normalizedPath === '/api/reimbursements' && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return

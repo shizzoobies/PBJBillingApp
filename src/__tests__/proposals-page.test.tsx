@@ -33,6 +33,9 @@ vi.mock('../lib/api', () => ({
   deleteProposalRequest: (...args: unknown[]) => api.deleteProposalRequest(...args),
   draftProposalLetterRequest: (...args: unknown[]) => api.draftProposalLetterRequest(...args),
   sendProposalRequest: (...args: unknown[]) => api.sendProposalRequest(...args),
+  listPackagesRequest: (...args: unknown[]) => api.listPackagesRequest(...args),
+  acceptProposalRequest: (...args: unknown[]) => api.acceptProposalRequest(...args),
+  declineProposalRequest: (...args: unknown[]) => api.declineProposalRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}
@@ -264,6 +267,16 @@ beforeEach(() => {
   api.deleteProposalRequest = vi.fn(async () => undefined)
   api.draftProposalLetterRequest = vi.fn(async () => WITH_LETTER)
   api.sendProposalRequest = vi.fn(async () => ({ ...WITH_LETTER, status: 'sent' }))
+  api.listPackagesRequest = vi.fn(async () => [
+    { id: 'pkg-1', name: 'Full service', description: '', planIds: [], templateIds: [], createdAt: '', updatedAt: null },
+  ])
+  api.acceptProposalRequest = vi.fn(async () => ({
+    proposal: { ...PROPOSAL, status: 'accepted', clientId: 'client-new' },
+    clientId: 'client-new',
+    createdClient: true,
+    packageApplied: false,
+  }))
+  api.declineProposalRequest = vi.fn(async () => ({ ...PROPOSAL, status: 'declined' }))
 })
 
 afterEach(() => {
@@ -769,5 +782,72 @@ describe('Send to prospect', () => {
     }))
     renderEditor('/proposals/prop-1?tab=letter')
     expect(await screen.findByText('Delivered', { selector: '.status-pill' })).toBeTruthy()
+  })
+})
+
+describe('Accept and Decline', () => {
+  it('Accept on a prospect says what it will create, then accepts', async () => {
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(confirm).toHaveBeenCalledWith(
+      'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00. Nothing about any invoice changes.',
+    )
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
+    )
+    expect(await screen.findByText('Accepted', { selector: '.status-pill' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Open the client' }).getAttribute('href')).toBe(
+      '/clients/client-new',
+    )
+  })
+
+  it('does nothing when the Accept confirm is canceled', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => false))
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(api.acceptProposalRequest).not.toHaveBeenCalled()
+  })
+
+  it('sends the chosen package with the accept', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    renderEditor()
+    await waitFor(() => expect(api.listPackagesRequest).toHaveBeenCalled())
+    fireEvent.change(await screen.findByLabelText('Package to apply on accept'), {
+      target: { value: 'pkg-1' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: 'pkg-1' }),
+    )
+  })
+
+  it('an upsell asks separately before it changes the client’s monthly fee', async () => {
+    api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
+    const confirm = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co?')
+    expect(confirm).toHaveBeenNthCalledWith(
+      2,
+      'Also change Existing Co’s monthly fee to $630.00? Cancel keeps their current fee.',
+    )
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
+        packageId: null,
+        updateMonthlyRate: false,
+      }),
+    )
+  })
+
+  it('Decline asks for a note and saves it', async () => {
+    vi.stubGlobal('prompt', vi.fn(() => 'Went with a friend'))
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline' }))
+    await waitFor(() =>
+      expect(api.declineProposalRequest).toHaveBeenCalledWith('prop-1', 'Went with a friend'),
+    )
   })
 })
