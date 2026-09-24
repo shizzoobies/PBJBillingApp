@@ -1,6 +1,9 @@
+import { dollarFiguresInCents } from '../../lib/money-figures.js'
+import { roundCents } from '../../lib/proposal-pricing.js'
 import type {
   Proposal,
   ProposalChatPatch,
+  ProposalEmailEvent,
   ProposalGroup,
   ProposalMultiplier,
   ProposalPatch,
@@ -8,6 +11,7 @@ import type {
   ProposalRole,
   ProposalSelection,
   ProposalService,
+  ProposalSnapshot,
   ProposalStatus,
   ProposalTotals,
 } from './types'
@@ -249,18 +253,62 @@ export function changedKeys(patch: ProposalChatPatch | null | undefined): Set<st
  * The delivery badge beside "Send to prospect": what the mail provider last
  * said about the most recent successful send, or "Sent <date>" before it has
  * said anything. Null when nothing has gone out.
+ *
+ * Picked by its own `at` timestamp (`>=` so a later position wins a tie),
+ * the same rule `latestInvoiceDelivery` in src/lib/utils.ts uses — NOT by
+ * append order (Minor 3, final fix wave): a late `email.sent` landing after
+ * a `bounced` must still show Bounced, not silently revert the badge.
  */
 export function proposalDeliveryBadge(proposal: Proposal): string | null {
   const lastSend = proposal.emailLog.filter((entry) => entry.kind === 'send' && entry.ok).at(-1)
   if (!lastSend) return null
-  const latest = proposal.emailLog
-    .filter(
-      (entry) =>
-        entry.kind === 'delivery' &&
-        entry.providerId !== null &&
-        entry.providerId === lastSend.providerId,
-    )
-    .at(-1)
+  let latest: ProposalEmailEvent | null = null
+  for (const entry of proposal.emailLog) {
+    if (entry.kind !== 'delivery' || entry.providerId === null || entry.providerId !== lastSend.providerId) {
+      continue
+    }
+    if (!latest || entry.at >= latest.at) latest = entry
+  }
   if (latest) return DELIVERY_WORDS[latest.event ?? ''] ?? latest.event ?? 'Sent'
   return `Sent ${proposalDate(lastSend.at)}`
+}
+
+/* ---- Important 1: a stale letter (final fix wave) ---------------------- */
+
+/**
+ * The figures a letter may quote, mirrored client-side from lib/assistant.js's
+ * `allowedLetterCents` — every line amount and every total, in cents, except
+ * a zero-priced line. Only the money REGEX has to be the one shared file
+ * (lib/money-figures.js): this rule reads the proposal's own already-typed
+ * `pricingSnapshot`, so duplicating it here is a few lines, not a second copy
+ * of anything that could disagree.
+ */
+function allowedLetterCentsClient(snapshot: ProposalSnapshot | null): Set<number> {
+  const cents = new Set<number>()
+  for (const line of snapshot?.lines ?? []) {
+    const amount = roundCents(Number(line.amount))
+    if (amount > 0) cents.add(Math.round(amount * 100))
+  }
+  for (const value of Object.values(snapshot?.totals ?? {})) {
+    const amount = roundCents(Number(value))
+    if (amount > 0) cents.add(Math.round(amount * 100))
+  }
+  return cents
+}
+
+/**
+ * How many distinct dollar figures the CURRENT letter text quotes that the
+ * estimate no longer has — the same rule the server enforces at send. Zero
+ * when there is no letter, or nothing about it is stale.
+ */
+export function staleLetterFigureCount(
+  proposal: Pick<Proposal, 'letter' | 'pricingSnapshot'>,
+): number {
+  const text = proposal.letter?.text ?? ''
+  if (!text.trim()) return 0
+  const allowed = allowedLetterCentsClient(proposal.pricingSnapshot)
+  const foreign = new Set(
+    dollarFiguresInCents(text).filter((cents) => cents > 0 && !allowed.has(cents)),
+  )
+  return foreign.size
 }

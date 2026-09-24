@@ -38,6 +38,7 @@ import {
   allowedLetterCents,
   draftProposalLetter,
   proposalChat,
+  staleLetterFigures,
   suggestPackageChecklists,
   summarizeSpitballSession,
   validateAssistantAction,
@@ -8348,6 +8349,21 @@ const server = createServer(async (request, response) => {
         })
         return
       }
+      // Important 1 (final fix wave): the letter was valid when drafted, but
+      // the estimate may have changed since — a stale letter would quote
+      // prices the priced table no longer shows. `confirmStaleFigures: true`
+      // is how the UI sends anyway after she confirms.
+      const staleFigures = staleLetterFigures(proposal.letter.text, proposal.pricingSnapshot)
+      if (staleFigures.length > 0 && payload?.confirmStaleFigures !== true) {
+        sendJson(response, 409, {
+          error: 'stale_letter_figures',
+          figures: staleFigures,
+          message:
+            `The letter quotes figures the estimate no longer has: ${staleFigures.join(', ')}. ` +
+            'Regenerate the letter, or send anyway.',
+        })
+        return
+      }
       const firmSettings = await appDataStore.getFirmSettings()
       // The PDF IS the proposal, so it is built before anything is sent: a
       // render failure sends nothing rather than an email with no proposal.
@@ -8573,10 +8589,21 @@ const server = createServer(async (request, response) => {
       let saved
       try {
         if (turn.patch) {
-          await appDataStore.updateProposal(
-            proposal.id,
-            applyProposalPatch(proposal, turn.patch, pricing.services),
-          )
+          // Important 2(a) (final fix wave): `applyProposalPatch` always
+          // returns full `inputs`/`selections` (it has to, to merge a chat
+          // patch onto what is already there) — but that shape reprices on
+          // EVERY turn, even a prospect-only one, if handed to
+          // `updateProposal` as-is. Only forward the fields this turn's patch
+          // actually touched, so a prospect-only turn leaves the snapshot
+          // alone the same way a prospect-only manual save does.
+          const applied = applyProposalPatch(proposal, turn.patch, pricing.services)
+          const touchedInputs = Object.keys(turn.patch.inputs ?? {}).length > 0
+          const touchedSelections =
+            (turn.patch.selections?.add?.length ?? 0) > 0 || (turn.patch.selections?.remove?.length ?? 0) > 0
+          const storePatch = { ...applied }
+          if (!touchedInputs) delete storePatch.inputs
+          if (!touchedSelections) delete storePatch.selections
+          await appDataStore.updateProposal(proposal.id, storePatch)
         }
         saved = await appDataStore.appendProposalMessages(proposal.id, [
           { role: 'user', text },

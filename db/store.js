@@ -1112,15 +1112,21 @@ const MAX_PROPOSAL_MESSAGES = 200
  * The priced snapshot a proposal carries (spec §4.2). Always the CURRENT
  * catalog: the snapshot moves only when the proposal itself is edited or
  * repriced, never because the catalog changed underneath it.
+ *
+ * `rates` defaults to the catalog's own (today's) rates — a draft's normal
+ * repricing. `updateProposal` passes the SNAPSHOT'S existing rates here for a
+ * SENT proposal (Important 2(b), final fix wave): the prospect saw a price
+ * built on a rate, and an edit to the counts or services after it went out
+ * must not quietly move that rate too.
  */
-function proposalSnapshot(pricing, inputs, selections, at) {
+function proposalSnapshot(pricing, inputs, selections, at, rates = pricing.rates) {
   const { lines, totals } = priceProposal({
     catalog: pricing,
-    rates: pricing.rates,
+    rates,
     inputs,
     selections,
   })
-  return { rates: { ...pricing.rates }, lines, totals, catalogAt: at }
+  return { rates: { ...rates }, lines, totals, catalogAt: at }
 }
 
 /** Trim and cap an id-like proposal field (clientId / createdBy / copiedFromId)
@@ -10116,16 +10122,28 @@ export class AppDataStore {
    * Edit a proposal's prospect, client link, inputs, selections or letter
    * text. `inputs` and `selections` REPLACE what is stored — a caller that
    * wants to add one selection must merge it onto the current list itself
-   * (the chat patch in a later task is partial and does its own merge).
+   * (the chat patch does its own merge, see `applyProposalPatch`).
    *
    * The snapshot re-prices ONLY when the patch carries `inputs` or
    * `selections`, or when the patch carries none of the recognized fields at
    * all — that empty-patch shape is the explicit "Reprice at today's
    * catalog" button, and it is refused (ProposalStateError) unless the
-   * proposal is still a draft: a sent proposal's letter was already
-   * validated against its snapshot, so nothing reprices it out from under
-   * the letter. A prospect / clientId / letterText-only edit leaves the
-   * existing `pricingSnapshot` untouched.
+   * proposal is still a draft. A prospect / clientId / letterText-only edit
+   * leaves the existing `pricingSnapshot` untouched.
+   *
+   * A DRAFT reprices at TODAY'S rates when counts or services change; a SENT
+   * proposal keeps the rates it was sent with; a catalog change alone never
+   * touches a proposal (Important 2(b), final fix wave) — the prospect saw a
+   * price built on a rate, and a later edit to a count must not quietly move
+   * that rate out from under a letter/PDF she already sent. Falls back to
+   * today's rates only if the snapshot being carried forward somehow has
+   * none.
+   *
+   * `letter` and `client_id` are written ONLY when the patch itself carries
+   * `letterText` / `clientId` (final fix wave, item 4) — never re-asserted
+   * from this call's own earlier `current` read, which could otherwise stomp
+   * a concurrent `setProposalLetter` / `linkProposalClient` / `acceptProposal`
+   * write that lands between that read and this write.
    *
    * An accepted or declined proposal is a record of what happened and is
    * refused entirely (copy it to change it). Returns null when there is no
@@ -10151,7 +10169,6 @@ export class AppDataStore {
     const pricing = (await this.getFirmSettings()).proposalPricing
     const next = {
       prospect: has('prospect') ? cleanProposalProspect(patch.prospect) : current.prospect,
-      clientId: has('clientId') ? cleanProposalId(patch.clientId) : current.clientId,
       inputs: has('inputs')
         ? cleanProposalInputs(
             patch.inputs,
@@ -10159,36 +10176,58 @@ export class AppDataStore {
           )
         : current.inputs,
       selections: has('selections') ? cleanProposalSelections(patch.selections) : current.selections,
-      letter: has('letterText')
-        ? {
-            subject: current.letter?.subject ?? '',
-            sections: current.letter?.sections ?? [],
-            text: typeof patch.letterText === 'string' ? patch.letterText.slice(0, 20000) : '',
-          }
-        : current.letter,
     }
     const updatedAt = nowIso()
-    const pricingSnapshot = shouldReprice
-      ? proposalSnapshot(pricing, next.inputs, next.selections, updatedAt)
-      : current.pricingSnapshot
+    const sentRates =
+      current.pricingSnapshot?.rates && Object.keys(current.pricingSnapshot.rates).length > 0
+        ? current.pricingSnapshot.rates
+        : pricing.rates
+    const pricingSnapshot = !shouldReprice
+      ? current.pricingSnapshot
+      : current.status === 'sent'
+        ? proposalSnapshot(
+            pricing,
+            next.inputs,
+            next.selections,
+            current.pricingSnapshot?.catalogAt ?? updatedAt,
+            sentRates,
+          )
+        : proposalSnapshot(pricing, next.inputs, next.selections, updatedAt)
 
     if (this.pool) {
+      const sets = [
+        'prospect = $2::jsonb',
+        'inputs = $3::jsonb',
+        'selections = $4::jsonb',
+        'pricing_snapshot = $5::jsonb',
+        'updated_at = now()',
+      ]
+      const params = [
+        id,
+        JSON.stringify(next.prospect),
+        JSON.stringify(next.inputs),
+        JSON.stringify(next.selections),
+        JSON.stringify(pricingSnapshot),
+      ]
+      if (has('letterText')) {
+        const letter = {
+          subject: current.letter?.subject ?? '',
+          sections: current.letter?.sections ?? [],
+          text: typeof patch.letterText === 'string' ? patch.letterText.slice(0, 20000) : '',
+        }
+        sets.push(`letter = $${params.length + 1}::jsonb`)
+        params.push(JSON.stringify(letter))
+      }
+      if (has('clientId')) {
+        sets.push(`client_id = $${params.length + 1}`)
+        params.push(cleanProposalId(patch.clientId))
+      }
       const { rows } = await this.pool.query(
         `update proposals
-            set prospect = $2::jsonb, client_id = $3, inputs = $4::jsonb,
-                selections = $5::jsonb, pricing_snapshot = $6::jsonb, letter = $7::jsonb,
-                updated_at = now()
+            set ${sets.join(', ')}
           where id = $1 and status not in ('accepted', 'declined')
           returning ${PROPOSAL_COLUMNS}`,
-        [
-          id,
-          JSON.stringify(next.prospect),
-          next.clientId,
-          JSON.stringify(next.inputs),
-          JSON.stringify(next.selections),
-          JSON.stringify(pricingSnapshot),
-          next.letter ? JSON.stringify(next.letter) : null,
-        ],
+        params,
       )
       if (rows[0]) return AppDataStore.mapProposal(rows[0])
       // Zero rows for an id we just confirmed exists and was editable: a
@@ -10204,6 +10243,16 @@ export class AppDataStore {
     )
     if (!target) return null
     Object.assign(target, next, { pricingSnapshot, updatedAt })
+    if (has('letterText')) {
+      target.letter = {
+        subject: current.letter?.subject ?? '',
+        sections: current.letter?.sections ?? [],
+        text: typeof patch.letterText === 'string' ? patch.letterText.slice(0, 20000) : '',
+      }
+    }
+    if (has('clientId')) {
+      target.clientId = cleanProposalId(patch.clientId)
+    }
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return AppDataStore.mapProposal(target)
   }

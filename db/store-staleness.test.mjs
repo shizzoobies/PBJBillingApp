@@ -16817,6 +16817,83 @@ describe('proposals (file backend)', () => {
     expect((await store.updateProposal(created.id, {})).pricingSnapshot.totals.monthly).toBe(840)
   })
 
+  it('a sent proposal keeps the rates it was sent with when a count changes; a draft uses the new ones (Important 2b, final fix wave)', async () => {
+    const sent = await store.createProposal({
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    await store.setProposalStatus(sent.id, 'sent')
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: { ...seed, rates: { ...seed.rates, bookkeeper: 100 } },
+    })
+
+    const editedSent = await store.updateProposal(sent.id, { inputs: { transactions: 200 } })
+    // 200 x 0.07 x $75/hr (the OLD rate the prospect saw, not today's $100).
+    expect(editedSent.pricingSnapshot.totals.monthly).toBe(1050)
+    expect(editedSent.pricingSnapshot.rates.bookkeeper).toBe(75)
+    expect(editedSent.pricingSnapshot.catalogAt).toBe(sent.pricingSnapshot.catalogAt)
+
+    const draft = await store.createProposal({
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const editedDraft = await store.updateProposal(draft.id, { inputs: { transactions: 200 } })
+    // A draft reprices at TODAY'S rate ($100).
+    expect(editedDraft.pricingSnapshot.totals.monthly).toBe(1400)
+    expect(editedDraft.pricingSnapshot.rates.bookkeeper).toBe(100)
+  })
+
+  it('a manual letterText edit landing between a chat-triggered update’s own read and write is not lost (task 14 leftover 8i, final fix wave)', async () => {
+    const created = await store.createProposal({
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const firmSettings = await store.getFirmSettings()
+    // `updateProposal` reads `current` first, then awaits `getFirmSettings()`
+    // before it writes — the exact window a concurrent manual PATCH (here, a
+    // hand-typed letter edit from another tab/request, landing while the
+    // CHAT's own `updateProposal` call for this turn is mid-flight) can land
+    // and complete in full; doing it from inside this mock reproduces that
+    // without needing real concurrency. The two patches touch DISJOINT
+    // columns (item 4's fix: `letter` is written only when ITS OWN patch
+    // carries `letterText`), so both survive — the store never has to choose
+    // whose write wins.
+    const spy = vi.spyOn(store, 'getFirmSettings').mockImplementationOnce(async () => {
+      await store.updateProposal(created.id, { letterText: 'Hand-typed while the chat was mid-write.' })
+      return firmSettings
+    })
+    const afterChatWrite = await store.updateProposal(created.id, { inputs: { transactions: 50 } })
+    spy.mockRestore()
+    expect(afterChatWrite.letter?.text).toBe('Hand-typed while the chat was mid-write.')
+    expect(afterChatWrite.inputs).toEqual({ transactions: 50 })
+    const final = await store.getProposal(created.id)
+    expect(final.letter?.text).toBe('Hand-typed while the chat was mid-write.')
+    expect(final.inputs).toEqual({ transactions: 50 })
+  })
+
+  it('a concurrent letter draft landing mid-update is not overwritten by an unrelated inputs-only patch (item 4, final fix wave)', async () => {
+    const created = await store.createProposal({ inputs: { transactions: 120 } })
+    const firmSettings = await store.getFirmSettings()
+    const drafted = {
+      subject: 'Your bookkeeping proposal',
+      sections: [{ heading: 'Opening', body: 'Thank you for meeting with us.' }],
+      text: 'Opening\n\nThank you for meeting with us.',
+    }
+    // `updateProposal` awaits `getFirmSettings()` right after reading
+    // `current` — exactly the window a concurrent `setProposalLetter` can
+    // land in. Landing the draft from inside this mock reproduces that race
+    // without needing real concurrency.
+    const spy = vi.spyOn(store, 'getFirmSettings').mockImplementationOnce(async () => {
+      await store.setProposalLetter(created.id, drafted)
+      return firmSettings
+    })
+    const edited = await store.updateProposal(created.id, { inputs: { transactions: 50 } })
+    spy.mockRestore()
+    expect(edited.letter).toEqual(drafted)
+    expect((await store.getProposal(created.id)).letter).toEqual(drafted)
+  })
+
   it('lists the most recently touched first', async () => {
     const first = await store.createProposal({ prospect: { company: 'First' } })
     const second = await store.createProposal({ prospect: { company: 'Second' } })
@@ -17100,9 +17177,17 @@ describe('proposals (postgres branch)', () => {
     const fake = fakeProposalPostgres(proposalRow())
     await postgresStore(fake).updateProposal('prop-1', { inputs: { transactions: 10 } })
     const update = fake.matching(/^update proposals/i)[0]
-    expect(update.text).toMatch(/pricing_snapshot = \$6::jsonb/)
-    expect(JSON.parse(update.params[3])).toEqual({ transactions: 10 })
-    const boundSnapshot = JSON.parse(update.params[5])
+    // `client_id` and `letter` are no longer unconditional columns of this
+    // statement (final fix wave, item 4) — a patch carrying only `inputs`
+    // sets exactly prospect/inputs/selections/pricing_snapshot/updated_at.
+    // (`client_id` still names a column of the `returning` list, so the SET
+    // clause alone — before `where` — is what is checked here.)
+    const setClause = update.text.split(/\bwhere\b/i)[0]
+    expect(update.text).toMatch(/pricing_snapshot = \$5::jsonb/)
+    expect(setClause).not.toMatch(/client_id/)
+    expect(setClause).not.toMatch(/\bletter\s*=/)
+    expect(JSON.parse(update.params[2])).toEqual({ transactions: 10 })
+    const boundSnapshot = JSON.parse(update.params[4])
     expect(boundSnapshot.totals).toHaveProperty('monthly')
     expect(boundSnapshot.lines[0]).toMatchObject({ serviceId: 'monthly-weekly-transactions-basic' })
 
@@ -17110,6 +17195,36 @@ describe('proposals (postgres branch)', () => {
     await expect(postgresStore(declined).updateProposal('prop-1', {})).rejects.toBeInstanceOf(
       ProposalStateError,
     )
+  })
+
+  it('a sent proposal reprices with its OWN snapshot rates, not the firm settings passed in (Important 2b, final fix wave)', async () => {
+    const fake = fakeProposalPostgres(
+      proposalRow({
+        status: 'sent',
+        pricing_snapshot: {
+          rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+          lines: [],
+          totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0 },
+          catalogAt: '2026-01-01T00:00:00.000Z',
+        },
+      }),
+    )
+    await postgresStore(fake).updateProposal('prop-1', { inputs: { transactions: 200 } })
+    const update = fake.matching(/^update proposals/i)[0]
+    const boundSnapshot = JSON.parse(update.params[4])
+    // Firm settings answers with bookkeeper: 75 by default (fakeProposalPostgres's
+    // `firm_settings` branch) too, so this pins the source: the snapshot's OWN
+    // rates carried forward, not the (possibly different) live catalog.
+    expect(boundSnapshot.rates).toEqual({ bookkeeper: 75, accountant: 115, controller: 125 })
+    expect(boundSnapshot.catalogAt).toBe('2026-01-01T00:00:00.000Z')
+  })
+
+  it('writes client_id only when the patch itself carries clientId (item 4, final fix wave)', async () => {
+    const fake = fakeProposalPostgres(proposalRow())
+    await postgresStore(fake).updateProposal('prop-1', { clientId: 'client-9' })
+    const update = fake.matching(/^update proposals/i)[0]
+    expect(update.text).toMatch(/client_id = \$\d/)
+    expect(update.params).toContain('client-9')
   })
 
   it('the accepted/declined guard lives in the update WHERE clause too (M2)', async () => {

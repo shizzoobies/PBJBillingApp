@@ -188,6 +188,9 @@ describe('sending a proposal', () => {
       name: 'POST /api/proposals/:id/send',
       pattern: /proposalSendMatch && request\.method === 'POST'/,
       write: true,
+      // The stale-letter-figures guard (Important 1, final fix wave) pushes
+      // `broadcastDataChanged()` past the shared 3000-char default.
+      broadcastLength: 3600,
     },
   ])
 
@@ -218,6 +221,21 @@ describe('sending a proposal', () => {
     const text = block()
     expect(text).toContain('Draft the letter before sending the proposal.')
     expect(text).toContain("sendJson(response, 400, { error: 'A valid email address is required.' })")
+  })
+
+  it('refuses a stale letter with a 409 naming the figures, unless the resend is confirmed (Important 1, final fix wave)', () => {
+    const text = block()
+    expect(text).toContain('staleLetterFigures(proposal.letter.text, proposal.pricingSnapshot)')
+    expect(text).toContain("error: 'stale_letter_figures'")
+    expect(text).toContain('figures: staleFigures')
+    expect(text).toContain('payload?.confirmStaleFigures !== true')
+    const staleAt = text.indexOf('staleLetterFigures(')
+    const pdfAt = text.indexOf('buildProposalPdf(')
+    expect(staleAt).toBeGreaterThan(-1)
+    // The stale-figure guard runs BEFORE the PDF is built (and before
+    // anything is sent) — same "refuse before doing the irreversible part"
+    // shape as the letter-present check right above it.
+    expect(staleAt).toBeLessThan(pdfAt)
   })
 })
 
@@ -315,13 +333,14 @@ describe('the intake chat route', () => {
       name: 'POST /api/proposals/:id/chat',
       pattern: /proposalChatMatch && request\.method === 'POST'/,
       write: true,
-      // The re-read + decided-proposal guards (fix batch 3, item 1) push
+      // The re-read + decided-proposal guards (fix batch 3, item 1), plus the
+      // Important-2(a) scoped-reprice guard (final fix wave), push
       // `broadcastDataChanged()` past the shared 3000-char default.
-      broadcastLength: 3700,
+      broadcastLength: 4700,
     },
   ])
 
-  const block = () => routeBlock(/proposalChatMatch && request\.method === 'POST'/, 3600)
+  const block = () => routeBlock(/proposalChatMatch && request\.method === 'POST'/, 4600)
 
   it('applies only the validated patch, through the same re-pricing write the form uses', () => {
     const text = block()
@@ -373,5 +392,15 @@ describe('the intake chat route', () => {
     const text = block()
     expect(text).toContain("error: 'proposal_chat_failed'")
     expect(text).toContain("message: error?.statusCode ? error.message : 'The AI could not answer right now.'")
+  })
+
+  it('only forwards inputs/selections to updateProposal when this turn actually touched them (Important 2a, final fix wave)', () => {
+    const text = block()
+    expect(text).toContain('const touchedInputs = Object.keys(turn.patch.inputs ?? {}).length > 0')
+    expect(text).toContain(
+      "(turn.patch.selections?.add?.length ?? 0) > 0 || (turn.patch.selections?.remove?.length ?? 0) > 0",
+    )
+    expect(text).toContain('if (!touchedInputs) delete storePatch.inputs')
+    expect(text).toContain('if (!touchedSelections) delete storePatch.selections')
   })
 })

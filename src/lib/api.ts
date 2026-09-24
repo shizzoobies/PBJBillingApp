@@ -885,12 +885,18 @@ export async function applyPackageRequest(
  * `pricingSnapshot` — the page never prices anything itself.
  */
 
-/** One proposal call: same-origin, JSON in and out, the server's sentence on failure. */
+/**
+ * One proposal call: same-origin, JSON in and out, the server's sentence on
+ * failure — plus its machine-readable `error` code (`safeError`, not
+ * `safeErrorMessage`), so a caller can tell a `stale_letter_figures` 409 from
+ * an ordinary refusal (Important 1, final fix wave) without matching on the
+ * sentence itself.
+ */
 async function proposalRequest<T>(path: string, init: RequestInit, failure: string): Promise<T> {
   const response = await apiFetch(path, { credentials: 'same-origin', ...init })
   if (!response.ok) {
-    const message = await safeErrorMessage(response)
-    throw new ApiError(response.status, message || `${failure} (${response.status})`)
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `${failure} (${response.status})`, code)
   }
   return (await response.json()) as T
 }
@@ -975,11 +981,22 @@ export function draftProposalLetterRequest(id: string): Promise<Proposal> {
   )
 }
 
-/** Owner-only: email the proposal PDF to the address she confirmed. */
-export function sendProposalRequest(id: string, to: string): Promise<Proposal> {
+/**
+ * Owner-only: email the proposal PDF to the address she confirmed.
+ *
+ * `confirmStaleFigures` resends after she has seen the 409 the server sends
+ * when the letter quotes a figure the (possibly-edited-since) estimate no
+ * longer has (Important 1, final fix wave) — an `ApiError` with
+ * `code === 'stale_letter_figures'` carries that sentence.
+ */
+export function sendProposalRequest(
+  id: string,
+  to: string,
+  opts: { confirmStaleFigures?: boolean } = {},
+): Promise<Proposal> {
   return proposalRequest<Proposal>(
     proposalPath(id, 'send'),
-    proposalJson('POST', { to }),
+    proposalJson('POST', { to, ...(opts.confirmStaleFigures ? { confirmStaleFigures: true } : {}) }),
     'The proposal could not be sent',
   )
 }

@@ -832,9 +832,10 @@ export function ProposalPricingSection({
     <CollapsibleSection kicker="Proposals" title="Proposal pricing" lockable>
       <p className="muted-text" style={{ marginTop: 0 }}>
         Every proposal line is a count from their books × a factor × one of these rates × a
-        multiplier. These rates are for proposals only — they are not your team’s bill rates.
-        Changing the catalog never reprices a proposal you already wrote; open it and choose
-        “Reprice at today’s catalog”.
+        multiplier. These rates are for proposals only — they are not your team’s bill rates. A
+        draft reprices at today’s rates when counts or services change; a sent proposal keeps the
+        rates it was sent with; a catalog change alone never touches a proposal — open a draft and
+        choose “Reprice at today’s catalog” to move it forward.
       </p>
       <div className="form-grid two-col">
         {PROPOSAL_ROLES.map((role) => (

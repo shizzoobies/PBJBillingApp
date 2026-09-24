@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { SavingTextarea } from '../SectionKit'
-import { proposalDeliveryBadge } from '../../lib/proposals'
+import { proposalDeliveryBadge, staleLetterFigureCount } from '../../lib/proposals'
 import type { Proposal } from '../../lib/types'
 
 /**
@@ -26,6 +26,10 @@ export function LetterTab({
   const locked = proposal.status === 'accepted' || proposal.status === 'declined'
   const text = proposal.letter?.text ?? ''
   const badge = proposalDeliveryBadge(proposal)
+  // Important 1 (final fix wave): the estimate may have changed since this
+  // letter was drafted — a quiet heads-up, computed with the same rule the
+  // server enforces at send, rather than an alarm before she has even tried.
+  const staleCount = staleLetterFigureCount(proposal)
 
   // The address is confirmed on EVERY send; the prospect's email only fills it in.
   const send = () => {
@@ -95,6 +99,12 @@ export function LetterTab({
       </div>
       {proposal.letter?.subject ? (
         <p className="muted-text">Subject: {proposal.letter.subject}</p>
+      ) : null}
+      {staleCount > 0 ? (
+        <p className="muted-text">
+          The estimate changed since this letter was drafted; {staleCount} figure(s) no longer
+          match.
+        </p>
       ) : null}
       {text ? (
         <fieldset className="proposal-fieldset" disabled={locked}>

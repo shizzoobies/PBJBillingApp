@@ -784,6 +784,142 @@ describe('Send to prospect', () => {
     renderEditor('/proposals/prop-1?tab=letter')
     expect(await screen.findByText('Delivered', { selector: '.status-pill' })).toBeTruthy()
   })
+
+  it('shows a quiet warning when the estimate changed since the letter was drafted (Important 1, final fix wave)', async () => {
+    api.getProposalRequest = vi.fn(async () => ({
+      ...WITH_LETTER,
+      letter: {
+        ...WITH_LETTER.letter!,
+        text: 'Opening\n\nThank you. The monthly fee is $9,999.00.',
+      },
+    }))
+    renderEditor('/proposals/prop-1?tab=letter')
+    expect(
+      await screen.findByText(
+        'The estimate changed since this letter was drafted; 1 figure(s) no longer match.',
+      ),
+    ).toBeTruthy()
+  })
+
+  it('shows no warning when every figure in the letter is still in the estimate', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    renderEditor('/proposals/prop-1?tab=letter')
+    await screen.findByLabelText('Letter text')
+    expect(screen.queryByText(/no longer match/)).toBeNull()
+  })
+
+  it('on a stale-letter 409, confirms with the server sentence and resends with confirmStaleFigures: true', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    vi.stubGlobal('prompt', vi.fn(() => 'pat@acme.test'))
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    const staleError = new ApiError(
+      409,
+      'The letter quotes figures the estimate no longer has: $500.00. Regenerate the letter, or send anyway.',
+      'stale_letter_figures',
+    )
+    api.sendProposalRequest = vi
+      .fn()
+      .mockRejectedValueOnce(staleError)
+      .mockResolvedValueOnce({ ...WITH_LETTER, status: 'sent' })
+    renderEditor('/proposals/prop-1?tab=letter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(staleError.message))
+    await waitFor(() =>
+      expect(api.sendProposalRequest).toHaveBeenNthCalledWith(2, 'prop-1', 'pat@acme.test', {
+        confirmStaleFigures: true,
+      }),
+    )
+    expect(await screen.findByText('Sent', { selector: '.status-pill' })).toBeTruthy()
+  })
+
+  it('does not resend, and shows the sentence, when she cancels the stale-figures confirm', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    vi.stubGlobal('prompt', vi.fn(() => 'pat@acme.test'))
+    vi.stubGlobal('confirm', vi.fn(() => false))
+    const staleError = new ApiError(
+      409,
+      'The letter quotes figures the estimate no longer has: $500.00. Regenerate the letter, or send anyway.',
+      'stale_letter_figures',
+    )
+    api.sendProposalRequest = vi.fn().mockRejectedValueOnce(staleError)
+    renderEditor('/proposals/prop-1?tab=letter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    await waitFor(() => expect(api.sendProposalRequest).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText(staleError.message, { selector: '.form-error' })).toBeTruthy()
+  })
+})
+
+describe('the "Existing client" picker (item 6, final fix wave)', () => {
+  it('excludes a billing master and a retired client, keeping active ones', async () => {
+    contextValue.data.clients = [
+      { id: 'client-1', name: 'Existing Co', billingMode: 'subscription' },
+      { id: 'client-master', name: 'KLC Master', billingMode: 'subscription', isBillingMaster: true },
+      { id: 'client-retired', name: 'Old Co', billingMode: 'subscription', lifecycleStage: 'inactive' },
+    ] as unknown as Client[]
+    renderEditor()
+    const select = await screen.findByLabelText('Existing client')
+    const options = within(select)
+      .getAllByRole('option')
+      .map((option) => option.textContent)
+    expect(options).toContain('Existing Co')
+    expect(options).not.toContain('KLC Master')
+    expect(options).not.toContain('Old Co')
+  })
+})
+
+describe('refetching on the app-wide data broadcast (item 5, final fix wave)', () => {
+  function renderEditorTree() {
+    return render(
+      <MemoryRouter initialEntries={['/proposals/prop-1']}>
+        <Routes>
+          <Route path="/proposals" element={<p>The proposals list</p>} />
+          <Route path="/proposals/:proposalId" element={<ProposalEditorPage />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+  }
+
+  it('refetches once when data changes while the save queue is idle, and shows the updated badge', async () => {
+    const { rerender } = renderEditorTree()
+    await screen.findByText('Acme Books')
+    expect(api.getProposalRequest).toHaveBeenCalledTimes(1)
+
+    api.getProposalRequest = vi.fn(async () => ({
+      ...WITH_LETTER,
+      status: 'sent' as const,
+      emailLog: [
+        {
+          kind: 'send' as const,
+          at: '2026-09-23T14:00:00.000Z',
+          providerId: 're_1',
+          to: ['pat@acme.test'],
+          ok: true,
+        },
+        {
+          kind: 'delivery' as const,
+          at: '2026-09-23T14:01:00.000Z',
+          providerId: 're_1',
+          to: ['pat@acme.test'],
+          event: 'delivered',
+        },
+      ],
+    }))
+    // A NEW `data` reference is what a `data-changed` broadcast produces
+    // app-wide (App.tsx's `setData(remote)`) — the signal this page reacts to.
+    contextValue = { ...contextValue, data: { clients: [...contextValue.data.clients] } } as typeof contextValue
+    rerender(
+      <MemoryRouter initialEntries={['/proposals/prop-1']}>
+        <Routes>
+          <Route path="/proposals" element={<p>The proposals list</p>} />
+          <Route path="/proposals/:proposalId" element={<ProposalEditorPage />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(api.getProposalRequest).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('tab', { name: 'Letter' }))
+    expect(await screen.findByText('Delivered', { selector: '.status-pill' })).toBeTruthy()
+  })
 })
 
 describe('Accept and Decline', () => {
@@ -961,6 +1097,31 @@ describe('the intake chat', () => {
     expect(await screen.findByText(/at capacity/)).toBeTruthy()
     expect(screen.getAllByText(/at capacity/)).toHaveLength(1)
     expect(box.value).toBe('Hello')
+  })
+
+  it('does not clear an unrelated page-level error (item 8, final fix wave)', async () => {
+    api.updateProposalRequest = vi.fn(async () => {
+      throw new ApiError(500, 'That did not save — try again.')
+    })
+    api.proposalChatRequest = vi.fn(async () => {
+      throw new ApiError(503, 'The AI is at capacity right now — give it a minute and try again.')
+    })
+    renderEditor()
+    // A manual save fails first, setting the page-level banner.
+    const company = await screen.findByLabelText('Company')
+    fireEvent.change(company, { target: { value: 'New name' } })
+    fireEvent.blur(company)
+    await screen.findByText('That did not save — try again.', { selector: '.form-error' })
+
+    // A chat turn that ALSO fails must not wipe that banner — `sendChat`
+    // swallows its own rejection and hands `enqueue` back the unchanged
+    // proposal, which used to unconditionally clear `error`.
+    const box = (await screen.findByLabelText('Message to the intake assistant')) as HTMLTextAreaElement
+    fireEvent.change(box, { target: { value: 'Hello' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(api.proposalChatRequest).toHaveBeenCalled())
+    await screen.findByText(/at capacity/)
+    expect(screen.getByText('That did not save — try again.', { selector: '.form-error' })).toBeTruthy()
   })
 
   it('a chat turn and a field edit queued together apply in order — the field edit is built from the chat’s result (fix batch 3, item 2)', async () => {

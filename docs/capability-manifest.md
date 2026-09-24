@@ -1112,9 +1112,12 @@ proposal** opens an empty draft. Three tabs:
   Reconciliations, AR, AP, Payroll, Sales tax, Reports, Additional reports,
   Annual and one-time, Clean-up) with Basic / Classes / Advance tiers. Each
   priced line shows its formula ("120 transactions x 0.07 x $75/hr =
-  $630.00"); any line can take a typed price (an override). Four totals:
-  Monthly fee, Annual fees, One-time fees, Clean-up. A catalog change never
-  reprices a proposal by itself — **Reprice at today's catalog** (drafts) does.
+  $630.00"); any active line can take a typed price (an override) — a retired
+  line can only be removed. Four totals: Monthly fee, Annual fees, One-time
+  fees, Clean-up. A draft reprices at today's rates when counts or services
+  change; a sent proposal keeps the rates it was sent with; a catalog change
+  alone never touches a proposal — **Reprice at today's catalog** (drafts)
+  moves it forward.
   Beside it, the **intake chat** (Opus 5.5) asks for the counts one topic at a
   time and fills the estimate in as she answers; what it changed is outlined.
 - **Letter** — **Draft the proposal** has the AI write the letter (Opening,
@@ -1130,8 +1133,9 @@ proposal** opens an empty draft. Three tabs:
 Header actions: **Accept** — a new prospect becomes a client in Onboarding,
 billed monthly at the proposal's monthly total with the firm's default payment
 terms, plus an optional package; for an existing client it asks separately
-before changing their monthly fee; no invoice changes. **Decline** (asks for a
-note), **Copy to new proposal**, **Delete** (drafts only).
+before changing their monthly fee; no invoice changes. Once accepted, **Open
+the client** jumps straight to its page. **Decline** (asks for a note),
+**Copy to new proposal**, **Delete** (drafts only).
 
 **Prices come from the catalog math, never from the AI.** The chat only
 collects counts and picks services; the letter may quote only figures the

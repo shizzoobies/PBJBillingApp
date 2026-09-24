@@ -5,6 +5,7 @@ import { ActivityTab } from '../components/proposals/ActivityTab'
 import { ChatPanel } from '../components/proposals/ChatPanel'
 import { EstimateTab } from '../components/proposals/EstimateTab'
 import { LetterTab } from '../components/proposals/LetterTab'
+import { workableClients } from '../lib/clientLifecycle'
 import { defaultProposalPricing, formatProposalMoney } from '../../lib/proposal-pricing.js'
 import {
   acceptProposalRequest,
@@ -120,6 +121,37 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     }
   }, [proposalId])
 
+  // Proposals are endpoint-managed — never inside `data` — but a `data`
+  // reference change is still this page's one signal that something on the
+  // server may have moved (another tab's edit, a delivery webhook landing),
+  // the same broadcast every page's `data` read reacts to. Refetch only when
+  // the save queue is idle (`pendingRef`, not `busy` — this effect must fire
+  // on a `data` change, not merely because `busy` later flips back to false)
+  // so a broadcast can never race a save in flight, and apply through the
+  // same stale-id guard `enqueue` uses (item 5, final fix wave).
+  const skippedFirstBroadcastRef = useRef(false)
+  useEffect(() => {
+    if (!skippedFirstBroadcastRef.current) {
+      skippedFirstBroadcastRef.current = true
+      return
+    }
+    if (pendingRef.current > 0) return
+    let cancelled = false
+    void getProposalRequest(proposalId)
+      .then((loaded) => {
+        if (cancelled || loaded.id !== proposalId) return
+        latestRef.current = loaded
+        setProposal(loaded)
+      })
+      .catch(() => {
+        /* transient — her own next save, or the next broadcast, retries */
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data])
+
   /**
    * Queue one server round trip. `action` is called with the latest
    * CONFIRMED proposal only once every save ahead of it has applied its
@@ -143,7 +175,12 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
         if (response.id === proposalId) {
           latestRef.current = response
           setProposal(response)
-          setError('')
+          // `sendChat` swallows its own rejection and hands back `current`
+          // UNCHANGED so this try/catch stays quiet (see its own comment) —
+          // that is the one case `response` is the very object passed in,
+          // and a failed chat turn must not clear an unrelated page error
+          // (item 8, final fix wave).
+          if (response !== current) setError('')
         }
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'That did not save — try again.')
@@ -190,6 +227,24 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           return latest
         }
       })
+    })
+
+  /**
+   * Send the letter (Important 1, final fix wave). A `stale_letter_figures`
+   * 409 means the estimate changed since this letter was drafted — the
+   * message names the figures; a yes on the confirm resends with
+   * `confirmStaleFigures: true` so the same send is not asked twice.
+   */
+  const sendLetter = (to: string) =>
+    enqueue(async () => {
+      try {
+        return await sendProposalRequest(proposalId, to)
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'stale_letter_figures' && window.confirm(err.message)) {
+          return await sendProposalRequest(proposalId, to, { confirmStaleFigures: true })
+        }
+        throw err
+      }
     })
 
   const tab = resolveProposalTab(searchParams.get('tab'))
@@ -379,7 +434,12 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           <EstimateTab
             proposal={proposal}
             pricing={pricing}
-            clients={data.clients}
+            // Never a billing master (no engagement of its own) and never a
+            // retired one — the same two exclusions every other client
+            // picker makes (item 6, final fix wave). `proposal.clientId`
+            // stays offered even if it became one of those after the fact,
+            // so the select never renders a value that matches no option.
+            clients={workableClients(data.clients, [proposal.clientId])}
             busy={busy}
             highlight={highlight}
             onSave={save}
@@ -393,7 +453,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           busy={busy}
           onDraft={() => enqueue(() => draftProposalLetterRequest(proposalId))}
           onSaveText={(text) => save(() => ({ letterText: text }))}
-          onSend={(to) => enqueue(() => sendProposalRequest(proposalId, to))}
+          onSend={sendLetter}
         />
       ) : null}
       {tab === 'activity' ? <ActivityTab proposal={proposal} /> : null}
