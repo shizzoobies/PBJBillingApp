@@ -138,7 +138,11 @@ export type ValidatedProposalPatch = {
   selections?: { add: ProposalSelection[]; remove: string[] }
 }
 
-/** Apply a validated chat patch; adding one tier of a row replaces its siblings. */
+/**
+ * Apply a validated chat patch. Every prospect field replaces except `notes`,
+ * which appends. Adding one tier of a row replaces its siblings only when
+ * both the added row's tier and the sibling's tier are non-null.
+ */
 export declare function applyProposalPatch(
   current: {
     prospect?: Partial<ProposalProspect> | null
