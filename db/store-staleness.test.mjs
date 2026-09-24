@@ -16894,6 +16894,42 @@ describe('proposals (file backend)', () => {
     expect((await store.getProposal(created.id)).letter).toEqual(drafted)
   })
 
+  it('re-checks status right before writing, refusing a concurrent accept that landed mid-update (N2, final fix wave round 2)', async () => {
+    const created = await store.createProposal({ inputs: { transactions: 120 } })
+    const firmSettings = await store.getFirmSettings()
+    // Same window as the letter/clientId races above: `updateProposal` reads
+    // `current` first, then awaits `getFirmSettings()` before its own second
+    // read/write — a concurrent accept landing in that window (someone else's
+    // Accept click) must refuse this stale-in-flight save, same convention
+    // as the Postgres zero-row path (`setProposalLetter` follows it too).
+    const spy = vi.spyOn(store, 'getFirmSettings').mockImplementationOnce(async () => {
+      await store.setProposalStatus(created.id, 'accepted')
+      return firmSettings
+    })
+    await expect(
+      store.updateProposal(created.id, { inputs: { transactions: 50 } }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    spy.mockRestore()
+    const final = await store.getProposal(created.id)
+    expect(final.status).toBe('accepted')
+    expect(final.inputs).toEqual({ transactions: 120 })
+  })
+
+  it('a stale "existing client" PATCH cannot overwrite a client link a concurrent Accept just made mid-update (N2, final fix wave round 2)', async () => {
+    const created = await store.createProposal({ inputs: { transactions: 120 } })
+    const firmSettings = await store.getFirmSettings()
+    const spy = vi.spyOn(store, 'getFirmSettings').mockImplementationOnce(async () => {
+      await store.linkProposalClient(created.id, 'client-accept')
+      return firmSettings
+    })
+    await expect(
+      store.updateProposal(created.id, { clientId: 'client-picker-stale' }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    spy.mockRestore()
+    const final = await store.getProposal(created.id)
+    expect(final.clientId).toBe('client-accept')
+  })
+
   it('lists the most recently touched first', async () => {
     const first = await store.createProposal({ prospect: { company: 'First' } })
     const second = await store.createProposal({ prospect: { company: 'Second' } })
@@ -17104,6 +17140,20 @@ function fakeProposalPostgres(row = null, { clientRows = [], packageRows = [] } 
         const eligible = (row.client_id ?? null) === null && ['draft', 'sent'].includes(row.status)
         return eligible ? { rows: [{ ...row, client_id: params?.[1] }], rowCount: 1 } : { rows: [], rowCount: 0 }
       }
+      // `updateProposal`'s own client_id compare-and-set (N2, final fix wave
+      // round 2), checked the same way — before the generic catch-all below,
+      // which would otherwise answer a mismatched CAS with the fixed row
+      // regardless of its WHERE clause. `row` can be mutated by a test
+      // between the initial read and this write to simulate a concurrent
+      // link landing in between; a mismatch answers zero rows, same as real
+      // Postgres would.
+      const casMatch = trimmed.match(/^update proposals[\s\S]*client_id is not distinct from \$(\d+)/i)
+      if (casMatch && row) {
+        const prevParam = params?.[Number(casMatch[1]) - 1] ?? null
+        const rowClientId = row.client_id ?? null
+        if (prevParam !== rowClientId) return { rows: [], rowCount: 0 }
+        return { rows: [{ ...row }], rowCount: 1 }
+      }
       // `getClientById` — the client `acceptProposal` loads before an upsell
       // write, anchored the same way the general `fakePostgres` above does.
       if (/^select id, name, contact, billing_mode\b[\s\S]*from clients where id = \$1$/i.test(trimmed)) {
@@ -17212,9 +17262,11 @@ describe('proposals (postgres branch)', () => {
     await postgresStore(fake).updateProposal('prop-1', { inputs: { transactions: 200 } })
     const update = fake.matching(/^update proposals/i)[0]
     const boundSnapshot = JSON.parse(update.params[4])
-    // Firm settings answers with bookkeeper: 75 by default (fakeProposalPostgres's
-    // `firm_settings` branch) too, so this pins the source: the snapshot's OWN
-    // rates carried forward, not the (possibly different) live catalog.
+    // `fakeProposalPostgres`'s `firm_settings` branch answers with
+    // `proposal_pricing: null`, so `getFirmSettings()` falls back to the seed
+    // catalog — $0 rates, nothing like `bookkeeper: 75` — so this pins the
+    // source: the snapshot's OWN rates carried forward, not the (very
+    // different) live catalog the patch was priced against.
     expect(boundSnapshot.rates).toEqual({ bookkeeper: 75, accountant: 115, controller: 125 })
     expect(boundSnapshot.catalogAt).toBe('2026-01-01T00:00:00.000Z')
   })
@@ -17225,6 +17277,33 @@ describe('proposals (postgres branch)', () => {
     const update = fake.matching(/^update proposals/i)[0]
     expect(update.text).toMatch(/client_id = \$\d/)
     expect(update.params).toContain('client-9')
+  })
+
+  it('adds a client_id compare-and-set to the WHERE clause on a clientId patch, bound to the value read at the top (N2, final fix wave round 2)', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ client_id: 'client-existing' }))
+    await postgresStore(fake).updateProposal('prop-1', { clientId: 'client-new' })
+    const update = fake.matching(/^update proposals/i)[0]
+    expect(update.text).toMatch(/client_id is not distinct from \$\d/)
+    expect(update.params).toContain('client-existing')
+  })
+
+  it('a stale clientId patch cannot overwrite a client link a concurrent write made mid-update (N2, final fix wave round 2)', async () => {
+    const row = proposalRow({ client_id: null })
+    const fake = fakeProposalPostgres(row)
+    const pgStore = postgresStore(fake)
+    const firmSettings = await pgStore.getFirmSettings()
+    // Same race window the file-backend equivalent above exercises:
+    // `updateProposal` reads `current` first, then awaits `getFirmSettings()`
+    // before issuing its write — mutate the fake's row here to simulate a
+    // concurrent Accept linking a client in that exact window.
+    const spy = vi.spyOn(pgStore, 'getFirmSettings').mockImplementationOnce(async () => {
+      row.client_id = 'client-accept'
+      return firmSettings
+    })
+    await expect(
+      pgStore.updateProposal('prop-1', { clientId: 'client-picker-stale' }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    spy.mockRestore()
   })
 
   it('the accepted/declined guard lives in the update WHERE clause too (M2)', async () => {

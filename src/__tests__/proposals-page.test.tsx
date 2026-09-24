@@ -5,6 +5,7 @@ import type { AppContextValue } from '../AppContext'
 import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
 import { ProposalEditorPage } from '../pages/ProposalEditorPage'
 import { ProposalsPage } from '../pages/ProposalsPage'
+import { proposalDeliveryBadge } from '../lib/proposals'
 import { ApiError, type Client, type Proposal } from '../lib/types'
 
 /** A promise plus its own `resolve`, for pinning a mock's response in flight. */
@@ -305,6 +306,36 @@ function renderEditor(entry = '/proposals/prop-1') {
     </MemoryRouter>,
   )
 }
+
+describe('proposalDeliveryBadge (item 2 test, final fix wave round 2)', () => {
+  it('picks the delivery event by its own `at`, not by append order — a late email.sent landing after a bounced still shows Bounced', () => {
+    const proposal: Proposal = {
+      ...PROPOSAL,
+      status: 'sent',
+      emailLog: [
+        { kind: 'send', at: '2026-09-23T14:00:00.000Z', providerId: 're_1', to: ['pat@acme.test'], ok: true },
+        {
+          kind: 'delivery',
+          at: '2026-09-23T14:02:00.000Z',
+          providerId: 're_1',
+          to: ['pat@acme.test'],
+          event: 'bounced',
+        },
+        // Appended AFTER the bounce above, but with an EARLIER `at` — a
+        // delayed `email.sent` webhook landing out of order must not
+        // silently revert the badge back off Bounced.
+        {
+          kind: 'delivery',
+          at: '2026-09-23T14:01:00.000Z',
+          providerId: 're_1',
+          to: ['pat@acme.test'],
+          event: 'sent',
+        },
+      ],
+    }
+    expect(proposalDeliveryBadge(proposal)).toBe('Bounced')
+  })
+})
 
 describe('the Proposals list', () => {
   it('shows company, contact, status and the monthly total', async () => {
@@ -919,6 +950,71 @@ describe('refetching on the app-wide data broadcast (item 5, final fix wave)', (
     await waitFor(() => expect(api.getProposalRequest).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('tab', { name: 'Letter' }))
     expect(await screen.findByText('Delivered', { selector: '.status-pill' })).toBeTruthy()
+    // N5 (final fix wave round 2): exactly one GET, checked AFTER the
+    // broadcast has fully settled — not inside `waitFor`, which would pass
+    // the moment the count first reaches 1 even if a stray second GET were
+    // about to follow.
+    expect(api.getProposalRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('a save that lands while a slow broadcast refetch is still in flight is not undone when that stale refetch lands late (N1, final fix wave round 2)', async () => {
+    const slowGet = deferred<Proposal>()
+    api.getProposalRequest = vi
+      .fn()
+      .mockResolvedValueOnce(PROPOSAL) // initial mount load
+      .mockReturnValueOnce(slowGet.promise) // the broadcast's own refetch — stays in flight
+    const saved: Proposal = {
+      ...PROPOSAL,
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic', override: 600 }],
+    }
+    api.updateProposalRequest = vi.fn(async () => saved)
+
+    const { rerender } = renderEditorTree()
+    await screen.findByText('Acme Books')
+    expect(api.getProposalRequest).toHaveBeenCalledTimes(1)
+
+    // A `data-changed` broadcast: the effect's own refetch GET is sent now,
+    // while the save queue is idle, and stays unresolved.
+    contextValue = { ...contextValue, data: { clients: [...contextValue.data.clients] } } as typeof contextValue
+    rerender(
+      <MemoryRouter initialEntries={['/proposals/prop-1']}>
+        <Routes>
+          <Route path="/proposals" element={<p>The proposals list</p>} />
+          <Route path="/proposals/:proposalId" element={<ProposalEditorPage />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(api.getProposalRequest).toHaveBeenCalledTimes(2))
+
+    // A save starts, and finishes, entirely while that GET is still in flight.
+    const override = await screen.findByLabelText('Override Monthly: Weekly transactions Basic')
+    fireEvent.change(override, { target: { value: '600' } })
+    fireEvent.blur(override)
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      const field = screen.getByLabelText('Override Monthly: Weekly transactions Basic') as HTMLInputElement
+      expect(field.value).toBe('600')
+    })
+
+    // Only now does the stale broadcast GET land, with the OLD value — it
+    // must be dropped rather than put back over what the save just wrote.
+    slowGet.resolve(PROPOSAL)
+    await waitFor(() => {
+      const field = screen.getByLabelText('Override Monthly: Weekly transactions Basic') as HTMLInputElement
+      expect(field.value).toBe('600')
+    })
+
+    // Proven definitively by what the NEXT save carries: built from `saved`
+    // (via `latestRef`), not from the stale `PROPOSAL` the late GET tried to
+    // put back.
+    fireEvent.click(await screen.findByLabelText('Reconciliations: Reconciliations'))
+    await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalledTimes(2))
+    expect(api.updateProposalRequest).toHaveBeenNthCalledWith(2, 'prop-1', {
+      selections: [
+        { serviceId: 'monthly-weekly-transactions-basic', override: 600 },
+        { serviceId: 'reconciliations' },
+      ],
+    })
   })
 })
 

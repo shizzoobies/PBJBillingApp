@@ -334,13 +334,14 @@ describe('the intake chat route', () => {
       pattern: /proposalChatMatch && request\.method === 'POST'/,
       write: true,
       // The re-read + decided-proposal guards (fix batch 3, item 1), plus the
-      // Important-2(a) scoped-reprice guard (final fix wave), push
+      // Important-2(a) scoped-reprice guard (final fix wave) and its N3
+      // prospect-scoping sibling (final fix wave round 2), push
       // `broadcastDataChanged()` past the shared 3000-char default.
-      broadcastLength: 4700,
+      broadcastLength: 5000,
     },
   ])
 
-  const block = () => routeBlock(/proposalChatMatch && request\.method === 'POST'/, 4600)
+  const block = () => routeBlock(/proposalChatMatch && request\.method === 'POST'/, 5000)
 
   it('applies only the validated patch, through the same re-pricing write the form uses', () => {
     const text = block()
@@ -402,5 +403,11 @@ describe('the intake chat route', () => {
     )
     expect(text).toContain('if (!touchedInputs) delete storePatch.inputs')
     expect(text).toContain('if (!touchedSelections) delete storePatch.selections')
+  })
+
+  it('also only forwards prospect to updateProposal when this turn actually touched it (N3, final fix wave round 2)', () => {
+    const text = block()
+    expect(text).toContain('const touchedProspect = Object.keys(turn.patch.prospect ?? {}).length > 0')
+    expect(text).toContain('if (!touchedProspect) delete storePatch.prospect')
   })
 })

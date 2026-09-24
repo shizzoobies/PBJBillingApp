@@ -92,9 +92,16 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   // responses apply — strictly in the order they were requested.
   const queueRef = useRef<Promise<unknown>>(Promise.resolve())
   const pendingRef = useRef(0)
+  // Bumped by every `beginBusy` (N1, final fix wave round 2): the broadcast
+  // refetch below records this at the moment its GET is SENT and compares
+  // again when the GET LANDS — a save that starts and finishes while that
+  // GET is in flight must still drop the now-stale answer, even though
+  // `pendingRef` is back to 0 by the time it arrives.
+  const saveGenRef = useRef(0)
 
   const beginBusy = () => {
     pendingRef.current += 1
+    saveGenRef.current += 1
     setBusy(true)
   }
   const endBusy = () => {
@@ -129,6 +136,12 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   // on a `data` change, not merely because `busy` later flips back to false)
   // so a broadcast can never race a save in flight, and apply through the
   // same stale-id guard `enqueue` uses (item 5, final fix wave).
+  //
+  // N1 (final fix wave round 2): idle is checked again when the GET LANDS,
+  // not only when it was sent — `saveGenRef` (bumped by every `beginBusy`)
+  // pins the generation at send time, so a save that starts and finishes
+  // entirely while this GET is in flight still drops the now-stale answer,
+  // rather than putting an older copy back over what that save just wrote.
   const skippedFirstBroadcastRef = useRef(false)
   useEffect(() => {
     if (!skippedFirstBroadcastRef.current) {
@@ -137,9 +150,17 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     }
     if (pendingRef.current > 0) return
     let cancelled = false
+    const issuedGen = saveGenRef.current
     void getProposalRequest(proposalId)
       .then((loaded) => {
-        if (cancelled || loaded.id !== proposalId) return
+        if (
+          cancelled ||
+          loaded.id !== proposalId ||
+          pendingRef.current !== 0 ||
+          saveGenRef.current !== issuedGen
+        ) {
+          return
+        }
         latestRef.current = loaded
         setProposal(loaded)
       })

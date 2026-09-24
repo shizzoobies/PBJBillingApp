@@ -10222,16 +10222,26 @@ export class AppDataStore {
         sets.push(`client_id = $${params.length + 1}`)
         params.push(cleanProposalId(patch.clientId))
       }
+      // N2 (final fix wave round 2): a `clientId` patch compare-and-sets
+      // against the value THIS call read at the top — a stale "existing
+      // client" picker PATCH, in flight while Accept links a client of its
+      // own, must not overwrite that link. `is not distinct from` treats
+      // null = null as a match, same as `linkProposalClient`'s CAS.
+      const clientIdGuard = has('clientId')
+        ? ` and client_id is not distinct from $${params.length + 1}`
+        : ''
+      const queryParams = has('clientId') ? [...params, current.clientId] : params
       const { rows } = await this.pool.query(
         `update proposals
             set ${sets.join(', ')}
-          where id = $1 and status not in ('accepted', 'declined')
+          where id = $1 and status not in ('accepted', 'declined')${clientIdGuard}
           returning ${PROPOSAL_COLUMNS}`,
-        params,
+        queryParams,
       )
       if (rows[0]) return AppDataStore.mapProposal(rows[0])
       // Zero rows for an id we just confirmed exists and was editable: a
-      // concurrent write moved it to accepted/declined in between.
+      // concurrent write moved it to accepted/declined, or (for a `clientId`
+      // patch) linked a different client, in between.
       throw new ProposalStateError(
         `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
       )
@@ -10242,6 +10252,20 @@ export class AppDataStore {
       (row) => row && row.id === id,
     )
     if (!target) return null
+    // File-backend parity with the Postgres path above (N2, final fix wave
+    // round 2): re-check right before writing, since the read at the top of
+    // this method and this second read straddle an `await` a concurrent
+    // write can land in — same convention `setProposalLetter` uses.
+    if (target.status === 'accepted' || target.status === 'declined') {
+      throw new ProposalStateError(
+        `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+      )
+    }
+    if (has('clientId') && (target.clientId ?? null) !== (current.clientId ?? null)) {
+      throw new ProposalStateError(
+        `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+      )
+    }
     Object.assign(target, next, { pricingSnapshot, updatedAt })
     if (has('letterText')) {
       target.letter = {

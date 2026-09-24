@@ -8597,10 +8597,16 @@ const server = createServer(async (request, response) => {
           // actually touched, so a prospect-only turn leaves the snapshot
           // alone the same way a prospect-only manual save does.
           const applied = applyProposalPatch(proposal, turn.patch, pricing.services)
+          const touchedProspect = Object.keys(turn.patch.prospect ?? {}).length > 0
           const touchedInputs = Object.keys(turn.patch.inputs ?? {}).length > 0
           const touchedSelections =
             (turn.patch.selections?.add?.length ?? 0) > 0 || (turn.patch.selections?.remove?.length ?? 0) > 0
           const storePatch = { ...applied }
+          // N3 (final fix wave round 2): same scoping as inputs/selections —
+          // a turn that never touched the prospect must not re-assert it
+          // either, so a concurrent prospect edit elsewhere can't be
+          // silently clobbered by this turn's own unchanged copy.
+          if (!touchedProspect) delete storePatch.prospect
           if (!touchedInputs) delete storePatch.inputs
           if (!touchedSelections) delete storePatch.selections
           await appDataStore.updateProposal(proposal.id, storePatch)
