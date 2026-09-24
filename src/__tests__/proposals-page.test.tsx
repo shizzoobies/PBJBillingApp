@@ -5,7 +5,7 @@ import type { AppContextValue } from '../AppContext'
 import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
 import { ProposalEditorPage } from '../pages/ProposalEditorPage'
 import { ProposalsPage } from '../pages/ProposalsPage'
-import { ApiError, type Proposal } from '../lib/types'
+import { ApiError, type Client, type Proposal } from '../lib/types'
 
 /** A promise plus its own `resolve`, for pinning a mock's response in flight. */
 function deferred<T>() {
@@ -840,6 +840,24 @@ describe('Accept and Decline', () => {
         updateMonthlyRate: false,
       }),
     )
+  })
+
+  it('skips the second question for a non-subscription client even with a fee above $0', async () => {
+    contextValue.data.clients = [
+      { id: 'client-1', name: 'Existing Co', billingMode: 'hourly' },
+    ] as unknown as Client[]
+    api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
+        packageId: null,
+        updateMonthlyRate: false,
+      }),
+    )
+    expect(confirm).toHaveBeenCalledTimes(1)
   })
 
   it('skips the second question and sends updateMonthlyRate: false when the snapshot is $0', async () => {

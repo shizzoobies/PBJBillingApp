@@ -10558,6 +10558,13 @@ export class AppDataStore {
    * write, and linking the create-then-link order narrows the retry window to
    * exactly the interval between those two calls.
    *
+   * Once a client exists, though, this cannot un-happen — a decline landing
+   * before the final accepted flip, a package/plan write failure, and the
+   * lost-link race below are all still possible, and every one of them
+   * throws with `createdClientId` set to that client's id (see the `catch`
+   * below), so the route still tells other tabs a client now exists even
+   * though this call itself refuses.
+   *
    * @returns {{ proposal, clientId, createdClient, packageApplied } | null}
    */
   async acceptProposal(
@@ -10630,50 +10637,69 @@ export class AppDataStore {
       clientId = client.id
       createdClient = true
       createdClientName = client.name
-      const linked = await this.linkProposalClient(id, clientId)
-      if (!linked) {
-        // Lost the race: a concurrent Accept of this SAME proposal linked its
-        // own client first. The one just created has no history yet — retire
-        // it rather than leave an orphan, and tell the route a client was
-        // created so it still broadcasts even though this call refuses.
-        await this._retireOrphanedAcceptClient(clientId, id)
-        const err = new ProposalStateError('Someone else already accepted this proposal.')
-        err.createdClientId = clientId
-        throw err
-      }
-    } else if (updateMonthlyRate === true) {
-      await this.setClientMonthlyRate(clientId, monthlyRate)
     }
 
-    const wantedPlans = [
-      ...new Set(
-        (Array.isArray(planIds) ? planIds : []).filter((planId) => typeof planId === 'string' && planId),
-      ),
-    ]
-    if (wantedPlans.length > 0) {
-      const data = await this.read()
-      const client = (data.clients ?? []).find((row) => row.id === clientId)
-      const known = new Set((data.plans ?? []).map((plan) => plan.id))
-      const existing = Array.isArray(client?.planIds) ? client.planIds : []
-      const added = wantedPlans.filter((planId) => known.has(planId) && !existing.includes(planId))
-      if (client && added.length > 0) await this._setClientPlanIds(clientId, [...existing, ...added])
-    }
-    const packageResult = pkg ? await this.applyPackageToClient(clientId, packageId, { actorUserId }) : null
-
-    const accepted = await this.setProposalStatus(id, 'accepted', { clientId })
-    if (actorUserId) {
+    // Everything from here on runs AFTER a client may already exist, so any
+    // failure — the lost-link race below, a decline landing before the final
+    // accepted flip, a package/plan write failure, or `_retireOrphanedAcceptClient`
+    // itself throwing — must still tell the caller a client was created, the
+    // same way the lost-link race always has. `??=` never overwrites an id an
+    // inner throw already attached.
+    try {
       if (createdClient) {
-        // Same event name and shape as `POST /api/clients` (server.js) — a
-        // client this route creates is still a client created.
-        await this.recordActivity(actorUserId, 'client_created', createdClientName || '')
+        const linked = await this.linkProposalClient(id, clientId)
+        if (!linked) {
+          // Lost the race: a concurrent Accept of this SAME proposal linked
+          // its own client first, or the proposal was declined or deleted
+          // while this one was creating its client. The one just created has
+          // no history yet — retire it rather than leave an orphan, and word
+          // the refusal from what actually happened to the proposal.
+          await this._retireOrphanedAcceptClient(clientId, id)
+          const latest = await this.getProposal(id)
+          const message = !latest
+            ? 'This proposal no longer exists.'
+            : latest.status === 'declined'
+              ? 'This proposal was declined while you were accepting it.'
+              : 'Someone else already accepted this proposal.'
+          throw new ProposalStateError(message)
+        }
+      } else if (updateMonthlyRate === true) {
+        await this.setClientMonthlyRate(clientId, monthlyRate)
       }
-      await this.recordActivity(
-        actorUserId,
-        'proposal_accepted',
-        `${proposal.prospect.company || proposal.prospect.contactName || 'Proposal'} · ${proposal.id}`,
-      )
+
+      const wantedPlans = [
+        ...new Set(
+          (Array.isArray(planIds) ? planIds : []).filter((planId) => typeof planId === 'string' && planId),
+        ),
+      ]
+      if (wantedPlans.length > 0) {
+        const data = await this.read()
+        const client = (data.clients ?? []).find((row) => row.id === clientId)
+        const known = new Set((data.plans ?? []).map((plan) => plan.id))
+        const existing = Array.isArray(client?.planIds) ? client.planIds : []
+        const added = wantedPlans.filter((planId) => known.has(planId) && !existing.includes(planId))
+        if (client && added.length > 0) await this._setClientPlanIds(clientId, [...existing, ...added])
+      }
+      const packageResult = pkg ? await this.applyPackageToClient(clientId, packageId, { actorUserId }) : null
+
+      const accepted = await this.setProposalStatus(id, 'accepted', { clientId })
+      if (actorUserId) {
+        if (createdClient) {
+          // Same event name and shape as `POST /api/clients` (server.js) — a
+          // client this route creates is still a client created.
+          await this.recordActivity(actorUserId, 'client_created', createdClientName || '')
+        }
+        await this.recordActivity(
+          actorUserId,
+          'proposal_accepted',
+          `${proposal.prospect.company || proposal.prospect.contactName || 'Proposal'} · ${proposal.id}`,
+        )
+      }
+      return { proposal: accepted, clientId, createdClient, packageApplied: Boolean(packageResult) }
+    } catch (e) {
+      if (createdClient) e.createdClientId ??= clientId
+      throw e
     }
-    return { proposal: accepted, clientId, createdClient, packageApplied: Boolean(packageResult) }
   }
 
   /**

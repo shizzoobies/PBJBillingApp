@@ -280,6 +280,17 @@ describe('accepting and declining', () => {
     expect(broadcastAt).toBeLessThan(sendAt)
   })
 
+  it('checks createdClientId BEFORE the instanceof check, so an unexpected error still broadcasts before it is rethrown', () => {
+    const text = accept()
+    const broadcastAt = text.indexOf('if (error.createdClientId) broadcastDataChanged()')
+    const instanceofAt = text.indexOf(
+      'error instanceof ProposalStateError || error instanceof PackageApplyError',
+    )
+    expect(broadcastAt).toBeGreaterThan(-1)
+    expect(instanceofAt).toBeGreaterThan(-1)
+    expect(broadcastAt).toBeLessThan(instanceofAt)
+  })
+
   it('Decline records the note through the status write', () => {
     const text = routeBlock(/proposalDeclineMatch && request\.method === 'POST'/, 2400)
     expect(text).toContain("appDataStore.setProposalStatus(current.id, 'declined', {")

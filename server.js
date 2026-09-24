@@ -8424,12 +8424,15 @@ const server = createServer(async (request, response) => {
           updateMonthlyRate: payload.updateMonthlyRate === true,
         })
       } catch (error) {
+        // A refusal that landed AFTER `acceptProposal` created a client — the
+        // lost-link race, a decline landing before the final flip, a
+        // package/plan write failure, anything after `createClient` — still
+        // changed the workspace. The store attaches `createdClientId` to
+        // every one of those, so this broadcasts BEFORE the instanceof check
+        // below: even an error neither branch below recognizes (rethrown as a
+        // 500) must still tell the other tabs a client now exists.
+        if (error.createdClientId) broadcastDataChanged()
         if (error instanceof ProposalStateError || error instanceof PackageApplyError) {
-          // A refusal that landed AFTER `acceptProposal` created a client (the
-          // concurrent-accept race in `linkProposalClient`) still changed the
-          // workspace — the store attaches `createdClientId` to that one, and
-          // only that one, so other sessions still hear about it.
-          if (error.createdClientId) broadcastDataChanged()
           sendJson(response, 409, { error: 'proposal_refused', message: error.message })
           return
         }

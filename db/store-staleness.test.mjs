@@ -17356,6 +17356,10 @@ describe('accepting a proposal (file backend)', () => {
     )
   })
 
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   const prospectProposal = () =>
     store.createProposal({
       prospect: {
@@ -17526,6 +17530,57 @@ describe('accepting a proposal (file backend)', () => {
     })
     expect(result.createdClient).toBe(true)
   })
+
+  it('carries createdClientId on ANY failure after the client is created, not just the lost-link race', async () => {
+    const proposal = await prospectProposal()
+    vi.spyOn(store, 'setProposalStatus').mockRejectedValueOnce(
+      new ProposalStateError('This proposal is already declined.'),
+    )
+    const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
+    expect(err).toBeInstanceOf(ProposalStateError)
+    expect(typeof err.createdClientId).toBe('string')
+    const client = (await store.read()).clients.find((row) => row.id === err.createdClientId)
+    expect(client?.name).toBe('Acme Books')
+  })
+
+  it('retires the orphaned client on the lost-link race, with a ProposalStateError carrying its id', async () => {
+    const proposal = await prospectProposal()
+    vi.spyOn(store, 'linkProposalClient').mockResolvedValueOnce(null)
+    const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
+    expect(err).toBeInstanceOf(ProposalStateError)
+    expect(err.message).toBe('Someone else already accepted this proposal.')
+    expect(typeof err.createdClientId).toBe('string')
+    const client = (await store.read()).clients.find((row) => row.id === err.createdClientId)
+    expect(client?.lifecycleStage).toBe('inactive')
+    const note = (await store.listClientNotes(err.createdClientId))[0]
+    expect(note).toMatchObject({ authorName: 'System' })
+    expect(note.body).toContain(proposal.id)
+  })
+
+  it('words the lost-link refusal from what actually happened: declined mid-accept', async () => {
+    const proposal = await prospectProposal()
+    await store.setProposalStatus(proposal.id, 'sent')
+    vi.spyOn(store, 'linkProposalClient').mockImplementationOnce(async () => {
+      await store.setProposalStatus(proposal.id, 'declined', { note: 'Went with a friend' })
+      return null
+    })
+    const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
+    expect(err).toBeInstanceOf(ProposalStateError)
+    expect(err.message).toBe('This proposal was declined while you were accepting it.')
+    expect(typeof err.createdClientId).toBe('string')
+  })
+
+  it('words the lost-link refusal from what actually happened: the proposal was deleted mid-accept', async () => {
+    const proposal = await prospectProposal()
+    vi.spyOn(store, 'linkProposalClient').mockImplementationOnce(async () => {
+      await store.deleteProposal(proposal.id)
+      return null
+    })
+    const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
+    expect(err).toBeInstanceOf(ProposalStateError)
+    expect(err.message).toBe('This proposal no longer exists.')
+    expect(typeof err.createdClientId).toBe('string')
+  })
 })
 
 describe('linkProposalClient — compare-and-set (file backend)', () => {
@@ -17630,7 +17685,7 @@ describe('linkProposalClient — compare-and-set (postgres branch)', () => {
  * to watch the SAME proposal move from unlinked draft to linked-and-accepted
  * across three different statements, with a real client insert in between.
  */
-function fakeAcceptOrderPostgres(initialRow) {
+function fakeAcceptOrderPostgres(initialRow, { loseLinkRace = false } = {}) {
   const statements = []
   let current = { ...initialRow }
   async function respond(text, params) {
@@ -17644,6 +17699,19 @@ function fakeAcceptOrderPostgres(initialRow) {
       return { rows: [] }
     }
     if (/^insert into clients\b/i.test(trimmed)) {
+      // Simulate a concurrent Accept of the SAME proposal linking its own
+      // client in the gap between this insert and the CAS link below — the
+      // one thing `loseLinkRace` exists to exercise.
+      if (loseLinkRace) current = { ...current, client_id: 'client-concurrent' }
+      return { rows: [] }
+    }
+    // `_retireOrphanedAcceptClient`'s two statements, fired when the CAS link
+    // below loses. Neither needs to actually mutate a client — the only thing
+    // worth proving here is that they fire, and in what order.
+    if (/^update clients set lifecycle_stage = \$2/i.test(trimmed)) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (/^insert into client_notes\b/i.test(trimmed)) {
       return { rows: [] }
     }
     if (/^select\b[\s\S]*from proposals where id = \$1$/i.test(trimmed)) {
@@ -17701,5 +17769,32 @@ describe('accepting a proposal: happy-path statement order (postgres branch)', (
     expect(insertClientAt).toBeGreaterThan(-1)
     expect(linkAt).toBeGreaterThan(insertClientAt)
     expect(acceptedFlipAt).toBeGreaterThan(linkAt)
+  })
+})
+
+describe('accepting a proposal: the lost-link race retires the orphan (postgres branch)', () => {
+  it('sets lifecycle_stage and inserts a client note after the client insert, and the refusal carries the new client’s id', async () => {
+    const fake = fakeAcceptOrderPostgres(
+      proposalRow({ client_id: null, status: 'draft', prospect: { company: 'Acme Books' } }),
+      { loseLinkRace: true },
+    )
+    const err = await postgresStore(fake)
+      .acceptProposal('prop-1', { actorUserId: 'emp-patrice' })
+      .catch((e) => e)
+    expect(err).toBeInstanceOf(ProposalStateError)
+    expect(err.message).toBe('Someone else already accepted this proposal.')
+
+    const insertClientAt = fake.indexOf(/^insert into clients\b/i)
+    const lifecycleAt = fake.indexOf(/^update clients set lifecycle_stage = \$2/i)
+    const noteAt = fake.indexOf(/^insert into client_notes\b/i)
+    expect(insertClientAt).toBeGreaterThan(-1)
+    expect(lifecycleAt).toBeGreaterThan(insertClientAt)
+    expect(noteAt).toBeGreaterThan(insertClientAt)
+
+    const insertedClientId = fake.matching(/^insert into clients\b/i)[0].params[0]
+    expect(err.createdClientId).toBe(insertedClientId)
+    // The link that lost is a DIFFERENT client — the retire targets the one
+    // THIS call created, never the one that won the race.
+    expect(err.createdClientId).not.toBe('client-concurrent')
   })
 })
