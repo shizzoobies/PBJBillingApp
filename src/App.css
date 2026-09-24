@@ -2687,6 +2687,9 @@ textarea.input {
 .client-table td:last-child {
   background: var(--surface);
   border-left: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  /* Wide enough for two compact buttons per line, so the owner's five
+     actions take three short lines instead of a five-high stack. */
+  min-width: 220px;
 }
 
 .client-table th:last-child {
