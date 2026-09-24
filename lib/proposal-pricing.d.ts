@@ -129,3 +129,22 @@ export declare function cleanProposalInputs(
 ): Record<string, number>
 /** One entry per service (the last wins), numbers finite and non-negative. */
 export declare function cleanProposalSelections(raw: unknown): ProposalSelection[]
+
+
+/** A chat patch AFTER `validateProposalPatch` (lib/assistant.js). */
+export type ValidatedProposalPatch = {
+  prospect?: Partial<ProposalProspect>
+  inputs?: Record<string, number>
+  selections?: { add: ProposalSelection[]; remove: string[] }
+}
+
+/** Apply a validated chat patch; adding one tier of a row replaces its siblings. */
+export declare function applyProposalPatch(
+  current: {
+    prospect?: Partial<ProposalProspect> | null
+    inputs?: Record<string, number> | null
+    selections?: readonly ProposalSelection[] | null
+  },
+  patch: ValidatedProposalPatch | null | undefined,
+  services: readonly ProposalService[],
+): { prospect: ProposalProspect; inputs: Record<string, number>; selections: ProposalSelection[] }
