@@ -69,6 +69,7 @@ describe('capability manifest', () => {
   it('covers every sidebar page', () => {
     for (const section of [
       '## Dashboard',
+      '## Proposals (owner only)',
       '## Time tracking',
       '## Timesheet',
       '## Time Approvals',
@@ -91,6 +92,19 @@ describe('capability manifest', () => {
   it('has the not-supported list the assistant relies on', () => {
     expect(manifest).toContain('## NOT supported (yet)')
     expect(manifest).toContain('feature request')
+  })
+
+  // Proposals (featreq-311473e2): the one sentence the assistant must be able
+  // to say, and the placeholder note it must no longer repeat.
+  it('says proposal prices come from the catalog, never from the AI', () => {
+    expect(manifest).toContain('Prices come from the catalog math, never from the AI.')
+    expect(manifest).toContain('**Proposal pricing**')
+    expect(manifest).not.toContain('**Engagements is a placeholder.**')
+  })
+
+  // The voice agent's knowledge-base upload caps at ~216 KB (HANDOFF §0).
+  it('stays under the voice knowledge-base cap', () => {
+    expect(Buffer.byteLength(manifest, 'utf8')).toBeLessThan(216_000)
   })
 })
 

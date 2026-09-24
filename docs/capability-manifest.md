@@ -31,18 +31,18 @@ report below ("HOW LABOR COST IS CALCULATED").
 
 ## Navigation map
 
-Sidebar pages: Dashboard, Engagements, Time, Timesheet, Time Approvals,
+Sidebar pages: Dashboard, Proposals, Time, Timesheet, Time Approvals,
 Checklists, Board, Delayed, Clients, Client Recap, Contacts, Reports,
 Productivity, Gantt, Invoices, Invoice Recap, Plans, Team, To 100%, Updates
 (owner only), Settings. A billing-month picker, notification bell, and account
 menu sit in the top bar on every page.
 
 **The owner's sidebar is grouped into sections** (nineteen flat links was too
-many to scan). In order: Dashboard, Engagements, **Clients** (Clients, Contacts,
+many to scan). In order: Dashboard, Proposals, **Clients** (Clients, Contacts,
 Client Recap), **Billing** (Invoices, Invoice Recap, Plans), **Operations**
 (Time, Timesheet, Time Approvals, Checklists, Board, Delayed, Gantt), Team,
 **Reports** (Reports, Productivity), Updates, **Settings** (Settings, To 100%).
-Dashboard, Engagements, Team and Updates stand alone — a heading over a single
+Dashboard, Proposals, Team and Updates stand alone — a heading over a single
 link is more clutter than help. Updates is deliberately top-level rather than
 under Settings, since that is where feature requests are filed and shipped work
 is reviewed.
@@ -51,10 +51,8 @@ is reviewed.
 would outweigh the content. Nothing moved for them and no route changed for
 anyone; this is purely how the list is presented.
 
-**Engagements is a placeholder.** The section is visible before it has content
-so it does not appear out of nowhere later; opening it explains that the intake
-form and proposals are on the way and that clients are still added on the
-Clients page meanwhile. Owner-only.
+**Proposals took the Engagements placeholder's place** (owner-only; an old
+/engagements link opens it). See "Proposals (owner only)" below.
 - New-version prompt: a browser tab left open across a deploy shows a small
   "A new version of the app is ready — Refresh" toast (bottom-right; Refresh
   loads it) within a few minutes, and immediately when you come back to the
@@ -1097,6 +1095,48 @@ Clients page meanwhile. Owner-only.
 - The step's own "Done" toggle survives on this page only for an OLD free-text
   wait, which has no wait record to resolve. A completed step drops off the list
   (done steps aren't shown).
+
+## Proposals (owner only)
+
+Sidebar: **Proposals**. Every prospect's estimate, letter, intake conversation
+and outcome is saved — declined ones too — so a prospect who comes back next
+year is reopened with **Copy to new proposal**, not started from zero. The list
+shows company, contact, status (Draft, Sent, Accepted, Declined), the monthly
+total and when it last changed, with a status filter and a search. **New
+proposal** opens an empty draft. Three tabs:
+
+- **Estimate** — the prospect (company, contact, email, phone, notes, or an
+  existing client for an upsell), the counts from their books (transactions,
+  balance sheet accounts, employees, sales tax states, months of clean-up...),
+  and the service picker grouped like her pricing sheet (Monthly,
+  Reconciliations, AR, AP, Payroll, Sales tax, Reports, Additional reports,
+  Annual and one-time, Clean-up) with Basic / Classes / Advance tiers. Each
+  priced line shows its formula ("120 transactions x 0.07 x $75/hr =
+  $630.00"); any line can take a typed price (an override). Four totals:
+  Monthly fee, Annual fees, One-time fees, Clean-up. A catalog change never
+  reprices a proposal by itself — **Reprice at today's catalog** (drafts) does.
+  Beside it, the **intake chat** (Opus 5.5) asks for the counts one topic at a
+  time and fills the estimate in as she answers; what it changed is outlined.
+- **Letter** — **Draft the proposal** has the AI write the letter (Opening,
+  What you told us, What we will do, Pricing, Terms, Next step) around the
+  priced estimate; she edits the text; **Regenerate** replaces it after a
+  confirm; **Copy text**; **Preview PDF**; **Send to prospect** asks for the To
+  address (filled in from the prospect) and emails the branded PDF. A badge
+  shows what the mail provider said (Delivered, Bounced, Marked as spam); a
+  bounce or spam report notifies the owners.
+- **Activity** — created, letter drafted, sends and delivery, accepted or
+  declined (with her note), and the chat transcript.
+
+Header actions: **Accept** — a new prospect becomes a client in Onboarding,
+billed monthly at the proposal's monthly total with the firm's default payment
+terms, plus an optional package; for an existing client it asks separately
+before changing their monthly fee; no invoice changes. **Decline** (asks for a
+note), **Copy to new proposal**, **Delete** (drafts only).
+
+**Prices come from the catalog math, never from the AI.** The chat only
+collects counts and picks services; the letter may quote only figures the
+estimate already has, and a draft that invents one is refused. The chat cannot
+send email or change a status. The catalog is **Settings → Proposal pricing**.
 
 ## Clients (owner manages; staff see assigned)
 
@@ -2735,6 +2775,12 @@ Clients page meanwhile. Owner-only.
   color, active-section color. A built-in contrast guard auto-corrects any
   illegible color combination, so branding can't break readability.
 - Mailing address, contact details, EIN — used on invoices.
+- **Proposal pricing** — the three proposal rates (Bookkeeper B, Accountant A,
+  Controller C; separate from the team's bill rates), the labels of the counts
+  collected, and the service catalog behind every proposal: each row is count x
+  factor x role rate x multiplier, a flat amount typed per proposal, or the
+  payroll / sales tax block. Rows can be edited, added or retired (Retire /
+  Restore). Editing it never reprices a proposal already written.
 - Sections can be locked to prevent accidental edits.
 
 ## Security & sign-in
