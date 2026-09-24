@@ -25,10 +25,10 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-24, early morning):** `main` = `4fa1123` + this handoff commit (**Proposals
+**State right now (2026-09-24, afternoon):** `main` = `0a1436c` (the 1200 px layout pass from Lisa's screenshot, entry below; Proposals shipped this morning as 2f71374 - **Proposals
 shipped** - 34 commits from the `feat/proposals` branch, fast-forwarded; read the
 2026-09-24 entry in section 5 FIRST), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
-— the body's `commit` is the deploy check). Suite **4061 tests / 209
+— the body's `commit` is the deploy check). Suite **4063 tests / 210
 files**, green. Voice agent re-provisioned after the deploy. **Rate history
 shipped today** (featreq-23351561, the "Billing prices and cost" brainstorm):
 bill and cost rates are dated versions, every hourly client is pinned to a
@@ -374,6 +374,35 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-09-24 (afternoon) - every page stays usable at a 1200 px laptop window.**
+Brittany forwarded Lisa's screenshot: on the staff Clients page the "Visible work"
+panel sat beside the list and the Checklist / Time / Note buttons were scrolled out
+of view inside `.table-wrap`. Root cause: the sidebar is 258 px and the only
+breakpoint that collapsed `.two-column` / `.reports-layout` / `.invoice-layout` was
+the 1100 px sidebar-hide rule, so from 1101 to ~1400 px every two-column page was
+squeezed. Reproduced on the dev server at 1200x800 as the seeded bookkeeper.
+
+- **Fix (`0a1436c`):** staff Clients is `content-grid client-scope-layout` (one
+  column, Visible work below the list; `src/__tests__/clients-page-staff-layout.test.tsx`
+  pins the order); `.two-column`, `.reports-layout`, `.invoice-layout` collapse below
+  1360 px; `.reports-layout` is single-column at every width (the Payroll report is
+  7-10 columns); `.report-metric-grid` is `auto-fit minmax(150px, 1fr)`; the invoice
+  month-run editor pairs up at >= 1360 px and its lines + hours tables sit in
+  `.table-wrap`; the proposal estimate layout pairs at >= 1360 px; the owner Clients
+  table pins its actions cell sticky on the right (`.client-table td:last-child`,
+  min-width 220 px = two buttons per line); Time entry actions wrap and the edit-row
+  inputs shrink; Board column headers and Productivity controls no longer slide
+  under the topbar.
+- **Dev tooling:** `.claude/launch.json` (gitignored, local only) gained `pbj-api` (API on 4173 with
+  `APP_PUBLIC_URL=http://localhost:5173` so the Vite proxy passes the origin check);
+  run it plus `pbj-vite`. The seeded local owner has TOTP; the secret is in
+  `tmp/auth-state.json` (gitignored) - a 30-second TOTP script in the session
+  scratchpad signed in.
+- **Not a bug, worth knowing:** Lisa sees 36 clients because 31 of them carry
+  recurring "Monthly Reconciliations" templates assigned to her (Aug 14); their
+  explicit team is the Bookkeepington/Accountington test accounts because the
+  2026-09-04 team reset left only explicit picks and Brittany has not re-picked.
+  Visibility follows tasks by design (team-visibility split).
 **2026-09-24 - Proposals shipped (featreq-311473e2 + featreq-ef18a38e): an editable
 pricing catalog, saved prospect estimates, an Opus 5.5 intake chat and letter,
 emailed as a PDF, accepted into a client.** 34 commits on `feat/proposals`
