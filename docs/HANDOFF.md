@@ -25,9 +25,10 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-23, late evening):** `main` = `8537d9b` (rate-history
-follow-ups 3 and 5 rebased from the `elastic-germain` worktree and pushed; the manifest was condensed under the voice agent's ~216 KB cap), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
-— the body's `commit` is the deploy check). Suite **3615 tests / 200
+**State right now (2026-09-24, early morning):** `main` = `4fa1123` + this handoff commit (**Proposals
+shipped** - 34 commits from the `feat/proposals` branch, fast-forwarded; read the
+2026-09-24 entry in section 5 FIRST), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
+— the body's `commit` is the deploy check). Suite **4061 tests / 209
 files**, green. Voice agent re-provisioned after the deploy. **Rate history
 shipped today** (featreq-23351561, the "Billing prices and cost" brainstorm):
 bill and cost rates are dated versions, every hourly client is pinned to a
@@ -373,6 +374,54 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-09-24 - Proposals shipped (featreq-311473e2 + featreq-ef18a38e): an editable
+pricing catalog, saved prospect estimates, an Opus 5.5 intake chat and letter,
+emailed as a PDF, accepted into a client.** 34 commits on `feat/proposals`
+(spec `docs/plans/proposals-2026-09.md`, plan `docs/plans/proposals-2026-09-plan.md`,
+15 tasks by subagent-driven development, every task reviewed and re-reviewed, one
+whole-branch review + fix wave), fast-forwarded to `main` as `4fa1123`.
+
+- **Where it lives:** `lib/proposal-pricing.js` (seed catalog transcribed from her
+  sheet, `priceProposal`, `applyProposalPatch`), `lib/proposal-pdf.js`,
+  `lib/proposal-email.js`, `lib/firm-lines.js` (the ONE copy of the letterhead
+  lines; the invoice PDF and email read it too), the proposals block in
+  `db/store.js` (both backends; `ProposalStateError`), `/api/proposals*` routes
+  in `server.js` (all owner-only; writes origin-checked), `src/pages/ProposalsPage.tsx`
+  (replaces Engagements; `/engagements` redirects), `src/pages/ProposalEditorPage.tsx`
+  + `src/components/proposals/*` (Estimate with the chat on the left, Letter,
+  Activity), Settings > Proposal pricing.
+- **Rules that bind (do not relax):** prices come ONLY from the calculator; the
+  chat and the letter run on `claude-opus-5-5` via `runStructuredModel` with
+  `modelFallback:false` and schemas with NO minimum/maximum/minItems/maxItems
+  (tripwires); the letter may quote only snapshot figures (validator + a warn-and-
+  confirm at Send when the estimate changed since the draft); a flagged or $0 line
+  is "Not yet priced", never $0.00; a DRAFT reprices at today's rates when counts
+  or services change, a SENT proposal keeps `pricingSnapshot.rates`, a catalog change
+  alone never touches a proposal; every status write is guarded in SQL WHERE +
+  the file backend (draft -> sent -> accepted/declined; Reprice/Delete drafts only);
+  the editor has ONE save queue (`enqueue`/`latestRef`) and the chat, Copy, Delete
+  all go through it; Accept checks client/package/billing-master rules BEFORE any
+  write, links the client once (compare-and-set), filters plan ids to known plans
+  (the June outage hazard), and stamps `createdClientId` on any later error so the
+  route can broadcast; proposals are outside the bulk save and the fingerprint.
+- **Prod:** the `proposals` table is created at first boot; the only new SQL
+  against an existing table (`update clients set monthly_rate ...`) was trialed
+  rolled-back on prod before the merge. Voice agent re-provisioned after deploy
+  (manifest ~214 KB, tripwire 216,000).
+- **Open for Brittany (on the tracker as Needs your answer):** the three seed
+  rates (start at $0 - set them before the first proposal), the sheet blanks
+  (client call, budget/forecast counts, payroll setup, tax return rate), and
+  whether the payroll bonus really scales with the rate squared.
+- **Open for Alex:** can a proposal be linked to a billing master at all (Accept
+  refuses one even when nothing would be written)? Accept carries only the monthly
+  fee (annual/one-time/clean-up are billed by hand); a clean-up-only proposal
+  creates a $0 monthly client.
+- **Follow-ups (not blocking):** new catalog rows share a "New service" label
+  until renamed; a non-array `services` patch should keep the current catalog;
+  `SavingNumberInput` in SectionKit does not reset its draft on a rejected same-
+  value commit (EstimateTab works around it); the chat's price allow-list covers
+  the current turn only; the upsell path has no compare-and-set before its writes
+  (two-owner race); API-only `planIds` skip the retired-client check.
 **2026-09-23 (evening) — rate-history follow-ups 1 and 2: a re-tag on a
 billing master prices at each sub's pin, and every Billable $ on Reports
 and the Dashboard's Projected billing price at the pin.** One commit on
