@@ -271,8 +271,27 @@ describe('accepting and declining', () => {
     expect(text).toContain("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
   })
 
+  it('broadcasts before the 409 when the refusal carries a createdClientId — the concurrent-accept race', () => {
+    const text = accept()
+    expect(text).toContain('if (error.createdClientId) broadcastDataChanged()')
+    const broadcastAt = text.indexOf('if (error.createdClientId) broadcastDataChanged()')
+    const sendAt = text.indexOf("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
+    expect(broadcastAt).toBeGreaterThan(-1)
+    expect(broadcastAt).toBeLessThan(sendAt)
+  })
+
   it('Decline records the note through the status write', () => {
     const text = routeBlock(/proposalDeclineMatch && request\.method === 'POST'/, 2400)
     expect(text).toContain("appDataStore.setProposalStatus(current.id, 'declined', {")
+  })
+
+  it('Decline maps a refused status write to a 409 with the sentence, like accept and letter', () => {
+    const text = routeBlock(/proposalDeclineMatch && request\.method === 'POST'/, 2400)
+    expect(text).toContain('error instanceof ProposalStateError')
+    expect(text).toContain("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
+    const savedAt = text.indexOf("appDataStore.setProposalStatus(current.id, 'declined', {")
+    const catchAt = text.indexOf('} catch (error) {')
+    expect(savedAt).toBeGreaterThan(-1)
+    expect(savedAt).toBeLessThan(catchAt)
   })
 })

@@ -16999,7 +16999,7 @@ describe('proposals (file backend)', () => {
 })
 
 /** A recorder pool that answers the firm-settings read and echoes one proposal row. */
-function fakeProposalPostgres(row = null) {
+function fakeProposalPostgres(row = null, { clientRows = [], packageRows = [] } = {}) {
   const statements = []
   const pool = {
     async query(text, params) {
@@ -17007,6 +17007,31 @@ function fakeProposalPostgres(row = null) {
       statements.push({ text: trimmed, params })
       if (/from firm_settings where id = 'singleton'/i.test(trimmed)) {
         return { rows: [{ name: 'PB&J', proposal_pricing: null }] }
+      }
+      // `linkProposalClient`'s CAS update, checked BEFORE the generic
+      // `proposals` catch-all below — that one answers every proposals
+      // statement with the fixed row regardless of its WHERE clause, which
+      // would hide the one thing worth proving about this statement: it
+      // takes only when `client_id is null` and the proposal is still open.
+      if (/^update proposals set client_id = \$2, updated_at = now\(\)/i.test(trimmed)) {
+        if (!row) return { rows: [], rowCount: 0 }
+        const eligible = (row.client_id ?? null) === null && ['draft', 'sent'].includes(row.status)
+        return eligible ? { rows: [{ ...row, client_id: params?.[1] }], rowCount: 1 } : { rows: [], rowCount: 0 }
+      }
+      // `getClientById` — the client `acceptProposal` loads before an upsell
+      // write, anchored the same way the general `fakePostgres` above does.
+      if (/^select id, name, contact, billing_mode\b[\s\S]*from clients where id = \$1$/i.test(trimmed)) {
+        const found = clientRows.find((c) => c.id === params?.[0])
+        return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
+      }
+      // `_refuseBillingMasterWrite`'s single-row lookup.
+      if (/^select name, is_billing_master from clients where id = \$1$/i.test(trimmed)) {
+        const found = clientRows.find((c) => c.id === params?.[0])
+        return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
+      }
+      // `listPackages`.
+      if (/^select id, name, description, plan_ids, template_ids, created_at, updated_at\s+from packages/i.test(trimmed)) {
+        return { rows: packageRows }
       }
       if (/proposals/i.test(trimmed) && row) return { rows: [row], rowCount: 1 }
       return { rows: [], rowCount: 0 }
@@ -17396,6 +17421,132 @@ describe('accepting a proposal (file backend)', () => {
     const nameless = await store.createProposal({})
     await expect(store.acceptProposal(nameless.id, {})).rejects.toBeInstanceOf(ProposalStateError)
   })
+
+  it('refuses an upsell whose client no longer exists, before any write (dangling client_id)', async () => {
+    const upsell = await store.createProposal({
+      clientId: 'client-ghost',
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    await expect(store.acceptProposal(upsell.id, {})).rejects.toBeInstanceOf(ProposalStateError)
+    const reloaded = await store.getProposal(upsell.id)
+    expect(reloaded.status).toBe('draft')
+    expect(reloaded.clientId).toBe('client-ghost')
+    expect((await store.read()).clients).toHaveLength(1)
+  })
+
+  it('refuses an upsell on a billing-master client with a package chosen, before any write', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'master-1', name: 'KLC Master', isBillingMaster: true, monthlyRate: 100 }],
+        plans: [
+          { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [] },
+          { id: 'plan-taxes', name: 'Taxes', notes: '', templateIds: [] },
+        ],
+      }),
+    )
+    const pkg = await store.createPackage({
+      name: 'Full service',
+      description: '',
+      planIds: ['plan-books', 'plan-taxes'],
+      templateIds: [],
+    })
+    const upsell = await store.createProposal({
+      clientId: 'master-1',
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    await expect(store.acceptProposal(upsell.id, { packageId: pkg.id })).rejects.toBeInstanceOf(
+      BillingMasterError,
+    )
+    const master = (await store.read()).clients.find((row) => row.id === 'master-1')
+    expect(master.monthlyRate).toBe(100)
+    expect(master.planIds ?? []).toEqual([])
+    expect((await store.getProposal(upsell.id)).status).toBe('draft')
+  })
+
+  it('refuses an upsell on a retired client with a package chosen, before any write (mirrors applyPackageToClient)', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'retired-1', name: 'Old Co', lifecycleStage: 'inactive', monthlyRate: 200 }],
+        plans: [
+          { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [] },
+          { id: 'plan-taxes', name: 'Taxes', notes: '', templateIds: [] },
+        ],
+      }),
+    )
+    const pkg = await store.createPackage({
+      name: 'Full service',
+      description: '',
+      planIds: ['plan-books', 'plan-taxes'],
+      templateIds: [],
+    })
+    const upsell = await store.createProposal({
+      clientId: 'retired-1',
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    await expect(store.acceptProposal(upsell.id, { packageId: pkg.id })).rejects.toBeInstanceOf(
+      PackageApplyError,
+    )
+    const retired = (await store.read()).clients.find((row) => row.id === 'retired-1')
+    expect(retired.monthlyRate).toBe(200)
+    expect(retired.planIds ?? []).toEqual([])
+  })
+
+  it('refuses when the chosen package no longer exists, before any write — and never creates a client, even retried', async () => {
+    const proposal = await prospectProposal()
+    await expect(
+      store.acceptProposal(proposal.id, { packageId: 'pkg-ghost' }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    // Retry with the same bad input: still no client, not a second one.
+    await expect(
+      store.acceptProposal(proposal.id, { packageId: 'pkg-ghost' }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    expect((await store.read()).clients.filter((row) => row.name === 'Acme Books')).toHaveLength(0)
+    expect((await store.getProposal(proposal.id)).status).toBe('draft')
+  })
+
+  it('records client_created for the client it makes, the same shape POST /api/clients does, alongside proposal_accepted', async () => {
+    // Other tests in this file share the same tmp/auth-state.json and the same
+    // actor, so the log already carries entries from earlier runs — only what
+    // THIS call appends is asserted on, not the whole log.
+    const before = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    const beforeCount = (before.activityLog ?? []).length
+    const proposal = await prospectProposal()
+    const result = await store.acceptProposal(proposal.id, { actorUserId: 'emp-patrice' })
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    const added = (authState.activityLog ?? []).slice(beforeCount)
+    expect(added.find((entry) => entry.action === 'client_created')).toMatchObject({
+      action: 'client_created',
+      target: 'Acme Books',
+    })
+    expect(added.find((entry) => entry.action === 'proposal_accepted')).toMatchObject({
+      action: 'proposal_accepted',
+    })
+    expect(result.createdClient).toBe(true)
+  })
+})
+
+describe('linkProposalClient — compare-and-set (file backend)', () => {
+  beforeEach(async () => {
+    await clearProposals()
+    await setProposalRates(store)
+  })
+
+  it('links an open, unlinked proposal', async () => {
+    const proposal = await store.createProposal({})
+    const linked = await store.linkProposalClient(proposal.id, 'client-new')
+    expect(linked.clientId).toBe('client-new')
+    expect((await store.getProposal(proposal.id)).clientId).toBe('client-new')
+  })
+
+  it('a proposal already linked is not re-linked', async () => {
+    const proposal = await store.createProposal({ clientId: 'client-first' })
+    const result = await store.linkProposalClient(proposal.id, 'client-second')
+    expect(result).toBeNull()
+    expect((await store.getProposal(proposal.id)).clientId).toBe('client-first')
+  })
 })
 
 describe('accepting a proposal (postgres branch)', () => {
@@ -17413,5 +17564,142 @@ describe('accepting a proposal (postgres branch)', () => {
       ProposalStateError,
     )
     expect(fake.matching(/^(insert|update)/i)).toHaveLength(0)
+  })
+
+  it('refuses an upsell whose client no longer exists, before any write (dangling client_id)', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ client_id: 'client-ghost' }))
+    await expect(postgresStore(fake).acceptProposal('prop-1', {})).rejects.toBeInstanceOf(
+      ProposalStateError,
+    )
+    expect(fake.matching(/^(insert|update)/i)).toHaveLength(0)
+  })
+
+  it('refuses an upsell on a billing-master client with a package chosen, before any write', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ client_id: 'master-1' }), {
+      clientRows: [{ id: 'master-1', name: 'KLC Master', is_billing_master: true, lifecycle_stage: 'active' }],
+      packageRows: [
+        {
+          id: 'pkg-1',
+          name: 'Full service',
+          description: '',
+          plan_ids: ['plan-a', 'plan-b'],
+          template_ids: [],
+          created_at: new Date('2026-09-01T00:00:00.000Z'),
+          updated_at: null,
+        },
+      ],
+    })
+    await expect(
+      postgresStore(fake).acceptProposal('prop-1', { packageId: 'pkg-1' }),
+    ).rejects.toBeInstanceOf(BillingMasterError)
+    expect(fake.matching(/^(insert|update)/i)).toHaveLength(0)
+  })
+
+  it('refuses when the chosen package no longer exists, before any write', async () => {
+    const fake = fakeProposalPostgres(proposalRow(), { packageRows: [] })
+    await expect(
+      postgresStore(fake).acceptProposal('prop-1', { packageId: 'pkg-ghost' }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    expect(fake.matching(/^(insert|update)/i)).toHaveLength(0)
+  })
+})
+
+describe('linkProposalClient — compare-and-set (postgres branch)', () => {
+  it('carries `client_id is null` and the open-status list in the statement itself', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ client_id: null }))
+    const linked = await postgresStore(fake).linkProposalClient('prop-1', 'client-new')
+    expect(linked.clientId).toBe('client-new')
+    const update = fake.matching(/^update proposals set client_id = \$2/i)[0]
+    expect(update.text).toMatch(/client_id is null/)
+    expect(update.text).toMatch(/status in \('draft', 'sent'\)/)
+    expect(update.params).toEqual(['prop-1', 'client-new'])
+  })
+
+  it('a proposal already linked is not re-linked', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ client_id: 'client-first' }))
+    const result = await postgresStore(fake).linkProposalClient('prop-1', 'client-second')
+    expect(result).toBeNull()
+  })
+})
+
+/**
+ * A stateful proposal+client fake for pinning statement ORDER across the
+ * accept flow's several separate writes (item 10, spec review of task 12).
+ * `fakeProposalPostgres` answers every `proposals` statement from one fixed
+ * row, which is enough for every other proposal test but not for one that has
+ * to watch the SAME proposal move from unlinked draft to linked-and-accepted
+ * across three different statements, with a real client insert in between.
+ */
+function fakeAcceptOrderPostgres(initialRow) {
+  const statements = []
+  let current = { ...initialRow }
+  async function respond(text, params) {
+    const trimmed = String(text).trim()
+    statements.push({ text: trimmed, params })
+    if (/^(begin|commit|rollback)$/i.test(trimmed)) return { rows: [] }
+    if (/from firm_settings where id = 'singleton'/i.test(trimmed)) {
+      return { rows: [{ name: 'PB&J', proposal_pricing: null }] }
+    }
+    if (/^select id, name, email, phone, archived_at as "archivedAt" from contacts$/i.test(trimmed)) {
+      return { rows: [] }
+    }
+    if (/^insert into clients\b/i.test(trimmed)) {
+      return { rows: [] }
+    }
+    if (/^select\b[\s\S]*from proposals where id = \$1$/i.test(trimmed)) {
+      return current.id === params?.[0] ? { rows: [current] } : { rows: [] }
+    }
+    if (/^update proposals set client_id = \$2, updated_at = now\(\)/i.test(trimmed)) {
+      const eligible = (current.client_id ?? null) === null && ['draft', 'sent'].includes(current.status)
+      if (!eligible) return { rows: [], rowCount: 0 }
+      current = { ...current, client_id: params?.[1] }
+      return { rows: [current], rowCount: 1 }
+    }
+    if (/^update proposals\b[\s\S]*set status = \$2/i.test(trimmed)) {
+      const status = params?.[1]
+      const closed = current.status === 'accepted' || current.status === 'declined'
+      if (closed) return { rows: [], rowCount: 0 }
+      current = {
+        ...current,
+        status,
+        client_id: params?.[3] ?? current.client_id,
+        accepted_at: status === 'accepted' ? new Date() : current.accepted_at,
+      }
+      return { rows: [current], rowCount: 1 }
+    }
+    if (/^insert into activity_log\b/i.test(trimmed)) return { rows: [] }
+    if (/^delete\s+from activity_log\b/i.test(trimmed)) return { rows: [] }
+    return { rows: [] }
+  }
+  const dbClient = { query: respond, release() {} }
+  const pool = {
+    async connect() {
+      return dbClient
+    },
+    query: respond,
+  }
+  return {
+    pool,
+    statements,
+    matching: (pattern) => statements.filter((s) => pattern.test(s.text)),
+    indexOf: (pattern) => statements.findIndex((s) => pattern.test(s.text)),
+  }
+}
+
+describe('accepting a proposal: happy-path statement order (postgres branch)', () => {
+  it('writes the client insert, then the proposal link, then the accepted flip, in that order', async () => {
+    const fake = fakeAcceptOrderPostgres(
+      proposalRow({ client_id: null, status: 'draft', prospect: { company: 'Acme Books' } }),
+    )
+    const result = await postgresStore(fake).acceptProposal('prop-1', { actorUserId: 'emp-patrice' })
+    expect(result.createdClient).toBe(true)
+    expect(result.proposal.status).toBe('accepted')
+
+    const insertClientAt = fake.indexOf(/^insert into clients\b/i)
+    const linkAt = fake.indexOf(/^update proposals set client_id = \$2/i)
+    const acceptedFlipAt = fake.indexOf(/^update proposals\b[\s\S]*set status = \$2/i)
+    expect(insertClientAt).toBeGreaterThan(-1)
+    expect(linkAt).toBeGreaterThan(insertClientAt)
+    expect(acceptedFlipAt).toBeGreaterThan(linkAt)
   })
 })

@@ -249,7 +249,7 @@ const PROPOSAL_WITH_FLAT_AMOUNT: Proposal = {
 beforeEach(() => {
   contextValue = {
     ownerMode: true,
-    data: { clients: [{ id: 'client-1', name: 'Existing Co' }] },
+    data: { clients: [{ id: 'client-1', name: 'Existing Co', billingMode: 'subscription' }] },
   } as unknown as AppContextValue
   api.listProposalsRequest = vi.fn(async () => [PROPOSAL, DECLINED])
   api.createProposalRequest = vi.fn(async () => ({ ...PROPOSAL, id: 'prop-new' }))
@@ -840,6 +840,43 @@ describe('Accept and Decline', () => {
         updateMonthlyRate: false,
       }),
     )
+  })
+
+  it('skips the second question and sends updateMonthlyRate: false when the snapshot is $0', async () => {
+    api.getProposalRequest = vi.fn(async () => ({
+      ...PROPOSAL,
+      clientId: 'client-1',
+      pricingSnapshot: {
+        ...PROPOSAL.pricingSnapshot!,
+        totals: { ...PROPOSAL.pricingSnapshot!.totals, monthly: 0 },
+      },
+    }))
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
+        packageId: null,
+        updateMonthlyRate: false,
+      }),
+    )
+    expect(confirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a notice when a chosen package could not be applied', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    renderEditor()
+    await waitFor(() => expect(api.listPackagesRequest).toHaveBeenCalled())
+    fireEvent.change(await screen.findByLabelText('Package to apply on accept'), {
+      target: { value: 'pkg-1' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    expect(
+      await screen.findByText(
+        "Accepted, but the package could not be applied — add it from the client's page.",
+      ),
+    ).toBeTruthy()
   })
 
   it('Decline asks for a note and saves it', async () => {

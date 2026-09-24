@@ -10308,6 +10308,56 @@ export class AppDataStore {
   }
 
   /**
+   * Compare-and-set the client a proposal links to, ONCE. `setProposalStatus`'s
+   * `client_id = coalesce($4, client_id)` overwrites — fine for every other
+   * caller, which never races itself, but not for Accept: two presses of the
+   * same button (a slow first response, an impatient second click) each create
+   * a client, and the coalesce write would let the second one silently replace
+   * the first's link. This is CAS instead: it takes only when the column is
+   * still empty and the proposal is still open, so exactly one of two
+   * concurrent Accepts links its client — the other gets zero rows back and
+   * knows to undo what it created. Returns the proposal, or null when the
+   * link did not take (already linked, or no longer draft/sent).
+   */
+  async linkProposalClient(id, clientId) {
+    if (!id || !clientId) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposals set client_id = $2, updated_at = now()
+          where id = $1 and client_id is null and status in ('draft', 'sent')
+          returning ${PROPOSAL_COLUMNS}`,
+        [id, clientId],
+      )
+      return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
+    }
+    const authState = await readJson(localAuthPath)
+    const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+      (row) => row && row.id === id,
+    )
+    if (!target) return null
+    if (target.clientId || (target.status !== 'draft' && target.status !== 'sent')) return null
+    target.clientId = clientId
+    target.updatedAt = nowIso()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return AppDataStore.mapProposal(target)
+  }
+
+  /**
+   * Retire a client an Accept created, then lost the race to link (see
+   * `linkProposalClient`) — there is no safe generic client-delete path (a
+   * client can pick up history the instant it exists), so the loser's client
+   * is marked retired rather than removed, with a note saying why, the same
+   * shape `addClientNote` gives every other note.
+   */
+  async _retireOrphanedAcceptClient(clientId, proposalId) {
+    await this.setClientLifecycleStage(clientId, 'inactive')
+    await this.addClientNote(clientId, {
+      authorName: 'System',
+      body: `Retired automatically: created by an Accept on proposal ${proposalId} that lost a race to link this proposal to a client.`,
+    })
+  }
+
+  /**
    * Append one entry to a proposal's email log — a send (`kind: 'send'`) or a
    * provider delivery event (`kind: 'delivery'`), the same shapes as
    * `invoices.email_log`. NEVER touches status: a bounce does not un-send a
@@ -10486,8 +10536,10 @@ export class AppDataStore {
    *
    * A PROSPECT (no `client_id`) becomes a client: company, contact fields,
    * Onboarding, Monthly billing at the proposal's monthly total, the firm's
-   * default payment terms. The new client is linked to the proposal at once, so
-   * a second press after a later failure can never create it twice.
+   * default payment terms. The new client is linked to the proposal through
+   * `linkProposalClient` (compare-and-set) right after it is created, so a
+   * second press after a later failure can never create it twice, and two
+   * concurrent presses can never both link a client to the same proposal.
    *
    * An UPSELL (`client_id` set) changes that client's monthly rate only when
    * `updateMonthlyRate` is true — the page asks first.
@@ -10495,6 +10547,16 @@ export class AppDataStore {
    * Chosen plans are unioned in through the targeted plan write and a chosen
    * package through `applyPackageToClient`, the same paths the client page
    * uses. Nothing about any existing invoice changes.
+   *
+   * Deliberately several statements, not one transaction: creating a client is
+   * itself several statements (see `createClient`), and wrapping all of this in
+   * one transaction would hold it open across an AI-free but still multi-step
+   * write for no benefit. What keeps a half-finished accept from being a
+   * problem is doing every check that CAN refuse — the client this proposal
+   * already points at exists and is not a billing master, a chosen package
+   * exists and (if applying it) the client is not retired — before the first
+   * write, and linking the create-then-link order narrows the retry window to
+   * exactly the interval between those two calls.
    *
    * @returns {{ proposal, clientId, createdClient, packageApplied } | null}
    */
@@ -10507,9 +10569,43 @@ export class AppDataStore {
     if (proposal.status === 'accepted' || proposal.status === 'declined') {
       throw new ProposalStateError(`This proposal is already ${proposal.status}.`)
     }
+
+    // Everything that can refuse runs BEFORE any write. `proposals.client_id`
+    // has no FK (the 2026-06-17 outage), so a proposal can outlive the client
+    // it points at — that is checked here rather than left for the rate
+    // change or the plan union to trip over. The billing-master guard used to
+    // run only inside `applyPackageToClient`, which meant a rate change or a
+    // plan union could land on a master, unguarded, before a chosen package's
+    // refusal ever ran; both now check up front, so a refusal here leaves a
+    // sent proposal exactly as it was.
+    const linkedClientId = proposal.clientId
+    let linkedClient = null
+    if (linkedClientId) {
+      linkedClient = await this.getClientById(linkedClientId)
+      if (!linkedClient) {
+        throw new ProposalStateError(
+          'The client on this proposal no longer exists. Clear the link or create the client again.',
+        )
+      }
+      await this._refuseBillingMasterWrite(linkedClientId, 'rate or plan changes')
+    }
+    const wantsPackage = typeof packageId === 'string' && packageId.length > 0
+    let pkg = null
+    if (wantsPackage) {
+      const packages = await this.listPackages()
+      pkg = packages.find((row) => row.id === packageId)
+      if (!pkg) throw new ProposalStateError('That package no longer exists.')
+      if (linkedClient && (linkedClient.lifecycleStage ?? 'active') === 'inactive') {
+        throw new PackageApplyError(
+          `${linkedClient.name || 'That client'} is retired, so new plans and checklists can't be added to them. Reactivate them first, then apply the package.`,
+        )
+      }
+    }
+
     const monthlyRate = Number(proposal.pricingSnapshot?.totals?.monthly) || 0
-    let clientId = proposal.clientId
+    let clientId = linkedClientId
     let createdClient = false
+    let createdClientName = null
 
     if (!clientId) {
       const { company, contactName, email, phone } = proposal.prospect
@@ -10533,7 +10629,18 @@ export class AppDataStore {
       if (!client) throw new ProposalStateError('The client could not be created.')
       clientId = client.id
       createdClient = true
-      await this.setProposalStatus(id, proposal.status, { clientId })
+      createdClientName = client.name
+      const linked = await this.linkProposalClient(id, clientId)
+      if (!linked) {
+        // Lost the race: a concurrent Accept of this SAME proposal linked its
+        // own client first. The one just created has no history yet — retire
+        // it rather than leave an orphan, and tell the route a client was
+        // created so it still broadcasts even though this call refuses.
+        await this._retireOrphanedAcceptClient(clientId, id)
+        const err = new ProposalStateError('Someone else already accepted this proposal.')
+        err.createdClientId = clientId
+        throw err
+      }
     } else if (updateMonthlyRate === true) {
       await this.setClientMonthlyRate(clientId, monthlyRate)
     }
@@ -10551,13 +10658,15 @@ export class AppDataStore {
       const added = wantedPlans.filter((planId) => known.has(planId) && !existing.includes(planId))
       if (client && added.length > 0) await this._setClientPlanIds(clientId, [...existing, ...added])
     }
-    const packageResult =
-      typeof packageId === 'string' && packageId
-        ? await this.applyPackageToClient(clientId, packageId, { actorUserId })
-        : null
+    const packageResult = pkg ? await this.applyPackageToClient(clientId, packageId, { actorUserId }) : null
 
     const accepted = await this.setProposalStatus(id, 'accepted', { clientId })
     if (actorUserId) {
+      if (createdClient) {
+        // Same event name and shape as `POST /api/clients` (server.js) — a
+        // client this route creates is still a client created.
+        await this.recordActivity(actorUserId, 'client_created', createdClientName || '')
+      }
       await this.recordActivity(
         actorUserId,
         'proposal_accepted',

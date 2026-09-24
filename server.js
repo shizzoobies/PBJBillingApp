@@ -8425,6 +8425,11 @@ const server = createServer(async (request, response) => {
         })
       } catch (error) {
         if (error instanceof ProposalStateError || error instanceof PackageApplyError) {
+          // A refusal that landed AFTER `acceptProposal` created a client (the
+          // concurrent-accept race in `linkProposalClient`) still changed the
+          // workspace — the store attaches `createdClientId` to that one, and
+          // only that one, so other sessions still hear about it.
+          if (error.createdClientId) broadcastDataChanged()
           sendJson(response, 409, { error: 'proposal_refused', message: error.message })
           return
         }
@@ -8470,9 +8475,18 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      const declined = await appDataStore.setProposalStatus(current.id, 'declined', {
-        note: typeof payload?.note === 'string' ? payload.note : '',
-      })
+      let declined
+      try {
+        declined = await appDataStore.setProposalStatus(current.id, 'declined', {
+          note: typeof payload?.note === 'string' ? payload.note : '',
+        })
+      } catch (error) {
+        if (error instanceof ProposalStateError) {
+          sendJson(response, 409, { error: 'proposal_refused', message: error.message })
+          return
+        }
+        throw error
+      }
       await appDataStore.recordActivity(
         session.user.id,
         'proposal_declined',

@@ -55,6 +55,10 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const [proposal, setProposal] = useState<Proposal | null>(null)
   const [pricing, setPricing] = useState<ProposalPricing | null>(null)
   const [error, setError] = useState('')
+  // Not a failure — a quiet notice for something Accept did that is still
+  // worth a look (a chosen package that could not be applied), held apart
+  // from `error` so it never renders in the alarm styling.
+  const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [packages, setPackages] = useState<Package[]>([])
   const [packageId, setPackageId] = useState('')
@@ -192,8 +196,18 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     }
   }
 
+  /** A toast/notice on the accepted result — the package could not be applied. */
+  const noticeFromAccept = (chosenPackage: string | null, packageApplied: boolean) =>
+    chosenPackage && !packageApplied
+      ? "Accepted, but the package could not be applied — add it from the client's page."
+      : ''
+
   // Accept says what it will do before it does it (spec §5.5). A prospect
-  // becomes a client; an existing client's fee moves only on a second yes.
+  // becomes a client; an existing client's fee moves only on a second yes —
+  // unless there is no fee to move: a $0 snapshot or a client not on
+  // subscription billing skips that second question and sends
+  // `updateMonthlyRate: false` outright, rather than asking about a fee the
+  // accept would never actually change.
   const accept = () => {
     if (!proposal) return
     const monthly = formatProposalMoney(proposal.pricingSnapshot?.totals.monthly ?? 0)
@@ -204,20 +218,26 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           `billed monthly at ${monthly}. Nothing about any invoice changes.`,
       )
       if (!ok) return
-      enqueue(async () => (await acceptProposalRequest(proposalId, { packageId: chosenPackage })).proposal)
+      enqueue(async () => {
+        const result = await acceptProposalRequest(proposalId, { packageId: chosenPackage })
+        setNotice(noticeFromAccept(chosenPackage, result.packageApplied))
+        return result.proposal
+      })
       return
     }
-    const clientName =
-      data.clients.find((client) => client.id === proposal.clientId)?.name ?? 'this client'
+    const client = data.clients.find((entry) => entry.id === proposal.clientId)
+    const clientName = client?.name ?? 'this client'
     if (!window.confirm(`Accept this proposal for ${clientName}?`)) return
-    const updateMonthlyRate = window.confirm(
-      `Also change ${clientName}’s monthly fee to ${monthly}? Cancel keeps their current fee.`,
-    )
-    enqueue(
-      async () =>
-        (await acceptProposalRequest(proposalId, { packageId: chosenPackage, updateMonthlyRate }))
-          .proposal,
-    )
+    const monthlyTotal = proposal.pricingSnapshot?.totals.monthly ?? 0
+    const skipRateQuestion = monthlyTotal === 0 || client?.billingMode !== 'subscription'
+    const updateMonthlyRate = skipRateQuestion
+      ? false
+      : window.confirm(`Also change ${clientName}’s monthly fee to ${monthly}? Cancel keeps their current fee.`)
+    enqueue(async () => {
+      const result = await acceptProposalRequest(proposalId, { packageId: chosenPackage, updateMonthlyRate })
+      setNotice(noticeFromAccept(chosenPackage, result.packageApplied))
+      return result.proposal
+    })
   }
 
   const decline = () => {
@@ -300,6 +320,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           {error}
         </p>
       ) : null}
+      {notice ? <p className="empty-state">{notice}</p> : null}
 
       <div className="task-area-tabs" role="tablist" aria-label="Proposal sections">
         {PROPOSAL_TABS.map((entry) => (
