@@ -236,6 +236,7 @@ export function InvoiceScopePanel({
       {groups.length === 0 ? (
         <p className="invoice-scope-empty">No time was logged for this client this period.</p>
       ) : (
+        <div className="table-wrap">
         <table className="invoice-scope-panel">
           <thead>
             <tr>
@@ -337,6 +338,7 @@ export function InvoiceScopePanel({
             )
           })}
         </table>
+        </div>
       )}
     </aside>
   )

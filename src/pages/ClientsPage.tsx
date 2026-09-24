@@ -238,7 +238,7 @@ export function ClientsPage() {
 
   if (!ownerMode) {
     return (
-      <section className="content-grid two-column" id="clients">
+      <section className="content-grid client-scope-layout" id="clients">
         <div className="panel">
           <div className="section-heading">
             <div>
@@ -986,7 +986,7 @@ function ClientTable({
   }
 
   return (
-    <div className="table-wrap">
+    <div className="table-wrap client-table">
       <table>
         <thead>
           <tr>

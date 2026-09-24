@@ -1285,7 +1285,7 @@ input[type='number'] {
 }
 
 .two-column {
-  grid-template-columns: minmax(0, 1.08fr) minmax(330px, 0.92fr);
+  grid-template-columns: minmax(0, 1.08fr) minmax(300px, 0.8fr);
 }
 
 .client-layout {
@@ -1300,8 +1300,30 @@ input[type='number'] {
   grid-template-columns: minmax(0, 1fr) minmax(310px, 0.65fr);
 }
 
+/* Every report section here can hold a 7-10 column table (Payroll Hours is
+   the widest); a half column never has room for one, so this stays a single
+   column at every width instead of pairing reports up. */
 .reports-layout {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
+}
+
+/* Staff Clients page (!ownerMode): the list keeps the full content width and
+   the "Visible work" panel sits below it instead of squeezing both into half
+   the screen (a 1200px laptop window was scrolling the table's whole Actions
+   column out of view). */
+.client-scope-layout {
+  grid-template-columns: 1fr;
+}
+
+/* Below 1360px window width the content area (window minus the 258px sidebar
+   + padding) is too narrow for two real columns at their real minimums —
+   collapse before they squeeze, same rule of thumb as .client-scope-layout
+   above. The 1100px breakpoint below still handles the sidebar itself. */
+@media (max-width: 1360px) {
+  .two-column,
+  .invoice-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 .panel {
@@ -2616,10 +2638,6 @@ textarea.input {
   font-size: 12px;
 }
 
-.visibility-panel {
-  min-height: 100%;
-}
-
 .visibility-copy {
   align-items: flex-start;
   color: var(--muted);
@@ -2646,6 +2664,34 @@ textarea.input {
 .client-chip-list.compact {
   gap: 5px;
   margin-top: 0;
+}
+
+/* Client table (staff + owner, ClientTable in ClientsPage.tsx): a long
+   assigned-team or plans chip list must wrap inside its cell instead of
+   setting the column's minimum width, and the action buttons stay reachable
+   at a 1200px laptop window instead of scrolling out of view with them. */
+.client-table td .client-chip-list {
+  flex-wrap: wrap;
+}
+
+.client-table .compact-input {
+  min-width: 120px;
+}
+
+.client-table td:last-child,
+.client-table th:last-child {
+  position: sticky;
+  right: 0;
+}
+
+.client-table td:last-child {
+  background: var(--surface);
+  border-left: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.client-table th:last-child {
+  background: var(--soft);
+  border-left: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
 }
 
 .client-chip-list span,
@@ -2846,7 +2892,7 @@ td strong {
 .report-metric-grid {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .report-metric-card {
@@ -6175,7 +6221,7 @@ td strong {
   gap: 12px;
   padding: 12px 14px;
   position: sticky;
-  top: 8px;
+  top: calc(var(--topbar-h, 64px) + 8px);
   z-index: 5;
 }
 
@@ -6646,6 +6692,7 @@ h2 {
 
 .entry-row-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   margin-top: 8px;
 }
@@ -8383,6 +8430,15 @@ button.repeating-task-toggle-pill {
   grid-template-columns: 1fr 1fr;
 }
 
+/* A narrow grid track otherwise leaves these date/duration inputs at their
+   intrinsic width, pushing the row wider than its column at a 1200px laptop
+   window. Scoped to these two containers, not the shared .input. */
+.session-edit-row .input,
+.entry-duration-fields .input {
+  min-width: 0;
+  width: 100%;
+}
+
 .entry-duration-hint {
   color: var(--muted);
   font-size: 12px;
@@ -9819,6 +9875,8 @@ button.repeating-task-toggle-pill {
   border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
+  z-index: 1;
+  background: inherit;
 }
 
 .board-column-header strong {
@@ -12306,16 +12364,23 @@ tr.is-inactive-client .client-name-link {
 
 /* The lines, and the hours they were built from, side by side — she asked to
    review the time WITHOUT leaving the invoice (featreq-8cec48db). One column
-   below 1200px, because at that width the panel would squeeze the amounts. */
+   below 1360px, because at that width the panel would squeeze the amounts. */
 .invoice-run-editor-body {
   display: grid;
   gap: 16px;
 }
 
-@media (min-width: 1200px) {
+@media (min-width: 1360px) {
   .invoice-run-editor-body {
     grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
   }
+}
+
+/* The lines table has no natural minimum, so as a grid item it can draw over
+   the hours panel instead of scrolling; the wrap below is what actually
+   constrains it. */
+.invoice-run-editor-body .table-wrap {
+  min-width: 0;
 }
 
 .invoice-run-lines {
@@ -12404,7 +12469,8 @@ tr.is-inactive-client .client-name-link {
 .invoice-scope-choice {
   display: grid;
   gap: 4px;
-  min-width: 170px;
+  min-width: 0;
+  width: 100%;
 }
 
 /* Said on the row, because "on save" is the whole rule: nothing here has
@@ -13206,7 +13272,7 @@ details.invoice-run-sent ul,
   min-width: 0;
 }
 
-@media (min-width: 1100px) {
+@media (min-width: 1360px) {
   .proposal-estimate-layout {
     align-items: start;
     grid-template-columns: minmax(280px, 1fr) 2fr;

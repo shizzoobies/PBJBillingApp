@@ -2601,6 +2601,7 @@ function InvoiceEditor({
           leaving the invoice, and a panel she has to scroll past the invoice to
           reach is a second screen with extra steps. */}
       <div className="invoice-run-editor-body">
+        <div className="table-wrap">
         <table className="invoice-run-lines">
           {/* A master's invoice is grouped by COMPANY instead of by scope — see
               `sourceGroups`. Everything about editing a row is the same either
@@ -2674,6 +2675,7 @@ function InvoiceEditor({
             </tbody>
           ) : null}
         </table>
+        </div>
         <InvoiceScopePanel
           entries={scope.entries}
           employees={scope.employees}
