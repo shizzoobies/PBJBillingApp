@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { SavingTextarea } from '../SectionKit'
+import { proposalDeliveryBadge } from '../../lib/proposals'
 import type { Proposal } from '../../lib/types'
 
 /**
@@ -13,15 +14,25 @@ export function LetterTab({
   busy,
   onDraft,
   onSaveText,
+  onSend,
 }: {
   proposal: Proposal
   busy: boolean
   onDraft: () => void
   onSaveText: (text: string) => void
+  onSend: (to: string) => void
 }) {
   const [copied, setCopied] = useState(false)
   const locked = proposal.status === 'accepted' || proposal.status === 'declined'
   const text = proposal.letter?.text ?? ''
+  const badge = proposalDeliveryBadge(proposal)
+
+  // The address is confirmed on EVERY send; the prospect's email only fills it in.
+  const send = () => {
+    const to = window.prompt('Send the proposal to which email address?', proposal.prospect.email)
+    if (to === null || !to.trim()) return
+    onSend(to.trim())
+  }
 
   const draft = () => {
     if (
@@ -71,6 +82,15 @@ export function LetterTab({
           >
             Preview PDF
           </a>
+          <button
+            type="button"
+            className="primary-action"
+            disabled={busy || locked || !text}
+            onClick={send}
+          >
+            Send to prospect
+          </button>
+          {badge ? <span className="status-pill">{badge}</span> : null}
         </div>
       </div>
       {proposal.letter?.subject ? (

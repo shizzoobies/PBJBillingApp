@@ -12,6 +12,7 @@ import {
   fetchFirmSettings,
   getProposalRequest,
   repriceProposalRequest,
+  sendProposalRequest,
   updateProposalRequest,
 } from '../lib/api'
 import {
@@ -248,6 +249,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           busy={busy}
           onDraft={() => enqueue(() => draftProposalLetterRequest(proposalId))}
           onSaveText={(text) => save(() => ({ letterText: text }))}
+          onSend={(to) => enqueue(() => sendProposalRequest(proposalId, to))}
         />
       ) : null}
       {tab === 'activity' ? <ActivityTab proposal={proposal} /> : null}

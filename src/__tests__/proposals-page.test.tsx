@@ -32,6 +32,7 @@ vi.mock('../lib/api', () => ({
   copyProposalRequest: (...args: unknown[]) => api.copyProposalRequest(...args),
   deleteProposalRequest: (...args: unknown[]) => api.deleteProposalRequest(...args),
   draftProposalLetterRequest: (...args: unknown[]) => api.draftProposalLetterRequest(...args),
+  sendProposalRequest: (...args: unknown[]) => api.sendProposalRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}
@@ -262,6 +263,7 @@ beforeEach(() => {
   api.copyProposalRequest = vi.fn(async () => ({ ...PROPOSAL, id: 'prop-copy' }))
   api.deleteProposalRequest = vi.fn(async () => undefined)
   api.draftProposalLetterRequest = vi.fn(async () => WITH_LETTER)
+  api.sendProposalRequest = vi.fn(async () => ({ ...WITH_LETTER, status: 'sent' }))
 })
 
 afterEach(() => {
@@ -728,5 +730,44 @@ describe('Preview PDF', () => {
     const link = await screen.findByRole('link', { name: 'Preview PDF' })
     expect(link.getAttribute('href')).toBe('/api/proposals/prop-1/pdf')
     expect(link.getAttribute('target')).toBe('_blank')
+  })
+})
+
+describe('Send to prospect', () => {
+  it('asks for the address, prefilled from the prospect, and sends to what she confirms', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    const prompt = vi.fn(() => 'pat@acme.test')
+    vi.stubGlobal('prompt', prompt)
+    renderEditor('/proposals/prop-1?tab=letter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    expect(prompt).toHaveBeenCalledWith('Send the proposal to which email address?', 'pat@acme.test')
+    await waitFor(() => expect(api.sendProposalRequest).toHaveBeenCalledWith('prop-1', 'pat@acme.test'))
+  })
+
+  it('sends nothing when she cancels the address prompt', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    vi.stubGlobal('prompt', vi.fn(() => null))
+    renderEditor('/proposals/prop-1?tab=letter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    expect(api.sendProposalRequest).not.toHaveBeenCalled()
+  })
+
+  it('cannot send before there is a letter', async () => {
+    renderEditor('/proposals/prop-1?tab=letter')
+    const send = (await screen.findByRole('button', { name: 'Send to prospect' })) as HTMLButtonElement
+    expect(send.disabled).toBe(true)
+  })
+
+  it('shows what the mail provider said about the last send', async () => {
+    api.getProposalRequest = vi.fn(async () => ({
+      ...WITH_LETTER,
+      status: 'sent' as const,
+      emailLog: [
+        { kind: 'send' as const, at: '2026-09-23T14:00:00.000Z', providerId: 're_1', to: ['pat@acme.test'], ok: true },
+        { kind: 'delivery' as const, at: '2026-09-23T14:01:00.000Z', providerId: 're_1', to: ['pat@acme.test'], event: 'delivered' },
+      ],
+    }))
+    renderEditor('/proposals/prop-1?tab=letter')
+    expect(await screen.findByText('Delivered', { selector: '.status-pill' })).toBeTruthy()
   })
 })

@@ -179,3 +179,65 @@ describe('previewing the PDF', () => {
     expect(block).toContain("'Cache-Control': 'no-store'")
   })
 })
+
+describe('sending a proposal', () => {
+  pinOwnerRoutes([
+    {
+      name: 'POST /api/proposals/:id/send',
+      pattern: /proposalSendMatch && request\.method === 'POST'/,
+      write: true,
+    },
+  ])
+
+  const block = () => routeBlock(/proposalSendMatch && request\.method === 'POST'/, 4600)
+
+  it('builds the PDF before anything is sent', () => {
+    const text = block()
+    expect(text).toContain('buildProposalPdf({ proposal, firmSettings })')
+    expect(text.indexOf('buildProposalPdf(')).toBeLessThan(text.indexOf('sendInvoiceEmail('))
+  })
+
+  it('tags the email with the proposal so delivery events come back to it', () => {
+    const text = block()
+    expect(text).toContain('proposalId: proposal.id')
+    expect(text).toContain("kind: 'proposal'")
+  })
+
+  it('logs every attempt and moves a draft to sent only after a successful send', () => {
+    const text = block()
+    expect(text).toContain('appDataStore.appendProposalEmailEvent(proposal.id, {')
+    const failAt = text.indexOf('if (!sendResult.ok) {')
+    expect(failAt).toBeGreaterThan(-1)
+    expect(text.indexOf("setProposalStatus(proposal.id, 'sent')")).toBeGreaterThan(failAt)
+    expect(text).toContain("proposal.status === 'draft'")
+  })
+
+  it('refuses without a letter and without a real address', () => {
+    const text = block()
+    expect(text).toContain('Draft the letter before sending the proposal.')
+    expect(text).toContain("sendJson(response, 400, { error: 'A valid email address is required.' })")
+  })
+})
+
+describe('the Resend webhook proposal branch', () => {
+  const webhook = () =>
+    routeBlock(/if \(normalizedPath === '\/api\/resend\/webhook' && request\.method === 'POST'\)/, 6000)
+
+  it('files a proposal-tagged event on the proposal, before any invoice lookup', () => {
+    const text = webhook()
+    expect(text).toContain("typeof tagBag.proposal_id === 'string'")
+    expect(text.indexOf('recordProposalDelivery(')).toBeLessThan(text.indexOf('const taggedInvoiceId'))
+  })
+
+  it('appends a delivery event, notifies once, and never writes a status', () => {
+    const at = serverSource.indexOf('async function recordProposalDelivery(')
+    expect(at).toBeGreaterThan(-1)
+    const rest = serverSource.slice(at)
+    const helper = rest.slice(0, rest.search(/\r?\n\}\r?\n/))
+    expect(helper).toContain('appDataStore.appendProposalEmailEvent(proposal.id, {')
+    expect(helper).toContain('const alreadyLogged =')
+    expect(helper).not.toContain('setProposalStatus')
+    expect(helper).not.toContain('updateProposal')
+    expect(helper).not.toMatch(/status:\s*'/)
+  })
+})

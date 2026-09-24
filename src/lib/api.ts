@@ -973,6 +973,15 @@ export function draftProposalLetterRequest(id: string): Promise<Proposal> {
   )
 }
 
+/** Owner-only: email the proposal PDF to the address she confirmed. */
+export function sendProposalRequest(id: string, to: string): Promise<Proposal> {
+  return proposalRequest<Proposal>(
+    proposalPath(id, 'send'),
+    proposalJson('POST', { to }),
+    'The proposal could not be sent',
+  )
+}
+
 /**
  * The covered-date half of a recurring reimbursement, as the setup form sends
  * it. Every field optional: an expense that does not name its covered period

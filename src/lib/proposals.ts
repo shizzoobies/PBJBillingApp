@@ -231,3 +231,23 @@ export function proposalActivity(
   }
   return entries.sort((a, b) => a.at.localeCompare(b.at))
 }
+
+/**
+ * The delivery badge beside "Send to prospect": what the mail provider last
+ * said about the most recent successful send, or "Sent <date>" before it has
+ * said anything. Null when nothing has gone out.
+ */
+export function proposalDeliveryBadge(proposal: Proposal): string | null {
+  const lastSend = proposal.emailLog.filter((entry) => entry.kind === 'send' && entry.ok).at(-1)
+  if (!lastSend) return null
+  const latest = proposal.emailLog
+    .filter(
+      (entry) =>
+        entry.kind === 'delivery' &&
+        entry.providerId !== null &&
+        entry.providerId === lastSend.providerId,
+    )
+    .at(-1)
+  if (latest) return DELIVERY_WORDS[latest.event ?? ''] ?? latest.event ?? 'Sent'
+  return `Sent ${proposalDate(lastSend.at)}`
+}

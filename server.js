@@ -72,6 +72,7 @@ import {
 } from './lib/resend-webhook.js'
 import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
 import { buildProposalPdf, proposalPdfFilename } from './lib/proposal-pdf.js'
+import { buildProposalEmail } from './lib/proposal-email.js'
 import {
   cardProcessingFeeLine,
   isInBillingPeriod,
@@ -1452,6 +1453,59 @@ function broadcastDataChanged() {
       sseClients.delete(client)
     }
   }
+}
+
+/**
+ * A Resend delivery event about a PROPOSAL email (featreq-311473e2, spec §5.4):
+ * appended to that proposal's email log — idempotently, in the store — and, on
+ * a bounce or a spam complaint, told to every owner once. It NEVER touches the
+ * proposal's status: a bounce does not un-send a proposal.
+ *
+ * Reuses the `invoice_email_bounced` event on purpose, so the owners' existing
+ * "Invoice alerts" email switch governs it; the subject says it is a proposal.
+ *
+ * @returns {Promise<boolean>} whether the proposal was found
+ */
+async function recordProposalDelivery(request, proposalId, deliveryEvent, resendEvent) {
+  const eventData = resendEvent?.data ?? {}
+  const providerId = typeof eventData.email_id === 'string' ? eventData.email_id : null
+  const proposal = await appDataStore.getProposal(proposalId)
+  if (!proposal) {
+    console.warn('[resend] event for an unknown proposal', resendEvent?.type, proposalId, providerId)
+    return false
+  }
+  const detail =
+    deliveryEvent === 'bounced' || deliveryEvent === 'complained'
+      ? String(eventData.bounce?.message ?? eventData.bounce?.type ?? '')
+      : ''
+  const alreadyLogged = proposal.emailLog.some(
+    (entry) =>
+      entry?.kind === 'delivery' &&
+      entry?.event === deliveryEvent &&
+      (entry?.providerId ?? null) === providerId,
+  )
+  await appDataStore.appendProposalEmailEvent(proposal.id, {
+    kind: 'delivery',
+    event: deliveryEvent,
+    at: resendEvent?.created_at ?? null,
+    providerId,
+    to: Array.isArray(eventData.to) ? eventData.to : [eventData.to].filter(Boolean),
+    detail,
+  })
+  if (!alreadyLogged && (deliveryEvent === 'bounced' || deliveryEvent === 'complained')) {
+    const what = deliveryEvent === 'bounced' ? 'bounced' : 'was marked as spam'
+    const who = proposal.prospect.company || proposal.prospect.contactName || 'a prospect'
+    const members = await appDataStore.getTeamMembers()
+    for (const owner of members.filter((member) => member.role === 'owner')) {
+      await notify(appDataStore, owner.id, 'invoice_email_bounced', {
+        message: `The proposal to ${who} ${what}${detail ? `: ${detail}` : ''}`,
+        subject: `Proposal email problem: ${who}`,
+        link: `/proposals/${proposal.id}?tab=activity`,
+        appPublicUrl: getPublicAppUrl(request),
+      })
+    }
+  }
+  return true
 }
 
 // ---- Consolidated billing (featreq-65f5eac1) ------------------------------
@@ -4047,6 +4101,18 @@ const server = createServer(async (request, response) => {
         const tagBag = Array.isArray(eventData.tags)
           ? Object.fromEntries(eventData.tags.map((tag) => [tag?.name, tag?.value]))
           : (eventData.tags ?? {})
+        // A proposal email carries a proposal_id tag: its events go on the
+        // proposal's own log (never its status), and nowhere near an invoice.
+        if (typeof tagBag.proposal_id === 'string' && tagBag.proposal_id) {
+          const matched = await recordProposalDelivery(
+            request,
+            tagBag.proposal_id,
+            deliveryEvent,
+            resendEvent,
+          )
+          sendJson(response, 200, { received: true, matched })
+          return
+        }
         const taggedInvoiceId =
           typeof tagBag.invoice_id === 'string' ? tagBag.invoice_id : null
         // The tag is the answer when it is there. The provider id is the
@@ -8231,6 +8297,101 @@ const server = createServer(async (request, response) => {
         'Cache-Control': 'no-store',
       })
       response.end(pdf)
+      return
+    }
+
+    // POST /api/proposals/:id/send — { to } (spec §5.4). The owner confirms the
+    // address on every send; the prospect's email only pre-fills that prompt.
+    // Sent through the invoice Resend path, tagged with the proposal so the
+    // delivery webhook files its events here. Draft -> sent on the first
+    // successful send; every attempt, failed ones included, is logged.
+    const proposalSendMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/send$/)
+    if (proposalSendMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can send proposals' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const to = typeof payload?.to === 'string' ? payload.to.trim() : ''
+      if (!to || to.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+        sendJson(response, 400, { error: 'A valid email address is required.' })
+        return
+      }
+      const proposal = await appDataStore.getProposal(proposalSendMatch[1])
+      if (!proposal) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      if (proposal.status === 'accepted' || proposal.status === 'declined') {
+        sendJson(response, 409, {
+          error: 'proposal_refused',
+          message: `This proposal is ${proposal.status} — copy it to send a new one.`,
+        })
+        return
+      }
+      if (!String(proposal.letter?.text ?? '').trim()) {
+        sendJson(response, 409, {
+          error: 'proposal_refused',
+          message: 'Draft the letter before sending the proposal.',
+        })
+        return
+      }
+      const firmSettings = await appDataStore.getFirmSettings()
+      // The PDF IS the proposal, so it is built before anything is sent: a
+      // render failure sends nothing rather than an email with no proposal.
+      const pdf = await buildProposalPdf({ proposal, firmSettings })
+      const email = buildProposalEmail({ proposal, firmSettings })
+      const sendResult = await sendInvoiceEmail({
+        to: [to],
+        subject: email.subject,
+        html: email.html,
+        text: email.text,
+        attachments: [{ filename: proposalPdfFilename(proposal), content: pdf }],
+        fromName: firmSettings?.name || undefined,
+        proposalId: proposal.id,
+        kind: 'proposal',
+      })
+      await appDataStore.appendProposalEmailEvent(proposal.id, {
+        kind: 'send',
+        ok: sendResult.ok,
+        to: [to],
+        subject: email.subject,
+        providerId: sendResult.providerId ?? null,
+        error: sendResult.error ?? null,
+      })
+      if (!sendResult.ok) {
+        broadcastDataChanged()
+        sendJson(response, 502, { error: 'proposal_send_failed', message: sendResult.error })
+        return
+      }
+      // Past this point the email HAS gone out, so no bookkeeping failure may
+      // make the answer say otherwise.
+      let sent = proposal
+      try {
+        sent =
+          (proposal.status === 'draft'
+            ? await appDataStore.setProposalStatus(proposal.id, 'sent')
+            : await appDataStore.getProposal(proposal.id)) ?? proposal
+        await appDataStore.recordActivity(
+          session.user.id,
+          'proposal_sent',
+          `${proposal.prospect.company || proposal.id} -> ${to}`,
+        )
+      } catch (error) {
+        console.error('[proposals] send bookkeeping failed after delivery:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, sent)
       return
     }
 
