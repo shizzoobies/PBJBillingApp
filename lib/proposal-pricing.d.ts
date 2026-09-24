@@ -130,7 +130,6 @@ export declare function cleanProposalInputs(
 /** One entry per service (the last wins), numbers finite and non-negative. */
 export declare function cleanProposalSelections(raw: unknown): ProposalSelection[]
 
-
 /** A chat patch AFTER `validateProposalPatch` (lib/assistant.js). */
 export type ValidatedProposalPatch = {
   prospect?: Partial<ProposalProspect>
