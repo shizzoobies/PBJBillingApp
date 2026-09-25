@@ -25,43 +25,46 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-24, afternoon):** `main` = `0a1436c` (the 1200 px layout pass from Lisa's screenshot, entry below; Proposals shipped this morning as 2f71374 - **Proposals
-shipped** - 34 commits from the `feat/proposals` branch, fast-forwarded; read the
-2026-09-24 entry in section 5 FIRST), pushed and confirmed live (`curl -s https://app.pbjsa.com/health`
-— the body's `commit` is the deploy check). Suite **4063 tests / 210
-files**, green. Voice agent re-provisioned after the deploy. **Rate history
-shipped today** (featreq-23351561, the "Billing prices and cost" brainstorm):
-bill and cost rates are dated versions, every hourly client is pinned to a
-rate month, cost resolves by the day worked — read the 2026-09-23 entry in
-§5 FIRST; it holds the resolver rules, the migration proof and the
-follow-ups. Every AI call still runs on `claude-opus-5-5`. Subagent
-dispatches from Claude Code now default to Opus 5.5 too
-(`CLAUDE_CODE_SUBAGENT_MODEL` in ~/.claude/settings.json; omit the model
-alias — `opus` means Opus 5).
+**State right now (2026-09-25, start of day):** `main` = `3427efc`, pushed,
+deployed, `/health` 200 with that commit. Suite **4063 tests / 210 files**,
+green. Working tree clean, no worktrees, no unmerged branches except
+`hold/july-security-p3` (never merge, never delete). Every AI call runs on
+`claude-opus-5-5`; subagent dispatches default to Opus 5.5 (omit the model
+alias). The two things that shipped on 09-24, newest first, are the top two
+entries in section 5 - read them before touching anything:
 
-The board at handoff: `featreq-23351561` flipped to Shipped with the
-plain-language note in `docs/plans/rate-history-2026-09.md` §8. Still in
-Shipped awaiting Brittany from 09-22: Britt's Brain fix + Opus 5.5,
-Packages, period label, billing-email check, 30-day pay window, and the
-two desktop/PWA items. `featreq-79b6d974` engagement-to-billing parked
-in_progress; two `planned_not_eom` parked. She reviews live — re-read the
-board at session start. **Brittany's 09-23 "time reports" email — SHIPPED the same day as
-`featreq-751ddc64` (595a07a + 258309e):** split shares keep the block's clock
-in/out and their allocated minutes (day totals unchanged), the task's own
-client's share keeps the task and the others show its name (a checklist task
-belongs to ONE client — never put one taskId on every share), the
-multi-client Add time form has an optional Task box, and Adjust split keeps
-each client's own task. Rows split before 09-23 are not backfilled. Group
-TIMER still has no task box. **Rate-history follow-ups 1+2 (master re-tag at each sub's pin; Reports
-Billable $ and the Dashboard estimate at the pin) are IN: rebased and pushed
-2026-09-23 as `d16581a`, deployed, health 200, voice re-provisioned. Suite
-3647 tests / 202 files. **Follow-ups 3 (only-version delete guard) and 5
-(`rateOf()` null guard) are LIVE as `8537d9b`, deployed, health 200, voice
-re-provisioned; the `elastic-germain` and `modest-wozniak` worktrees were removed.
-Open rate-history follow-ups: 4, 6, 7.**
+- **The 1200 px layout pass** (`0a1436c` + handoff `3427efc`): from Lisa's
+  screenshot; staff Clients single-column, two-column pages collapse below
+  1360 px, owner Clients actions sticky, Reports single-column, wide tables
+  scroll. Tracker `featreq-d62b995a` Shipped with the plain-language note.
+- **Proposals** (`2f71374`, 34 commits): catalog in Settings, estimate + Opus 5.5
+  intake chat, letter, PDF, send, accept/decline. `featreq-ef18a38e` Shipped;
+  `featreq-311473e2` is parked at **Needs your answer** on purpose (three
+  questions for Brittany: seed rates, sheet blanks, payroll bonus) - flip it to
+  Shipped when she answers. Two policy calls made without Alex, reversible: a
+  SENT proposal keeps its snapshot rates; Send warns-and-confirms on stale
+  letter figures. Accept refuses a billing-master client outright (ask Alex).
+
+Rate history (09-23, `40ed65d` + follow-ups 1-3, 5 live) and the 09-21/22 ships
+are in their own section 5 entries; open rate-history follow-ups: 4, 6, 7.
+Dev-server verification recipe (two launchers, seeded users, the local
+owner's TOTP): the 09-24 afternoon entry and the session memory.
 
 Then the queue / watch list:
 
+0. **Lisa's 36 visible clients (Brittany's 09-24 email)** - by design, not a
+   gate bug: 5 on her team, 31 via recurring "Monthly Reconciliations"
+   templates assigned to her (Aug 14). Their "Assigned team" shows the
+   Bookkeepington / Accountington TEST accounts because the 09-04 reset kept
+   only explicit picks. One question is with Alex for Brittany: does Lisa
+   really work those 31 (then pick her as the team), or are the templates
+   mis-assigned (then reassign them on Checklists)? Retiring the two test
+   accounts is a small change if she wants them gone. Reproduce with
+   `scratchpad/lisa-visibility*.js` pattern (read-only pg).
+0b. **Proposals follow-ups (not blocking):** Brittany's three answers on
+   `featreq-311473e2`; Alex's billing-master question; the minors list in the
+   Proposals section 5 entry (catalog row label, non-array `services` patch,
+   SectionKit number-input draft reset, chat price allow-list, upsell CAS).
 1. **Brittany's team re-pick is still unfinished** (13 of 55 clients had an
    empty team on 09-21; Lisa 5, Allison 1). Until a client has a team, staff
    see none of its invoices on the Invoice Recap, and nobody but the owners
