@@ -60,10 +60,17 @@ Then the queue / watch list:
    mis-assigned (then reassign them on Checklists)? Retiring the two test
    accounts is a small change if she wants them gone. Reproduce with
    `scratchpad/lisa-visibility*.js` pattern (read-only pg).
-0b. **Proposals follow-ups (not blocking):** Brittany's three answers on
-   `featreq-311473e2`; Alex's billing-master question; the minors list in the
-   Proposals section 5 entry (catalog row label, non-array `services` patch,
-   SectionKit number-input draft reset, chat price allow-list, upsell CAS).
+0a. **Two NEW Brittany items from her 09-25 spitball session, untriaged —
+   need her answers before a build (09-27 entry):** `featreq-11ffb3a6`
+   statement date box on the client page; `featreq-b688e73c` notes for
+   checklists that have not populated yet. Alex triages; the open questions
+   are in each item's description.
+0b. **Proposals follow-ups (not blocking):** Alex's billing-master question
+   (may a proposal be accepted into a billing master at all?); the minors
+   list in the Proposals section 5 entry (catalog row label, non-array
+   `services` patch, SectionKit number-input draft reset, chat price
+   allow-list, upsell CAS). **The manifest is 24 bytes under the 214,000
+   house cap — trim before the next manifest edit.**
 1. **Brittany's team re-pick is still unfinished** (13 of 55 clients had an
    empty team on 09-21; Lisa 5, Allison 1). Until a client has a team, staff
    see none of its invoices on the Invoice Recap, and nobody but the owners
