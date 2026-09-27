@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChangePasswordCard } from '../components/ChangePasswordCard'
@@ -790,6 +790,13 @@ export function ProposalPricingSection({
         input.key === key ? { ...input, label } : input,
       ),
     })
+  const setInputDefault = (key: string, value: number | null) =>
+    save({
+      ...pricingRef.current,
+      inputs: pricingRef.current.inputs.map((input) =>
+        input.key === key ? { ...input, defaultValue: value } : input,
+      ),
+    })
   const setService = (id: string, patch: Partial<ProposalService>) =>
     save({
       ...pricingRef.current,
@@ -818,6 +825,8 @@ export function ProposalPricingSection({
           cadence: group === ANNUAL_GROUP ? 'annual' : null,
           active: true,
           sortOrder,
+          defaultAmount: null,
+          defaultQuantity: null,
         },
       ],
     })
@@ -855,14 +864,26 @@ export function ProposalPricingSection({
       <h3>What you collect</h3>
       <div className="form-grid two-col">
         {pricing.inputs.map((input) => (
-          <label className="field" key={input.key}>
-            <span>{input.help || input.key}</span>
-            <SavingTextInput
-              ariaLabel={`Label for ${input.key}`}
-              canonical={input.label}
-              onCommit={(value) => setInputLabel(input.key, value)}
-            />
-          </label>
+          <Fragment key={input.key}>
+            <label className="field">
+              <span>{input.help || input.key}</span>
+              <SavingTextInput
+                ariaLabel={`Label for ${input.key}`}
+                canonical={input.label}
+                onCommit={(value) => setInputLabel(input.key, value)}
+              />
+            </label>
+            <label className="field">
+              <span>Standard value for {input.label || input.key}</span>
+              <SavingNumberInput
+                ariaLabel={`Standard value for ${input.key}`}
+                canonical={input.defaultValue ?? null}
+                min="0"
+                step="any"
+                onCommit={(value) => setInputDefault(input.key, value)}
+              />
+            </label>
+          </Fragment>
         ))}
       </div>
 
@@ -884,6 +905,7 @@ export function ProposalPricingSection({
                     <th>Role</th>
                     <th>Multiplier</th>
                     <th>Pricing</th>
+                    <th>Standard</th>
                     {group === ANNUAL_GROUP ? <th>Billed</th> : null}
                     <th>Status</th>
                   </tr>
@@ -969,11 +991,13 @@ export function ProposalPricingSection({
                             className="input"
                             aria-label={`Multiplier for ${label}`}
                             value={service.multiplier}
-                            onChange={(event) =>
+                            onChange={(event) => {
+                              const multiplier = event.target.value as ProposalMultiplier
                               setService(service.id, {
-                                multiplier: event.target.value as ProposalMultiplier,
+                                multiplier,
+                                ...(multiplier !== 'per-count' ? { defaultQuantity: null } : {}),
                               })
-                            }
+                            }}
                           >
                             {PROPOSAL_MULTIPLIERS.map((multiplier) => (
                               <option key={multiplier} value={multiplier}>
@@ -987,11 +1011,13 @@ export function ProposalPricingSection({
                             className="input"
                             aria-label={`Pricing for ${label}`}
                             value={service.pricing}
-                            onChange={(event) =>
+                            onChange={(event) => {
+                              const pricing = event.target.value as ProposalPricingKind
                               setService(service.id, {
-                                pricing: event.target.value as ProposalPricingKind,
+                                pricing,
+                                ...(pricing !== 'flat' ? { defaultAmount: null } : {}),
                               })
-                            }
+                            }}
                           >
                             {PROPOSAL_PRICING_KINDS.map((kind) => (
                               <option key={kind} value={kind}>
@@ -999,6 +1025,29 @@ export function ProposalPricingSection({
                               </option>
                             ))}
                           </select>
+                        </td>
+                        <td>
+                          {service.pricing === 'flat' ? (
+                            <SavingNumberInput
+                              ariaLabel={`Standard amount for ${label}`}
+                              canonical={service.defaultAmount ?? null}
+                              min="0"
+                              step="0.01"
+                              placeholder="—"
+                              onCommit={(value) => setService(service.id, { defaultAmount: value })}
+                            />
+                          ) : service.multiplier === 'per-count' ? (
+                            <SavingNumberInput
+                              ariaLabel={`Standard count for ${label}`}
+                              canonical={service.defaultQuantity ?? null}
+                              min="0"
+                              step="1"
+                              placeholder="—"
+                              onCommit={(value) => setService(service.id, { defaultQuantity: value })}
+                            />
+                          ) : (
+                            <span className="muted-text">—</span>
+                          )}
                         </td>
                         {group === ANNUAL_GROUP ? (
                           <td>
@@ -1039,6 +1088,10 @@ export function ProposalPricingSection({
           </div>
         )
       })}
+      <p className="muted-text">
+        Input standards fill in a new proposal; a row's standard fills in when you first
+        pick it.
+      </p>
     </CollapsibleSection>
   )
 }

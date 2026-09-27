@@ -1129,6 +1129,23 @@ function proposalSnapshot(pricing, inputs, selections, at, rates = pricing.rates
   return { rates: { ...rates }, lines, totals, catalogAt: at }
 }
 
+/**
+ * A fresh proposal's starting inputs: the catalog's `defaultValue` for
+ * every input the caller did not supply (featreq-311473e2 pt 2, "Standard
+ * values"). A caller-supplied value - even 0 - always wins; only an ABSENT
+ * key is filled in, and only from a real number (an unset default stays
+ * unset).
+ */
+function withInputDefaults(inputs, catalogInputs) {
+  const next = { ...inputs }
+  for (const input of catalogInputs) {
+    if (typeof input.defaultValue === 'number' && !Object.hasOwn(next, input.key)) {
+      next[input.key] = input.defaultValue
+    }
+  }
+  return next
+}
+
 /** Trim and cap an id-like proposal field (clientId / createdBy / copiedFromId)
  *  to 64 chars; anything else that is not a non-empty string is null. */
 function cleanProposalId(value) {
@@ -10052,6 +10069,10 @@ export class AppDataStore {
   /**
    * Start a proposal. Everything is optional — "New proposal" opens an empty
    * draft — and the snapshot is priced from the firm's catalog at creation.
+   * Any input the caller did not supply is seeded from the catalog's
+   * standard value (`applyDefaults`, default true) — `copyProposal` below
+   * turns it off, since a copy keeps exactly the source's figures, not
+   * today's standard values.
    */
   async createProposal({
     prospect = {},
@@ -10060,12 +10081,14 @@ export class AppDataStore {
     selections = [],
     createdBy = null,
     copiedFromId = null,
+    applyDefaults = true,
   } = {}) {
     const pricing = (await this.getFirmSettings()).proposalPricing
     const cleanInputs = cleanProposalInputs(
       inputs,
       pricing.inputs.map((input) => input.key),
     )
+    const seededInputs = applyDefaults ? withInputDefaults(cleanInputs, pricing.inputs) : cleanInputs
     const cleanSelections = cleanProposalSelections(selections)
     const now = nowIso()
     const record = {
@@ -10073,9 +10096,9 @@ export class AppDataStore {
       status: 'draft',
       prospect: cleanProposalProspect(prospect),
       clientId: cleanProposalId(clientId),
-      inputs: cleanInputs,
+      inputs: seededInputs,
       selections: cleanSelections,
-      pricingSnapshot: proposalSnapshot(pricing, cleanInputs, cleanSelections, now),
+      pricingSnapshot: proposalSnapshot(pricing, seededInputs, cleanSelections, now),
       letter: null,
       letterAt: null,
       messages: [],
@@ -10322,6 +10345,10 @@ export class AppDataStore {
       selections: source.selections,
       createdBy,
       copiedFromId: source.id,
+      // Copy keeps exactly the source's figures - a standard value added
+      // to the catalog since the source was created must not appear on the
+      // copy where the source never had it (featreq-311473e2 pt 2).
+      applyDefaults: false,
     })
   }
 

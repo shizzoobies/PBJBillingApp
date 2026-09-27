@@ -1,5 +1,5 @@
 import { dollarFiguresInCents } from '../../lib/money-figures.js'
-import { roundCents } from '../../lib/proposal-pricing.js'
+import { proposalSelectionDefaults, roundCents } from '../../lib/proposal-pricing.js'
 import type {
   Proposal,
   ProposalChatPatch,
@@ -161,7 +161,13 @@ export function selectService(
   const optionIds = new Set(rowOptions.map((option) => option.id))
   const previous = serviceId ? selections.find((entry) => entry.serviceId === serviceId) : undefined
   const rest = selections.filter((entry) => !optionIds.has(entry.serviceId))
-  return serviceId ? [...rest, previous ?? { serviceId }] : rest
+  if (!serviceId) return rest
+  if (previous) return [...rest, previous]
+  // A FIRST-time pick starts from the row's standard amount/count, when
+  // Settings > Proposal pricing has one (featreq-311473e2 pt 2) - a
+  // re-pick keeps `previous` above instead.
+  const service = rowOptions.find((option) => option.id === serviceId)
+  return [...rest, { serviceId, ...proposalSelectionDefaults(service) }]
 }
 
 /** Merge fields into one selection; a null or undefined value removes the field. */

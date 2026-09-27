@@ -16789,6 +16789,50 @@ describe('proposals (file backend)', () => {
     expect(created.pricingSnapshot.rates).toEqual({ bookkeeper: 75, accountant: 115, controller: 125 })
   })
 
+  it("seeds inputs from the catalog's standard values on create; a caller-supplied value always wins, and Copy never re-seeds (featreq-311473e2 pt 2)", async () => {
+    const original = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: {
+        ...original,
+        inputs: original.inputs.map((input) =>
+          input.key === 'transactions'
+            ? { ...input, defaultValue: 80 }
+            : input.key === 'employees'
+              ? { ...input, defaultValue: 0 }
+              : input,
+        ),
+      },
+    })
+    try {
+      const created = await store.createProposal({ inputs: { balanceSheetAccounts: 5 } })
+      // A default of 0 (employees) seeds 0, same as any other real number -
+      // it is not treated as "no default" (item 7).
+      expect(created.inputs).toEqual({ balanceSheetAccounts: 5, transactions: 80, employees: 0 })
+
+      // A caller-supplied value for the SAME key always wins over the default -
+      // including a caller-supplied 0, which must not read as "absent" and get
+      // overwritten by the (different, non-zero) default (item 7).
+      const explicit = await store.createProposal({ inputs: { transactions: 0 } })
+      expect(explicit.inputs).toEqual({ transactions: 0, employees: 0 })
+
+      // A caller-supplied '' is dropped before the seed check, so it still
+      // falls back to the standard value (item 7).
+      const blank = await store.createProposal({ inputs: { transactions: '' } })
+      expect(blank.inputs).toEqual({ transactions: 80, employees: 0 })
+
+      // A proposal from BEFORE the standard value existed (simulated with
+      // `applyDefaults: false`) keeps exactly its own figures on Copy.
+      const source = await store.createProposal({
+        inputs: { balanceSheetAccounts: 5 },
+        applyDefaults: false,
+      })
+      const copy = await store.copyProposal(source.id, { createdBy: 'emp-copy' })
+      expect(copy.inputs).toEqual({ balanceSheetAccounts: 5 })
+    } finally {
+      await store.updateFirmSettings({ proposalPricing: original })
+    }
+  })
+
   it('re-prices on every edit and survives a fresh store instance', async () => {
     const created = await store.createProposal({ inputs: { transactions: 120 } })
     await store.updateProposal(created.id, {
@@ -17121,14 +17165,17 @@ describe('proposals (file backend)', () => {
 })
 
 /** A recorder pool that answers the firm-settings read and echoes one proposal row. */
-function fakeProposalPostgres(row = null, { clientRows = [], packageRows = [] } = {}) {
+function fakeProposalPostgres(
+  row = null,
+  { clientRows = [], packageRows = [], proposalPricing = null } = {},
+) {
   const statements = []
   const pool = {
     async query(text, params) {
       const trimmed = String(text).trim()
       statements.push({ text: trimmed, params })
       if (/from firm_settings where id = 'singleton'/i.test(trimmed)) {
-        return { rows: [{ name: 'PB&J', proposal_pricing: null }] }
+        return { rows: [{ name: 'PB&J', proposal_pricing: proposalPricing }] }
       }
       // `linkProposalClient`'s CAS update, checked BEFORE the generic
       // `proposals` catch-all below — that one answers every proposals
@@ -17221,6 +17268,37 @@ describe('proposals (postgres branch)', () => {
     const snapshot = JSON.parse(insert.params[5])
     expect(snapshot.lines).toHaveLength(1)
     expect(snapshot.totals).toHaveProperty('monthly')
+  })
+
+  it("binds inputs seeded from the catalog's standard values; a caller-supplied value always wins (featreq-311473e2 pt 2)", async () => {
+    const pricingWithDefault = {
+      rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+      inputs: [{ key: 'transactions', label: 'Transactions', help: '', defaultValue: 80 }],
+      services: [],
+    }
+    const fake = fakeProposalPostgres(null, { proposalPricing: pricingWithDefault })
+    await postgresStore(fake).createProposal({ inputs: {} })
+    const insert1 = fake.matching(/^insert into proposals/i)[0]
+    expect(JSON.parse(insert1.params[3])).toEqual({ transactions: 80 })
+
+    // A caller-supplied value for the SAME key always wins over the default.
+    const fake2 = fakeProposalPostgres(null, { proposalPricing: pricingWithDefault })
+    await postgresStore(fake2).createProposal({ inputs: { transactions: 200 } })
+    const insert2 = fake2.matching(/^insert into proposals/i)[0]
+    expect(JSON.parse(insert2.params[3])).toEqual({ transactions: 200 })
+  })
+
+  it("copyProposal keeps exactly the source's figures - never seeds a standard value the source never had (featreq-311473e2 pt 2)", async () => {
+    const pricingWithDefault = {
+      rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+      inputs: [{ key: 'transactions', label: 'Transactions', help: '', defaultValue: 80 }],
+      services: [],
+    }
+    const source = proposalRow({ inputs: {} })
+    const fake = fakeProposalPostgres(source, { proposalPricing: pricingWithDefault })
+    await postgresStore(fake).copyProposal('prop-1', { createdBy: 'emp-2' })
+    const insert = fake.matching(/^insert into proposals/i)[0]
+    expect(JSON.parse(insert.params[3])).toEqual({})
   })
 
   it('updates with a fresh snapshot, binding the actual inputs and totals, and refuses a declined row', async () => {

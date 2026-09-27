@@ -34,7 +34,13 @@ export type PayrollRun = 'weekly' | 'biweekly' | 'monthly'
 
 export type ProposalRates = Record<ProposalRole, number>
 
-export type ProposalInput = { key: string; label: string; help: string }
+export type ProposalInput = {
+  key: string
+  label: string
+  help: string
+  /** The count that fills a new proposal automatically, or null (Settings > Proposal pricing). */
+  defaultValue: number | null
+}
 
 export type ProposalService = {
   id: string
@@ -50,6 +56,10 @@ export type ProposalService = {
   cadence: ProposalCadence | null
   active: boolean
   sortOrder: number
+  /** A 'flat' row's standard amount (its selection's `flatAmount`), or null. */
+  defaultAmount: number | null
+  /** A 'per-count' row's standard count (its selection's `quantity`), or null. */
+  defaultQuantity: number | null
 }
 
 export type ProposalPricing = {
@@ -136,6 +146,13 @@ export type ValidatedProposalPatch = {
   inputs?: Record<string, number>
   selections?: { add: ProposalSelection[]; remove: string[] }
 }
+
+/** A brand-new selection's starting typed figure(s) from the row's standard
+ *  amount/count - only the field its CURRENT pricing/multiplier actually
+ *  uses ('flat' -> flatAmount, 'per-count' -> quantity) - or {} otherwise. */
+export declare function proposalSelectionDefaults(
+  service: Pick<ProposalService, 'pricing' | 'multiplier' | 'defaultAmount' | 'defaultQuantity'> | null | undefined,
+): Pick<ProposalSelection, 'flatAmount' | 'quantity'>
 
 /**
  * Apply a validated chat patch. Every prospect field replaces except `notes`,

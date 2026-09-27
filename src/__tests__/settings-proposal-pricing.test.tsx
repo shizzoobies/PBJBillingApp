@@ -189,4 +189,85 @@ describe('Proposal pricing in Settings', () => {
       vi.useRealTimers()
     }
   })
+
+  // featreq-311473e2 pt 2: standard values (Brittany's sheet blanks - client
+  // call, budget/forecast counts, payroll setup amount, tax return rate).
+  it("saves an input's standard value, keyed on the input's key", () => {
+    const onCommit = renderSection()
+    const input = screen.getByLabelText('Standard value for transactions')
+    fireEvent.change(input, { target: { value: '80' } })
+    fireEvent.blur(input)
+    const saved = lastSaved(onCommit)
+    expect(saved.inputs.find((row) => row.key === 'transactions')?.defaultValue).toBe(80)
+  })
+
+  it("clears an input's standard value back to null", () => {
+    const pricing = defaultProposalPricing()
+    pricing.inputs.find((row) => row.key === 'transactions')!.defaultValue = 80
+    const onCommit = renderSection(pricing)
+    const input = screen.getByLabelText('Standard value for transactions')
+    fireEvent.change(input, { target: { value: '' } })
+    fireEvent.blur(input)
+    const saved = lastSaved(onCommit)
+    expect(saved.inputs.find((row) => row.key === 'transactions')?.defaultValue).toBeNull()
+  })
+
+  it("saves a flat row's standard amount", () => {
+    const onCommit = renderSection()
+    const input = screen.getByLabelText(
+      'Standard amount for Annual and one-time Payroll setup',
+    )
+    fireEvent.change(input, { target: { value: '450' } })
+    fireEvent.blur(input)
+    const saved = lastSaved(onCommit)
+    expect(saved.services.find((row) => row.id === 'payroll-setup')?.defaultAmount).toBe(450)
+  })
+
+  it("saves a per-count row's standard count, and shows neither control for a row that reads no typed figure", () => {
+    const onCommit = renderSection()
+    const input = screen.getByLabelText('Standard count for Annual and one-time Budget')
+    fireEvent.change(input, { target: { value: '2' } })
+    fireEvent.blur(input)
+    const saved = lastSaved(onCommit)
+    expect(saved.services.find((row) => row.id === 'budget')?.defaultQuantity).toBe(2)
+    expect(
+      screen.queryByLabelText('Standard amount for Reconciliations Reconciliations'),
+    ).toBeNull()
+    expect(
+      screen.queryByLabelText('Standard count for Reconciliations Reconciliations'),
+    ).toBeNull()
+  })
+
+  it('nulls a stale standard amount when a flat row stops being flat', () => {
+    const pricing = defaultProposalPricing()
+    pricing.services.find((row) => row.id === 'payroll-setup')!.defaultAmount = 450
+    const onCommit = renderSection(pricing)
+    fireEvent.change(
+      screen.getByLabelText('Pricing for Annual and one-time Payroll setup'),
+      { target: { value: 'formula' } },
+    )
+    const saved = lastSaved(onCommit)
+    expect(saved.services.find((row) => row.id === 'payroll-setup')?.defaultAmount).toBeNull()
+  })
+
+  it('nulls a stale standard count when a per-count row stops being per-count', () => {
+    const pricing = defaultProposalPricing()
+    pricing.services.find((row) => row.id === 'budget')!.defaultQuantity = 2
+    const onCommit = renderSection(pricing)
+    fireEvent.change(
+      screen.getByLabelText('Multiplier for Annual and one-time Budget'),
+      { target: { value: 'none' } },
+    )
+    const saved = lastSaved(onCommit)
+    expect(saved.services.find((row) => row.id === 'budget')?.defaultQuantity).toBeNull()
+  })
+
+  it('shows the standard-values hint under the section', () => {
+    renderSection()
+    expect(
+      screen.getByText(
+        "Input standards fill in a new proposal; a row's standard fills in when you first pick it.",
+      ),
+    ).toBeTruthy()
+  })
 })

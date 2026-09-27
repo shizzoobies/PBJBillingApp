@@ -1098,49 +1098,47 @@ anyone; this is purely how the list is presented.
 
 ## Proposals (owner only)
 
-Sidebar: **Proposals**. Every prospect's estimate, letter, intake conversation
-and outcome is saved — declined ones too — so a prospect who comes back next
-year is reopened with **Copy to new proposal**, not started from zero. The list
-shows company, contact, status (Draft, Sent, Accepted, Declined), the monthly
-total and when it last changed, with a status filter and a search. **New
-proposal** opens an empty draft. Three tabs:
+Sidebar: **Proposals**. Every prospect's estimate, letter, chat and outcome
+is saved (declined too), so a returning prospect is reopened with
+**Copy to new proposal** instead of starting over. The list shows
+company, contact, status (Draft, Sent, Accepted, Declined), monthly total and
+last-changed date, with a status filter and search. **New proposal** opens an
+empty draft. Three tabs:
 
 - **Estimate** — the prospect (company, contact, email, phone, notes, or an
   existing client for an upsell), the counts from their books (transactions,
   balance sheet accounts, employees, sales tax states, months of clean-up...),
-  and the service picker grouped like her pricing sheet (Monthly,
-  Reconciliations, AR, AP, Payroll, Sales tax, Reports, Additional reports,
-  Annual and one-time, Clean-up) with Basic / Classes / Advance tiers. Each
-  priced line shows its formula ("120 transactions x 0.07 x $75/hr =
-  $630.00"); any active line can take a typed price (an override) — a retired
-  line can only be removed. Four totals: Monthly fee, Annual fees, One-time
-  fees, Clean-up. A draft reprices at today's rates when counts or services
-  change; a sent proposal keeps the rates it was sent with; a catalog change
-  alone never touches a proposal — **Reprice at today's catalog** (drafts)
-  moves it forward.
-  Beside it, the **intake chat** (Opus 5.5) asks for the counts one topic at a
-  time and fills the estimate in as she answers; what it changed is outlined.
+  and the service picker matching her sheet (Monthly, Reconciliations,
+  AR, AP, Payroll, Sales tax, Reports, Additional reports, Annual/one-time,
+  Clean-up) with Basic/Classes/Advance tiers. Each line shows its formula
+  ("120 transactions x 0.07 x $75/hr = $630.00"); any active line takes a
+  typed override; a retired one can only be removed.
+  Four totals: Monthly fee, Annual fees, One-time fees, Clean-up. A draft
+  reprices at today's rates when counts or services change; a sent proposal
+  keeps the rates it was sent with; a catalog change alone never touches a
+  proposal — **Reprice at today's catalog** (drafts) moves it forward.
+  Beside it, the **intake chat** (Opus 5.5) asks for counts one topic at a
+  time and fills in the estimate; changes are outlined.
 - **Letter** — **Draft the proposal** has the AI write the letter (Opening,
   What you told us, What we will do, Pricing, Terms, Next step) around the
-  priced estimate; she edits the text; **Regenerate** replaces it after a
-  confirm; **Copy text**; **Preview PDF**; **Send to prospect** asks for the To
-  address (filled in from the prospect) and emails the branded PDF. A badge
-  shows what the mail provider said (Delivered, Bounced, Marked as spam); a
-  bounce or spam report notifies the owners.
-- **Activity** — created, letter drafted, sends and delivery, accepted or
-  declined (with her note), and the chat transcript.
+  priced estimate; she edits the text; **Regenerate** replaces it after
+  confirm; **Copy text**; **Preview PDF**; **Send to prospect** (address
+  prefilled) emails the branded PDF; a badge shows delivery status
+  (Delivered, Bounced, Spam) and a bounce/spam report notifies owners.
+- **Activity** — created, letter drafted, sends/delivery, accept/decline
+  (note), and the chat transcript.
 
-Header actions: **Accept** — a new prospect becomes a client in Onboarding,
-billed monthly at the proposal's monthly total with the firm's default payment
-terms, plus an optional package; for an existing client it asks separately
-before changing their monthly fee; no invoice changes. Once accepted, **Open
-the client** jumps straight to its page. **Decline** (asks for a note),
-**Copy to new proposal**, **Delete** (drafts only).
+Header actions: **Accept** turns a new prospect into an Onboarding client
+billed monthly at the proposal's total (firm-default terms, optional
+package); an existing client is asked before any fee change; invoices
+untouched. Once accepted, **Open the client** jumps straight to its
+page. **Decline** (note), **Copy to new proposal**, **Delete** (drafts
+only).
 
 **Prices come from the catalog math, never from the AI.** The chat only
 collects counts and picks services; the letter may quote only figures the
-estimate already has, and a draft that invents one is refused. The chat cannot
-send email or change a status. The catalog is **Settings → Proposal pricing**.
+estimate has — a draft that invents one is refused. The chat cannot send
+email or change a status. The catalog is **Settings → Proposal pricing**.
 
 ## Clients (owner manages; staff see assigned)
 
@@ -2776,15 +2774,17 @@ send email or change a status. The catalog is **Settings → Proposal pricing**.
 
 - Firm identity: name, tagline, logo upload (shows in sidebar, login,
   invoices, printed reports), brand color (sidebar background), sidebar text
-  color, active-section color. A built-in contrast guard auto-corrects any
-  illegible color combination, so branding can't break readability.
-- Mailing address, contact details, EIN — used on invoices.
+  color, active-section color. A contrast guard auto-corrects illegible
+  color combinations, so branding can't break readability.
+- Mailing address, contact details, EIN (invoices).
 - **Proposal pricing** — the three proposal rates (Bookkeeper B, Accountant A,
-  Controller C; separate from the team's bill rates), the labels of the counts
-  collected, and the service catalog behind every proposal: each row is count x
-  factor x role rate x multiplier, a flat amount typed per proposal, or the
-  payroll / sales tax block. Rows can be edited, added or retired (Retire /
-  Restore). Editing it never reprices a proposal already written.
+  Controller C; separate from the team's bill rates), labels for the counts
+  collected, and the service catalog: each row is count x factor x
+  role rate x multiplier, a flat amount typed per proposal, or the payroll /
+  sales tax block. Rows can be edited, added or retired (Retire / Restore);
+  editing never reprices a proposal already written. An input's standard
+  value fills in a new proposal; a flat/per-count row's standard fills in
+  only when she first picks it.
 - Sections can be locked to prevent accidental edits.
 
 ## Security & sign-in

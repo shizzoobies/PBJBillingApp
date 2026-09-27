@@ -425,6 +425,29 @@ describe('the proposal editor', () => {
     expect(screen.getByText('$1,005.00')).toBeTruthy()
   })
 
+  it('picking a flat service with a standard amount seeds it as the flatAmount (featreq-311473e2 pt 2)', async () => {
+    api.fetchFirmSettings = vi.fn(async () => ({
+      name: 'PB&J',
+      proposalPricing: {
+        ...defaultProposalPricing(),
+        rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+        services: defaultProposalPricing().services.map((service) =>
+          service.id === 'payroll-setup' ? { ...service, defaultAmount: 450 } : service,
+        ),
+      },
+    }))
+    renderEditor()
+    fireEvent.click(await screen.findByLabelText('Annual and one-time: Payroll setup'))
+    await waitFor(() =>
+      expect(api.updateProposalRequest).toHaveBeenCalledWith('prop-1', {
+        selections: [
+          { serviceId: 'monthly-weekly-transactions-basic' },
+          { serviceId: 'payroll-setup', flatAmount: 450 },
+        ],
+      }),
+    )
+  })
+
   it('choosing another tier replaces the one that was picked', async () => {
     renderEditor()
     const row = await screen.findByRole('radiogroup', { name: 'Monthly: Weekly transactions' })
