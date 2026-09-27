@@ -25,8 +25,8 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-25, start of day):** `main` = `3427efc`, pushed,
-deployed, `/health` 200 with that commit. Suite **4063 tests / 210 files**,
+**State right now (2026-09-27):** `main` = `e505696` (+ this handoff), pushed,
+deployed, `/health` 200 with that commit. Suite **4081 tests / 210 files**,
 green. Working tree clean, no worktrees, no unmerged branches except
 `hold/july-security-p3` (never merge, never delete). Every AI call runs on
 `claude-opus-5-5`; subagent dispatches default to Opus 5.5 (omit the model
@@ -39,9 +39,8 @@ entries in section 5 - read them before touching anything:
   scroll. Tracker `featreq-d62b995a` Shipped with the plain-language note.
 - **Proposals** (`2f71374`, 34 commits): catalog in Settings, estimate + Opus 5.5
   intake chat, letter, PDF, send, accept/decline. `featreq-ef18a38e` Shipped;
-  `featreq-311473e2` is parked at **Needs your answer** on purpose (three
-  questions for Brittany: seed rates, sheet blanks, payroll bonus) - flip it to
-  Shipped when she answers. Two policy calls made without Alex, reversible: a
+  `featreq-311473e2` — she answered 09-25; standard values shipped 09-27 (top
+  entry in section 5) and the item is Shipped. Two policy calls made without Alex, reversible: a
   SENT proposal keeps its snapshot rates; Send warns-and-confirms on stale
   letter figures. Accept refuses a billing-master client outright (ask Alex).
 
@@ -376,6 +375,36 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-27 — Brittany answered the Proposals questions; standard values
+shipped (`e505696`), deployed, health 200, voice re-provisioned.**
+Her answers on `featreq-311473e2`: (1) the seeded role rates are right —
+nothing changed; (3) the payroll bonus math (rate squared) is intended —
+nothing changed; (2) the sheet's blank lines DO have standard numbers and
+she wanted a place to set them. Built: every catalog input carries
+`defaultValue`, every service carries `defaultAmount` (read only when
+`pricing === 'flat'`) and `defaultQuantity` (read only when
+`multiplier === 'per-count'`), all seeded null (no invented numbers);
+`createProposal` seeds inputs from defaults unless the caller supplied a
+value (0 counts as supplied; '' does not); Copy never applies defaults; a
+FIRST pick of a service (editor picker or chat add) starts from
+`proposalSelectionDefaults(service)`; a catalog change alone still never
+touches a proposal; Settings > Proposal pricing shows "Standard value" beside
+each input and a Standard column on flat / per-count rows, and nulls the
+stale field when a row's pricing or multiplier changes. The intake chat's
+context marks an input "(standard value — confirm with the prospect)" when
+its value equals the catalog default, so a seeded count is still asked
+about. Manifest at 213,976 bytes — 24 under the 214,000 house cap; the next
+manifest edit needs a trim pass first. Tracker flipped to Shipped with the
+note in her terms.
+
+**Two new items from her 09-25 spitball session, status New, untriaged —
+both need her answers before a build:** `featreq-11ffb3a6` statement date
+box on the client page (one date per client or per account? what would it
+pull from the reconciliation checklist?) and `featreq-b688e73c` notes for
+checklists that have not populated yet (task vs note; which checklist and
+cycle; where the count shows; team or owner only). Alex triages.
+
 
 **2026-09-24 (afternoon) - every page stays usable at a 1200 px laptop window.**
 Brittany forwarded Lisa's screenshot: on the staff Clients page the "Visible work"
