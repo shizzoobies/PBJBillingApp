@@ -69,8 +69,10 @@ Then the queue / watch list:
    (may a proposal be accepted into a billing master at all?); the minors
    list in the Proposals section 5 entry (catalog row label, non-array
    `services` patch, SectionKit number-input draft reset, chat price
-   allow-list, upsell CAS). **The manifest is 24 bytes under the 214,000
-   house cap — trim before the next manifest edit.**
+   allow-list, upsell CAS). **The manifest is now 194,680 bytes (condensed
+   09-28, one line per bullet/paragraph — don't hard-wrap new entries), and
+   `src/__tests__/capability-manifest-size.test.ts` fails verify above
+   205,000 bytes or characters** — state each rule once and cross-reference.
 1. **Brittany's team re-pick is still unfinished** (13 of 55 clients had an
    empty team on 09-21; Lisa 5, Allison 1). Until a client has a team, staff
    see none of its invoices on the Invoice Recap, and nobody but the owners
@@ -401,8 +403,8 @@ each input and a Standard column on flat / per-count rows, and nulls the
 stale field when a row's pricing or multiplier changes. The intake chat's
 context marks an input "(standard value — confirm with the prospect)" when
 its value equals the catalog default, so a seeded count is still asked
-about. Manifest at 213,976 bytes — 24 under the 214,000 house cap; the next
-manifest edit needs a trim pass first. Tracker flipped to Shipped with the
+about. Manifest was at 213,976 bytes then; the 09-28 condense took it to
+194,680, and the size tripwire now fails verify above 205,000. Tracker flipped to Shipped with the
 note in her terms.
 
 **Two new items from her 09-25 spitball session, status New, untriaged —
