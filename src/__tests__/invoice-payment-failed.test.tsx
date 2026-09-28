@@ -125,7 +125,7 @@ describe('the Payment failed tab', () => {
     fireEvent.click(await screen.findByText('INV-2026-08-031'))
     // The editor can hold other alerts (a client with no address on file
     // gets one), so the notice is found by what it says, not by its role.
-    const alert = (await screen.findByText(/The pay link from that attempt/)).closest('p')
+    const alert = (await screen.findByText(/The client's Pay link still works for a retry/)).closest('p')
     expect(alert).not.toBeNull()
     expect(alert).toHaveAttribute('role', 'alert')
     expect(alert?.textContent).toContain('Payment failed Sep 10')
@@ -133,7 +133,7 @@ describe('the Payment failed tab', () => {
     expect(alert?.textContent).toContain('send the invoice again')
   })
 
-  // The follow-up IS the re-send: fresh link, back in the client's inbox. The
+  // The follow-up IS the re-send: the same permanent link, back in the client's inbox. The
   // invoice goes back to Sent, and the tab empties.
   it('returns the invoice to Sent once it has been sent again', async () => {
     const run = await renderRun([

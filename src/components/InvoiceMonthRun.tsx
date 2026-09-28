@@ -2999,8 +2999,8 @@ function InvoiceEditor({
           <strong>Payment failed {formatSentOn(paymentFailure.at)}</strong>
           {paymentFailure.detail ? ` — ${paymentFailure.detail}` : ''}
           <br />
-          The pay link from that attempt may no longer work. Follow up with the client, then
-          send the invoice again for a fresh link — or mark it paid if they pay another way.
+          The client's Pay link still works for a retry. Follow up with the client, then send
+          the invoice again if they need it — or mark it paid if they pay another way.
         </p>
       ) : null}
 
