@@ -75,7 +75,7 @@ Then the queue / watch list:
    (may a proposal be accepted into a billing master at all?); the minors
    list in the Proposals section 5 entry (catalog row label, non-array
    `services` patch, SectionKit number-input draft reset, chat price
-   allow-list, upsell CAS). **The manifest is now 194,680 bytes (condensed
+   allow-list, upsell CAS). **The manifest is now 195,074 bytes (condensed
    09-28, one line per bullet/paragraph — don't hard-wrap new entries), and
    `src/__tests__/capability-manifest-size.test.ts` fails verify above
    205,000 bytes or characters** — state each rule once and cross-reference.
@@ -169,7 +169,11 @@ workaround when you have none:
 - **Voice re-provision** (manifest changed) needs `ELEVENLABS_API_KEY`,
   `ELEVENLABS_AGENT_ID`, `APP_PUBLIC_URL`, `VOICE_TOOL_SECRET` — without
   them, leave it as the FIRST line of your handoff entry so the next session
-  with Railway access runs `node scripts/provision-voice-agent.mjs`.
+  with Railway access runs `node scripts/provision-voice-agent.mjs`. The
+  four values come from `npx @railway/cli@latest variables --service
+  PBJBillingApp --json` (spawn the script with them in `env`; never print
+  them). The upload cap is ~216,148 characters on the agent's total knowledge
+  base; verify fails at 205,000 first (09-28 entry).
 - **Prod writes** (backfills, resets) are Railway-credentialed and need
   Alex's yes at run time regardless of where you are.
 - Cloud sessions work on a branch; the merge to `main` is the deploy. Say
@@ -390,6 +394,52 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-28 — The voice agent's knowledge base got real headroom
+(`ed5999e` + `5d8378f`), and five sentences in it were corrected against the
+code.** The manifest had been 24 bytes under the ElevenLabs upload cap since the
+Proposals ship, so any manifest edit would have failed the voice provision.
+Now 195,074 bytes (from 213,976): ~8 KB by unwrapping hard-wrapped lines (word
+sequence unchanged, script-verified) and ~11 KB by stating each rule once in its
+home section and cross-referencing elsewhere. A scripted check (every number,
+backticked string, quoted UI label, and every never/only/refuse/cannot/must
+sentence in the BEFORE file) plus a hand read of the 126 reworded sentences
+found nothing lost; an Opus truth review agreed. `npm run verify` now fails
+above 205,000 bytes or characters (`src/__tests__/capability-manifest-size.test.ts`).
+
+*Rules for editing the manifest from now on:* one line per paragraph or bullet
+(no hard wrap — the file is now unwrapped and a wrapped entry would be the odd
+one out); state a rule once in its home section and point to it in one clause
+elsewhere; run `wc -c docs/capability-manifest.md` before committing; the
+ElevenLabs cap is on the agent's TOTAL knowledge base (~216,148 characters), so
+splitting the file would not help — the only other lever is the agent's model
+in the ElevenLabs dashboard (Alex's call). Re-provision with the four env vars
+exported from `npx @railway/cli@latest variables --service PBJBillingApp --json`
+(spawn the script with them in `env`; never print them).
+
+*The five corrections — the app was right, the knowledge base was not:*
+(1) the invoice's Pay link is the invoice's permanent `/pay/<token>` address and
+builds a fresh Stripe page every time it is opened, so a failed bank attempt
+does NOT spend it (`server.js` `payment_intent.payment_failed` clears no
+token; `getOrCreateInvoicePayToken` never rotates) — the on-screen Payment
+failed notice in `InvoiceMonthRun.tsx` said "fresh link" and was corrected in
+the same commit; (2) every send carries the same two links (bank, and the same
+address ending in `/card`); paying through one still kills the other;
+(3) Invoice History month tables sort client A–Z by default
+(`InvoiceHistory.tsx`, featreq-a1e61913); (4) adding a task to a live recurring
+instance shows the "This checklist only / This + all future" prompt to ANYONE
+who can edit the checklist, not only owners (`ChecklistsPage.tsx`
+`canEditStructure`; the server route accepts non-owners but refuses standard
+blueprints and clients outside the user's visible set); (5) the per-client
+Email invoice offers to build a missing invoice, and for a client opted out of
+platform invoicing it still asks but Yes builds nothing ("<Client> is invoiced
+outside the app, so no invoice was created."). Four other contradictions the
+condense pass noticed were checked and resolved the same way; none are left
+that we know of.
+
+*Also this session:* the stale `laughing-raman-651691` worktree (09-22 flake
+fix, already on main) and the merged `chore/manifest-headroom` branch were
+removed. Nothing else changed in the app.
 
 **2026-09-27 — Brittany answered the Proposals questions; standard values
 shipped (`e505696`), deployed, health 200, voice re-provisioned.**
