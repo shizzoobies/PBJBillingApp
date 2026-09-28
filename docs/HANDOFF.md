@@ -25,9 +25,15 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-27):** `main` = `e505696` (+ this handoff), pushed,
-deployed, `/health` 200 with that commit. Suite **4081 tests / 210 files**,
-green. Working tree clean, no worktrees, no unmerged branches except
+**State right now (2026-09-28):** `main` = `5d8378f` (+ this handoff), pushed,
+deployed, `/health` 200 with that commit. Suite **4083 tests / 211 files**,
+green. **09-28:** the capability manifest was condensed to 195,074 bytes (from
+24 bytes under the voice cap) with a verify-time tripwire at 205,000, five
+sentences were corrected against the code (Pay link survives a failed attempt;
+same two links on every send; History sorts A–Z; recurring add-task prompts
+anyone who can edit; opted-out Email invoice still asks), and the on-screen
+Payment failed notice lost its stale "fresh link" wording. Manifest paragraphs
+are one line each now — do not hard-wrap new entries. Working tree clean, no worktrees, no unmerged branches except
 `hold/july-security-p3` (never merge, never delete). Every AI call runs on
 `claude-opus-5-5`; subagent dispatches default to Opus 5.5 (omit the model
 alias). The two things that shipped on 09-24, newest first, are the top two
