@@ -25,7 +25,7 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-29):** `main` = `fed7925` (+ this handoff), pushed,
+**State right now (2026-09-29):** `main` = `0f431aa` (+ this handoff), pushed,
 deployed, `/health` 200 with that commit. Suite **4094 tests / 211 files**,
 green. **09-29:** the Updates "Refine for dev" button (and every other AI
 feature that uses structured outputs) was failing on a provider-side outage of
@@ -438,7 +438,11 @@ existing overload tests only had call counts renumbered.
 grammar once the retry has run, even for a plain 529 — acceptable; the retry
 replaces the original error object (log the grammar error's `request_id` for
 diagnosis); no test covers an array-shaped `system` or the streaming path with
-request options (the streaming chat sends no grammar today).
+request options (the streaming chat sends no grammar today). No test yet combines
+the armed memo with `modelFallback: false` (the brainstorm's never-Haiku rule);
+the code path is shared and was inspected, but a regression test is cheap:
+arm the memo with one grammar 503, then assert a second `spitballChat` call
+still throws the capacity 503 rather than reaching Haiku.
 
 **2026-09-28 — The voice agent's knowledge base got real headroom
 (`ed5999e` + `5d8378f`), and five sentences in it were corrected against the
