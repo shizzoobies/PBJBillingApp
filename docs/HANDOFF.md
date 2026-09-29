@@ -70,11 +70,15 @@ Then the queue / watch list:
    mis-assigned (then reassign them on Checklists)? Retiring the two test
    accounts is a small change if she wants them gone. Reproduce with
    `scratchpad/lisa-visibility*.js` pattern (read-only pg).
-0a. **Two NEW Brittany items from her 09-25 spitball session, untriaged —
-   need her answers before a build (09-27 entry):** `featreq-11ffb3a6`
-   statement date box on the client page; `featreq-b688e73c` notes for
-   checklists that have not populated yet. Alex triages; the open questions
-   are in each item's description.
+0a. **Two Brittany items from her 09-25 spitball session are waiting on her
+   answers (09-27 entry):** `featreq-11ffb3a6` statement date box on the
+   client page; `featreq-b688e73c` notes for checklists that have not
+   populated yet. Alex moved both to planned on 09-29; the same day they were
+   filed as `needs_input` with one default-with-question each (per account
+   with a day-of-month pick list from the reconciliation checklist; flag a
+   note to the next occurrence of a chosen recurring checklist, Task-or-Note
+   chosen at write time, count on the notes box). On the next queue run read
+   `clarification_answer` first and build against it.
 0b. **Proposals follow-ups (not blocking):** Alex's billing-master question
    (may a proposal be accepted into a billing master at all?); the minors
    list in the Proposals section 5 entry (catalog row label, non-array
