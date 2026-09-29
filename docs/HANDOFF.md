@@ -25,9 +25,13 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-28):** `main` = `5d8378f` (+ this handoff), pushed,
-deployed, `/health` 200 with that commit. Suite **4083 tests / 211 files**,
-green. **09-28:** the capability manifest was condensed to 195,074 bytes (from
+**State right now (2026-09-29):** `main` = `fed7925` (+ this handoff), pushed,
+deployed, `/health` 200 with that commit. Suite **4094 tests / 211 files**,
+green. **09-29:** the Updates "Refine for dev" button (and every other AI
+feature that uses structured outputs) was failing on a provider-side outage of
+the JSON-schema grammar service — see the 2026-09-29 entry in section 5 for
+the diagnosis, the fix (plain-JSON retry on the same model, then a five-minute
+outage memo) and how to recognize it in the logs. **09-28:** the capability manifest was condensed to 195,074 bytes (from
 24 bytes under the voice cap) with a verify-time tripwire at 205,000, five
 sentences were corrected against the code (Pay link survives a failed attempt;
 same two links on every send; History sorts A–Z; recurring add-task prompts
@@ -394,6 +398,47 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-09-29 — "The refining button isn't working": a provider-side outage of
+the structured-output grammar service, routed around (`c70300d`, then the
+outage memo `fed7925`).** Alex reported the Updates page's **Refine for dev**
+button failing. Production logs held the cause verbatim: every call carrying
+`output_config: { format: { type: 'json_schema' } }` came back **503
+`overloaded_error`: "Grammar compilation is temporarily unavailable. Please
+try again."** — the Anthropic feature that constrains a reply to a JSON
+schema, not the model itself. Our existing fallback to `claude-haiku-4-5`
+carried the same grammar and usually 503'd the same way; with the SDK client's
+`maxRetries: 3` a lucky success took 87 s (reproduced live with the production
+key — `scratchpad/refine-repro.mjs` pattern: import `refineFeatureRequest`
+from `lib/assistant.js` and call it with a fake item). status.claude.com showed
+nothing. Ten features share the path: refine, walkthrough, owner feedback,
+spitball summary + chat, package checklist, proposal letter + chat, invoice
+confidence rating.
+
+*The fix, all in `runModel` (`lib/assistant.js`), no per-caller change:* a
+grammar-carrying call that fails with 429/500/502/503/529 is retried on the
+SAME model without `output_config.format`, with a schema-derived instruction
+appended to the system prompt ("Reply with ONLY a JSON object (no prose, no
+code fence) with these keys: …", nested object/array keys and `minLength`/
+`maxLength` floors spelled out — `jsonReplyInstruction`), `maxRetries: 0` on
+that leg; only if that also fails does the Haiku fallback run, also without
+the grammar. The brainstorm chat (`modelFallback: false`) still never reaches
+Haiku. The existing `parseModelJson` / `extractJsonObject` / per-caller
+`validate` handle the text reply (fenced or prose-wrapped included). Live
+after `c70300d`: Opus answered on the no-grammar retry in 37 s, Haiku never
+called. `fed7925` adds a five-minute in-process memo armed ONLY by the
+grammar-compilation message: while armed, the first request already skips the
+grammar (so no SDK backoff is wasted on a doomed call); any successful grammar
+call clears it. Log lines to recognize: `[assistant] … (grammar compilation
+unavailable) … sending <model> without the grammar` and `grammar outage memo
+active`. Tests: six + four new cases in `lib/assistant.test.mjs`; nine
+existing overload tests only had call counts renumbered.
+
+*Follow-ups (minor, from the review):* Haiku now always goes without the
+grammar once the retry has run, even for a plain 529 — acceptable; the retry
+replaces the original error object (log the grammar error's `request_id` for
+diagnosis); no test covers an array-shaped `system` or the streaming path with
+request options (the streaming chat sends no grammar today).
 
 **2026-09-28 — The voice agent's knowledge base got real headroom
 (`ed5999e` + `5d8378f`), and five sentences in it were corrected against the
