@@ -442,11 +442,10 @@ existing overload tests only had call counts renumbered.
 grammar once the retry has run, even for a plain 529 — acceptable; the retry
 replaces the original error object (log the grammar error's `request_id` for
 diagnosis); no test covers an array-shaped `system` or the streaming path with
-request options (the streaming chat sends no grammar today). No test yet combines
-the armed memo with `modelFallback: false` (the brainstorm's never-Haiku rule);
-the code path is shared and was inspected, but a regression test is cheap:
-arm the memo with one grammar 503, then assert a second `spitballChat` call
-still throws the capacity 503 rather than reaching Haiku.
+request options (the streaming chat sends no grammar today). The armed memo
+combined with `modelFallback: false` (the brainstorm's never-Haiku rule) got its
+regression test later on 09-29, with a contrast case showing a fallback-allowed
+caller does reach Haiku, grammar-free, under the same armed memo.
 
 **2026-09-28 — The voice agent's knowledge base got real headroom
 (`ed5999e` + `5d8378f`), and five sentences in it were corrected against the
