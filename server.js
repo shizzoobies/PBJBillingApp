@@ -13,6 +13,7 @@ import {
   InvoiceAiReviewError,
   InvoiceLockedError,
   ManualPaymentError,
+  NothingToPushError,
   PackageApplyError,
   ProposalStateError,
   RateVersionError,
@@ -9548,12 +9549,25 @@ const server = createServer(async (request, response) => {
         session.user.name ??
         'A team member'
 
-      const pushed = await appDataStore.pushChecklistInstance(
-        checklistId,
-        session.user.id,
-        validatedPush.newDueDate,
-      )
-      if (!pushed) {
+      let pushResult
+      try {
+        pushResult = await appDataStore.pushChecklistInstance(
+          checklistId,
+          session.user.id,
+          validatedPush.newDueDate,
+        )
+      } catch (error) {
+        // Every step on this occurrence is already done — a push would carry
+        // nothing forward (featreq-fbab3370). A fact about the data, not a
+        // failure: the UI hides Push on a complete checklist, so reaching this
+        // means a stale render or a direct call.
+        if (error instanceof NothingToPushError) {
+          sendJson(response, 409, { error: 'NOTHING_TO_PUSH', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!pushResult || !pushResult.checklist) {
         // NOT the already-skipped refusal above: that one is checked and
         // answered before we get here. Reaching this means the row changed
         // underneath us between the read and the update — someone else skipped
@@ -9565,8 +9579,13 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      const pushRecord = await appDataStore.createChecklistSkip({
-        checklistId,
+      const { checklist: pushed, completed } = pushResult
+      // The skip-ledger `push` entry follows whichever checklist carries the
+      // open work forward — the same row for a plain push, the NEW row for a
+      // split — so next-occurrence rules keep reading identity off the row
+      // that actually owns the cycle now (see checklist-push-next-occurrence).
+      await appDataStore.createChecklistSkip({
+        checklistId: pushed.id,
         templateId: checklist.templateId ?? null,
         clientId: checklist.clientId ?? null,
         title: checklist.title,
@@ -9602,7 +9621,7 @@ const server = createServer(async (request, response) => {
         console.error('[notify] checklist_pushed dispatch failed:', err?.message || err)
       }
 
-      sendJson(response, 200, { checklist: pushed, skip: pushRecord })
+      sendJson(response, 200, { checklist: pushed, completed })
       return
     }
 

@@ -10,6 +10,7 @@
  */
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
+  CHECKLIST_INSTANCE_UNIQUE_INDEX_V3,
   buildChecklistInstanceKeys,
   checklistInstanceKey,
   checklistMonthKey,
@@ -97,5 +98,21 @@ describe('findChecklistInstance', () => {
 describe('CHECKLIST_INSTANCE_UNIQUE_INDEX', () => {
   it('names the Postgres backstop the boot migration creates', () => {
     expect(CHECKLIST_INSTANCE_UNIQUE_INDEX).toBe('checklists_template_instance_uniq')
+  })
+})
+
+/**
+ * Split push (featreq-fbab3370): a mixed push hands the cycle's identity from
+ * a done-only original to a brand-new row (`pushed_to_checklist_id` /
+ * `pushed_from_checklist_id` — see db/store.js `pushChecklistInstance`). Both
+ * rows can share `(template_id, coalesce(cycle_due_date, due_date),
+ * stage_index)` for as long as the app runs, which v2's predicate does not
+ * tolerate. v3 is what makes that legal — see db/store-staleness.test.mjs for
+ * the statement-shape proof and checklist-push-next-occurrence.test.ts for the
+ * materializer proof that neither row respawns the cycle.
+ */
+describe('CHECKLIST_INSTANCE_UNIQUE_INDEX_V3', () => {
+  it('names the backstop that replaces v2 for the split push', () => {
+    expect(CHECKLIST_INSTANCE_UNIQUE_INDEX_V3).toBe('checklists_template_instance_uniq_v3')
   })
 })

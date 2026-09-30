@@ -1368,10 +1368,12 @@ function App() {
   )
 
   /**
-   * Push. The server returns the checklist with its NEW `dueDate` (and the
-   * `cycleDueDate` stamp that keeps its place in the cycle); merging it is all
-   * the screen needs — the lists sort by due date, so the task simply moves.
-   * It is not skipped, so it stays visible throughout.
+   * Push. The server returns the checklist that carries the OPEN work forward
+   * (with its NEW `dueDate` and the `cycleDueDate` stamp that keeps its place
+   * in the cycle) and, on a SPLIT (featreq-fbab3370), the done-only original
+   * left behind as a completed record. A plain push is just a merge — the
+   * lists sort by due date, so the task simply moves. A split also has to
+   * ADD the new row: its id is not yet anywhere in `current.checklists`.
    */
   const pushChecklistOccurrence = useCallback(
     async (
@@ -1379,13 +1381,17 @@ function App() {
       input: { category: SkipReasonCategory; explanation: string; newDueDate: string },
     ) => {
       if (previewActiveRef.current) return
-      const { checklist } = await pushChecklistOccurrenceRequest(checklistId, input)
-      applyServerDataUpdate((current) => ({
-        ...current,
-        checklists: current.checklists.map((entry) =>
-          entry.id === checklist.id ? checklist : entry,
-        ),
-      }))
+      const { checklist, completed } = await pushChecklistOccurrenceRequest(checklistId, input)
+      applyServerDataUpdate((current) => {
+        const merged = current.checklists.map((entry) =>
+          entry.id === checklist.id ? checklist : entry.id === completed?.id ? completed : entry,
+        )
+        const checklistIsNew = !current.checklists.some((entry) => entry.id === checklist.id)
+        return {
+          ...current,
+          checklists: checklistIsNew ? [...merged, checklist] : merged,
+        }
+      })
       await refreshChecklistSkips()
     },
     [refreshChecklistSkips],

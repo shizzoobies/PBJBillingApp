@@ -83,6 +83,26 @@ const ALREADY_PUSHED = checklist({
   pushedAt: '2026-08-20T12:00:00.000Z',
   pushedBy: LISA,
 })
+/**
+ * Split push (featreq-fbab3370): one done step, one open step — the dialog
+ * has to say both counts before anyone confirms.
+ */
+const MIXED = checklist({
+  id: 'cl-mixed',
+  title: 'Mixed close',
+  templateId: 'tmpl-on',
+  items: [
+    { id: 'cl-mixed-done', label: 'Reconcile', done: true },
+    { id: 'cl-mixed-open', label: 'Send statements', done: false },
+  ],
+})
+/** Every step done — Push is refused server-side, so it must not be offered. */
+const ALL_DONE = checklist({
+  id: 'cl-alldone',
+  title: 'All done close',
+  templateId: 'tmpl-on',
+  items: [{ id: 'cl-alldone-done', label: 'Reconcile', done: true }],
+})
 
 const data = {
   clients: [CLIENT],
@@ -90,7 +110,15 @@ const data = {
     { id: LISA, name: 'Lisa Chen', role: 'Bookkeeper' },
     { id: OWNER, name: 'Patrice Owner', role: 'Owner' },
   ],
-  checklists: [SKIPPABLE, NOT_SKIPPABLE, ONE_OFF, ALREADY_SKIPPED, ALREADY_PUSHED],
+  checklists: [
+    SKIPPABLE,
+    NOT_SKIPPABLE,
+    ONE_OFF,
+    ALREADY_SKIPPED,
+    ALREADY_PUSHED,
+    MIXED,
+    ALL_DONE,
+  ],
   checklistTemplates: [template('tmpl-on', true), template('tmpl-off', false)],
   recycledChecklists: [],
   timeEntries: [],
@@ -326,6 +354,43 @@ describe('the push affordance', () => {
     )
     // Pushing is not skipping. Nothing was closed out.
     expect(skipChecklistOccurrence).not.toHaveBeenCalled()
+  })
+
+  it('says what a push will do, counting done and open steps separately', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Mixed close')).getByText(PUSH_LABEL))
+
+    const dialog = within(
+      screen.getByRole('group', { name: /Push Mixed close to a new date/i }),
+    )
+    expect(
+      dialog.getByText(/1 done step\(s\) stay here as a completed record/),
+    ).toBeInTheDocument()
+    expect(dialog.getByText(/1 open step\(s\) move to/)).toBeInTheDocument()
+  })
+})
+
+/**
+ * Split push (featreq-fbab3370): "pushing a checklist where every item is
+ * completed pushes no items and moves all of them to Complete." There is
+ * nothing left to carry forward once every step is done, so the server
+ * refuses with NOTHING_TO_PUSH — and the button that would trigger it is
+ * hidden, the same absence rule Skip already uses elsewhere in this file.
+ */
+describe('a complete checklist', () => {
+  it('offers no Push button — every step is already done', () => {
+    renderPage()
+    // A checklist with every step done sorts into the "Completed" GROUP
+    // (ChecklistsPage's own `ChecklistGroup`, class `checklist-group-header`),
+    // which mounts collapsed — its card isn't in the DOM at all until opened.
+    const completedToggle = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.checklist-group-header'),
+    ).find((button) => within(button).queryByText('Completed'))
+    fireEvent.click(completedToggle as HTMLButtonElement)
+
+    expect(
+      within(cardFor('All done close')).queryByText('Push to a new date'),
+    ).not.toBeInTheDocument()
   })
 })
 

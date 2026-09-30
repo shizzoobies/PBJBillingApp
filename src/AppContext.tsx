@@ -499,7 +499,11 @@ export type AppContextValue = {
    * Push this occurrence to a new due date — the task lives on rather than
    * closing out for the cycle. Same template gate and same required reason as a
    * skip, plus a date the server checks is later than the current due date.
-   * Completes nothing and unblocks nothing.
+   * Completes nothing and unblocks nothing that was open before — but when the
+   * checklist has a genuine mix of done and open steps (featreq-fbab3370), the
+   * server SPLITS it: the done steps stay behind as a completed record and a
+   * new checklist carries the open steps forward. This merges both rows into
+   * local state.
    */
   pushChecklistOccurrence: (
     checklistId: string,

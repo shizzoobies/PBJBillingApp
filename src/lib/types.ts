@@ -1423,6 +1423,19 @@ export type Checklist = {
   pushedAt?: string | null
   /** User id of whoever pushed it last. */
   pushedBy?: string | null
+  /**
+   * Split push (featreq-fbab3370): "pushing a checklist where every item is
+   * completed pushes no items and moves all of them to Complete." A push on a
+   * checklist with a genuine mix of done and open steps creates a NEW
+   * checklist carrying the open work forward and leaves this one behind,
+   * done-only. These two fields are the link between the two rows, set on
+   * OPPOSITE rows by `POST /api/checklists/:id/push` — the bulk save
+   * round-trips them untouched, the same as the push stamps above.
+   */
+  /** On the new row: the id of the done-only original it split off from. */
+  pushedFromChecklistId?: string | null
+  /** On the original: the id of the new row carrying its open work forward. */
+  pushedToChecklistId?: string | null
 }
 
 /**

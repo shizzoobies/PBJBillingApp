@@ -43,3 +43,4 @@ export function findChecklistInstance<T extends ChecklistInstanceIdentity>(
 
 export const CHECKLIST_INSTANCE_UNIQUE_INDEX: string
 export const CHECKLIST_INSTANCE_UNIQUE_INDEX_V2: string
+export const CHECKLIST_INSTANCE_UNIQUE_INDEX_V3: string

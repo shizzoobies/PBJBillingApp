@@ -226,3 +226,41 @@ describe('the push endpoint drops the opt-in the skip endpoint keeps', () => {
     expect(block).toContain('SKIP_NOT_ENABLED_MESSAGE')
   })
 })
+
+/**
+ * Split push (featreq-fbab3370): "pushing a checklist where every item is
+ * completed pushes no items and moves all of them to Complete." The store's
+ * `pushChecklistInstance` now decides between a plain move, a refusal, and a
+ * split — see db/store-staleness.test.mjs for that decision. This describe
+ * block pins the ROUTE's half: it has to translate the refusal into the exact
+ * 409 the spec promises, and it has to hand the skip-ledger entry and the
+ * response to whichever checklist actually carries the open work forward.
+ */
+describe('the push endpoint answers a split the way the spec promises', () => {
+  const serverSource = readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../server.js'),
+    'utf8',
+  )
+  const routeBlock = (startPattern: RegExp, length = 6200): string => {
+    const at = serverSource.search(startPattern)
+    expect(at, `route not found: ${startPattern}`).toBeGreaterThan(-1)
+    return serverSource.slice(at, at + length)
+  }
+
+  it('maps a NothingToPushError to 409 NOTHING_TO_PUSH with its message', () => {
+    const block = routeBlock(/const checklistPushMatch = normalizedPath\.match/)
+    expect(block).toContain('error instanceof NothingToPushError')
+    expect(block).toContain("sendJson(response, 409, { error: 'NOTHING_TO_PUSH', message: error.message })")
+  })
+
+  it('files the skip-ledger push entry against the checklist carrying the open work', () => {
+    const block = routeBlock(/const checklistPushMatch = normalizedPath\.match/)
+    expect(block).toMatch(/checklistId:\s*pushed\.id/)
+  })
+
+  it('responds with { checklist, completed } — the new shape, not { checklist, skip }', () => {
+    const block = routeBlock(/const checklistPushMatch = normalizedPath\.match/)
+    expect(block).toContain('sendJson(response, 200, { checklist: pushed, completed })')
+    expect(block).not.toMatch(/sendJson\(response, 200, \{ checklist: pushed, skip:/)
+  })
+})

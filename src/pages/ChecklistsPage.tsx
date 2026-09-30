@@ -1881,6 +1881,8 @@ function SkipTaskDialog({
   title,
   currentDueDate,
   defaultNewDueDate,
+  doneStepCount,
+  openStepCount,
   onCancel,
   onConfirm,
 }: {
@@ -1890,6 +1892,13 @@ function SkipTaskDialog({
   currentDueDate: string
   /** Pre-filled push date: the next cycle of this task's own schedule. */
   defaultNewDueDate: string
+  /**
+   * Split push (featreq-fbab3370): how many of this checklist's steps are
+   * already done vs. still open, so the dialog can say what a push will
+   * actually do before anyone confirms it. Unused in skip mode.
+   */
+  doneStepCount: number
+  openStepCount: number
   onCancel: () => void
   onConfirm: (input: {
     category: SkipReasonCategory
@@ -1938,10 +1947,12 @@ function SkipTaskDialog({
     >
       <p className="skip-task-dialog-lead">
         {isPush ? (
+          // Split push (featreq-fbab3370): say exactly what this push is about
+          // to do, since "nothing is completed" stopped being true the moment
+          // a checklist can carry a mix of done and open steps.
           <>
-            Pushing “{title}” to a new date. It stays on your list and stays open — nothing is
-            completed and nothing is skipped — and it keeps its place in the cycle, so the next
-            occurrence still generates as normal.
+            {doneStepCount} done step(s) stay here as a completed record; {openStepCount} open
+            step(s) move to {shortDate.format(new Date(`${newDueDate}T12:00:00`))}.
           </>
         ) : (
           <>
@@ -2164,9 +2175,12 @@ export function ChecklistCard({
   // Push is on EVERY task this viewer can edit, one-offs included — it does NOT
   // ride skipping's per-template opt-in any more (featreq-68638ed2: that flag is
   // on 6 of 150 templates, so the button was invisible). A projected ghost is
-  // still excluded: there is no instance yet to move.
+  // still excluded: there is no instance yet to move. A COMPLETE checklist is
+  // excluded too (featreq-fbab3370): every step is already done, so there is
+  // no open work left to carry forward and the server refuses with
+  // NOTHING_TO_PUSH.
   const canPush =
-    !checklist.projected && canOfferPush({ checklist, canWrite: canEditStructure })
+    !checklist.projected && !allDone && canOfferPush({ checklist, canWrite: canEditStructure })
   // The push date the dialog pre-fills: this task's own next cycle. A missing
   // template (a stray instance whose repeating setup was deleted) falls back to
   // a month, which is what the frequency helper defaults to anyway.
@@ -2502,6 +2516,8 @@ export function ChecklistCard({
           title={checklist.title}
           currentDueDate={checklist.dueDate}
           defaultNewDueDate={pushDefaultDueDate}
+          doneStepCount={completed}
+          openStepCount={checklist.items.length - completed}
           onCancel={() => setSkipOpen(null)}
           onConfirm={async ({ category, explanation, newDueDate }) => {
             if (skipOpen === 'push') {

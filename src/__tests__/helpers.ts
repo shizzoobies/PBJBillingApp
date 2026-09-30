@@ -29,6 +29,15 @@ export type FetchMockOptions = {
   sessionUser: SessionUser | null
   /** App data returned from /api/app-data once signed in. Defaults to the seed. */
   appData?: AppData
+  /**
+   * Extra routes a test needs beyond the fixed boot set below — a POST a
+   * single test is driving, say. Tried in order, before the built-in routes,
+   * against the request's path (query string stripped) and method. Return a
+   * `Response` to handle it, or `undefined` to fall through.
+   */
+  extraRoutes?: Array<
+    (path: string, method: string, body: unknown) => Response | undefined
+  >
 }
 
 /**
@@ -47,7 +56,7 @@ export const OWNER_SESSION: SessionUser = {
 export function installFetchMock(options: FetchMockOptions): void {
   const appData = options.appData ?? createSeedData()
 
-  const handler = vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+  const handler = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url =
       typeof input === 'string'
         ? input
@@ -55,6 +64,18 @@ export function installFetchMock(options: FetchMockOptions): void {
           ? input.toString()
           : input.url
     const path = url.split('?')[0]
+    const method = init?.method ?? 'GET'
+
+    if (options.extraRoutes) {
+      const body =
+        typeof init?.body === 'string' && init.body.length > 0
+          ? (JSON.parse(init.body) as unknown)
+          : undefined
+      for (const route of options.extraRoutes) {
+        const response = route(path, method, body)
+        if (response) return response
+      }
+    }
 
     if (path.endsWith('/api/session')) {
       return jsonResponse({ user: options.sessionUser })

@@ -250,3 +250,106 @@ describe('what a push is NOT', () => {
     expect(row.items.every((item) => !item.done)).toBe(true)
   })
 })
+
+/**
+ * Split push (featreq-fbab3370): "pushing a checklist where every item is
+ * completed pushes no items and moves all of them to Complete." A mixed push
+ * leaves TWO rows behind for one cycle — the done-only original
+ * (`pushedToChecklistId`) and the new checklist that inherits the cycle's
+ * identity (`pushedFromChecklistId`, `cycleDueDate`) the same way the
+ * no-split case stamps the single row it moves. This is exactly the shape
+ * `db/store.js`'s `pushChecklistInstance` split branch writes, and exactly
+ * the shape `CHECKLIST_INSTANCE_UNIQUE_INDEX_V3` exists to allow: both rows
+ * answer for the SAME identity tuple, which v2's predicate would have
+ * refused outright.
+ */
+describe('a SPLIT push — mixed done/open — does not respawn the cycle either', () => {
+  const cycleDue = dateOffset(-40)
+  const nextCycleDue = addMonths(cycleDue, 1)
+
+  function completedOriginal(over: Record<string, unknown> = {}) {
+    return {
+      id: 'cl-original',
+      title: 'Monthly Close',
+      clientId: 'client-1',
+      assigneeId: 'emp-1',
+      templateId: TEMPLATE_ID,
+      frequency: 'monthly',
+      dueDate: cycleDue,
+      pushedAt: new Date().toISOString(),
+      pushedBy: 'emp-1',
+      pushedToChecklistId: 'cl-split',
+      viewerIds: [],
+      editorIds: [],
+      caseId: 'case-original',
+      stageId: 'stage-1',
+      stageIndex: 0,
+      stageCount: 1,
+      items: [{ id: 'item-done', label: 'Reconcile bank feed', done: true }],
+      ...over,
+    }
+  }
+
+  function splitOpen(over: Record<string, unknown> = {}) {
+    return {
+      id: 'cl-split',
+      title: 'Monthly Close',
+      clientId: 'client-1',
+      assigneeId: 'emp-1',
+      templateId: TEMPLATE_ID,
+      frequency: 'monthly',
+      dueDate: nextCycleDue,
+      cycleDueDate: cycleDue,
+      pushedAt: new Date().toISOString(),
+      pushedBy: 'emp-1',
+      pushedFromChecklistId: 'cl-original',
+      viewerIds: [],
+      editorIds: [],
+      caseId: 'case-original',
+      stageId: 'stage-1',
+      stageIndex: 0,
+      stageCount: 1,
+      items: [{ id: 'item-open', label: 'Reconcile bank feed', done: false }],
+      ...over,
+    }
+  }
+
+  it('does not respawn the cycle it was pushed out of — both rows still answer for it', () => {
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [makeTemplate(cycleDue)],
+        checklists: [completedOriginal(), splitOpen()],
+      }),
+    )
+    const sameCycle = forTemplate(result.data.checklists).filter(
+      (row: Row) => (row.cycleDueDate ?? row.dueDate) === cycleDue,
+    )
+    expect(sameCycle.map((row: Row) => row.id).sort()).toEqual(['cl-original', 'cl-split'])
+  })
+
+  it('still generates the next cycle as its own distinct row, once', () => {
+    const result = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [makeTemplate(cycleDue)],
+        checklists: [completedOriginal(), splitOpen()],
+      }),
+    )
+    const fresh = forTemplate(result.data.checklists).filter(
+      (row: Row) => row.id !== 'cl-original' && row.id !== 'cl-split',
+    )
+    expect(fresh).toHaveLength(1)
+    expect(fresh[0].dueDate).toBe(nextCycleDue)
+    expect(fresh[0].cycleDueDate ?? null).toBeNull()
+  })
+
+  it('is idempotent — a second read adds nothing, for either row', () => {
+    const first = materializeRecurringChecklists(
+      makeData({
+        checklistTemplates: [makeTemplate(cycleDue)],
+        checklists: [completedOriginal(), splitOpen()],
+      }),
+    )
+    const second = materializeRecurringChecklists(first.data)
+    expect(second.data.checklists).toHaveLength(first.data.checklists.length)
+  })
+})

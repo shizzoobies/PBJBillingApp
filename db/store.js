@@ -11,6 +11,7 @@ import {
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
   CHECKLIST_INSTANCE_UNIQUE_INDEX_V2,
+  CHECKLIST_INSTANCE_UNIQUE_INDEX_V3,
   buildChecklistInstanceKeys,
   checklistInstanceKey,
   checklistMonthKey,
@@ -2522,6 +2523,21 @@ export class TimeEntrySplitError extends Error {
 }
 
 /**
+ * Thrown by `pushChecklistInstance` when every step on the occurrence is
+ * already done (featreq-fbab3370): there is no open work left to carry
+ * forward, so a push would move nothing. A FACT about the data, not a bug —
+ * same shape as `RetainerCreditError` and its siblings above. The route maps
+ * this to 409 `NOTHING_TO_PUSH`; the UI hides the Push button on a complete
+ * checklist so this is reachable only from a stale render or a direct call.
+ */
+export class NothingToPushError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'NothingToPushError'
+  }
+}
+
+/**
  * True only for a plain `YYYY-MM-DD` string whose year is in the sane window
  * (2000–2100) AND which round-trips as a real calendar date (so 2026-02-31 is
  * rejected). Conservative on purpose: a valid date returns true and is left
@@ -3920,6 +3936,21 @@ export class AppDataStore {
       await this.pool.query(`alter table checklists add column if not exists cycle_due_date date`)
       await this.pool.query(`alter table checklists add column if not exists pushed_at timestamptz`)
       await this.pool.query(`alter table checklists add column if not exists pushed_by text`)
+      // Split push (featreq-fbab3370): "pushing a checklist where every item is
+      // completed pushes no items and moves all of them to Complete." A mixed
+      // push (some done, some open) creates a NEW checklist that carries the
+      // open work forward and leaves the original behind holding only its done
+      // steps. These two columns are the link between them —
+      // `pushed_from_checklist_id` on the new row points back at the original,
+      // `pushed_to_checklist_id` on the original points forward at the new row.
+      // Declared here, ahead of the v3 unique index below, for the same reason
+      // `cycle_due_date` is declared ahead of v2: the index reads the column.
+      await this.pool.query(
+        `alter table checklists add column if not exists pushed_from_checklist_id text`,
+      )
+      await this.pool.query(
+        `alter table checklists add column if not exists pushed_to_checklist_id text`,
+      )
 
       // DUPLICATE-INSTANCE BACKSTOP.
       //
@@ -4002,6 +4033,57 @@ export class AppDataStore {
         }
       } finally {
         checklistIndexClient.release()
+      }
+
+      // SPLIT PUSH CHANGED THE TUPLE AGAIN — not the columns it reads (still
+      // `template_id, coalesce(cycle_due_date, due_date), stage_index`), but
+      // which ROWS count. A mixed push (featreq-fbab3370) creates a new
+      // checklist that inherits the SAME cycle identity the original row
+      // answered for, so the two would collide under v2's predicate the moment
+      // both exist un-deleted. `pushed_to_checklist_id is null` excludes the
+      // original once it has handed its identity to the new row — the same
+      // idea `deleted_at is null` already applies to the recycle bin.
+      //
+      // Same swap discipline as v1→v2: one transaction, build v3 before
+      // dropping v2, wrapped in try/catch so a boot never crashes over this.
+      const checklistIndexV3Client = await this.pool.connect()
+      let checklistIndexV3Created = false
+      try {
+        await checklistIndexV3Client.query('BEGIN')
+        await checklistIndexV3Client.query(`
+          create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3}
+            on checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
+            where deleted_at is null and template_id is not null and pushed_to_checklist_id is null
+        `)
+        checklistIndexV3Created = true
+        await checklistIndexV3Client.query(
+          `drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2}`,
+        )
+        await checklistIndexV3Client.query('COMMIT')
+      } catch (error) {
+        try {
+          await checklistIndexV3Client.query('ROLLBACK')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        if (checklistIndexV3Created) {
+          console.warn(
+            `[init] built ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3} but could not finish the swap, ` +
+              `so the whole swap was rolled back and ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} is ` +
+              `still the backstop. Not a data problem — this will be retried on the next boot. Reason:`,
+            error && error.message ? error.message : error,
+          )
+        } else {
+          console.warn(
+            `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3} — most likely duplicate ` +
+              `(template_id, cycle date, stage_index) rows still present among rows that have not ` +
+              `handed off their identity. New duplicates are still blocked in code; this will be ` +
+              `retried on the next boot. Reason:`,
+            error && error.message ? error.message : error,
+          )
+        }
+      } finally {
+        checklistIndexV3Client.release()
       }
 
       // Templates cloned from another template stamp their origin id so the UI
@@ -6302,7 +6384,8 @@ export class AppDataStore {
             select id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids,
                    case_id, stage_id, stage_index, stage_count, category_id, deleted_at,
                    deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by,
-                   skipped_at, skipped_by, cycle_due_date, pushed_at, pushed_by, period_label
+                   skipped_at, skipped_by, cycle_due_date, pushed_at, pushed_by,
+                   pushed_from_checklist_id, pushed_to_checklist_id, period_label
             from checklists
             order by due_date asc, id asc
           `),
@@ -6464,6 +6547,11 @@ export class AppDataStore {
           : null,
         pushedAt: row.pushed_at ? row.pushed_at.toISOString() : null,
         pushedBy: row.pushed_by ?? null,
+        // Split push (featreq-fbab3370): the link between a done-only original
+        // and the new checklist that carries its open work forward. Set on
+        // opposite rows — see `pushChecklistInstance`.
+        pushedFromChecklistId: row.pushed_from_checklist_id ?? null,
+        pushedToChecklistId: row.pushed_to_checklist_id ?? null,
         // COSMETIC ONLY — see lib/checklist-period-label.js. Nothing may read
         // this to decide anything; it is rendered beside the title and that is
         // the whole of it.
@@ -7111,23 +7199,30 @@ export class AppDataStore {
         )
 
         // The push stamps, by the same rule and for a sharper reason. These
-        // three are endpoint-owned (POST /api/checklists/:id/push is the only
-        // writer) and `cycle_due_date` is the row's IDENTITY — the unique index
-        // is built on `coalesce(cycle_due_date, due_date)`. The insert below is
+        // five are endpoint-owned (POST /api/checklists/:id/push is the only
+        // writer, for a plain move or for a split) and `cycle_due_date` is the
+        // row's IDENTITY — the unique index is built on
+        // `coalesce(cycle_due_date, due_date)`. The insert below is
         // `on conflict do nothing`, so a payload carrying a WRONG or MISSING
         // cycle date does not merely lose a stamp: it collides with some other
         // row's identity and the checklist AND every one of its items are
         // dropped from the save with nothing but a warn. What is stored wins;
-        // the payload's copy is ignored outright.
+        // the payload's copy is ignored outright. `pushed_from_checklist_id` /
+        // `pushed_to_checklist_id` get the same treatment: a stale tab does not
+        // carry the link between a split's two rows, and must not erase it.
         const priorChecklistPushStamps = new Map(
           (
-            await client.query(`select id, cycle_due_date, pushed_at, pushed_by from checklists`)
+            await client.query(
+              `select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id from checklists`,
+            )
           ).rows.map((row) => [
             row.id,
             {
               cycleDueDate: row.cycle_due_date ?? null,
               pushedAt: row.pushed_at ?? null,
               pushedBy: row.pushed_by ?? null,
+              pushedFromChecklistId: row.pushed_from_checklist_id ?? null,
+              pushedToChecklistId: row.pushed_to_checklist_id ?? null,
             },
           ]),
         )
@@ -7748,8 +7843,8 @@ export class AppDataStore {
           // we already have.
           const insertResult = await client.query(
             `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, skipped_at, skipped_by, cycle_due_date, pushed_at, pushed_by, period_label, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, now())
+              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, skipped_at, skipped_by, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, period_label, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, now())
               on conflict do nothing
             `,
             [
@@ -7789,6 +7884,11 @@ export class AppDataStore {
               storedPush ? storedPush.cycleDueDate : null,
               storedPush ? storedPush.pushedAt : null,
               storedPush ? storedPush.pushedBy : null,
+              // The split link, preserved the same way and for the same reason:
+              // only the push endpoint may ever set either id, so a payload's
+              // copy (present or absent) never gets a vote.
+              storedPush ? storedPush.pushedFromChecklistId : null,
+              storedPush ? storedPush.pushedToChecklistId : null,
               // Preserved like the skip stamps above: the bulk save wipes and
               // reinserts, and a column missing here is a label that vanishes on
               // the next autosave with no error anywhere.
@@ -8076,7 +8176,16 @@ export class AppDataStore {
             // would hand the instance to the materializer under a cycle it does
             // not belong to.
             if (prior) {
-              for (const field of ['cycleDueDate', 'pushedAt', 'pushedBy']) {
+              for (const field of [
+                'cycleDueDate',
+                'pushedAt',
+                'pushedBy',
+                // The split link (featreq-fbab3370): endpoint-owned exactly like
+                // the three above, and for the same reason — only
+                // `pushChecklistInstance` may ever set either id.
+                'pushedFromChecklistId',
+                'pushedToChecklistId',
+              ]) {
                 if (prior[field] == null) delete next[field]
                 else next[field] = prior[field]
               }
@@ -19541,44 +19650,235 @@ export class AppDataStore {
   }
 
   /**
-   * Push an instance to a new due date, keeping it alive (featreq-68638ed2).
+   * Push an instance to a new due date, keeping it alive (featreq-68638ed2) —
+   * extended by featreq-fbab3370 to carry only the OPEN work forward, per
+   * Brittany's acceptance: "pushing a checklist where every item is completed
+   * pushes no items and moves all of them to Complete."
    *
-   * `cycle_due_date = coalesce(cycle_due_date, due_date)` stamps the date the
-   * occurrence was ORIGINALLY due, once — a second push moves `due_date` again
-   * and leaves the cycle date alone, because the row still belongs to the cycle
-   * it was born in. That column is what the materializer's identity reads
-   * (lib/checklist-identity.js), so the cycle left behind is not respawned and
-   * the occurrence being pushed into does not collide with it.
+   * Three outcomes, decided by the split between done and open STEPS
+   * (top-level items; `rollUpItemDone` is what decides a step with sub-items):
    *
-   * Refuses a task that is skipped or in the recycle bin — both are closed out.
-   * Returns the updated checklist, or null.
+   *   - no done steps: unchanged from before — move the one row. `checklist`
+   *     is that row, `completed` is null.
+   *   - every step done (and there is at least one): nothing to carry
+   *     forward. Throws {@link NothingToPushError} rather than quietly
+   *     no-op'ing, so the route can tell this apart from "someone changed
+   *     this underneath you" (still a plain `null` return).
+   *   - a genuine mix: SPLIT. A brand-new checklist is created that carries
+   *     the OPEN steps (with their sub-items, waits, assignees and order) and
+   *     this occurrence's cycle identity forward — `cycleDueDate =
+   *     coalesce(original.cycleDueDate, original.dueDate)`, the exact stamp
+   *     the no-split case writes onto the row it moves. The original keeps
+   *     only its DONE steps (so it now reads complete and shows on the
+   *     Completed tab) and hands its identity off via `pushedToChecklistId`
+   *     — which is what {@link CHECKLIST_INSTANCE_UNIQUE_INDEX_V3} excludes,
+   *     so the two rows do not collide on
+   *     `(template_id, coalesce(cycle_due_date, due_date), stage_index)`; see
+   *     lib/checklist-identity.js. `checklist` is the new row, `completed` is
+   *     the original.
+   *
+   * Returns `{ checklist, completed }` on success — `checklist` always the
+   * row carrying the open work (the very row that moved, for a plain push) —
+   * or `null` when the row was not found, already skipped, or already
+   * recycled (a push closes nothing, so none of those may be pushed).
    */
   async pushChecklistInstance(checklistId, userId, newDueDate) {
     if (!checklistId || !newDueDate) return null
     if (this.pool) {
-      const result = await this.pool.query(
-        `update checklists
-            set cycle_due_date = coalesce(cycle_due_date, due_date),
-                due_date = $3,
-                pushed_at = now(),
-                pushed_by = $2
-          where id = $1 and deleted_at is null and skipped_at is null
-          returning id`,
-        [checklistId, userId ?? null, newDueDate],
-      )
-      if ((result.rowCount ?? 0) === 0) return null
-      const data = await this.read()
-      return (data.checklists ?? []).find((checklist) => checklist.id === checklistId) ?? null
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        const checklistRow = (
+          await client.query(
+            `select id, client_id, title, assignee_id, template_id, frequency, due_date,
+                    viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
+                    category_id, cycle_due_date, period_label
+               from checklists
+              where id = $1 and deleted_at is null and skipped_at is null
+              for update`,
+            [checklistId],
+          )
+        ).rows[0]
+        if (!checklistRow) {
+          await client.query('rollback')
+          return null
+        }
+        const itemRows = (
+          await client.query(
+            `select ${CHECKLIST_ITEM_SELECT_COLUMNS}
+               from checklist_items
+              where checklist_id = $1
+              order by sort_order asc, id asc`,
+            [checklistId],
+          )
+        ).rows
+        const items = itemRows.map((row) => mapChecklistItemRow(row))
+        const openItems = items.filter((item) => !rollUpItemDone(item))
+        const doneItems = items.filter((item) => rollUpItemDone(item))
+
+        if (items.length > 0 && openItems.length === 0) {
+          // Thrown, not returned: the outer catch below rolls this back
+          // exactly once — a second explicit rollback here would double up.
+          throw new NothingToPushError('Everything here is done. Nothing to push.')
+        }
+
+        if (doneItems.length === 0) {
+          // No done steps: today's behavior — move the same instance. The
+          // `for update` select above already locked and re-checked this row,
+          // but the guard is repeated here too — belt and suspenders costs
+          // nothing and keeps this statement's shape identical to before the
+          // split existed.
+          await client.query(
+            `update checklists
+                set cycle_due_date = coalesce(cycle_due_date, due_date),
+                    due_date = $3,
+                    pushed_at = now(),
+                    pushed_by = $2
+              where id = $1 and deleted_at is null and skipped_at is null`,
+            [checklistId, userId ?? null, newDueDate],
+          )
+          await client.query('commit')
+          const data = await this.read()
+          const checklist =
+            (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
+          return { checklist, completed: null }
+        }
+
+        // A genuine mix: split. The new row inherits the cycle identity the
+        // no-split branch above would have stamped onto THIS row.
+        const newChecklistId = `check-${randomUUID().slice(0, 8)}`
+        // One shared instant for pushed_at / created_at / updated_at, bound as
+        // a parameter rather than three separate `now()` calls — the balance
+        // check in db/store-staleness.test.mjs (column count == value count)
+        // walks these statements with a lazy paren match that stops at the
+        // FIRST `)`, so more than one `now()` inside one values list breaks it.
+        const splitNowIso = nowIso()
+        await client.query(
+          `
+            insert into checklists (
+              id, title, client_id, assignee_id, template_id, frequency, due_date,
+              viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
+              category_id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id,
+              period_label, created_at, updated_at
+            )
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+          `,
+          [
+            newChecklistId,
+            checklistRow.title,
+            checklistRow.client_id,
+            checklistRow.assignee_id,
+            checklistRow.template_id,
+            checklistRow.frequency,
+            newDueDate,
+            checklistRow.viewer_ids ?? [],
+            checklistRow.editor_ids ?? [],
+            checklistRow.case_id ?? checklistRow.id,
+            checklistRow.stage_id,
+            checklistRow.stage_index,
+            checklistRow.stage_count,
+            checklistRow.category_id,
+            checklistRow.cycle_due_date ?? checklistRow.due_date,
+            splitNowIso,
+            userId ?? null,
+            checklistId,
+            checklistRow.period_label,
+            splitNowIso,
+            splitNowIso,
+          ],
+        )
+
+        // Re-parent the OPEN items onto the new checklist, in one update per
+        // item rather than a rebuild: every other column (sub_items, waiting
+        // state, assignee, due date) rides along untouched, which is the only
+        // way to satisfy "with their sub-items, waits, assignees and order"
+        // without re-serializing anything.
+        for (const [index, item] of openItems.entries()) {
+          await client.query(
+            `update checklist_items set checklist_id = $1, sort_order = $2 where id = $3`,
+            [newChecklistId, index, item.id],
+          )
+        }
+
+        // The original keeps its done steps untouched and hands its identity
+        // off — see CHECKLIST_INSTANCE_UNIQUE_INDEX_V3.
+        await client.query(
+          `update checklists
+              set pushed_at = now(), pushed_by = $2, pushed_to_checklist_id = $3
+            where id = $1`,
+          [checklistId, userId ?? null, newChecklistId],
+        )
+
+        await client.query('commit')
+        const data = await this.read()
+        const checklist =
+          (data.checklists ?? []).find((entry) => entry.id === newChecklistId) ?? null
+        const completed =
+          (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
+        return { checklist, completed }
+      } catch (error) {
+        try {
+          await client.query('rollback')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        throw error
+      } finally {
+        client.release()
+      }
     }
+
     const data = await readJson(localDataPath)
     const target = (data.checklists ?? []).find((checklist) => checklist.id === checklistId)
     if (!target || target.deletedAt || target.skippedAt) return null
-    target.cycleDueDate = target.cycleDueDate ?? target.dueDate
-    target.dueDate = newDueDate
-    target.pushedAt = nowIso()
+    const items = Array.isArray(target.items) ? target.items : []
+    const openItems = items.filter((item) => !rollUpItemDone(item))
+    const doneItems = items.filter((item) => rollUpItemDone(item))
+
+    if (items.length > 0 && openItems.length === 0) {
+      throw new NothingToPushError('Everything here is done. Nothing to push.')
+    }
+
+    if (doneItems.length === 0) {
+      target.cycleDueDate = target.cycleDueDate ?? target.dueDate
+      target.dueDate = newDueDate
+      target.pushedAt = nowIso()
+      target.pushedBy = userId ?? null
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+      return { checklist: target, completed: null }
+    }
+
+    // A genuine mix: split, the same shape as the Postgres branch.
+    const now = nowIso()
+    const newChecklist = {
+      id: `check-${randomUUID().slice(0, 8)}`,
+      title: target.title,
+      clientId: target.clientId,
+      assigneeId: target.assigneeId,
+      templateId: target.templateId ?? null,
+      frequency: target.frequency ?? null,
+      dueDate: newDueDate,
+      viewerIds: Array.isArray(target.viewerIds) ? [...target.viewerIds] : [],
+      editorIds: Array.isArray(target.editorIds) ? [...target.editorIds] : [],
+      caseId: target.caseId ?? target.id,
+      stageId: target.stageId ?? null,
+      stageIndex: target.stageIndex,
+      stageCount: target.stageCount,
+      categoryId: target.categoryId ?? null,
+      periodLabel: target.periodLabel ?? null,
+      cycleDueDate: target.cycleDueDate ?? target.dueDate,
+      pushedAt: now,
+      pushedBy: userId ?? null,
+      pushedFromChecklistId: target.id,
+      items: openItems,
+    }
+    target.items = doneItems
+    target.pushedAt = now
     target.pushedBy = userId ?? null
+    target.pushedToChecklistId = newChecklist.id
+    data.checklists = [...(data.checklists ?? []), newChecklist]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return target
+    return { checklist: newChecklist, completed: target }
   }
 
   /**

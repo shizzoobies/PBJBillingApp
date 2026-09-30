@@ -14,6 +14,7 @@ import {
   INVOICE_SELECT_COLUMNS,
   InvoiceLockedError,
   ManualPaymentError,
+  NothingToPushError,
   PackageApplyError,
   ProposalStateError,
   RateVersionError,
@@ -988,6 +989,8 @@ function fakePostgres({
   timeEntryRows = [],
   holdingRows = [],
   checklistRows = [],
+  pushChecklistRows = [],
+  pushItemRows = [],
 } = {}) {
   const statements = []
   const record = (text, params) => {
@@ -1097,7 +1100,12 @@ function fakePostgres({
     // The bulk save's push-stamp snapshot, taken before the wipe. What is
     // STORED here wins over whatever the payload carried, so a fake that
     // answered nothing would make every push stamp look like a new row's.
-    if (/^select id, cycle_due_date, pushed_at, pushed_by from checklists$/i.test(trimmed)) {
+    // The split link (featreq-fbab3370) rides in the same snapshot.
+    if (
+      /^select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id from checklists$/i.test(
+        trimmed,
+      )
+    ) {
       return { rows: priorChecklistRows }
     }
     // `_refuseBillingMasterWrite`'s single-row lookup, and `createClient`'s
@@ -1154,6 +1162,27 @@ function fakePostgres({
     if (/^select id, client_id, title from checklists where id = \$1$/i.test(trimmed)) {
       const found = checklistRows.filter((row) => row.id === params?.[0])
       return { rows: found, rowCount: found.length }
+    }
+    // `pushChecklistInstance`'s `for update` read of the row it is about to
+    // push — anchored on its own column list (distinct from the split's task
+    // read above) so the two never cross-match.
+    if (
+      /^select id, client_id, title, assignee_id, template_id, frequency, due_date,[\s\S]*from checklists[\s\S]*where id = \$1 and deleted_at is null and skipped_at is null[\s\S]*for update$/i.test(
+        trimmed,
+      )
+    ) {
+      const found = pushChecklistRows.find((row) => row.id === params?.[0])
+      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
+    }
+    // `pushChecklistInstance`'s read of the row's current steps, used to
+    // decide plain move / refuse / split. Anchored on `CHECKLIST_ITEM_SELECT_
+    // COLUMNS` followed by the checklist_id where-clause this call alone uses.
+    if (
+      /^select id, checklist_id, label, done, sort_order[\s\S]*from checklist_items\s*where checklist_id = \$1\s*order by sort_order asc, id asc$/i.test(
+        trimmed,
+      )
+    ) {
+      return { rows: pushItemRows, rowCount: pushItemRows.length }
     }
     // The `for update` read a split adjustment starts with.
     if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
@@ -6705,7 +6734,9 @@ describe('quiet skip (file backend)', () => {
   // ---- Push (featreq-68638ed2): the same row, moved instead of closed out ----
 
   it('moves the due date and stamps the cycle it came from', async () => {
-    const updated = await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
+    const result = await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
+    expect(result.completed).toBeNull()
+    const updated = result.checklist
     expect(updated.dueDate).toBe('2026-09-30')
     // The date it was ORIGINALLY due — this is what identity reads, and losing
     // it would let the materializer respawn the cycle it was pushed out of.
@@ -6723,7 +6754,7 @@ describe('quiet skip (file backend)', () => {
 
   it('keeps the FIRST cycle date when a task is pushed a second time', async () => {
     await store.pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
-    const twice = await store.pushChecklistInstance('cl-1', 'emp-1', '2026-10-31')
+    const twice = (await store.pushChecklistInstance('cl-1', 'emp-1', '2026-10-31')).checklist
     expect(twice.dueDate).toBe('2026-10-31')
     // Still the original. The row belongs to the cycle it was born in however
     // many times it moves.
@@ -6747,7 +6778,8 @@ describe('quiet skip (file backend)', () => {
       }),
     )
 
-    const updated = await store.pushChecklistInstance('cl-oneoff', 'emp-1', '2026-09-30')
+    const updated = (await store.pushChecklistInstance('cl-oneoff', 'emp-1', '2026-09-30'))
+      .checklist
     expect(updated.dueDate).toBe('2026-09-30')
     expect(updated.pushedBy).toBe('emp-1')
     // Stamped harmlessly: with no template there is no identity tuple reading it.
@@ -6756,6 +6788,126 @@ describe('quiet skip (file backend)', () => {
     const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-oneoff')
     expect(row.dueDate).toBe('2026-09-30')
     expect(row.templateId ?? null).toBeNull()
+  })
+
+  // ---- Split push (featreq-fbab3370): done steps stay, open steps move ----
+
+  it('refuses a push when every step is already done — nothing to carry forward', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          instance({ id: 'cl-alldone', items: [{ id: 'item-1', label: 'Reconcile', done: true }] }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+
+    await expect(store.pushChecklistInstance('cl-alldone', 'emp-1', '2026-09-30')).rejects.toThrow(
+      NothingToPushError,
+    )
+    await expect(store.pushChecklistInstance('cl-alldone', 'emp-1', '2026-09-30')).rejects.toThrow(
+      'Everything here is done. Nothing to push.',
+    )
+    // Refused, not silently accepted: the row is untouched.
+    const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-alldone')
+    expect(row.dueDate).toBe('2026-08-31')
+    expect(row.pushedAt ?? null).toBeNull()
+  })
+
+  it('splits a MIXED push: done steps stay, open steps (with sub-items and waits) move', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            id: 'cl-mixed',
+            items: [
+              { id: 'item-done', label: 'Reconcile', done: true },
+              {
+                id: 'item-open',
+                label: 'Send statements',
+                done: false,
+                waiting: true,
+                subItems: [{ id: 'sub-1', title: 'Draft the email', done: false }],
+              },
+            ],
+          }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+
+    const { checklist: moved, completed } = await store.pushChecklistInstance(
+      'cl-mixed',
+      'emp-1',
+      '2026-09-30',
+    )
+
+    // The new checklist carries only the open step, whole — sub-items and the
+    // wait flag included — and this occurrence's cycle identity.
+    expect(moved.id).not.toBe('cl-mixed')
+    expect(moved.items.map((item) => item.id)).toEqual(['item-open'])
+    expect(moved.items[0].waiting).toBe(true)
+    expect(moved.items[0].subItems).toEqual([{ id: 'sub-1', title: 'Draft the email', done: false }])
+    expect(moved.dueDate).toBe('2026-09-30')
+    expect(moved.cycleDueDate).toBe('2026-08-31')
+    expect(moved.pushedFromChecklistId).toBe('cl-mixed')
+    // Identity fields copied, so the new row is recognizably the same task.
+    expect(moved.title).toBe('Monthly close')
+    expect(moved.clientId).toBe('c1')
+    expect(moved.templateId).toBe('tmpl-skip')
+
+    // The original keeps only its done step — it now reads complete — and
+    // hands its identity off to the new row.
+    expect(completed.id).toBe('cl-mixed')
+    expect(completed.items.map((item) => item.id)).toEqual(['item-done'])
+    expect(completed.pushedToChecklistId).toBe(moved.id)
+    expect(completed.dueDate).toBe('2026-08-31')
+
+    const persistedData = await persisted()
+    const movedRow = persistedData.checklists.find((entry) => entry.id === moved.id)
+    const originalRow = persistedData.checklists.find((entry) => entry.id === 'cl-mixed')
+    expect(movedRow.items).toHaveLength(1)
+    expect(originalRow.items).toHaveLength(1)
+    expect(originalRow.pushedToChecklistId).toBe(moved.id)
+    expect(movedRow.pushedFromChecklistId).toBe('cl-mixed')
+  })
+
+  it('survives a bulk save — pushedFromChecklistId / pushedToChecklistId round-trip', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            id: 'cl-mixed2',
+            items: [
+              { id: 'item-done', label: 'Reconcile', done: true },
+              { id: 'item-open', label: 'Send statements', done: false },
+            ],
+          }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+    const { checklist: moved } = await store.pushChecklistInstance('cl-mixed2', 'emp-1', '2026-09-30')
+
+    // The owner's tab round-trips BOTH rows the split left behind — neither
+    // row's link field is something the UI edits.
+    const persistedBefore = await persisted()
+    const originalRow = persistedBefore.checklists.find((entry) => entry.id === 'cl-mixed2')
+    const movedRow = persistedBefore.checklists.find((entry) => entry.id === moved.id)
+    await store.write(
+      workspace({
+        checklists: [originalRow, movedRow],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+
+    const after = await persisted()
+    expect(after.checklists.find((entry) => entry.id === 'cl-mixed2').pushedToChecklistId).toBe(
+      moved.id,
+    )
+    expect(after.checklists.find((entry) => entry.id === moved.id).pushedFromChecklistId).toBe(
+      'cl-mixed2',
+    )
   })
 
   it('files a one-off push on the review trail with a null template id', async () => {
@@ -6969,7 +7121,11 @@ describe('quiet skip (postgres branch)', () => {
   //     then drop index checklists_template_instance_uniq
 
   it('stamps the ORIGINAL cycle date once, and only ever moves due_date', async () => {
-    const fake = fakePostgres()
+    // No item rows (default `pushItemRows: []`) ⇒ no done steps ⇒ the plain
+    // no-split move, exactly like before the split existed.
+    const fake = fakePostgres({
+      pushChecklistRows: [{ id: 'cl-1', due_date: '2026-08-31', cycle_due_date: null }],
+    })
     await postgresStore(fake).pushChecklistInstance('cl-1', 'emp-1', '2026-09-30')
 
     const [statement] = fake.matching(/^update checklists\s+set cycle_due_date/i)
@@ -6986,6 +7142,100 @@ describe('quiet skip (postgres branch)', () => {
     // (featreq-68638ed2) pushes on Postgres exactly as it does on the file
     // backend — there is no per-template gate left in the write.
     expect(statement.text).not.toMatch(/template_id/i)
+  })
+
+  // ---- Split push (featreq-fbab3370), Postgres statement shapes ----
+
+  it('refuses in one transaction when every step is already done — no write at all', async () => {
+    const fake = fakePostgres({
+      pushChecklistRows: [{ id: 'cl-done', due_date: '2026-08-31', cycle_due_date: null }],
+      pushItemRows: [{ id: 'item-1', checklist_id: 'cl-done', label: 'Reconcile', done: true }],
+    })
+
+    await expect(
+      postgresStore(fake).pushChecklistInstance('cl-done', 'emp-1', '2026-09-30'),
+    ).rejects.toThrow(NothingToPushError)
+
+    expect(fake.matching(/^begin$/i)).toHaveLength(1)
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+    // Refused before any write: neither an UPDATE nor an INSERT ever touched
+    // the checklists table.
+    expect(fake.matching(/^update checklists\b/i)).toHaveLength(0)
+    expect(fake.matching(/^insert into checklists\b/i)).toHaveLength(0)
+  })
+
+  it('splits in one transaction: a new row is inserted, its open items are re-parented, the original hands off its identity', async () => {
+    const fake = fakePostgres({
+      pushChecklistRows: [
+        {
+          id: 'cl-mixed',
+          title: 'Monthly close',
+          client_id: 'c1',
+          assignee_id: 'emp-1',
+          template_id: 'tmpl-skip',
+          frequency: 'monthly',
+          due_date: '2026-08-31',
+          viewer_ids: [],
+          editor_ids: [],
+          case_id: 'cl-mixed',
+          stage_id: null,
+          stage_index: 0,
+          stage_count: 1,
+          category_id: null,
+          cycle_due_date: null,
+          period_label: null,
+        },
+      ],
+      pushItemRows: [
+        { id: 'item-done', checklist_id: 'cl-mixed', label: 'Reconcile', done: true, sort_order: 0 },
+        {
+          id: 'item-open',
+          checklist_id: 'cl-mixed',
+          label: 'Send statements',
+          done: false,
+          sort_order: 1,
+        },
+      ],
+    })
+
+    await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
+
+    // One transaction: begin → … → commit, never a rollback on the happy path.
+    expect(fake.matching(/^begin$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(1)
+    expect(fake.matching(/^rollback$/i)).toHaveLength(0)
+
+    const [insert] = fake.matching(/^insert into checklists \(/i)
+    expect(insert).toBeTruthy()
+    expect(insert.text).toMatch(/pushed_from_checklist_id/i)
+    // The new row's cycle_due_date inherits exactly what the no-split branch
+    // would have stamped onto the original: coalesce(cycle_due_date, due_date)
+    // computed in JS since this row was never pushed before.
+    expect(insert.params).toContain('2026-08-31')
+    expect(insert.params).toContain('cl-mixed') // pushed_from_checklist_id
+    expect(insert.params).toContain('2026-09-30') // the new row's due_date
+
+    const reparented = fake.matching(/^update checklist_items set checklist_id = \$1/i)
+    expect(reparented).toHaveLength(1)
+    expect(reparented[0].params[2]).toBe('item-open')
+    // The done step is never touched — no statement mentions it at all.
+    expect(fake.statements.some((s) => s.params?.includes('item-done'))).toBe(false)
+
+    const [handoff] = fake.matching(/^update checklists\s+set pushed_at = now\(\), pushed_by/i)
+    expect(handoff).toBeTruthy()
+    expect(handoff.text).toMatch(/pushed_to_checklist_id = \$3/i)
+    expect(handoff.params[0]).toBe('cl-mixed')
+
+    // The INSERT happens before the re-parent (the FK needs the row to exist
+    // first), and the hand-off UPDATE happens after — ordering that matters
+    // because `checklist_items.checklist_id` references `checklists(id)`.
+    expect(fake.statements.indexOf(insert)).toBeLessThan(
+      fake.statements.indexOf(reparented[0]),
+    )
+    expect(fake.statements.indexOf(reparented[0])).toBeLessThan(
+      fake.statements.indexOf(handoff),
+    )
   })
 
   it('files a ONE-OFF push with a null template_id — the column is nullable', async () => {
@@ -7067,6 +7317,9 @@ describe('quiet skip (postgres branch)', () => {
     // null. Losing `cycle_due_date` hands the row to the materializer under
     // the WRONG identity and respawns the cycle it was pushed out of.
     expect(statement.text).toMatch(/cycle_due_date, pushed_at, pushed_by/i)
+    // Same failure mode for the split link (featreq-fbab3370): missing it from
+    // the read loses the hand-off the moment the row round-trips.
+    expect(statement.text).toMatch(/pushed_from_checklist_id, pushed_to_checklist_id/i)
   })
 
   it('writes the STORED cycle_due_date / pushed_at / pushed_by through the bulk save', async () => {
@@ -7101,7 +7354,7 @@ describe('quiet skip (postgres branch)', () => {
     // The snapshot has to be taken BEFORE the wipe, or there is nothing left to
     // preserve from.
     const snapshotAt = fake.indexOf(
-      /^select id, cycle_due_date, pushed_at, pushed_by from checklists$/i,
+      /^select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id from checklists$/i,
     )
     expect(snapshotAt).toBeGreaterThan(-1)
     expect(snapshotAt).toBeLessThan(fake.indexOf(/^delete from checklists$/i))
@@ -7116,6 +7369,41 @@ describe('quiet skip (postgres branch)', () => {
     expect(statement.params).toContain('2026-08-20T10:00:00.000Z')
     expect(statement.params).toContain('emp-1')
     expect(statement.params).not.toContain('2026-12-31')
+  })
+
+  it('writes the STORED pushedFromChecklistId / pushedToChecklistId through the bulk save', async () => {
+    const fake = fakePostgres({
+      priorChecklistRows: [
+        {
+          id: 'cl-split',
+          cycle_due_date: '2026-08-31',
+          pushed_at: '2026-08-20T10:00:00.000Z',
+          pushed_by: 'emp-1',
+          pushed_from_checklist_id: 'cl-original',
+          pushed_to_checklist_id: null,
+        },
+      ],
+    })
+    await postgresStore(fake).write(
+      workspace({
+        checklists: [
+          {
+            id: 'cl-split',
+            title: 'Monthly close',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            dueDate: '2026-09-30',
+            items: [],
+            // A stale tab carries none of this — the split link is
+            // endpoint-owned, like the push stamps above.
+          },
+        ],
+      }),
+    )
+
+    const [statement] = fake.matching(/insert into checklists \(/i)
+    expect(statement.text).toMatch(/pushed_from_checklist_id, pushed_to_checklist_id/i)
+    expect(statement.params).toContain('cl-original')
   })
 
   it('carries skipped_at / skipped_by through the bulk save', async () => {
@@ -13457,7 +13745,9 @@ describe('the checklist period label round-trips the bulk save (file backend)', 
         expect(columns).toContain('period_coverage_anchor_due')
       }
     }
-    expect(statements).toBe(3)
+    // Split push (featreq-fbab3370) added a FOURTH: `pushChecklistInstance`'s
+    // own `insert into checklists (...)` for the new row a mixed push creates.
+    expect(statements).toBe(4)
   })
 })
 

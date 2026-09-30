@@ -2103,6 +2103,10 @@ export async function skipChecklistOccurrence(
  * alive rather than being closed out for the cycle. Same required reason as a
  * skip, plus the date; the SERVER enforces that the date is real and later than
  * the one the task is due on now.
+ *
+ * `checklist` always carries the OPEN work (the same row that moved, for a
+ * plain push); `completed` is the done-only original left behind by a SPLIT
+ * (featreq-fbab3370), or null when nothing was split off.
  */
 export async function pushChecklistOccurrence(
   checklistId: string,
@@ -2118,7 +2122,7 @@ export async function pushChecklistOccurrence(
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to push task (${response.status})`)
   }
-  return (await response.json()) as { checklist: Checklist; skip: ChecklistSkip }
+  return (await response.json()) as { checklist: Checklist; completed: Checklist | null }
 }
 
 /** Owner-only: every skip record ever filed, newest first (reviewed included). */
