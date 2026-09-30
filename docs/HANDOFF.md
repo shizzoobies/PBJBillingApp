@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-09-23. Everything below is committed on
+Written 2026-07-21, last updated 2026-09-29. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -25,9 +25,14 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-29):** `main` = `0f431aa` (+ this handoff), pushed,
-deployed, `/health` 200 with that commit. Suite **4094 tests / 211 files**,
-green. **09-29:** the Updates "Refine for dev" button (and every other AI
+**State right now (2026-09-29, afternoon):** `main` = `81b2be1` (+ this
+handoff), pushed, deployed, `/health` 200 with that commit. Suite **4096 tests
+/ 211 files**, green. Working tree clean. **09-29 afternoon:** the tracker was
+checked (read-only) and its two planned items, Brittany's 09-25 spitball
+requests, were filed as `needs_input` with a default-with-question each (queue
+item 0a below); the outage-memo regression test from the morning's review
+landed (`81b2be1`). Nothing is in flight; the queue is empty until she
+answers. **09-29 morning:** the Updates "Refine for dev" button (and every other AI
 feature that uses structured outputs) was failing on a provider-side outage of
 the JSON-schema grammar service — see the 2026-09-29 entry in section 5 for
 the diagnosis, the fix (plain-JSON retry on the same model, then a five-minute
@@ -403,7 +408,40 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
-**2026-09-29 — "The refining button isn't working": a provider-side outage of
+**2026-09-29 (afternoon) — Tracker check, two items routed to Brittany, and the
+outage-memo regression test (`2d7ded5`, `81b2be1`).** A read-only pass over
+`feature_requests` found Alex had moved both 09-25 spitball items to `planned`
+at 14:54 UTC with none of their open questions answered (no clarification
+answer, dev notes = the chat transcript only). Per the queue-run contract
+(§7: never best-guess an ambiguous item) both went to `needs_input` through
+`scripts/prod/tracker-update.mjs`, each question written as a default she can
+confirm or correct: `featreq-b688e73c` (pending notes) - pick the recurring
+checklist, it lands on the next occurrence that populates, Task-or-Note chosen
+at write time, anyone who can edit that client's checklists can add one,
+count on the client notes box, recurring notes later; `featreq-11ffb3a6`
+(statement box) - one line per account with a day-of-month pick, names offered
+from the reconciliation checklist plus manual add, or a single date per
+client. When she answers in-app the item returns to `planned` on its own: read
+`clarification_answer` FIRST, then build. Neither has been designed beyond
+those defaults - both touch the client page's notes area (`ClientsPage` /
+client detail) and the pending-notes one needs a materializer hook where a
+recurring instance populates. Nothing else in the tracker moved; the two
+`planned_not_eom` items are skipped outside the 6th-23rd anyway, and
+`featreq-79b6d974` (engagement-to-billing) is still parked `in_progress` from
+August pending its planning session.
+
+*The regression test* (`81b2be1`, `lib/assistant.test.mjs`, grammar outage
+memo block): arm the memo with one grammar 503, then a brainstorm
+(`modelFallback: false`) call whose single grammar-free request overloads must
+throw the capacity 503 after exactly one Opus request - proven to fail (two
+requests, Haiku reached) with the never-Haiku rule removed from `runModel`'s
+`canFallback`. A contrast case shows a fallback-allowed caller reaches Haiku
+under the same armed memo, grammar-free on both requests. Test-only plus this
+handoff; no manifest change, no voice re-provision. Railway took ~18 minutes
+from push to serving the new hash today - poll longer than ten minutes before
+calling a deploy stuck.
+
+**2026-09-29 (morning) — "The refining button isn't working": a provider-side outage of
 the structured-output grammar service, routed around (`c70300d`, then the
 outage memo `fed7925`).** Alex reported the Updates page's **Refine for dev**
 button failing. Production logs held the cause verbatim: every call carrying
