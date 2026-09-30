@@ -878,6 +878,7 @@ const PREVIEW_AWARE_API_PATTERNS = [
   /^\/api\/team\/[^/]+\/activity$/,
   /^\/api\/cases\/[^/]+$/,
   /^\/api\/clients\/[^/]+\/notes$/,
+  /^\/api\/clients\/[^/]+\/statement-accounts$/,
 ]
 
 function isPreviewAwareApiPath(normalizedPath) {
@@ -6191,6 +6192,69 @@ const server = createServer(async (request, response) => {
       }
       const removed = await appDataStore.deleteClientNote(noteId)
       sendJson(response, removed ? 200 : 404, removed ? { ok: true } : { error: 'Note not found' })
+      return
+    }
+
+    // Statement dates box: a reference-only per-client list of accounts and
+    // the day of the month each account's statement usually appears. Nothing
+    // else in the app reads it. Visible to (and savable by) the owner AND a
+    // client's assigned staff — endpoint-managed (NOT the owner-only bulk
+    // /api/app-data) so staff can save it. Gated by visibleClientIdSet, same
+    // as client notes.
+    const clientStatementAccountsMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/statement-accounts$/,
+    )
+    if (clientStatementAccountsMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const clientId = decodeURIComponent(clientStatementAccountsMatch[1])
+      const data = await appDataStore.read()
+      // Scoped, for the same reason as client notes: this opens from a link in
+      // the previewed workspace, so "may I read these" is the previewed
+      // person's question.
+      const scoped = await previewScopedSession(request, session, response, { data })
+      if (!scoped) return
+      const allowed = visibleClientIdSet(scoped, data)
+      if (!allowed.has(clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const accounts = await appDataStore.listClientStatementAccounts(clientId)
+      sendJson(response, 200, { accounts })
+      return
+    }
+
+    if (clientStatementAccountsMatch && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const clientId = decodeURIComponent(clientStatementAccountsMatch[1])
+      const data = await appDataStore.read()
+      const allowed = visibleClientIdSet(session, data)
+      if (!allowed.has(clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const accounts = await appDataStore.saveClientStatementAccounts(
+        clientId,
+        Array.isArray(payload?.accounts) ? payload.accounts : [],
+      )
+      const client = data.clients.find((entry) => entry.id === clientId)
+      await appDataStore.recordActivity(
+        session.user.id,
+        'client_statements_updated',
+        client?.name ?? clientId,
+      )
+      broadcastDataChanged()
+      sendJson(response, 200, { accounts })
       return
     }
 

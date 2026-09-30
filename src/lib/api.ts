@@ -15,6 +15,7 @@
   type PersistedInvoice,
   type PersistedInvoiceLine,
   type ClientNote,
+  type ClientStatementAccount,
   type FeatureRequest,
   type FeatureRequestType,
   type ItemDeletionRequest,
@@ -3689,6 +3690,48 @@ export async function deleteClientNote(clientId: string, noteId: string) {
     throw new ApiError(response.status, body?.error ?? `Failed to delete note (${response.status})`)
   }
   return (await response.json()) as { ok: boolean }
+}
+
+// ---- Statement dates box: reference-only accounts + day-of-month per client ----
+
+/** A client's statement accounts, in saved order. Owner or the client's assigned staff. */
+export async function listClientStatementAccountsRequest(clientId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/statement-accounts`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to load statement accounts (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { accounts: ClientStatementAccount[] }).accounts
+}
+
+/** Replace a client's whole statement-dates list. Returns the saved list. */
+export async function saveClientStatementAccountsRequest(
+  clientId: string,
+  accounts: Array<{ id?: string; name: string; dayOfMonth: number }>,
+) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/statement-accounts`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accounts }),
+    },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to save statement accounts (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { accounts: ClientStatementAccount[] }).accounts
 }
 
 export async function assistantFeatureRequestSend(draft: AssistantFeatureRequestDraft) {

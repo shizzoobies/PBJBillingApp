@@ -53,6 +53,7 @@ import {
 } from '../lib/api'
 import { applyPackageConfirmText } from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
+import { ClientStatementsPanel } from '../components/ClientStatementsPanel'
 import { useSaveFlash } from '../lib/useSaveFlash'
 import {
   ApiError,
@@ -376,6 +377,10 @@ export function ClientDetailPage() {
           </CollapsibleSection>
         </>
       ) : null}
+
+      <CollapsibleSection id="client-section-statements" kicker="Statements" title="Statement dates">
+        <ClientStatementsPanel clientId={client.id} />
+      </CollapsibleSection>
 
       <CollapsibleSection id="client-section-notes" kicker="Notes" title="Client notes">
         <ClientNotesPanel clientId={client.id} ownerMode={ownerMode} currentUserId={sessionUser.id} />

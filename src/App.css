@@ -8603,6 +8603,52 @@ button.repeating-task-toggle-pill {
   margin-bottom: 0;
 }
 
+/* ---- Statement dates box ---- */
+.statement-accounts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+}
+
+.statement-account-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.statement-account-row input[type='text'] {
+  flex: 1;
+}
+
+.statement-account-row select {
+  width: 90px;
+}
+
+.statement-account-remove {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  color: var(--muted);
+  display: flex;
+  height: 28px;
+  justify-content: center;
+  width: 28px;
+}
+
+.statement-account-remove:hover {
+  background: rgba(173, 48, 66, 0.12);
+  color: var(--red);
+}
+
+.statement-account-error {
+  color: var(--red);
+  font-size: 12px;
+  margin: 0;
+}
+
 /* ---- Client-list checklist + notes modal ---- */
 .client-checklist-modal {
   max-width: 760px;

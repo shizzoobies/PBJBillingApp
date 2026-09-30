@@ -75,6 +75,7 @@ const CHILD_TABLES = [
   'reimbursements',
   'recurring_reimbursements',
   'client_notes',
+  'client_statement_accounts',
   'item_deletion_requests',
   'sales_tax_records',
   'invoices',

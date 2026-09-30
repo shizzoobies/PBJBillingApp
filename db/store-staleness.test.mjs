@@ -6542,6 +6542,196 @@ describe('bulk save preserves checklist history (file backend)', () => {
 })
 
 /**
+ * Statement dates box (featreq-11ffb3a6) — the FILE backend, end to end.
+ *
+ * Reference-only per-client list: an account name and the day of the month
+ * its statement usually appears. Cardinal rule 1: this half proves the shape
+ * both branches implement (a whole-list replace, validated and capped); the
+ * Postgres half below pins the delete + insert transaction and its params.
+ */
+describe('statement dates box (file backend)', () => {
+  const authPersisted = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+
+  it('starts empty for a client with no rows saved yet', async () => {
+    expect(await store.listClientStatementAccounts('c-stmt-empty')).toEqual([])
+  })
+
+  it('saves a list and lists it back in saved order with minted ids', async () => {
+    const saved = await store.saveClientStatementAccounts('c-stmt-1', [
+      { name: 'TD Bank 4920', dayOfMonth: 12 },
+      { name: 'Amex 1108', dayOfMonth: 3 },
+    ])
+    expect(saved.map((row) => row.name)).toEqual(['TD Bank 4920', 'Amex 1108'])
+    expect(saved.map((row) => row.sortOrder)).toEqual([0, 1])
+    expect(saved.every((row) => row.id.startsWith('stmt-'))).toBe(true)
+
+    const listed = await store.listClientStatementAccounts('c-stmt-1')
+    expect(listed.map((row) => row.name)).toEqual(['TD Bank 4920', 'Amex 1108'])
+  })
+
+  it('replaces the whole list — a second save drops rows left out of it', async () => {
+    await store.saveClientStatementAccounts('c-stmt-2', [
+      { name: 'TD Bank 4920', dayOfMonth: 12 },
+      { name: 'Amex 1108', dayOfMonth: 3 },
+    ])
+    const second = await store.saveClientStatementAccounts('c-stmt-2', [
+      { name: 'Amex 1108', dayOfMonth: 5 },
+    ])
+    expect(second).toHaveLength(1)
+    const listed = await store.listClientStatementAccounts('c-stmt-2')
+    expect(listed).toHaveLength(1)
+    expect(listed[0].dayOfMonth).toBe(5)
+  })
+
+  it('keeps a row’s id across a re-save when the caller sends it back — an edit, not a new row', async () => {
+    const [first] = await store.saveClientStatementAccounts('c-stmt-3', [
+      { name: 'TD Bank 4920', dayOfMonth: 12 },
+    ])
+    const [second] = await store.saveClientStatementAccounts('c-stmt-3', [
+      { id: first.id, name: 'TD Bank 4920', dayOfMonth: 15 },
+    ])
+    expect(second.id).toBe(first.id)
+    expect(second.dayOfMonth).toBe(15)
+  })
+
+  it('never touches another client’s rows', async () => {
+    await store.saveClientStatementAccounts('c-stmt-4a', [{ name: 'A', dayOfMonth: 1 }])
+    await store.saveClientStatementAccounts('c-stmt-4b', [{ name: 'B', dayOfMonth: 2 }])
+    await store.saveClientStatementAccounts('c-stmt-4a', [{ name: 'A2', dayOfMonth: 3 }])
+    expect((await store.listClientStatementAccounts('c-stmt-4b'))[0].name).toBe('B')
+  })
+
+  it('drops a row with a blank name, or a day outside 1..31', async () => {
+    const saved = await store.saveClientStatementAccounts('c-stmt-5', [
+      { name: '  ', dayOfMonth: 5 },
+      { name: 'ZeroDay', dayOfMonth: 0 },
+      { name: 'TooLate', dayOfMonth: 32 },
+      { name: 'NotANumber', dayOfMonth: Number.NaN },
+      { name: 'Kept', dayOfMonth: 10 },
+    ])
+    expect(saved.map((row) => row.name)).toEqual(['Kept'])
+  })
+
+  it('trims a name and caps it at 120 characters', async () => {
+    const long = 'x'.repeat(200)
+    const [saved] = await store.saveClientStatementAccounts('c-stmt-6', [
+      { name: `  ${long}  `, dayOfMonth: 9 },
+    ])
+    expect(saved.name).toBe(long.slice(0, 120))
+  })
+
+  it('caps the list at 60 rows', async () => {
+    const rows = Array.from({ length: 65 }, (_, index) => ({
+      name: `Acct ${index}`,
+      dayOfMonth: 1,
+    }))
+    const saved = await store.saveClientStatementAccounts('c-stmt-7', rows)
+    expect(saved).toHaveLength(60)
+  })
+
+  it('persists in auth-state, not app-data — endpoint-managed like client notes', async () => {
+    await store.saveClientStatementAccounts('c-stmt-8', [{ name: 'X', dayOfMonth: 1 }])
+    const authState = await authPersisted()
+    expect(authState.clientStatementAccounts.some((row) => row.clientId === 'c-stmt-8')).toBe(
+      true,
+    )
+    const appData = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(appData.clientStatementAccounts).toBeUndefined()
+  })
+})
+
+/**
+ * Statement dates box — the POSTGRES branch: the delete + insert transaction
+ * and the params it sends, exactly what the file-backend half above cannot
+ * exercise (cardinal rule 1).
+ */
+describe('statement dates box (postgres branch)', () => {
+  it('replaces the whole list in one transaction: delete then insert, keyed by client_id', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).saveClientStatementAccounts('c1', [
+      { name: 'TD Bank 4920', dayOfMonth: 12 },
+      { name: 'Amex 1108', dayOfMonth: 3 },
+    ])
+
+    const beginAt = fake.indexOf(/^begin$/i)
+    const deleteAt = fake.indexOf(
+      /^delete from client_statement_accounts where client_id = \$1$/i,
+    )
+    const inserts = fake.matching(/^insert into client_statement_accounts/i)
+    const commitAt = fake.indexOf(/^commit$/i)
+
+    expect(beginAt).toBeGreaterThan(-1)
+    expect(deleteAt).toBeGreaterThan(beginAt)
+    expect(inserts).toHaveLength(2)
+    expect(fake.statements.indexOf(inserts[0])).toBeGreaterThan(deleteAt)
+    expect(commitAt).toBeGreaterThan(fake.statements.indexOf(inserts[1]))
+
+    const [deleteStatement] = fake.matching(/^delete from client_statement_accounts/i)
+    expect(deleteStatement.params).toEqual(['c1'])
+    // params: id, client_id, name, day_of_month, sort_order
+    expect(inserts[0].params[1]).toBe('c1')
+    expect(inserts[0].params[2]).toBe('TD Bank 4920')
+    expect(inserts[0].params[3]).toBe(12)
+    expect(inserts[0].params[4]).toBe(0)
+    expect(inserts[1].params[3]).toBe(3)
+    expect(inserts[1].params[4]).toBe(1)
+  })
+
+  it('rolls back rather than leaving a half-replaced list when a write fails', async () => {
+    const fake = fakePostgres()
+    const realConnect = fake.pool.connect.bind(fake.pool)
+    fake.pool.connect = async () => {
+      const client = await realConnect()
+      const realQuery = client.query.bind(client)
+      return {
+        ...client,
+        query: async (text, params) => {
+          if (/^insert into client_statement_accounts/i.test(String(text).trim())) {
+            throw new Error('boom')
+          }
+          return realQuery(text, params)
+        },
+      }
+    }
+
+    await expect(
+      postgresStore(fake).saveClientStatementAccounts('c1', [{ name: 'X', dayOfMonth: 1 }]),
+    ).rejects.toThrow('boom')
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+  })
+
+  it('reads the list back ordered by sort_order, scoped to one client', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).listClientStatementAccounts('c1')
+
+    const [statement] = fake.matching(
+      /^select id, client_id, name, day_of_month, sort_order/i,
+    )
+    expect(statement).toBeTruthy()
+    expect(statement.text).toMatch(/where client_id = \$1 order by sort_order asc/i)
+    expect(statement.params).toEqual(['c1'])
+  })
+
+  it('creates the table (with its 1..31 check) and the client_id index in initialize()', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+
+    const [created] = fake.matching(/create table if not exists client_statement_accounts/i)
+    expect(created).toBeTruthy()
+    expect(created.text).toMatch(/check \(day_of_month between 1 and 31\)/i)
+
+    const [indexed] = fake.matching(
+      /create index if not exists client_statement_accounts_client_idx/i,
+    )
+    expect(indexed).toBeTruthy()
+    expect(indexed.text).toMatch(/on client_statement_accounts \(client_id\)/i)
+  })
+})
+
+/**
  * Quiet skip — the FILE backend, end to end.
  *
  * Cardinal rule 1: `db/store.js` has two backends and any persisted change must

@@ -1656,6 +1656,20 @@ export type ClientNote = {
 }
 
 /**
+ * One row in a client's statement dates box: an account name and the day of
+ * the month its statement usually appears. Reference only — nothing else in
+ * the app reads this. Endpoint-managed (NOT part of the bulk app-data save),
+ * saved as the client's whole list at once.
+ */
+export type ClientStatementAccount = {
+  id: string
+  clientId: string
+  name: string
+  dayOfMonth: number
+  sortOrder: number
+}
+
+/**
  * Owner-configurable defaults applied when creating a NEW client. Lets the
  * firm set its house rate / terms / invoice prefs once instead of retyping
  * them on every new client. Only affects the Add-client form's starting

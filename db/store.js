@@ -3875,6 +3875,30 @@ export class AppDataStore {
         `create index if not exists client_notes_client_idx on client_notes (client_id)`,
       )
 
+      // Statement dates box: a reference-only per-client list of accounts and
+      // the day of the month each one's statement usually appears. Nothing
+      // else in the app reads this — it exists so staff stop hunting old
+      // statements for the date. Endpoint-managed (NOT part of the bulk
+      // /api/app-data wipe-and-reinsert) — exactly like client_notes — so the
+      // whole box is saved with one PUT and can't be clobbered by an autosave.
+      // `saveClientStatementAccounts` replaces a client's whole list in one
+      // transaction (delete + insert), which is why there is no update path.
+      await this.pool.query(`
+        create table if not exists client_statement_accounts (
+          id text primary key,
+          client_id text not null,
+          name text not null,
+          day_of_month int not null check (day_of_month between 1 and 31),
+          sort_order int not null default 0,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists client_statement_accounts_client_idx
+           on client_statement_accounts (client_id)`,
+      )
+
       // Item-level deletion requests: a NON-owner asks to delete a single
       // checklist item / sub-item / sub-sub-item; nothing is removed until an
       // owner approves. Endpoint-managed (NOT part of the bulk app-data write)
@@ -19139,6 +19163,102 @@ export class AppDataStore {
     const removed = authState.clientNotes.length < before
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return removed
+  }
+
+  // ---- Statement dates box: reference-only per-client account/day list ----
+  //
+  // Endpoint-managed (NOT part of the bulk /api/app-data write), like client
+  // notes — nothing else in the app reads this, and it must never be clobbered
+  // by an autosave. Stored in auth-state on the file backend,
+  // client_statement_accounts on pg. The panel always saves its whole box at
+  // once, so there is one write method that replaces a client's entire list
+  // rather than per-row create/update/delete.
+
+  /** A client's statement accounts, in saved (display) order. */
+  async listClientStatementAccounts(clientId) {
+    if (!clientId) return []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, name, day_of_month, sort_order
+           from client_statement_accounts where client_id = $1 order by sort_order asc`,
+        [clientId],
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        clientId: row.client_id,
+        name: row.name,
+        dayOfMonth: row.day_of_month,
+        sortOrder: row.sort_order,
+      }))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientStatementAccounts)
+      ? authState.clientStatementAccounts
+      : []
+    return list
+      .filter((row) => row.clientId === clientId)
+      .slice()
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+  }
+
+  /**
+   * Replace a client's whole statement-dates list. Rows are validated (name
+   * trimmed 1..120 chars, day an integer 1..31), capped at 60 rows, and
+   * re-sorted to match array order — a row's id is kept when the caller sent
+   * one (an edit), otherwise a fresh id is minted (a new row). One
+   * transaction on Postgres (delete then insert); a full replace of this
+   * client's slice on the file backend. Returns the saved list.
+   */
+  async saveClientStatementAccounts(clientId, rows) {
+    if (!clientId) return []
+    const clean = (Array.isArray(rows) ? rows : [])
+      .map((row) => ({
+        id: row?.id ? String(row.id) : null,
+        name: String(row?.name ?? '').trim().slice(0, 120),
+        day: Number(row?.dayOfMonth),
+      }))
+      .filter((row) => row.name && Number.isInteger(row.day) && row.day >= 1 && row.day <= 31)
+      .slice(0, 60)
+      .map((row, index) => ({
+        id: row.id || `stmt-${randomUUID().slice(0, 8)}`,
+        clientId,
+        name: row.name,
+        dayOfMonth: row.day,
+        sortOrder: index,
+      }))
+
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        await client.query(`delete from client_statement_accounts where client_id = $1`, [
+          clientId,
+        ])
+        for (const row of clean) {
+          await client.query(
+            `insert into client_statement_accounts
+               (id, client_id, name, day_of_month, sort_order, created_at, updated_at)
+             values ($1, $2, $3, $4, $5, now(), now())`,
+            [row.id, row.clientId, row.name, row.dayOfMonth, row.sortOrder],
+          )
+        }
+        await client.query('commit')
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
+      }
+      return clean
+    }
+
+    const authState = await readJson(localAuthPath)
+    const others = (
+      Array.isArray(authState.clientStatementAccounts) ? authState.clientStatementAccounts : []
+    ).filter((row) => row.clientId !== clientId)
+    authState.clientStatementAccounts = [...others, ...clean]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return clean
   }
 
   // ---- Item-level deletion requests (staff request → owner approves) ----
