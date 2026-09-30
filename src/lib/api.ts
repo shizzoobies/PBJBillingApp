@@ -3695,7 +3695,12 @@ export async function deleteClientNote(clientId: string, noteId: string) {
 
 // ---- Statement dates box: reference-only accounts + day-of-month per client ----
 
-/** A client's statement accounts, in saved order. Owner or the client's assigned staff. */
+/**
+ * A client's statement accounts, in saved order, plus the `version` fingerprint
+ * of that list — the panel keeps it and sends it back on save so a stale tab is
+ * told to reload instead of silently overwriting someone else's edit (see
+ * `saveClientStatementAccountsRequest`).
+ */
 export async function listClientStatementAccountsRequest(clientId: string) {
   const response = await apiFetch(
     `/api/clients/${encodeURIComponent(clientId)}/statement-accounts`,
@@ -3708,13 +3713,19 @@ export async function listClientStatementAccountsRequest(clientId: string) {
       body?.error ?? `Failed to load statement accounts (${response.status})`,
     )
   }
-  return ((await response.json()) as { accounts: ClientStatementAccount[] }).accounts
+  return (await response.json()) as { accounts: ClientStatementAccount[]; version: string }
 }
 
-/** Replace a client's whole statement-dates list. Returns the saved list. */
+/**
+ * Replace a client's whole statement-dates list. `version` is the fingerprint
+ * the panel last loaded (or saved); omit it to skip the staleness check. On a
+ * 409 the thrown `ApiError`'s `code` is `'stale_statement_accounts'` — the
+ * panel matches on that, not the sentence, to show its Reload prompt.
+ */
 export async function saveClientStatementAccountsRequest(
   clientId: string,
   accounts: Array<{ id?: string; name: string; dayOfMonth: number }>,
+  version?: string | null,
 ) {
   const response = await apiFetch(
     `/api/clients/${encodeURIComponent(clientId)}/statement-accounts`,
@@ -3722,17 +3733,18 @@ export async function saveClientStatementAccountsRequest(
       method: 'PUT',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accounts }),
+      body: JSON.stringify(version ? { accounts, version } : { accounts }),
     },
   )
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    const { message, code } = await safeError(response)
     throw new ApiError(
       response.status,
-      body?.error ?? `Failed to save statement accounts (${response.status})`,
+      message || `Failed to save statement accounts (${response.status})`,
+      code,
     )
   }
-  return ((await response.json()) as { accounts: ClientStatementAccount[] }).accounts
+  return (await response.json()) as { accounts: ClientStatementAccount[]; version: string }
 }
 
 // ---- Pending notes for future recurring checklists (featreq-b688e73c) ----

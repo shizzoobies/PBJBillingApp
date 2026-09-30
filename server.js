@@ -17,6 +17,8 @@ import {
   ProposalStateError,
   RateVersionError,
   RetainerCreditError,
+  StaleStatementAccountsError,
+  statementAccountsVersion,
   TimeEntrySplitError,
 } from './db/store.js'
 import {
@@ -6230,7 +6232,7 @@ const server = createServer(async (request, response) => {
         return
       }
       const accounts = await appDataStore.listClientStatementAccounts(clientId)
-      sendJson(response, 200, { accounts })
+      sendJson(response, 200, { accounts, version: statementAccountsVersion(accounts) })
       return
     }
 
@@ -6253,10 +6255,25 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = await readJsonBody(request)
-      const accounts = await appDataStore.saveClientStatementAccounts(
-        clientId,
-        Array.isArray(payload?.accounts) ? payload.accounts : [],
-      )
+      if (!Array.isArray(payload?.accounts)) {
+        sendJson(response, 400, { error: 'accounts must be an array' })
+        return
+      }
+      const expectedVersion = typeof payload?.version === 'string' ? payload.version : ''
+      let accounts
+      try {
+        accounts = await appDataStore.saveClientStatementAccounts(
+          clientId,
+          payload.accounts,
+          expectedVersion,
+        )
+      } catch (error) {
+        if (error instanceof StaleStatementAccountsError) {
+          sendJson(response, 409, { error: 'stale_statement_accounts', message: error.message })
+          return
+        }
+        throw error
+      }
       const client = data.clients.find((entry) => entry.id === clientId)
       await appDataStore.recordActivity(
         session.user.id,
@@ -6264,7 +6281,7 @@ const server = createServer(async (request, response) => {
         client?.name ?? clientId,
       )
       broadcastDataChanged()
-      sendJson(response, 200, { accounts })
+      sendJson(response, 200, { accounts, version: statementAccountsVersion(accounts) })
       return
     }
 

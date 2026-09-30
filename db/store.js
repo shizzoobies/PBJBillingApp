@@ -108,7 +108,7 @@ function writeFile(filePath, content) {
   return enqueueFileOperation(filePath, () => fsWriteFile(filePath, content))
 }
 import path from 'node:path'
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 
@@ -1087,6 +1087,22 @@ export class ProposalStateError extends Error {
   constructor(message) {
     super(message)
     this.name = 'ProposalStateError'
+  }
+}
+
+/**
+ * The statement dates box's save was sent a `version` that no longer matches
+ * the client's stored list (see `statementAccountsVersion` below) — another
+ * tab or another save landed first. Same idea as `StaleWorkspaceError` in
+ * lib/workspace-version.js, scaled down to one client's list instead of the
+ * whole bulk-save payload: nothing is written, and the route answers 409 with
+ * this message so the panel can show a Reload prompt instead of silently
+ * overwriting someone else's change.
+ */
+export class StaleStatementAccountsError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'StaleStatementAccountsError'
   }
 }
 
@@ -3452,6 +3468,25 @@ export function periodRestampPlan(template, instances) {
     plan.push({ id: instance.id, before, after })
   }
   return plan
+}
+
+/** A client-supplied statement-account id is kept only in this shape; anything else is a new row. */
+const STATEMENT_ACCOUNT_ID_PATTERN = /^stmt-[0-9a-f]{8}$/
+
+/**
+ * The stale-tab guard for the statement dates box: a stable fingerprint of one
+ * client's list, derived from the data itself rather than a bumped counter —
+ * same reasoning as the bulk-save fingerprint in lib/workspace-version.js, just
+ * scaled to one list instead of fifteen tables. `GET` hands this back beside
+ * the rows; `PUT` is sent it and refuses (409) when it no longer matches the
+ * stored list, so a save from a tab that loaded before someone else's change
+ * cannot silently replace it.
+ */
+export function statementAccountsVersion(rows) {
+  const parts = (Array.isArray(rows) ? rows : []).map(
+    (row) => `${row.id}|${row.name}|${row.dayOfMonth}`,
+  )
+  return createHash('sha1').update(parts.join('\n')).digest('hex')
 }
 
 export class AppDataStore {
@@ -19275,13 +19310,32 @@ export class AppDataStore {
   /**
    * Replace a client's whole statement-dates list. Rows are validated (name
    * trimmed 1..120 chars, day an integer 1..31), capped at 60 rows, and
-   * re-sorted to match array order — a row's id is kept when the caller sent
-   * one (an edit), otherwise a fresh id is minted (a new row). One
-   * transaction on Postgres (delete then insert); a full replace of this
-   * client's slice on the file backend. Returns the saved list.
+   * re-sorted to match array order — a row's id is kept only when the caller
+   * sent one shaped like `stmt-<8 hex>` AND it has not already appeared
+   * earlier in this same payload (an edit); otherwise a fresh id is minted (a
+   * new row) — a malformed or duplicated id is exactly the shape a bug (or a
+   * replayed chip click) would produce, and minting rather than trusting it
+   * keeps two rows from ever fighting over one id. One transaction on
+   * Postgres (delete then insert); a full replace of this client's slice on
+   * the file backend. Returns the saved list.
+   *
+   * `expectedVersion`, when sent, is checked against the CURRENT stored
+   * list's `statementAccountsVersion` before anything is written — a mismatch
+   * means another save landed first, and throws `StaleStatementAccountsError`
+   * instead of replacing it. Omitted (falsy), the check is skipped, so the
+   * API stays usable for callers that don't track it.
    */
-  async saveClientStatementAccounts(clientId, rows) {
+  async saveClientStatementAccounts(clientId, rows, expectedVersion) {
     if (!clientId) return []
+    if (expectedVersion) {
+      const current = await this.listClientStatementAccounts(clientId)
+      if (statementAccountsVersion(current) !== expectedVersion) {
+        throw new StaleStatementAccountsError(
+          'Someone else changed these dates. Reload and try again.',
+        )
+      }
+    }
+    const seenIds = new Set()
     const clean = (Array.isArray(rows) ? rows : [])
       .map((row) => ({
         id: row?.id ? String(row.id) : null,
@@ -19290,13 +19344,20 @@ export class AppDataStore {
       }))
       .filter((row) => row.name && Number.isInteger(row.day) && row.day >= 1 && row.day <= 31)
       .slice(0, 60)
-      .map((row, index) => ({
-        id: row.id || `stmt-${randomUUID().slice(0, 8)}`,
-        clientId,
-        name: row.name,
-        dayOfMonth: row.day,
-        sortOrder: index,
-      }))
+      .map((row, index) => {
+        const keepId =
+          row.id && STATEMENT_ACCOUNT_ID_PATTERN.test(row.id) && !seenIds.has(row.id)
+            ? row.id
+            : null
+        if (keepId) seenIds.add(keepId)
+        return {
+          id: keepId || `stmt-${randomUUID().slice(0, 8)}`,
+          clientId,
+          name: row.name,
+          dayOfMonth: row.day,
+          sortOrder: index,
+        }
+      })
 
     if (this.pool) {
       const client = await this.pool.connect()

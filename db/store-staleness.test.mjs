@@ -17,12 +17,14 @@ import {
   PackageApplyError,
   ProposalStateError,
   RateVersionError,
+  StaleStatementAccountsError,
   mapChecklistItemRow,
   mapClientRow,
   mapInvoiceRow,
   mapRecurringReimbursementRow,
   sanitizeAppData,
   sanitizeClientBillingLinks,
+  statementAccountsVersion,
 } from './store.js'
 import {
   BULK_SAVE_SLICES,
@@ -6638,6 +6640,87 @@ describe('statement dates box (file backend)', () => {
     const appData = JSON.parse(await readFile(localDataPath, 'utf8'))
     expect(appData.clientStatementAccounts).toBeUndefined()
   })
+
+  // Minor 4: a client-supplied id is only trusted in the exact shape the store
+  // mints (`stmt-<8 hex>`) and only once per payload — anything else is a bug
+  // (or a replayed chip click) that would otherwise let two rows fight over
+  // one id.
+  it('mints a fresh id rather than trusting one that does not match stmt-<8 hex>', async () => {
+    const [saved] = await store.saveClientStatementAccounts('c-stmt-9', [
+      { id: 'not-a-real-id', name: 'TD Bank 4920', dayOfMonth: 12 },
+    ])
+    expect(saved.id).not.toBe('not-a-real-id')
+    expect(saved.id).toMatch(/^stmt-[0-9a-f]{8}$/)
+  })
+
+  it('mints a fresh id for the second row when a client-supplied id repeats in the same payload', async () => {
+    const saved = await store.saveClientStatementAccounts('c-stmt-10', [
+      { id: 'stmt-aaaaaaaa', name: 'TD Bank 4920', dayOfMonth: 12 },
+      { id: 'stmt-aaaaaaaa', name: 'Amex 1108', dayOfMonth: 3 },
+    ])
+    expect(saved[0].id).toBe('stmt-aaaaaaaa')
+    expect(saved[1].id).not.toBe('stmt-aaaaaaaa')
+    expect(saved[1].id).toMatch(/^stmt-[0-9a-f]{8}$/)
+  })
+
+  // Important 2a: the stale-tab guard. `statementAccountsVersion` is a pure
+  // hash of the ordered rows — same value for the same list, different value
+  // once it changes.
+  describe('the version fingerprint and the staleness guard', () => {
+    it('is the same for the same ordered list and changes when the list does', async () => {
+      const saved = await store.saveClientStatementAccounts('c-stmt-11', [
+        { name: 'TD Bank 4920', dayOfMonth: 12 },
+      ])
+      const v1 = statementAccountsVersion(saved)
+      expect(statementAccountsVersion(await store.listClientStatementAccounts('c-stmt-11'))).toBe(
+        v1,
+      )
+      const saved2 = await store.saveClientStatementAccounts('c-stmt-11', [
+        { id: saved[0].id, name: 'TD Bank 4920', dayOfMonth: 15 },
+      ])
+      expect(statementAccountsVersion(saved2)).not.toBe(v1)
+    })
+
+    it('refuses a save whose expectedVersion no longer matches the stored list, and writes nothing', async () => {
+      await store.saveClientStatementAccounts('c-stmt-12', [
+        { name: 'TD Bank 4920', dayOfMonth: 12 },
+      ])
+      const staleVersion = 'not-the-current-version'
+      await expect(
+        store.saveClientStatementAccounts(
+          'c-stmt-12',
+          [{ name: 'Amex 1108', dayOfMonth: 3 }],
+          staleVersion,
+        ),
+      ).rejects.toThrow(StaleStatementAccountsError)
+      // Nothing was written — the original row is still there.
+      const listed = await store.listClientStatementAccounts('c-stmt-12')
+      expect(listed.map((row) => row.name)).toEqual(['TD Bank 4920'])
+    })
+
+    it('skips the check when no expectedVersion is sent, so the API stays usable', async () => {
+      await store.saveClientStatementAccounts('c-stmt-13', [
+        { name: 'TD Bank 4920', dayOfMonth: 12 },
+      ])
+      const saved = await store.saveClientStatementAccounts('c-stmt-13', [
+        { name: 'Amex 1108', dayOfMonth: 3 },
+      ])
+      expect(saved.map((row) => row.name)).toEqual(['Amex 1108'])
+    })
+
+    it('accepts a save whose expectedVersion matches the currently stored list', async () => {
+      const first = await store.saveClientStatementAccounts('c-stmt-14', [
+        { name: 'TD Bank 4920', dayOfMonth: 12 },
+      ])
+      const matching = statementAccountsVersion(first)
+      const saved = await store.saveClientStatementAccounts(
+        'c-stmt-14',
+        [{ id: first[0].id, name: 'TD Bank 4920', dayOfMonth: 15 }],
+        matching,
+      )
+      expect(saved[0].dayOfMonth).toBe(15)
+    })
+  })
 })
 
 /**
@@ -6711,6 +6794,83 @@ describe('statement dates box (postgres branch)', () => {
     expect(statement).toBeTruthy()
     expect(statement.text).toMatch(/where client_id = \$1 order by sort_order asc/i)
     expect(statement.params).toEqual(['c1'])
+  })
+
+  it('mints a fresh id rather than trusting a malformed or repeated client-supplied one', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).saveClientStatementAccounts('c1', [
+      { id: 'not-a-real-id', name: 'TD Bank 4920', dayOfMonth: 12 },
+      { id: 'stmt-aaaaaaaa', name: 'Amex 1108', dayOfMonth: 3 },
+      { id: 'stmt-aaaaaaaa', name: 'Chase 7712', dayOfMonth: 5 },
+    ])
+    const inserts = fake.matching(/^insert into client_statement_accounts/i)
+    expect(inserts).toHaveLength(3)
+    expect(inserts[0].params[0]).toMatch(/^stmt-[0-9a-f]{8}$/)
+    expect(inserts[0].params[0]).not.toBe('not-a-real-id')
+    expect(inserts[1].params[0]).toBe('stmt-aaaaaaaa')
+    expect(inserts[2].params[0]).not.toBe('stmt-aaaaaaaa')
+    expect(inserts[2].params[0]).toMatch(/^stmt-[0-9a-f]{8}$/)
+  })
+
+  // Important 2a, postgres branch: the stale-tab guard reads the CURRENT
+  // stored list (a plain select on `this.pool`) before the transaction opens
+  // at all — a mismatch must refuse without ever calling `begin`.
+  describe('the staleness guard', () => {
+    /** Points the version-check SELECT at a canned "currently stored" row,
+     *  leaving the transaction's own queries (begin/delete/insert/commit) on
+     *  the real fake so they still get recorded into `fake.statements`. */
+    function withCurrentRow(fake, row) {
+      const realQuery = fake.pool.query.bind(fake.pool)
+      fake.pool.query = async (text, params) => {
+        if (/^select id, client_id, name, day_of_month, sort_order/i.test(String(text).trim())) {
+          return { rows: [row] }
+        }
+        return realQuery(text, params)
+      }
+    }
+
+    it('refuses before the transaction opens when expectedVersion no longer matches', async () => {
+      const fake = fakePostgres()
+      withCurrentRow(fake, {
+        id: 'stmt-11111111',
+        client_id: 'c1',
+        name: 'TD Bank 4920',
+        day_of_month: 12,
+        sort_order: 0,
+      })
+
+      await expect(
+        postgresStore(fake).saveClientStatementAccounts(
+          'c1',
+          [{ name: 'Amex 1108', dayOfMonth: 3 }],
+          'not-the-current-version',
+        ),
+      ).rejects.toThrow(StaleStatementAccountsError)
+      expect(fake.matching(/^begin$/i)).toHaveLength(0)
+      expect(fake.matching(/^insert into client_statement_accounts/i)).toHaveLength(0)
+    })
+
+    it('proceeds with the transaction when expectedVersion matches the stored list', async () => {
+      const fake = fakePostgres()
+      withCurrentRow(fake, {
+        id: 'stmt-11111111',
+        client_id: 'c1',
+        name: 'TD Bank 4920',
+        day_of_month: 12,
+        sort_order: 0,
+      })
+      const matching = statementAccountsVersion([
+        { id: 'stmt-11111111', name: 'TD Bank 4920', dayOfMonth: 12 },
+      ])
+
+      await postgresStore(fake).saveClientStatementAccounts(
+        'c1',
+        [{ name: 'Amex 1108', dayOfMonth: 3 }],
+        matching,
+      )
+      expect(fake.matching(/^begin$/i)).toHaveLength(1)
+      expect(fake.matching(/^commit$/i)).toHaveLength(1)
+    })
   })
 
   it('creates the table (with its 1..31 check) and the client_id index in initialize()', async () => {
