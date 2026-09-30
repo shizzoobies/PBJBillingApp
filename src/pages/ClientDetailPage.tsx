@@ -118,6 +118,10 @@ export function ClientDetailPage() {
   const [trackingTime, setTrackingTime] = useState(false)
   // True while a retire/reactivate round-trip is in flight.
   const [lifecycleBusy, setLifecycleBusy] = useState(false)
+  // Pending-notes count (featreq-b688e73c) for the "Client notes" section's
+  // header pill — fetched inside ClientNotesPanel, reported up here so it can
+  // sit in the CollapsibleSection's header rather than its body.
+  const [pendingNoteCount, setPendingNoteCount] = useState(0)
 
   const client = useMemo(
     () => data.clients.find((entry) => entry.id === clientId),
@@ -382,8 +386,24 @@ export function ClientDetailPage() {
         <ClientStatementsPanel clientId={client.id} />
       </CollapsibleSection>
 
-      <CollapsibleSection id="client-section-notes" kicker="Notes" title="Client notes">
-        <ClientNotesPanel clientId={client.id} ownerMode={ownerMode} currentUserId={sessionUser.id} />
+      <CollapsibleSection
+        id="client-section-notes"
+        kicker="Notes"
+        title="Client notes"
+        headerAction={
+          pendingNoteCount > 0 ? (
+            <span className="pending-note-count-pill">
+              {pendingNoteCount} waiting for a checklist
+            </span>
+          ) : undefined
+        }
+      >
+        <ClientNotesPanel
+          clientId={client.id}
+          ownerMode={ownerMode}
+          currentUserId={sessionUser.id}
+          onPendingCountChange={setPendingNoteCount}
+        />
       </CollapsibleSection>
       </div>
       ) : null}

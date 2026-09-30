@@ -35,6 +35,7 @@ import {
   type SkipReasonCategory,
 } from '../../lib/checklist-skip.js'
 import { useAppContext } from '../AppContext'
+import { listPendingNotesForChecklistRequest } from '../lib/api'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { PeriodLabelChip } from '../components/PeriodLabelChip'
 import {
@@ -60,6 +61,7 @@ import type {
   ChecklistTemplate,
   ChecklistTemplateItem,
   Client,
+  ClientPendingNote,
   Employee,
   ItemDeletionRequest,
   PendingTaskEdit,
@@ -2018,6 +2020,57 @@ function SkipTaskDialog({
   )
 }
 
+/**
+ * "Notes from the client page" (featreq-b688e73c): a note flagged against
+ * this checklist's recurring template, kind 'note', that attached here once
+ * this checklist populated. Checklists have no notes field, so this reads
+ * from the pending-notes table instead — GET /api/checklists/:id/pending-notes
+ * — and renders read-only above the item list. Kind 'task' notes are excluded
+ * here: they already landed as an ordinary item.
+ */
+export function AttachedClientNotes({ checklistId }: { checklistId: string }) {
+  const [notes, setNotes] = useState<ClientPendingNote[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    void listPendingNotesForChecklistRequest(checklistId)
+      .then((list) => {
+        if (!cancelled) setNotes(list.filter((note) => note.kind === 'note'))
+      })
+      .catch(() => {
+        if (!cancelled) setNotes([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [checklistId])
+
+  if (notes.length === 0) return null
+
+  return (
+    <div className="checklist-client-notes">
+      <span className="field-label-row">Notes from the client page</span>
+      <ul className="checklist-client-notes-list">
+        {notes.map((note) => (
+          <li key={note.id}>
+            <span className="client-note-body">{note.body}</span>
+            <strong>{note.authorName || 'Unknown'}</strong>
+            {note.createdAt ? (
+              <span className="muted-text">
+                {new Date(note.createdAt).toLocaleDateString('en-US', {
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric',
+                })}
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 export function ChecklistCard({
   activeEmployeeId,
   checklist,
@@ -2519,6 +2572,7 @@ export function ChecklistCard({
           }}
         />
       </div>
+      {!checklist.projected ? <AttachedClientNotes checklistId={checklist.id} /> : null}
       {canEditStructure && checklist.items.length === 0 ? (
         <p className="checklist-empty-hint">No items yet — add one below.</p>
       ) : null}

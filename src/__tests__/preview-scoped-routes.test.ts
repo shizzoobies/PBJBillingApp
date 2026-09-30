@@ -128,6 +128,27 @@ describe('every leaking route now scopes by the previewed person', () => {
     expect(statementsBlock).toContain('visibleClientIdSet(session, data)')
   })
 
+  it('pending client notes follow the same split: GET scoped, POST/DELETE on the real session', () => {
+    // GET (list, for the client page) and POST (add) share one matcher —
+    // same shape as clientNotesMatch above: the GET opens from a link in the
+    // previewed workspace, the write does not.
+    const clientBlock = routeBlock(
+      /const clientPendingNotesMatch = normalizedPath\.match/,
+      3800,
+    )
+    expect(clientBlock).toContain('await previewScopedSession(request, session, response')
+    expect(clientBlock).toContain('visibleClientIdSet(scoped, data)')
+    expect(clientBlock).toContain('visibleClientIdSet(session, data)')
+
+    // The attached-side GET (for the checklist itself) is scoped the same way.
+    const checklistBlock = routeBlock(
+      /const checklistPendingNotesMatch = normalizedPath\.match/,
+      1200,
+    )
+    expect(checklistBlock).toContain('await previewScopedSession(request, session, response')
+    expect(checklistBlock).toContain('visibleClientIdSet(scoped, data)')
+  })
+
   it('the team activity log is gated on the PREVIEWED role, so a staffer preview 403s', () => {
     const block = routeBlock(/const teamActivityMatch = normalizedPath\.match/, 1200)
     expect(block).toContain('await previewScopedSession(request, session, response')
@@ -295,6 +316,8 @@ describe('the guard fails closed', () => {
     // The one deeper path that is allowlisted is named, not swept in.
     expect(patterns).toContain('/^\\/api\\/auth\\/totp\\/[^/?]*$/')
     expect(patterns).toContain('/^\\/api\\/clients\\/[^/]+\\/statement-accounts$/')
+    expect(patterns).toContain('/^\\/api\\/clients\\/[^/]+\\/pending-notes$/')
+    expect(patterns).toContain('/^\\/api\\/checklists\\/[^/]+\\/pending-notes$/')
   })
 })
 

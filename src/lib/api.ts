@@ -15,6 +15,7 @@
   type PersistedInvoice,
   type PersistedInvoiceLine,
   type ClientNote,
+  type ClientPendingNote,
   type ClientStatementAccount,
   type FeatureRequest,
   type FeatureRequestType,
@@ -3732,6 +3733,77 @@ export async function saveClientStatementAccountsRequest(
     )
   }
   return ((await response.json()) as { accounts: ClientStatementAccount[] }).accounts
+}
+
+// ---- Pending notes for future recurring checklists (featreq-b688e73c) ----
+
+/** A client's pending notes: pending + attached in the last 90 days, newest first. */
+export async function listClientPendingNotesRequest(clientId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/pending-notes`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to load pending notes (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { notes: ClientPendingNote[] }).notes
+}
+
+/** Flag a pending note against a recurring template. Returns the created note. */
+export async function addClientPendingNoteRequest(
+  clientId: string,
+  note: { templateId: string; kind: 'task' | 'note'; body: string },
+) {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/pending-notes`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(note),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to add pending note (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { note: ClientPendingNote }).note
+}
+
+/** Delete a pending note. Owner can delete any; staff only their own, while unattached. */
+export async function deleteClientPendingNoteRequest(clientId: string, noteId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/pending-notes/${encodeURIComponent(noteId)}`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to delete pending note (${response.status})`,
+    )
+  }
+  return (await response.json()) as { ok: boolean }
+}
+
+/** Notes attached to one checklist (kind 'note' to show, kind 'task' for the link back). */
+export async function listPendingNotesForChecklistRequest(checklistId: string) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/pending-notes`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to load checklist notes (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { notes: ClientPendingNote[] }).notes
 }
 
 export async function assistantFeatureRequestSend(draft: AssistantFeatureRequestDraft) {

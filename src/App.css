@@ -8649,6 +8649,91 @@ button.repeating-task-toggle-pill {
   margin: 0;
 }
 
+/* ---- Pending notes for future recurring checklists (featreq-b688e73c) ---- */
+.pending-client-notes {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+}
+
+.pending-note-textarea {
+  margin-top: 6px;
+  resize: vertical;
+  width: 100%;
+}
+
+.pending-note-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.pending-note-kind {
+  align-items: center;
+  display: flex;
+  font-size: 13px;
+  gap: 4px;
+}
+
+.pending-note-count-pill {
+  background: var(--accent-soft, rgba(46, 107, 196, 0.12));
+  border-radius: 999px;
+  color: var(--accent, #2e6bc4);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
+.pending-client-notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.pending-client-note {
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 8px;
+}
+
+.pending-client-note.attached {
+  opacity: 0.65;
+}
+
+.pending-note-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pending-note-attached {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.checklist-client-notes {
+  background: var(--surface-muted, rgba(0, 0, 0, 0.03));
+  border-radius: 8px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+}
+
+.checklist-client-notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
 /* ---- Client-list checklist + notes modal ---- */
 .client-checklist-modal {
   max-width: 760px;

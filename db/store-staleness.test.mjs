@@ -6732,6 +6732,716 @@ describe('statement dates box (postgres branch)', () => {
 })
 
 /**
+ * Pending notes for future recurring checklists (featreq-b688e73c) — the FILE
+ * backend, end to end: create/list/delete and the 90-day history window.
+ * The attach pass (the part that moves a note onto the next checklist that
+ * populates) gets its own describe block below, because it needs full
+ * checklist fixtures rather than just the notes table.
+ */
+describe('pending client notes (file backend)', () => {
+  const authPersisted = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+
+  it('starts empty for a client with no notes yet', async () => {
+    expect(await store.listClientPendingNotes('c-pn-empty')).toEqual([])
+  })
+
+  it('creates a note and lists it back newest first, unattached', async () => {
+    const first = await store.createClientPendingNote('c-pn-1', {
+      templateId: 'tpl-payroll',
+      kind: 'task',
+      body: 'New hire starting — add onboarding paperwork',
+      authorId: 'emp-lisa',
+      authorName: 'Lisa',
+    })
+    expect(first.id).toMatch(/^pnote-/)
+    expect(first.attachedChecklistId).toBeNull()
+
+    const second = await store.createClientPendingNote('c-pn-1', {
+      templateId: 'tpl-payroll',
+      kind: 'note',
+      body: 'Second note',
+      authorId: 'emp-lisa',
+      authorName: 'Lisa',
+    })
+    // Two creates this close together can land in the same millisecond, which
+    // would make "newest first" untestable by timing alone — force a gap the
+    // same way the 90-day-window test below forces an age.
+    const authState = await authPersisted()
+    const secondRow = authState.clientPendingNotes.find((entry) => entry.id === second.id)
+    secondRow.createdAt = new Date(new Date(first.createdAt).getTime() + 1000).toISOString()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    const listed = await store.listClientPendingNotes('c-pn-1')
+    expect(listed.map((note) => note.id)).toEqual([second.id, first.id])
+  })
+
+  it('rejects a missing template, an invalid kind, or a blank body', async () => {
+    expect(
+      await store.createClientPendingNote('c-pn-2', {
+        templateId: '',
+        kind: 'task',
+        body: 'x',
+      }),
+    ).toBeNull()
+    expect(
+      await store.createClientPendingNote('c-pn-2', {
+        templateId: 'tpl-1',
+        kind: 'reminder',
+        body: 'x',
+      }),
+    ).toBeNull()
+    expect(
+      await store.createClientPendingNote('c-pn-2', {
+        templateId: 'tpl-1',
+        kind: 'task',
+        body: '   ',
+      }),
+    ).toBeNull()
+  })
+
+  it('trims the body and caps it at 2000 characters', async () => {
+    const long = 'x'.repeat(2100)
+    const note = await store.createClientPendingNote('c-pn-3', {
+      templateId: 'tpl-1',
+      kind: 'note',
+      body: `  ${long}  `,
+    })
+    expect(note.body).toBe(long.slice(0, 2000))
+  })
+
+  it('deletes a note by id', async () => {
+    const note = await store.createClientPendingNote('c-pn-4', {
+      templateId: 'tpl-1',
+      kind: 'note',
+      body: 'x',
+    })
+    expect(await store.deleteClientPendingNote(note.id)).toBe(true)
+    expect(await store.listClientPendingNotes('c-pn-4')).toEqual([])
+    expect(await store.deleteClientPendingNote(note.id)).toBe(false)
+  })
+
+  it('never touches another client’s notes', async () => {
+    await store.createClientPendingNote('c-pn-5a', { templateId: 'tpl-1', kind: 'note', body: 'A' })
+    await store.createClientPendingNote('c-pn-5b', { templateId: 'tpl-1', kind: 'note', body: 'B' })
+    const listed = await store.listClientPendingNotes('c-pn-5a')
+    expect(listed).toHaveLength(1)
+    expect(listed[0].body).toBe('A')
+  })
+
+  it('persists in auth-state, not app-data — endpoint-managed like client notes', async () => {
+    await store.createClientPendingNote('c-pn-6', { templateId: 'tpl-1', kind: 'note', body: 'X' })
+    const authState = await authPersisted()
+    expect(authState.clientPendingNotes.some((note) => note.clientId === 'c-pn-6')).toBe(true)
+    const appData = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(appData.clientPendingNotes).toBeUndefined()
+  })
+
+  it('lists an attached note within the last 90 days, and drops it once older', async () => {
+    const note = await store.createClientPendingNote('c-pn-7', {
+      templateId: 'tpl-1',
+      kind: 'note',
+      body: 'X',
+    })
+    // Stamp it attached directly (bypassing the attach pass — that's tested on
+    // its own below) so this test is only about the 90-day window.
+    const authState = await authPersisted()
+    const row = authState.clientPendingNotes.find((entry) => entry.id === note.id)
+    row.attachedChecklistId = 'chk-somewhere'
+    row.attachedAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    expect((await store.listClientPendingNotes('c-pn-7')).map((entry) => entry.id)).toEqual([
+      note.id,
+    ])
+
+    row.attachedAt = new Date(Date.now() - 120 * 24 * 60 * 60 * 1000).toISOString()
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    expect(await store.listClientPendingNotes('c-pn-7')).toEqual([])
+  })
+})
+
+/**
+ * The attach pass (`attachPendingClientNotes`) — the FILE backend. This is
+ * the part the pure materializer cannot do itself: it runs independently of
+ * `read()` here so each test can hand it exact `createdAt`/`dueDate` values
+ * (a materializer-spawned checklist carries neither by default). The wiring
+ * that decides WHEN this runs relative to `read()` is pinned separately below.
+ */
+describe('pending client notes — attach pass (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  const checklistFixture = (id, { createdAt, dueDate, deletedAt, skippedAt, clientId = 'c1' }) => ({
+    id,
+    title: 'Payroll',
+    clientId,
+    assigneeId: 'emp-1',
+    templateId: 'tpl-pn',
+    dueDate,
+    createdAt,
+    viewerIds: [],
+    editorIds: [],
+    items: [{ id: 'item-existing', label: 'Existing step', done: false }],
+    ...(deletedAt ? { deletedAt } : {}),
+    ...(skippedAt ? { skippedAt } : {}),
+  })
+
+  it('picks the earliest later checklist, ignoring earlier, deleted and skipped ones', async () => {
+    const note = await store.createClientPendingNote('c1', {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'New hire starting',
+      authorId: 'emp-lisa',
+      authorName: 'Lisa',
+    })
+    const t = new Date(note.createdAt).getTime()
+    const iso = (offsetMs) => new Date(t + offsetMs).toISOString()
+
+    await store.write(
+      workspace({
+        checklists: [
+          checklistFixture('chk-earlier', { createdAt: iso(-1000), dueDate: '2026-08-01' }),
+          checklistFixture('chk-deleted', {
+            createdAt: iso(1000),
+            dueDate: '2026-09-01',
+            deletedAt: iso(2000),
+          }),
+          checklistFixture('chk-skipped', {
+            createdAt: iso(1000),
+            dueDate: '2026-09-05',
+            skippedAt: iso(2000),
+          }),
+          checklistFixture('chk-later-far', { createdAt: iso(2000), dueDate: '2026-10-01' }),
+          checklistFixture('chk-later-near', { createdAt: iso(1000), dueDate: '2026-09-10' }),
+          // A different client's checklist of the same template must never match.
+          checklistFixture('chk-other-client', {
+            createdAt: iso(1000),
+            dueDate: '2026-09-02',
+            clientId: 'c-other',
+          }),
+        ],
+      }),
+    )
+
+    const attachedCount = await store.attachPendingClientNotes({ clientId: 'c1' })
+    expect(attachedCount).toBe(1)
+
+    const updated = await store.getClientPendingNote(note.id)
+    expect(updated.attachedChecklistId).toBe('chk-later-near')
+    const expectedItemId = `item-pn-${note.id.replace(/^pnote-/, '')}`
+    expect(updated.attachedItemId).toBe(expectedItemId)
+    expect(updated.attachedAt).toBeTruthy()
+
+    const target = (await persisted()).checklists.find((c) => c.id === 'chk-later-near')
+    expect(target.items.at(-1)).toMatchObject({
+      id: expectedItemId,
+      label: 'New hire starting',
+      done: false,
+    })
+    // The other candidates were left alone.
+    for (const id of ['chk-earlier', 'chk-deleted', 'chk-skipped', 'chk-later-far']) {
+      const checklist = (await persisted()).checklists.find((c) => c.id === id)
+      expect(checklist.items).toHaveLength(1)
+    }
+  })
+
+  it('is idempotent: a second pass attaches nothing more and does not duplicate the item', async () => {
+    const note = await store.createClientPendingNote('c1', {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'New hire starting',
+    })
+    const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
+    await store.write(
+      workspace({
+        checklists: [checklistFixture('chk-pn-idem', { createdAt: later, dueDate: '2026-09-10' })],
+      }),
+    )
+
+    expect(await store.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+    expect(await store.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+
+    const target = (await persisted()).checklists.find((c) => c.id === 'chk-pn-idem')
+    expect(target.items).toHaveLength(2)
+  })
+
+  it('kind "note" only stamps the checklist id — no item is inserted', async () => {
+    const note = await store.createClientPendingNote('c1', {
+      templateId: 'tpl-pn',
+      kind: 'note',
+      body: 'Heads up for next cycle',
+    })
+    const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
+    await store.write(
+      workspace({
+        checklists: [checklistFixture('chk-pn-note', { createdAt: later, dueDate: '2026-09-10' })],
+      }),
+    )
+
+    await store.attachPendingClientNotes({ clientId: 'c1' })
+
+    const updated = await store.getClientPendingNote(note.id)
+    expect(updated.attachedChecklistId).toBe('chk-pn-note')
+    expect(updated.attachedItemId).toBeNull()
+    const target = (await persisted()).checklists.find((c) => c.id === 'chk-pn-note')
+    expect(target.items).toHaveLength(1)
+
+    const notesForChecklist = await store.listPendingNotesForChecklist('chk-pn-note')
+    expect(notesForChecklist.map((entry) => entry.id)).toEqual([note.id])
+  })
+
+  it('does nothing when no checklist of that template exists yet for this client', async () => {
+    // A client of its own, untouched by the other tests' checklist fixtures —
+    // so this only exercises "nothing matches", not test ordering.
+    const note = await store.createClientPendingNote('c-pn-nomatch', {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'x',
+    })
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-nomatch' })).toBe(0)
+    expect((await store.getClientPendingNote(note.id)).attachedChecklistId).toBeNull()
+  })
+
+  it('cheap no-op with nothing pending: touches neither app-data nor auth-state', async () => {
+    // Scoped to a client that has never had a pending note in this run, so the
+    // "nothing pending" fast path is exercised regardless of what other tests
+    // in this file left unattached.
+    const before = await persisted()
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-truly-empty' })).toBe(0)
+    expect(await persisted()).toEqual(before)
+  })
+})
+
+/**
+ * `read()`'s pending-notes attach pass wiring: the pass runs only when its
+ * guarded materializer write-back actually SUCCEEDS, never when the write-back
+ * is refused as stale — otherwise a note could attach against a checklist that
+ * was never actually persisted (`attachPendingClientNotes`'s own doc comment).
+ * Reuses the exact interleaving technique the write-back guard tests above use.
+ */
+describe("read()'s pending-notes attach pass wiring (file backend)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const utcDaysAgo = (days) =>
+    new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+
+  const spawnableWorkspace = () =>
+    workspace({
+      clients: [{ id: 'c1', name: 'Acme' }],
+      checklists: [
+        {
+          id: 'chk-1',
+          title: 'Existing task',
+          clientId: 'c1',
+          assigneeId: 'emp-1',
+          templateId: null,
+          frequency: 'once',
+          dueDate: utcDaysAgo(1),
+          caseId: 'chk-1',
+          stageId: null,
+          stageIndex: 0,
+          stageCount: 1,
+          items: [{ id: 'item-1', label: 'Reconcile the bank feed', done: false }],
+        },
+      ],
+      checklistTemplates: [
+        {
+          id: 'tpl-1',
+          title: 'Monthly bookkeeping',
+          clientId: 'c1',
+          assigneeId: 'emp-1',
+          frequency: 'monthly',
+          nextDueDate: utcDaysAgo(1),
+          active: true,
+          isStandard: false,
+          viewerIds: [],
+          editorIds: [],
+          stages: [
+            {
+              id: 'stage-1',
+              name: 'Stage 1',
+              assigneeId: 'emp-1',
+              offsetDays: 0,
+              viewerIds: [],
+              editorIds: [],
+              items: [{ id: 'ti-1', label: 'Close the month' }],
+            },
+          ],
+        },
+      ],
+    })
+
+  it('runs the attach pass once, after a successful materializer write-back', async () => {
+    await store.write(spawnableWorkspace())
+    const attachSpy = vi.spyOn(store, 'attachPendingClientNotes')
+
+    await store.read()
+
+    expect(attachSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('a materializer write-back that fails leaves pending notes exactly pending — no phantom attachment', async () => {
+    await store.write(spawnableWorkspace())
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const attachSpy = vi.spyOn(store, 'attachPendingClientNotes')
+
+    // Same deterministic interleaving as "refuses the write-back when a wait
+    // was saved mid-read" above: land an unrelated change the instant read()
+    // hands its materialized snapshot to write(), so THIS write-back is
+    // refused as stale.
+    const realWrite = AppDataStore.prototype.write
+    let interleaved = false
+    vi.spyOn(store, 'write').mockImplementation(async function (data, options) {
+      if (!interleaved) {
+        interleaved = true
+        await store.addWaitingOn(
+          'chk-1',
+          { itemId: 'item-1' },
+          { blockerId: 'emp-1', requestedBy: 'emp-1', note: 'client statements' },
+        )
+      }
+      return realWrite.call(store, data, options)
+    })
+
+    await store.read()
+
+    expect(attachSpy).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalled()
+  })
+})
+
+/**
+ * Pending client notes — the POSTGRES branch: the statements the simple CRUD
+ * methods send (mirroring the statement-dates-box Postgres suite above), plus
+ * the table/index creation. The attach pass gets its own fully-behavioral fake
+ * pool below it, because pinning its several statements individually would not
+ * prove the ORDER/matching logic the file-backend suite above already pins.
+ */
+describe('pending client notes (postgres branch)', () => {
+  it('inserts a note with the given fields', async () => {
+    const fake = fakePostgres()
+    const note = await postgresStore(fake).createClientPendingNote('c1', {
+      templateId: 'tpl-payroll',
+      kind: 'task',
+      body: 'New hire starting',
+      authorId: 'emp-lisa',
+      authorName: 'Lisa',
+    })
+    const [insert] = fake.matching(/^insert into client_pending_notes/i)
+    expect(insert).toBeTruthy()
+    expect(insert.params).toEqual([
+      note.id,
+      'c1',
+      'tpl-payroll',
+      'task',
+      'New hire starting',
+      'emp-lisa',
+      'Lisa',
+    ])
+  })
+
+  it('lists a client’s notes, pending or attached within 90 days', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).listClientPendingNotes('c1')
+    const [select] = fake.matching(/^select id, client_id, template_id, kind, body/i)
+    expect(select).toBeTruthy()
+    expect(select.text).toMatch(/where client_id = \$1/i)
+    expect(select.text).toMatch(/attached_checklist_id is null or attached_at > now\(\) - interval '90 days'/i)
+    expect(select.params).toEqual(['c1'])
+  })
+
+  it('deletes a note by id', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).deleteClientPendingNote('pnote-1')
+    const [del] = fake.matching(/^delete from client_pending_notes where id = \$1$/i)
+    expect(del).toBeTruthy()
+    expect(del.params).toEqual(['pnote-1'])
+  })
+
+  it('creates the table (with its task/note check), the client_id index, and the checklist reads it depends on', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+
+    const [created] = fake.matching(/create table if not exists client_pending_notes/i)
+    expect(created).toBeTruthy()
+    expect(created.text).toMatch(/check \(kind in \('task', 'note'\)\)/i)
+
+    const [indexed] = fake.matching(/create index if not exists client_pending_notes_client_idx/i)
+    expect(indexed).toBeTruthy()
+    expect(indexed.text).toMatch(/on client_pending_notes \(client_id\)/i)
+  })
+})
+
+/**
+ * The attach pass on Postgres — a small, self-contained in-memory fake (not
+ * the shared `fakePostgres()`, which has no branches for these tables) so the
+ * matching/idempotency/transaction behavior can be proven end to end, the same
+ * way the file-backend suite above proves it, rather than only pinning SQL
+ * text. `begin`/`commit` are tracked so the task-kind item-insert + note-stamp
+ * pair is provably ONE transaction.
+ */
+function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = {}) {
+  const statements = []
+  let inTransaction = false
+  const run = (text, params = []) => {
+    const trimmed = String(text).trim()
+    statements.push({ text: trimmed, params, inTransaction })
+
+    if (/^begin$/i.test(trimmed)) {
+      inTransaction = true
+      return { rows: [] }
+    }
+    if (/^commit$/i.test(trimmed) || /^rollback$/i.test(trimmed)) {
+      inTransaction = false
+      return { rows: [] }
+    }
+    if (/^insert into client_pending_notes/i.test(trimmed)) {
+      notes.push({
+        id: params[0],
+        client_id: params[1],
+        template_id: params[2],
+        kind: params[3],
+        body: params[4],
+        author_id: params[5],
+        author_name: params[6],
+        created_at: new Date(),
+        attached_checklist_id: null,
+        attached_item_id: null,
+        attached_at: null,
+      })
+      return { rows: [] }
+    }
+    if (/^select id, client_id, template_id, kind, body, created_at\s+from client_pending_notes\s+where attached_checklist_id is null/i.test(trimmed)) {
+      const clientId = params[0]
+      const rows = notes
+        .filter((note) => note.attached_checklist_id === null)
+        .filter((note) => !clientId || note.client_id === clientId)
+      return { rows }
+    }
+    if (/^select id\s+from checklists/i.test(trimmed)) {
+      const [templateId, clientId, createdAfter, dueAfter] = params
+      const rows = checklists
+        .filter(
+          (c) =>
+            c.template_id === templateId &&
+            c.client_id === clientId &&
+            !c.deleted_at &&
+            !c.skipped_at &&
+            (c.created_at ? c.created_at > createdAfter : c.due_date > dueAfter),
+        )
+        .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
+      const limited = rows.slice(0, 1)
+      return { rows: limited, rowCount: limited.length }
+    }
+    if (/^select coalesce\(max\(sort_order\), -1\) as max_order\s+from checklist_items/i.test(trimmed)) {
+      const checklistId = params[0]
+      const existing = items.filter((item) => item.checklist_id === checklistId)
+      const max = existing.reduce((acc, item) => Math.max(acc, item.sort_order ?? -1), -1)
+      return { rows: [{ max_order: max }] }
+    }
+    if (/^insert into checklist_items/i.test(trimmed)) {
+      const [id, checklistId, label, sortOrder] = params
+      if (!items.some((item) => item.id === id)) {
+        items.push({ id, checklist_id: checklistId, label, sort_order: sortOrder })
+      }
+      return { rows: [] }
+    }
+    if (/^update client_pending_notes\s+set attached_checklist_id = \$2/i.test(trimmed)) {
+      const [id, checklistId, itemId] = params
+      const note = notes.find((entry) => entry.id === id && entry.attached_checklist_id === null)
+      if (note) {
+        note.attached_checklist_id = checklistId
+        note.attached_item_id = itemId ?? null
+        note.attached_at = new Date()
+      }
+      return { rows: [] }
+    }
+    return { rows: [] }
+  }
+  const client = { async query(text, params) { return run(text, params) }, release() {} }
+  const pool = {
+    async connect() { return client },
+    async query(text, params) { return run(text, params) },
+  }
+  const matching = (pattern) => statements.filter((s) => pattern.test(s.text))
+  return { pool, statements, matching, notes, checklists, items }
+}
+
+describe('pending client notes — attach pass (postgres branch)', () => {
+  it('picks the earliest later checklist and attaches a task-kind note in one transaction', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-1',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'task',
+          body: 'New hire starting',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: null,
+        },
+      ],
+      checklists: [
+        {
+          id: 'chk-earlier',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-08-01',
+          created_at: '2026-08-25T00:00:00.000Z',
+        },
+        {
+          id: 'chk-later-far',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-10-01',
+          created_at: '2026-09-05T00:00:00.000Z',
+        },
+        {
+          id: 'chk-later-near',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-09-10',
+          created_at: '2026-09-05T00:00:00.000Z',
+        },
+      ],
+    })
+
+    const attachedCount = await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })
+    expect(attachedCount).toBe(1)
+
+    const note = fake.notes.find((entry) => entry.id === 'pnote-1')
+    expect(note.attached_checklist_id).toBe('chk-later-near')
+    expect(note.attached_item_id).toBe('item-pn-1')
+
+    const item = fake.items.find((entry) => entry.checklist_id === 'chk-later-near')
+    expect(item).toMatchObject({ id: 'item-pn-1', label: 'New hire starting' })
+
+    // One transaction: begin, the insert and the stamp both issued while
+    // inside it, then commit.
+    const insertItem = fake.matching(/^insert into checklist_items/i)[0]
+    const stamp = fake.matching(/^update client_pending_notes/i)[0]
+    expect(insertItem.inTransaction).toBe(true)
+    expect(stamp.inTransaction).toBe(true)
+    expect(fake.matching(/^begin$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(1)
+  })
+
+  it('is idempotent: on conflict do nothing on the item insert, second pass attaches nothing', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-2',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'task',
+          body: 'X',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: null,
+        },
+      ],
+      checklists: [
+        {
+          id: 'chk-1',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-09-10',
+          created_at: '2026-09-05T00:00:00.000Z',
+        },
+      ],
+    })
+    const store2 = postgresStore(fake)
+    expect(await store2.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+    expect(await store2.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+    expect(fake.items).toHaveLength(1)
+
+    const insertStatements = fake.matching(/^insert into checklist_items/i)
+    expect(insertStatements).toHaveLength(1)
+    expect(insertStatements[0].text).toMatch(/on conflict \(id\) do nothing/i)
+  })
+
+  it('note-kind stamps the checklist id only — no checklist_items insert', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-3',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'note',
+          body: 'Heads up',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: null,
+        },
+      ],
+      checklists: [
+        {
+          id: 'chk-1',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-09-10',
+          created_at: '2026-09-05T00:00:00.000Z',
+        },
+      ],
+    })
+    await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })
+    expect(fake.notes[0].attached_checklist_id).toBe('chk-1')
+    expect(fake.notes[0].attached_item_id).toBeNull()
+    expect(fake.items).toHaveLength(0)
+  })
+})
+
+/**
+ * `generateChecklistFromTemplate` (the "Generate a task now" / onboarding
+ * spawn path) is the third attach-pass call site — the one outside `read()`
+ * and outside the bulk PUT. FILE backend: a generated instance carries no
+ * `createdAt` (same as a materializer spawn), so the match goes through the
+ * `dueDate` fallback — hence a future due date here.
+ */
+describe('generateChecklistFromTemplate runs the pending-notes attach pass (file backend)', () => {
+  const genTemplate = {
+    id: 'tpl-pn-gen',
+    title: 'Payroll',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2026-10-15',
+    active: true,
+    isStandard: false,
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      {
+        id: 'stage-1',
+        name: 'Stage 1',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: 'ti-1', label: 'Run payroll' }],
+      },
+    ],
+  }
+
+  it('attaches a pending note to the checklist it just generated', async () => {
+    await store.write(workspace({ checklistTemplates: [genTemplate] }))
+    const note = await store.createClientPendingNote('c1', {
+      templateId: 'tpl-pn-gen',
+      kind: 'task',
+      body: 'New hire this cycle',
+    })
+
+    const created = await store.generateChecklistFromTemplate('tpl-pn-gen', {
+      dueDate: '2026-10-15',
+    })
+    expect(created).toBeTruthy()
+
+    const updated = await store.getClientPendingNote(note.id)
+    expect(updated.attachedChecklistId).toBe(created.id)
+  })
+})
+
+/**
  * Quiet skip — the FILE backend, end to end.
  *
  * Cardinal rule 1: `db/store.js` has two backends and any persisted change must

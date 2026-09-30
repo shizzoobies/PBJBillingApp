@@ -116,7 +116,10 @@ import {
   templateApplyRoleDenial,
   templateApplyScopeDenial,
 } from './lib/template-apply-permission.js'
-import { checklistWriteDenial } from './lib/checklist-write-permission.js'
+import {
+  checklistWriteDenial,
+  pendingNoteWriteDenial,
+} from './lib/checklist-write-permission.js'
 import {
   isPreviewUnsupportedError,
   previewScopedSession as resolvePreviewScope,
@@ -171,6 +174,11 @@ const distDir = path.join(__dirname, 'dist')
 const indexFile = path.join(distDir, 'index.html')
 const port = Number(process.env.PORT || 4173)
 const appDataStore = new AppDataStore()
+// Pending-notes attach pass (featreq-b688e73c) runs from inside db/store.js
+// itself (read()'s guarded write-back, generateChecklistFromTemplate) as well
+// as from the bulk-save route below — this hook is the one way any of those
+// call sites can ping open tabs without db/store.js importing server.js.
+appDataStore.onPendingNotesAttached = () => broadcastDataChanged()
 const sessionCookieName = 'pbj_session'
 const pendingTwoFactorCookieName = 'pbj_2fa_pending'
 // 5-minute pending cookie for the 2FA challenge / forced-setup flow.
@@ -879,6 +887,8 @@ const PREVIEW_AWARE_API_PATTERNS = [
   /^\/api\/cases\/[^/]+$/,
   /^\/api\/clients\/[^/]+\/notes$/,
   /^\/api\/clients\/[^/]+\/statement-accounts$/,
+  /^\/api\/clients\/[^/]+\/pending-notes$/,
+  /^\/api\/checklists\/[^/]+\/pending-notes$/,
 ]
 
 function isPreviewAwareApiPath(normalizedPath) {
@@ -6258,6 +6268,169 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // Pending notes for future recurring checklists (featreq-b688e73c): she
+    // flags a note against a recurring template before its next checklist has
+    // populated; it attaches itself to that checklist once it does (see
+    // `attachPendingClientNotes` in db/store.js). Endpoint-managed (NOT the
+    // owner-only bulk /api/app-data). GET is gated like client notes; POST's
+    // write boundary is wider than "client visible" — see
+    // `pendingNoteWriteDenial`.
+    const clientPendingNotesMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/pending-notes$/,
+    )
+    if (clientPendingNotesMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const clientId = decodeURIComponent(clientPendingNotesMatch[1])
+      const data = await appDataStore.read()
+      // Scoped, for the same reason as client notes: this opens from a link in
+      // the previewed workspace, so "may I read these" is the previewed
+      // person's question.
+      const scoped = await previewScopedSession(request, session, response, { data })
+      if (!scoped) return
+      const allowed = visibleClientIdSet(scoped, data)
+      if (!allowed.has(clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const notes = await appDataStore.listClientPendingNotes(clientId)
+      sendJson(response, 200, { notes })
+      return
+    }
+
+    if (clientPendingNotesMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const clientId = decodeURIComponent(clientPendingNotesMatch[1])
+      const data = await appDataStore.read()
+      const allowed = visibleClientIdSet(session, data)
+      if (!allowed.has(clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const templateId = String(payload?.templateId ?? '')
+      const template = (data.checklistTemplates ?? []).find(
+        (entry) => entry.id === templateId && entry.clientId === clientId,
+      )
+      if (!template) {
+        sendJson(response, 404, { error: 'Recurring template not found' })
+        return
+      }
+      const templateChecklists = (data.checklists ?? []).filter(
+        (checklist) =>
+          checklist.templateId === template.id &&
+          checklist.clientId === clientId &&
+          !checklist.deletedAt,
+      )
+      const denial = pendingNoteWriteDenial({
+        user: session.user,
+        clientVisible: true,
+        template,
+        checklists: templateChecklists,
+      })
+      if (denial) {
+        sendJson(response, denial.status, { error: denial.error })
+        return
+      }
+      const kind = payload?.kind === 'task' ? 'task' : payload?.kind === 'note' ? 'note' : null
+      if (!kind) {
+        sendJson(response, 400, { error: 'kind must be "task" or "note"' })
+        return
+      }
+      const body = String(payload?.body ?? '').trim()
+      if (!body) {
+        sendJson(response, 400, { error: 'A note body is required' })
+        return
+      }
+      const member = await appDataStore.getTeamMember(session.user.id)
+      const authorName = member?.name ?? session.user.name ?? null
+      const note = await appDataStore.createClientPendingNote(clientId, {
+        templateId: template.id,
+        kind,
+        body,
+        authorId: session.user.id,
+        authorName,
+      })
+      if (!note) {
+        sendJson(response, 400, { error: 'A note body is required' })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'pending_note_added', template.title)
+      broadcastDataChanged()
+      sendJson(response, 201, { note })
+      return
+    }
+
+    const clientPendingNoteDeleteMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/pending-notes\/([^/]+)$/,
+    )
+    if (clientPendingNoteDeleteMatch && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const noteId = decodeURIComponent(clientPendingNoteDeleteMatch[2])
+      const note = await appDataStore.getClientPendingNote(noteId)
+      if (!note) {
+        sendJson(response, 404, { error: 'Note not found' })
+        return
+      }
+      // Owner can delete any note; everyone else only their own, and only
+      // while it's still unattached — once it has landed on a checklist,
+      // deleting it here would silently pull context out from under that task.
+      const isOwnUnattached = note.authorId === session.user.id && !note.attachedChecklistId
+      if (session.user.role !== 'owner' && !isOwnUnattached) {
+        sendJson(response, 403, {
+          error: 'You can only delete your own notes, and only before they attach to a checklist.',
+        })
+        return
+      }
+      const removed = await appDataStore.deleteClientPendingNote(noteId)
+      broadcastDataChanged()
+      sendJson(response, removed ? 200 : 404, removed ? { ok: true } : { error: 'Note not found' })
+      return
+    }
+
+    // The attached side of the same feature: what a CHECKLIST shows for notes
+    // that landed on it. Kind 'note' renders read-only above the items; kind
+    // 'task' is already an ordinary item, returned too so the UI can link back
+    // to "added from the client page".
+    const checklistPendingNotesMatch = normalizedPath.match(
+      /^\/api\/checklists\/([^/]+)\/pending-notes$/,
+    )
+    if (checklistPendingNotesMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const checklistId = decodeURIComponent(checklistPendingNotesMatch[1])
+      const data = await appDataStore.read()
+      const scoped = await previewScopedSession(request, session, response, { data })
+      if (!scoped) return
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
+      if (!checklist) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+      const allowed = visibleClientIdSet(scoped, data)
+      if (!allowed.has(checklist.clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const notes = await appDataStore.listPendingNotesForChecklist(checklistId)
+      sendJson(response, 200, { notes })
+      return
+    }
+
     if (normalizedPath === '/api/app-data') {
       const session = await requireSession(request, response)
       if (!session) {
@@ -6422,6 +6595,18 @@ const server = createServer(async (request, response) => {
         }
         if (restampedLabels > 0) {
           console.log(`[bulk-save] re-stamped ${restampedLabels} period label(s)`)
+        }
+
+        // Pending notes for future recurring checklists (featreq-b688e73c): a
+        // bulk save can create/change checklists too, not only the
+        // materializer, so the attach pass runs here as well — idempotent and
+        // cheap when nothing is pending. `onPendingNotesAttached` (set above,
+        // near the store's construction) broadcasts for us when it attaches
+        // anything.
+        try {
+          await appDataStore.attachPendingClientNotes({})
+        } catch (error) {
+          console.error('[bulk-save] pending-notes attach pass failed:', error)
         }
 
         // The write changed the workspace, so the fingerprint moved. Hand the

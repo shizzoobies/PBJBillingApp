@@ -3353,6 +3353,27 @@ function mapChecklistSkipRow(row) {
   }
 }
 
+/**
+ * One shape for a pending-client-note record whichever backend produced it —
+ * same idea as {@link mapChecklistSkipRow}. The file backend already stores
+ * this exact shape, so it needs no separate normalizer.
+ */
+function mapClientPendingNoteRow(row) {
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    templateId: row.template_id,
+    kind: row.kind === 'task' ? 'task' : 'note',
+    body: row.body,
+    authorId: row.author_id ?? null,
+    authorName: row.author_name ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    attachedChecklistId: row.attached_checklist_id ?? null,
+    attachedItemId: row.attached_item_id ?? null,
+    attachedAt: row.attached_at ? new Date(row.attached_at).toISOString() : null,
+  }
+}
+
 /** The file backend's stored object, filled out to the same shape. */
 function normalizeChecklistSkip(record) {
   return {
@@ -3897,6 +3918,36 @@ export class AppDataStore {
       await this.pool.query(
         `create index if not exists client_statement_accounts_client_idx
            on client_statement_accounts (client_id)`,
+      )
+
+      // Pending notes for future recurring checklists (featreq-b688e73c): she
+      // flags a note ("new hire starting" etc.) against a recurring template
+      // BEFORE that template's next checklist has materialized, picks Task or
+      // Note, and the note attaches itself to the next checklist that template
+      // spawns. Endpoint-managed (NOT part of the bulk /api/app-data write) —
+      // exactly like client_notes — so staff can write one without the
+      // owner-only bulk save. `attached_checklist_id` / `attached_item_id` /
+      // `attached_at` stay null until the idempotent attach pass
+      // (`attachPendingClientNotes`) finds a checklist for it; see that
+      // method's comment for why it never runs inside the pure materializer.
+      await this.pool.query(`
+        create table if not exists client_pending_notes (
+          id text primary key,
+          client_id text not null,
+          template_id text not null,
+          kind text not null check (kind in ('task', 'note')),
+          body text not null,
+          author_id text,
+          author_name text,
+          created_at timestamptz not null default now(),
+          attached_checklist_id text,
+          attached_item_id text,
+          attached_at timestamptz
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists client_pending_notes_client_idx
+           on client_pending_notes (client_id)`,
       )
 
       // Item-level deletion requests: a NON-owner asks to delete a single
@@ -6709,6 +6760,14 @@ export class AppDataStore {
         }
         served = freshMaterialized.data
         await this.write(freshMaterialized.data, { expectedVersion })
+        // The write-back landed, so any pending note waiting on a template
+        // that just spawned may now have a checklist to attach to. Only runs
+        // on this SUCCESS path — never against a write that got refused.
+        try {
+          await this.attachPendingClientNotes({})
+        } catch (attachError) {
+          console.error('[read] pending-notes attach pass failed:', attachError)
+        }
         return freshMaterialized.data
       } catch (error) {
         if (error instanceof StaleWorkspaceError) {
@@ -6859,8 +6918,10 @@ export class AppDataStore {
       // restores invoices explicitly); file mode is dev/test only.
       // A refused (or failed) write-back serves the in-memory data and lets
       // the next read retry — never 500s the read.
+      let writeBackSucceeded = false
       try {
         await this.write(materialized.data, { expectedVersion: persistedVersion })
+        writeBackSucceeded = true
       } catch (error) {
         if (error instanceof StaleWorkspaceError) {
           console.warn(
@@ -6868,6 +6929,16 @@ export class AppDataStore {
           )
         } else {
           console.error('[read] materialize write-back failed; serving in-memory data:', error)
+        }
+      }
+      // Same reasoning as the Postgres branch above: only run the attach pass
+      // when the write-back actually persisted — a refused/failed write-back
+      // leaves every pending note exactly as pending as it was.
+      if (writeBackSucceeded) {
+        try {
+          await this.attachPendingClientNotes({})
+        } catch (attachError) {
+          console.error('[read] pending-notes attach pass failed:', attachError)
         }
       }
       return materialized.data
@@ -19261,6 +19332,363 @@ export class AppDataStore {
     return clean
   }
 
+  // ---- Pending notes for future recurring checklists (featreq-b688e73c) ----
+  //
+  // Endpoint-managed (NOT part of the bulk /api/app-data write), like client
+  // notes — so anyone who can write the client's checklists can flag one
+  // without the owner-only bulk save. Stored in auth-state on the file
+  // backend, client_pending_notes on pg.
+  //
+  // A note starts unattached (`attachedChecklistId: null`) and stays that way
+  // until `attachPendingClientNotes` finds the next checklist its chosen
+  // template spawns. `listClientPendingNotes` returns BOTH pending notes and
+  // notes attached in the last 90 days, so the client page can render the
+  // short history alongside the live count.
+
+  /** A client's pending notes, newest first: pending + attached (last 90 days). */
+  async listClientPendingNotes(clientId) {
+    if (!clientId) return []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, template_id, kind, body, author_id, author_name,
+                created_at, attached_checklist_id, attached_item_id, attached_at
+           from client_pending_notes
+          where client_id = $1
+            and (attached_checklist_id is null or attached_at > now() - interval '90 days')
+          order by created_at desc`,
+        [clientId],
+      )
+      return result.rows.map(mapClientPendingNoteRow)
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000
+    return list
+      .filter((note) => note.clientId === clientId)
+      .filter((note) => !note.attachedAt || new Date(note.attachedAt).getTime() > cutoff)
+      .slice()
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+  }
+
+  /** Notes attached to one checklist (kind 'note' to show, kind 'task' for the link back). */
+  async listPendingNotesForChecklist(checklistId) {
+    if (!checklistId) return []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, template_id, kind, body, author_id, author_name,
+                created_at, attached_checklist_id, attached_item_id, attached_at
+           from client_pending_notes
+          where attached_checklist_id = $1
+          order by attached_at asc nulls last, created_at asc`,
+        [checklistId],
+      )
+      return result.rows.map(mapClientPendingNoteRow)
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    return list
+      .filter((note) => note.attachedChecklistId === checklistId)
+      .slice()
+      .sort((a, b) =>
+        String(a.attachedAt ?? a.createdAt).localeCompare(String(b.attachedAt ?? b.createdAt)),
+      )
+  }
+
+  /** Create a pending note. Returns the created note, or null on invalid input. */
+  async createClientPendingNote(clientId, { templateId, kind, body, authorId, authorName } = {}) {
+    if (!clientId || !templateId) return null
+    const cleanKind = kind === 'task' ? 'task' : kind === 'note' ? 'note' : null
+    if (!cleanKind) return null
+    const cleanBody = String(body ?? '').trim().slice(0, 2000)
+    if (!cleanBody) return null
+    const note = {
+      id: `pnote-${randomUUID().slice(0, 8)}`,
+      clientId,
+      templateId,
+      kind: cleanKind,
+      body: cleanBody,
+      authorId: authorId ?? null,
+      authorName: authorName ?? null,
+      createdAt: nowIso(),
+      attachedChecklistId: null,
+      attachedItemId: null,
+      attachedAt: null,
+    }
+    if (this.pool) {
+      await this.pool.query(
+        `insert into client_pending_notes
+           (id, client_id, template_id, kind, body, author_id, author_name, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7, now())`,
+        [note.id, note.clientId, note.templateId, note.kind, note.body, note.authorId, note.authorName],
+      )
+      return note
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.clientPendingNotes)) authState.clientPendingNotes = []
+    authState.clientPendingNotes.push(note)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return note
+  }
+
+  /** Look up a single pending note by id (used to authorize deletes). */
+  async getClientPendingNote(noteId) {
+    if (!noteId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, template_id, kind, body, author_id, author_name,
+                created_at, attached_checklist_id, attached_item_id, attached_at
+           from client_pending_notes where id = $1`,
+        [noteId],
+      )
+      if (!result.rowCount) return null
+      return mapClientPendingNoteRow(result.rows[0])
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    return list.find((note) => note.id === noteId) ?? null
+  }
+
+  /** Delete a pending note by id. Returns true if a row was removed. */
+  async deleteClientPendingNote(noteId) {
+    if (!noteId) return false
+    if (this.pool) {
+      const result = await this.pool.query(`delete from client_pending_notes where id = $1`, [
+        noteId,
+      ])
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.clientPendingNotes)) authState.clientPendingNotes = []
+    const before = authState.clientPendingNotes.length
+    authState.clientPendingNotes = authState.clientPendingNotes.filter(
+      (note) => note.id !== noteId,
+    )
+    const removed = authState.clientPendingNotes.length < before
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return removed
+  }
+
+  /**
+   * Every pending (unattached) note, optionally narrowed to one client.
+   * Internal helper for `attachPendingClientNotes` — cheap, so that method's
+   * "nothing pending" fast path costs one query.
+   */
+  async _listUnattachedPendingNotes(clientId) {
+    if (this.pool) {
+      const result = clientId
+        ? await this.pool.query(
+            `select id, client_id, template_id, kind, body, created_at
+               from client_pending_notes
+              where attached_checklist_id is null and client_id = $1`,
+            [clientId],
+          )
+        : await this.pool.query(
+            `select id, client_id, template_id, kind, body, created_at
+               from client_pending_notes
+              where attached_checklist_id is null`,
+          )
+      return result.rows.map((row) => ({
+        id: row.id,
+        clientId: row.client_id,
+        templateId: row.template_id,
+        kind: row.kind === 'task' ? 'task' : 'note',
+        body: row.body,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+      }))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    return list
+      .filter((note) => !note.attachedChecklistId)
+      .filter((note) => !clientId || note.clientId === clientId)
+      .map((note) => ({
+        id: note.id,
+        clientId: note.clientId,
+        templateId: note.templateId,
+        kind: note.kind === 'task' ? 'task' : 'note',
+        body: note.body,
+        createdAt: note.createdAt,
+      }))
+  }
+
+  /**
+   * The next checklist a pending note attaches to: this client's checklists
+   * of the note's template, not deleted, not skipped, whose `createdAt` is
+   * AFTER the note's `createdAt` (a checklist that already existed when the
+   * note was written is not "the next one that populates") — falling back to
+   * `dueDate > note.createdAt's date` for rows with no `createdAt` — picking
+   * the earliest by due date. Returns `{ id }` or null.
+   */
+  async _findNextChecklistForPendingNote(note) {
+    const noteDateOnly = String(note.createdAt ?? '').slice(0, 10)
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id
+           from checklists
+          where template_id = $1
+            and client_id = $2
+            and deleted_at is null
+            and skipped_at is null
+            and (
+              (created_at is not null and created_at > $3)
+              or (created_at is null and due_date > $4)
+            )
+          order by due_date asc
+          limit 1`,
+        [note.templateId, note.clientId, note.createdAt, noteDateOnly],
+      )
+      return result.rowCount ? { id: result.rows[0].id } : null
+    }
+    const data = await readJson(localDataPath)
+    const candidates = (Array.isArray(data.checklists) ? data.checklists : []).filter(
+      (checklist) => {
+        if (checklist.templateId !== note.templateId || checklist.clientId !== note.clientId) {
+          return false
+        }
+        if (checklist.deletedAt || checklist.skippedAt) return false
+        if (typeof checklist.createdAt === 'string' && checklist.createdAt) {
+          return checklist.createdAt > note.createdAt
+        }
+        return typeof checklist.dueDate === 'string' && checklist.dueDate > noteDateOnly
+      },
+    )
+    if (candidates.length === 0) return null
+    candidates.sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)))
+    return { id: candidates[0].id }
+  }
+
+  /**
+   * Attach a task-kind note: insert the derived item at the end of the
+   * checklist's items, idempotent, then stamp the note attached — one
+   * Postgres transaction; a matched pair of file writes otherwise.
+   */
+  async _attachTaskKindPendingNote({ checklistId, itemId, label, noteId }) {
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        const sortResult = await client.query(
+          `select coalesce(max(sort_order), -1) as max_order
+             from checklist_items where checklist_id = $1`,
+          [checklistId],
+        )
+        const nextOrder = (sortResult.rows[0]?.max_order ?? -1) + 1
+        await client.query(
+          `insert into checklist_items (id, checklist_id, label, done, sort_order, created_at, updated_at)
+           values ($1, $2, $3, false, $4, now(), now())
+           on conflict (id) do nothing`,
+          [itemId, checklistId, label, nextOrder],
+        )
+        await client.query(
+          `update client_pending_notes
+              set attached_checklist_id = $2, attached_item_id = $3, attached_at = now()
+            where id = $1 and attached_checklist_id is null`,
+          [noteId, checklistId, itemId],
+        )
+        await client.query('commit')
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
+      }
+      return
+    }
+
+    const data = await readJson(localDataPath)
+    const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
+    let itemAdded = false
+    if (checklist) {
+      if (!Array.isArray(checklist.items)) checklist.items = []
+      if (!checklist.items.some((item) => item.id === itemId)) {
+        checklist.items.push({ id: itemId, label, done: false })
+        itemAdded = true
+      }
+    }
+    if (itemAdded) {
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    const note = list.find((entry) => entry.id === noteId)
+    if (note && !note.attachedChecklistId) {
+      note.attachedChecklistId = checklistId
+      note.attachedItemId = itemId
+      note.attachedAt = nowIso()
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+  }
+
+  /** Attach a note-kind note: stamp the checklist id only, no item. */
+  async _attachNoteKindPendingNote({ checklistId, noteId }) {
+    if (this.pool) {
+      await this.pool.query(
+        `update client_pending_notes
+            set attached_checklist_id = $2, attached_item_id = null, attached_at = now()
+          where id = $1 and attached_checklist_id is null`,
+        [noteId, checklistId],
+      )
+      return
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    const note = list.find((entry) => entry.id === noteId)
+    if (note && !note.attachedChecklistId) {
+      note.attachedChecklistId = checklistId
+      note.attachedItemId = null
+      note.attachedAt = nowIso()
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+  }
+
+  /**
+   * Idempotent pass that moves pending notes onto the next checklist that
+   * populates for their chosen recurring template — the part the pure
+   * materializer cannot do itself (its spawned output may never be
+   * persisted: a guarded write-back can be refused as stale, in which case
+   * nothing here should run against it). Call ONLY after a checklist write
+   * has actually landed:
+   *   - at the end of `read()`, after its guarded materializer write-back
+   *     SUCCEEDS (both backends) — never on a failed/refused write-back;
+   *   - after the bulk `write()` (the owner's PUT /api/app-data);
+   *   - after `generateChecklistFromTemplate`.
+   * Never call this from inside `materializeRecurringChecklists` itself.
+   *
+   * `clientId` narrows the sweep to one client (cheap; used after a single
+   * checklist is generated); omitted, it sweeps every pending note. Cheap
+   * when nothing is pending — the first query decides that. Broadcasts via
+   * `this.onPendingNotesAttached` (set by server.js to `broadcastDataChanged`)
+   * when anything actually attached, so open tabs refetch.
+   *
+   * @returns {Promise<number>} how many notes were attached.
+   */
+  async attachPendingClientNotes({ clientId } = {}) {
+    const pending = await this._listUnattachedPendingNotes(clientId)
+    if (pending.length === 0) return 0
+
+    let attached = 0
+    for (const note of pending) {
+      const target = await this._findNextChecklistForPendingNote(note)
+      if (!target) continue
+      if (note.kind === 'task') {
+        const itemId = `item-pn-${note.id.replace(/^pnote-/, '')}`
+        await this._attachTaskKindPendingNote({
+          checklistId: target.id,
+          itemId,
+          label: note.body,
+          noteId: note.id,
+        })
+      } else {
+        await this._attachNoteKindPendingNote({ checklistId: target.id, noteId: note.id })
+      }
+      attached += 1
+    }
+    if (attached > 0) {
+      this.onPendingNotesAttached?.()
+    }
+    return attached
+  }
+
   // ---- Item-level deletion requests (staff request → owner approves) ----
   //
   // Endpoint-managed (NOT part of the bulk /api/app-data write), like client
@@ -20425,6 +20853,13 @@ export class AppDataStore {
     })
     const created = await this.createChecklist(checklist)
     await this.grantClientVisibility(created.clientId, created.assigneeId)
+    // A freshly generated instance may be exactly what a pending note
+    // (featreq-b688e73c) was waiting on — never fatal to "Generate a task now".
+    try {
+      await this.attachPendingClientNotes({ clientId: created.clientId })
+    } catch (error) {
+      console.error('[generateChecklistFromTemplate] pending-notes attach pass failed:', error)
+    }
     return created
   }
 

@@ -1,0 +1,258 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ClientNotesPanel } from '../components/ClientNotesPanel'
+import type { AppContextValue } from '../AppContext'
+import type { AppData, Checklist, ChecklistTemplate, ClientPendingNote } from '../lib/types'
+
+/**
+ * Pending notes for future recurring checklists (featreq-b688e73c), the
+ * client-page half: the "For an upcoming checklist" block inside
+ * ClientNotesPanel — the count, the write gate (mirrors
+ * `pendingNoteWriteDenial`), adding, and how an attached note renders.
+ * Reuses the existing `ClientNotesPanel` plumbing (client-statements-panel
+ * test's mocking pattern), so the plain-notes half is stubbed out rather than
+ * re-tested here.
+ */
+
+vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
+vi.mock('../lib/api', () => ({
+  listClientNotes: async () => [],
+  addClientNote: vi.fn(),
+  deleteClientNote: vi.fn(),
+  listClientPendingNotesRequest: (...args: unknown[]) => listPending(...args),
+  addClientPendingNoteRequest: (...args: unknown[]) => addPending(...args),
+  deleteClientPendingNoteRequest: (...args: unknown[]) => deletePending(...args),
+}))
+
+let listPending = vi.fn()
+let addPending = vi.fn()
+let deletePending = vi.fn()
+let contextValue: AppContextValue
+
+function payrollTemplate(over: Partial<ChecklistTemplate> = {}): ChecklistTemplate {
+  return {
+    id: 'tmpl-payroll',
+    title: 'Payroll',
+    clientId: 'c1',
+    assigneeId: 'emp-lisa',
+    frequency: 'monthly',
+    nextDueDate: '2026-10-01',
+    active: true,
+    viewerIds: [],
+    editorIds: [],
+    stages: [],
+    ...over,
+  } as unknown as ChecklistTemplate
+}
+
+function renderPanel({
+  clientId = 'c1',
+  ownerMode = true,
+  currentUserId = 'emp-owner',
+  templates = [payrollTemplate()],
+  checklists = [],
+  onPendingCountChange,
+}: {
+  clientId?: string
+  ownerMode?: boolean
+  currentUserId?: string
+  templates?: ChecklistTemplate[]
+  checklists?: Checklist[]
+  onPendingCountChange?: (count: number) => void
+} = {}) {
+  contextValue = {
+    data: { checklistTemplates: templates, checklists } as unknown as AppData,
+  } as unknown as AppContextValue
+  return render(
+    <MemoryRouter>
+      <ClientNotesPanel
+        clientId={clientId}
+        ownerMode={ownerMode}
+        currentUserId={currentUserId}
+        onPendingCountChange={onPendingCountChange}
+      />
+    </MemoryRouter>,
+  )
+}
+
+const pendingNote = (over: Partial<ClientPendingNote> = {}): ClientPendingNote => ({
+  id: 'pnote-1',
+  clientId: 'c1',
+  templateId: 'tmpl-payroll',
+  kind: 'task',
+  body: 'New hire starting',
+  authorId: 'emp-lisa',
+  authorName: 'Lisa',
+  createdAt: '2026-09-20T12:00:00.000Z',
+  attachedChecklistId: null,
+  attachedItemId: null,
+  attachedAt: null,
+  ...over,
+})
+
+beforeEach(() => {
+  listPending = vi.fn(async () => [])
+  addPending = vi.fn(async (_id: string, note: { templateId: string; kind: string; body: string }) =>
+    pendingNote({ ...note, id: 'pnote-new' } as Partial<ClientPendingNote>),
+  )
+  deletePending = vi.fn(async () => ({ ok: true }))
+})
+
+describe('the "for an upcoming checklist" block', () => {
+  it('is shown to the owner and reports the unattached count', async () => {
+    const onPendingCountChange = vi.fn()
+    listPending = vi.fn(async () => [pendingNote()])
+    renderPanel({ onPendingCountChange })
+    expect(await screen.findByText('For an upcoming checklist')).toBeInTheDocument()
+    await waitFor(() => expect(onPendingCountChange).toHaveBeenLastCalledWith(1))
+  })
+
+  it('does not count an already-attached note toward the pill', async () => {
+    const onPendingCountChange = vi.fn()
+    listPending = vi.fn(async () => [
+      pendingNote({ id: 'pnote-attached', attachedChecklistId: 'chk-1', attachedAt: '2026-09-25T00:00:00.000Z' }),
+    ])
+    renderPanel({
+      onPendingCountChange,
+      checklists: [
+        {
+          id: 'chk-1',
+          title: 'Payroll',
+          clientId: 'c1',
+          assigneeId: 'emp-lisa',
+          dueDate: '2026-10-05',
+          viewerIds: [],
+          editorIds: [],
+          items: [],
+        } as unknown as Checklist,
+      ],
+    })
+    await screen.findByText(/Attached to/i)
+    await waitFor(() => expect(onPendingCountChange).toHaveBeenLastCalledWith(0))
+  })
+
+  it('is hidden for a staff user with no write access to any active template', async () => {
+    renderPanel({
+      ownerMode: false,
+      currentUserId: 'emp-stranger',
+      templates: [payrollTemplate()],
+    })
+    // Give the plain-notes load a tick so we are not just catching a loading flash.
+    await screen.findByText('No notes yet.')
+    expect(screen.queryByText('For an upcoming checklist')).not.toBeInTheDocument()
+  })
+
+  it('shows the block for a staff user who is the template’s assignee, and lets them add', async () => {
+    renderPanel({
+      ownerMode: false,
+      currentUserId: 'emp-lisa',
+      templates: [payrollTemplate({ assigneeId: 'emp-lisa' })],
+    })
+    expect(await screen.findByText('For an upcoming checklist')).toBeInTheDocument()
+    const addButton = screen.getByRole('button', { name: /^Add$/ })
+    expect(addButton).toBeDisabled() // no body typed yet
+    fireEvent.change(screen.getByPlaceholderText(/hasn't come up yet/i), {
+      target: { value: 'New hire starting' },
+    })
+    expect(addButton).not.toBeDisabled()
+  })
+
+  it('shows the block, but disables Add, for a staff user who can see the template with no write access to it — only via a live checklist they are on', async () => {
+    renderPanel({
+      ownerMode: false,
+      currentUserId: 'emp-brit',
+      templates: [payrollTemplate({ assigneeId: 'emp-lisa' })],
+      checklists: [],
+    })
+    // Not the template's assignee/editor and no live checklist of it yet —
+    // nothing eligible, so the block does not render at all.
+    await screen.findByText('No notes yet.')
+    expect(screen.queryByText('For an upcoming checklist')).not.toBeInTheDocument()
+  })
+
+  it('submits a new note against the selected template', async () => {
+    renderPanel()
+    fireEvent.change(await screen.findByPlaceholderText(/hasn't come up yet/i), {
+      target: { value: 'New hire starting' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/ }))
+    await waitFor(() => expect(addPending).toHaveBeenCalledWith('c1', {
+      templateId: 'tmpl-payroll',
+      kind: 'task',
+      body: 'New hire starting',
+    }))
+  })
+
+  it('renders a pending row with its target and kind', async () => {
+    listPending = vi.fn(async () => [pendingNote({ kind: 'note' })])
+    renderPanel()
+    expect(await screen.findByText('New hire starting')).toBeInTheDocument()
+    expect(screen.getByText(/→ Payroll as Note/)).toBeInTheDocument()
+  })
+
+  it('renders an attached note greyed with a link to the checklist', async () => {
+    listPending = vi.fn(async () => [
+      pendingNote({
+        attachedChecklistId: 'chk-1',
+        attachedAt: '2026-09-25T00:00:00.000Z',
+      }),
+    ])
+    renderPanel({
+      checklists: [
+        {
+          id: 'chk-1',
+          title: 'Payroll',
+          clientId: 'c1',
+          assigneeId: 'emp-lisa',
+          dueDate: '2026-10-05',
+          viewerIds: [],
+          editorIds: [],
+          items: [],
+        } as unknown as Checklist,
+      ],
+    })
+    const link = await screen.findByRole('link', { name: /Payroll \(2026-10-05\)/ })
+    expect(link).toHaveAttribute('href', '/checklists?focus=chk-1')
+  })
+
+  it('lets the owner delete any pending note; a staff author only their own, and only while unattached', async () => {
+    listPending = vi.fn(async () => [
+      pendingNote({ id: 'pnote-mine', authorId: 'emp-lisa', body: 'Unattached note' }),
+      pendingNote({
+        id: 'pnote-attached-mine',
+        authorId: 'emp-lisa',
+        body: 'Attached note',
+        attachedChecklistId: 'chk-1',
+        attachedAt: '2026-09-25T00:00:00.000Z',
+      }),
+    ])
+    const { rerender } = renderPanel({
+      ownerMode: false,
+      currentUserId: 'emp-lisa',
+      templates: [payrollTemplate({ assigneeId: 'emp-lisa' })],
+    })
+    await screen.findByText('Unattached note')
+    await screen.findByText('Attached note')
+    // Only the unattached one owned by this staff user is deletable.
+    expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(1)
+
+    contextValue = {
+      data: { checklistTemplates: [payrollTemplate()], checklists: [] } as unknown as AppData,
+    } as unknown as AppContextValue
+    rerender(
+      <MemoryRouter>
+        <ClientNotesPanel clientId="c1" ownerMode currentUserId="emp-owner" />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(2))
+  })
+
+  it('deletes a pending note', async () => {
+    listPending = vi.fn(async () => [pendingNote({ authorId: 'emp-owner' })])
+    renderPanel({ currentUserId: 'emp-owner' })
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(deletePending).toHaveBeenCalledWith('c1', 'pnote-1'))
+    await waitFor(() => expect(screen.queryByText('New hire starting')).not.toBeInTheDocument())
+  })
+})
