@@ -24,6 +24,7 @@ import {
 // THE bill-rate chain the invoice is priced with, and the pin rule, so the
 // revenue estimate below says what the month run will.
 import { billRateAt, ratePeriodAsOf } from '../../lib/rate-history.js'
+import { waitingBlocksCompletion } from '../../lib/waiting-on-state.js'
 import { useAppContext } from '../AppContext'
 import {
   fetchGlobalActivity,
@@ -1279,22 +1280,33 @@ function QueueGroup({
                 </span>
               </div>
               <ul className={`queue-row-items${disabled ? ' preview-disabled' : ''}`}>
-                {c.items.map((item) => (
-                  <li key={item.id}>
-                    <label title={disabled ? 'Disabled in preview mode' : undefined}>
-                      <input
-                        type="checkbox"
-                        checked={item.done}
-                        disabled={disabled}
-                        onChange={() => void onToggle(c.id, item.id)}
-                      />
-                      <span className={item.done ? 'queue-item-done' : ''}>
-                        {item.done ? <CheckCircle2 size={12} /> : null}
-                        {item.label}
-                      </span>
-                    </label>
-                  </li>
-                ))}
+                {c.items.map((item) => {
+                  const blocked = waitingBlocksCompletion(item)
+                  return (
+                    <li key={item.id}>
+                      <label
+                        title={
+                          disabled
+                            ? 'Disabled in preview mode'
+                            : blocked
+                              ? 'Clear the wait first'
+                              : undefined
+                        }
+                      >
+                        <input
+                          type="checkbox"
+                          checked={item.done}
+                          disabled={disabled || blocked}
+                          onChange={() => void onToggle(c.id, item.id)}
+                        />
+                        <span className={item.done ? 'queue-item-done' : ''}>
+                          {item.done ? <CheckCircle2 size={12} /> : null}
+                          {item.label}
+                        </span>
+                      </label>
+                    </li>
+                  )
+                })}
               </ul>
             </li>
           )

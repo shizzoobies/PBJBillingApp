@@ -2219,6 +2219,15 @@ function App() {
         setDataSyncState('offline')
         return
       }
+      if (error instanceof ApiError && error.status === 409) {
+        // The checkbox is disabled while a step is waiting, so this is only
+        // reachable from a stale render (a wait saved elsewhere since this
+        // tab last synced). Nothing failed to save — say why and stop, same
+        // as isCleanRejection elsewhere in this file.
+        setDataSyncState('synced')
+        window.alert(error.message)
+        return
+      }
 
       setDataSyncState('error')
     }
@@ -2244,6 +2253,13 @@ function App() {
         setSessionUser(null)
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
+        return
+      }
+      if (error instanceof ApiError && error.status === 409) {
+        // See toggleChecklistItem above — the box is disabled ahead of this,
+        // so a 409 here means the render was stale, not that the save failed.
+        setDataSyncState('synced')
+        window.alert(error.message)
         return
       }
       setDataSyncState('error')
@@ -2330,6 +2346,13 @@ function App() {
         setSessionUser(null)
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
+        return
+      }
+      if (error instanceof ApiError && error.status === 409) {
+        // See toggleChecklistItem above — the box is disabled ahead of this,
+        // so a 409 here means the render was stale, not that the save failed.
+        setDataSyncState('synced')
+        window.alert(error.message)
         return
       }
       setDataSyncState('error')

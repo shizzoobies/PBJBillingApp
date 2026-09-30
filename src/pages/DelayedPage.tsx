@@ -25,6 +25,7 @@ import {
   localDateOnly,
   shortDate,
   stepIsWaiting,
+  WAITING_CLEAR_PATCH,
 } from '../lib/utils'
 
 /**
@@ -56,6 +57,13 @@ import {
  * own done-toggle, i.e. completing the checklist step from the Delayed list.
  * That is now the wait's Done. The step-toggle survives only for OLD free-text
  * waits, which have no wait record to resolve — see `row.legacy` below.
+ *
+ * A second change (featreq-cdab1605, "a waiting step cannot be checked off"):
+ * that old free-text action no longer ticks the step either, because nothing
+ * anywhere may check off a step that is still waiting — the server refuses it
+ * regardless of who asks. So the legacy action shrank to exactly what it can
+ * still honestly do: clear the wait flag. The step itself stays for its owner
+ * to check off from the Checklists page once the work is actually done.
  *
  * Owners are filtered like everyone else rather than seeing the whole firm
  * (Alex's call), which is why the routing helpers are asked without the owner
@@ -105,8 +113,8 @@ type ClientGroup = {
 export function DelayedPage() {
   const {
     data,
-    toggleChecklistItem,
-    toggleSubItem,
+    updateChecklistItem,
+    updateSubItemWaiting,
     waitingOnDone,
     waitingOnVerify,
     waitingOnSendBack,
@@ -317,14 +325,18 @@ export function DelayedPage() {
     })
   }
 
-  // The ONLY remaining step-completing action on this page, and only for a
-  // free-text wait with no record behind it. A structured wait is retired by
-  // its own Done — the step stays for its owner to tick off.
-  const markLegacyDone = (row: WaitingRow) => {
+  // The ONLY remaining action this page offers on an OLD free-text wait, which
+  // has no wait record to resolve the way a structured one does. It no longer
+  // ticks the step — a waiting step cannot be checked off (featreq-cdab1605),
+  // so clearing the flag is all it honestly does; the step stays for its owner
+  // to check off from the Checklists page once the work is done.
+  const clearLegacyWait = (row: WaitingRow) => {
     if (row.subItemId) {
-      void toggleSubItem(row.checklistId, row.itemId, row.subItemId)
+      void run(() =>
+        updateSubItemWaiting(row.checklistId, row.itemId, row.subItemId as string, WAITING_CLEAR_PATCH),
+      )
     } else {
-      void toggleChecklistItem(row.checklistId, row.itemId)
+      void run(() => updateChecklistItem(row.checklistId, row.itemId, WAITING_CLEAR_PATCH))
     }
   }
 
@@ -503,10 +515,10 @@ export function DelayedPage() {
                                     <button
                                       type="button"
                                       className="delayed-row-done"
-                                      onClick={() => markLegacyDone(row)}
-                                      title="Mark this step done (same as checking it off on the Checklists page)"
+                                      onClick={() => clearLegacyWait(row)}
+                                      title="Clear the wait flag — the step stays yours to check off on the Checklists page"
                                     >
-                                      <Check size={14} /> Done
+                                      <Check size={14} /> Clear wait
                                     </button>
                                   ) : null}
                                 </div>

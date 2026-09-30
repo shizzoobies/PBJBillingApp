@@ -66,8 +66,8 @@ const waitingOnDone = vi.fn()
 const waitingOnVerify = vi.fn()
 const waitingOnSendBack = vi.fn()
 const waitingOnQuestion = vi.fn()
-const toggleChecklistItem = vi.fn()
-const toggleSubItem = vi.fn()
+const updateChecklistItem = vi.fn()
+const updateSubItemWaiting = vi.fn()
 
 function signInAs(viewerId: string, checklists: Checklist[]) {
   contextValue = {
@@ -81,8 +81,8 @@ function signInAs(viewerId: string, checklists: Checklist[]) {
       checklists,
     } as unknown as AppData,
     activeEmployeeId: viewerId,
-    toggleChecklistItem,
-    toggleSubItem,
+    updateChecklistItem,
+    updateSubItemWaiting,
     waitingOnDone,
     waitingOnVerify,
     waitingOnSendBack,
@@ -190,8 +190,8 @@ describe('the blocker side', () => {
 
     expect(waitingOnDone).toHaveBeenCalledWith('cl-1', 'wo-1')
     // The invariant from every prior round: nothing here completes the step.
-    expect(toggleChecklistItem).not.toHaveBeenCalled()
-    expect(toggleSubItem).not.toHaveBeenCalled()
+    expect(updateChecklistItem).not.toHaveBeenCalled()
+    expect(updateSubItemWaiting).not.toHaveBeenCalled()
   })
 
   it('loses it from their list the moment it is resolved', () => {
@@ -241,7 +241,7 @@ describe('the requester side', () => {
       expect(tab(/I'm waiting on others/)).toHaveTextContent('0')
       view.unmount()
     }
-    expect(toggleChecklistItem).not.toHaveBeenCalled()
+    expect(updateChecklistItem).not.toHaveBeenCalled()
   })
 })
 
@@ -365,7 +365,7 @@ describe('the question button', () => {
     // The three things it must NOT do: finish, approve, or tick the step off.
     expect(waitingOnDone).not.toHaveBeenCalled()
     expect(waitingOnVerify).not.toHaveBeenCalled()
-    expect(toggleChecklistItem).not.toHaveBeenCalled()
+    expect(updateChecklistItem).not.toHaveBeenCalled()
   })
 
   it('can be backed out of without sending anything', () => {
@@ -420,9 +420,12 @@ describe('the question button', () => {
 })
 
 /**
- * The one place the step's own done-toggle survives on this page: an OLD
- * free-text wait, which has no wait record to resolve. Removing it would strand
- * every pre-structured wait on the page with no way to clear it.
+ * The one action this page still offers on an OLD free-text wait, which has
+ * no wait record to resolve. A waiting step cannot be checked off anywhere in
+ * the app any more (featreq-cdab1605), so this no longer ticks the step —
+ * only the wait flag itself, via the same PATCH the checklist page's Clear
+ * button sends. Removing the action entirely would strand every
+ * pre-structured legacy wait on the page with no way to clear it at all.
  */
 describe('an old free-text wait', () => {
   const legacyStep = {
@@ -436,13 +439,47 @@ describe('an old free-text wait', () => {
     subItems: [],
   }
 
-  it('sits under "I\'m waiting on others" and keeps its step Done', () => {
+  it('sits under "I\'m waiting on others" and offers Clear wait, not Done', () => {
     signInAs(A, [checklistWith([legacyStep] as unknown as Checklist['items'])])
     renderPage()
 
     expect(tab(/I'm waiting on others/)).toHaveTextContent('1')
     expect(screen.getByText('client to send statements')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /Done/ }))
-    expect(toggleChecklistItem).toHaveBeenCalledWith('cl-1', 'it-legacy')
+    fireEvent.click(screen.getByRole('button', { name: /Clear wait/ }))
+    expect(updateChecklistItem).toHaveBeenCalledWith('cl-1', 'it-legacy', {
+      waiting: false,
+      waitingOn: null,
+      waitingForChecklistId: null,
+    })
+    // It never reaches for the step's own done-toggle any more.
+    expect(screen.queryByRole('button', { name: /^Done$/ })).not.toBeInTheDocument()
+  })
+
+  it('clears a legacy wait on a SUB-step through the sub-item PATCH', () => {
+    const legacySub = {
+      id: 'sub-legacy',
+      title: 'Confirm the March statement',
+      done: false,
+      waiting: true,
+      waitingOn: 'client to send statements',
+      waitingOns: [],
+    }
+    const parent = {
+      id: 'it-1',
+      label: 'Bank rec',
+      done: false,
+      assigneeId: A,
+      waitingOns: [],
+      subItems: [legacySub],
+    }
+    signInAs(A, [checklistWith([parent] as unknown as Checklist['items'])])
+    renderPage()
+
+    fireEvent.click(screen.getByRole('button', { name: /Clear wait/ }))
+    expect(updateSubItemWaiting).toHaveBeenCalledWith('cl-1', 'it-1', 'sub-legacy', {
+      waiting: false,
+      waitingOn: null,
+      waitingForChecklistId: null,
+    })
   })
 })

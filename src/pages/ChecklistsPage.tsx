@@ -26,6 +26,7 @@ import {
   hasLiveSavedWait,
   isClientWait,
   isWaitingOnOpen,
+  waitingBlocksCompletion,
   waitingOnStage,
 } from '../../lib/waiting-on-state.js'
 import {
@@ -3440,14 +3441,16 @@ function DraggableTaskList({
               ) : null}
               <input
                 checked={item.done}
-                disabled={!allowToggle}
+                disabled={!allowToggle || waitingBlocksCompletion(item)}
                 onChange={() => void onToggle(checklistId, item.id)}
                 title={
                   !allowToggle
                     ? "This step is assigned to someone else — only they can check it off."
-                    : hasSubItems
-                      ? 'Checking this checks every sub-step'
-                      : undefined
+                    : waitingBlocksCompletion(item)
+                      ? 'Clear the wait first'
+                      : hasSubItems
+                        ? 'Checking this checks every sub-step'
+                        : undefined
                 }
                 type="checkbox"
               />
@@ -3670,12 +3673,14 @@ function DraggableTaskList({
                       <div className={sub.done ? 'sub-item-row done' : 'sub-item-row'}>
                         <input
                           checked={sub.done}
-                          disabled={!allowToggle}
+                          disabled={!allowToggle || waitingBlocksCompletion(sub)}
                           onChange={() => onToggleSubItem(item.id, sub.id)}
                           title={
-                            hasSubSubItems
-                              ? 'Checking this checks every sub-step'
-                              : undefined
+                            waitingBlocksCompletion(sub)
+                              ? 'Clear the wait first'
+                              : hasSubSubItems
+                                ? 'Checking this checks every sub-step'
+                                : undefined
                           }
                           type="checkbox"
                         />
@@ -3847,9 +3852,14 @@ function DraggableTaskList({
                             >
                               <input
                                 checked={subSub.done}
-                                disabled={!allowToggle}
+                                disabled={!allowToggle || waitingBlocksCompletion(subSub)}
                                 onChange={() =>
                                   onToggleSubSubItem(item.id, sub.id, subSub.id)
+                                }
+                                title={
+                                  waitingBlocksCompletion(subSub)
+                                    ? 'Clear the wait first'
+                                    : undefined
                                 }
                                 type="checkbox"
                               />

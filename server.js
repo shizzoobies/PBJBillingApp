@@ -154,6 +154,7 @@ import {
   REFUSED_WAITING_ON_ACTIONS,
   SELF_WAIT_REFUSAL,
   waitForTaskLinkDenial,
+  waitingBlocksCompletion,
   waitingLockRefusal,
   waitingOnActionRefusal,
   waitingOnStage,
@@ -9871,6 +9872,7 @@ const server = createServer(async (request, response) => {
         // No body — plain item toggle.
       }
       let targetSub
+      let targetSubSub
       if (toggleSubItemId) {
         targetSub = Array.isArray(targetItem.subItems)
           ? targetItem.subItems.find((sub) => sub.id === toggleSubItemId)
@@ -9886,13 +9888,28 @@ const server = createServer(async (request, response) => {
           sendJson(response, 400, { error: 'subItemId is required to toggle a sub-sub-item' })
           return
         }
-        const targetSubSub = Array.isArray(targetSub?.subItems)
+        targetSubSub = Array.isArray(targetSub?.subItems)
           ? targetSub.subItems.find((subSub) => subSub.id === toggleSubSubItemId)
           : undefined
         if (!targetSubSub) {
           sendJson(response, 404, { error: 'Sub-sub-item not found' })
           return
         }
+      }
+
+      // A waiting step cannot be checked off (featreq-cdab1605) — the shared
+      // predicate reuses `stepIsWaiting`'s meaning (the legacy flag, or any
+      // structured wait not yet verified) and is itself the source of truth:
+      // the UI disables the same checkboxes, but this is what actually
+      // refuses it, before the store ever sees the toggle. Un-checking a done
+      // step is never blocked — the predicate is already false once `done`.
+      const toggleTarget = targetSubSub ?? targetSub ?? targetItem
+      if (waitingBlocksCompletion(toggleTarget)) {
+        sendJson(response, 409, {
+          error: 'STEP_IS_WAITING',
+          message: 'Clear the wait on this step first.',
+        })
+        return
       }
 
       const toggleResult = await appDataStore.toggleChecklistItem(

@@ -69,6 +69,9 @@ export const SELF_WAIT_REFUSAL: string
 export const REFUSED_WAITING_ON_ACTIONS: readonly string[]
 
 export function hasLiveSavedWait(node: WaitingStepLike | undefined): boolean
+export function waitingBlocksCompletion(
+  node: (WaitingStepLike & { done?: boolean }) | undefined,
+): boolean
 export function waitForTaskLinkDenial(args: {
   checklist: { id?: string; clientId?: string } | undefined
   pool?: Array<{ id?: string; clientId?: string }>
