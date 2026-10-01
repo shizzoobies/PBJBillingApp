@@ -28,6 +28,11 @@
 //        --description "<what and why, 2000 chars>" [--type feature|bug|improvement] \
 //        [--dev-notes "<text>" | --dev-notes-file <path>] [--acting <user-id>] [--dry-run]
 //
+//   Filing a NEW item for later (work Alex asked to be queued, not yet built).
+//   Same arguments, one new row, status 'new', no shipped date:
+//   node scripts/prod/tracker-update.mjs --file-new --title "<120 chars>" \
+//        --description "<what and why, 2000 chars>" [--description-file <path>] ...
+//
 // The connection string comes from DATABASE_PUBLIC_URL (or DATABASE_URL) in
 // the environment, else from `railway variables --service Postgres --json`.
 
@@ -63,8 +68,10 @@ function parseArgs(argv) {
     if (a === '--dry-run') out.dryRun = true
     else if (a === '--replace-notes') out.replaceNotes = true
     else if (a === '--file-shipped') out.fileShipped = true
+    else if (a === '--file-new') out.fileNew = true
     else if (a === '--title') out.title = args.shift()
     else if (a === '--description') out.description = args.shift()
+    else if (a === '--description-file') out.description = readFileSync(args.shift(), 'utf8')
     else if (a === '--type') out.type = args.shift()
     else if (a === '--status') out.status = args.shift()
     else if (a === '--dev-notes') out.devNotes = args.shift()
@@ -75,10 +82,12 @@ function parseArgs(argv) {
     else if (!out.id && /^featreq-[0-9a-f]{8}$/.test(a)) out.id = a
     else throw new Error(`Unexpected argument: ${a}`)
   }
-  if (out.fileShipped) {
-    if (out.id) throw new Error('--file-shipped creates a new row; do not pass an id')
-    if (!out.title || !out.title.trim()) throw new Error('--file-shipped needs --title')
-    if (!out.description || !out.description.trim()) throw new Error('--file-shipped needs --description')
+  if (out.fileShipped && out.fileNew) throw new Error('Pass --file-shipped or --file-new, not both')
+  if (out.fileShipped || out.fileNew) {
+    const flag = out.fileNew ? '--file-new' : '--file-shipped'
+    if (out.id) throw new Error(`${flag} creates a new row; do not pass an id`)
+    if (!out.title || !out.title.trim()) throw new Error(`${flag} needs --title`)
+    if (!out.description || !out.description.trim()) throw new Error(`${flag} needs --description`)
     if (!['feature', 'bug', 'improvement'].includes(out.type))
       throw new Error('--type must be feature, bug or improvement')
     return out
@@ -112,13 +121,15 @@ function connectionString() {
 const opts = parseArgs(process.argv.slice(2))
 const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: false } })
 
-async function fileShipped() {
+// One new row: 'shipped' (with its shipped date) for work already live, or
+// 'new' (no shipped date) for work queued for later.
+async function fileRow(status) {
   const id = `featreq-${randomUUID().slice(0, 8)}`
   const title = opts.title.trim().slice(0, 120)
   const description = opts.description.trim().slice(0, 2000)
   const devNotes = opts.devNotes === undefined ? null : opts.devNotes.trim().slice(0, 4000)
   console.log(`NEW ROW ${id} "${title}"`)
-  console.log(`  type=${opts.type} status=shipped priority=medium acting=${opts.acting}`)
+  console.log(`  type=${opts.type} status=${status} priority=medium acting=${opts.acting}`)
   console.log(`  description ${description.length} chars, dev_notes ${devNotes ? devNotes.length : 0} chars`)
   if (opts.dryRun) {
     console.log('DRY RUN - nothing written')
@@ -128,16 +139,17 @@ async function fileShipped() {
   const r = await pool.query(
     `insert into feature_requests
        (id, user_id, title, description, type, status, priority, priority_rank, dev_notes, created_at, shipped_at)
-     values ($1, $2, $3, $4, $5, 'shipped', 'medium', $6, $7, now(), now())
+     values ($1, $2, $3, $4, $5, $8::text, 'medium', $6, $7, now(), case when $8::text = 'shipped' then now() else null end)
      returning id, status, shipped_at`,
-    [id, opts.acting, title, description, opts.type, Number(rank.rows[0]?.next ?? 0) || 0, devNotes],
+    [id, opts.acting, title, description, opts.type, Number(rank.rows[0]?.next ?? 0) || 0, devNotes, status],
   )
-  console.log(`FILED  ${r.rows[0].id} status=${r.rows[0].status} shipped_at=${r.rows[0].shipped_at.toISOString()}`)
+  const row = r.rows[0]
+  console.log(`FILED  ${row.id} status=${row.status} shipped_at=${row.shipped_at ? row.shipped_at.toISOString() : null}`)
 }
 
 try {
-  if (opts.fileShipped) {
-    await fileShipped()
+  if (opts.fileShipped || opts.fileNew) {
+    await fileRow(opts.fileNew ? 'new' : 'shipped')
   } else {
   const before = await pool.query(
     `select id, title, status, priority, dev_notes, review_note, reviewed_by,
