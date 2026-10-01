@@ -25,7 +25,16 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-01, afternoon):** `main` = `67e50cb` (+ this handoff). A THIRD ship
+**State right now (2026-10-01, late afternoon):** `main` = `3e8e769` (+ this handoff). A FOURTH
+ship followed (staff "This + all future" delete requests, last bullets of the 2026-10-01 entry);
+suite **4821 tests / 242 files**; manifest 204,297 bytes (703 under the tripwire - TRIM FIRST).
+One send-back is OPEN and waiting on Alex/Brittany: `featreq-8a01fe08` "no longer able to check
+off sub task under a step" - not reproducible as a bug, almost certainly the waiting rule (see
+the entry). Nine invoice-control items are filed as ONE New ticket, `featreq-459bdfc2`. Two
+more New items from Brittany are untouched: `featreq-27836ea0` (no deleting a client once time
+is entered) and `featreq-87b20ed7` (invoice shows only the sections a client has).
+
+**Earlier that afternoon:** `main` = `67e50cb` (+ handoff `085a5b7`). A THIRD ship
 landed after the two below: the "Change covered dates" control, plus a one-time production
 fix that put Oct 13 - Nov 13 on every QuickBooks / Workforce line of the September drafts
 (third bullet group of the 2026-10-01 entry in section 5). Suite **4760 tests / 241 files**.
@@ -532,20 +541,38 @@ with instructions rather than failing. Run it by hand after any print change.
   gate; "Void" has no confirm and is allowed on a processing invoice, after which the Stripe
   payment is dropped; the month run treats every non-lock 409 as a retainer refusal. Full list
   with file:line in `.superpowers/sdd/invoice-lever-audit.md`. Alex decides what to build.
-- **Watch:** `checklist-step-delete-scope.test.tsx > clears after 8 seconds` failed once under
-  a full run for a subagent and never for me (4 clean runs alone, 5 clean full verifies). No
-  failure message was captured; capture it before changing the test.
-- **When she reports a date or "due" on an invoice:** first pin down the SURFACE (list row, print
-  sheet, PDF, email) and WHICH Print button. The row date is internal; the client copies say Due
-  on receipt. This one was two interpretation gaps and one real default problem, not a bug in
-  the money.
-- **Local dev sign-in:** test runs can reset `tmp/auth-state.json`, after which the seeded owner
-  lands on `/two-factor/setup`; enroll in the page (reveal the setup code, compute the code
-  in-page). Stop both preview servers before running vitest - they share `tmp/`.
-**2026-09-30 (late) - the queue run: two client-page items, five checklist items, and the
-evening date bug.** Spec `docs/plans/queue-2026-09-30.md`. Built in three parallel worktree
-lanes by subagents, every task reviewed and re-reviewed, three whole-branch reviews (storage,
-routes/permissions, frontend), one post-review fix pass and a delta review; shipped as `a4f78ac`.
+- **Flaky test fixed (`ae20bd6`):** `checklist-step-delete-scope.test.tsx > clears after 8 seconds`
+  looked for the notice's 8-second timer before the effect that arms it had run; it now waits
+  for the timer. A subagent also saw `checklist-push-merge.test.tsx` fail once under load after
+  last night's fix - not reproduced; capture the message if it shows again.
+- **Tracker script (`427f423`):** `scripts/prod/tracker-update.mjs --file-new` files one row with
+  status `new` (no shipped date); `--description-file` reads a long description from a file.
+- **Staff can ask for "This + all future" (`featreq-01464e64`, sent back; `caaf9d0`, `d73799a`,
+  `3e8e769`).** Her send-back: employees must get both choices and it still goes to her for
+  approval. `item_deletion_requests.scope` (`checklist` | `series`; file backend `scope` on the
+  auth-state request; old rows read `checklist`). A non-owner `DELETE ...?scope=series` now FILES
+  a series request instead of the 403 (same recurring / own-template checks, nothing written).
+  Approve runs the SAME series delete as the owner's own route through one helper
+  (`runSeriesStepDelete` / `seriesDeleteDenial` in `lib/series-step-delete.js`), re-validated at
+  approval time; a refusal (not recurring, shared template, last recurring step) is a 409 and the
+  request stays. RULES THAT BIND: the approve POST carries the scope the owner's row SHOWED and
+  the server refuses a mismatch (409 `request_changed`, nothing written; a body with no scope
+  reads `checklist`, so an old tab can never approve a series request); only the requester can
+  change a pending request's scope, and a change re-notifies the owner; a series request with a
+  sub-step id is refused. `server.js` is never booted by a test - the route glue is pinned by
+  source-reading tests; I exercised it over real HTTP on the dev server (staff files, stale
+  approve refused, owner approve removes step + template step and it survives the autosave) and
+  trialed the Postgres statements on production in a rolled-back transaction.
+- **OPEN send-back, `featreq-8a01fe08`: "no longer able to check it off sub task under a step".**
+  Reproduce-first result: a sub-step ticks and stays ticked for owner AND staff in a real
+  browser; production has 4 open sub-steps and the guard refuses none. At the minute she wrote
+  it, Lisa had just added a task to XAct's Monthly Reconciliations and marked it WAITING ON
+  BRITTANY; that task and one more are still waiting on her (checkbox gray, "Clear the wait
+  first"), and Bright Tower's were ticked seconds after its wait was cleared. Reading: "sub task
+  under a step" = a task under a STAGE ("Step 1 of 3"), blocked by the waiting rule she asked
+  for in `featreq-cdab1605`. Alex was asked which she meant; offered fix if the rule is too
+  strict: the owner may tick a waiting task directly, which clears the wait. NOTHING CHANGED;
+  the ticket is still Planned.
 
 - **Statement dates box** (`featreq-11ffb3a6`): client page, Overview, above Client notes.
   Table `client_statement_accounts` (file key `authState.clientStatementAccounts`), endpoint-
