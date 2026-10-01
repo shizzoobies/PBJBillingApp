@@ -383,6 +383,41 @@ describe('deleting a step on a recurring checklist', () => {
       expect(within(card()).queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
     })
 
+    it('closes the question when its step is no longer on the checklist (a refetch removed it)', () => {
+      const view = renderPage()
+      deleteStep('Second step')
+      expect(screen.getByRole('group', { name: 'Where to delete this step' })).toBeInTheDocument()
+
+      const showChecklist = (card: Checklist) => {
+        contextValue = {
+          ...contextValue,
+          data: { ...data, checklists: [RECURRING, ONE_OFF, card] },
+          visibleChecklists: [RECURRING, ONE_OFF, card],
+        } as unknown as AppContextValue
+        view.rerender(
+          <MemoryRouter initialEntries={['/checklists']}>
+            <ChecklistsPage />
+          </MemoryRouter>,
+        )
+      }
+      showChecklist({
+        ...TWO_STEPS,
+        items: TWO_STEPS.items.filter((item) => item.id !== 'cl-two-second'),
+      } as Checklist)
+      expect(screen.queryByText('Second step')).not.toBeInTheDocument()
+      // The step comes back (a later refetch): an old question must not come back with it.
+      showChecklist(TWO_STEPS)
+      expect(screen.getByText('Second step')).toBeInTheDocument()
+      expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
+    })
+
+    it('Cancel hands focus back to the x that opened the question', () => {
+      renderPage()
+      deleteStep('Second step')
+      fireEvent.click(within(stepItem('Second step')).getByRole('button', { name: 'Cancel' }))
+      expect(within(stepItem('Second step')).getByRole('button', { name: 'Delete item' })).toHaveFocus()
+    })
+
     it('is disabled with "Disabled in preview mode" while previewing as someone', () => {
       contextValue = { ...contextValue, previewMode: true } as unknown as AppContextValue
       renderPage()

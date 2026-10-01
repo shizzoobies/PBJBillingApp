@@ -109,12 +109,19 @@ function boot(extraRoutes: Array<(path: string, method: string, body: unknown) =
 
 /** A local edit the bulk autosave carries: add a plan on the Plans page. */
 async function makeALocalEdit(page: ReturnType<typeof within>) {
+  const plansBefore = createSeedData().plans.length
   fireEvent.click(page.getByRole('link', { name: 'Plans' }))
   fireEvent.click(await page.findByRole('button', { name: 'Add plan' }))
   const submit = page.getAllByRole('button', { name: 'Add plan' }).at(-1) as HTMLElement
   fireEvent.click(submit)
-  await waitFor(() => expect(savedBodies.length).toBeGreaterThan(0), { timeout: 4000 })
-  return savedBodies.at(-1) as AppData
+  // Wait for the save that carries the edit, not merely the first save.
+  await waitFor(
+    () => expect(savedBodies.some((body) => body.plans.length === plansBefore + 1)).toBe(true),
+    { timeout: 4000 },
+  )
+  const saved = savedBodies.filter((body) => body.plans.length === plansBefore + 1).at(-1) as AppData
+  expect(saved.plans.length).toBe(plansBefore + 1)
+  return saved
 }
 
 beforeEach(() => {

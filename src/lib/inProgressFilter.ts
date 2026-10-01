@@ -10,18 +10,19 @@ type WaitNode = Parameters<typeof stepIsWaiting>[0] & { done: boolean; subItems?
  * is the roll-up reading (`isChecklistItemDone`, the rule Push splits by): a
  * step marked done with an unchecked sub-step is open, so its waiting sub-step
  * counts, while a done step - and anything beneath it - does not. A verified
- * wait is not waiting (`stepIsWaiting`). Derived on every read, never stored,
- * so clearing or verifying the wait is what returns a checklist to Active.
+ * wait is not waiting (`stepIsWaiting`). A step whose OWN waiting flag is on and
+ * whose stored `done` is false counts even when its sub-steps all read done (the
+ * toggle guard and the Delayed page treat it as waiting). Derived on every read,
+ * never stored, so clearing or verifying the wait is what returns a checklist to
+ * Active.
  */
 export function waitingStepCount(checklist: Checklist): number {
   const walk = (nodes: WaitNode[]): number =>
-    nodes.reduce(
-      (sum, node) =>
-        isChecklistItemDone(node)
-          ? sum
-          : sum + (stepIsWaiting(node) ? 1 : 0) + walk(node.subItems ?? []),
-      0,
-    )
+    nodes.reduce((sum, node) => {
+      const rolledUpDone = isChecklistItemDone(node)
+      const ownCounts = stepIsWaiting(node) && (!rolledUpDone || !node.done)
+      return sum + (ownCounts ? 1 : 0) + (rolledUpDone ? 0 : walk(node.subItems ?? []))
+    }, 0)
   return walk(checklist.items)
 }
 

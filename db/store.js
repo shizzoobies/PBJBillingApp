@@ -3245,6 +3245,13 @@ function mapClientPendingNoteRow(row) {
   }
 }
 
+/** A file-backend note without its internal `releasedAt` flag (Postgres rows never carry it). */
+function publicPendingNote(note) {
+  const copy = { ...note }
+  delete copy.releasedAt
+  return copy
+}
+
 /** The file backend's stored object, filled out to the same shape. */
 function normalizeChecklistSkip(record) {
   return {
@@ -3833,9 +3840,15 @@ export class AppDataStore {
           created_at timestamptz not null default now(),
           attached_checklist_id text,
           attached_item_id text,
-          attached_at timestamptz
+          attached_at timestamptz,
+          released_at timestamptz
         )
       `)
+      // A note released from a deleted or skipped checklist stays marked
+      // released until it attaches again, so it keeps skipping finished work.
+      await this.pool.query(
+        `alter table client_pending_notes add column if not exists released_at timestamptz`,
+      )
       await this.pool.query(
         `create index if not exists client_pending_notes_client_idx
            on client_pending_notes (client_id)`,
@@ -15939,7 +15952,7 @@ export class AppDataStore {
       if (!result.rowCount) {
         return null
       }
-      await this._clearPendingNoteItemStamps([itemId])
+      await this._clearPendingNoteItemStampsSafely([itemId])
       const data = await this.read()
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
@@ -15965,8 +15978,20 @@ export class AppDataStore {
       return null
     }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    await this._clearPendingNoteItemStamps([itemId])
+    await this._clearPendingNoteItemStampsSafely([itemId])
     return updatedChecklist
+  }
+
+  /**
+   * The step-link clear for callers whose delete is already written: a failure
+   * here is logged, never turned into a failed delete.
+   */
+  async _clearPendingNoteItemStampsSafely(itemIds) {
+    try {
+      await this._clearPendingNoteItemStamps(itemIds)
+    } catch (error) {
+      console.error('[pending-notes] could not clear the step link after a delete:', error)
+    }
   }
 
   /**
@@ -16254,7 +16279,7 @@ export class AppDataStore {
       }
     }
     if (queuesChanged) await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    await this._clearPendingNoteItemStamps(removedSteps.map((step) => step.itemId))
+    await this._clearPendingNoteItemStampsSafely(removedSteps.map((step) => step.itemId))
     return { removedFromTemplate: Boolean(templateItem), removedFromChecklists, keptOnChecklists }
   }
 
@@ -19858,6 +19883,7 @@ export class AppDataStore {
           String(b.createdAt).localeCompare(String(a.createdAt)),
       )
       .slice(0, MAX_LISTED_PENDING_NOTES)
+      .map(publicPendingNote)
   }
 
   /**
@@ -19890,6 +19916,7 @@ export class AppDataStore {
       .sort((a, b) =>
         String(a.attachedAt ?? a.createdAt).localeCompare(String(b.attachedAt ?? b.createdAt)),
       )
+      .map(publicPendingNote)
   }
 
   /**
@@ -19960,7 +19987,8 @@ export class AppDataStore {
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
-    return list.find((note) => note.id === noteId) ?? null
+    const found = list.find((note) => note.id === noteId)
+    return found ? publicPendingNote(found) : null
   }
 
   /** Delete a pending note by id. Returns true if a row was removed. */
@@ -19998,7 +20026,8 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select n.id, n.client_id, n.template_id, n.kind, n.body, n.created_at,
-                (n.attached_checklist_id is not null) as stale
+                (n.attached_checklist_id is not null) as was_attached,
+                (n.released_at is not null) as was_released
            from client_pending_notes n
            left join checklists c on c.id = n.attached_checklist_id
           where (n.attached_checklist_id is null or c.id is null or c.deleted_at is not null
@@ -20006,20 +20035,30 @@ export class AppDataStore {
             ${clientId ? 'and n.client_id = $1' : ''}`,
         clientId ? [clientId] : [],
       )
-      const staleIds = result.rows.filter((row) => row.stale).map((row) => row.id)
+      // "Released" is durable (`released_at`): a note released from a deleted
+      // or skipped checklist keeps skipping finished work on every later pass
+      // until it attaches again. Stamped here, then read back, so a note
+      // released in this very pass is also stale in this pass.
+      const releasedIds = new Set(
+        result.rows.filter((row) => row.was_released).map((row) => row.id),
+      )
+      const staleIds = result.rows.filter((row) => row.was_attached).map((row) => row.id)
       if (staleIds.length > 0) {
-        await this.pool.query(
+        const cleared = await this.pool.query(
           `update client_pending_notes
-              set attached_checklist_id = null, attached_item_id = null, attached_at = null
+              set attached_checklist_id = null, attached_item_id = null, attached_at = null,
+                  released_at = now()
             where id = any($1::text[])
               and not exists (
                 select 1 from checklists c
                  where c.id = client_pending_notes.attached_checklist_id
                    and c.deleted_at is null
                    and c.skipped_at is null
-              )`,
+              )
+            returning id`,
           [staleIds],
         )
+        for (const row of cleared.rows) releasedIds.add(row.id)
       }
       return result.rows.map((row) => ({
         id: row.id,
@@ -20028,7 +20067,7 @@ export class AppDataStore {
         kind: row.kind === 'task' ? 'task' : 'note',
         body: row.body,
         createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
-        stale: Boolean(row.stale),
+        stale: releasedIds.has(row.id),
       }))
     }
     const authState = await readJson(localAuthPath)
@@ -20044,14 +20083,13 @@ export class AppDataStore {
       )
     }
     let cleared = false
-    const staleIds = new Set()
     const pending = scoped.filter((note) => {
       if (!note.attachedChecklistId) return true
       if (liveChecklistIds?.has(note.attachedChecklistId)) return false
-      staleIds.add(note.id)
       note.attachedChecklistId = null
       note.attachedItemId = null
       note.attachedAt = null
+      note.releasedAt = nowIso()
       cleared = true
       return true
     })
@@ -20065,7 +20103,7 @@ export class AppDataStore {
       kind: note.kind === 'task' ? 'task' : 'note',
       body: note.body,
       createdAt: note.createdAt,
-      stale: staleIds.has(note.id),
+      stale: Boolean(note.releasedAt),
     }))
   }
 
@@ -20186,7 +20224,8 @@ export class AppDataStore {
         // and a step added there would land on finished history.
         const lockedTarget = await client.query(
           `select 1 from checklists
-            where id = $1 and deleted_at is null and pushed_to_checklist_id is null
+            where id = $1 and deleted_at is null and skipped_at is null
+              and pushed_to_checklist_id is null
               for update`,
           [checklistId],
         )
@@ -20222,7 +20261,8 @@ export class AppDataStore {
         )
         const stamp = await client.query(
           `update client_pending_notes
-              set attached_checklist_id = $2, attached_item_id = $3, attached_at = now()
+              set attached_checklist_id = $2, attached_item_id = $3, attached_at = now(),
+                  released_at = null
             where id = $1 and attached_checklist_id is null`,
           [noteId, checklistId, finalItemId],
         )
@@ -20233,7 +20273,7 @@ export class AppDataStore {
         await client.query('commit')
         return true
       } catch (error) {
-        await client.query('rollback')
+        await client.query('rollback').catch(() => {})
         throw error
       } finally {
         client.release()
@@ -20242,8 +20282,10 @@ export class AppDataStore {
 
     const data = await readJson(localDataPath)
     const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
-    // Same re-check as the Postgres lock: never a missing, deleted or split-record target.
-    if (!checklist || checklist.deletedAt || checklist.pushedToChecklistId) return false
+    // Same re-check as the Postgres lock: never a missing, deleted, skipped or split-record target.
+    if (!checklist || checklist.deletedAt || checklist.skippedAt || checklist.pushedToChecklistId) {
+      return false
+    }
     // Same rule as the Postgres branch: item ids share one namespace and a
     // deleted checklist keeps its items (in `recycledChecklists` here), so an
     // id already used by a DIFFERENT checklist gets this checklist's id appended.
@@ -20278,6 +20320,7 @@ export class AppDataStore {
       note.attachedChecklistId = checklistId
       note.attachedItemId = finalItemId
       note.attachedAt = nowIso()
+      note.releasedAt = null
       await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
       return true
     }
@@ -20289,12 +20332,22 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `update client_pending_notes
-            set attached_checklist_id = $2, attached_item_id = null, attached_at = now()
-          where id = $1 and attached_checklist_id is null`,
+            set attached_checklist_id = $2, attached_item_id = null, attached_at = now(),
+                released_at = null
+          where id = $1 and attached_checklist_id is null
+            and exists (
+              select 1 from checklists
+               where id = $2 and deleted_at is null and skipped_at is null
+                 and pushed_to_checklist_id is null
+            )`,
         [noteId, checklistId],
       )
       return (result.rowCount ?? 0) > 0
     }
+    // Same re-check as the Postgres `exists`: never stamp a deleted, skipped or split target.
+    const targetData = await readJson(localDataPath)
+    const target = (targetData.checklists ?? []).find((entry) => entry.id === checklistId)
+    if (!target || target.deletedAt || target.skippedAt || target.pushedToChecklistId) return false
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
     const note = list.find((entry) => entry.id === noteId)
@@ -20302,6 +20355,7 @@ export class AppDataStore {
       note.attachedChecklistId = checklistId
       note.attachedItemId = null
       note.attachedAt = nowIso()
+      note.releasedAt = null
       await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
       return true
     }

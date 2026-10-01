@@ -3228,6 +3228,8 @@ function App() {
         // still in sync. The caller shows the server's sentence and keeps its
         // prompt open - a 400 / 404 never closes it silently.
         setDataSyncState('synced')
+        // A 404 means the row the server says is gone is still on this screen.
+        if (error instanceof ApiError && error.status === 404) requestLiveRefetchRef.current?.()
         throw error
       }
       setDataSyncState('error')

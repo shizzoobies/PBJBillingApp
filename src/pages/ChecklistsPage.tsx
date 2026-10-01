@@ -2770,6 +2770,10 @@ export function ChecklistCard({
         onCanToggle={canToggleItem}
         onDeleteItem={async (itemId) => requestStepDelete(itemId)}
         deletePromptItemId={stepDeletePrompt?.itemId ?? null}
+        onDeletePromptHidden={() => {
+          setStepDeletePrompt(null)
+          setStepDeleteError(null)
+        }}
         renderDeletePrompt={() =>
           stepDeletePrompt ? (
             <StepDeletePrompt
@@ -3545,6 +3549,14 @@ function StepDeletePrompt({
   useEffect(() => {
     containerRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
   }, [])
+  // Closing without deleting hands focus back to the x that opened the question.
+  const cancelAndRestoreFocus = () => {
+    containerRef.current
+      ?.closest('.task-item')
+      ?.querySelector<HTMLButtonElement>('button.item-delete-btn')
+      ?.focus()
+    onCancel()
+  }
   const locked = busy || Boolean(previewMode)
   const lockedTitle = previewMode ? 'Disabled in preview mode' : undefined
   return (
@@ -3556,7 +3568,7 @@ function StepDeletePrompt({
       onKeyDown={(event) => {
         if (event.key === 'Escape' && !busy) {
           event.stopPropagation()
-          onCancel()
+          cancelAndRestoreFocus()
         }
       }}
     >
@@ -3582,7 +3594,7 @@ function StepDeletePrompt({
             This + all future
           </button>
         ) : null}
-        <button type="button" className="link-button" disabled={busy} onClick={onCancel}>
+        <button type="button" className="link-button" disabled={busy} onClick={cancelAndRestoreFocus}>
           Cancel
         </button>
       </div>
@@ -3620,6 +3632,7 @@ function DraggableTaskList({
   onCanToggle,
   onDeleteItem,
   deletePromptItemId = null,
+  onDeletePromptHidden,
   renderDeletePrompt,
   onRemoveSubItem,
   onRemoveSubSubItem,
@@ -3642,6 +3655,8 @@ function DraggableTaskList({
   onDeleteItem: (itemId: string) => Promise<void>
   /** The step whose "where to delete" question is open: it renders INSIDE that step's row. */
   deletePromptItemId?: string | null
+  /** Called when that step is hidden by "Hide completed", so Show never revives an old question. */
+  onDeletePromptHidden?: () => void
   renderDeletePrompt?: () => ReactNode
   onRemoveSubItem: (itemId: string, subItemId: string) => void
   onRemoveSubSubItem: (itemId: string, subItemId: string, subSubItemId: string) => void
@@ -3875,6 +3890,15 @@ function DraggableTaskList({
   const orderedItems = orderStepsForDisplay(items)
   const visibleItems = hiding ? orderedItems.filter((item) => !hideable(item)) : orderedItems
   const openItemIds = items.filter((entry) => !isStepDone(entry)).map((entry) => entry.id)
+  // The question belongs to a step that is on screen: when its step is gone (deleted, or
+  // removed by a refetch) or hidden by Hide completed, the question closes, so nothing old
+  // comes back when the step returns or Show is pressed.
+  const deletePromptHidden =
+    deletePromptItemId !== null && !visibleItems.some((item) => item.id === deletePromptItemId)
+  useEffect(() => {
+    if (deletePromptHidden) onDeletePromptHidden?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the callback only clears state
+  }, [deletePromptHidden])
 
   const handleDragEnd = () => {
     setDraggingId(null)
