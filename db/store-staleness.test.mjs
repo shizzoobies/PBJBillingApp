@@ -1000,8 +1000,12 @@ function fakePostgres({
     // pre-capture and write()'s in-transaction re-check issue the same SQL.
     // `versionResponses` scripts the answers in order, so a test can make the
     // fingerprint MOVE between the capture and the check (i.e. simulate a
-    // concurrent write landing mid-read). Default: empty tables, stable value.
+    // concurrent write landing mid-read). A FUNCTION answers from live state
+    // instead, so a test can flip the "database" at an exact point in the
+    // read and see which side of that point the captured version fell on.
+    // Default: empty tables, stable value.
     if (/md5\(coalesce\(string_agg/i.test(trimmed) && /union all/i.test(trimmed)) {
+      if (typeof versionResponses === 'function') return { rows: versionResponses() }
       return { rows: Array.isArray(versionResponses) ? (versionResponses.shift() ?? []) : [] }
     }
     // `findInvoiceByPayToken`'s narrow read. It has to come BEFORE the general
@@ -1312,12 +1316,7 @@ describe('read() derives assignedEmployeeIds from the client row (postgres branc
     const fake = fakePostgres({ clientRows: [clientRow] })
     await postgresStore(fake).read()
 
-    // The workspace fingerprint read() now captures names every table the bulk
-    // save owns, `client_assignments` included; it is the only statement that
-    // may mention the table.
-    expect(
-      fake.matching(/client_assignments/i).filter((statement) => !/union all/i.test(statement.text)),
-    ).toEqual([])
+    expect(fake.matching(/client_assignments/i)).toEqual([])
   })
 
   it('emits an empty team as an empty array on both names', async () => {
@@ -10542,6 +10541,31 @@ describe("read()'s materializer write-back is guarded (file backend)", () => {
     expect(version).toBe(await store.computeWorkspaceVersion())
     await expect(store.write(data, { expectedVersion: version })).resolves.not.toThrow()
   })
+
+  // I-1 on the file backend: a plain read() hands out no version, and its
+  // post-write-back re-read (which needs no guard and no version) still serves
+  // what was persisted, attached note included.
+  it('a plain read() after a write-back serves what was persisted and carries no version', async () => {
+    await store.write(spawnableWorkspace())
+    const note = await store.createClientPendingNote('c1', {
+      templateId: 'tpl-1',
+      kind: 'task',
+      body: 'New hire this cycle',
+    })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    const plain = await store.read()
+
+    expect(Object.keys(plain)).not.toContain('version')
+    const spawned = plain.checklists.find((c) => c.templateId === 'tpl-1')
+    expect(spawned.items.map((item) => item.id)).toContain(
+      `item-pn-${note.id.replace(/^pnote-/, '')}`,
+    )
+    // Same persisted workspace the versioned read now sees.
+    const { data, version } = await store.readWithVersion()
+    expect(data.checklists.map((c) => c.id).sort()).toEqual(plain.checklists.map((c) => c.id).sort())
+    expect(version).toBe(await store.computeWorkspaceVersion())
+  })
 })
 
 /**
@@ -11281,10 +11305,10 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
     expect(fake.matching(/^insert into checklists\b/i).length).toBeGreaterThan(0)
 
     // Fingerprint captured BEFORE the snapshot that gets written: the template
-    // table is read once to detect the spawn, then again AFTER the capture. (The
-    // very first fingerprint belongs to the first read, for the version the
-    // caller is handed; the write-back's own capture is the second.)
-    const captureAt = nthIndexOf(fake, VERSION_SQL, 2)
+    // table is read once to detect the spawn, then again AFTER the capture. A
+    // plain read() takes no fingerprint for the caller, so the write-back's own
+    // capture is the FIRST one.
+    const captureAt = nthIndexOf(fake, VERSION_SQL, 1)
     const secondTemplateReadAt = nthIndexOf(
       fake,
       /\bnext_due_date\b[\s\S]*from checklist_templates\b/i,
@@ -11296,7 +11320,7 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
 
     // And write() re-checked it INSIDE the transaction.
     const beginAt = fake.indexOf(/^begin$/i)
-    const recheckAt = nthIndexOf(fake, VERSION_SQL, 3)
+    const recheckAt = nthIndexOf(fake, VERSION_SQL, 2)
     const firstDeleteAt = fake.indexOf(/^delete from /i)
     expect(beginAt).toBeGreaterThan(-1)
     expect(recheckAt).toBeGreaterThan(beginAt)
@@ -11307,7 +11331,6 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const fake = spawnableFake({
       versionResponses: [
-        [{ t: 'clients', h: 'before' }],
         [{ t: 'clients', h: 'before' }],
         [{ t: 'clients', h: 'after-a-concurrent-write' }],
       ],
@@ -11329,28 +11352,57 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
   // the tab never saw.
   const rowsFor = (hash) => [{ t: 'clients', h: hash }]
 
-  it('hands out the version captured BEFORE the final read, so a later write makes the next save stale', async () => {
-    const responses = [rowsFor('v1'), rowsFor('v2'), rowsFor('v2'), rowsFor('v3')]
-    const fake = spawnableFake({ versionResponses: responses })
+  // The fake's fingerprint answers from `state.current`, and the workspace-read
+  // spy flips it the moment a read returns - exactly "a write landing right
+  // after that read". The version a caller is handed therefore tells WHICH SIDE
+  // of the read it was captured on (a version captured after the read would
+  // carry the flipped value), instead of merely being the nth scripted answer.
+  const stateVersionFake = (overrides = {}) => {
+    const state = { current: 'v1', reads: 0 }
+    const fake = fakePostgres({
+      clientRows: [clientRow],
+      versionResponses: () => rowsFor(state.current),
+      ...overrides,
+    })
     const pgStore = postgresStore(fake)
     const realRead = pgStore._readPostgresWorkspace.bind(pgStore)
-    let reads = 0
+    return { state, fake, pgStore, realRead }
+  }
+  const spawnRows = {
+    templateRows: [spawnTemplateRow],
+    templateStageRows: [stageRow],
+    templateItemRows: [templateItemRow],
+  }
+
+  it('hands out the version captured BEFORE the final read, so a later write makes the next save stale', async () => {
+    const { state, fake, pgStore, realRead } = stateVersionFake(spawnRows)
     vi.spyOn(pgStore, '_readPostgresWorkspace').mockImplementation(async () => {
       const snapshot = await realRead()
-      reads += 1
-      // The write lands right after the FINAL workspace read: the next
-      // fingerprint the database would give is a different one.
-      if (reads === 3) responses.push(rowsFor('v4-after-the-final-read'))
+      state.reads += 1
+      // Reads 1 and 2 feed the guarded write-back, which must find the state
+      // unmoved. A write lands right after the FINAL (3rd) read.
+      if (state.reads === 3) state.current = 'v2-after-the-final-read'
       return snapshot
     })
 
     const { data, version } = await pgStore.readWithVersion()
 
     // read -> re-read (guarded write-back) -> final read of what was persisted.
-    expect(reads).toBe(3)
+    expect(state.reads).toBe(3)
     expect(fake.matching(/^insert into checklists\b/i).length).toBeGreaterThan(0)
-    expect(version).toBe(foldVersionRows(rowsFor('v3')))
-    expect(version).not.toBe(foldVersionRows(rowsFor('v4-after-the-final-read')))
+    expect(version).toBe(foldVersionRows(rowsFor('v1')))
+    expect(version).not.toBe(foldVersionRows(rowsFor('v2-after-the-final-read')))
+
+    // Statement order says the same: the last fingerprint precedes the last
+    // workspace read of the clients table.
+    let lastVersionAt = -1
+    let lastClientsReadAt = -1
+    fake.statements.forEach((statement, index) => {
+      if (VERSION_SQL.test(statement.text) && /union all/i.test(statement.text)) lastVersionAt = index
+      else if (/^select\b[\s\S]*\bfrom clients\b/i.test(statement.text)) lastClientsReadAt = index
+    })
+    expect(lastVersionAt).toBeGreaterThan(-1)
+    expect(lastVersionAt).toBeLessThan(lastClientsReadAt)
 
     // A save built from that snapshot, under that version, is refused.
     const deletesBefore = fake.matching(/^delete from /i).length
@@ -11361,13 +11413,10 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
   })
 
   it('serves the snapshot it already holds, under the version that predates it, when nothing is spawned', async () => {
-    const responses = [rowsFor('v1')]
-    const fake = fakePostgres({ clientRows: [clientRow], versionResponses: responses })
-    const pgStore = postgresStore(fake)
-    const realRead = pgStore._readPostgresWorkspace.bind(pgStore)
+    const { state, pgStore, realRead } = stateVersionFake()
     vi.spyOn(pgStore, '_readPostgresWorkspace').mockImplementation(async () => {
       const snapshot = await realRead()
-      responses.push(rowsFor('v2-after-the-read'))
+      state.current = 'v2-after-the-read'
       return snapshot
     })
 
@@ -11385,10 +11434,15 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
 
   it('a refused write-back serves the in-memory data under the version captured before the re-read', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const fake = spawnableFake({
-      versionResponses: [rowsFor('v1'), rowsFor('v2'), rowsFor('after-a-concurrent-write')],
+    const { state, pgStore, realRead } = stateVersionFake(spawnRows)
+    vi.spyOn(pgStore, '_readPostgresWorkspace').mockImplementation(async () => {
+      const snapshot = await realRead()
+      // Every read is followed by a concurrent write: the write-back's capture
+      // sees v2 (before the re-read), the in-transaction re-check sees v3.
+      state.reads += 1
+      state.current = `v${state.reads + 1}`
+      return snapshot
     })
-    const pgStore = postgresStore(fake)
 
     const { data, version } = await pgStore.readWithVersion()
 
@@ -11428,6 +11482,55 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
     await pgStore.readWithVersion()
 
     expect(reader).toHaveBeenCalledTimes(3)
+  })
+
+  // I-1: only the workspace download computes the fingerprint. read() runs at
+  // well over a hundred call sites and must cost what it did before.
+  const fingerprintStatements = (fake) =>
+    fake.statements.filter((s) => VERSION_SQL.test(s.text) && /union all/i.test(s.text))
+
+  it('a plain read() with nothing to spawn issues ZERO fingerprint queries; readWithVersion() issues exactly one, before the first workspace select', async () => {
+    const plainFake = fakePostgres({ clientRows: [clientRow] })
+    await postgresStore(plainFake).read()
+    expect(fingerprintStatements(plainFake)).toHaveLength(0)
+
+    const versionedFake = fakePostgres({ clientRows: [clientRow] })
+    await postgresStore(versionedFake).readWithVersion()
+    expect(fingerprintStatements(versionedFake)).toHaveLength(1)
+    const fingerprintAt = versionedFake.statements.findIndex(
+      (s) => VERSION_SQL.test(s.text) && /union all/i.test(s.text),
+    )
+    const firstWorkspaceSelectAt = versionedFake.statements.findIndex((s) =>
+      /^select\b[\s\S]*\bfrom clients\b/i.test(s.text) && !/union all/i.test(s.text),
+    )
+    expect(firstWorkspaceSelectAt).toBeGreaterThan(-1)
+    expect(fingerprintAt).toBe(0)
+    expect(fingerprintAt).toBeLessThan(firstWorkspaceSelectAt)
+  })
+
+  it('a read() that spawns pays only the write-back guard (capture + in-transaction re-check), never one for the caller', async () => {
+    const plainFake = spawnableFake()
+    await postgresStore(plainFake).read()
+    expect(plainFake.matching(/^insert into checklists\b/i).length).toBeGreaterThan(0)
+    expect(fingerprintStatements(plainFake)).toHaveLength(2)
+
+    const versionedFake = spawnableFake()
+    await postgresStore(versionedFake).readWithVersion()
+    // The caller's first capture, the guard's capture + re-check, and the
+    // capture before the post-write-back re-read.
+    expect(fingerprintStatements(versionedFake)).toHaveLength(4)
+  })
+
+  it('a failing fingerprint query cannot fail a plain read()', async () => {
+    const fake = fakePostgres({
+      clientRows: [clientRow],
+      versionResponses: () => {
+        throw new Error('fingerprint sql broke')
+      },
+    })
+    const pgStore = postgresStore(fake)
+    await expect(pgStore.read()).resolves.toBeDefined()
+    await expect(pgStore.readWithVersion()).rejects.toThrow('fingerprint sql broke')
   })
 })
 

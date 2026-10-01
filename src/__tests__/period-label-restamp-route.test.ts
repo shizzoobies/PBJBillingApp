@@ -55,9 +55,8 @@ describe('the bulk save re-stamps the period labels it may have moved', () => {
 
   it('re-takes the fingerprint AFTER a restamp that changed rows, or the tab 409s against us', () => {
     const restampAt = serverSource.indexOf('restampPeriodLabelsForTemplate(template.id)')
-    const versionAt = serverSource.indexOf(
-      'restampedLabels > 0 ? await appDataStore.computeWorkspaceVersion()',
-    )
+    const retakeAt = serverSource.indexOf('if (restampedLabels > 0 && !versionFailed) {')
+    const versionAt = serverSource.indexOf('nextVersion = await appDataStore.computeWorkspaceVersion()', retakeAt)
     expect(restampAt).toBeGreaterThan(-1)
     expect(versionAt).toBeGreaterThan(restampAt)
   })

@@ -1673,8 +1673,9 @@ function ChecklistInProgressSection({
 
   // The notes attached to the rendered cards, fetched ONCE for all of them (a
   // projected card has no id the server knows). Keyed on the set WITHOUT the
-  // search box applied, so typing in it does not refetch (the dropdown
-  // filters still bound the set, which one request is capped on).
+  // search box applied, so typing in it does not refetch. Requests are already
+  // chunked (300 ids each), so this is not about a cap: every chunk costs a
+  // full server read, and a refetch per keystroke would repeat that cost.
   const notesScope = useMemo(
     () =>
       filterInProgressChecklists(checklists, {

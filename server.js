@@ -6589,16 +6589,8 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        // The version of the state this save just produced, taken the moment
-        // write() returns with NO other await in between: nothing below (the
-        // label restamp, the attach pass) may sit between the write and the
-        // version, or another request's write landing during it would be
-        // folded into the version this tab is handed without being in the data
-        // it holds.
-        let postWriteVersion
         try {
           await appDataStore.write(data, { expectedVersion })
-          postWriteVersion = await appDataStore.computeWorkspaceVersion()
         } catch (error) {
           if (error instanceof StaleWorkspaceError) {
             // Nothing was written — the transaction rolled back.
@@ -6633,6 +6625,33 @@ const server = createServer(async (request, response) => {
             message: 'Could not save changes — please try again.',
           })
           return
+        }
+
+        // The version of the state this save just produced, taken the moment
+        // write() returns with NO other await in between: nothing below (the
+        // label restamp, the attach pass) may sit between the write and the
+        // version, or another request's write landing during it would be
+        // folded into the version this tab is handed without being in the data
+        // it holds.
+        //
+        // KNOWN, NOT CLOSED HERE: a concurrent commit can still land between
+        // write() committing and this statement and be folded into the version
+        // returned (the tab then holds a version covering rows it never
+        // received; wider when the period-label restamp below re-takes it).
+        // That window exists on main today. Closing it needs the post-write
+        // version computed INSIDE write()'s transaction at REPEATABLE READ.
+        //
+        // OUTSIDE the write's try on purpose: the write has COMMITTED, so a
+        // failure computing the version must not tell the tab the save failed.
+        // It fails closed instead: no version header (the tab keeps its old
+        // one, so its next save 409s) plus `refetch: true`.
+        let postWriteVersion = null
+        let versionFailed = false
+        try {
+          postWriteVersion = await appDataStore.computeWorkspaceVersion()
+        } catch (error) {
+          versionFailed = true
+          console.error('[bulk-save] workspace version failed after a committed write:', error)
         }
 
         // PERIOD LABELS. A recipe's covered-window fields ride this save like
@@ -6680,8 +6699,16 @@ const server = createServer(async (request, response) => {
         // would 409 the tab against this server's own write). That re-take can
         // observe another request's write that landed during the restamp - a
         // narrow window, and only on saves that re-labeled something.
-        const nextVersion =
-          restampedLabels > 0 ? await appDataStore.computeWorkspaceVersion() : postWriteVersion
+        let nextVersion = postWriteVersion
+        if (restampedLabels > 0 && !versionFailed) {
+          try {
+            nextVersion = await appDataStore.computeWorkspaceVersion()
+          } catch (error) {
+            nextVersion = null
+            versionFailed = true
+            console.error('[bulk-save] workspace version failed after the label restamp:', error)
+          }
+        }
 
         // Pending notes for future recurring checklists (featreq-b688e73c): a
         // bulk save can create/change checklists too, not only the
@@ -6711,8 +6738,8 @@ const server = createServer(async (request, response) => {
         sendJson(
           response,
           200,
-          attachedNotes > 0 ? { ok: true, refetch: true } : { ok: true },
-          { [WORKSPACE_VERSION_HEADER]: nextVersion },
+          attachedNotes > 0 || versionFailed ? { ok: true, refetch: true } : { ok: true },
+          nextVersion ? { [WORKSPACE_VERSION_HEADER]: nextVersion } : {},
         )
         return
       }

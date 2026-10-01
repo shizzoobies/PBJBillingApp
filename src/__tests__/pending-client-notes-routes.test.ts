@@ -164,43 +164,71 @@ describe('the bulk PUT runs the attach pass after a successful save', () => {
     // stamped attached). Taken BEFORE, the next save is refused and the tab
     // refetches.
     const writeAt = serverSource.indexOf('await appDataStore.write(data, { expectedVersion })')
+    const writeFailedAt = serverSource.indexOf("error: 'bulk_save_failed'")
+    const declAt = serverSource.indexOf('let postWriteVersion = null')
     const postWriteAt = serverSource.indexOf(
       'postWriteVersion = await appDataStore.computeWorkspaceVersion()',
     )
     const attachAt = serverSource.indexOf('appDataStore.attachPendingClientNotes({})')
     expect(writeAt).toBeGreaterThan(-1)
-    expect(postWriteAt).toBeGreaterThan(writeAt)
-    // Nothing else is awaited between the write and its version: any other
+    expect(writeFailedAt).toBeGreaterThan(writeAt)
+    // The version is taken AFTER the write's try/catch closed (its failure
+    // branches all return), with nothing but its own try between: any other
     // request's write landing there would be folded into the version.
-    expect(serverSource.slice(writeAt, postWriteAt).match(/await /g)).toHaveLength(1)
+    expect(declAt).toBeGreaterThan(writeFailedAt)
+    expect(postWriteAt).toBeGreaterThan(declAt)
+    expect(serverSource.slice(declAt, postWriteAt).match(/await /g)).toBeNull()
     expect(attachAt).toBeGreaterThan(postWriteAt)
+  })
+
+  it('a failure computing the version never tells the tab its COMMITTED save failed - it fails closed instead', () => {
+    const declAt = serverSource.indexOf('let postWriteVersion = null')
+    const postWriteAt = serverSource.indexOf(
+      'postWriteVersion = await appDataStore.computeWorkspaceVersion()',
+    )
+    // Its own try/catch, outside the write's: the catch only logs and flags.
+    expect(serverSource.slice(declAt, postWriteAt)).toContain('try {')
+    const catchBlock = serverSource.slice(postWriteAt, postWriteAt + 300)
+    expect(catchBlock).toContain('} catch (error) {')
+    expect(catchBlock).toContain('versionFailed = true')
+    expect(catchBlock).not.toContain('sendJson')
+    // No version header on failure (the tab keeps its old one, so its next
+    // save 409s) plus a refetch hint, still a 200.
+    const sendAt = serverSource.indexOf('nextVersion ? { [WORKSPACE_VERSION_HEADER]: nextVersion } : {}')
+    expect(sendAt).toBeGreaterThan(-1)
+    const reply = serverSource.slice(sendAt - 300, sendAt)
+    expect(reply).toContain('sendJson(')
+    expect(reply).toContain('200')
+    expect(reply).toContain('attachedNotes > 0 || versionFailed ? { ok: true, refetch: true } : { ok: true }')
+    // The known, documented gap.
+    expect(serverSource).toContain('KNOWN, NOT CLOSED HERE')
+    expect(serverSource).toContain('REPEATABLE READ')
   })
 
   it('re-takes the version only when the label restamp actually changed rows', () => {
     const restampAt = serverSource.indexOf(
       "[bulk-save] re-stamped",
     )
-    const nextAt = serverSource.indexOf('const nextVersion =')
+    const nextAt = serverSource.indexOf('let nextVersion = postWriteVersion')
     const attachAt = serverSource.indexOf('appDataStore.attachPendingClientNotes({})')
     expect(nextAt).toBeGreaterThan(restampAt)
     expect(attachAt).toBeGreaterThan(nextAt)
     const decl = serverSource.slice(nextAt, nextAt + 200)
     expect(decl).toContain('restampedLabels > 0')
-    expect(decl).toContain('postWriteVersion')
-    // The only computation after the write sits in that ternary.
+    // The only computation after the restamp sits in that guarded re-take.
     expect(
       serverSource.slice(nextAt, attachAt).match(/computeWorkspaceVersion\(\)/g),
     ).toHaveLength(1)
   })
 
   it('answers with that version, and tells the tab to refetch when notes attached', () => {
-    const nextAt = serverSource.indexOf('const nextVersion =')
+    const nextAt = serverSource.indexOf('let nextVersion = postWriteVersion')
     const attachAt = serverSource.indexOf('appDataStore.attachPendingClientNotes({})')
     const sendAt = serverSource.indexOf('{ [WORKSPACE_VERSION_HEADER]: nextVersion }')
     expect(sendAt).toBeGreaterThan(attachAt)
     expect(attachAt).toBeGreaterThan(nextAt)
     const reply = serverSource.slice(sendAt - 250, sendAt)
-    expect(reply).toContain('attachedNotes > 0 ? { ok: true, refetch: true } : { ok: true }')
+    expect(reply).toContain('attachedNotes > 0 || versionFailed ? { ok: true, refetch: true } : { ok: true }')
     expect(serverSource.slice(attachAt - 40, attachAt)).toContain('attachedNotes = await')
   })
 

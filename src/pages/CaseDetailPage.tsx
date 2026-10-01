@@ -75,7 +75,7 @@ export function CaseDetailPage() {
             <h2>{template.title}</h2>
             <p className="checklist-meta-line">
               {client?.name ?? 'Unknown client'}
-              {openedAt ? ` · Case opened ${shortDate.format(new Date(`${openedAt}T12:00:00`))}` : ''}
+              {openedAt ? ` · Case opened ${shortDate.format(new Date(`${openedAt.slice(0, 10)}T12:00:00`))}` : ''}
             </p>
           </div>
         </div>

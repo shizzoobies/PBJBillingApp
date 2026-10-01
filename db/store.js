@@ -6766,7 +6766,10 @@ export class AppDataStore {
   }
 
   async read() {
-    return (await this.readWithVersion()).data
+    // No `captureVersion`: ~110 call sites read the workspace for their own
+    // purposes and must not pay the fingerprint query (an md5 over every row of
+    // ~15 tables) or fail if it ever fails. Only `readWithVersion()` does.
+    return (await this._readWorkspace({ captureVersion: false })).data
   }
 
   /**
@@ -6779,15 +6782,31 @@ export class AppDataStore {
    * never saw. Computing the version after `read()` returns (the old shape of
    * `GET /api/app-data`) left exactly that window open.
    *
+   * Only this method (used by `GET /api/app-data`) computes that fingerprint;
+   * plain `read()` does not.
+   *
+   * @returns {Promise<{ data: object, version: string }>}
+   */
+  async readWithVersion() {
+    return this._readWorkspace({ captureVersion: true })
+  }
+
+  /**
+   * The shared body of `read()` and `readWithVersion()`.
+   *
+   * `captureVersion` false (plain `read()`) skips the workspace fingerprint
+   * query and returns `version: null`; the materializer write-back's own
+   * guard fingerprint is separate and still runs when something spawns.
+   *
    * `afterWriteBack` is internal: the re-read that follows a successful
    * materializer write-back. It serves what was persisted and does NOT run the
    * materializer again.
    *
-   * @returns {Promise<{ data: object, version: string }>}
+   * @returns {Promise<{ data: object, version: string | null }>}
    */
-  async readWithVersion({ afterWriteBack = false } = {}) {
+  async _readWorkspace({ afterWriteBack = false, captureVersion = false } = {}) {
     if (this.pool) {
-      const firstVersion = await postgresWorkspaceVersion(this.pool)
+      const firstVersion = captureVersion ? await postgresWorkspaceVersion(this.pool) : null
       const data = await this._readPostgresWorkspace()
       const materialized = afterWriteBack
         ? { changed: false, data }
@@ -6862,7 +6881,7 @@ export class AppDataStore {
       // attach pass added only makes the tab's next save 409.
       if (wroteBack) {
         try {
-          return await this.readWithVersion({ afterWriteBack: true })
+          return await this._readWorkspace({ afterWriteBack: true, captureVersion })
         } catch (rereadError) {
           console.error('[read] re-read after materialize write-back failed; serving in-memory data:', rereadError)
         }
@@ -6874,7 +6893,9 @@ export class AppDataStore {
     // Fingerprint of the persisted file EXACTLY as read, captured before any
     // in-place backfill below mutates `data` — this is what the guarded
     // write-back at the bottom is compared against.
-    const persistedVersion = fileWorkspaceVersion(data)
+    // The afterWriteBack re-read neither writes back nor hands out a version
+    // unless asked, so a plain read() does not fingerprint it at all.
+    const persistedVersion = afterWriteBack && !captureVersion ? null : fileWorkspaceVersion(data)
     if (!Array.isArray(data.checklistTemplates)) {
       const seed = await this.getSeedData()
       data.checklistTemplates = seed.checklistTemplates ?? []
@@ -7035,7 +7056,7 @@ export class AppDataStore {
         // write-back, so it would make the tab's very next save 409 against
         // our own write; the re-read's own pre-read fingerprint does not.
         try {
-          return await this.readWithVersion({ afterWriteBack: true })
+          return await this._readWorkspace({ afterWriteBack: true, captureVersion })
         } catch (rereadError) {
           console.error('[read] re-read after materialize write-back failed; serving in-memory data:', rereadError)
         }
