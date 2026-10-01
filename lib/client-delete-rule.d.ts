@@ -6,6 +6,8 @@
 
 export const CLIENT_HAS_TIME_REASON: string
 export const CLIENT_HAS_INVOICES_REASON: string
+export const CLIENT_HAS_TIME_REASON_RETIRED: string
+export const CLIENT_HAS_INVOICES_REASON_RETIRED: string
 
 export type ClientHistoryCounts = {
   timeEntryCount?: number
@@ -13,8 +15,8 @@ export type ClientHistoryCounts = {
 }
 
 export type ClientDeleteVerdict =
-  | { deletable: true; reason: null }
-  | { deletable: false; reason: string }
+  | { deletable: true; reason: null; retiredReason: null }
+  | { deletable: false; reason: string; retiredReason: string }
 
 export function clientDeleteVerdict(counts?: ClientHistoryCounts): ClientDeleteVerdict
 

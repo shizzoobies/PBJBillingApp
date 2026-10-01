@@ -15,7 +15,16 @@ import { RefreshCw, AlertTriangle } from 'lucide-react'
  * snapshot into current data is exactly the failure this guard exists to
  * prevent, so we do not offer it.
  */
-export function StaleWorkspaceNotice({ message, title }: { message?: string; title?: string }) {
+export function StaleWorkspaceNotice({
+  message,
+  title,
+  detail,
+}: {
+  message?: string
+  title?: string
+  /** Replaces the fixed stale-tab line under the message, for a refusal that is not about a stale tab. */
+  detail?: string
+}) {
   return (
     <div className="stale-workspace-backdrop" role="alertdialog" aria-modal="true">
       <div className="stale-workspace-panel">
@@ -27,9 +36,13 @@ export function StaleWorkspaceNotice({ message, title }: { message?: string; tit
             'Someone else changed something while this tab was open, so your last change was not saved.'}
         </p>
         <p className="stale-workspace-body muted-text">
-          Reload to get the current data. Anything you just typed will need to be
-          entered again — reloading protects the rest of the workspace from being
-          overwritten with this tab&rsquo;s older copy.
+          {detail ?? (
+            <>
+              Reload to get the current data. Anything you just typed will need to be
+              entered again — reloading protects the rest of the workspace from being
+              overwritten with this tab&rsquo;s older copy.
+            </>
+          )}
         </p>
         <button
           type="button"

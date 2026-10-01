@@ -96,12 +96,30 @@ describe('Delete client on the client page', () => {
     expect(invoiceCount).toHaveBeenCalledWith('c1')
   })
 
-  it('shows only the sentence beside Reactivate for a retired client with time', async () => {
+  it('tells a retired client only the fact, not "Mark it inactive instead", beside Reactivate', async () => {
     renderPage({ lifecycleStage: 'inactive' }, [entry])
-    expect(await screen.findByText(TIME_SENTENCE)).toBeInTheDocument()
+    expect(
+      await screen.findByText('This client has time logged, so it cannot be deleted.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(TIME_SENTENCE)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Mark it inactive instead/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Delete client/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Mark inactive/ })).not.toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: /Reactivate/ }).length).toBeGreaterThan(0)
+  })
+
+  it('does the same for a retired client with only invoices', async () => {
+    invoiceCount = vi.fn(async () => 1)
+    renderPage({ lifecycleStage: 'inactive' })
+    expect(
+      await screen.findByText('This client has invoices, so it cannot be deleted.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Mark it inactive instead/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the full sentence for an active client (the sentence points at the button beside it)', async () => {
+    renderPage({}, [entry])
+    expect(await screen.findByText(TIME_SENTENCE)).toBeInTheDocument()
   })
 
   it('keeps the button for a client with nothing logged, with a confirm that is true', async () => {

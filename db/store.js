@@ -1039,17 +1039,37 @@ export class ClientHasHistoryError extends Error {
  * one row each. ONE set-based statement - never a query per client - and run
  * on the same connection as the bulk write so it sees what the write is about
  * to delete. `invoices` is not in the payload, so only the database can say.
+ *
+ * "Has invoices" means an invoice of the client's own OR a line, on any
+ * invoice, that names the client as its `sourceClientId`: a sub-company billed
+ * only on its billing master's invoice has none under its own id, and deleting
+ * it would orphan those lines (the recap loses the name).
  */
 const CLIENTS_WITH_HISTORY_SQL = `
   select c.id, c.name,
          exists (select 1 from time_entries t where t.client_id = c.id) as has_time,
-         exists (select 1 from invoices i where i.client_id = c.id) as has_invoices
+         (exists (select 1 from invoices i where i.client_id = c.id)
+          or exists (select 1 from invoices i
+                      where i.line_items @> jsonb_build_array(jsonb_build_object('sourceClientId', c.id)))) as has_invoices
     from clients c
    where not (c.id = any($1::text[]))
      and (exists (select 1 from time_entries t where t.client_id = c.id)
-          or exists (select 1 from invoices i where i.client_id = c.id))
+          or exists (select 1 from invoices i where i.client_id = c.id)
+          or exists (select 1 from invoices i
+                      where i.line_items @> jsonb_build_array(jsonb_build_object('sourceClientId', c.id))))
    order by c.name
    limit 1
+`
+
+/**
+ * Locks the stored clients a bulk save omits, on the write's own connection,
+ * BEFORE the history check. Inserting a time entry takes a key-share lock on
+ * its client row, so this makes a concurrent time insert for one of these
+ * clients wait until the save ends. In a normal save the set is empty and it
+ * locks nothing.
+ */
+const LOCK_OMITTED_CLIENTS_SQL = `
+  select id from clients where not (id = any($1::text[])) for update
 `
 
 /**
@@ -7220,11 +7240,18 @@ export class AppDataStore {
         // bulk save, whatever the payload says (a stale tab, a bug, a crafted
         // request). After the staleness check on purpose: a stale tab is told
         // to reload first, and only a current one can reach this. Same
-        // transaction as the deletes below, so nothing can log time between
-        // this look and the wipe. Throwing lands in the catch's rollback.
+        // transaction as the deletes below. READ COMMITTED alone would let a
+        // time entry commit between this look and the wipe, so the clients the
+        // payload omits are row-locked first. Guaranteed: any time entry
+        // committed before that lock is granted is seen by the check below
+        // (its snapshot is taken after the lock), and an insert that arrives
+        // later waits for this transaction and then fails on the foreign key
+        // if the client was deleted, so no committed entry is wiped unseen.
+        // Throwing lands in the catch's rollback.
         const keptClientIds = (Array.isArray(data.clients) ? data.clients : [])
           .map((c) => c?.id)
           .filter((id) => typeof id === 'string')
+        await client.query(LOCK_OMITTED_CLIENTS_SQL, [keptClientIds])
         const blocked = (await client.query(CLIENTS_WITH_HISTORY_SQL, [keptClientIds])).rows[0]
         if (blocked) {
           throw new ClientHasHistoryError(
@@ -8242,9 +8269,15 @@ export class AppDataStore {
         const timeClientIds = new Set(
           (Array.isArray(previous.timeEntries) ? previous.timeEntries : []).map((e) => e?.clientId),
         )
-        const invoiceClientIds = new Set(
-          (Array.isArray(previous.invoices) ? previous.invoices : []).map((i) => i?.clientId),
-        )
+        // An invoice counts for its own client AND for every client named as a
+        // line's `sourceClientId` (a sub billed only on its master's invoice).
+        const invoiceClientIds = new Set()
+        for (const invoice of Array.isArray(previous.invoices) ? previous.invoices : []) {
+          invoiceClientIds.add(invoice?.clientId)
+          for (const line of Array.isArray(invoice?.lineItems) ? invoice.lineItems : []) {
+            if (typeof line?.sourceClientId === 'string') invoiceClientIds.add(line.sourceClientId)
+          }
+        }
         const blocked = previous.clients.find(
           (c) =>
             c &&
@@ -12338,18 +12371,25 @@ export class AppDataStore {
    * How many invoices (any status, void included) a client has. The client page
    * asks this to decide whether Delete is offered; the invoices themselves are
    * not in the workspace payload, so the page cannot count them locally.
+   *
+   * An invoice counts when it is the client's own OR when one of its lines names
+   * the client as its `sourceClientId` (a sub billed only on its billing
+   * master's invoice).
    */
   async countClientInvoices(clientId) {
     if (this.pool) {
       const { rows } = await this.pool.query(
-        'select count(*)::int as n from invoices where client_id = $1',
-        [clientId],
+        'select count(*)::int as n from invoices where client_id = $1 or line_items @> $2::jsonb',
+        [clientId, JSON.stringify([{ sourceClientId: clientId }])],
       )
       return rows[0]?.n ?? 0
     }
     const data = await readJson(localDataPath)
     return (Array.isArray(data.invoices) ? data.invoices : []).filter(
-      (invoice) => invoice?.clientId === clientId,
+      (invoice) =>
+        invoice?.clientId === clientId ||
+        (Array.isArray(invoice?.lineItems) &&
+          invoice.lineItems.some((line) => line?.sourceClientId === clientId)),
     ).length
   }
 

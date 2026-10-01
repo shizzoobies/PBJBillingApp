@@ -392,6 +392,7 @@ function App() {
   // Set instead of the default title when the refusal was a blocked client
   // delete (409 client_has_history) rather than an out-of-date snapshot.
   const [staleWorkspaceTitle, setStaleWorkspaceTitle] = useState<string | null>(null)
+  const [staleWorkspaceDetail, setStaleWorkspaceDetail] = useState<string | null>(null)
   // Real-time sync support: timestamp of the last local workspace edit (so an
   // incoming refetch never clobbers an in-flight edit), plus a live mirror of
   // the sync state readable inside the SSE refetch timer.
@@ -1053,6 +1054,7 @@ function App() {
           if (error instanceof ClientHasHistoryApiError) {
             staleWorkspaceRef.current = true
             setStaleWorkspaceTitle('A client could not be deleted')
+            setStaleWorkspaceDetail('Reload to put this client back. Nothing was deleted.')
             setStaleWorkspaceMessage(error.message)
             setDataSyncState('error')
             return
@@ -4302,7 +4304,11 @@ function App() {
             snapshot is stale. Blocking — every further save is refused too, and
             a reload is the only recovery. */}
         {staleWorkspaceMessage ? (
-          <StaleWorkspaceNotice message={staleWorkspaceMessage} title={staleWorkspaceTitle ?? undefined} />
+          <StaleWorkspaceNotice
+            message={staleWorkspaceMessage}
+            title={staleWorkspaceTitle ?? undefined}
+            detail={staleWorkspaceDetail ?? undefined}
+          />
         ) : null}
       </AppContext.Provider>
     </BrowserRouter>

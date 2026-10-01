@@ -24687,6 +24687,55 @@ describe('bulk save refuses to delete a client with history (file backend)', () 
     ).rejects.toBeInstanceOf(StaleWorkspaceError)
   })
 
+  // A sub billed only on its master's invoice has no invoice under its own id:
+  // it appears as `sourceClientId` on the master's lines.
+  const masterInvoice = {
+    id: 'inv-master',
+    clientId: 'c-master',
+    period: '2026-08',
+    status: 'sent',
+    lineItems: [{ label: 'Work', amount: 10, sourceClientId: 'c-sub' }],
+  }
+  const withSub = (overrides = {}) =>
+    workspace({
+      clients: [
+        { id: 'c1', name: 'Acme' },
+        { id: 'c-master', name: 'KLC Master' },
+        { id: 'c-sub', name: 'Sub Co' },
+      ],
+      invoices: [masterInvoice],
+      ...overrides,
+    })
+
+  it('refuses dropping a sub that is billed only on its master invoice (no time, no invoice of its own)', async () => {
+    await store.write(withSub())
+    const before = await readFile(localDataPath, 'utf8')
+
+    const error = await store
+      .write(
+        withSub({
+          clients: [
+            { id: 'c1', name: 'Acme' },
+            { id: 'c-master', name: 'KLC Master' },
+          ],
+        }),
+      )
+      .catch((e) => e)
+
+    expect(error).toBeInstanceOf(ClientHasHistoryError)
+    expect(error.message).toBe(
+      'Sub Co has invoices and cannot be deleted. Reload and mark it inactive instead.',
+    )
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('counts the sub as having an invoice, and a client named on no line as having none', async () => {
+    await store.write(withSub())
+    expect(await store.countClientInvoices('c-sub')).toBe(1)
+    expect(await store.countClientInvoices('c-master')).toBe(1)
+    expect(await store.countClientInvoices('c1')).toBe(0)
+  })
+
   it("counts a client's invoices, void ones too", async () => {
     await store.write(
       workspace({
@@ -24768,6 +24817,58 @@ describe('bulk save refuses to delete a client with history (postgres branch)', 
       pgStore.write(workspace(), { expectedVersion: current }),
     ).rejects.toBeInstanceOf(ClientHasHistoryError)
     expect(fake.matching(/^delete from /i)).toHaveLength(0)
+  })
+
+  it('counts a line that names the client as sourceClientId as an invoice (both in the check and the count)', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    await pgStore.write(workspace())
+    const check = fake.matching(/^select c\.id, c\.name,/i)[0]
+    const lineMatch = "i.line_items @> jsonb_build_array(jsonb_build_object('sourceClientId', c.id))"
+    // Once in the has_invoices column and once in the where clause.
+    expect(check.text.split(lineMatch)).toHaveLength(3)
+
+    await pgStore.countClientInvoices('c-sub')
+    const count = fake.matching(/^select count\(\*\)::int as n from invoices/i)[0]
+    expect(count.text).toBe(
+      'select count(*)::int as n from invoices where client_id = $1 or line_items @> $2::jsonb',
+    )
+    expect(count.params).toEqual(['c-sub', JSON.stringify([{ sourceClientId: 'c-sub' }])])
+  })
+
+  it('names a sub billed only on its master invoice in the invoice words', async () => {
+    const fake = fakePostgres({
+      clientsWithHistory: [{ id: 'c-sub', name: 'Sub Co', has_time: false, has_invoices: true }],
+    })
+    const error = await postgresStore(fake).write(workspace()).catch((e) => e)
+    expect(error.message).toBe(
+      'Sub Co has invoices and cannot be deleted. Reload and mark it inactive instead.',
+    )
+  })
+
+  it('row-locks the omitted clients AFTER the staleness check and BEFORE the history check', async () => {
+    const fake = fakePostgres({ clientsWithHistory: [withTime] })
+    const pgStore = postgresStore(fake)
+    const current = await pgStore.computeWorkspaceVersion()
+
+    // A stale tab never reaches the lock.
+    await pgStore.write(workspace(), { expectedVersion: 'stale' }).catch(() => {})
+    expect(fake.matching(/for update$/i).filter((s) => /^select id from clients/i.test(s.text))).toHaveLength(0)
+
+    await pgStore.write(workspace(), { expectedVersion: current }).catch(() => {})
+    const locks = fake.matching(/^select id from clients where not \(id = any\(\$1::text\[\]\)\) for update$/i)
+    expect(locks).toHaveLength(1)
+    expect(locks[0].text).toBe('select id from clients where not (id = any($1::text[])) for update')
+    expect(locks[0].params).toEqual([['c1']])
+
+    const texts = fake.statements.map((s) => s.text)
+    const lockAt = texts.findIndex((t) => /^select id from clients where not/i.test(t))
+    const fingerprintAt = texts.findLastIndex((t) => /md5\(coalesce\(string_agg/i.test(t) && /union all/i.test(t))
+    const checkAt = texts.findIndex((t) => /^select c\.id, c\.name,/i.test(t))
+    expect(fingerprintAt).toBeGreaterThan(-1)
+    expect(lockAt).toBeGreaterThan(fingerprintAt)
+    expect(checkAt).toBeGreaterThan(lockAt)
+    expect(fake.indexOf(/^delete from /i)).toBe(-1)
   })
 
   it('lets a payload that keeps the client with history, and drops nothing else, through to the wipe', async () => {

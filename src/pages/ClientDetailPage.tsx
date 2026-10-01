@@ -415,7 +415,9 @@ export function ClientDetailPage() {
                 </button>
               ) : null}
               {deleteVerdict && !deleteVerdict.deletable ? (
-                <p className="muted-text">{deleteVerdict.reason}</p>
+                <p className="muted-text">
+                  {retired ? deleteVerdict.retiredReason : deleteVerdict.reason}
+                </p>
               ) : null}
             </div>
           }

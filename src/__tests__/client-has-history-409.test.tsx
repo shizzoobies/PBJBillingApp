@@ -84,8 +84,33 @@ describe('the notice it puts up', () => {
     expect(screen.getByRole('button', { name: /Reload the page/ })).toBeInTheDocument()
   })
 
-  it('keeps its default title for the stale-tab refusal', () => {
+  it('gives the client-history case its own line, not the stale-tab one', () => {
+    render(
+      <StaleWorkspaceNotice
+        message={SENTENCE}
+        title="A client could not be deleted"
+        detail="Reload to put this client back. Nothing was deleted."
+      />,
+    )
+    expect(screen.getByText('Reload to put this client back. Nothing was deleted.')).toBeInTheDocument()
+    expect(screen.queryByText(/overwritten with this tab/)).not.toBeInTheDocument()
+  })
+
+  it('keeps its default title and line for the stale-tab refusal', () => {
     render(<StaleWorkspaceNotice message="Reload." />)
     expect(screen.getByText(/This tab is out of date/)).toBeInTheDocument()
+    expect(screen.getByText(/overwritten with this tab/)).toBeInTheDocument()
+  })
+
+  it('has App pass that line for ClientHasHistoryApiError only', () => {
+    const appSource = readFileSync(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../App.tsx'),
+      'utf8',
+    )
+    const at = appSource.indexOf('if (error instanceof ClientHasHistoryApiError) {')
+    const branch = appSource.slice(at, appSource.indexOf('return', at))
+    expect(branch).toContain("setStaleWorkspaceDetail('Reload to put this client back. Nothing was deleted.')")
+    const stale = appSource.indexOf('if (error instanceof StaleWorkspaceApiError) {')
+    expect(appSource.slice(stale, at)).not.toContain('setStaleWorkspaceDetail')
   })
 })
