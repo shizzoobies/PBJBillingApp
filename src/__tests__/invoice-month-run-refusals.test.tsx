@@ -4,7 +4,7 @@ import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
 import { ApiError, type Client, type PersistedInvoice } from '../lib/types'
 
 /**
- * The editor answers each refusal for what it is.
+ * The editor answers each refusal for what it is, and says it ONCE.
  *
  * The invoice PATCH route answers 409 with four different codes
  * (retainer_credit_refused, coverage_unconfirmed, invoice_locked,
@@ -24,6 +24,7 @@ vi.mock('../lib/api', () => ({
 }))
 
 import {
+  generateInvoicesRequest,
   listInvoicesRequest,
   listUnappliedRetainersRequest,
   updateInvoiceRequest,
@@ -32,6 +33,7 @@ import {
 const mockList = vi.mocked(listInvoicesRequest)
 const mockRetainers = vi.mocked(listUnappliedRetainersRequest)
 const mockUpdate = vi.mocked(updateInvoiceRequest)
+const mockGenerate = vi.mocked(generateInvoicesRequest)
 
 const clients = [
   {
@@ -108,10 +110,12 @@ beforeEach(() => {
   mockRetainers.mockResolvedValue([retainer])
   mockUpdate.mockReset()
   mockUpdate.mockResolvedValue(invoice)
+  mockGenerate.mockReset()
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('InvoiceMonthRun — a refused save', () => {
@@ -205,5 +209,132 @@ describe('InvoiceMonthRun — a refused Mark reviewed', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }))
 
     expect(await editor().findByText(sentence)).toBeInTheDocument()
+  })
+})
+
+/**
+ * ONE MESSAGE PER REFUSAL. A refusal to a Save, Mark reviewed, Back to draft or
+ * Void is said in the open editor's slot beside the buttons; the run's banner
+ * above the whole list does not repeat it. (Both are role="alert", so counting
+ * the sentence on the page counts the copies.)
+ */
+describe('InvoiceMonthRun — a refusal is said once', () => {
+  const sentence = 'Something the server would not do.'
+
+  it('says a refused Save once, in the editor', async () => {
+    mockUpdate.mockRejectedValue(new ApiError(500, sentence))
+    await stageEdits()
+
+    expect(await editor().findByText(sentence)).toBeInTheDocument()
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+  })
+
+  it('says a refused Mark reviewed once, in the editor', async () => {
+    mockUpdate.mockRejectedValue(new ApiError(409, sentence, 'coverage_unconfirmed'))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }))
+
+    expect(await editor().findByText(sentence)).toBeInTheDocument()
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+  })
+
+  it('says a refused Void once, in the editor', async () => {
+    // happy-dom ships no window.confirm, so it is stubbed (as the void tests do).
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
+    mockUpdate.mockRejectedValue(new ApiError(500, sentence))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Void' }))
+
+    expect(await editor().findByText(sentence)).toBeInTheDocument()
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+  })
+
+  it('says a refused Back to draft once, in the editor', async () => {
+    mockList.mockResolvedValue([{ ...invoice, status: 'reviewed' }])
+    mockUpdate.mockRejectedValue(new ApiError(500, sentence))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('tab', { name: /^Reviewed/ }))
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to draft' }))
+
+    expect(await editor().findByText(sentence)).toBeInTheDocument()
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+  })
+
+  // A failure with no open editor to speak in still reaches the banner: Generate
+  // is a month-level action.
+  it('still raises the banner for a month-level failure', async () => {
+    mockGenerate.mockRejectedValue(new Error('Could not generate this month.'))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    await screen.findByText('INV-2026-08-001')
+
+    fireEvent.click(screen.getByRole('button', { name: /^Generate/ }))
+
+    expect(await screen.findByText('Could not generate this month.')).toBeInTheDocument()
+  })
+})
+
+describe('InvoiceMonthRun — the editor message clears when she edits', () => {
+  const sentence = 'Confirm the covered dates on the QuickBooks line before marking reviewed.'
+
+  async function refusedReview() {
+    mockUpdate.mockRejectedValue(new ApiError(409, sentence, 'coverage_unconfirmed'))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }))
+    expect(await editor().findByText(sentence)).toBeInTheDocument()
+  }
+
+  it('clears when she changes a line', async () => {
+    await refusedReview()
+
+    fireEvent.change(screen.getByDisplayValue('Billable hours — Lisa'), {
+      target: { value: 'Billable hours — edited' },
+    })
+
+    expect(screen.queryByText(sentence)).not.toBeInTheDocument()
+  })
+
+  it('clears when she types in the note', async () => {
+    await refusedReview()
+
+    fireEvent.change(screen.getByLabelText('Note to the client'), {
+      target: { value: 'Thank you!' },
+    })
+
+    expect(screen.queryByText(sentence)).not.toBeInTheDocument()
+  })
+
+  it('clears when she adds a line', async () => {
+    await refusedReview()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add a line' }))
+
+    expect(screen.queryByText(sentence)).not.toBeInTheDocument()
+  })
+
+  // The older message goes BEFORE the next request runs, not after it answers.
+  it('clears an older message before Back to draft and Void run', async () => {
+    mockList.mockResolvedValue([{ ...invoice, status: 'reviewed' }])
+    // happy-dom ships no window.confirm, so it is stubbed (as the void tests do).
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
+    mockUpdate.mockRejectedValueOnce(new ApiError(500, 'The first refusal.'))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('tab', { name: /^Reviewed/ }))
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to draft' }))
+    expect(await editor().findByText('The first refusal.')).toBeInTheDocument()
+
+    let answer: (value: PersistedInvoice) => void = () => {}
+    mockUpdate.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)))
+    fireEvent.click(screen.getByRole('button', { name: 'Void' }))
+
+    expect(screen.queryByText('The first refusal.')).not.toBeInTheDocument()
+    answer(invoice)
   })
 })

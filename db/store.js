@@ -1288,6 +1288,17 @@ const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100
  */
 const INVOICE_LINE_ROLE_TIERS = new Set(['CFO', 'Accountant', 'Bookkeeper', 'Other'])
 
+/**
+ * Has a month AFTER `period` already been billed for this expense? Read off the
+ * expense's coverage ledger (`coverage_history`, keyed by YYYY-MM). One answer
+ * for the three places that ask it: the refusal to move a settled window, the
+ * rule that keeps the cycle's anchor day where it is, and the flag that tells
+ * the editor not to offer the control.
+ */
+function hasLaterCoveragePeriod(history, period) {
+  return Object.keys(history ?? {}).some((key) => /^\d{4}-\d{2}$/.test(key) && key > period)
+}
+
 function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
   return (Array.isArray(raw) ? raw : [])
     .map((line) => {
@@ -11858,6 +11869,65 @@ export class AppDataStore {
     return hasUnconfirmedCoverage(lines)
   }
 
+  /**
+   * Tell the editor which covered windows cannot be moved, on the way OUT.
+   *
+   * A settled window cannot move once a later month has been billed for its
+   * expense (`confirmExpenseCoverage` refuses), and the month run has no ledger
+   * to consult, so it would offer a control that can only fail. This marks
+   * `coverageChangeable: false` on exactly those lines and nothing else; a
+   * movable line is left as it was. DERIVED per response and never stored — the
+   * PATCH sanitizer does not name the field, so a round trip drops it — and the
+   * server's refusal stays the real guard.
+   *
+   * ONE read of the ledgers for the whole list, not one per invoice or line;
+   * no read at all when no line has a settled window to ask about. A flagged
+   * line is skipped: it is answered through the confirm block, in any order.
+   */
+  async withCoverageChangeable(invoices) {
+    const list = Array.isArray(invoices) ? invoices : []
+    const askable = (line) =>
+      line?.kind === 'recurring' &&
+      Boolean(line.recurringId) &&
+      isIsoDate(line.coverageStart) &&
+      isIsoDate(line.coverageEnd) &&
+      !line.needsCoverageConfirmation
+    const wanted = [
+      ...new Set(
+        list.flatMap((invoice) =>
+          (invoice?.lineItems ?? []).filter(askable).map((line) => line.recurringId),
+        ),
+      ),
+    ]
+    if (wanted.length === 0) return list
+
+    const ledgers = new Map()
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select id, coverage_history from recurring_reimbursements where id = any($1::text[])`,
+        [wanted],
+      )
+      for (const row of rows) ledgers.set(row.id, row.coverage_history)
+    } else {
+      const data = await readJson(localDataPath)
+      for (const expense of data.recurringReimbursements ?? []) {
+        if (wanted.includes(expense.id)) ledgers.set(expense.id, expense.coverageHistory)
+      }
+    }
+
+    return list.map((invoice) => {
+      let changed = false
+      const lineItems = (invoice.lineItems ?? []).map((line) => {
+        if (!askable(line) || !hasLaterCoveragePeriod(ledgers.get(line.recurringId), invoice.period)) {
+          return line
+        }
+        changed = true
+        return { ...line, coverageChangeable: false }
+      })
+      return changed ? { ...invoice, lineItems } : invoice
+    })
+  }
+
   /** Every expense id a set of invoices' recurring lines names. */
   _coveredExpenseIds(invoices) {
     const ids = []
@@ -11973,13 +12043,11 @@ export class AppDataStore {
     // already stepped from this one, so moving it here would leave that invoice
     // (and the cycle) describing dates that no longer follow on. A flagged line
     // is a different case — it is an open question, answered in any order.
-    if (rangeMoved && !line.needsCoverageConfirmation) {
-      const history = expense?.coverageHistory ?? {}
-      if (Object.keys(history).some((key) => /^\d{4}-\d{2}$/.test(key) && key > current.period)) {
-        throw new CoverageConfirmationError(
-          'A later month has already been billed for this expense. Change the dates on the latest invoice instead.',
-        )
-      }
+    const laterPeriodBilled = hasLaterCoveragePeriod(expense?.coverageHistory, current.period)
+    if (rangeMoved && !line.needsCoverageConfirmation && laterPeriodBilled) {
+      throw new CoverageConfirmationError(
+        'A later month has already been billed for this expense. Change the dates on the latest invoice instead.',
+      )
     }
 
     const generatedNow = coverageLineLabel(expense, {
@@ -12013,10 +12081,20 @@ export class AppDataStore {
     // to be the thing that changed: a window clamped by a short month (anchor
     // 31, end September 30) must not re-anchor to the 30th because she moved
     // only the start.
+    //
+    // NOT WHEN A LATER MONTH IS ALREADY BILLED. That month stepped from the old
+    // cycle, so moving the anchor here would restart every month after it from
+    // a day it was never billed on (a backfill confirmed to the 20th, with a
+    // later period ending on the 13th, put a 37-day window two months on). The
+    // window she confirmed is still saved for THIS period; only the cycle holds.
     const movedAnchor = anchorDayFromRange(nextEnd)
     const endDayChanged = nextEnd.slice(8, 10) !== String(line.coverageEnd ?? '').slice(8, 10)
     const anchorDay =
-      rangeMoved && endDayChanged && movedAnchor !== null && movedAnchor !== anchorDayOf(expense)
+      rangeMoved &&
+      endDayChanged &&
+      !laterPeriodBilled &&
+      movedAnchor !== null &&
+      movedAnchor !== anchorDayOf(expense)
         ? movedAnchor
         : null
 

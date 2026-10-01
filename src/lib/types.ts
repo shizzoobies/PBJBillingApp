@@ -571,6 +571,12 @@ export type PersistedInvoiceLine = {
   /** Why she is being asked. `backfill` is a month behind one already billed. */
   coverageReason?: 'gap' | 'resumed' | 'backfill'
   /**
+   * `false` when a later month is already billed for this expense, so the
+   * server would refuse to move these dates. Derived by the server on every
+   * response and never stored; absent means the dates can still be changed.
+   */
+  coverageChangeable?: false
+  /**
    * `retainer_credit` lines only: WHICH retainer this credit came out of. The
    * save reads it to mark that retainer spent, and reads its absence — the line
    * having been deleted — to put the money back on account.

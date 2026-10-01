@@ -97,6 +97,7 @@ export function InvoiceScopePanel({
   applicable,
   blocked = [],
   readOnly,
+  saving = false,
   isBillingMaster = false,
   sourceClientName,
 }: {
@@ -133,6 +134,8 @@ export function InvoiceScopePanel({
   blocked?: string[]
   /** Preview mode, or an invoice past the point where lines may change. */
   readOnly: boolean
+  /** Covered dates are being saved: read-only for a moment, then live again. */
+  saving?: boolean
   isBillingMaster?: boolean
   /** A sub's client id to that company's name, for a master's group headings. */
   sourceClientName?: (clientId: string) => string
@@ -217,7 +220,11 @@ export function InvoiceScopePanel({
     <aside className="invoice-scope" aria-label="Hours logged for this client">
       <div className="invoice-scope-head">
         <h3>Hours this period</h3>
-        {readOnly ? (
+        {saving ? (
+          <p className="invoice-scope-note">
+            The covered dates are saving, so the tags are read-only for a moment.
+          </p>
+        ) : readOnly ? (
           <p className="invoice-scope-note">
             This invoice is past the point where its lines can change, so the tags are shown
             read-only.

@@ -634,6 +634,16 @@ function todayIso() {
 }
 
 /**
+ * One invoice, marked for the month run's editor the way the list marks it: a
+ * recurring line whose covered dates cannot move (a later month is already
+ * billed for that expense) says so. Every response the editor merges back into
+ * its list goes through here, or the control would reappear after a save.
+ */
+async function withCoverageChangeable(invoice) {
+  return (await appDataStore.withCoverageChangeable([invoice]))[0]
+}
+
+/**
  * The rate history the caller is allowed to see.
  *
  * Replaces the old cost-rate map, which returned one live cost rate per person
@@ -3844,7 +3854,9 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      sendJson(response, 200, { invoices })
+      // The month run is the one reader that needs to know which covered windows
+      // can still move. ONE ledger read for the whole list.
+      sendJson(response, 200, { invoices: await appDataStore.withCoverageChangeable(invoices) })
       return
     }
 
@@ -4384,7 +4396,7 @@ const server = createServer(async (request, response) => {
         url: linkPayToken
           ? `${getPublicAppUrl(request)}/pay/${linkPayToken}`
           : result.session.url,
-        invoice: updated,
+        invoice: await withCoverageChangeable(updated),
       })
       return
     }
@@ -4654,7 +4666,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Invoice not found' })
         return
       }
-      sendJson(response, 200, { invoice: updated })
+      sendJson(response, 200, { invoice: await withCoverageChangeable(updated) })
       return
     }
 
@@ -4981,6 +4993,13 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         console.error('[invoice] send bookkeeping failed after delivery:', error)
       }
+      // Its own guard: past this point nothing may turn a delivered email into a
+      // failed response, and the mark is a courtesy to the editor.
+      try {
+        sentInvoice = await withCoverageChangeable(sentInvoice)
+      } catch (error) {
+        console.error('[invoice] could not mark covered dates after send:', error)
+      }
       sendJson(response, 200, { invoice: sentInvoice })
       return
     }
@@ -5212,7 +5231,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Invoice not found' })
         return
       }
-      sendJson(response, 200, { invoice: updated })
+      sendJson(response, 200, { invoice: await withCoverageChangeable(updated) })
       return
     }
 
@@ -5288,7 +5307,7 @@ const server = createServer(async (request, response) => {
         'invoice_coverage_confirmed',
         `${confirmed.number ?? confirmed.id}: ${recurringId}`,
       )
-      sendJson(response, 200, { invoice: confirmed })
+      sendJson(response, 200, { invoice: await withCoverageChangeable(confirmed) })
       return
     }
 

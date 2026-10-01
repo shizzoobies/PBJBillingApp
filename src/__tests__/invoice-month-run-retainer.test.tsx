@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
 import { ApiError, type Client, type PersistedInvoice } from '../lib/types'
@@ -271,8 +271,8 @@ describe('InvoiceMonthRun — the credit at the edges', () => {
     await waitFor(() => expect(mockRetainers).toHaveBeenCalledTimes(2))
   })
 
-  // An ordinary failure reports to the run's banner and, since the save was
-  // hers, beside Save as well — hence two copies of the sentence.
+  // An ordinary failure is said ONCE, beside Save, where the save was made. The
+  // run's banner above the list used to repeat it (two copies of the sentence).
   it('reports a non-retainer failure without touching the lines', async () => {
     mockUpdate.mockRejectedValue(new ApiError(500, 'Could not save that change — please try again.'))
     await openEditor()
@@ -283,8 +283,14 @@ describe('InvoiceMonthRun — the credit at the edges', () => {
     await waitFor(() =>
       expect(
         screen.getAllByText('Could not save that change — please try again.'),
-      ).toHaveLength(2),
+      ).toHaveLength(1),
     )
+    // ...and in the editor, not the banner above the list.
+    expect(
+      within(document.querySelector('.invoice-run-editor') as HTMLElement).getByText(
+        'Could not save that change — please try again.',
+      ),
+    ).toBeInTheDocument()
     expect(screen.getByDisplayValue('Retainer applied — credit')).toBeInTheDocument()
   })
 })

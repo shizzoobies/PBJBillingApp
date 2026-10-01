@@ -403,3 +403,37 @@ describe('the verify-payment route', () => {
     expect(block).toContain('isCrossSiteOrigin(request)')
   })
 })
+
+/**
+ * Which covered windows can still move — glue only (wiring, not behavior).
+ *
+ * The month run has no ledger, so the server marks `coverageChangeable: false`
+ * on a settled window whose expense already has a later month billed. The
+ * decision is exercised, both backends, in db/store-staleness.test.mjs. What can
+ * rot HERE: the list stops going through the marker (the editor offers a control
+ * that can only fail), or one of the responses the editor merges back stops
+ * going through it (the control reappears after a save).
+ */
+describe('the invoice responses carry which covered windows can still move', () => {
+  it('marks the whole list in one call, not line by line', () => {
+    const block = routeBlock(/\/\/ GET \/api\/invoices\?period=YYYY-MM/, 3600)
+    expect(block).toContain('appDataStore.withCoverageChangeable(invoices)')
+  })
+
+  it('marks the invoice a save, a confirm, a send and a pay link hand back', () => {
+    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 5200)
+    expect(patch).toContain('invoice: await withCoverageChangeable(updated)')
+    const confirm = routeBlock(/const coverageConfirmMatch = normalizedPath\.match\(/, 3400)
+    expect(confirm).toContain('invoice: await withCoverageChangeable(confirmed)')
+    const send = routeBlock(/send bookkeeping failed after delivery/, 900)
+    expect(send).toContain('sentInvoice = await withCoverageChangeable(sentInvoice)')
+    const link = routeBlock(/const invoicePaymentLinkMatch = normalizedPath\.match\(/, 6000)
+    expect(link).toContain('invoice: await withCoverageChangeable(updated)')
+  })
+
+  it('does not let a failed mark turn a delivered email into a failed send', () => {
+    const send = routeBlock(/send bookkeeping failed after delivery/, 900)
+    const at = send.indexOf('sentInvoice = await withCoverageChangeable(sentInvoice)')
+    expect(send.slice(Math.max(0, at - 80), at)).toContain('try {')
+  })
+})

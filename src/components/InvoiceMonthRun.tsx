@@ -1204,12 +1204,12 @@ export function InvoiceMonthRun({
         // Whatever the server knows about that retainer, we now do not. Re-ask
         // before offering it to anybody else.
         setRetainerToken((token) => token + 1)
-      } else if (code !== 'invoice_payment_processing') {
-        // A void refused because a bank payment is clearing is said by the
-        // editor beside its buttons — the banner above the whole list would
-        // repeat it without saying which invoice it is about.
-        setError(message)
       }
+      // NO BANNER for any of them. Every caller of `patch` is the open editor
+      // (Save, Mark reviewed, Back to draft, Void), and each says the refusal
+      // itself in the slot beside its buttons; the banner above the whole list
+      // would repeat the sentence without saying which invoice it is about. The
+      // banner stays for month-level actions, which have no editor to speak in.
       return { ok: false, message, retainer: refusedRetainer, locked, code }
     } finally {
       setBusy(false)
@@ -1736,6 +1736,7 @@ function InvoiceLineRow({
   onModeChange,
   coverage,
   locked = false,
+  busy = false,
 }: {
   line: PersistedInvoiceLine
   /** Position in the SAVED array — every edit addresses a line by this. */
@@ -1758,6 +1759,12 @@ function InvoiceLineRow({
     open: boolean
     /** `change` only: set while previewing as someone, to say why it is dead. */
     disabledTitle?: string
+    /**
+     * `change` only: a later month is already billed for this expense, so the
+     * server would refuse to move these dates. Offered as a sentence, not a
+     * control that can only fail.
+     */
+    settledByLater?: boolean
     onEdit: (range: { start: string; end: string }) => void
     onConfirm: () => void
     onOpen: () => void
@@ -1765,6 +1772,13 @@ function InvoiceLineRow({
   }
   /** The invoice has been paid: every field here is a record, not a draft. */
   locked?: boolean
+  /**
+   * A request that remounts the editor is in flight (saving covered dates), so
+   * nothing typed here would survive it. The fields go read-only and Remove is
+   * DISABLED but stays where it is — `locked` hides it, and hiding it for a
+   * moment made every row's button blink away and back.
+   */
+  busy?: boolean
 }) {
   const mode = normalizeAdhocMode(line.adhocMode)
   // The same two boxes for the question she must answer and the change she may
@@ -1803,7 +1817,7 @@ function InvoiceLineRow({
           className="input"
           value={line.label}
           aria-label="Line description"
-          readOnly={locked}
+          readOnly={locked || busy}
           onChange={(event) => onChange(index, { label: event.target.value })}
         />
         <input
@@ -1811,7 +1825,7 @@ function InvoiceLineRow({
           value={line.detail}
           aria-label="Line detail"
           placeholder="Detail (optional)"
-          readOnly={locked}
+          readOnly={locked || busy}
           onChange={(event) => onChange(index, { detail: event.target.value })}
         />
         {/* THE ASK. A skipped cycle or a resumed pause means the app worked out
@@ -1847,7 +1861,11 @@ function InvoiceLineRow({
             editing the expense changes nothing. Collapsed, because most of the
             time the dates are right and this must not read as a question. It
             never gates Mark reviewed: that reads the flag, and there is none. */}
-        {coverage?.mode === 'change' ? (
+        {coverage?.mode === 'change' && coverage.settledByLater ? (
+          <p className="invoice-run-coverage-why">
+            Dates are set by a later invoice - change them there.
+          </p>
+        ) : coverage?.mode === 'change' ? (
           coverage.open ? (
             <div
               className="invoice-run-coverage invoice-run-coverage-quiet"
@@ -1921,7 +1939,7 @@ function InvoiceLineRow({
                 min="0"
                 value={line.hours}
                 aria-label="Billed hours"
-                readOnly={locked}
+                readOnly={locked || busy}
                 onChange={(event) => {
                   const typed = Number(event.target.value)
                   const hours = Number.isFinite(typed) && typed >= 0 ? typed : 0
@@ -1944,7 +1962,7 @@ function InvoiceLineRow({
               <select
                 className="compact-input"
                 value={mode}
-                disabled={locked}
+                disabled={locked || busy}
                 onChange={(event) => onModeChange(index, event.target.value as AdhocMode)}
               >
                 {ADHOC_CHOICES.map((choice) => (
@@ -1983,6 +2001,7 @@ function InvoiceLineRow({
           aria-label="Amount"
           readOnly={
             locked ||
+            busy ||
             (Boolean(onModeChange) && mode !== 'billed') ||
             line.kind === 'retainer_credit' ||
             // Derived from the hours field beside it — typing here would be
@@ -2004,6 +2023,7 @@ function InvoiceLineRow({
             type="button"
             className="icon-button"
             aria-label={`Remove ${line.label || 'line'}`}
+            disabled={busy}
             onClick={() => onRemove(index)}
           >
             <Trash2 size={15} />
@@ -2123,6 +2143,13 @@ function InvoiceEditor({
   const [coverageError, setCoverageError] = useState<string | null>(null)
   /** The expense whose quiet "Change covered dates" boxes are open, if any. */
   const [coverageOpenId, setCoverageOpenId] = useState<string | null>(null)
+  /**
+   * The covered dates are being saved. The server's invoice then replaces this
+   * one and the editor remounts (keyed on `updatedAt`), so anything typed or
+   * staged in the meantime would be discarded. Every field and button that
+   * could take input — or send this invoice somewhere — waits for it.
+   */
+  const savingDates = coverageBusyId !== null
 
   /**
    * Answers being typed to the rating's questions, keyed by question id. Held
@@ -2242,6 +2269,12 @@ function InvoiceEditor({
    * invoice is the moment before she signs it off, which is why the questions
    * are asked here rather than hoping she opened the card.
    */
+  const backToDraft = async () => {
+    setRetainerError(null)
+    const result = await onPatch({ status: 'draft' })
+    if (!result.ok) setRetainerError(result.message)
+  }
+
   const markReviewed = () => {
     if (unansweredQuestions.length > 0) {
       setAiError(null)
@@ -2411,6 +2444,7 @@ function InvoiceEditor({
   const stageTag = (entryId: string, tag: ScopeTag, adhocMode?: AdhocMode) => {
     const entry = scope.entries.find((row) => row.id === entryId)
     const mode = tag === 'adhoc' ? (adhocMode ?? 'billed') : undefined
+    setRetainerError(null)
     // Picking the tag it already has, with nothing else to decide, is a
     // RETRACTION rather than an edit: dropping the key leaves the editor clean
     // and stops the save sending a tag write that changes nothing.
@@ -2449,6 +2483,9 @@ function InvoiceEditor({
   }, [dirty, onDirtyChange])
 
   const setLine = (index: number, patch: Partial<PersistedInvoiceLine>) => {
+    // A refusal said beside the buttons is about the lines as she last sent
+    // them; the moment she changes one it is no longer news.
+    setRetainerError(null)
     setLines((current) =>
       current.map((line, i) => {
         if (i !== index) return line
@@ -2479,6 +2516,7 @@ function InvoiceEditor({
    * flipping back to billed restores the figure the line was holding.
    */
   const setAdhocMode = (index: number, mode: AdhocMode) => {
+    setRetainerError(null)
     setLines((current) =>
       current.map((line, i) => (i === index ? adhocLineForMode(line, mode) : line)),
     )
@@ -2561,6 +2599,9 @@ function InvoiceEditor({
       ...coverageValue(line),
       busy: coverageBusyId === recurringId,
       open: coverageOpenId === recurringId,
+      // The server marks it on every response it sends; a flagged line is the
+      // open question and is always answerable, so it never carries it.
+      settledByLater: !flagged && line.coverageChangeable === false,
       // Saving the dates reloads this invoice from the server, which would
       // throw away any line, note or hours edit she has not saved yet — so
       // the dates wait until those are saved.
@@ -2600,6 +2641,7 @@ function InvoiceEditor({
   }
 
   const removeLine = (index: number) => {
+    setRetainerError(null)
     setLines((current) => current.filter((_, i) => i !== index))
     setSaved(false)
   }
@@ -2813,7 +2855,8 @@ function InvoiceEditor({
                       index={index}
                       onChange={setLine}
                       onRemove={removeLine}
-                      locked={Boolean(lockMessage) || coverageBusyId !== null}
+                      locked={Boolean(lockMessage)}
+                      busy={savingDates}
                       coverage={coverageFor(line)}
                       // Ad hoc work keeps its three-way decision inside its
                       // company's block; a scoped line has none, and that absence
@@ -2833,7 +2876,8 @@ function InvoiceEditor({
                   index={index}
                   onChange={setLine}
                   onRemove={removeLine}
-                  locked={Boolean(lockMessage) || coverageBusyId !== null}
+                  locked={Boolean(lockMessage)}
+                  busy={savingDates}
                   coverage={coverageFor(line)}
                 />
               ))}
@@ -2856,7 +2900,8 @@ function InvoiceEditor({
                   index={index}
                   onChange={setLine}
                   onRemove={removeLine}
-                  locked={Boolean(lockMessage) || coverageBusyId !== null}
+                  locked={Boolean(lockMessage)}
+                  busy={savingDates}
                   onModeChange={setAdhocMode}
                 />
               ))}
@@ -2875,7 +2920,8 @@ function InvoiceEditor({
           onTagChange={stageTag}
           applicable={retag.applicable}
           blocked={blocked}
-          readOnly={scope.readOnly || Boolean(lockMessage)}
+          readOnly={scope.readOnly || Boolean(lockMessage) || savingDates}
+          saving={savingDates && !scope.readOnly && !lockMessage}
           isBillingMaster={isBillingMaster}
           sourceClientName={sourceClientName}
         />
@@ -2888,7 +2934,9 @@ function InvoiceEditor({
           <button
             type="button"
             className="secondary-action"
+            disabled={savingDates}
             onClick={() => {
+              setRetainerError(null)
               setLines((current) => [
                 ...current,
                 { kind: 'custom', label: '', detail: '', amount: 0 },
@@ -2912,7 +2960,7 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={offeredCredit.amount === 0}
+              disabled={savingDates || offeredCredit.amount === 0}
               title={
                 offeredCredit.amount === 0
                   ? 'There is nothing on this invoice left to credit'
@@ -3027,6 +3075,7 @@ function InvoiceEditor({
                         rows={2}
                         aria-label={question.question}
                         placeholder="A sentence is plenty — or skip it."
+                        readOnly={savingDates}
                         value={answerDrafts[question.id] ?? ''}
                         onChange={(event) => setAnswerDraft(question.id, event.target.value)}
                       />
@@ -3092,9 +3141,10 @@ function InvoiceEditor({
           className="input"
           rows={2}
           value={blurb}
-          readOnly={Boolean(lockMessage)}
+          readOnly={Boolean(lockMessage) || savingDates}
           placeholder="Carried over from last month once you've written one."
           onChange={(event) => {
+            setRetainerError(null)
             setBlurb(event.target.value)
             setSaved(false)
           }}
@@ -3238,6 +3288,7 @@ function InvoiceEditor({
                 rows={2}
                 aria-label={question.question}
                 placeholder="A sentence is plenty — or leave it blank."
+                readOnly={savingDates}
                 value={answerDrafts[question.id] ?? ''}
                 onChange={(event) => setAnswerDraft(question.id, event.target.value)}
               />
@@ -3247,7 +3298,7 @@ function InvoiceEditor({
             <button
               type="button"
               className="primary-action"
-              disabled={busy || approveBusy}
+              disabled={busy || approveBusy || savingDates}
               onClick={() => void finishApprove(true)}
             >
               {approveBusy ? 'Approving…' : 'Answer & approve'}
@@ -3255,7 +3306,7 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy || approveBusy}
+              disabled={busy || approveBusy || savingDates}
               onClick={() => void finishApprove(false)}
             >
               Skip &amp; approve
@@ -3294,7 +3345,7 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy || !dirty}
+              disabled={busy || savingDates || !dirty}
               onClick={save}
             >
               {saved && !dirty ? 'Saved' : 'Save changes'}
@@ -3307,7 +3358,7 @@ function InvoiceEditor({
             <button
               type="button"
               className="primary-action"
-              disabled={busy || dirty || coverageUnconfirmed}
+              disabled={busy || savingDates || dirty || coverageUnconfirmed}
               title={
                 dirty
                   ? 'Save your changes first'
@@ -3326,8 +3377,8 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy}
-              onClick={() => void onPatch({ status: 'draft' })}
+              disabled={busy || savingDates}
+              onClick={() => void backToDraft()}
             >
               Back to draft
             </button>
@@ -3339,7 +3390,7 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy || payBusy || dirty || optedOut}
+              disabled={busy || savingDates || payBusy || dirty || optedOut}
               title={
                 dirty
                   ? 'Save your changes first'
@@ -3367,6 +3418,7 @@ function InvoiceEditor({
               className="secondary-action"
               disabled={
                 busy ||
+                savingDates ||
                 sendBusy ||
                 dirty ||
                 optedOut ||
@@ -3398,7 +3450,7 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy || dirty}
+              disabled={busy || savingDates || dirty}
               title={
                 dirty
                   ? 'Save your changes first'
@@ -3417,7 +3469,7 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy}
+              disabled={busy || savingDates}
               title="Ask Stripe whether this payment has settled, and mark the invoice paid if it has"
               onClick={() => void verifyPayment()}
             >
@@ -3428,7 +3480,7 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy}
+              disabled={busy || savingDates}
               title="This invoice was marked paid by hand — undo returns it to be collected"
               onClick={() => void unmarkPaid()}
             >
@@ -3439,7 +3491,9 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy || scope.previewMode || invoice.status === 'processing'}
+              disabled={
+                busy || savingDates || scope.previewMode || invoice.status === 'processing'
+              }
               title={
                 scope.previewMode
                   ? 'Disabled in preview mode'
