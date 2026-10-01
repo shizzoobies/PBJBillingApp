@@ -433,6 +433,8 @@ export type AppContextValue = {
     patch: { waiting?: boolean; waitingOn?: string | null; waitingForChecklistId?: string | null },
   ) => Promise<void>
   deleteChecklistItem: (checklistId: string, itemId: string) => Promise<void>
+  /** Owner-only: delete a step from this checklist, its template and the later open copies. */
+  deleteChecklistItemFromSeries: (checklistId: string, itemId: string) => Promise<void>
   /**
    * Owner-only soft-delete: moves the checklist to `data.recycledChecklists`
    * (the recycle bin) without losing data. Use when a one-time task should

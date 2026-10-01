@@ -15791,6 +15791,144 @@ export class AppDataStore {
   }
 
   /**
+   * Delete a step from a recurring checklist AND from its series: "this and
+   * every future one" (featreq-01464e64).
+   *
+   * Instance steps carry no link to the template step they were copied from
+   * (`buildChecklistFromStage` gives fresh ids), so the match is by LABEL,
+   * trimmed and case-insensitive, within the instance's stage (`stage_id`, else
+   * the template's first stage):
+   *   - the step itself is deleted;
+   *   - every template step in that stage with the same label is deleted, so no
+   *     future instance is created with it;
+   *   - the same-label top-level steps that are NOT done on the template's
+   *     OTHER live checklists in that stage with a LATER due date are deleted.
+   *     Earlier checklists and done steps are history and stay; a skipped or
+   *     recycled checklist is closed out and stays too.
+   *
+   * Postgres runs all of it in ONE transaction so a failure part-way leaves the
+   * step, the template and the later checklists exactly as they were; the file
+   * backend does it in one write. Both change the workspace fingerprint (the
+   * rows are gone), so a tab holding the old template is refused on its next
+   * bulk save instead of re-adding the step.
+   *
+   * @returns {Promise<{ removedFromTemplate: boolean, removedFromChecklists: string[] } | null>}
+   *   null when the checklist or the step is not there.
+   */
+  async deleteChecklistItemFromSeries(checklistId, itemId) {
+    const sameLabel = (a, b) =>
+      String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase()
+
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        const own = await client.query(
+          `select template_id, stage_id, to_char(due_date, 'YYYY-MM-DD') as due_date
+             from checklists where id = $1 for update`,
+          [checklistId],
+        )
+        const checklist = own.rows[0]
+        if (!checklist) {
+          await client.query('rollback')
+          return null
+        }
+        const removed = await client.query(
+          `delete from checklist_items where checklist_id = $1 and id = $2 returning label`,
+          [checklistId, itemId],
+        )
+        if (!removed.rowCount) {
+          await client.query('rollback')
+          return null
+        }
+        const label = String(removed.rows[0]?.label ?? '').trim().toLowerCase()
+        let removedFromTemplate = false
+        const removedFromChecklists = []
+        if (checklist.template_id) {
+          const stages = await client.query(
+            `select id from checklist_template_stages where template_id = $1 order by position asc, id asc`,
+            [checklist.template_id],
+          )
+          const stageIds = stages.rows.map((row) => row.id)
+          const stageId = stageIds.includes(checklist.stage_id) ? checklist.stage_id : (stageIds[0] ?? null)
+          if (stageId) {
+            const templateItems = await client.query(
+              `delete from checklist_template_items
+                where template_id = $1 and stage_id = $2 and lower(btrim(label)) = $3
+                returning id`,
+              [checklist.template_id, stageId, label],
+            )
+            removedFromTemplate = (templateItems.rowCount ?? 0) > 0
+            const later = await client.query(
+              `delete from checklist_items ci
+                using checklists c
+                where ci.checklist_id = c.id
+                  and c.template_id = $1
+                  and c.id <> $2
+                  and c.due_date > $3::date
+                  and c.deleted_at is null
+                  and c.skipped_at is null
+                  and coalesce(c.stage_id, $5) = $4
+                  and ci.done = false
+                  and lower(btrim(ci.label)) = $6
+                returning ci.checklist_id`,
+              [checklist.template_id, checklistId, checklist.due_date, stageId, stageIds[0] ?? '', label],
+            )
+            for (const row of later.rows) {
+              if (!removedFromChecklists.includes(row.checklist_id)) removedFromChecklists.push(row.checklist_id)
+            }
+          }
+        }
+        await client.query('commit')
+        return { removedFromTemplate, removedFromChecklists }
+      } catch (error) {
+        try {
+          await client.query('rollback')
+        } catch {
+          // The connection is already gone; the original error is the one to surface.
+        }
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const checklists = data.checklists ?? []
+    const checklist = checklists.find((entry) => entry.id === checklistId)
+    const target = checklist?.items.find((item) => item.id === itemId)
+    if (!checklist || !target) return null
+    const label = target.label
+    checklist.items = checklist.items.filter((item) => item.id !== itemId)
+
+    let removedFromTemplate = false
+    const removedFromChecklists = []
+    const template = checklist.templateId
+      ? (data.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId)
+      : null
+    const stages = template?.stages ?? []
+    const stage = stages.find((entry) => entry.id === checklist.stageId) ?? stages[0] ?? null
+    if (template && stage) {
+      const before = stage.items?.length ?? 0
+      stage.items = (stage.items ?? []).filter((item) => !sameLabel(item.label, label))
+      removedFromTemplate = stage.items.length < before
+      for (const other of checklists) {
+        if (other.id === checklistId || other.templateId !== checklist.templateId) continue
+        if (other.deletedAt || other.skippedAt) continue
+        if (!(other.dueDate > checklist.dueDate)) continue
+        if ((stages.find((entry) => entry.id === other.stageId) ?? stages[0]) !== stage) continue
+        const kept = other.items.filter((item) => item.done || !sameLabel(item.label, label))
+        if (kept.length < other.items.length) {
+          other.items = kept
+          removedFromChecklists.push(other.id)
+        }
+      }
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return { removedFromTemplate, removedFromChecklists }
+  }
+
+  /**
    * Delete an entire checklist by id. Owner-gated at the server boundary.
    * In Postgres mode the `checklist_items` FK has `on delete cascade`, so a
    * single DELETE removes the parent row and all of its items together.

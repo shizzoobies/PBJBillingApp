@@ -2142,6 +2142,7 @@ export function ChecklistCard({
     pendingTaskEditChecklistIds,
     serviceCategories,
     addSeriesChecklistItem,
+    deleteChecklistItemFromSeries,
     data: contextData,
     skipChecklistOccurrence,
     pushChecklistOccurrence,
@@ -2185,6 +2186,17 @@ export function ChecklistCard({
   // for this checklist only or the whole series. Holds the pending label(s)
   // until they pick; null = no prompt open.
   const [seriesPromptLabels, setSeriesPromptLabels] = useState<string[] | null>(null)
+  // The step whose x was clicked, while the "this checklist only / this + all
+  // future" question is open. A checklist with no template has no series, so it
+  // gets a plain confirm instead and never sets this.
+  const [stepDeletePrompt, setStepDeletePrompt] = useState<{ itemId: string; label: string } | null>(null)
+  const requestStepDelete = (itemId: string) => {
+    if (checklist.templateId) {
+      setStepDeletePrompt({ itemId, label: checklist.items.find((item) => item.id === itemId)?.label ?? '' })
+    } else if (window.confirm('Delete this step?')) {
+      void onDeleteItem(checklist.id, itemId)
+    }
+  }
   const [metaTitle, setMetaTitle] = useState(checklist.title)
   const [metaDue, setMetaDue] = useState(checklist.dueDate)
   const [metaAssignee, setMetaAssignee] = useState(checklist.assigneeId)
@@ -2544,7 +2556,7 @@ export function ChecklistCard({
           onAddSubSubItem(checklist.id, itemId, subItemId, title)
         }
         onCanToggle={canToggleItem}
-        onDeleteItem={(itemId) => onDeleteItem(checklist.id, itemId)}
+        onDeleteItem={async (itemId) => requestStepDelete(itemId)}
         onRemoveSubItem={(itemId, subItemId) =>
           onRemoveSubItem(checklist.id, itemId, subItemId)
         }
@@ -2565,6 +2577,38 @@ export function ChecklistCard({
         onUpdateItem={(itemId, patch) => onUpdateItem(checklist.id, itemId, patch)}
         todayDateOnly={todayDateOnly}
       />
+      {stepDeletePrompt ? (
+        <div className="series-scope-prompt" role="group" aria-label="Where to delete this step">
+          <span className="series-scope-text">Delete “{stepDeletePrompt.label}” from…</span>
+          <div className="series-scope-actions">
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => {
+                void onDeleteItem(checklist.id, stepDeletePrompt.itemId)
+                setStepDeletePrompt(null)
+              }}
+            >
+              This checklist only
+            </button>
+            {role === 'owner' ? (
+              <button
+                type="button"
+                className="primary-action"
+                onClick={() => {
+                  void deleteChecklistItemFromSeries(checklist.id, stepDeletePrompt.itemId)
+                  setStepDeletePrompt(null)
+                }}
+              >
+                This + all future
+              </button>
+            ) : null}
+            <button type="button" className="link-button" onClick={() => setStepDeletePrompt(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
       {canEditStructure
         ? (() => {
             // On a live recurring instance ANYONE who can edit the checklist

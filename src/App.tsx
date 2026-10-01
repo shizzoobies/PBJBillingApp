@@ -26,6 +26,7 @@ import {
   createStandardTemplateRequest,
   createTimeEntry,
   deleteChecklistItemRequest,
+  deleteChecklistItemFromSeriesRequest,
   deleteChecklistRequest,
   approveChecklistDeletionRequest,
   rejectChecklistDeletionRequest,
@@ -3096,6 +3097,37 @@ function App() {
     }
   }
 
+  // Owner-only "this and every future one" delete: the server removes the step
+  // here, the recurring template's step and the later open copies in one
+  // transaction. Merge ALL of that into local state through the server-update
+  // path (not the dirty-marking one): a stale template left in memory would be
+  // written straight back by the next autosave and the step would reappear.
+  const deleteChecklistItemFromSeries = async (checklistId: string, itemId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const result = await deleteChecklistItemFromSeriesRequest(checklistId, itemId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map(
+          (checklist) => result.checklists.find((updated) => updated.id === checklist.id) ?? checklist,
+        ),
+        checklistTemplates: current.checklistTemplates.map((template) =>
+          result.template && template.id === result.template.id ? result.template : template,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
   /**
    * Delete a checklist. The server branches on the caller's REAL role:
    *  - Owner → soft-delete: the row gets `deleted_at` and `read()` sorts it
@@ -4038,6 +4070,7 @@ function App() {
     updateChecklistItem,
     updateSubItemWaiting,
     deleteChecklistItem,
+    deleteChecklistItemFromSeries,
     deleteChecklist,
     approveChecklistDeletion,
     rejectChecklistDeletion,

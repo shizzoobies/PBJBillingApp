@@ -11069,6 +11069,46 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // ?scope=series: delete the step from this checklist AND the recurring
+        // template and the later open copies (featreq-01464e64). It edits the
+        // template, which only an owner may do, so a non-owner is refused here
+        // rather than falling through to a deletion request for one checklist.
+        if (requestUrl.searchParams.get('scope') === 'series') {
+          if (session.user.role !== 'owner') {
+            sendJson(response, 403, { error: 'Only owners can remove a step from the recurring checklist' })
+            return
+          }
+          if (isCrossSiteOrigin(request)) {
+            sendJson(response, 403, { error: 'Origin not allowed' })
+            return
+          }
+          if (!checklist.templateId) {
+            sendJson(response, 400, { error: 'This checklist is not part of a recurring series' })
+            return
+          }
+          const removal = await appDataStore.deleteChecklistItemFromSeries(checklistId, itemId)
+          if (!removal) {
+            sendJson(response, 404, { error: 'Checklist item not found' })
+            return
+          }
+          await appDataStore.recordActivity(
+            session.user.id,
+            'checklist_item_removed_series',
+            `${checklist.title}: ${targetItem.label}`,
+          )
+          broadcastDataChanged()
+          // Hand back what changed so the tab can merge it rather than keep a
+          // stale template that its next autosave would write straight back.
+          const fresh = await appDataStore.read()
+          const touched = new Set([checklistId, ...removal.removedFromChecklists])
+          sendJson(response, 200, {
+            ...removal,
+            checklists: fresh.checklists.filter((entry) => touched.has(entry.id)),
+            template: fresh.checklistTemplates.find((entry) => entry.id === checklist.templateId) ?? null,
+          })
+          return
+        }
+
         if (session.user.role !== 'owner') {
           const filed = await fileItemDeletionRequest(request, session, data, checklist, {
             itemId,
