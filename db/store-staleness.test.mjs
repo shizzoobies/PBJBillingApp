@@ -47,6 +47,7 @@ import {
 } from '../lib/expense-coverage.js'
 import {
   LAST_RECURRING_STEP_MESSAGE,
+  approvalDenial,
   normalizedLabelSql,
   reuseDuplicateDeletionRequest,
   runSeriesStepDelete,
@@ -23664,46 +23665,99 @@ describe('item deletion request scope (file backend)', () => {
   })
 
   describe('the duplicate rule', () => {
-    const path = { checklistId: 'cl-1', itemId: 's1' }
+    const path = { checklistId: 'cl-1', itemId: 's1', requestedBy: 'emp-1' }
+    const pending = async () => store.listItemDeletionRequests()
 
     it('finds nothing to reuse when no request is pending for that step', async () => {
       await store.createItemDeletionRequest(filing({ itemId: 'other-step' }))
-      expect(
-        await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), { ...path, scope: 'series' }),
-      ).toBeNull()
+      expect(await reuseDuplicateDeletionRequest(store, await pending(), { ...path, scope: 'series' })).toBeNull()
     })
 
     it('returns the pending request untouched when the scope is the same', async () => {
       const created = await store.createItemDeletionRequest(filing({ scope: 'series' }))
-      const reused = await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), {
-        ...path,
-        scope: 'series',
-      })
-      expect(reused).toEqual(created)
+      const reused = await reuseDuplicateDeletionRequest(store, await pending(), { ...path, scope: 'series' })
+      expect(reused).toEqual({ request: created, scopeChanged: false })
     })
 
-    it('updates the one pending request to the newer scope (her latest choice wins), both ways', async () => {
+    it('lets the SAME requester change the one pending request to the newer scope, both ways, and reports the change', async () => {
       const created = await store.createItemDeletionRequest(filing())
-      const toSeries = await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), {
-        ...path,
-        scope: 'series',
-      })
-      expect(toSeries).toEqual({ ...created, scope: 'series' })
-      const back = await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), {
-        ...path,
-        scope: 'checklist',
-      })
-      expect(back.scope).toBe('checklist')
-      const all = await store.listItemDeletionRequests()
+      const toSeries = await reuseDuplicateDeletionRequest(store, await pending(), { ...path, scope: 'series' })
+      expect(toSeries).toEqual({ request: { ...created, scope: 'series' }, scopeChanged: true })
+      const back = await reuseDuplicateDeletionRequest(store, await pending(), { ...path, scope: 'checklist' })
+      expect(back.request.scope).toBe('checklist')
+      expect(back.scopeChanged).toBe(true)
+      const all = await pending()
       expect(all).toHaveLength(1)
       expect(all[0].id).toBe(created.id)
     })
 
+    it('leaves the request untouched for a DIFFERENT requester: no new request, no scope change', async () => {
+      const created = await store.createItemDeletionRequest(filing({ scope: 'checklist' }))
+      const reused = await reuseDuplicateDeletionRequest(store, await pending(), {
+        ...path,
+        requestedBy: 'emp-2',
+        scope: 'series',
+      })
+      expect(reused).toEqual({ request: created, scopeChanged: false })
+      const all = await pending()
+      expect(all).toHaveLength(1)
+      expect(all[0].scope).toBe('checklist')
+      expect((await persistedAuth()).itemDeletionRequests[0].scope).toBe('checklist')
+    })
+
+    it('does not let an unknown requester change a request filed by someone', async () => {
+      await store.createItemDeletionRequest(filing())
+      const reused = await reuseDuplicateDeletionRequest(store, await pending(), {
+        checklistId: 'cl-1',
+        itemId: 's1',
+        scope: 'series',
+      })
+      expect(reused.scopeChanged).toBe(false)
+      expect((await pending())[0].scope).toBe('checklist')
+    })
+
     it('treats a sub-step request as a different path', async () => {
       await store.createItemDeletionRequest(filing({ subItemId: 'u1' }))
-      expect(
-        await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), { ...path, scope: 'series' }),
-      ).toBeNull()
+      expect(await reuseDuplicateDeletionRequest(store, await pending(), { ...path, scope: 'series' })).toBeNull()
+    })
+  })
+
+  describe('approvalDenial: the owner approves the scope she was shown', () => {
+    const series = { id: 'idr-1', checklistId: 'cl-1', itemId: 's1', scope: 'series' }
+    const plain = { id: 'idr-2', checklistId: 'cl-1', itemId: 's1', scope: 'checklist' }
+    const changed = { status: 409, body: { error: 'request_changed', message: 'This request changed - reload to see it.' } }
+
+    it('lets a request through when the scope she was shown is the stored one', () => {
+      expect(approvalDenial(series, 'series')).toBeNull()
+      expect(approvalDenial(plain, 'checklist')).toBeNull()
+    })
+
+    it('refuses a stale scope in both directions', () => {
+      expect(approvalDenial(series, 'checklist')).toEqual(changed)
+      expect(approvalDenial(plain, 'series')).toEqual(changed)
+    })
+
+    it('reads a body with no scope (an old open tab) as checklist: fine for a one-checklist request, never a series one', () => {
+      expect(approvalDenial(plain, undefined)).toBeNull()
+      expect(approvalDenial(plain, null)).toBeNull()
+      expect(approvalDenial(series, undefined)).toEqual(changed)
+      expect(approvalDenial(series, null)).toEqual(changed)
+    })
+
+    it('reads a request stored without a scope as checklist', () => {
+      expect(approvalDenial({ id: 'idr-old', checklistId: 'cl-1', itemId: 's1' }, 'checklist')).toBeNull()
+      expect(approvalDenial({ id: 'idr-old', checklistId: 'cl-1', itemId: 's1' }, 'series')).toEqual(changed)
+    })
+
+    it('refuses a series request that names a sub-step, so the whole parent step is never deleted', () => {
+      for (const over of [{ subItemId: 'u1' }, { subItemId: 'u1', subSubItemId: 'v1' }]) {
+        const denial = approvalDenial({ ...series, ...over }, 'series')
+        expect(denial.status).toBe(409)
+        expect(denial.body.error).toMatch(/sub-step/)
+        expect(denial.body.error).not.toBe('request_changed')
+      }
+      // A one-checklist request for a sub-step is the ordinary case and is untouched.
+      expect(approvalDenial({ ...plain, subItemId: 'u1' }, 'checklist')).toBeNull()
     })
   })
 })

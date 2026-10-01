@@ -1859,16 +1859,18 @@ export async function listItemDeletionRequests() {
 /**
  * Owner-only: approve a pending item-deletion request. Returns the updated
  * checklist, or - for a "This + all future" request - what the series delete
- * changed (the same body the owner's own series delete answers).
+ * changed (the same body the owner's own series delete answers). `scope` is the
+ * scope the row SHOWED: the server refuses (409 request_changed, request kept) when
+ * the request no longer asks for it, so she never approves more than she saw.
  */
-export async function approveItemDeletion(requestId: string) {
+export async function approveItemDeletion(requestId: string, scope: 'checklist' | 'series' = 'checklist') {
   const response = await apiFetch(
     `/api/checklists/item-deletions/${encodeURIComponent(requestId)}/approve`,
     {
       credentials: 'same-origin',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ scope }),
     },
   )
   if (!response.ok) {

@@ -264,6 +264,30 @@ describe('deleting a step on a recurring checklist', () => {
       expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
     })
 
+    it('reads without a count when there were no upcoming checklists to remove it from', async () => {
+      deleteChecklistItemFromSeries.mockResolvedValue({
+        removedFromTemplate: true,
+        removedFromChecklists: [],
+        keptOnChecklists: [],
+      })
+      await chooseSeries()
+      const notice = await screen.findByRole('status')
+      expect(notice).toHaveTextContent('Removed from the recurring checklist.')
+      expect(notice).not.toHaveTextContent('0 upcoming')
+    })
+
+    it('keeps the "kept" tail when there were no upcoming checklists to remove it from', async () => {
+      deleteChecklistItemFromSeries.mockResolvedValue({
+        removedFromTemplate: true,
+        removedFromChecklists: [],
+        keptOnChecklists: ['b'],
+      })
+      await chooseSeries()
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        'Removed from the recurring checklist. Kept on 1 where work had started.',
+      )
+    })
+
     it('adds where it kept a copy because work had started', async () => {
       deleteChecklistItemFromSeries.mockResolvedValue({
         removedFromTemplate: true,

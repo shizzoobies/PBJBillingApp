@@ -34,17 +34,14 @@ export declare function runSeriesStepDelete(args: {
   itemId: string
   label: string
 }): Promise<{ status: number; body: Record<string, unknown> }>
-export declare function reuseDuplicateDeletionRequest<T extends DeletionRequestPath & { id: string; scope?: string }>(
+export declare function reuseDuplicateDeletionRequest<T extends DeletionRequestPath & { id: string; scope?: string; requestedBy?: string | null }>(
   store: SeriesDeleteStore,
   existing: T[],
-  path: DeletionRequestPath & { scope?: string },
-): Promise<T | null>
-export declare function normalizeStepLabel(label: unknown): string
-export declare function normalizedLabelSql(column: string): string
-export declare function stepCarriesWork(item: unknown): boolean
-export declare function untouchedStepSql(alias?: string): string
-export declare function sameLabelOrdinal(items: { id: string; label?: string }[], itemId: string): number
-export declare function pickCopyToRemove(
-  copies: { id: string; carriesWork: boolean }[],
-  ordinal: number,
-): { removeId: string | null; kept: boolean }
+  path: DeletionRequestPath & { scope?: string; requestedBy?: string | null },
+): Promise<{ request: T; scopeChanged: boolean } | null>
+export declare const REQUEST_CHANGED_MESSAGE: string
+export declare const SERIES_SUBSTEP_MESSAGE: string
+export declare function approvalDenial(
+  request: DeletionRequestPath & { scope?: string },
+  shownScope: string | null | undefined,
+): { status: 409; body: { error: string; message?: string } } | null

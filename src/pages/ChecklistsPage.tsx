@@ -527,8 +527,8 @@ export function ChecklistsPage() {
           onApprove={approveChecklistDeletion}
           onReject={rejectChecklistDeletion}
           itemRequests={itemDeletionRequests}
-          onApproveItem={async (requestId) => {
-            const result = await approveItemDeletion(requestId)
+          onApproveItem={async (requestId, scope) => {
+            const result = await approveItemDeletion(requestId, scope)
             // A "This + all future" approval says what it removed, in the same
             // sentence the owner's own series delete shows.
             if (result) setDeletionApprovalNote(seriesDeleteNotice(result))
@@ -1218,7 +1218,7 @@ function PendingDeletionsSection({
   onApprove: (checklistId: string) => Promise<void>
   onReject: (checklistId: string) => Promise<void>
   itemRequests: ItemDeletionRequest[]
-  onApproveItem: (requestId: string) => Promise<void>
+  onApproveItem: (requestId: string, scope: 'checklist' | 'series') => Promise<void>
   onRejectItem: (requestId: string) => Promise<void>
 }) {
   const pending = checklists
@@ -1352,7 +1352,7 @@ function PendingDeletionsSection({
                     type="button"
                     className="secondary-action danger"
                     disabled={approveBlocked}
-                    onClick={() => void onApproveItem(req.id)}
+                    onClick={() => void onApproveItem(req.id, req.scope ?? 'checklist')}
                     title={
                       approveBlocked
                         ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
@@ -2155,7 +2155,9 @@ function seriesDeleteNotice(result: {
   const upcoming = `${count} upcoming ${count === 1 ? 'checklist' : 'checklists'}`
   const kept =
     result.keptOnChecklists.length > 0 ? ` Kept on ${result.keptOnChecklists.length} where work had started.` : ''
-  if (result.removedFromTemplate) return `Removed from the recurring checklist and ${upcoming}.${kept}`
+  if (result.removedFromTemplate) {
+    return count > 0 ? `Removed from the recurring checklist and ${upcoming}.${kept}` : `Removed from the recurring checklist.${kept}`
+  }
   const notOnTemplate = 'This step is not on the recurring checklist under that name'
   return count > 0
     ? `${notOnTemplate}, but it was removed from ${upcoming}.${kept}`

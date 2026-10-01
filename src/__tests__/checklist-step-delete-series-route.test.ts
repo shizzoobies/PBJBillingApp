@@ -129,6 +129,20 @@ describe('a team member\'s request (fileItemDeletionRequest)', () => {
     expect(block.slice(create, create + 400)).toContain('scope: requestScope')
   })
 
+  it('only the requester can change a pending request, and a change is announced like a new request', () => {
+    const block = fileRequestBlock()
+    expect(block).toContain('requestedBy: session.user.id,')
+    const early = block.indexOf('if (duplicate && !duplicate.scopeChanged) return duplicate.request')
+    const activity = block.indexOf("'checklist_item_deletion_requested',")
+    const notify = block.indexOf("notify(appDataStore, owner.id, 'checklist_item_deletion_requested'")
+    // Someone else's re-filing (or the same scope) returns BEFORE any activity or notification.
+    expect(early).toBeGreaterThan(-1)
+    expect(early).toBeLessThan(activity)
+    expect(activity).toBeLessThan(notify)
+    // A changed scope reuses the updated request instead of creating a second one.
+    expect(block).toContain('duplicate?.request ??')
+  })
+
   it('tells the owner which one it is, in the activity and in the notification', () => {
     const block = fileRequestBlock()
     expect(block).toContain("' (this checklist and all future ones)'")
@@ -157,6 +171,22 @@ describe('approving a "This + all future" request', () => {
     const reject = serverSource.indexOf("if (decision === 'reject') {")
     expect(reject).toBeGreaterThan(-1)
     expect(reject).toBeLessThan(at)
+  })
+
+  it('refuses a stale or missing scope, and a series request naming a sub-step, before doing anything', () => {
+    const at = serverSource.indexOf('const approvalRefusal = approvalDenial(req, shownScope)')
+    expect(at).toBeGreaterThan(-1)
+    expect(serverSource.slice(at, at + 200)).toContain('sendJson(response, approvalRefusal.status, approvalRefusal.body)')
+    // The scope in the body is read after reject has returned (reject is unchanged) ...
+    expect(serverSource.indexOf("if (decision === 'reject') {")).toBeLessThan(at)
+    // ... and before the series branch, the waiting-step guard and every store write.
+    const series = serverSource.indexOf("if (req.scope === 'series') {")
+    const guard = serverSource.indexOf('removalWouldCompleteWaitingStep(approvalItem')
+    expect(at).toBeLessThan(series)
+    expect(at).toBeLessThan(guard)
+    const before = serverSource.slice(serverSource.indexOf("let shownScope = null"), at)
+    expect(before).not.toMatch(/appDataStore.(delete|remove|update|create|set)/)
+    expect(before).toContain('readJsonBody(request)')
   })
 
   it('answers 404 and drops the request when the checklist or step is already gone', () => {

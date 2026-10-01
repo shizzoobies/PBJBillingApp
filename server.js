@@ -127,6 +127,7 @@ import {
   pendingNoteWriteDenial,
 } from './lib/checklist-write-permission.js'
 import {
+  approvalDenial,
   reuseDuplicateDeletionRequest,
   runSeriesStepDelete,
   seriesDeleteDenial,
@@ -998,30 +999,41 @@ async function fileItemDeletionRequest(
 ) {
   // 'series' = "this checklist and all future ones" (top-level steps only).
   const requestScope = scope === 'series' ? 'series' : 'checklist'
-  // One request per step: asking again keeps the one already pending, taking the
-  // scope just chosen (her latest choice wins).
+  // One request per step: asking again keeps the one already pending. Only the
+  // person who filed it can change its scope (her latest choice wins, and the
+  // owners are told again so a change is never silent); anyone else gets the
+  // pending request back untouched.
   const duplicate = await reuseDuplicateDeletionRequest(
     appDataStore,
     await appDataStore.listItemDeletionRequests(),
-    { checklistId: checklist.id, itemId, subItemId, subSubItemId, scope: requestScope },
+    {
+      checklistId: checklist.id,
+      itemId,
+      subItemId,
+      subSubItemId,
+      scope: requestScope,
+      requestedBy: session.user.id,
+    },
   )
-  if (duplicate) return duplicate
+  if (duplicate && !duplicate.scopeChanged) return duplicate.request
 
   const requesterName =
     (data.employees ?? []).find((e) => e.id === session.user.id)?.name ??
     session.user.name ??
     'A team member'
-  const created = await appDataStore.createItemDeletionRequest({
-    clientId: checklist.clientId,
-    checklistId: checklist.id,
-    itemId,
-    subItemId: subItemId ?? null,
-    subSubItemId: subSubItemId ?? null,
-    label,
-    requestedBy: session.user.id,
-    requestedByName: requesterName,
-    scope: requestScope,
-  })
+  const created =
+    duplicate?.request ??
+    (await appDataStore.createItemDeletionRequest({
+      clientId: checklist.clientId,
+      checklistId: checklist.id,
+      itemId,
+      subItemId: subItemId ?? null,
+      subSubItemId: subSubItemId ?? null,
+      label,
+      requestedBy: session.user.id,
+      requestedByName: requesterName,
+      scope: requestScope,
+    }))
   await appDataStore.recordActivity(
     session.user.id,
     'checklist_item_deletion_requested',
@@ -9535,6 +9547,22 @@ const server = createServer(async (request, response) => {
       if (decision === 'reject') {
         await appDataStore.deleteItemDeletionRequest(requestId)
         sendJson(response, 200, { ok: true, removed: requestId })
+        return
+      }
+
+      // The owner approves the scope she was SHOWN: the page sends it with the
+      // approval (none reads as 'checklist'). A request that changed since, or a
+      // series request naming a sub-step, is refused before anything is done and
+      // the request stays.
+      let shownScope = null
+      try {
+        shownScope = (await readJsonBody(request))?.scope ?? null
+      } catch {
+        shownScope = null
+      }
+      const approvalRefusal = approvalDenial(req, shownScope)
+      if (approvalRefusal) {
+        sendJson(response, approvalRefusal.status, approvalRefusal.body)
         return
       }
 

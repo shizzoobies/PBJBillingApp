@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
+import { cleanup, configure, fireEvent, render, waitFor, within } from '@testing-library/react'
 import App from '../App'
 import { createSeedData } from '../lib/seed'
 import { LAST_RECURRING_STEP_MESSAGE } from '../../lib/series-step-delete.js'
@@ -18,6 +18,9 @@ import type { Checklist, ChecklistTemplate, ItemDeletionRequest, SessionUser } f
  *     request leaves the list; a refused approval shows the server's sentence
  *     and the request stays.
  */
+
+// A whole-app render is slow when the full suite runs in parallel; give the finders room.
+configure({ asyncUtilTimeout: 5000 })
 
 const STAFF_SESSION: SessionUser = {
   id: 'emp-jordan',
@@ -95,11 +98,12 @@ type Seen = { method: string; url: string }
 /** Boot the app as `session`, with `pending` as the queue the server answers (it shrinks when the test says so). */
 function boot(session: SessionUser, opts: {
   pending?: ItemDeletionRequest[]
-  onWrite?: (path: string, method: string) => Response | undefined
+  onWrite?: (path: string, method: string, body: unknown) => Response | undefined
   queue?: { current: ItemDeletionRequest[] }
 } = {}) {
   const queue = opts.queue ?? { current: opts.pending ?? [] }
   const seen: Seen[] = []
+  const bodies: unknown[] = []
   window.history.pushState({}, '', '/')
   installFetchMock({
     sessionUser: session,
@@ -109,19 +113,20 @@ function boot(session: SessionUser, opts: {
       checklistTemplates: [TEMPLATE],
     },
     extraRoutes: [
-      (path, method) => {
+      (path, method, body) => {
         if (method === 'GET' && path.endsWith('/api/checklists/item-deletions')) return json({ requests: queue.current })
         if (method === 'GET' && path.endsWith('/api/checklists/pending-edits')) return json({ edits: [] })
         if (method === 'GET' && path.endsWith('/api/waiting-on-me')) return json({ items: [] })
         if (method !== 'GET') {
           seen.push({ method, url: path })
-          return opts.onWrite?.(path, method)
+          bodies.push(body)
+          return opts.onWrite?.(path, method, body)
         }
         return undefined
       },
     ],
   })
-  return { queue, seen }
+  return { queue, seen, bodies }
 }
 
 const openChecklists = async () => {
@@ -324,4 +329,87 @@ describe('as the owner', () => {
     expect(within(await rowFor(page, 'Reconcile')).getByText('This + all future')).toBeInTheDocument()
     expect(page.queryByText(/Removed from the recurring checklist/)).not.toBeInTheDocument()
   })
+
+  it('sends the scope the row showed with the approval, so she approves what she saw', async () => {
+    for (const scope of ['series', 'checklist'] as const) {
+      cleanup()
+      const queue = { current: [request({ scope })] }
+      const { bodies } = boot(OWNER_SESSION, {
+        queue,
+        onWrite: (path, method) => {
+          if (method === 'POST' && path.endsWith('/approve')) {
+            queue.current = []
+            return scope === 'series'
+              ? json({ removedFromTemplate: true, removedFromChecklists: [], keptOnChecklists: [], checklists: [], template: null })
+              : json({ ...RECURRING, items: [step('cl-sep-rep', 'Send report')] })
+          }
+          return undefined
+        },
+      })
+      const page = await openChecklists()
+      fireEvent.click(within(await rowFor(page, 'Reconcile')).getByRole('button', { name: 'Approve' }))
+      await waitFor(() => expect(bodies).toEqual([{ scope }]))
+    }
+  })
+
+  it('a request that changed since the row was drawn: shows the sentence, keeps the request, and reloads the list', async () => {
+    const alert = vi.fn()
+    vi.stubGlobal('alert', alert)
+    // The row was drawn as "This checklist only"; by the time she clicks, it asks for the series.
+    const queue = { current: [request({ scope: 'checklist' })] }
+    const { bodies } = boot(OWNER_SESSION, {
+      queue,
+      onWrite: (path, method) => {
+        if (method === 'POST' && path.endsWith('/approve')) {
+          queue.current = [request({ scope: 'series' })]
+          return json({ error: 'request_changed', message: 'This request changed - reload to see it.' }, 409)
+        }
+        return undefined
+      },
+    })
+    const page = await openChecklists()
+    const row = await rowFor(page, 'Reconcile')
+    expect(within(row).getByText('This checklist only')).toBeInTheDocument()
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Approve' }))
+
+    await waitFor(() => expect(alert).toHaveBeenCalledWith('This request changed - reload to see it.'))
+    expect(bodies).toEqual([{ scope: 'checklist' }])
+    // The list was reloaded: the same row now says what the request really asks for.
+    await waitFor(async () =>
+      expect(within(await rowFor(page, 'Reconcile')).getByText('This + all future')).toBeInTheDocument(),
+    )
+    expect(page.queryByText(/Removed from the recurring checklist/)).not.toBeInTheDocument()
+  })
+
+  for (const scope of ['checklist', 'series'] as const) {
+    it(`a 404 on approving a ${scope} request (the step is already gone) is quiet: the stale row leaves`, async () => {
+      const alert = vi.fn()
+      vi.stubGlobal('alert', alert)
+      const queue = { current: [request({ scope })] }
+      boot(OWNER_SESSION, {
+        queue,
+        onWrite: (path, method) => {
+          if (method === 'POST' && path.endsWith('/approve')) {
+            // The server dropped the request when it found the step gone.
+            queue.current = []
+            return json({ error: 'Target item no longer exists' }, 404)
+          }
+          return undefined
+        },
+      })
+      const page = await openChecklists()
+      const unhandled = vi.fn()
+      window.addEventListener('unhandledrejection', unhandled)
+      try {
+        fireEvent.click(within(await rowFor(page, 'Reconcile')).getByRole('button', { name: 'Approve' }))
+        await waitFor(() => expect(page.queryByText('Item deletions')).not.toBeInTheDocument())
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      } finally {
+        window.removeEventListener('unhandledrejection', unhandled)
+      }
+      expect(unhandled).not.toHaveBeenCalled()
+      expect(page.queryByText(/something went wrong|not being saved/i)).not.toBeInTheDocument()
+    })
+  }
 })

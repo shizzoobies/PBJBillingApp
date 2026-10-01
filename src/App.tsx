@@ -1258,17 +1258,28 @@ function App() {
   // Owner item-deletion decisions. Defined after `applyServerDataUpdate` since
   // approve merges the server-returned checklist into local state.
   const approveItemDeletion = useCallback(
-    async (requestId: string): Promise<SeriesItemDeleteResult | void> => {
+    async (requestId: string, scope: 'checklist' | 'series' = 'checklist'): Promise<SeriesItemDeleteResult | void> => {
       if (previewActiveRef.current) return
       let updated: Checklist | SeriesItemDeleteResult
       try {
-        updated = await approveItemDeletionRequest(requestId)
+        updated = await approveItemDeletionRequest(requestId, scope)
       } catch (error) {
         if (isCleanRejection(error) && error instanceof ApiError) {
           // The server refused this one approval (it would finish a waiting
-          // step). The request stays; nothing failed to save. Say why, the same
-          // way the checkbox handlers do, so the owner is never left guessing.
+          // step, a stop of the series delete, or the request changed since this
+          // row was drawn). The request stays; nothing failed to save. Say why,
+          // the same way the checkbox handlers do, so the owner is never left
+          // guessing, and reload the list so the row shows the request as it is.
           window.alert(error.message)
+          await refreshItemDeletionRequests()
+          return
+        }
+        if (error instanceof ApiError && error.status === 404) {
+          // The step was already deleted somewhere else and the server dropped the
+          // request: nothing to approve. Reload the list (the stale row leaves) and
+          // the data (the step is gone from the page); no error, nothing failed.
+          await refreshItemDeletionRequests()
+          requestLiveRefetchRef.current?.()
           return
         }
         throw error

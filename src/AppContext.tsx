@@ -482,7 +482,7 @@ export type AppContextValue = {
    * Resolves with what a "This + all future" approval changed (so the page can
    * say it), nothing for a one-checklist request or a refusal.
    */
-  approveItemDeletion: (requestId: string) => Promise<SeriesItemDeleteResult | void>
+  approveItemDeletion: (requestId: string, scope?: 'checklist' | 'series') => Promise<SeriesItemDeleteResult | void>
   /** Owner-only: reject a pending item-deletion request (deletes nothing). */
   rejectItemDeletion: (requestId: string) => Promise<void>
   /**
