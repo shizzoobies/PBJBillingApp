@@ -573,6 +573,18 @@ with instructions rather than failing. Run it by hand after any print change.
   for in `featreq-cdab1605`. Alex was asked which she meant; offered fix if the rule is too
   strict: the owner may tick a waiting task directly, which clears the wait. NOTHING CHANGED;
   the ticket is still Planned.
+- **When she reports a date or "due" on an invoice:** first pin down the SURFACE (list row, print
+  sheet, PDF, email) and WHICH Print button. The row date is internal; the client copies say Due
+  on receipt. This one was two interpretation gaps and one real default problem, not a bug in
+  the money.
+- **Local dev sign-in:** test runs can reset `tmp/auth-state.json`, after which the seeded owner
+  lands on `/two-factor/setup`; enroll in the page (reveal the setup code, compute the code
+  in-page). Stop both preview servers before running vitest - they share `tmp/`.
+
+**2026-09-30 (late) - the queue run: two client-page items, five checklist items, and the
+evening date bug.** Spec `docs/plans/queue-2026-09-30.md`. Built in three parallel worktree
+lanes by subagents, every task reviewed and re-reviewed, three whole-branch reviews (storage,
+routes/permissions, frontend), one post-review fix pass and a delta review; shipped as `a4f78ac`.
 
 - **Statement dates box** (`featreq-11ffb3a6`): client page, Overview, above Client notes.
   Table `client_statement_accounts` (file key `authState.clientStatementAccounts`), endpoint-
