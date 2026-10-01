@@ -30,7 +30,6 @@ import {
   isWaitingOnOpen,
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
   removalWouldCompleteWaitingStep,
-  toggleWouldCompleteWaitingStep,
   waitingOnStage,
   waitingToggleRefusal,
 } from '../../lib/waiting-on-state.js'
@@ -1290,7 +1289,17 @@ function PendingDeletionsSection({
             className="pending-deletions-list"
             style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}
           >
-            {pendingItems.map((req) => (
+            {pendingItems.map((req) => {
+              // Approving would finish a step that is waiting, so the server
+              // would refuse it. Ask the same simulation up front and say why.
+              const approveBlocked = removalWouldCompleteWaitingStep(
+                checklists
+                  .find((c) => c.id === req.checklistId)
+                  ?.items.find((entry) => entry.id === req.itemId),
+                req.subItemId ?? undefined,
+                req.subSubItemId ?? undefined,
+              )
+              return (
               <li
                 key={req.id}
                 className="pending-deletion-item"
@@ -1318,8 +1327,13 @@ function PendingDeletionsSection({
                   <button
                     type="button"
                     className="secondary-action danger"
+                    disabled={approveBlocked}
                     onClick={() => void onApproveItem(req.id)}
-                    title="Approve — remove this item"
+                    title={
+                      approveBlocked
+                        ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
+                        : 'Approve — remove this item'
+                    }
                   >
                     Approve
                   </button>
@@ -1333,7 +1347,8 @@ function PendingDeletionsSection({
                   </button>
                 </div>
               </li>
-            ))}
+              )
+            })}
           </ul>
         </>
       ) : null}
@@ -2334,6 +2349,9 @@ export function ChecklistCard({
   // future" question is open. A checklist with no template has no series, so it
   // gets a plain confirm instead and never sets this.
   const [stepDeletePrompt, setStepDeletePrompt] = useState<{ itemId: string; label: string } | null>(null)
+  // True while a delete chosen in that prompt is in flight, so a second click
+  // cannot send the same delete twice (the series delete is not repeatable).
+  const [stepDeleteBusy, setStepDeleteBusy] = useState(false)
   // What the series delete did (or why the server refused it), shown under the step list.
   const [stepDeleteNote, setStepDeleteNote] = useState<string | null>(null)
   const [stepDeleteError, setStepDeleteError] = useState<string | null>(null)
@@ -2743,9 +2761,17 @@ export function ChecklistCard({
             <button
               type="button"
               className="secondary-action"
+              disabled={stepDeleteBusy}
               onClick={() => {
-                void onDeleteItem(checklist.id, stepDeletePrompt.itemId)
-                setStepDeletePrompt(null)
+                void (async () => {
+                  setStepDeleteBusy(true)
+                  try {
+                    await onDeleteItem(checklist.id, stepDeletePrompt.itemId)
+                  } finally {
+                    setStepDeleteBusy(false)
+                  }
+                  setStepDeletePrompt(null)
+                })()
               }}
             >
               This checklist only
@@ -2754,8 +2780,10 @@ export function ChecklistCard({
               <button
                 type="button"
                 className="primary-action"
+                disabled={stepDeleteBusy}
                 onClick={() => {
                   void (async () => {
+                    setStepDeleteBusy(true)
                     try {
                       const result = await deleteChecklistItemFromSeries(checklist.id, stepDeletePrompt.itemId)
                       setStepDeletePrompt(null)
@@ -2763,6 +2791,8 @@ export function ChecklistCard({
                     } catch (error) {
                       // A refusal (the recurring checklist's last step): keep the prompt open and say why.
                       setStepDeleteError(error instanceof Error ? error.message : 'Could not remove the step.')
+                    } finally {
+                      setStepDeleteBusy(false)
                     }
                   })()
                 }}
@@ -3781,6 +3811,9 @@ function DraggableTaskList({
         const subItems = item.subItems ?? []
         const hasSubItems = subItems.length > 0
         const allowToggle = onCanToggle(item)
+        // The waiting guard's verdict for this step's own checkbox, asked once:
+        // the box disables on it and titles with it.
+        const itemWaitTitle = toggleWaitTitle(item)
         // Done sub-steps sit below the open ones, and fold away with the
         // checklist's "Hide completed" (an open step only - a done step is
         // hidden whole, or shown whole).
@@ -3848,13 +3881,13 @@ function DraggableTaskList({
               ) : null}
               <input
                 checked={item.done}
-                disabled={!allowToggle || toggleWouldCompleteWaitingStep(item)}
+                disabled={!allowToggle || itemWaitTitle !== undefined}
                 onChange={() => void onToggle(checklistId, item.id)}
                 title={
                   !allowToggle
                     ? "This step is assigned to someone else — only they can check it off."
-                    : toggleWaitTitle(item)
-                      ? toggleWaitTitle(item)
+                    : itemWaitTitle
+                      ? itemWaitTitle
                       : hasSubItems
                         ? 'Checking this checks every sub-step'
                         : undefined
@@ -4077,6 +4110,9 @@ function DraggableTaskList({
                   const subSubDoneCount = subSubItems.filter((s) => s.done).length
                   const subOpenIndex = openSubIds.indexOf(sub.id)
                   const subInOpenGroup = !isStepDone(sub)
+                  // Both verdicts of the waiting guard, asked once per row.
+                  const subWaitTitle = toggleWaitTitle(item, sub.id)
+                  const subRemovalBlocked = removalWouldCompleteWaitingStep(item, sub.id)
                   const subRowClasses = ['sub-item-row']
                   if (sub.done) subRowClasses.push('done')
                   if (draggingSub?.subId === sub.id) subRowClasses.push('dragging')
@@ -4129,13 +4165,13 @@ function DraggableTaskList({
                         ) : null}
                         <input
                           checked={sub.done}
-                          disabled={!allowToggle || toggleWouldCompleteWaitingStep(item, sub.id)}
+                          disabled={!allowToggle || subWaitTitle !== undefined}
                           onChange={() => onToggleSubItem(item.id, sub.id)}
                           title={
                             !allowToggle
                               ? "This step is assigned to someone else — only they can check it off."
-                              : toggleWaitTitle(item, sub.id)
-                                ? toggleWaitTitle(item, sub.id)
+                              : subWaitTitle
+                                ? subWaitTitle
                                 : hasSubSubItems
                                 ? 'Checking this checks every sub-step'
                                 : undefined
@@ -4205,14 +4241,11 @@ function DraggableTaskList({
                             type="button"
                             aria-label="Delete sub-step"
                             className="item-delete-btn sub-item-delete"
-                            disabled={
-                              hasPendingDeletion(item.id, sub.id) ||
-                              removalWouldCompleteWaitingStep(item, sub.id)
-                            }
+                            disabled={hasPendingDeletion(item.id, sub.id) || subRemovalBlocked}
                             title={
                               hasPendingDeletion(item.id, sub.id)
                                 ? 'Deletion already requested — waiting on owner approval'
-                                : removalWouldCompleteWaitingStep(item, sub.id)
+                                : subRemovalBlocked
                                   ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
                                   : 'Delete sub-step'
                             }
@@ -4306,7 +4339,15 @@ function DraggableTaskList({
                       />
                       {(hasSubSubItems || canEdit) ? (
                         <div className="sub-sub-item-list">
-                          {subSubItems.map((subSub) => (
+                          {subSubItems.map((subSub) => {
+                            // Both verdicts of the waiting guard, asked once per row.
+                            const subSubWaitTitle = toggleWaitTitle(item, sub.id, subSub.id)
+                            const subSubRemovalBlocked = removalWouldCompleteWaitingStep(
+                              item,
+                              sub.id,
+                              subSub.id,
+                            )
+                            return (
                             <div
                               key={subSub.id}
                               className={
@@ -4315,17 +4356,14 @@ function DraggableTaskList({
                             >
                               <input
                                 checked={subSub.done}
-                                disabled={
-                                  !allowToggle ||
-                                  toggleWouldCompleteWaitingStep(item, sub.id, subSub.id)
-                                }
+                                disabled={!allowToggle || subSubWaitTitle !== undefined}
                                 onChange={() =>
                                   onToggleSubSubItem(item.id, sub.id, subSub.id)
                                 }
                                 title={
                                   !allowToggle
                                     ? "This step is assigned to someone else — only they can check it off."
-                                    : toggleWaitTitle(item, sub.id, subSub.id)
+                                    : subSubWaitTitle
                                 }
                                 type="checkbox"
                               />
@@ -4337,12 +4375,12 @@ function DraggableTaskList({
                                   className="item-delete-btn sub-item-delete"
                                   disabled={
                                     hasPendingDeletion(item.id, sub.id, subSub.id) ||
-                                    removalWouldCompleteWaitingStep(item, sub.id, subSub.id)
+                                    subSubRemovalBlocked
                                   }
                                   title={
                                     hasPendingDeletion(item.id, sub.id, subSub.id)
                                       ? 'Deletion already requested — waiting on owner approval'
-                                      : removalWouldCompleteWaitingStep(item, sub.id, subSub.id)
+                                      : subSubRemovalBlocked
                                         ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
                                         : 'Delete sub-step'
                                   }
@@ -4359,7 +4397,8 @@ function DraggableTaskList({
                                 </span>
                               ) : null}
                             </div>
-                          ))}
+                            )
+                          })}
                           {canEdit ? (
                             <SubItemAddRow
                               onAdd={(title) => onAddSubSubItem(item.id, sub.id, title)}

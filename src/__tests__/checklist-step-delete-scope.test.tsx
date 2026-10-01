@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChecklistsPage } from '../pages/ChecklistsPage'
@@ -134,13 +134,85 @@ describe('deleting a step on a recurring checklist', () => {
     expect(deleteChecklistItemFromSeries).not.toHaveBeenCalled()
   })
 
-  it('"This checklist only" deletes the step from this checklist alone', () => {
+  it('"This checklist only" deletes the step from this checklist alone', async () => {
     renderPage()
     clickDelete('Recurring close')
     fireEvent.click(within(prompt('Recurring close')).getByRole('button', { name: 'This checklist only' }))
     expect(deleteChecklistItem).toHaveBeenCalledWith('cl-recurring', 'cl-recurring-step')
     expect(deleteChecklistItemFromSeries).not.toHaveBeenCalled()
-    expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument(),
+    )
+  })
+
+  describe('while a delete is in flight', () => {
+    // A promise the test settles by hand, so the click is observed mid-request.
+    const pending = () => {
+      let settle: (value?: unknown) => void = () => {}
+      const promise = new Promise((resolve) => {
+        settle = resolve
+      })
+      return { promise, settle }
+    }
+
+    it('disables both choices so "This + all future" cannot be sent twice', async () => {
+      const request = pending()
+      deleteChecklistItemFromSeries.mockReturnValue(request.promise)
+      renderPage()
+      clickDelete('Recurring close')
+      const group = within(prompt('Recurring close'))
+      const everyFuture = group.getByRole('button', { name: 'This + all future' })
+      const thisOnly = group.getByRole('button', { name: 'This checklist only' })
+      expect(everyFuture).not.toBeDisabled()
+
+      fireEvent.click(everyFuture)
+      await waitFor(() => expect(everyFuture).toBeDisabled())
+      expect(thisOnly).toBeDisabled()
+      fireEvent.click(everyFuture)
+      fireEvent.click(thisOnly)
+      expect(deleteChecklistItemFromSeries).toHaveBeenCalledTimes(1)
+      expect(deleteChecklistItem).not.toHaveBeenCalled()
+
+      request.settle({ removedFromTemplate: true, removedFromChecklists: [], keptOnChecklists: [] })
+      await waitFor(() =>
+        expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument(),
+      )
+    })
+
+    it('disables both choices so "This checklist only" cannot be sent twice', async () => {
+      const request = pending()
+      deleteChecklistItem.mockReturnValue(request.promise)
+      renderPage()
+      clickDelete('Recurring close')
+      const group = within(prompt('Recurring close'))
+      const thisOnly = group.getByRole('button', { name: 'This checklist only' })
+
+      fireEvent.click(thisOnly)
+      await waitFor(() => expect(thisOnly).toBeDisabled())
+      expect(group.getByRole('button', { name: 'This + all future' })).toBeDisabled()
+      fireEvent.click(thisOnly)
+      expect(deleteChecklistItem).toHaveBeenCalledTimes(1)
+
+      request.settle()
+      await waitFor(() =>
+        expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument(),
+      )
+    })
+
+    it('enables them again when the series delete is refused', async () => {
+      const request = pending()
+      deleteChecklistItemFromSeries.mockReturnValue(request.promise)
+      renderPage()
+      clickDelete('Recurring close')
+      const everyFuture = within(prompt('Recurring close')).getByRole('button', { name: 'This + all future' })
+      fireEvent.click(everyFuture)
+      await waitFor(() => expect(everyFuture).toBeDisabled())
+
+      // Settle the pending call with a refusal.
+      request.settle(Promise.reject(new Error(LAST_RECURRING_STEP_MESSAGE)))
+      expect(await screen.findByRole('alert')).toHaveTextContent(LAST_RECURRING_STEP_MESSAGE)
+      await waitFor(() => expect(everyFuture).not.toBeDisabled())
+    })
   })
 
   it('an owner can choose "This + all future"', () => {

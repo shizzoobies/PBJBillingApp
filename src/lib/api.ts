@@ -1862,10 +1862,15 @@ export async function approveItemDeletion(requestId: string) {
     },
   )
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    // A refused approval answers { error: 'STEP_IS_WAITING', message: <sentence> }:
+    // the sentence is what the owner needs to read, not the code.
+    const body = (await response.json().catch(() => null)) as {
+      error?: string
+      message?: string
+    } | null
     throw new ApiError(
       response.status,
-      body?.error ?? `Failed to approve deletion (${response.status})`,
+      body?.message ?? body?.error ?? `Failed to approve deletion (${response.status})`,
     )
   }
   return (await response.json()) as Checklist

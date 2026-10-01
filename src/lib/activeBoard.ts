@@ -144,8 +144,10 @@ export function effectiveDue(checklist: Checklist): string {
  * Quick-glance status for a board checklist: is it still DUE (actionable, incl.
  * overdue) or PENDING (blocked — at least one open step is flagged waiting)?
  * Mirrors the Delayed page's definition of blocked: a legacy `waiting` flag or
- * any unresolved structured `waitingOns` entry, at any depth (step, sub-step,
- * sub-sub-step). `reasons` collects the human "why" strings — the free-text
+ * any structured `waitingOns` entry that is not yet verified, at any depth
+ * (step, sub-step, sub-sub-step). A wait the other person has marked done but
+ * the requester has not yet approved is still unverified, so it still holds the
+ * chip on Pending. `reasons` collects the human "why" strings — the free-text
  * waiting note first, else the structured blocker's note or name (resolved via
  * `employeeNameById` when provided).
  */

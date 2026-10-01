@@ -21869,25 +21869,89 @@ describe('deleteChecklistItemFromSeries', () => {
         // Clicking the SECOND Reconcile: ordinal 1.
         checklist('cl-sep', '2026-09-30', [step('s1', 'Reconcile'), step('s2', 'Send report'), step('s3', 'Reconcile')]),
         checklist('cl-oct', '2026-10-31', [step('o1', 'Reconcile'), step('o2', 'Reconcile')]),
-        // Only one copy left there: no copy at ordinal 1, so the first untouched copy goes.
+        // Only one copy there, and the template stage had two: that copy may be the
+        // counterpart of the template step that stays, so the checklist is left alone.
         checklist('cl-nov', '2026-11-30', [step('n1', 'Reconcile'), step('n2', 'Send report')]),
         // The copy at the ordinal is untouched while the first one has work: the ordinal one goes.
         checklist('cl-dec', '2026-12-31', [step('d1', 'Reconcile', { done: true }), step('d2', 'Reconcile')]),
-        // The copy at the ordinal has work: another untouched copy goes, and the kept one is reported.
+        // The copy at the ordinal has work, and this checklist has as many copies as
+        // the template stage had: another untouched copy goes. It is removed from, so
+        // it is NOT also reported as kept.
         checklist('cl-jan', '2027-01-31', [step('j1', 'Reconcile'), step('j2', 'Reconcile', { waiting: true })]),
+        // The copy at the ordinal has work and there are too few copies to fall back
+        // on: nothing is removed, and the checklist is reported as kept.
+        checklist('cl-feb', '2027-02-28', [step('f1', 'Reconcile', { done: true })]),
       ],
       [dupes],
     )
     const result = await store.deleteChecklistItemFromSeries('cl-sep', 's3')
     expect(result.removedFromTemplate).toBe(true)
-    expect(result.keptOnChecklists).toEqual(['cl-jan'])
-    expect(result.removedFromChecklists).toEqual(['cl-oct', 'cl-nov', 'cl-dec', 'cl-jan'])
+    expect(result.keptOnChecklists).toEqual(['cl-feb'])
+    expect(result.removedFromChecklists).toEqual(['cl-oct', 'cl-dec', 'cl-jan'])
     expect(await itemsOf('cl-sep')).toEqual(['s1', 's2'])
     expect((await persisted()).checklistTemplates[0].stages[0].items.map((item) => item.id)).toEqual(['ti-1', 'ti-2'])
     expect(await itemsOf('cl-oct')).toEqual(['o1'])
-    expect(await itemsOf('cl-nov')).toEqual(['n2'])
+    expect(await itemsOf('cl-nov')).toEqual(['n1', 'n2'])
     expect(await itemsOf('cl-dec')).toEqual(['d1'])
     expect(await itemsOf('cl-jan')).toEqual(['j2'])
+    expect(await itemsOf('cl-feb')).toEqual(['f1'])
+  })
+
+  it('never lists a checklist as both removed-from and kept-on', async () => {
+    const dupes = template({
+      stages: [
+        {
+          id: 'stage-a',
+          name: 'Prep',
+          assigneeId: 'emp-1',
+          offsetDays: 0,
+          items: [
+            { id: 'ti-1', label: 'Reconcile' },
+            { id: 'ti-2', label: 'Reconcile' },
+          ],
+        },
+      ],
+    })
+    await seed(
+      [
+        checklist('cl-sep', '2026-09-30', [step('s1', 'Reconcile'), step('s2', 'Reconcile')]),
+        // Work started on the second copy, so the ordinal-1 copy is kept; the fallback removes the first.
+        checklist('cl-oct', '2026-10-31', [step('o1', 'Reconcile'), step('o2', 'Reconcile', { done: true })]),
+      ],
+      [dupes],
+    )
+    const result = await store.deleteChecklistItemFromSeries('cl-sep', 's2')
+    expect(result.removedFromChecklists).toEqual(['cl-oct'])
+    expect(result.keptOnChecklists).toEqual([])
+    expect(await itemsOf('cl-oct')).toEqual(['o2'])
+  })
+
+  it('leaves a later checklist alone when it has fewer look-alikes than the template stage had', async () => {
+    const dupes = template({
+      stages: [
+        {
+          id: 'stage-a',
+          name: 'Prep',
+          assigneeId: 'emp-1',
+          offsetDays: 0,
+          items: [
+            { id: 'ti-1', label: 'Reconcile' },
+            { id: 'ti-2', label: 'Reconcile' },
+          ],
+        },
+      ],
+    })
+    await seed(
+      [
+        checklist('cl-sep', '2026-09-30', [step('s1', 'Reconcile'), step('s2', 'Reconcile')]),
+        // One copy: it is the counterpart of the template step that stays.
+        checklist('cl-oct', '2026-10-31', [step('o1', 'Reconcile')]),
+      ],
+      [dupes],
+    )
+    const result = await store.deleteChecklistItemFromSeries('cl-sep', 's2')
+    expect(result).toEqual({ removedFromTemplate: true, removedFromChecklists: [], keptOnChecklists: [] })
+    expect(await itemsOf('cl-oct')).toEqual(['o1'])
   })
 
   it('treats a stage that is no longer on the template as the first stage, for other checklists too', async () => {
@@ -22027,6 +22091,27 @@ describe('deleteChecklistItemFromSeries (postgres branch)', () => {
     expect(fake.find(/^delete from pending_task_edits/i)[0].params).toEqual(queue.params)
   })
 
+  it('locks the template row right after the own checklist row, before anything is read for the last-step check', async () => {
+    const fake = seriesPostgres()
+    await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's1')
+    const texts = fake.statements.map((entry) => entry.text)
+    const ownLock = texts.findIndex((text) => /^select template_id, stage_id.*for update$/is.test(text))
+    const templateLock = texts.findIndex((text) =>
+      /^select 1 from checklist_templates where id = \$1 for update$/i.test(text),
+    )
+    expect(ownLock).toBe(1)
+    expect(templateLock).toBe(ownLock + 1)
+    expect(fake.statements[templateLock].params).toEqual(['tmpl-1'])
+    // Both locks come before the stage's steps are read for the last-step check.
+    expect(templateLock).toBeLessThan(texts.findIndex((text) => /^select id, label from checklist_template_items/i.test(text)))
+  })
+
+  it('takes no template lock for a checklist that has no template', async () => {
+    const fake = seriesPostgres({ checklistRow: { template_id: null, stage_id: null, occurrence: '2026-09-30' } })
+    await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's1')
+    expect(fake.find(/^select 1 from checklist_templates/i)).toHaveLength(0)
+  })
+
   it('selects later copies by OCCURRENCE, live, in the effective stage, by trimmed label, flagging untouched ones', async () => {
     const fake = seriesPostgres()
     await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's1')
@@ -22110,8 +22195,10 @@ describe('deleteChecklistItemFromSeries (postgres branch)', () => {
     const result = await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's2')
     // Clicked step 's2' is the second Reconcile: ordinal 1.
     expect(fake.find(/^delete from checklist_template_items/i)[0].params).toEqual(['tmpl-1', 'ti-2'])
-    expect(fake.find(/^delete from checklist_items ci/i)[0].params).toEqual([['o2', 'n1', 'd2']])
-    expect(result).toEqual({ removedFromTemplate: true, removedFromChecklists: ['cl-oct', 'cl-nov', 'cl-dec'], keptOnChecklists: [] })
+    // 'cl-nov' has one Reconcile and the template stage had two: left alone, not
+    // fallen back on.
+    expect(fake.find(/^delete from checklist_items ci/i)[0].params).toEqual([['o2', 'd2']])
+    expect(result).toEqual({ removedFromTemplate: true, removedFromChecklists: ['cl-oct', 'cl-dec'], keptOnChecklists: [] })
   })
 
   it('falls back to the first stage when the instance stage is not on the template', async () => {

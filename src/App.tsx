@@ -1241,7 +1241,19 @@ function App() {
   const approveItemDeletion = useCallback(
     async (requestId: string) => {
       if (previewActiveRef.current) return
-      const updated = await approveItemDeletionRequest(requestId)
+      let updated: Checklist
+      try {
+        updated = await approveItemDeletionRequest(requestId)
+      } catch (error) {
+        if (isCleanRejection(error) && error instanceof ApiError) {
+          // The server refused this one approval (it would finish a waiting
+          // step). The request stays; nothing failed to save. Say why, the same
+          // way the checkbox handlers do, so the owner is never left guessing.
+          window.alert(error.message)
+          return
+        }
+        throw error
+      }
       applyServerDataUpdate((current) => ({
         ...current,
         checklists: current.checklists.map((checklist) =>

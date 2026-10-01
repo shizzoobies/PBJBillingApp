@@ -15961,8 +15961,12 @@ export class AppDataStore {
    *     same-label copy per checklist is deleted, and only an UNTOUCHED one
    *     (`stepCarriesWork` / `untouchedStepSql` in lib/series-step-delete.js:
    *     not done, no done sub-step, no wait of any kind, a saved one included).
-   *     A copy that carries work stays and its checklist is reported in
-   *     `keptOnChecklists`. Earlier checklists stay; a skipped or recycled one
+   *     The copy at the clicked step's ordinal goes; when it is missing or has
+   *     work, another untouched copy goes only if the checklist has at least as
+   *     many same-label copies as the template stage had before the delete (see
+   *     `pickCopyToRemove`). A checklist where nothing was removed because a copy
+   *     carries work is reported in `keptOnChecklists` (never in both lists).
+   *     Earlier checklists stay; a skipped or recycled one
    *     is closed out and stays too;
    *   - any pending item-deletion request or pending item edit that points at a
    *     step this removes is dropped with it, so the queue cannot hold a request
@@ -15996,6 +16000,14 @@ export class AppDataStore {
           await client.query('rollback')
           return null
         }
+        if (checklist.template_id) {
+          // Serializes series deletes on one template: the last-step check below
+          // reads the stage's steps, so two concurrent deletes of its last two
+          // steps could each see "one other step left" and both pass.
+          await client.query(`select 1 from checklist_templates where id = $1 for update`, [
+            checklist.template_id,
+          ])
+        }
         const ownItems = await client.query(
           `select id, label from checklist_items where checklist_id = $1 order by sort_order asc, id asc`,
           [checklistId],
@@ -16009,6 +16021,7 @@ export class AppDataStore {
         const ordinal = sameLabelOrdinal(ownItems.rows, itemId)
 
         let templateItemId = null
+        let templateCopies = 0
         let stageId = null
         let stageIds = []
         if (checklist.template_id) {
@@ -16027,6 +16040,7 @@ export class AppDataStore {
             )
             const copies = stageItems.rows.filter((row) => normalizeStepLabel(row.label) === label)
             templateItemId = copies[ordinal]?.id ?? null
+            templateCopies = copies.length
             if (templateItemId && stageId === stageIds[0] && stageItems.rows.length === 1) {
               // Nothing has been written yet; the rollback only ends the transaction.
               await client.query('rollback')
@@ -16068,7 +16082,7 @@ export class AppDataStore {
           }
           const removeIds = []
           for (const [laterId, copies] of byChecklist) {
-            const pick = pickCopyToRemove(copies, ordinal)
+            const pick = pickCopyToRemove(copies, ordinal, templateCopies)
             if (pick.removeId) removeIds.push(pick.removeId)
             if (pick.kept) keptOnChecklists.push(laterId)
           }
@@ -16129,9 +16143,10 @@ export class AppDataStore {
       : null
     const stages = template?.stages ?? []
     const stage = stages.find((entry) => entry.id === checklist.stageId) ?? stages[0] ?? null
-    const templateItem = stage
-      ? ((stage.items ?? []).filter((item) => normalizeStepLabel(item.label) === label)[ordinal] ?? null)
-      : null
+    const templateCopyItems = stage
+      ? (stage.items ?? []).filter((item) => normalizeStepLabel(item.label) === label)
+      : []
+    const templateItem = templateCopyItems[ordinal] ?? null
     if (templateItem && stage === stages[0] && stage.items.length === 1) {
       return { refusal: 'last_recurring_step' }
     }
@@ -16151,7 +16166,7 @@ export class AppDataStore {
         const copies = other.items
           .filter((item) => normalizeStepLabel(item.label) === label)
           .map((item) => ({ id: item.id, carriesWork: stepCarriesWork(item) }))
-        const pick = pickCopyToRemove(copies, ordinal)
+        const pick = pickCopyToRemove(copies, ordinal, templateCopyItems.length)
         if (pick.removeId) {
           other.items = other.items.filter((item) => item.id !== pick.removeId)
           removedSteps.push({ checklistId: other.id, itemId: pick.removeId })

@@ -141,6 +141,34 @@ describe('boardChecklistStatus', () => {
     })
   })
 
+  // A wait the other person has finished (resolved) but the requester has not
+  // approved (verified) is still unverified: the step is still held up, so the
+  // chip stays on Pending. Only a verified wait lets go.
+  it('a resolved-but-not-verified wait still reads Pending, a verified one does not', () => {
+    const waitOn = {
+      id: 'w',
+      blockerId: 'e2',
+      requestedBy: 'e1',
+      createdAt: '2026-06-15T00:00:00Z',
+      resolvedAt: '2026-06-15T01:00:00Z',
+      resolvedBy: 'e2',
+    }
+    const withWait = (entry: Record<string, unknown>) =>
+      open({ items: [{ id: 'i', label: 'l', done: false, waitingOns: [entry] }] as Checklist['items'] })
+
+    expect(boardChecklistStatus(withWait(waitOn), TODAY, { e2: 'Allison Lehmann' })).toEqual({
+      kind: 'pending',
+      reasons: ['waiting on Allison Lehmann'],
+      waitingCount: 1,
+    })
+    expect(
+      boardChecklistStatus(
+        withWait({ ...waitOn, verifiedAt: '2026-06-15T02:00:00Z', verifiedBy: 'e1' }),
+        TODAY,
+      ).kind,
+    ).toBe('due')
+  })
+
   it('collects waits from sub-items and sub-sub-items', () => {
     const status = boardChecklistStatus(
       open({
