@@ -1246,6 +1246,9 @@ function PrintInvoiceDialog({
           submit blocks the browser's implicit submission, and the guard below
           keeps an unanswered, failed or invalid lookup from printing either way. */}
       <form
+        // The modal body spaces its children with a grid gap; the form is now
+        // its only child, so it carries the same spacing for its own.
+        style={{ display: 'grid', gap: 14 }}
         onSubmit={(event) => {
           event.preventDefault()
           if (printable) onPrint(period, customizedHere ? null : saved)
