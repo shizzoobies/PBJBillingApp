@@ -4077,7 +4077,7 @@ function DraggableTaskList({
                     </span>
                   ) : null}
                 </span>
-                {stepIsWaiting(item) && !item.done ? (
+                {stepIsWaiting(item) && !isChecklistItemDone(item) ? (
                   <span className="task-row-waiting" title="Why this step isn't done yet">
                     {item.waitingOn ? `Waiting on: ${item.waitingOn}` : 'Waiting'}
                   </span>
@@ -4352,7 +4352,7 @@ function DraggableTaskList({
                             {subSubDoneCount}/{subSubItems.length}
                           </span>
                         ) : null}
-                        {stepIsWaiting(sub) && !sub.done ? (
+                        {stepIsWaiting(sub) && !isChecklistItemDone(sub) ? (
                           <span
                             className="task-row-waiting sub-waiting-badge"
                             title="Why this sub-step isn't done yet"

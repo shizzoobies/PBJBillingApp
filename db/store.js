@@ -35,7 +35,12 @@ import {
   priceProposal,
   sanitizeProposalPricing,
 } from '../lib/proposal-pricing.js'
-import { isWaitingOnOpen, toggleClosingWaits, waitingOnStage } from '../lib/waiting-on-state.js'
+import {
+  isWaitingOnOpen,
+  toggleClosingWaits,
+  waitingOnStage,
+  waitingToggleRefusal,
+} from '../lib/waiting-on-state.js'
 import {
   normalizedLabelSql,
   normalizeStepLabel,
@@ -2450,6 +2455,22 @@ export class PushedRecordError extends Error {
   constructor(message) {
     super(message)
     this.name = 'PushedRecordError'
+  }
+}
+
+/**
+ * Thrown by `toggleChecklistItem` when a staff tick would finish a step that is
+ * waiting (featreq-cdab1605). The refusal is decided here, against the row the
+ * toggle is about to write, so a wait added a moment before cannot be ticked
+ * through. `refusal` is exactly what `waitingToggleRefusal` answers
+ * (`{ status, error, message, where }`); the route sends it as it is, and nothing
+ * was written.
+ */
+export class StepIsWaitingError extends Error {
+  constructor(refusal) {
+    super(refusal.message)
+    this.name = 'StepIsWaitingError'
+    this.refusal = refusal
   }
 }
 
@@ -15568,78 +15589,110 @@ export class AppDataStore {
    * waiting node the tick turns done has its wait closed - verified by that user
    * - in the same write as the toggle (`toggleClosingWaits`,
    * lib/waiting-on-state.js, runs the same simulation the guard does). The result
-   * then carries `closedWaits`, one `{ path, label }` per wait closed. Without it
-   * nothing here changes, and a waiting step is the route's to refuse.
+   * then carries `closedWaits`, one `{ path, label }` per wait closed.
+   *
+   * Without `closeWaitsBy` (staff) a tick that would finish a waiting step is
+   * refused HERE with a `StepIsWaitingError`, against the row about to be
+   * written: the Postgres branch reads it `for update` inside the transaction
+   * and the file branch reads it inside the file queue slot, so a wait added a
+   * moment earlier is always seen. Nothing is written when it throws.
    */
   async toggleChecklistItem(checklistId, itemId, subItemId, subSubItemId, options = {}) {
     const { closeWaitsBy } = options ?? {}
     let closedWaits = []
     if (this.pool) {
-      // Read-modify-write: roll-up can't be expressed as a single SQL update,
-      // so load the item, mutate the JSONB, and persist atomically.
-      const itemResult = await this.pool.query(
-        closeWaitsBy
-          ? `select id, label, done, waiting, waiting_on, waiting_ons, sub_items from checklist_items where checklist_id = $1 and id = $2`
-          : `select id, done, sub_items from checklist_items where checklist_id = $1 and id = $2`,
-        [checklistId, itemId],
-      )
-      if (!itemResult.rowCount) {
-        return null
-      }
-      const row = itemResult.rows[0]
+      // Read, decide and write in ONE transaction with the item row locked: roll-up
+      // can't be expressed as a single SQL update, so the item is loaded, its JSONB
+      // mutated and persisted atomically, and the waiting guard reads the very row
+      // being written. A wait written by someone else after this lock waits for
+      // this commit; one written before it is on the row we read.
+      const client = await this.pool.connect()
       let toggled
       let closing = null
-      if (closeWaitsBy) {
-        const result = toggleClosingWaits(
-          {
-            label: row.label,
-            done: row.done,
-            // The same reading `mapChecklistItemRow` gives the page.
-            waiting: Boolean(row.waiting || row.waiting_on),
-            waitingOns: row.waiting_ons,
-            subItems: row.sub_items,
-          },
-          subItemId,
-          subSubItemId,
-          { userId: closeWaitsBy, at: nowIso() },
+      try {
+        await client.query('begin')
+        const itemResult = await client.query(
+          `select id, label, done, waiting, waiting_on, waiting_ons, sub_items from checklist_items where checklist_id = $1 and id = $2 for update`,
+          [checklistId, itemId],
         )
-        if (!result) return null
-        toggled = { subItems: result.item.subItems, done: result.item.done }
-        if (result.closedWaits.length > 0) closing = result
-      } else {
-        toggled = applyItemToggle(row.sub_items, row.done, { subItemId, subSubItemId })
-      }
-      if (!toggled) return null
+        if (!itemResult.rowCount) {
+          await client.query('rollback')
+          return null
+        }
+        const row = itemResult.rows[0]
+        if (closeWaitsBy) {
+          const result = toggleClosingWaits(
+            {
+              label: row.label,
+              done: row.done,
+              // The same reading `mapChecklistItemRow` gives the page.
+              waiting: Boolean(row.waiting || row.waiting_on),
+              waitingOns: row.waiting_ons,
+              subItems: row.sub_items,
+            },
+            subItemId,
+            subSubItemId,
+            { userId: closeWaitsBy, at: nowIso() },
+          )
+          if (!result) {
+            await client.query('rollback')
+            return null
+          }
+          toggled = { subItems: result.item.subItems, done: result.item.done }
+          if (result.closedWaits.length > 0) closing = result
+        } else {
+          const refusal = waitingToggleRefusal(mapChecklistItemRow(row), subItemId, subSubItemId)
+          if (refusal) throw new StepIsWaitingError(refusal)
+          toggled = applyItemToggle(row.sub_items, row.done, { subItemId, subSubItemId })
+        }
+        if (!toggled) {
+          await client.query('rollback')
+          return null
+        }
 
-      // The top-level wait columns are rewritten only when the TOP node's own wait
-      // closed. A sub-step's closure lives in sub_items, so a tick that finished
-      // only sub-steps keeps the plain statement: it must not flip `waiting` on a
-      // node it did not finish, nor rewrite `waiting_ons` from this unlocked read.
-      const closesTop = Boolean(closing?.closedWaits.some(({ path }) => path.length === 0))
-      const updateResult = closesTop
-        ? await this.pool.query(
-            `update checklist_items
+        // The top-level wait columns are rewritten only when the TOP node's own wait
+        // closed. A sub-step's closure lives in sub_items, so a tick that finished
+        // only sub-steps keeps the plain statement: it must not flip `waiting` on a
+        // node it did not finish, nor rewrite `waiting_ons` from a node it left alone.
+        const closesTop = Boolean(closing?.closedWaits.some(({ path }) => path.length === 0))
+        const updateResult = closesTop
+          ? await client.query(
+              `update checklist_items
          set done = $3, sub_items = $4::jsonb, waiting = $5, waiting_ons = $6::jsonb, ${completedAtClause(3)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
-            [
-              checklistId,
-              itemId,
-              toggled.done,
-              JSON.stringify(toggled.subItems),
-              Boolean(closing.item.waiting),
-              JSON.stringify(normalizeWaitingOns(closing.item.waitingOns)),
-            ],
-          )
-        : await this.pool.query(
-            `update checklist_items
+              [
+                checklistId,
+                itemId,
+                toggled.done,
+                JSON.stringify(toggled.subItems),
+                Boolean(closing.item.waiting),
+                JSON.stringify(normalizeWaitingOns(closing.item.waitingOns)),
+              ],
+            )
+          : await client.query(
+              `update checklist_items
          set done = $3, sub_items = $4::jsonb, ${completedAtClause(3)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
-            [checklistId, itemId, toggled.done, JSON.stringify(toggled.subItems)],
-          )
+              [checklistId, itemId, toggled.done, JSON.stringify(toggled.subItems)],
+            )
+        // The step vanished (or moved to another checklist) between the read and
+        // this write: report "not found" rather than a silent success.
+        if (updateResult.rowCount === 0) {
+          await client.query('rollback')
+          return null
+        }
+        await client.query('commit')
+      } catch (error) {
+        try {
+          await client.query('rollback')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        throw error
+      } finally {
+        client.release()
+      }
       closedWaits = closing?.closedWaits ?? []
-      // The step vanished (or moved to another checklist) between the read and
-      // this write: report "not found" rather than a silent success.
-      if (updateResult.rowCount === 0) return null
 
       const data = await this.read()
       const updated = data.checklists.find((checklist) => checklist.id === checklistId) ?? null
@@ -15654,87 +15707,98 @@ export class AppDataStore {
       return { checklist: updated, spawned: spawn, ...(closeWaitsBy ? { closedWaits } : {}) }
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    let itemUpdated = false
+    // Read, decide and write inside ONE file-queue slot (raw fs calls only in
+    // here: `readJson`/`writeFile` enqueue behind this very slot and would
+    // deadlock). As separate queue entries another request's write could land
+    // between the read and the write, and the waiting guard would be reading a
+    // copy that is already out of date. `maybeSpawnNextStage` is pure in file mode.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let updatedChecklist = null
+      let itemUpdated = false
 
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) {
-        return checklist
-      }
-
-      const items = checklist.items.map((item) => {
-        if (item.id !== itemId) {
-          return item
+      data.checklists = data.checklists.map((checklist) => {
+        if (checklist.id !== checklistId) {
+          return checklist
         }
 
-        if (closeWaitsBy) {
-          const closing = toggleClosingWaits(item, subItemId, subSubItemId, {
-            userId: closeWaitsBy,
-            at: nowIso(),
-          })
-          if (!closing) return item
-          itemUpdated = true
-          closedWaits = closing.closedWaits
-          // Same shape as the plain toggle below, plus the item's own wait
-          // fields (only the ones it already carries) - and only when the TOP
-          // node's own wait closed; a sub-step's closure lives in subItems.
-          const next = { ...item }
-          if (closing.item.subItems.length > 0) next.subItems = closing.item.subItems
-          if (closing.closedWaits.some(({ path }) => path.length === 0)) {
-            for (const key of ['waiting', 'waitingOns']) {
-              if (key in closing.item) next[key] = closing.item[key]
-            }
+        const items = checklist.items.map((item) => {
+          if (item.id !== itemId) {
+            return item
           }
-          return withCompletionStamp(next, closing.item.done)
+
+          if (closeWaitsBy) {
+            const closing = toggleClosingWaits(item, subItemId, subSubItemId, {
+              userId: closeWaitsBy,
+              at: nowIso(),
+            })
+            if (!closing) return item
+            itemUpdated = true
+            closedWaits = closing.closedWaits
+            // Same shape as the plain toggle below, plus the item's own wait
+            // fields (only the ones it already carries) - and only when the TOP
+            // node's own wait closed; a sub-step's closure lives in subItems.
+            const next = { ...item }
+            if (closing.item.subItems.length > 0) next.subItems = closing.item.subItems
+            if (closing.closedWaits.some(({ path }) => path.length === 0)) {
+              for (const key of ['waiting', 'waitingOns']) {
+                if (key in closing.item) next[key] = closing.item[key]
+              }
+            }
+            return withCompletionStamp(next, closing.item.done)
+          }
+
+          // Decided on THIS read, inside the same slot that writes: a wait added a
+          // moment earlier is on the item we are looking at.
+          const refusal = waitingToggleRefusal(item, subItemId, subSubItemId)
+          if (refusal) throw new StepIsWaitingError(refusal)
+          const toggled = applyItemToggle(item.subItems, item.done, { subItemId, subSubItemId })
+          if (!toggled) return item
+          itemUpdated = true
+          // Keep flat items flat: only attach `subItems` when there are some.
+          return toggled.subItems.length > 0
+            ? withCompletionStamp({ ...item, subItems: toggled.subItems }, toggled.done)
+            : withCompletionStamp(item, toggled.done)
+        })
+
+        if (!itemUpdated) {
+          return checklist
         }
 
-        const toggled = applyItemToggle(item.subItems, item.done, { subItemId, subSubItemId })
-        if (!toggled) return item
-        itemUpdated = true
-        // Keep flat items flat: only attach `subItems` when there are some.
-        return toggled.subItems.length > 0
-          ? withCompletionStamp({ ...item, subItems: toggled.subItems }, toggled.done)
-          : withCompletionStamp(item, toggled.done)
+        updatedChecklist = {
+          ...checklist,
+          items,
+        }
+
+        return updatedChecklist
       })
 
-      if (!itemUpdated) {
-        return checklist
+      if (!updatedChecklist) {
+        return null
       }
 
-      updatedChecklist = {
-        ...checklist,
-        items,
+      // Auto-spawn next stage atomically with the toggle so the next assignee
+      // sees the new live checklist on their next refetch.
+      const spawn = await this.maybeSpawnNextStage(data, updatedChecklist, { fileMode: true })
+      if (spawn) {
+        data.checklists = sortChecklists([...data.checklists, spawn])
       }
 
-      return updatedChecklist
+      // Onboarding case ↔ client lifecycle sync, applied to the same open
+      // snapshot so it persists atomically with the toggle. No-op for normal
+      // cases (helper returns null without `onboardingForClientId`).
+      const lifecycleStage = onboardingStageForSync(updatedChecklist, spawn)
+      if (lifecycleStage) {
+        data.clients = (data.clients ?? []).map((client) =>
+          client.id === updatedChecklist.onboardingForClientId
+            ? { ...client, lifecycleStage }
+            : client,
+        )
+      }
+
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return { checklist: updatedChecklist, spawned: spawn, ...(closeWaitsBy ? { closedWaits } : {}) }
     })
-
-    if (!updatedChecklist) {
-      return null
-    }
-
-    // Auto-spawn next stage atomically with the toggle so the next assignee
-    // sees the new live checklist on their next refetch.
-    const spawn = await this.maybeSpawnNextStage(data, updatedChecklist, { fileMode: true })
-    if (spawn) {
-      data.checklists = sortChecklists([...data.checklists, spawn])
-    }
-
-    // Onboarding case ↔ client lifecycle sync, applied to the same open
-    // snapshot so it persists atomically with the toggle. No-op for normal
-    // cases (helper returns null without `onboardingForClientId`).
-    const lifecycleStage = onboardingStageForSync(updatedChecklist, spawn)
-    if (lifecycleStage) {
-      data.clients = (data.clients ?? []).map((client) =>
-        client.id === updatedChecklist.onboardingForClientId
-          ? { ...client, lifecycleStage }
-          : client,
-      )
-    }
-
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return { checklist: updatedChecklist, spawned: spawn, ...(closeWaitsBy ? { closedWaits } : {}) }
   }
 
   /**
@@ -20475,7 +20539,9 @@ export class AppDataStore {
    *
    * A note that went back to pending (`stale`: its checklist was deleted or
    * skipped) also skips a checklist whose steps are all done: attaching to
-   * finished work would only reopen it.
+   * finished work would only reopen it. "Done" is the roll-up
+   * (`rollUpItemDone`): a step with sub-steps is done when its sub-steps are, so
+   * a checklist whose only open work is a sub-step is still a valid target.
    *
    * Only a cycle's FIRST stage qualifies (`stageIndex` 0, or no stage at all).
    * On a multi-stage template, "the next checklist that populates" is the next
@@ -20510,7 +20576,25 @@ export class AppDataStore {
                  or not (
                    exists (select 1 from checklist_items i where i.checklist_id = c.id)
                    and not exists (
-                     select 1 from checklist_items i where i.checklist_id = c.id and not i.done
+                     select 1 from checklist_items i
+                      where i.checklist_id = c.id
+                        and (
+                          case
+                            when jsonb_array_length(case when jsonb_typeof(i.sub_items) = 'array' then i.sub_items else '[]'::jsonb end) > 0 then
+                              exists (
+                                select 1 from jsonb_array_elements(i.sub_items) s
+                                 where case
+                                         when jsonb_array_length(case when jsonb_typeof(s -> 'subItems') = 'array' then s -> 'subItems' else '[]'::jsonb end) > 0 then
+                                           exists (
+                                             select 1 from jsonb_array_elements(s -> 'subItems') ss
+                                              where (ss -> 'done') is distinct from 'true'::jsonb
+                                           )
+                                         else (s -> 'done') is distinct from 'true'::jsonb
+                                       end
+                              )
+                            else not i.done
+                          end
+                        )
                    )
                  )
                )
@@ -20542,7 +20626,9 @@ export class AppDataStore {
         if (typeof checklist.stageIndex === 'number' && checklist.stageIndex !== 0) return false
         if (note.stale) {
           const items = Array.isArray(checklist.items) ? checklist.items : []
-          if (items.length > 0 && items.every((item) => item && item.done)) return false
+          // Finished by the roll-up (`rollUpItemDone`), the rule the Postgres branch
+          // spells out in SQL: a step with an open sub-step is open work.
+          if (items.length > 0 && items.every((item) => item && rollUpItemDone(item))) return false
         }
         if (typeof checklist.createdAt === 'string' && checklist.createdAt) {
           return checklist.createdAt > note.createdAt

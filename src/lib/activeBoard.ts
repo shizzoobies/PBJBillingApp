@@ -16,7 +16,7 @@
  */
 
 import { isWaitingOnOpen, type WaitingOnLike } from '../../lib/waiting-on-state.js'
-import { stepIsWaiting } from './utils'
+import { isChecklistItemDone, stepIsWaiting } from './utils'
 import type { Checklist, ChecklistTemplate, ServiceCategory } from './types'
 
 export type PeriodType = 'week' | 'month' | 'quarter'
@@ -182,14 +182,17 @@ export function boardChecklistStatus(
     reasons.push(reason)
   }
 
+  // "Open" is the roll-up reading (`isChecklistItemDone`), the same rule the
+  // Waiting count, the checkbox guard and the Delayed page use, never the stored
+  // flag: a step whose stored flag lags its sub-steps must not read differently here.
   for (const item of checklist.items ?? []) {
-    if (item.done) continue
+    if (isChecklistItemDone(item)) continue
     addWaiting(item.waiting, item.waitingOn, item.waitingOns)
     for (const sub of item.subItems ?? []) {
-      if (sub.done) continue
+      if (isChecklistItemDone(sub)) continue
       addWaiting(sub.waiting, sub.waitingOn, sub.waitingOns)
       for (const subSub of sub.subItems ?? []) {
-        if (subSub.done) continue
+        if (isChecklistItemDone(subSub)) continue
         addWaiting(undefined, undefined, subSub.waitingOns)
       }
     }

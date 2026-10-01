@@ -25,6 +25,7 @@ import {
   PushedRecordError,
   RateVersionError,
   StaleStatementAccountsError,
+  StepIsWaitingError,
   TooManyPendingNotesError,
   mapChecklistItemRow,
   mapClientRow,
@@ -47,6 +48,8 @@ import {
   normalizeRecurringReimbursement,
   resolveCoverageForPeriod,
 } from '../lib/expense-coverage.js'
+import { rollUpItemDone } from '../lib/checklist-step-done.js'
+import { waitingToggleRefusal } from '../lib/waiting-on-state.js'
 import {
   LAST_RECURRING_STEP_MESSAGE,
   approvalDenial,
@@ -6419,11 +6422,17 @@ describe('completed_at on checklist items (postgres branch)', () => {
     const inner = fake.pool.query.bind(fake.pool)
     fake.pool.query = async (text, params) => {
       const result = await inner(text, params)
-      if (/^select (id, done|done|sub_items).*from checklist_items/is.test(String(text).trim())) {
+      if (/^select (id, (label, )?done|done|sub_items).*from checklist_items/is.test(String(text).trim())) {
         return { rows: [row], rowCount: 1 }
       }
       return result
     }
+    // The toggle reads and writes on ONE connection inside a transaction; that
+    // connection answers through the same (patched) query.
+    fake.pool.connect = async () => ({
+      query: (text, params) => fake.pool.query(text, params),
+      release() {},
+    })
     return { fake, store }
   }
 
@@ -8045,6 +8054,25 @@ describe('pending client notes (postgres branch)', () => {
 })
 
 /**
+ * The JavaScript twin of the "is this step still open" expression in the
+ * next-checklist lookup's SQL (`_findNextChecklistsForPendingNotes`), written
+ * from the statement, arm for arm: a step with sub-steps is open when any
+ * sub-step is (a sub-step with sub-sub-steps by THEM, otherwise by its own
+ * `done`); a flat step is open when its own `done` is not true. The fake cannot
+ * run SQL, so the test below pins this twin to `rollUpItemDone` over every shape.
+ */
+function stepIsOpenBySql(item) {
+  const subItems = Array.isArray(item.sub_items) ? item.sub_items : []
+  if (subItems.length > 0) {
+    return subItems.some((sub) => {
+      const subSubs = Array.isArray(sub.subItems) ? sub.subItems : []
+      return subSubs.length > 0 ? subSubs.some((ss) => ss.done !== true) : sub.done !== true
+    })
+  }
+  return !item.done
+}
+
+/**
  * The attach pass on Postgres — a small, self-contained in-memory fake (not
  * the shared `fakePostgres()`, which has no branches for these tables) so the
  * matching/idempotency/transaction behavior can be proven end to end, the same
@@ -8160,7 +8188,14 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
                 !stales[index] ||
                 !(
                   items.some((item) => item.checklist_id === c.id) &&
-                  items.filter((item) => item.checklist_id === c.id).every((item) => item.done)
+                  !items
+                    .filter((item) => item.checklist_id === c.id)
+                    .some((item) =>
+                      // The roll-up arm is honored only when the SQL spells it out.
+                      /jsonb_array_elements\(i\.sub_items\)/i.test(trimmed)
+                        ? stepIsOpenBySql(item)
+                        : !item.done,
+                    )
                 )) &&
               (c.created_at ? c.created_at > createdAts[index] : c.due_date > createdDates[index]),
           )
@@ -23563,6 +23598,100 @@ describe('pending notes: cap, capped list, attach guards (file backend)', () => 
     expect((await store.getClientPendingNote('pnote-c-fin-2')).attachedChecklistId).toBe('chk-finished')
   })
 
+  // "Finished" is the roll-up (`rollUpItemDone`), the rule everything else uses:
+  // a step with sub-steps is done when its sub-steps are, whatever its stored
+  // flag says. A checklist whose top-level flags are all true but one sub-step is
+  // open still has work, so a note that went back to pending may land on it.
+  it('a note that went back to pending still lands on a checklist whose only open work is a sub-step', async () => {
+    await seedNotes('c-sub', [
+      noteRow('c-sub', 1, { attachedChecklistId: 'chk-gone', attachedAt: new Date().toISOString() }),
+    ])
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-sub', name: 'Sub' }],
+        checklists: [
+          checklistRow('chk-substep', 'c-sub', {
+            dueDate: '2026-09-05',
+            items: [
+              { id: 'a1', label: 'Done step', done: true },
+              {
+                id: 'a2',
+                label: 'Marked done, one sub-step open',
+                done: true,
+                subItems: [
+                  { id: 'a2-1', title: 'Pulled', done: true },
+                  { id: 'a2-2', title: 'Matched', done: false },
+                ],
+              },
+            ],
+          }),
+        ],
+      }),
+    )
+    // Top-level flags all true, as the file stores them (the save keeps what the page sent).
+    const file = await persisted()
+    const stored = file.checklists.find((entry) => entry.id === 'chk-substep')
+    stored.items.forEach((item) => (item.done = true))
+    await writeFile(localDataPath, JSON.stringify(file, null, 2))
+
+    const found = await store._findNextChecklistsForPendingNotes([
+      { id: 'pnote-c-sub-1', templateId: 'tpl-pn', clientId: 'c-sub', createdAt: '2026-09-01T00:00:00.000Z', stale: true },
+    ])
+    expect(found.get('pnote-c-sub-1')).toEqual({ id: 'chk-substep' })
+  })
+
+  it('a checklist whose steps and sub-steps are all done is still skipped for a stale note, and still taken by a fresh one', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-all', name: 'All' }],
+        checklists: [
+          checklistRow('chk-all-done', 'c-all', {
+            dueDate: '2026-09-05',
+            items: [
+              {
+                id: 'a1',
+                label: 'Step',
+                done: true,
+                subItems: [{ id: 'a1-1', title: 'Sub', done: true }],
+              },
+            ],
+          }),
+        ],
+      }),
+    )
+    const note = { id: 'n', templateId: 'tpl-pn', clientId: 'c-all', createdAt: '2026-09-01T00:00:00.000Z' }
+    expect((await store._findNextChecklistsForPendingNotes([{ ...note, stale: true }])).size).toBe(0)
+    expect((await store._findNextChecklistsForPendingNotes([{ ...note, stale: false }])).get('n')).toEqual({
+      id: 'chk-all-done',
+    })
+  })
+
+  it('a step marked not-done whose sub-steps are all done is finished too (the roll-up, not the flag)', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-lag', name: 'Lag' }],
+        checklists: [
+          checklistRow('chk-lag', 'c-lag', {
+            dueDate: '2026-09-05',
+            items: [
+              {
+                id: 'a1',
+                label: 'Step',
+                done: false,
+                subItems: [{ id: 'a1-1', title: 'Sub', done: true }],
+              },
+            ],
+          }),
+        ],
+      }),
+    )
+    const file = await persisted()
+    file.checklists.find((entry) => entry.id === 'chk-lag').items[0].done = false
+    await writeFile(localDataPath, JSON.stringify(file, null, 2))
+    const note = { id: 'n', templateId: 'tpl-pn', clientId: 'c-lag', createdAt: '2026-09-01T00:00:00.000Z', stale: true }
+    expect((await store._findNextChecklistsForPendingNotes([note])).size).toBe(0)
+  })
+
   it('a note attached to a checklist that is later SKIPPED goes back to waiting', async () => {
     await seedNotes('c-skip', [
       noteRow('c-skip', 1, { attachedChecklistId: 'chk-skipped', attachedAt: new Date().toISOString() }),
@@ -23841,6 +23970,88 @@ describe('pending notes: cap, one lookup, attach guards (postgres branch)', () =
     expect(lookup.text).toMatch(/not n\.stale/i)
     expect(fake.notes.find((entry) => entry.id === 'pnote-fresh').attached_checklist_id).toBe('chk-finished')
     expect(fake.notes.find((entry) => entry.id === 'pnote-stale').attached_checklist_id).toBe('chk-open')
+  })
+
+  // The lookup reads "finished" by the roll-up, not by the stored flags: a
+  // checklist whose rows are all `done` but one sub-step is open is still a
+  // target. The fake mirrors the SQL arm for arm (`stepIsOpenBySql`) and honors
+  // it only when the statement contains it, so these prove the clause is there.
+  it('the lookup reads a finished checklist by the roll-up: a checklist whose only open work is a sub-step is a valid target', async () => {
+    const staleNote = note('pnote-stale', {
+      attached_checklist_id: 'chk-gone',
+      attached_at: '2026-09-06T00:00:00.000Z',
+    })
+    const fake = fakePendingNotesPostgres({
+      notes: [staleNote],
+      checklists: [
+        checklist('chk-substep', { due_date: '2026-09-05' }),
+        checklist('chk-open', { due_date: '2026-10-10' }),
+      ],
+      items: [
+        // Stored done everywhere, one sub-step open: NOT finished.
+        { id: 'a1', checklist_id: 'chk-substep', done: true, sort_order: 0, sub_items: [] },
+        {
+          id: 'a2',
+          checklist_id: 'chk-substep',
+          done: true,
+          sort_order: 1,
+          sub_items: [
+            { id: 'a2-1', title: 'Pulled', done: true },
+            { id: 'a2-2', title: 'Matched', done: false },
+          ],
+        },
+        { id: 'o1', checklist_id: 'chk-open', done: false, sort_order: 0, sub_items: [] },
+      ],
+    })
+    expect(await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+    expect(fake.notes[0].attached_checklist_id).toBe('chk-substep')
+    const [lookup] = fake.matching(/^select n\.id as note_id, found\.id as checklist_id/i)
+    expect(lookup.text).toMatch(/jsonb_array_elements\(i\.sub_items\)/i)
+    expect(lookup.text).toMatch(/jsonb_array_elements\(s -> 'subItems'\)/i)
+  })
+
+  it('the lookup still skips a checklist whose steps and sub-steps are all done, for a stale note only', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        note('pnote-fresh'),
+        note('pnote-stale', { attached_checklist_id: 'chk-gone', attached_at: '2026-09-06T00:00:00.000Z' }),
+      ],
+      checklists: [
+        checklist('chk-finished', { due_date: '2026-09-05' }),
+        checklist('chk-open', { due_date: '2026-10-10' }),
+      ],
+      items: [
+        {
+          id: 'f1',
+          checklist_id: 'chk-finished',
+          done: true,
+          sort_order: 0,
+          sub_items: [{ id: 'f1-1', title: 'Sub', done: true, subItems: [{ id: 'f1-1-1', title: 'Sub-sub', done: true }] }],
+        },
+      ],
+    })
+    expect(await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })).toBe(2)
+    expect(fake.notes.find((entry) => entry.id === 'pnote-fresh').attached_checklist_id).toBe('chk-finished')
+    expect(fake.notes.find((entry) => entry.id === 'pnote-stale').attached_checklist_id).toBe('chk-open')
+  })
+
+  it('the SQL twin agrees with rollUpItemDone on every shape (so the fake proves what the SQL says)', () => {
+    const flags = [true, false]
+    const shapes = []
+    for (const top of flags) {
+      shapes.push({ done: top, subItems: [] })
+      for (const sub of flags) {
+        shapes.push({ done: top, subItems: [{ done: sub }] })
+        for (const subSub of flags) {
+          shapes.push({ done: top, subItems: [{ done: sub, subItems: [{ done: subSub }] }, { done: sub }] })
+          shapes.push({ done: top, subItems: [{ done: sub, subItems: [{ done: subSub }, { done: !subSub }] }] })
+        }
+      }
+    }
+    for (const shape of shapes) {
+      const row = { done: shape.done, sub_items: shape.subItems }
+      expect(stepIsOpenBySql(row), JSON.stringify(shape)).toBe(!rollUpItemDone(shape))
+    }
   })
 
   it('a note attached to a SKIPPED checklist is selected as stale and cleared with the same guard', async () => {
@@ -24185,6 +24396,38 @@ describe('item deletion request scope (file backend)', () => {
       await store.createItemDeletionRequest(filing({ subItemId: 'u1' }))
       expect(await reuseDuplicateDeletionRequest(store, await pending(), { ...path, scope: 'series' })).toBeNull()
     })
+
+    // The requester re-sends with the other scope at the same moment the owner
+    // approves (or rejects) the pending request: her read of the pending list
+    // still holds it, and the scope change finds nothing. The helper used to hand
+    // back the vanished request as if it were still pending, so she was told
+    // "sent" for a request nobody would ever see. It reports nothing pending
+    // instead, and the caller files a fresh request with the scope she just chose.
+    it('reports nothing pending, not the vanished request, when the owner decided it mid-change', async () => {
+      const created = await store.createItemDeletionRequest(filing())
+      const staleList = await pending() // her read, before the owner acts
+      expect(await store.deleteItemDeletionRequest(created.id)).toBe(true) // approved or rejected in between
+
+      expect(
+        await reuseDuplicateDeletionRequest(store, staleList, { ...path, scope: 'series' }),
+      ).toBeNull()
+      // Nothing was resurrected by the failed scope change.
+      expect(await pending()).toEqual([])
+      expect((await persistedAuth()).itemDeletionRequests).toEqual([])
+
+      // The caller (`fileItemDeletionRequest`) now files a fresh one: the new
+      // scope, a new id - the same thing it does when the list no longer holds one.
+      const fresh = await store.createItemDeletionRequest(filing({ scope: 'series' }))
+      expect(fresh.id).not.toBe(created.id)
+      expect((await pending()).map((req) => [req.id, req.scope])).toEqual([[fresh.id, 'series']])
+    })
+
+    it('still reports the change when the request is there (the vanished case is the only new answer)', async () => {
+      const created = await store.createItemDeletionRequest(filing())
+      const staleList = await pending()
+      const reused = await reuseDuplicateDeletionRequest(store, staleList, { ...path, scope: 'series' })
+      expect(reused).toEqual({ request: { ...created, scope: 'series' }, scopeChanged: true })
+    })
   })
 
   describe('approvalDenial: the owner approves the scope she was shown', () => {
@@ -24224,6 +24467,46 @@ describe('item deletion request scope (file backend)', () => {
       // A one-checklist request for a sub-step is the ordinary case and is untouched.
       expect(approvalDenial({ ...plain, subItemId: 'u1' }, 'checklist')).toBeNull()
     })
+  })
+})
+
+describe('a deletion request decided while its scope is being changed (postgres branch)', () => {
+  const pendingRequest = {
+    id: 'idr-1',
+    checklistId: 'cl-1',
+    itemId: 's1',
+    subItemId: null,
+    subSubItemId: null,
+    scope: 'checklist',
+    requestedBy: 'emp-1',
+  }
+  const path = { checklistId: 'cl-1', itemId: 's1', requestedBy: 'emp-1', scope: 'series' }
+
+  it('reports nothing pending when the scope update touches no row (the owner already approved or rejected it)', async () => {
+    const fake = fakePostgres()
+    const result = await reuseDuplicateDeletionRequest(postgresStore(fake), [pendingRequest], path)
+
+    expect(result).toBeNull()
+    const [update] = fake.matching(/^update item_deletion_requests set scope = \$2 where id = \$1$/i)
+    expect(update.params).toEqual(['idr-1', 'series'])
+    // No re-read of a request that is not there.
+    expect(fake.matching(/^select\b[\s\S]*\bfrom item_deletion_requests/i)).toHaveLength(0)
+  })
+
+  it('reports the change when the update found the row', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    const inner = fake.pool.query
+    fake.pool.query = async (text, params) => {
+      if (/^update item_deletion_requests set scope/i.test(String(text).trim())) {
+        await inner(text, params)
+        return { rows: [], rowCount: 1 }
+      }
+      return inner(text, params)
+    }
+    pgStore.getItemDeletionRequest = async () => ({ ...pendingRequest, scope: 'series' })
+    const result = await reuseDuplicateDeletionRequest(pgStore, [pendingRequest], path)
+    expect(result).toEqual({ request: { ...pendingRequest, scope: 'series' }, scopeChanged: true })
   })
 })
 
@@ -24644,13 +24927,20 @@ describe('the owner ticks a waiting step (file backend)', () => {
     expect(item.subItems[1].subItems[0].waitingOns[0].verifiedBy).toBe(OWNER_ID)
   })
 
-  it('without the option the store does what it always did: toggles, closes nothing', async () => {
-    const result = await store.toggleChecklistItem('cl-1', 'it-1')
-    expect(result).not.toHaveProperty('closedWaits')
-    const item = await itemOf('it-1')
-    expect(item.done).toBe(true)
-    expect(item.waiting).toBe(true)
-    expect(item.waitingOns[0].verifiedAt).toBeUndefined()
+  // The refusal lives in the store now: it is decided on the row read inside the
+  // same file-queue slot that writes, so a wait set a moment before the tick is
+  // always seen. (The route no longer asks first.)
+  it('without the option a tick on a waiting step is refused inside the store, and nothing is written', async () => {
+    const before = await readFile(localDataPath, 'utf8')
+    const error = await store.toggleChecklistItem('cl-1', 'it-1').catch((e) => e)
+    expect(error).toBeInstanceOf(StepIsWaitingError)
+    expect(error.refusal).toEqual({
+      status: 409,
+      error: 'STEP_IS_WAITING',
+      message: 'Clear the wait first',
+      where: 'own',
+    })
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
   })
 
   it('un-ticking with the option touches no wait', async () => {
@@ -24672,13 +24962,122 @@ describe('the owner ticks a waiting step (file backend)', () => {
   })
 })
 
+/**
+ * A wait added a moment after the caller read its copy of the checklist (the
+ * route used to ask `waitingToggleRefusal` against that copy, before the store's
+ * own read-modify-write). The store decides on the row it is about to write, so
+ * the late wait is seen: refused, nothing written.
+ */
+describe('a wait added after the caller read its copy cannot be ticked through (file backend)', () => {
+  const RACE_WORKSPACE = {
+    clients: [{ id: 'c1', name: 'Acme' }],
+    employees: [
+      { id: OWNER_ID, name: 'Brittany', role: 'owner' },
+      { id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' },
+    ],
+    checklists: [
+      {
+        id: 'cl-1',
+        title: 'August close',
+        clientId: 'c1',
+        items: [
+          { id: 'it-1', label: 'Reconcile', done: false },
+          {
+            id: 'it-2',
+            label: 'Payroll',
+            done: false,
+            subItems: [
+              { id: 'sub-1', title: 'Confirm the hours', done: false },
+              { id: 'sub-2', title: 'Approve', done: false },
+            ],
+          },
+        ],
+      },
+    ],
+  }
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const addWaitAfterTheCopyWasRead = async (mutate) => {
+    const file = await persisted()
+    mutate(file.checklists[0])
+    await writeFile(localDataPath, JSON.stringify(file, null, 2))
+  }
+
+  beforeEach(async () => {
+    await store.write(workspace(RACE_WORKSPACE))
+  })
+
+  it('refuses the tick, with the route\'s sentence, and writes nothing', async () => {
+    // What the route's own copy said when it was read: nothing is waiting.
+    const callersCopy = (await store.read()).checklists[0].items[0]
+    expect(waitingToggleRefusal(callersCopy)).toBeNull()
+
+    await addWaitAfterTheCopyWasRead((checklist) => {
+      checklist.items[0].waitingOns = [openWait()]
+    })
+    const before = await readFile(localDataPath, 'utf8')
+
+    const error = await store.toggleChecklistItem('cl-1', 'it-1').catch((e) => e)
+    expect(error).toBeInstanceOf(StepIsWaitingError)
+    expect(error.refusal).toEqual({
+      status: 409,
+      error: 'STEP_IS_WAITING',
+      message: 'Clear the wait first',
+      where: 'own',
+    })
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('refuses a tick whose cascade would finish a sub-step that is waiting by now', async () => {
+    await addWaitAfterTheCopyWasRead((checklist) => {
+      checklist.items[1].subItems[0].waitingOns = [openWait()]
+    })
+    const before = await readFile(localDataPath, 'utf8')
+
+    const error = await store.toggleChecklistItem('cl-1', 'it-2').catch((e) => e)
+    expect(error).toBeInstanceOf(StepIsWaitingError)
+    expect(error.refusal.message).toBe('A sub-step is waiting - clear it first')
+    // Ticking the OTHER sub-step finishes nothing that waits: it goes through.
+    await store.toggleChecklistItem('cl-1', 'it-2', 'sub-2')
+    expect((await persisted()).checklists[0].items[1].subItems[1].done).toBe(true)
+    expect(await readFile(localDataPath, 'utf8')).not.toBe(before)
+  })
+
+  it('ticks as before when nothing is waiting', async () => {
+    const result = await store.toggleChecklistItem('cl-1', 'it-1')
+    expect(result).not.toHaveProperty('closedWaits')
+    expect(result.checklist.items[0].done).toBe(true)
+    expect((await persisted()).checklists[0].items[0].done).toBe(true)
+  })
+
+  it('still lets the tick that UN-checks a waiting step through', async () => {
+    await addWaitAfterTheCopyWasRead((checklist) => {
+      checklist.items[0].done = true
+      checklist.items[0].waitingOns = [openWait()]
+    })
+    await store.toggleChecklistItem('cl-1', 'it-1')
+    expect((await persisted()).checklists[0].items[0].done).toBe(false)
+  })
+
+  it('an owner tick on the late wait closes it, as before', async () => {
+    await addWaitAfterTheCopyWasRead((checklist) => {
+      checklist.items[0].waitingOns = [openWait()]
+    })
+    const result = await store.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    expect(result.closedWaits).toEqual([{ path: [], label: 'Reconcile' }])
+    const item = (await persisted()).checklists[0].items[0]
+    expect(item.done).toBe(true)
+    expect(item.waitingOns[0]).toMatchObject({ verifiedBy: OWNER_ID })
+  })
+})
+
 describe('the owner ticks a waiting step (postgres branch)', () => {
-  const PLAIN_SELECT =
-    'select id, done, sub_items from checklist_items where checklist_id = $1 and id = $2'
   const PLAIN_UPDATE =
     'update checklist_items\n         set done = $3, sub_items = $4::jsonb, completed_at = case when $3 then coalesce(completed_at, now()) else null end, updated_at = now()\n         where checklist_id = $1 and id = $2'
-  const CLOSING_SELECT =
-    'select id, label, done, waiting, waiting_on, waiting_ons, sub_items from checklist_items where checklist_id = $1 and id = $2'
+  // ONE read for every tick, locked: the waiting guard decides on this very row.
+  const ROW_SELECT =
+    'select id, label, done, waiting, waiting_on, waiting_ons, sub_items from checklist_items where checklist_id = $1 and id = $2 for update'
   const CLOSING_UPDATE =
     'update checklist_items\n         set done = $3, sub_items = $4::jsonb, waiting = $5, waiting_ons = $6::jsonb, completed_at = case when $3 then coalesce(completed_at, now()) else null end, updated_at = now()\n         where checklist_id = $1 and id = $2'
 
@@ -24722,6 +25121,12 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
       }
       return result
     }
+    // The toggle reads and writes on ONE connection inside a transaction; that
+    // connection answers through the same (patched) query.
+    fake.pool.connect = async () => ({
+      query: (text, params) => fake.pool.query(text, params),
+      release() {},
+    })
     pgStore.read = async () => ({
       checklists: [
         { id: 'cl-1', title: 'August close', items: [mapChecklistItemRow(current)] },
@@ -24730,20 +25135,96 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
     return { fake, pgStore }
   }
 
-  it('without the option the statements are exactly what they always were', async () => {
-    const { fake, pgStore } = pgStoreWithItem(itemRow({ waiting: true }))
+  it('a tick with nothing waiting reads the row for update, writes the plain update, and commits', async () => {
+    const { fake, pgStore } = pgStoreWithItem(itemRow())
     await pgStore.toggleChecklistItem('cl-1', 'it-1')
 
     expect(fake.statements.find((entry) => /^select id, (label, )?done/i.test(entry.text)).text).toBe(
-      PLAIN_SELECT,
+      ROW_SELECT,
     )
     const update = fake.matching(/^update checklist_items\s+set done = \$3/i)
     expect(update).toHaveLength(1)
     expect(update[0].text).toBe(PLAIN_UPDATE)
     expect(update[0].params).toEqual(['cl-1', 'it-1', true, '[]'])
+    // One transaction, lock before write: begin, select ... for update, update, commit.
+    const order = [/^begin$/i, /for update$/i, /^update checklist_items/i, /^commit$/i].map((pattern) =>
+      fake.indexOf(pattern),
+    )
+    expect(order.every((at) => at >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
   })
 
-  it('with the option and a waiting step it widens the read and writes done + the closed waits in ONE update', async () => {
+  // A wait set after the caller read its copy of the checklist but before this
+  // tick: the store reads the row itself, under the lock, so it is seen.
+  it('refuses a staff tick on a row that carries a wait, writes nothing and rolls back', async () => {
+    const { fake, pgStore } = pgStoreWithItem(itemRow({ waiting_ons: [openWait()] }))
+    const error = await pgStore.toggleChecklistItem('cl-1', 'it-1').catch((e) => e)
+
+    expect(error).toBeInstanceOf(StepIsWaitingError)
+    expect(error.refusal).toEqual({
+      status: 409,
+      error: 'STEP_IS_WAITING',
+      message: 'Clear the wait first',
+      where: 'own',
+    })
+    expect(error.message).toBe('Clear the wait first')
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(0)
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(fake.indexOf(/for update$/i))
+    expect(fake.indexOf(/^commit$/i)).toBe(-1)
+  })
+
+  it('refuses a staff tick that would finish a waiting sub-step, with the sub-step sentence', async () => {
+    const { fake, pgStore } = pgStoreWithItem(
+      itemRow({
+        sub_items: [
+          { id: 'sub-1', title: 'Confirm the hours', done: false, waitingOns: [openWait()] },
+          { id: 'sub-2', title: 'Approve', done: false },
+        ],
+      }),
+    )
+    const error = await pgStore.toggleChecklistItem('cl-1', 'it-1').catch((e) => e)
+    expect(error).toBeInstanceOf(StepIsWaitingError)
+    expect(error.refusal.message).toBe('A sub-step is waiting - clear it first')
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(0)
+  })
+
+  it('still lets a staff tick un-check a step that carries a wait', async () => {
+    const { fake, pgStore } = pgStoreWithItem(itemRow({ done: true, waiting_ons: [openWait()] }))
+    await pgStore.toggleChecklistItem('cl-1', 'it-1')
+    const [update] = fake.matching(/^update checklist_items/i)
+    expect(update.params[2]).toBe(false)
+  })
+
+  it('an owner tick on a row that carries a wait closes it (no refusal), in one update, then commits', async () => {
+    const { fake, pgStore } = pgStoreWithItem(itemRow({ waiting_ons: [openWait()] }))
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    expect(result.closedWaits).toHaveLength(1)
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(1)
+    expect(fake.indexOf(/^commit$/i)).toBeGreaterThan(fake.indexOf(/^update checklist_items/i))
+  })
+
+  it('rolls back and releases the connection when the update throws', async () => {
+    const { fake, pgStore } = pgStoreWithItem(itemRow())
+    const inner = fake.pool.query
+    fake.pool.query = async (text, params) => {
+      if (/^update checklist_items/i.test(String(text).trim())) throw new Error('boom')
+      return inner(text, params)
+    }
+    let released = 0
+    const connect = fake.pool.connect
+    fake.pool.connect = async () => {
+      const client = await connect()
+      return { ...client, release: () => (released += 1) }
+    }
+    await expect(pgStore.toggleChecklistItem('cl-1', 'it-1')).rejects.toThrow('boom')
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
+    expect(fake.indexOf(/^commit$/i)).toBe(-1)
+    expect(released).toBe(1)
+  })
+
+  it('with the option and a waiting step it writes done + the closed waits in ONE update', async () => {
     const { fake, pgStore } = pgStoreWithItem(
       itemRow({ waiting: true, waiting_ons: [openWait(), openWait({ id: 'wo-9' })] }),
     )
@@ -24752,7 +25233,7 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
     })
 
     expect(fake.statements.find((entry) => /^select id, (label, )?done/i.test(entry.text)).text).toBe(
-      CLOSING_SELECT,
+      ROW_SELECT,
     )
     const updates = fake.matching(/^update checklist_items/i)
     expect(updates).toHaveLength(1)

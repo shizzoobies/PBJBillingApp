@@ -682,16 +682,17 @@ routes/permissions, frontend), one post-review fix pass and a delta review; ship
   `prod-newtables-trial.mjs`, `prod-released-trial.mjs`).
 - **Open for Brittany:** the two interpretations above; whether a sub-step that carries a saved
   wait should be deletable at all (only the roll-up is guarded); recurring notes are not built.
-- **Follow-ups (not blocking):** older checklist write routes still lack the origin check
-  (toggle, sub-step add/delete, item PATCH); the waiting guard runs before the store's unlocked
-  read-modify-write (a wait added in between can be ticked through); toggle/removal can undo a
-  concurrent sub-step reorder (order only); an owner edit within ~2.5 s of any targeted write can
-  hit the stale-tab reload notice; time logged before a split stays on the completed record;
-  the card chip and the Board read a waiting step by its STORED done flag while the Waiting
-  count, the checkbox guard and the Delayed page read the roll-up (they differ only on data
-  whose stored flag lags its sub-steps) - pick one rule; the released-note lookup likewise calls
-  a checklist finished by its top-level stored flags, so one whose only open work is a sub-step
-  is skipped.
+- **Follow-ups (not blocking):** toggle/removal can undo a concurrent sub-step reorder (order
+  only); an owner edit within ~2.5 s of any targeted write can hit the stale-tab reload notice;
+  time logged before a split stays on the completed record. CLOSED in `fix/checklist-loose-ends`:
+  every `/api/checklists/**` write route checks the origin (the `/api/checklist-templates/**`
+  routes still do not); the toggle's waiting refusal is decided inside the store
+  (`StepIsWaitingError`; Postgres reads the row `for update` in a transaction, the file backend
+  reads inside the queue slot) so the route no longer asks first; the step chip, the Board and the
+  Delayed page's sub-step rows read "done" by the roll-up like the Waiting count; the released-note
+  lookup reads a finished checklist by the roll-up (a sub-step still open keeps it a target); a
+  request re-sent with a new scope while the owner decides it files a fresh request instead of
+  answering "sent" for the one that is gone.
 - **Process notes:** worktree lanes share node_modules through a junction (`New-Item -ItemType
   Junction`); never run two vitest processes in one tree (file-backend tests share `tmp/`);
   two tests flaked only under the full run and were fixed at the root (a page-scoped lookup

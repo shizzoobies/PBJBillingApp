@@ -24,6 +24,7 @@ import {
   RetainerCreditError,
   StaleStatementAccountsError,
   statementAccountsVersion,
+  StepIsWaitingError,
   TimeEntrySplitError,
   TooManyPendingNotesError,
 } from './db/store.js'
@@ -176,7 +177,6 @@ import {
   waitingLockRefusal,
   waitingOnActionRefusal,
   waitingOnStage,
-  waitingToggleRefusal,
 } from './lib/waiting-on-state.js'
 import {
   generateBackupCodes,
@@ -9266,6 +9266,11 @@ const server = createServer(async (request, response) => {
       }
 
       if (request.method === 'POST') {
+        if (isCrossSiteOrigin(request)) {
+          sendJson(response, 403, { error: 'Origin not allowed' })
+          return
+        }
+
         const payload = await readJsonBody(request)
         const title = typeof payload?.title === 'string' ? payload.title.trim() : ''
         const clientId = typeof payload?.clientId === 'string' ? payload.clientId : ''
@@ -9403,6 +9408,11 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
       const removed = await appDataStore.emptyChecklistRecycleBin()
       if (removed > 0) {
         await appDataStore.recordActivity(
@@ -9432,6 +9442,11 @@ const server = createServer(async (request, response) => {
 
       if (session.user.role !== 'owner') {
         sendJson(response, 403, { error: 'Only owners can restore a checklist' })
+        return
+      }
+
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
 
@@ -10322,6 +10337,11 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
       const checklistId = checklistDeleteMatch[1]
       // Capture the title for the activity log before the row is gone.
       const existing = await appDataStore.read()
@@ -10414,6 +10434,11 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+
       const checklistId = checklistToggleMatch[1]
       const itemId = checklistToggleMatch[2]
       const data = await appDataStore.read()
@@ -10501,40 +10526,40 @@ const server = createServer(async (request, response) => {
       }
 
       // A waiting step cannot be checked off (featreq-cdab1605). One rule, decided
-      // by SIMULATION: the guard runs the store's own toggle (`applyItemToggle`,
-      // lib/checklist-step-ops.js) on this step and refuses when a waiting,
-      // not-yet-done node (the target, anything its tick cascades onto, or a
-      // parent its tick rolls up) would come out done. The UI disables the same
-      // checkboxes with the same helper, but this is what actually refuses it,
-      // before the store ever sees the toggle. Un-checking is never blocked:
-      // nothing becomes done.
+      // by SIMULATION: the store runs its own toggle (`applyItemToggle`,
+      // lib/checklist-step-ops.js) on this step and refuses - a
+      // `StepIsWaitingError`, nothing written - when a waiting, not-yet-done node
+      // (the target, anything its tick cascades onto, or a parent its tick rolls
+      // up) would come out done. The decision is the STORE's, made against the row
+      // it is about to write, so a wait someone added a moment ago cannot be ticked
+      // through; the copy of the checklist read above can be that old. The UI
+      // disables the same checkboxes with the same helper. Un-checking is never
+      // blocked: nothing becomes done.
       //
       // The OWNER is the one exception (featreq-8a01fe08): she is usually the
       // person being waited on, so her tick goes through and the store closes the
       // wait it finishes, in the same write (`closeWaitsBy`). Staff are refused
       // exactly as before. Preview-as is read-only in the page and never reaches
       // here.
-      const toggleRefusal = waitingToggleRefusal(
-        targetItem,
-        toggleSubItemId,
-        toggleSubSubItemId,
-      )
-      const ownerClosesWaits = Boolean(toggleRefusal) && session.user.role === 'owner'
-      if (toggleRefusal && !ownerClosesWaits) {
-        sendJson(response, toggleRefusal.status, {
-          error: toggleRefusal.error,
-          message: toggleRefusal.message,
-        })
-        return
+      let toggleResult
+      try {
+        toggleResult = await appDataStore.toggleChecklistItem(
+          checklistId,
+          itemId,
+          toggleSubItemId,
+          toggleSubSubItemId,
+          session.user.role === 'owner' ? { closeWaitsBy: session.user.id } : undefined,
+        )
+      } catch (error) {
+        if (error instanceof StepIsWaitingError) {
+          sendJson(response, error.refusal.status, {
+            error: error.refusal.error,
+            message: error.refusal.message,
+          })
+          return
+        }
+        throw error
       }
-
-      const toggleResult = await appDataStore.toggleChecklistItem(
-        checklistId,
-        itemId,
-        toggleSubItemId,
-        toggleSubSubItemId,
-        ownerClosesWaits ? { closeWaitsBy: session.user.id } : undefined,
-      )
       if (!toggleResult || !toggleResult.checklist) {
         sendJson(response, 404, { error: 'Checklist item not found' })
         return
@@ -10685,6 +10710,10 @@ const server = createServer(async (request, response) => {
     if (checklistSubSubItemMatch) {
       const session = await requireSession(request, response)
       if (!session) return
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
 
       const checklistId = checklistSubSubItemMatch[1]
       const itemId = checklistSubSubItemMatch[2]
@@ -10904,6 +10933,10 @@ const server = createServer(async (request, response) => {
     if (checklistSubItemMatch) {
       const session = await requireSession(request, response)
       if (!session) return
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
 
       const checklistId = checklistSubItemMatch[1]
       const itemId = checklistSubItemMatch[2]
@@ -11619,6 +11652,10 @@ const server = createServer(async (request, response) => {
     if (checklistItemMatch) {
       const session = await requireSession(request, response)
       if (!session) return
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
 
       const checklistId = checklistItemMatch[1]
       const itemId = checklistItemMatch[2] // undefined for the collection route
@@ -11908,6 +11945,11 @@ const server = createServer(async (request, response) => {
 
       if (session.user.role !== 'owner') {
         sendJson(response, 403, { error: 'Only owners can update checklist viewers' })
+        return
+      }
+
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
 

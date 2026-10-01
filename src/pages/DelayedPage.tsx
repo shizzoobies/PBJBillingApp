@@ -191,7 +191,7 @@ export function DelayedPage() {
             }
           }
           for (const sub of item.subItems ?? []) {
-            if (!stepIsWaiting(sub) || sub.done) continue
+            if (!stepIsWaiting(sub) || isChecklistItemDone(sub)) continue
             const waits = waitingsOnDelayedTab(sub, { userId: meId, assigneeId, tab })
             const legacy = legacyWaitBelongsOnTab(sub, { userId: meId, assigneeId, tab })
             if (waits.length === 0 && !legacy) continue

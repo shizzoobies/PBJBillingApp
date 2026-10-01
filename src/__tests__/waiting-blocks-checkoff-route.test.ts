@@ -13,8 +13,9 @@ import { waitingBlocksCompletion } from '../../lib/waiting-on-state.js'
  * `waiting-lock-routes.test.ts` and `audit-backlog-hardening.test.ts` -
  * `server.js` calls `server.listen()` at module scope and exports nothing, so
  * there is no HTTP harness here. These assertions read the route source and pin
- * exactly the wiring: the server is the SOURCE OF TRUTH (it refuses before the
- * store is ever asked), and it asks the one shared helper the checkboxes use.
+ * exactly the wiring: the server is the SOURCE OF TRUTH, and the toggle's refusal
+ * is decided inside the store (`StepIsWaitingError`), on the row it is about to
+ * write, with the one shared helper the checkboxes use.
  */
 
 const serverSource = readFileSync(
@@ -32,19 +33,21 @@ function routeBlock(startPattern: RegExp, length = 4000): string {
 const toggleBlock = () =>
   routeBlock(/const checklistToggleMatch = normalizedPath\.match\(/, 6000)
 
-const TOGGLE_GUARD = 'const toggleRefusal = waitingToggleRefusal('
+const storeSource = readFileSync(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../db/store.js'),
+  'utf8',
+).replaceAll('\r\n', '\n')
 
 describe('POST /api/checklists/:id/items/:itemId/toggle refuses a waiting step', () => {
-  // ONE check replaces the three hand-written ones (the node itself, what the
-  // tick cascades onto, the parent it rolls up): the simulation runs the store's
-  // toggle and looks at every node that would come out done.
-  it('asks the one simulation helper, with the item and whichever ids the request names', () => {
+  // ONE decision, in ONE place: the store runs the toggle's own math on the row
+  // it is about to write and refuses when a waiting, not-yet-done node would come
+  // out done. The route used to ask first, against a copy of the checklist read
+  // before the store's read-modify-write, so a wait added in between was not seen.
+  it('no longer asks the simulation itself - the copy it would ask about can be out of date', () => {
     const block = toggleBlock()
-    expect(block).toContain(TOGGLE_GUARD)
-    const guard = block.slice(block.indexOf(TOGGLE_GUARD), block.indexOf(TOGGLE_GUARD) + 500)
-    expect(guard).toContain('targetItem,')
-    expect(guard).toContain('toggleSubItemId,')
-    expect(guard).toContain('toggleSubSubItemId,')
+    expect(block).not.toContain('waitingToggleRefusal(')
+    expect(block).not.toContain('toggleRefusal')
+    expect(serverSource).not.toContain('waitingToggleRefusal')
   })
 
   it('no longer carries the three hand-written guards', () => {
@@ -54,40 +57,60 @@ describe('POST /api/checklists/:id/items/:itemId/toggle refuses a waiting step',
     expect(block).not.toContain('waitingBlocksCompletion(')
   })
 
-  it('answers 409 STEP_IS_WAITING with the sentence the simulation chose', () => {
+  it('answers 409 STEP_IS_WAITING with the sentence the store carried', () => {
     const block = toggleBlock()
-    const at = block.indexOf('if (toggleRefusal && !ownerClosesWaits) {')
+    const at = block.indexOf('if (error instanceof StepIsWaitingError) {')
     expect(at).toBeGreaterThan(-1)
-    const guard = block.slice(at, at + 300)
-    expect(guard).toContain('sendJson(response, toggleRefusal.status, {')
-    expect(guard).toContain('error: toggleRefusal.error,')
-    expect(guard).toContain('message: toggleRefusal.message,')
+    const guard = block.slice(at, at + 400)
+    expect(guard).toContain('sendJson(response, error.refusal.status, {')
+    expect(guard).toContain('error: error.refusal.error,')
+    expect(guard).toContain('message: error.refusal.message,')
+    // Anything else is not this route's to swallow.
+    expect(block.slice(at, at + 600)).toContain('throw error')
+    expect(serverSource).toContain('StepIsWaitingError,')
   })
 
-  // A refusal that lands after the write is not a refusal.
-  it('refuses BEFORE the store is asked to toggle anything', () => {
+  // A refusal that lands after the write is not a refusal: the store throws
+  // before its UPDATE / file write, in both backends.
+  it('the store decides on the row it is about to write, before it writes', () => {
+    const start = storeSource.indexOf('async toggleChecklistItem(')
+    const end = storeSource.indexOf('async maybeSpawnNextStage(', start)
+    expect(start).toBeGreaterThan(-1)
+    const method = storeSource.slice(start, end)
+    const guard = 'const refusal = waitingToggleRefusal('
+    // Postgres: inside the transaction, on the row read `for update`.
+    const select = method.indexOf('where checklist_id = $1 and id = $2 for update')
+    const pgGuard = method.indexOf(guard)
+    const pgWrite = method.indexOf('update checklist_items', pgGuard)
+    expect(select).toBeGreaterThan(-1)
+    expect(pgGuard).toBeGreaterThan(select)
+    expect(pgWrite).toBeGreaterThan(pgGuard)
+    expect(method.slice(pgGuard, pgGuard + 300)).toContain('throw new StepIsWaitingError(refusal)')
+    // File backend: inside the queue slot, on the fresh read, before the write.
+    const slot = method.indexOf('return enqueueFileOperation(localDataPath, async () => {')
+    const fileGuard = method.indexOf(guard, pgGuard + 1)
+    const fileWrite = method.indexOf('await fsWriteFile(localDataPath', fileGuard)
+    expect(slot).toBeGreaterThan(pgWrite)
+    expect(fileGuard).toBeGreaterThan(slot)
+    expect(fileWrite).toBeGreaterThan(fileGuard)
+    expect(method.slice(fileGuard, fileGuard + 300)).toContain('throw new StepIsWaitingError(refusal)')
+  })
+
+  // The sub-item / sub-sub-item lookups still answer their 404s first, ahead of
+  // the store call.
+  it('still resolves the sub-item and sub-sub-item before it asks the store', () => {
     const block = toggleBlock()
-    const guardAt = block.indexOf(TOGGLE_GUARD)
     const writeAt = block.indexOf('appDataStore.toggleChecklistItem(')
-    expect(guardAt).toBeGreaterThan(-1)
     expect(writeAt).toBeGreaterThan(-1)
-    expect(guardAt).toBeLessThan(writeAt)
+    expect(block.indexOf("error: 'Sub-item not found'")).toBeLessThan(writeAt)
+    expect(block.indexOf("error: 'Sub-sub-item not found'")).toBeLessThan(writeAt)
   })
 
-  // The guard has to run after the sub-item / sub-sub-item lookups answer their
-  // 404s (it names whichever the request targets).
-  it('runs after the sub-item and sub-sub-item are resolved, not before', () => {
-    const block = toggleBlock()
-    const guardAt = block.indexOf(TOGGLE_GUARD)
-    expect(block.indexOf("error: 'Sub-item not found'")).toBeLessThan(guardAt)
-    expect(block.indexOf("error: 'Sub-sub-item not found'")).toBeLessThan(guardAt)
-  })
-
-  // The shared helper is imported, not re-implemented - the whole point is that
-  // the UI's disabled checkboxes and this refusal can never drift apart.
-  it('imports the helper from the shared module rather than inlining it', () => {
-    expect(serverSource).toContain('waitingToggleRefusal,')
-    expect(serverSource).toContain("from './lib/waiting-on-state.js'")
+  // The shared helper is imported by the store, not re-implemented - the whole
+  // point is that the UI's disabled checkboxes and this refusal can never drift apart.
+  it('the store imports the helper from the shared module rather than inlining it', () => {
+    expect(storeSource).toContain('waitingToggleRefusal,')
+    expect(storeSource).toContain("from '../lib/waiting-on-state.js'")
   })
 })
 
@@ -104,20 +127,20 @@ describe('POST /api/checklists/:id/items/:itemId/toggle lets the owner tick a wa
   const longToggleBlock = () =>
     routeBlock(/const checklistToggleMatch = normalizedPath\.match\(/, 9000)
 
-  it('exempts only a signed-in owner, and only when there is a refusal to exempt', () => {
+  it('exempts only a signed-in owner: staff get the store\'s refusal, the very same 409 as before', () => {
     const block = longToggleBlock()
-    expect(block).toContain(
-      "const ownerClosesWaits = Boolean(toggleRefusal) && session.user.role === 'owner'",
+    const call = block.slice(block.indexOf('appDataStore.toggleChecklistItem('))
+    expect(call.slice(0, 400)).toContain(
+      "session.user.role === 'owner' ? { closeWaitsBy: session.user.id } : undefined,",
     )
-    // Staff (and anyone else) fall through to the very same 409 as before.
-    expect(block).toContain('if (toggleRefusal && !ownerClosesWaits) {')
+    expect(block).toContain('if (error instanceof StepIsWaitingError) {')
   })
 
   it('hands the store the owner id so the wait closes in the same write, and nothing otherwise', () => {
     const block = longToggleBlock()
     const call = block.slice(block.indexOf('appDataStore.toggleChecklistItem('))
     expect(call.slice(0, 400)).toContain(
-      'ownerClosesWaits ? { closeWaitsBy: session.user.id } : undefined,',
+      "session.user.role === 'owner' ? { closeWaitsBy: session.user.id } : undefined,",
     )
   })
 
