@@ -136,6 +136,16 @@ const PUSHED_ORIGINAL = checklist({
   pushedBy: LISA,
   pushedToChecklistId: 'cl-newrow',
 })
+/** The same record after someone un-checked its one done step: an open step, still not pushable. */
+const UNCHECKED_RECORD = checklist({
+  id: 'cl-unchecked',
+  title: 'Unchecked record close',
+  templateId: 'tmpl-on',
+  items: [{ id: 'cl-unchecked-open', label: 'Reconcile', done: false }],
+  pushedAt: '2026-08-20T12:00:00.000Z',
+  pushedBy: LISA,
+  pushedToChecklistId: 'cl-newrow',
+})
 const NEW_ROW = checklist({
   id: 'cl-newrow',
   title: 'Moved open work',
@@ -171,6 +181,7 @@ const data = {
     ALL_DONE,
     HALF_DONE_STEP,
     PUSHED_ORIGINAL,
+    UNCHECKED_RECORD,
     NEW_ROW,
     ORPHAN_ORIGINAL,
   ],
@@ -492,6 +503,14 @@ describe('the done-only record a split push leaves behind', () => {
     expect(
       within(cardFor('Record close')).getByText(/Pushed · open steps moved to Oct\s*15/),
     ).toBeInTheDocument()
+  })
+
+  it('offers no Push even when one of its steps is un-checked - push the live copy instead', () => {
+    renderPage()
+    const card = within(cardFor('Unchecked record close'))
+    expect(card.queryByText('Push to a new date')).not.toBeInTheDocument()
+    // The live copy it points at still offers it.
+    expect(within(cardFor('Moved open work')).getByText('Push to a new date')).toBeInTheDocument()
   })
 
   it('says it without a date when the new row is not in local data', () => {

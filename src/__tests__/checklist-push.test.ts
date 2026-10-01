@@ -182,6 +182,24 @@ describe('who is offered a push', () => {
     ).toBe(false)
   })
 
+  it('offers nothing on the completed record a split push left behind', () => {
+    expect(
+      canOfferPush({
+        checklist: instance({ pushedToChecklistId: 'cl-live' }),
+        templates: [template()],
+        canWrite: true,
+      }),
+    ).toBe(false)
+    // The live copy it points at (pushedFromChecklistId) is pushable as ever.
+    expect(
+      canOfferPush({
+        checklist: instance({ pushedFromChecklistId: 'cl-orig' }),
+        templates: [template()],
+        canWrite: true,
+      }),
+    ).toBe(true)
+  })
+
   it('SKIPPING is unchanged — it still rides the template opt-in', () => {
     expect(canOfferSkip({ checklist: instance(), templates: [template()], canWrite: true })).toBe(
       true,
@@ -268,6 +286,12 @@ describe('the push endpoint answers a split the way the spec promises', () => {
     const block = routeBlock(/const checklistPushMatch = normalizedPath\.match/)
     expect(block).toContain('error instanceof PushConflictError')
     expect(block).toContain("sendJson(response, 409, { error: 'PUSH_CONFLICT', message: error.message })")
+  })
+
+  it('maps a PushedRecordError to 409 PUSHED_RECORD with its message', () => {
+    const block = routeBlock(/const checklistPushMatch = normalizedPath\.match/)
+    expect(block).toContain('error instanceof PushedRecordError')
+    expect(block).toContain("sendJson(response, 409, { error: 'PUSHED_RECORD', message: error.message })")
   })
 
   it('names the checklist that holds the open work on the notification', () => {

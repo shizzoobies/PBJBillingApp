@@ -18,6 +18,7 @@ import {
   PackageApplyError,
   ProposalStateError,
   PushConflictError,
+  PushedRecordError,
   RateVersionError,
   mapChecklistItemRow,
   mapClientRow,
@@ -1237,7 +1238,13 @@ function fakePostgres({
       )
     ) {
       const found = pushChecklistRows.find((row) => row.id === params?.[0])
-      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
+      // `to_char(coalesce(cycle_due_date, due_date), 'YYYY-MM-DD') as
+      // identity_date`: a fixture that does not script it gets the string the
+      // database would produce from its (string) dates.
+      const answered = found
+        ? { identity_date: String(found.cycle_due_date ?? found.due_date), ...found }
+        : null
+      return { rows: answered ? [answered] : [], rowCount: answered ? 1 : 0 }
     }
     // `pushChecklistInstance`'s read of the row's current steps, used to
     // decide plain move / refuse / split. Anchored on `CHECKLIST_ITEM_SELECT_
@@ -6357,6 +6364,21 @@ describe('completed_at on checklist items (postgres branch)', () => {
     expect(update.text).toMatch(/else null end/)
   })
 
+  it('answers null, not a silent success, when the UPDATE touches no row (Postgres)', async () => {
+    const { fake, store } = pgStoreWithItem(itemRow())
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      if (/^update checklist_items\s+set done = \$3/i.test(String(text).trim())) {
+        return { rows: [], rowCount: 0 }
+      }
+      return result
+    }
+
+    expect(await store.toggleChecklistItem('cl-1', 'item-1')).toBeNull()
+    expect(fake.matching(/^update checklist_items\s+set done = \$3/i)).toHaveLength(1)
+  })
+
   it('follows the roll-up when a sub-item is added', async () => {
     // Every sub-item write recomputes the parent `done`; the stamp has to move
     // with it or a task can be "complete" with no completion date.
@@ -6882,6 +6904,45 @@ describe('quiet skip (file backend)', () => {
     const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-alldone')
     expect(row.dueDate).toBe('2026-08-31')
     expect(row.pushedAt ?? null).toBeNull()
+  })
+
+  it('refuses to push the completed record a split left behind, even with a step un-checked', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            id: 'cl-mixed-rec',
+            items: [
+              { id: 'item-done', label: 'Reconcile', done: true },
+              { id: 'item-open', label: 'Send statements', done: false },
+            ],
+          }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+    const { checklist: live, completed } = await store.pushChecklistInstance(
+      'cl-mixed-rec',
+      'emp-1',
+      '2026-09-30',
+    )
+    // Someone un-checks the done step on the RECORD: it now has an open step.
+    await store.toggleChecklistItem('cl-mixed-rec', 'item-done')
+    const before = await persisted()
+
+    await expect(
+      store.pushChecklistInstance(completed.id, 'emp-1', '2026-10-31'),
+    ).rejects.toBeInstanceOf(PushedRecordError)
+    await expect(store.pushChecklistInstance(completed.id, 'emp-1', '2026-10-31')).rejects.toThrow(
+      'This is the completed record of a pushed checklist. Push the live copy instead.',
+    )
+    // Untouched: no second split, no moved date.
+    expect(await persisted()).toEqual(before)
+    expect(
+      before.checklists.filter((entry) => entry.pushedFromChecklistId === completed.id),
+    ).toHaveLength(1)
+    // The live copy is still pushable.
+    await expect(store.pushChecklistInstance(live.id, 'emp-1', '2026-10-31')).resolves.toBeTruthy()
   })
 
   it('splits a MIXED push: done steps stay, open steps (with sub-items and waits) move', async () => {
@@ -7417,6 +7478,8 @@ describe('quiet skip (postgres branch)', () => {
     stage_count: 1,
     category_id: null,
     cycle_due_date: null,
+    identity_date: '2026-08-31',
+    pushed_to_checklist_id: null,
     period_label: null,
     onboarding_for_client_id: 'c1',
     created_by: 'emp-9',
@@ -7494,6 +7557,13 @@ describe('quiet skip (postgres branch)', () => {
     // The new row's cycle_due_date inherits exactly what the no-split branch
     // would have stamped onto the original: coalesce(cycle_due_date, due_date).
     expect(insert.params).toContain('2026-08-31')
+    // ...and it is the STRING the lock select's to_char produced, never a Date.
+    expect(insert.params[14]).toBe('2026-08-31')
+    expect(insert.params.some((value) => value instanceof Date)).toBe(false)
+    const [lock] = fake.matching(/^select id, client_id, title, assignee_id[\s\S]*for update$/i)
+    expect(lock.text).toMatch(
+      /to_char\(coalesce\(cycle_due_date, due_date\), 'YYYY-MM-DD'\) as identity_date/,
+    )
     expect(insert.params).toContain('cl-mixed') // pushed_from_checklist_id
     expect(insert.params).toContain('2026-09-30') // the new row's due_date
     // Onboarding link and creator ride along.
@@ -7566,22 +7636,108 @@ describe('quiet skip (postgres branch)', () => {
   })
 
   it('maps an unexpected unique violation (23505) from the split to a PushConflictError', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fake = fakePostgres({
+        pushChecklistRows: [splitPushRow],
+        pushItemRows: splitPushItems,
+        failOn: {
+          pattern: /^insert into checklists \(/i,
+          error: Object.assign(new Error('duplicate key'), {
+            code: '23505',
+            constraint: 'checklists_template_instance_uniq_v3',
+            detail: 'Key (template_id, ...)=(tmpl-skip, ...) already exists.',
+          }),
+        },
+      })
+
+      const pushing = postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
+      await expect(pushing).rejects.toBeInstanceOf(PushConflictError)
+      await expect(pushing).rejects.toThrow(
+        'This checklist changed while you were pushing it. Reload and try again.',
+      )
+      expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+      expect(fake.matching(/^commit$/i)).toHaveLength(0)
+      // The constraint that fired is logged, so a conflict is diagnosable.
+      expect(warn).toHaveBeenCalledWith(
+        '[push] unique violation',
+        'checklists_template_instance_uniq_v3',
+        'Key (template_id, ...)=(tmpl-skip, ...) already exists.',
+      )
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('maps a deadlock (40P01) from the split to a PushConflictError too', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fake = fakePostgres({
+        pushChecklistRows: [splitPushRow],
+        pushItemRows: splitPushItems,
+        failOn: {
+          pattern: /^update checklist_items set checklist_id/i,
+          error: Object.assign(new Error('deadlock detected'), { code: '40P01' }),
+        },
+      })
+      await expect(
+        postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30'),
+      ).rejects.toBeInstanceOf(PushConflictError)
+      expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+      expect(fake.matching(/^commit$/i)).toHaveLength(0)
+      // Not a unique violation: nothing to log about a constraint.
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('refuses the completed record a split left behind - no write, one rollback (Postgres)', async () => {
+    const fake = fakePostgres({
+      pushChecklistRows: [{ ...splitPushRow, pushed_to_checklist_id: 'cl-live' }],
+      // One step was un-checked, so a naive count would call this pushable.
+      pushItemRows: splitPushItems,
+    })
+    const pushing = postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
+    await expect(pushing).rejects.toBeInstanceOf(PushedRecordError)
+    await expect(pushing).rejects.toThrow(
+      'This is the completed record of a pushed checklist. Push the live copy instead.',
+    )
+    expect(fake.matching(/^begin$/i)).toHaveLength(1)
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+    expect(fake.matching(/^update checklists\b/i)).toHaveLength(0)
+    expect(fake.matching(/^insert into checklists\b/i)).toHaveLength(0)
+    // Refused straight after the lock: the items were never even read.
+    expect(fake.matching(/^select id, checklist_id, label/i)).toHaveLength(0)
+  })
+
+  it('inserts the occurrence date as the to_char string even when the column parses to a Date', async () => {
+    // node-postgres hands a `date` column back as a LOCAL-midnight Date. Re-
+    // binding it can land on the neighboring day when Node is not in UTC, so the
+    // split must use the string the lock select formatted in SQL.
+    const localMidnightPriorDay = new Date(2026, 7, 30) // Aug 30 local: the shifted day
+    const fake = fakePostgres({
+      pushChecklistRows: [
+        { ...splitPushRow, cycle_due_date: localMidnightPriorDay, identity_date: '2026-08-31' },
+      ],
+      pushItemRows: splitPushItems,
+    })
+    await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
+
+    const [insert] = fake.matching(/^insert into checklists \(/i)
+    expect(insert.params[14]).toBe('2026-08-31')
+    expect(insert.params.some((value) => value instanceof Date)).toBe(false)
+  })
+
+  it('locks the sub-step waiter rows it rewrites (for update)', async () => {
     const fake = fakePostgres({
       pushChecklistRows: [splitPushRow],
       pushItemRows: splitPushItems,
-      failOn: {
-        pattern: /^insert into checklists \(/i,
-        error: Object.assign(new Error('duplicate key'), { code: '23505' }),
-      },
     })
-
-    const pushing = postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
-    await expect(pushing).rejects.toBeInstanceOf(PushConflictError)
-    await expect(pushing).rejects.toThrow(
-      'This checklist changed while you were pushing it. Reload and try again.',
-    )
-    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
-    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+    await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
+    const [waiters] = fake.matching(/^select id, sub_items from checklist_items/i)
+    expect(waiters.text).toMatch(/position\(\$1 in sub_items::text\) > 0\s+for update$/i)
   })
 
   it('re-points pending requests: moved steps and task-level edits follow, stayed steps do not', async () => {

@@ -2559,6 +2559,19 @@ export class PushConflictError extends Error {
 }
 
 /**
+ * Thrown by `pushChecklistInstance` when the row is the completed record a
+ * split push left behind (`pushedToChecklistId` is set): its open work already
+ * lives on the live copy, so pushing the record again would fork the occurrence.
+ * The route maps it to 409 `PUSHED_RECORD`.
+ */
+export class PushedRecordError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'PushedRecordError'
+  }
+}
+
+/**
  * Re-point every `waitingForChecklistId === fromId` found on `nodes` (sub-items
  * and, recursively, their sub-sub-items) to `toId`, in place. Returns whether
  * anything changed. Used by the split push, which moves the open work to a new
@@ -15267,12 +15280,15 @@ export class AppDataStore {
       const toggled = applyItemToggle(row.sub_items, row.done, { subItemId, subSubItemId })
       if (!toggled) return null
 
-      await this.pool.query(
+      const updateResult = await this.pool.query(
         `update checklist_items
          set done = $3, sub_items = $4::jsonb, ${completedAtClause(3)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
         [checklistId, itemId, toggled.done, JSON.stringify(toggled.subItems)],
       )
+      // The step vanished (or moved to another checklist) between the read and
+      // this write: report "not found" rather than a silent success.
+      if (updateResult.rowCount === 0) return null
 
       const data = await this.read()
       const updated = data.checklists.find((checklist) => checklist.id === checklistId) ?? null
@@ -19789,7 +19805,8 @@ export class AppDataStore {
             `select id, client_id, title, assignee_id, template_id, frequency, due_date,
                     viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
                     category_id, cycle_due_date, period_label,
-                    onboarding_for_client_id, created_by
+                    onboarding_for_client_id, created_by, pushed_to_checklist_id,
+                    to_char(coalesce(cycle_due_date, due_date), 'YYYY-MM-DD') as identity_date
                from checklists
               where id = $1 and deleted_at is null and skipped_at is null
               for update`,
@@ -19799,6 +19816,12 @@ export class AppDataStore {
         if (!checklistRow) {
           await client.query('rollback')
           return null
+        }
+        if (checklistRow.pushed_to_checklist_id) {
+          // Thrown, not returned: the outer catch rolls back exactly once.
+          throw new PushedRecordError(
+            'This is the completed record of a pushed checklist. Push the live copy instead.',
+          )
         }
         const itemRows = (
           await client.query(
@@ -19898,7 +19921,10 @@ export class AppDataStore {
             checklistRow.stage_index,
             checklistRow.stage_count,
             checklistRow.category_id,
-            checklistRow.cycle_due_date ?? checklistRow.due_date,
+            // The lock select's to_char string, never the parsed `date` column:
+            // node-postgres turns that into a local-midnight Date, and binding it
+            // back can land on the neighboring day when Node is not in UTC.
+            checklistRow.identity_date,
             splitNowIso,
             userId ?? null,
             checklistId,
@@ -19953,7 +19979,8 @@ export class AppDataStore {
         const subWaiters = (
           await client.query(
             `select id, sub_items from checklist_items
-              where position($1 in sub_items::text) > 0`,
+              where position($1 in sub_items::text) > 0
+              for update`,
             [checklistId],
           )
         ).rows
@@ -19984,6 +20011,13 @@ export class AppDataStore {
         // A unique violation here means another request got to this
         // occurrence's identity first - a clean conflict, never a 500.
         if (error?.code === '23505') {
+          console.warn('[push] unique violation', error.constraint, error.detail)
+          throw new PushConflictError(
+            'This checklist changed while you were pushing it. Reload and try again.',
+          )
+        }
+        // A deadlock (40P01) between two concurrent pushes: the loser retries.
+        if (error?.code === '40P01') {
           throw new PushConflictError(
             'This checklist changed while you were pushing it. Reload and try again.',
           )
@@ -19997,6 +20031,11 @@ export class AppDataStore {
     const data = await readJson(localDataPath)
     const target = (data.checklists ?? []).find((checklist) => checklist.id === checklistId)
     if (!target || target.deletedAt || target.skippedAt) return null
+    if (target.pushedToChecklistId) {
+      throw new PushedRecordError(
+        'This is the completed record of a pushed checklist. Push the live copy instead.',
+      )
+    }
     const items = Array.isArray(target.items) ? target.items : []
     const openItems = items.filter((item) => !rollUpItemDone(item))
     const doneItems = items.filter((item) => rollUpItemDone(item))

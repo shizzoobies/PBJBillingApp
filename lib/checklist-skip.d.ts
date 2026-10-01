@@ -78,7 +78,10 @@ export declare function canOfferSkip(args: {
  * pass the same argument object to both gates still type-check.
  */
 export declare function canOfferPush(args: {
-  checklist: { templateId?: string; skippedAt?: string | null } | null | undefined
+  checklist:
+    | { templateId?: string; skippedAt?: string | null; pushedToChecklistId?: string | null }
+    | null
+    | undefined
   templates?: { id?: string; skipAllowed?: boolean }[]
   canWrite: boolean
 }): boolean

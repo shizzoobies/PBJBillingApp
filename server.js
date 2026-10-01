@@ -17,6 +17,7 @@ import {
   PackageApplyError,
   ProposalStateError,
   PushConflictError,
+  PushedRecordError,
   RateVersionError,
   RetainerCreditError,
   TimeEntrySplitError,
@@ -9573,6 +9574,13 @@ const server = createServer(async (request, response) => {
         // identity). A clean conflict, not a 500.
         if (error instanceof PushConflictError) {
           sendJson(response, 409, { error: 'PUSH_CONFLICT', message: error.message })
+          return
+        }
+        // The row is the completed record a split push left behind: the live
+        // copy carries the open work. A stale render (the UI hides Push here)
+        // or a direct call.
+        if (error instanceof PushedRecordError) {
+          sendJson(response, 409, { error: 'PUSHED_RECORD', message: error.message })
           return
         }
         throw error
