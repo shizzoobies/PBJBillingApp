@@ -447,8 +447,12 @@ describe('deleting a step on a recurring checklist', () => {
         const notice = await removeFromSeries()
         expect(notice).toHaveTextContent('Removed from the recurring checklist')
         // The notice armed exactly one 8-second timer; fire it as the clock would.
-        const eightSeconds = timers.mock.calls.filter(([, delay]) => delay === 8000)
-        expect(eightSeconds).toHaveLength(1)
+        // The timer is armed in an effect, which runs AFTER the notice is on the
+        // page - under a loaded run the sentence can be found before the effect
+        // has fired, so wait for the timer rather than assuming it is there.
+        const armed = () => timers.mock.calls.filter(([, delay]) => delay === 8000)
+        await waitFor(() => expect(armed()).toHaveLength(1))
+        const eightSeconds = armed()
         act(() => {
           ;(eightSeconds[0][0] as () => void)()
         })
