@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClientStatementsPanel } from '../components/ClientStatementsPanel'
 import { ApiError } from '../lib/types'
@@ -57,8 +57,32 @@ function reconciliationTemplate(clientId: string, labels: string[]): ChecklistTe
 function renderPanel(clientId = 'c1', templates: ChecklistTemplate[] = []) {
   contextValue = {
     data: { checklistTemplates: templates } as unknown as AppData,
+    dataRefreshCount: 0,
   } as unknown as AppContextValue
   return render(<ClientStatementsPanel clientId={clientId} />)
+}
+
+/** The live-sync signal: bump `dataRefreshCount` and re-render, as App.tsx does. */
+function signalDataChanged(view: ReturnType<typeof renderPanel>, count: number) {
+  contextValue = { ...contextValue, dataRefreshCount: count } as unknown as AppContextValue
+  view.rerender(<ClientStatementsPanel clientId="c1" />)
+}
+
+/** A promise a test settles by hand, to hold a request in flight. */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+/** Lets already-resolved promises run their continuations. */
+const flush = () => act(async () => {})
+
+const LOADED = {
+  accounts: [{ id: 'stmt-1', clientId: 'c1', name: 'TD Bank 4920', dayOfMonth: 12, sortOrder: 0 }],
+  version: 'v0',
 }
 
 beforeEach(() => {
@@ -225,6 +249,122 @@ describe('a failed load leaves Save disarmed instead of armed over an empty list
     expect(await screen.findByDisplayValue('TD Bank 4920')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Save$/ })).not.toBeDisabled()
   })
+
+  it('disables the reconciliation chips after a failed load', async () => {
+    listAccounts = vi.fn(async () => {
+      throw new Error('network down')
+    })
+    renderPanel('c1', [reconciliationTemplate('c1', ['Chase 7712'])])
+    expect(await screen.findByText('Could not load statement dates.')).toBeInTheDocument()
+    const chip = screen.getByRole('button', { name: 'Chase 7712' })
+    expect(chip).toBeDisabled()
+    fireEvent.click(chip)
+    expect(screen.queryByDisplayValue('Chase 7712')).not.toBeInTheDocument()
+  })
+
+  it('keeps Add account, Save and the chips disabled while the first load is pending', async () => {
+    const pending = deferred<typeof LOADED>()
+    listAccounts = vi.fn(() => pending.promise)
+    renderPanel('c1', [reconciliationTemplate('c1', ['Chase 7712'])])
+    expect(screen.getByRole('button', { name: /Add account/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /^Save$/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Chase 7712' })).toBeDisabled()
+
+    pending.resolve(LOADED)
+    expect(await screen.findByDisplayValue('TD Bank 4920')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Add account/i })).not.toBeDisabled()
+  })
+})
+
+describe('a background refetch never locks the box or eats what she typed', () => {
+  it('never flips the controls to loading, and applies a clean result', async () => {
+    listAccounts = vi.fn(async () => LOADED)
+    const view = renderPanel()
+    await screen.findByDisplayValue('TD Bank 4920')
+
+    const pending = deferred<typeof LOADED>()
+    listAccounts = vi.fn(() => pending.promise)
+    signalDataChanged(view, 1)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
+    // In flight: no Loading flicker, controls stay enabled.
+    expect(screen.getByRole('button', { name: /^Save$/ })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: /Add account/i })).not.toBeDisabled()
+
+    pending.resolve({
+      accounts: [{ id: 'stmt-1', clientId: 'c1', name: 'Amex 1108', dayOfMonth: 5, sortOrder: 0 }],
+      version: 'v2',
+    })
+    expect(await screen.findByDisplayValue('Amex 1108')).toBeInTheDocument()
+  })
+
+  it('drops the result when she typed while it was in flight, and Save stays enabled', async () => {
+    listAccounts = vi.fn(async () => LOADED)
+    const view = renderPanel()
+    const input = await screen.findByDisplayValue('TD Bank 4920')
+
+    const pending = deferred<typeof LOADED>()
+    listAccounts = vi.fn(() => pending.promise)
+    signalDataChanged(view, 1)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
+    fireEvent.change(input, { target: { value: 'TD Bank 4920 (old)' } })
+
+    pending.resolve({
+      accounts: [{ id: 'stmt-1', clientId: 'c1', name: 'Amex 1108', dayOfMonth: 5, sortOrder: 0 }],
+      version: 'v2',
+    })
+    await flush()
+    expect(screen.getByDisplayValue('TD Bank 4920 (old)')).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('Amex 1108')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Save$/ })).not.toBeDisabled()
+
+    // The version stays what she loaded, so a real conflict still 409s.
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
+    await waitFor(() => expect(saveAccounts).toHaveBeenCalled())
+    expect(saveAccounts).toHaveBeenCalledWith(
+      'c1',
+      [{ id: 'stmt-1', name: 'TD Bank 4920 (old)', dayOfMonth: 12 }],
+      'v0',
+    )
+  })
+
+  it('ignores a failed background refetch: the rows stay, no Retry block', async () => {
+    listAccounts = vi.fn(async () => LOADED)
+    const view = renderPanel()
+    await screen.findByDisplayValue('TD Bank 4920')
+
+    listAccounts = vi.fn(async () => {
+      throw new Error('network down')
+    })
+    signalDataChanged(view, 1)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
+    await flush()
+    expect(screen.getByDisplayValue('TD Bank 4920')).toBeInTheDocument()
+    expect(screen.queryByText('Could not load statement dates.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Retry/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Save$/ })).not.toBeDisabled()
+  })
+
+  it('two data-changed signals in a row with a dirty panel never leave the controls disabled', async () => {
+    listAccounts = vi.fn(async () => LOADED)
+    const view = renderPanel()
+    const input = await screen.findByDisplayValue('TD Bank 4920')
+
+    const first = deferred<typeof LOADED>()
+    const second = deferred<typeof LOADED>()
+    listAccounts = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    signalDataChanged(view, 1)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
+    fireEvent.change(input, { target: { value: 'Typed' } })
+    signalDataChanged(view, 2)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2))
+
+    second.resolve(LOADED)
+    first.resolve(LOADED)
+    await flush()
+    expect(screen.getByDisplayValue('Typed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Save$/ })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: /Add account/i })).not.toBeDisabled()
+  })
 })
 
 describe('a stale save (409) is told to reload, not shown the generic save error', () => {
@@ -246,7 +386,9 @@ describe('a stale save (409) is told to reload, not shown the generic save error
     expect(
       await screen.findByText('Someone else changed these dates. Reload and try again.'),
     ).toBeInTheDocument()
-    const reloadButton = screen.getByRole('button', { name: /Reload/i })
+    const reloadButton = screen.getByRole('button', {
+      name: 'Reload (discards your unsaved changes)',
+    })
 
     listAccounts = vi.fn(async () => ({
       accounts: [{ id: 'stmt-1', clientId: 'c1', name: 'Amex 1108', dayOfMonth: 5, sortOrder: 0 }],

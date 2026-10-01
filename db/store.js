@@ -3488,10 +3488,11 @@ const STATEMENT_ACCOUNT_ID_PATTERN = /^stmt-[0-9a-f]{8}$/
  * cannot silently replace it.
  */
 export function statementAccountsVersion(rows) {
-  const parts = (Array.isArray(rows) ? rows : []).map(
-    (row) => `${row.id}|${row.name}|${row.dayOfMonth}`,
-  )
-  return createHash('sha1').update(parts.join('\n')).digest('hex')
+  // A JSON array of [id, name, dayOfMonth] tuples, not a delimiter-joined
+  // string: a name containing the delimiter can never collide with a
+  // different list.
+  const tuples = (Array.isArray(rows) ? rows : []).map((row) => [row.id, row.name, row.dayOfMonth])
+  return createHash('sha1').update(JSON.stringify(tuples)).digest('hex')
 }
 
 export class AppDataStore {
@@ -19329,58 +19330,82 @@ export class AppDataStore {
    * Replace a client's whole statement-dates list. Rows are validated (name
    * trimmed 1..120 chars, day an integer 1..31), capped at 60 rows, and
    * re-sorted to match array order — a row's id is kept only when the caller
-   * sent one shaped like `stmt-<8 hex>` AND it has not already appeared
-   * earlier in this same payload (an edit); otherwise a fresh id is minted (a
-   * new row) — a malformed or duplicated id is exactly the shape a bug (or a
-   * replayed chip click) would produce, and minting rather than trusting it
-   * keeps two rows from ever fighting over one id. One transaction on
-   * Postgres (delete then insert); a full replace of this client's slice on
-   * the file backend. Returns the saved list.
+   * sent one shaped like `stmt-<8 hex>`, it is one of THIS client's current
+   * ids (an edit), and it has not already appeared earlier in this same
+   * payload; otherwise a fresh id is minted (a new row). A malformed,
+   * duplicated or foreign id (one that belongs to another client's row would
+   * hit the primary key and 500) is exactly the shape a bug or a replayed chip
+   * click would produce, and minting rather than trusting it keeps two rows
+   * from ever fighting over one id. One transaction on Postgres (delete then
+   * insert); a full replace of this client's slice on the file backend.
+   * Returns the saved list.
    *
    * `expectedVersion`, when sent, is checked against the CURRENT stored
-   * list's `statementAccountsVersion` before anything is written — a mismatch
-   * means another save landed first, and throws `StaleStatementAccountsError`
-   * instead of replacing it. Omitted (falsy), the check is skipped, so the
-   * API stays usable for callers that don't track it.
+   * list's `statementAccountsVersion` — a mismatch means another save landed
+   * first, and throws `StaleStatementAccountsError` instead of replacing it.
+   * The check is atomic with the write: on Postgres it runs INSIDE the
+   * transaction behind a per-client advisory lock (a `for update` would have
+   * nothing to lock when the list is empty), so two tabs holding the same
+   * version cannot both pass; on the file backend the read, compare and write
+   * are one queue slot with no await between compare and write. Omitted
+   * (falsy), the check is skipped, so the API stays usable for callers that
+   * don't track it.
    */
   async saveClientStatementAccounts(clientId, rows, expectedVersion) {
     if (!clientId) return []
-    if (expectedVersion) {
-      const current = await this.listClientStatementAccounts(clientId)
-      if (statementAccountsVersion(current) !== expectedVersion) {
-        throw new StaleStatementAccountsError(
-          'Someone else changed these dates. Reload and try again.',
-        )
-      }
+    const staleMessage = 'Someone else changed these dates. Reload and try again.'
+    // `currentIds` is the ids of this client's rows as stored right now (read
+    // inside the atomic section by the caller); only those may be kept.
+    const cleanRows = (currentIds) => {
+      const seenIds = new Set()
+      return (Array.isArray(rows) ? rows : [])
+        .map((row) => ({
+          id: row?.id ? String(row.id) : null,
+          name: String(row?.name ?? '').trim().slice(0, 120),
+          day: Number(row?.dayOfMonth),
+        }))
+        .filter((row) => row.name && Number.isInteger(row.day) && row.day >= 1 && row.day <= 31)
+        .slice(0, 60)
+        .map((row, index) => {
+          const keepId =
+            row.id &&
+            STATEMENT_ACCOUNT_ID_PATTERN.test(row.id) &&
+            currentIds.has(row.id) &&
+            !seenIds.has(row.id)
+              ? row.id
+              : null
+          if (keepId) seenIds.add(keepId)
+          return {
+            id: keepId || `stmt-${randomUUID().slice(0, 8)}`,
+            clientId,
+            name: row.name,
+            dayOfMonth: row.day,
+            sortOrder: index,
+          }
+        })
     }
-    const seenIds = new Set()
-    const clean = (Array.isArray(rows) ? rows : [])
-      .map((row) => ({
-        id: row?.id ? String(row.id) : null,
-        name: String(row?.name ?? '').trim().slice(0, 120),
-        day: Number(row?.dayOfMonth),
-      }))
-      .filter((row) => row.name && Number.isInteger(row.day) && row.day >= 1 && row.day <= 31)
-      .slice(0, 60)
-      .map((row, index) => {
-        const keepId =
-          row.id && STATEMENT_ACCOUNT_ID_PATTERN.test(row.id) && !seenIds.has(row.id)
-            ? row.id
-            : null
-        if (keepId) seenIds.add(keepId)
-        return {
-          id: keepId || `stmt-${randomUUID().slice(0, 8)}`,
-          clientId,
-          name: row.name,
-          dayOfMonth: row.day,
-          sortOrder: index,
-        }
-      })
 
     if (this.pool) {
       const client = await this.pool.connect()
       try {
         await client.query('begin')
+        await client.query('select pg_advisory_xact_lock(hashtext($1))', [
+          `client_statement_accounts:${clientId}`,
+        ])
+        const stored = await client.query(
+          `select id, client_id, name, day_of_month, sort_order
+             from client_statement_accounts where client_id = $1 order by sort_order asc`,
+          [clientId],
+        )
+        const current = stored.rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          dayOfMonth: row.day_of_month,
+        }))
+        if (expectedVersion && statementAccountsVersion(current) !== expectedVersion) {
+          throw new StaleStatementAccountsError(staleMessage)
+        }
+        const clean = cleanRows(new Set(current.map((row) => row.id)))
         await client.query(`delete from client_statement_accounts where client_id = $1`, [
           clientId,
         ])
@@ -19393,22 +19418,34 @@ export class AppDataStore {
           )
         }
         await client.query('commit')
+        return clean
       } catch (error) {
         await client.query('rollback')
         throw error
       } finally {
         client.release()
       }
-      return clean
     }
 
-    const authState = await readJson(localAuthPath)
-    const others = (
-      Array.isArray(authState.clientStatementAccounts) ? authState.clientStatementAccounts : []
-    ).filter((row) => row.clientId !== clientId)
-    authState.clientStatementAccounts = [...others, ...clean]
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return clean
+    // File backend: read, compare and write in ONE queue slot. `readJson` and
+    // `writeFile` enqueue behind the slot they would run in and deadlock, so
+    // raw fs calls only in here.
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const all = Array.isArray(authState.clientStatementAccounts)
+        ? authState.clientStatementAccounts
+        : []
+      const current = all
+        .filter((row) => row.clientId === clientId)
+        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+      if (expectedVersion && statementAccountsVersion(current) !== expectedVersion) {
+        throw new StaleStatementAccountsError(staleMessage)
+      }
+      const clean = cleanRows(new Set(current.map((row) => row.id)))
+      authState.clientStatementAccounts = [...all.filter((row) => row.clientId !== clientId), ...clean]
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return clean
+    })
   }
 
   // ---- Pending notes for future recurring checklists (featreq-b688e73c) ----

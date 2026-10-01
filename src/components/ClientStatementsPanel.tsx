@@ -31,14 +31,19 @@ const DAYS = Array.from({ length: 31 }, (_, index) => index + 1)
  *    matches — another tab changed the list first — is refused with 409
  *    `stale_statement_accounts` instead of overwriting it; the panel shows
  *    the server's message with a Reload button rather than the ordinary
- *    save-failed error. The panel also refetches whenever the app's
- *    data-changed broadcast lands (a fresh `data` reference from
- *    AppContext) AS LONG AS there are no local edits in progress — the same
- *    reusable pattern ClientNotesPanel's pending-notes block uses for the
- *    same signal.
+ *    save-failed error.
+ *  - Two kinds of load. The FIRST load (and an explicit Retry / Reload) sets
+ *    `loading`, which disables the controls. A BACKGROUND refetch, run on
+ *    the app's live-sync signal (`dataRefreshCount`, the same one
+ *    ClientNotesPanel's pending-notes block uses), never touches `loading`,
+ *    so the controls never flicker or lock. Any load is applied only if the
+ *    panel is still clean when it RESOLVES (`dirtyRef`), so what she typed
+ *    always wins (the version stays what she loaded, so a real conflict still
+ *    409s on save), and a failed background refetch is ignored — only a
+ *    failed first load or Retry shows the Retry block.
  */
 export function ClientStatementsPanel({ clientId }: { clientId: string }) {
-  const { data } = useAppContext()
+  const { data, dataRefreshCount = 0 } = useAppContext()
   const [rows, setRows] = useState<Row[]>([])
   const [loading, setLoading] = useState(true)
   const [loadFailed, setLoadFailed] = useState(false)
@@ -48,52 +53,102 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
   const [version, setVersion] = useState<string | null>(null)
   const [reloadToken, setReloadToken] = useState(0)
 
-  // Unsaved local edits, tracked in a ref (not state) so the load effect can
-  // read it without depending on it — a data-changed refetch checks it and
-  // skips entirely rather than clobbering a row the user is mid-typing.
+  // Unsaved local edits, tracked in a ref (not state) so a load can check it
+  // at RESOLVE time without the effects depending on it.
   const dirtyRef = useRef(false)
   const loadedClientRef = useRef<string | null>(null)
+  const mountedRef = useRef(true)
+  // Newest-wins counters: a load's result is dropped when a newer load of the
+  // same kind started after it, or (background) when a save landed after it.
+  const foregroundSeqRef = useRef(0)
+  const backgroundSeqRef = useRef(0)
+  const loadingRef = useRef(true)
+  const lastRefreshCountRef = useRef(dataRefreshCount)
 
   useEffect(() => {
-    let cancelled = false
-    const isNewClient = loadedClientRef.current !== clientId
-    if (!isNewClient && dirtyRef.current) {
-      return
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  const applyLoaded = (
+    accounts: Array<{ id: string; name: string; dayOfMonth: number }>,
+    loadedVersion: string,
+  ) => {
+    setRows(
+      accounts.map((account) => ({
+        id: account.id,
+        name: account.name,
+        dayOfMonth: account.dayOfMonth,
+      })),
+    )
+    setVersion(loadedVersion)
+    setLoadFailed(false)
+    setStaleReload(false)
+    dirtyRef.current = false
+    loadedClientRef.current = clientId
+  }
+
+  // Foreground load: first mount, a different client, and Retry / Reload. The
+  // only load that sets `loading`. It is NOT cancelled by a background refetch
+  // (that is what used to leave `loading` stuck); a newer foreground load or
+  // unmount is the only thing that supersedes it.
+  useEffect(() => {
+    const seq = ++foregroundSeqRef.current
+    if (loadedClientRef.current !== clientId) {
+      // A different client: nothing of the previous one may stay on screen,
+      // and its unsaved edits are not this client's.
+      dirtyRef.current = false
+      setRows([])
+      setVersion(null)
+      setLoadFailed(false)
     }
     const load = async () => {
+      loadingRef.current = true
       setLoading(true)
       setError('')
       try {
         const { accounts, version: loadedVersion } =
           await listClientStatementAccountsRequest(clientId)
-        if (!cancelled) {
-          setRows(
-            accounts.map((account) => ({
-              id: account.id,
-              name: account.name,
-              dayOfMonth: account.dayOfMonth,
-            })),
-          )
-          setVersion(loadedVersion)
-          setLoadFailed(false)
-          setStaleReload(false)
-          dirtyRef.current = false
-          loadedClientRef.current = clientId
-        }
+        if (!mountedRef.current || seq !== foregroundSeqRef.current) return
+        if (!dirtyRef.current) applyLoaded(accounts, loadedVersion)
       } catch {
-        if (!cancelled) {
-          setError('Could not load statement dates.')
-          setLoadFailed(true)
-        }
+        if (!mountedRef.current || seq !== foregroundSeqRef.current) return
+        setError('Could not load statement dates.')
+        setLoadFailed(true)
       } finally {
-        if (!cancelled) setLoading(false)
+        if (mountedRef.current && seq === foregroundSeqRef.current) {
+          loadingRef.current = false
+          setLoading(false)
+        }
       }
     }
     void load()
-    return () => {
-      cancelled = true
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- applyLoaded only closes over clientId and setters
+  }, [clientId, reloadToken])
+
+  // Background refetch: the live-sync signal landed. Never sets `loading`,
+  // never shows an error, and never overwrites local edits.
+  useEffect(() => {
+    if (lastRefreshCountRef.current === dataRefreshCount) return
+    lastRefreshCountRef.current = dataRefreshCount
+    if (loadingRef.current) return
+    const seq = ++backgroundSeqRef.current
+    const load = async () => {
+      try {
+        const { accounts, version: loadedVersion } =
+          await listClientStatementAccountsRequest(clientId)
+        if (!mountedRef.current || seq !== backgroundSeqRef.current) return
+        if (loadingRef.current || dirtyRef.current) return
+        applyLoaded(accounts, loadedVersion)
+      } catch {
+        // Keep what is on screen; only the first load or a Retry reports.
+      }
     }
-  }, [clientId, data, reloadToken])
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- applyLoaded only closes over clientId and setters
+  }, [dataRefreshCount, clientId])
 
   // Reconciliation item labels from this client's recurring templates, minus
   // names already in the box. Deduped case-insensitively among themselves too
@@ -174,6 +229,9 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
       setVersion(result.version)
       dirtyRef.current = false
       loadedClientRef.current = clientId
+      // A background refetch still in flight read the list from before this
+      // save; it must not land on top of what was just saved.
+      backgroundSeqRef.current += 1
     } catch (err) {
       if (err instanceof ApiError && err.code === 'stale_statement_accounts') {
         setError(err.message)
@@ -280,7 +338,7 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
           {error}
           {staleReload ? (
             <button type="button" className="link-button" onClick={reload}>
-              Reload
+              Reload (discards your unsaved changes)
             </button>
           ) : null}
         </p>

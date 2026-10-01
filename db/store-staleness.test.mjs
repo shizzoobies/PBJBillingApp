@@ -6654,13 +6654,32 @@ describe('statement dates box (file backend)', () => {
   })
 
   it('mints a fresh id for the second row when a client-supplied id repeats in the same payload', async () => {
-    const saved = await store.saveClientStatementAccounts('c-stmt-10', [
-      { id: 'stmt-aaaaaaaa', name: 'TD Bank 4920', dayOfMonth: 12 },
-      { id: 'stmt-aaaaaaaa', name: 'Amex 1108', dayOfMonth: 3 },
+    const [existing] = await store.saveClientStatementAccounts('c-stmt-10', [
+      { name: 'TD Bank 4920', dayOfMonth: 12 },
     ])
-    expect(saved[0].id).toBe('stmt-aaaaaaaa')
-    expect(saved[1].id).not.toBe('stmt-aaaaaaaa')
+    const saved = await store.saveClientStatementAccounts('c-stmt-10', [
+      { id: existing.id, name: 'TD Bank 4920', dayOfMonth: 12 },
+      { id: existing.id, name: 'Amex 1108', dayOfMonth: 3 },
+    ])
+    expect(saved[0].id).toBe(existing.id)
+    expect(saved[1].id).not.toBe(existing.id)
     expect(saved[1].id).toMatch(/^stmt-[0-9a-f]{8}$/)
+  })
+
+  // N7: a well-formed id that is not one of THIS client's current ids (here,
+  // another client's row) would hit the primary key — mint a fresh one.
+  it('mints a fresh id for a well-formed id that belongs to another client’s row', async () => {
+    const [other] = await store.saveClientStatementAccounts('c-stmt-10-other', [
+      { name: 'Chase 7712', dayOfMonth: 5 },
+    ])
+    const [saved] = await store.saveClientStatementAccounts('c-stmt-10-mine', [
+      { id: other.id, name: 'TD Bank 4920', dayOfMonth: 12 },
+    ])
+    expect(saved.id).not.toBe(other.id)
+    expect(saved.id).toMatch(/^stmt-[0-9a-f]{8}$/)
+    // The other client's row is untouched.
+    const theirs = await store.listClientStatementAccounts('c-stmt-10-other')
+    expect(theirs.map((row) => row.id)).toEqual([other.id])
   })
 
   // Important 2a: the stale-tab guard. `statementAccountsVersion` is a pure
@@ -6696,6 +6715,29 @@ describe('statement dates box (file backend)', () => {
       // Nothing was written — the original row is still there.
       const listed = await store.listClientStatementAccounts('c-stmt-12')
       expect(listed.map((row) => row.name)).toEqual(['TD Bank 4920'])
+    })
+
+    // N1, file backend: the compare and the write are one queue slot, so two
+    // saves holding the same version cannot both pass.
+    it('lets only one of two concurrent saves holding the same version win', async () => {
+      const first = await store.saveClientStatementAccounts('c-stmt-12b', [
+        { name: 'TD Bank 4920', dayOfMonth: 12 },
+      ])
+      const version = statementAccountsVersion(first)
+      const results = await Promise.allSettled([
+        store.saveClientStatementAccounts('c-stmt-12b', [{ name: 'Amex 1108', dayOfMonth: 3 }], version),
+        store.saveClientStatementAccounts('c-stmt-12b', [{ name: 'Chase 7712', dayOfMonth: 5 }], version),
+      ])
+      expect(results.map((result) => result.status)).toEqual(['fulfilled', 'rejected'])
+      expect(results[1].reason).toBeInstanceOf(StaleStatementAccountsError)
+      const listed = await store.listClientStatementAccounts('c-stmt-12b')
+      expect(listed.map((row) => row.name)).toEqual(['Amex 1108'])
+    })
+
+    it('hashes a list of tuples, so a delimiter inside a name cannot collide with another list', () => {
+      const a = [{ id: 'stmt-11111111', name: 'a|b', dayOfMonth: 1 }]
+      const b = [{ id: 'stmt-11111111|a', name: 'b', dayOfMonth: 1 }]
+      expect(statementAccountsVersion(a)).not.toBe(statementAccountsVersion(b))
     })
 
     it('skips the check when no expectedVersion is sent, so the API stays usable', async () => {
@@ -6796,48 +6838,65 @@ describe('statement dates box (postgres branch)', () => {
     expect(statement.params).toEqual(['c1'])
   })
 
-  it('mints a fresh id rather than trusting a malformed or repeated client-supplied one', async () => {
+  /** Answers the in-transaction select of this client's stored rows with
+   *  `rows`, leaving every other statement on the real fake so it still gets
+   *  recorded into `fake.statements` (the select itself is recorded too). */
+  function withStoredRows(fake, rows) {
+    const realConnect = fake.pool.connect.bind(fake.pool)
+    fake.pool.connect = async () => {
+      const client = await realConnect()
+      const realQuery = client.query.bind(client)
+      return {
+        ...client,
+        query: async (text, params) => {
+          const result = await realQuery(text, params)
+          if (/^select id, client_id, name, day_of_month, sort_order/i.test(String(text).trim())) {
+            return { rows }
+          }
+          return result
+        },
+      }
+    }
+  }
+
+  const storedRow = (id, name, day, order = 0) => ({
+    id,
+    client_id: 'c1',
+    name,
+    day_of_month: day,
+    sort_order: order,
+  })
+
+  it('mints a fresh id rather than trusting a malformed, repeated or foreign client-supplied one', async () => {
     const fake = fakePostgres()
+    withStoredRows(fake, [storedRow('stmt-aaaaaaaa', 'Existing', 1)])
     await postgresStore(fake).saveClientStatementAccounts('c1', [
       { id: 'not-a-real-id', name: 'TD Bank 4920', dayOfMonth: 12 },
       { id: 'stmt-aaaaaaaa', name: 'Amex 1108', dayOfMonth: 3 },
       { id: 'stmt-aaaaaaaa', name: 'Chase 7712', dayOfMonth: 5 },
+      // Well-formed but not one of c1's current ids (another client's row).
+      { id: 'stmt-bbbbbbbb', name: 'Visa 0042', dayOfMonth: 9 },
     ])
     const inserts = fake.matching(/^insert into client_statement_accounts/i)
-    expect(inserts).toHaveLength(3)
+    expect(inserts).toHaveLength(4)
     expect(inserts[0].params[0]).toMatch(/^stmt-[0-9a-f]{8}$/)
     expect(inserts[0].params[0]).not.toBe('not-a-real-id')
     expect(inserts[1].params[0]).toBe('stmt-aaaaaaaa')
     expect(inserts[2].params[0]).not.toBe('stmt-aaaaaaaa')
     expect(inserts[2].params[0]).toMatch(/^stmt-[0-9a-f]{8}$/)
+    expect(inserts[3].params[0]).not.toBe('stmt-bbbbbbbb')
+    expect(inserts[3].params[0]).toMatch(/^stmt-[0-9a-f]{8}$/)
   })
 
-  // Important 2a, postgres branch: the stale-tab guard reads the CURRENT
-  // stored list (a plain select on `this.pool`) before the transaction opens
-  // at all — a mismatch must refuse without ever calling `begin`.
+  // N1: the stale-tab guard runs INSIDE the transaction, behind a per-client
+  // advisory lock, so two tabs holding the same version cannot both pass. A
+  // bare pool query before `begin` (the old shape) let both through.
   describe('the staleness guard', () => {
-    /** Points the version-check SELECT at a canned "currently stored" row,
-     *  leaving the transaction's own queries (begin/delete/insert/commit) on
-     *  the real fake so they still get recorded into `fake.statements`. */
-    function withCurrentRow(fake, row) {
-      const realQuery = fake.pool.query.bind(fake.pool)
-      fake.pool.query = async (text, params) => {
-        if (/^select id, client_id, name, day_of_month, sort_order/i.test(String(text).trim())) {
-          return { rows: [row] }
-        }
-        return realQuery(text, params)
-      }
-    }
+    const stored = storedRow('stmt-11111111', 'TD Bank 4920', 12)
 
-    it('refuses before the transaction opens when expectedVersion no longer matches', async () => {
+    it('locks, re-selects inside the transaction, and rolls back with no delete or insert on a stale version', async () => {
       const fake = fakePostgres()
-      withCurrentRow(fake, {
-        id: 'stmt-11111111',
-        client_id: 'c1',
-        name: 'TD Bank 4920',
-        day_of_month: 12,
-        sort_order: 0,
-      })
+      withStoredRows(fake, [stored])
 
       await expect(
         postgresStore(fake).saveClientStatementAccounts(
@@ -6846,19 +6905,35 @@ describe('statement dates box (postgres branch)', () => {
           'not-the-current-version',
         ),
       ).rejects.toThrow(StaleStatementAccountsError)
-      expect(fake.matching(/^begin$/i)).toHaveLength(0)
+
+      const beginAt = fake.indexOf(/^begin$/i)
+      const lockAt = fake.indexOf(/pg_advisory_xact_lock\(hashtext\(\$1\)\)/i)
+      const selectAt = fake.indexOf(/^select id, client_id, name, day_of_month, sort_order/i)
+      const rollbackAt = fake.indexOf(/^rollback$/i)
+      expect(beginAt).toBeGreaterThan(-1)
+      expect(lockAt).toBeGreaterThan(beginAt)
+      expect(fake.statements[lockAt].params[0]).toContain('c1')
+      expect(selectAt).toBeGreaterThan(lockAt)
+      expect(fake.statements[selectAt].params).toEqual(['c1'])
+      expect(rollbackAt).toBeGreaterThan(selectAt)
+      expect(fake.matching(/^delete from client_statement_accounts/i)).toHaveLength(0)
       expect(fake.matching(/^insert into client_statement_accounts/i)).toHaveLength(0)
+      expect(fake.matching(/^commit$/i)).toHaveLength(0)
+    })
+
+    it('does the version check on the transaction client, never on the pool', async () => {
+      const fake = fakePostgres()
+      withStoredRows(fake, [stored])
+      const poolQuery = vi.spyOn(fake.pool, 'query')
+      await postgresStore(fake)
+        .saveClientStatementAccounts('c1', [{ name: 'Amex 1108', dayOfMonth: 3 }], 'nope')
+        .catch(() => {})
+      expect(poolQuery).not.toHaveBeenCalled()
     })
 
     it('proceeds with the transaction when expectedVersion matches the stored list', async () => {
       const fake = fakePostgres()
-      withCurrentRow(fake, {
-        id: 'stmt-11111111',
-        client_id: 'c1',
-        name: 'TD Bank 4920',
-        day_of_month: 12,
-        sort_order: 0,
-      })
+      withStoredRows(fake, [stored])
       const matching = statementAccountsVersion([
         { id: 'stmt-11111111', name: 'TD Bank 4920', dayOfMonth: 12 },
       ])
@@ -6869,6 +6944,16 @@ describe('statement dates box (postgres branch)', () => {
         matching,
       )
       expect(fake.matching(/^begin$/i)).toHaveLength(1)
+      expect(fake.matching(/^commit$/i)).toHaveLength(1)
+      expect(fake.matching(/^delete from client_statement_accounts/i)).toHaveLength(1)
+    })
+
+    it('locks even when no version is sent, and when the stored list is empty', async () => {
+      const fake = fakePostgres()
+      await postgresStore(fake).saveClientStatementAccounts('c1', [
+        { name: 'Amex 1108', dayOfMonth: 3 },
+      ])
+      expect(fake.indexOf(/pg_advisory_xact_lock/i)).toBeGreaterThan(fake.indexOf(/^begin$/i))
       expect(fake.matching(/^commit$/i)).toHaveLength(1)
     })
   })
