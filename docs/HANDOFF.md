@@ -25,7 +25,16 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-01, late morning):** `main` = `a064405` (+ this handoff), pushed,
+**State right now (2026-10-01, afternoon):** `main` = `67e50cb` (+ this handoff). A THIRD ship
+landed after the two below: the "Change covered dates" control, plus a one-time production
+fix that put Oct 13 - Nov 13 on every QuickBooks / Workforce line of the September drafts
+(third bullet group of the 2026-10-01 entry in section 5). Suite **4760 tests / 241 files**.
+The manifest is now at 204,121 bytes - 879 under the tripwire; TRIM IT BEFORE ANY MANIFEST
+EDIT. An invoice-controls audit is saved at `.superpowers/sdd/invoice-lever-audit.md`
+(git-ignored, this machine) and summarized in section 5; Alex has not yet picked what to
+build from it.
+
+**Earlier the same day (late morning):** `main` = `a064405` (+ handoff `5ead047`), pushed,
 deployed, `/health` 200 with that commit, voice agent re-provisioned. Suite **4722 tests /
 240 files**, green. Working tree clean. Two ships today on top of last night's queue run - read
 the 2026-10-01 entry at the top of section 5: the Plans/Packages tabs fix (`81ab2ae`) and the
@@ -478,6 +487,54 @@ with instructions rather than failing. Run it by hand after any print change.
 - **Pre-existing, raised with Alex, no decision yet:** the lower Print prints the live
   calculation, NOT the stored invoice, so lines edited on a draft in the month run do not appear
   on it. Brittany was told to use the row's Print for the real invoice.
+- **QuickBooks expenses bill FORWARD (Alex, 2026-10-01).** An invoice going out on the 1st
+  carries the window that STARTS on the 13th of that month: September invoices (sent Oct 1)
+  read October 13 - November 13. Brittany emailed that K & A read Sept 13 - Oct 13. Cause: the
+  FIRST invoice for an expense uses the seed window typed at setup (`resolveCoverageForPeriod`,
+  source `seed`); K & A had never been billed. Most QuickBooks expenses had no moving dates at
+  all, and Mind Body & Spirit had dates typed into the description.
+- **Production data fix, approved by Alex and RUN BY ALEX** (the auto-mode classifier blocked my
+  run): `scripts/prod/qbo-forward-2026-10.mjs` (trial by default, `--apply`, `--include-workforce`),
+  two runs at 17:14 and 17:15 UTC, before-snapshots in `docs/prod-snapshots/2026-10-01T17-1*`.
+  34 recurring lines on the September DRAFTS relabeled to Oct 13 - Nov 13 (39 of 39 now carry it),
+  39 of 40 expenses switched to moving dates (anchor 13, seed and the 2026-09 ledger entry set to
+  that window; an expense with an earlier ledger entry kept its seed), MBS description cleaned.
+  No amounts changed (38 invoices, $13,826.82 before and after). Left alone: Rivercity
+  Appraisal's Payroll Core (no September invoice). Undo is manual from the snapshots, newest
+  first. `recurring_reimbursements` rides the bulk workspace save, but the setup columns are in
+  the workspace fingerprint, so a stale tab is told to reload rather than overwrite this.
+- **"Change covered dates" control** (`6601fa0`, `557f10d`, `67e50cb`): every recurring line
+  that carries a window gets a quiet, collapsed control in the month-run editor (draft,
+  reviewed, sent; not void / paid / processing). It calls the same `confirmExpenseCoverage`
+  the flagged "Confirm the covered dates" block uses, so the line, its wording and the ledger
+  move together and next month steps from the new end. Rules added to that method: (1) a paid
+  or processing invoice is refused with the paid-lock sentence; (2) the cycle's anchor day
+  moves only when the END's day-of-month actually changed (a start-only edit of a window clamped
+  by a short month no longer re-anchors); (3) an UNFLAGGED line cannot be moved once a later
+  period is in the expense's ledger ("A later month has already been billed ..."); flagged
+  lines confirm in any order as before. UI: disabled with "Save your other changes first" while
+  the editor is dirty (a save reloads the editor from the server), rows locked while the save is
+  in flight. Rolled-back production trial of the real method on K & A's line passed.
+- **Known leftovers from that review (not blocking):** during a dates save the blurb, Add a
+  line and staged hour tags are still live (typing then is lost on the reload); Remove buttons
+  vanish for the duration of the save; a flagged BACKFILL confirm that moves the end day still
+  re-anchors the whole cycle; the control is offered on an earlier month and only the server
+  refuses it.
+- **Invoice-controls audit (read-only, 2026-10-01) - what she cannot adjust on one invoice.**
+  Ranked gaps: no preview of the PDF/email the client gets (the print sheet differs: no note, no
+  Due field, no Subtotal, but an address and the QuickBooks link); changes after Generate never
+  reach a draft and "Add a line" is always kind `custom` (prints outside the sections); no
+  per-invoice invoice date, terms or due date; hourly RATE not editable; the note placeholder
+  says it carries over but Generate blanks it; the carry-forward adjustment is never written
+  (`adjustmentForNextPeriod` has no writer, yet the manifest describes it); the client footer
+  note is not passed to the email. RISKS, not yet fixed: the "Payment link" button marks ANY
+  non-void invoice Sent, including an unreviewed draft, skipping review and the covered-dates
+  gate; "Void" has no confirm and is allowed on a processing invoice, after which the Stripe
+  payment is dropped; the month run treats every non-lock 409 as a retainer refusal. Full list
+  with file:line in `.superpowers/sdd/invoice-lever-audit.md`. Alex decides what to build.
+- **Watch:** `checklist-step-delete-scope.test.tsx > clears after 8 seconds` failed once under
+  a full run for a subagent and never for me (4 clean runs alone, 5 clean full verifies). No
+  failure message was captured; capture it before changing the test.
 - **When she reports a date or "due" on an invoice:** first pin down the SURFACE (list row, print
   sheet, PDF, email) and WHICH Print button. The row date is internal; the client copies say Due
   on receipt. This one was two interpretation gaps and one real default problem, not a bug in
