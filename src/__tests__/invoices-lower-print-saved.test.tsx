@@ -50,6 +50,17 @@ const client = {
   invoiceGroupByCategory: false,
 } as unknown as Client
 
+const master = {
+  id: 'client-master',
+  name: 'Master Group',
+  contact: '',
+  billingMode: 'hourly',
+  hourlyRate: 100,
+  planIds: [],
+  contactIds: [],
+  isBillingMaster: true,
+} as unknown as Client
+
 const timeEntries = [
   {
     id: 'e-aug',
@@ -72,7 +83,7 @@ const timeEntries = [
 vi.mock('../AppContext', () => ({
   useAppContext: () => ({
     data: {
-      clients: [client],
+      clients: [client, master],
       contacts: [],
       timeEntries,
       plans: [],
@@ -123,6 +134,10 @@ const serveStored = () =>
   mockList.mockImplementation(async (period?: string) => stored.get(period ?? '') ?? [])
 
 const printed = () => document.querySelector('.invoice-print')!.textContent ?? ''
+// The sheet AS IT WAS when print ran. Reading it afterwards would let a print
+// that fired before the right sheet had rendered pass.
+const sheets: string[] = []
+const sheet = () => sheets[0] ?? ''
 
 function renderInShell() {
   return render(
@@ -167,10 +182,15 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(new Date(2026, 9, 1, 9, 30, 0)) // Oct 1, 2026, local
   printInvoice.mockReset()
+  sheets.length = 0
+  printInvoice.mockImplementation(() => {
+    sheets.push(printed())
+  })
   mockList.mockReset()
   stored.clear()
   serveStored()
   page.billingPeriod = '2026-10'
+  client.billToClientId = null
 })
 
 afterEach(() => {
@@ -193,11 +213,11 @@ describe('the lower Print prints the saved invoice when the month has one', () =
 
     expect(screen.queryByRole('dialog', { name: 'Print invoice' })).toBeNull()
     // Only the stored invoice carries these; the live September is $300.00.
-    expect(printed()).toContain('$777.00')
-    expect(printed()).toContain('Corrected September wording')
-    expect(printed()).not.toContain('$300.00')
+    expect(sheet()).toContain('$777.00')
+    expect(sheet()).toContain('Corrected September wording')
+    expect(sheet()).not.toContain('$300.00')
     // Dated like the row's Print: the last day of the month it bills.
-    expect(printed()).toContain('September 30, 2026')
+    expect(sheet()).toContain('September 30, 2026')
   })
 
   it('says the status the way the month run does, and copes with no number', async () => {
@@ -238,8 +258,8 @@ describe('the lower Print prints the saved invoice when the month has one', () =
     ).toBeInTheDocument()
     await clickPrint(dialog)
 
-    expect(printed()).toContain('$777.00')
-    expect(printed()).not.toContain('$555.00')
+    expect(sheet()).toContain('$777.00')
+    expect(sheet()).not.toContain('$555.00')
   })
 
   it('takes the monthly invoice over a retainer issued the same month', async () => {
@@ -262,8 +282,8 @@ describe('the lower Print prints the saved invoice when the month has one', () =
       await dialog.findByText('Prints the saved invoice INV-2026-09-001 (Draft).'),
     ).toBeInTheDocument()
     await clickPrint(dialog)
-    expect(printed()).toContain('$777.00')
-    expect(printed()).not.toContain('Engagement retainer')
+    expect(sheet()).toContain('$777.00')
+    expect(sheet()).not.toContain('Engagement retainer')
   })
 
   it('does not count another client’s invoice', async () => {
@@ -284,8 +304,8 @@ describe('with no saved invoice the lower Print is the preview it always was', (
 
     expect(await dialog.findByText(NO_INVOICE)).toBeInTheDocument()
     await clickPrint(dialog)
-    expect(printed()).toContain('$300.00')
-    expect(printed()).toContain('Billing Period: September 2026')
+    expect(sheet()).toContain('$300.00')
+    expect(sheet()).toContain('Billing Period: September 2026')
   })
 
   it('treats a month holding only void invoices as having none', async () => {
@@ -296,19 +316,23 @@ describe('with no saved invoice the lower Print is the preview it always was', (
 
     expect(await dialog.findByText(NO_INVOICE)).toBeInTheDocument()
     await clickPrint(dialog)
-    expect(printed()).toContain('$300.00')
-    expect(printed()).not.toContain('$777.00')
+    expect(sheet()).toContain('$300.00')
+    expect(sheet()).not.toContain('$777.00')
   })
 
-  it('treats a month holding only a retainer as having no monthly invoice', async () => {
+  it('treats a month holding only a retainer as having no monthly invoice, and says so', async () => {
     stored.set('2026-09', [saved({ kind: 'retainer', number: 'INV-RET-001' })])
     renderInShell()
     const dialog = await openDialog()
     setMonth(dialog, '2026-09')
 
-    expect(await dialog.findByText(NO_INVOICE)).toBeInTheDocument()
+    expect(
+      await dialog.findByText(
+        'No monthly invoice has been generated for September 2026 yet. Prints a preview from current time and rates.',
+      ),
+    ).toBeInTheDocument()
     await clickPrint(dialog)
-    expect(printed()).toContain('$300.00')
+    expect(sheet()).toContain('$300.00')
   })
 })
 
@@ -329,9 +353,9 @@ describe('Customize on the page’s own month stays her one-off sheet', () => {
     ).toBeInTheDocument()
     await clickPrint(dialog)
 
-    expect(printed()).toContain('Custom review fee')
-    expect(printed()).not.toContain('$555.00')
-    expect(printed()).not.toContain('Corrected September wording')
+    expect(sheet()).toContain('Custom review fee')
+    expect(sheet()).not.toContain('$555.00')
+    expect(sheet()).not.toContain('Corrected September wording')
   })
 
   it('still prints another month’s saved invoice while Customize is open', async () => {
@@ -346,8 +370,8 @@ describe('Customize on the page’s own month stays her one-off sheet', () => {
     ).toBeInTheDocument()
     await clickPrint(dialog)
 
-    expect(printed()).toContain('$777.00')
-    expect(printed()).not.toContain('Custom review fee')
+    expect(sheet()).toContain('$777.00')
+    expect(sheet()).not.toContain('Custom review fee')
   })
 })
 
@@ -461,7 +485,106 @@ describe('when the lookup does not answer cleanly', () => {
     ).toBeInTheDocument()
 
     await clickPrint(dialog)
-    expect(printed()).toContain('$200.00')
-    expect(printed()).not.toContain('$777.00')
+    expect(sheet()).toContain('$200.00')
+    expect(sheet()).not.toContain('$777.00')
+  })
+})
+
+describe('Customize on the dialog’s month never waits on the lookup', () => {
+  it('says what prints when there is no saved invoice', async () => {
+    renderInShell()
+    await addCustomLine()
+
+    const dialog = await openDialog()
+    expect(await dialog.findByText('Prints this page with your Customize edits.')).toBeInTheDocument()
+    expect(dialog.queryByText(/No invoice has been generated/)).toBeNull()
+    await clickPrint(dialog)
+
+    expect(sheet()).toContain('Custom review fee')
+  })
+
+  it('keeps Print on, and prints the on-screen sheet, while the lookup is held', async () => {
+    renderInShell()
+    await addCustomLine()
+    let release: (rows: PersistedInvoice[]) => void = () => {}
+    mockList.mockImplementation(
+      () =>
+        new Promise<PersistedInvoice[]>((resolve) => {
+          release = resolve
+        }),
+    )
+
+    const dialog = await openDialog()
+    expect(dialog.getByText('Prints this page with your Customize edits.')).toBeInTheDocument()
+    expect(dialog.queryByText('Checking for a saved invoice...')).toBeNull()
+    expect(printButton(dialog)).toBeEnabled()
+
+    // Once the answer lands the sentence names the invoice she is NOT printing.
+    await act(async () => {
+      release([saved({ id: 'inv-oct', period: '2026-10', number: 'INV-2026-10-001' })])
+    })
+    expect(
+      await dialog.findByText(
+        'Prints this page with your Customize edits, not the saved invoice INV-2026-10-001.',
+      ),
+    ).toBeInTheDocument()
+    await clickPrint(dialog)
+    expect(sheet()).toContain('Custom review fee')
+    expect(sheet()).not.toContain('$777.00')
+  })
+
+  it('keeps Print on, with no alert, when the lookup fails', async () => {
+    renderInShell()
+    await addCustomLine()
+    mockList.mockImplementation(async () => {
+      throw new Error('network down')
+    })
+
+    const dialog = await openDialog()
+    expect(await dialog.findByText('Prints this page with your Customize edits.')).toBeInTheDocument()
+    expect(dialog.queryByRole('alert')).toBeNull()
+    expect(printButton(dialog)).toBeEnabled()
+    await clickPrint(dialog)
+    expect(sheet()).toContain('Custom review fee')
+  })
+
+  it('still holds Print for another month while Customize is open', async () => {
+    renderInShell()
+    await addCustomLine()
+    mockList.mockImplementation(() => new Promise<PersistedInvoice[]>(() => {}))
+
+    const dialog = await openDialog()
+    setMonth(dialog, '2026-09')
+    expect(dialog.getByText('Checking for a saved invoice...')).toBeInTheDocument()
+    expect(printButton(dialog)).toBeDisabled()
+  })
+})
+
+describe('a client billed on another client’s invoice', () => {
+  it('is told to print the master’s invoice, and still gets its own preview', async () => {
+    client.billToClientId = 'client-master'
+    renderInShell()
+    const dialog = await openDialog()
+    setMonth(dialog, '2026-09')
+
+    expect(
+      await dialog.findByText(
+        "Hourly Co is billed on Master Group's invoice. Print that invoice from the list above. This prints a preview of Hourly Co's own lines.",
+      ),
+    ).toBeInTheDocument()
+    await clickPrint(dialog)
+    expect(sheet()).toContain('$300.00')
+  })
+
+  it('names a saved invoice of its own when it has one', async () => {
+    client.billToClientId = 'client-master'
+    stored.set('2026-09', [saved({})])
+    renderInShell()
+    const dialog = await openDialog()
+    setMonth(dialog, '2026-09')
+
+    expect(
+      await dialog.findByText('Prints the saved invoice INV-2026-09-001 (Draft).'),
+    ).toBeInTheDocument()
   })
 })

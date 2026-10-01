@@ -909,6 +909,9 @@ export function InvoicesPage() {
         <PrintInvoiceDialog
           clientId={selectedClient.id}
           clientName={selectedClient.name}
+          billedOnName={
+            data.clients.find((entry) => entry.id === selectedClient.billToClientId)?.name ?? null
+          }
           initialPeriod={printDialog.period}
           pagePeriod={billingPeriod}
           customizeNote={customizing ? billingPeriodLabel : null}
@@ -1163,6 +1166,7 @@ export function InvoicesPage() {
 function PrintInvoiceDialog({
   clientId,
   clientName,
+  billedOnName,
   initialPeriod,
   pagePeriod,
   customizeNote,
@@ -1171,6 +1175,8 @@ function PrintInvoiceDialog({
 }: {
   clientId: string
   clientName: string
+  /** The billing master this client is billed on (`billToClientId`), if any. */
+  billedOnName: string | null
   initialPeriod: string
   /** The month the page itself is on, the one Customize edits belong to. */
   pagePeriod: string
@@ -1185,6 +1191,8 @@ function PrintInvoiceDialog({
   const [lookup, setLookup] = useState<{
     key: string
     saved: PersistedInvoice | null
+    /** The client's only live row that month is a retainer invoice. */
+    retainerOnly: boolean
     failed: boolean
   } | null>(null)
   useEffect(() => {
@@ -1196,14 +1204,14 @@ function PrintInvoiceDialog({
         // A live row only (void rows count as none), and the MONTHLY one when
         // the client also has a retainer invoice issued that month: the lower
         // Print is the month's invoice, and a retainer is another document.
-        const saved =
-          invoices.find(
-            (entry) =>
-              entry.clientId === clientId && entry.status !== 'void' && entry.kind !== 'retainer',
-          ) ?? null
-        if (!stale) setLookup({ key: lookupKey, saved, failed: false })
+        const live = invoices.filter(
+          (entry) => entry.clientId === clientId && entry.status !== 'void',
+        )
+        const saved = live.find((entry) => entry.kind !== 'retainer') ?? null
+        const retainerOnly = !saved && live.length > 0
+        if (!stale) setLookup({ key: lookupKey, saved, retainerOnly, failed: false })
       } catch {
-        if (!stale) setLookup({ key: lookupKey, saved: null, failed: true })
+        if (!stale) setLookup({ key: lookupKey, saved: null, retainerOnly: false, failed: true })
       }
     })()
     return () => {
@@ -1236,7 +1244,15 @@ function PrintInvoiceDialog({
       {customizeNote ? (
         <p className="modal-intro">Customize edits apply to {customizeNote} only.</p>
       ) : null}
-      {checking ? (
+      {customizedHere ? (
+        // Her Customize sheet prints whatever the lookup says, so the lookup
+        // neither holds Print nor shows its own progress or failure here.
+        <p className="modal-intro">
+          {saved
+            ? `Prints this page with your Customize edits, not the ${savedLabel}.`
+            : 'Prints this page with your Customize edits.'}
+        </p>
+      ) : checking ? (
         <p className="modal-intro">Checking for a saved invoice...</p>
       ) : answer?.failed ? (
         <p className="modal-intro" role="alert">
@@ -1244,14 +1260,17 @@ function PrintInvoiceDialog({
         </p>
       ) : saved ? (
         <p className="modal-intro">
-          {customizedHere
-            ? `Prints this page with your Customize edits, not the ${savedLabel}.`
-            : `Prints the ${savedLabel} (${INVOICE_STATUS_LABELS[saved.status] ?? saved.status}).`}
+          Prints the {savedLabel} ({INVOICE_STATUS_LABELS[saved.status] ?? saved.status}).
+        </p>
+      ) : answer && billedOnName ? (
+        <p className="modal-intro">
+          {clientName} is billed on {billedOnName}'s invoice. Print that invoice from the list above.
+          This prints a preview of {clientName}'s own lines.
         </p>
       ) : answer ? (
         <p className="modal-intro">
-          No invoice has been generated for {getBillingPeriodLabel(period)} yet. Prints a preview from
-          current time and rates.
+          No {answer.retainerOnly ? 'monthly ' : ''}invoice has been generated for{' '}
+          {getBillingPeriodLabel(period)} yet. Prints a preview from current time and rates.
         </p>
       ) : null}
       <div className="button-row">
@@ -1261,7 +1280,7 @@ function PrintInvoiceDialog({
         <button
           type="button"
           className="primary-action"
-          disabled={!valid || !answer || answer.failed}
+          disabled={!valid || (!customizedHere && (!answer || answer.failed))}
           onClick={() => onPrint(period, customizedHere ? null : saved)}
         >
           Print
