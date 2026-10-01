@@ -14,6 +14,7 @@ import {
   EntryTagError,
   INVOICE_SELECT_COLUMNS,
   InvoiceLockedError,
+  InvoicePaymentProcessingError,
   MAX_LISTED_PENDING_NOTES,
   ManualPaymentError,
   NothingToPushError,
@@ -4983,7 +4984,42 @@ describe('voidUnsentInvoicesForPeriod (file backend)', () => {
 
   it('reports nothing voided for a month with no unsent invoices', async () => {
     await seedInvoices([invoice('sent', { status: 'sent' })])
-    expect(await store.voidUnsentInvoicesForPeriod('2026-08')).toEqual({ voided: 0, ids: [] })
+    expect(await store.voidUnsentInvoicesForPeriod('2026-08')).toEqual({
+      voided: 0,
+      ids: [],
+      clearing: 0,
+    })
+  })
+
+  // "Void & regenerate" never voided a processing invoice (only draft/reviewed
+  // are in its set); what it did NOT do was say so. It now counts them so the
+  // month's result can name how many were left alone because a payment is
+  // clearing.
+  it('leaves an invoice with a clearing payment untouched, and reports it', async () => {
+    await seedInvoices([
+      invoice('clearing', { status: 'processing' }),
+      invoice('draft', { status: 'draft' }),
+      invoice('paid', { status: 'paid' }),
+      // Another month's processing invoice is not this month's business.
+      invoice('other-month', { period: '2026-07', status: 'processing' }),
+    ])
+    const before = await readFile(localDataPath, 'utf8')
+
+    const result = await store.voidUnsentInvoicesForPeriod('2026-08')
+
+    expect(result).toEqual({ voided: 1, ids: ['draft'], clearing: 1 })
+    expect(await storedStatuses()).toEqual({
+      clearing: 'processing',
+      draft: 'void',
+      paid: 'paid',
+      'other-month': 'processing',
+    })
+    // The processing invoice's own row is byte-for-byte what it was.
+    const after = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const was = JSON.parse(before)
+    expect(after.invoices.find((row) => row.id === 'clearing')).toEqual(
+      was.invoices.find((row) => row.id === 'clearing'),
+    )
   })
 })
 
@@ -11516,6 +11552,54 @@ describe('retainer lifecycle edges on the postgres branch', () => {
 })
 
 /**
+ * A bank payment that is still clearing cannot be voided — the Postgres half of
+ * the rule the file-backend lock tests pin (cardinal rule 1: both backends).
+ */
+describe('voiding while a bank payment is clearing (postgres branch)', () => {
+  const processing = { ...existingInvoice, status: 'processing' }
+
+  it('refuses the void and issues no write at all', async () => {
+    const fake = fakePostgres({ invoices: [{ ...processing }] })
+
+    const error = await postgresStore(fake)
+      .updateInvoice('inv-1', { status: 'void' })
+      .then(() => null, (thrown) => thrown)
+
+    expect(error).toBeInstanceOf(InvoicePaymentProcessingError)
+    expect(error.code).toBe('invoice_payment_processing')
+    expect(error.message).toBe(
+      'A bank payment is still clearing on this invoice. Wait until it is paid or fails, then void it.',
+    )
+    // Nothing written: no UPDATE, no transaction, no ledger release.
+    expect(fake.matching(/^update\b/i)).toHaveLength(0)
+    expect(fake.matching(/^(begin|commit)$/i)).toHaveLength(0)
+    expect(fake.matching(/^(insert|delete)\b/i)).toHaveLength(0)
+  })
+
+  it('still voids a paid invoice', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice, status: 'paid' }] })
+
+    await postgresStore(fake).updateInvoice('inv-1', { status: 'void' })
+
+    const [write] = fake.matching(/^update invoices\s+set line_items/i)
+    expect(write).toBeTruthy()
+    expect(write.params[0]).toBe('inv-1')
+    expect(write.params[6]).toBe('void')
+  })
+
+  it('leaves a clearing invoice out of the month void and counts it', async () => {
+    const fake = fakePostgres({ invoices: [{ ...processing }] })
+
+    const result = await postgresStore(fake).voidUnsentInvoicesForPeriod('2026-08')
+
+    expect(result.clearing).toBe(1)
+    // The void statement itself still names only draft and reviewed.
+    const [voidStatement] = fake.matching(/set status = 'void'/i)
+    expect(voidStatement.text).toMatch(/status in \('draft', 'reviewed'\)/i)
+  })
+})
+
+/**
  * `read()`'s materializer write-back is GUARDED.
  *
  * The write-back is a full bulk save (wipe-and-reinsert of every workspace
@@ -15529,6 +15613,27 @@ describe('the paid lock (file backend)', () => {
     const result = await store.updateInvoice('inv-paid', { status: 'void' })
     expect(result).not.toBeNull()
     expect((await stored('inv-paid')).status).toBe('void')
+  })
+
+  // THE ONE VOID THE ESCAPE HATCH DOES NOT REACH. A bank payment that is still
+  // clearing would arrive against a void invoice, which `applyInvoicePayment`
+  // ignores — money against no live invoice, with nothing saying so.
+  it('refuses voiding an invoice whose bank payment is still clearing, and writes NOTHING', async () => {
+    const before = await readFile(localDataPath, 'utf8')
+
+    const error = await store
+      .updateInvoice('inv-processing', { status: 'void' })
+      .then(() => null, (thrown) => thrown)
+    expect(error).toBeInstanceOf(InvoicePaymentProcessingError)
+    expect(error.code).toBe('invoice_payment_processing')
+    expect(error.message).toBe(
+      'A bank payment is still clearing on this invoice. Wait until it is paid or fails, then void it.',
+    )
+
+    // Not just the status: the whole stored workspace — ledger, retainer links,
+    // review events — is byte-for-byte what it was.
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+    expect((await stored('inv-processing')).status).toBe('processing')
   })
 
   // THE DELIBERATE BOUNDARY. Nobody has paid a sent invoice yet, and correcting

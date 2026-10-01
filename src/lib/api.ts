@@ -4144,6 +4144,8 @@ export async function regenerateInvoicesRequest(period: string) {
   return (await response.json()) as {
     period: string
     voided: number
+    /** Invoices left alone because a bank payment is still clearing on them. */
+    clearing?: number
     created: PersistedInvoice[]
     /**
      * `billedToClientId` rides along with the `billed-to-other` reason: the

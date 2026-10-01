@@ -12,6 +12,7 @@ import {
   EntryTagError,
   InvoiceAiReviewError,
   InvoiceLockedError,
+  InvoicePaymentProcessingError,
   ManualPaymentError,
   NothingToPushError,
   PackageApplyError,
@@ -5185,6 +5186,12 @@ const server = createServer(async (request, response) => {
           sendJson(response, 409, { error: 'invoice_locked', message: error.message })
           return
         }
+        // A void aimed at an invoice whose bank payment is still clearing.
+        // Nothing was written; the sentence says what to wait for.
+        if (error instanceof InvoicePaymentProcessingError) {
+          sendJson(response, 409, { error: 'invoice_payment_processing', message: error.message })
+          return
+        }
         // A scope re-tag the invoice will not carry — it has gone out, or an
         // entry id in the body is not this invoice's month and client. Same
         // treatment as the three above: a sentence, and NOTHING was written, so
@@ -5570,6 +5577,7 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, {
         period: regenPeriod,
         voided: voided.voided,
+        clearing: voided.clearing ?? 0,
         created: rebuilt.created,
         skipped: rebuilt.skipped,
       })

@@ -68,6 +68,7 @@ import {
   RETAINER_LABEL,
   invoiceLockMessage,
   invoiceLockRefusal,
+  invoiceVoidRefusal,
   normalizeAdhocMode,
   normalizeTimeBreakdownMode,
   retainerCreditAmount,
@@ -910,6 +911,19 @@ export class InvoiceLockedError extends Error {
   constructor(message) {
     super(message)
     this.name = 'InvoiceLockedError'
+  }
+}
+
+/**
+ * A void aimed at an invoice whose bank payment is still clearing — see
+ * `invoiceVoidRefusal` in lib/invoice-lines.js. Carries its own `code` so the
+ * route can answer with it. Thrown BEFORE any write.
+ */
+export class InvoicePaymentProcessingError extends Error {
+  constructor(message, code = 'invoice_payment_processing') {
+    super(message)
+    this.name = 'InvoicePaymentProcessingError'
+    this.code = code
   }
 }
 
@@ -12714,7 +12728,9 @@ export class AppDataStore {
    * Only `draft` and `reviewed` are touched, and only in this period. Anything
    * that has left the building — `sent`, `processing`, `paid`, `overdue` — is
    * the client's copy of a promise and must never be rewritten behind their
-   * back; an already-`void` row has nothing left to void. The partial unique
+   * back; an already-`void` row has nothing left to void. The result's
+   * `clearing` counts the monthly invoices left alone because a bank payment is
+   * still clearing on them, so the page can say so. The partial unique
    * index allows any number of voids per (client, period), so the generation
    * pass that follows is free to insert a fresh live invoice for each one.
    *
@@ -12732,13 +12748,18 @@ export class AppDataStore {
     // Which expenses these invoices had claimed windows for, read BEFORE the
     // void — the lines survive the status change, but reading first keeps the
     // release scoped to exactly the invoices this pass touches.
-    const releasing = this._coveredExpenseIds(
-      (await this.listInvoices({ period })).filter(
-        (invoice) =>
-          (invoice.kind ?? 'monthly') === 'monthly' &&
-          (invoice.status === 'draft' || invoice.status === 'reviewed'),
-      ),
+    const monthly = (await this.listInvoices({ period })).filter(
+      (invoice) => (invoice.kind ?? 'monthly') === 'monthly',
     )
+    const releasing = this._coveredExpenseIds(
+      monthly.filter((invoice) => invoice.status === 'draft' || invoice.status === 'reviewed'),
+    )
+    // Invoices this pass leaves alone because a bank payment is still clearing
+    // on them — a void would send that money to no live invoice (see
+    // `invoiceVoidRefusal`). They were never in the draft/reviewed set below;
+    // counting them is what lets the page say so instead of leaving her to
+    // wonder why that client was not rebuilt.
+    const clearing = monthly.filter((invoice) => invoice.status === 'processing').length
 
     if (this.pool) {
       const dbClient = await this.pool.connect()
@@ -12766,7 +12787,7 @@ export class AppDataStore {
           await this._clearCoverageLedgerForPeriod(period, releasing, { dbClient })
         }
         await dbClient.query('COMMIT')
-        return { voided: ids.length, ids }
+        return { voided: ids.length, ids, clearing }
       } catch (error) {
         try {
           await dbClient.query('ROLLBACK')
@@ -12813,7 +12834,7 @@ export class AppDataStore {
       }
       await writeFile(localDataPath, JSON.stringify(data, null, 2))
     }
-    return { voided: ids.length, ids }
+    return { voided: ids.length, ids, clearing }
   }
 
   /**
@@ -13160,6 +13181,12 @@ export class AppDataStore {
     // PATCH route is reachable with a stale tab, a replayed request, or curl.
     const lockRefusal = invoiceLockRefusal(current, patch)
     if (lockRefusal) throw new InvoiceLockedError(lockRefusal)
+
+    // The one status the void escape hatch does NOT reach: a bank payment that
+    // is still clearing. Same position and same reason as the lock above — it is
+    // a fact about the invoice, and every route that voids goes through here.
+    const voidRefusal = invoiceVoidRefusal(current, patch)
+    if (voidRefusal) throw new InvoicePaymentProcessingError(voidRefusal.message, voidRefusal.code)
 
     // The hours panel beside the invoice stages her scope decisions and sends
     // them with the lines they moved. Read HERE, above the backend split and

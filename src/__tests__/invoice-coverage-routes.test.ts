@@ -177,6 +177,45 @@ describe('the invoice PATCH route answers a locked invoice with a sentence', () 
 })
 
 /**
+ * The clearing-payment void refusal's glue. The rule itself is exercised, both
+ * backends, in db/store-staleness.test.mjs and lib/invoice-paid-lock.test.mjs;
+ * what can rot HERE is the translation of the store's error into the 409 the
+ * page shows beside the buttons. Same caveat as above: wiring, not behavior.
+ */
+describe('the invoice PATCH route refuses a void while a payment is clearing', () => {
+  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 5000)
+
+  it('answers 409 invoice_payment_processing with the store sentence', () => {
+    const at = block.indexOf('error instanceof InvoicePaymentProcessingError')
+    expect(at).toBeGreaterThan(-1)
+    const branch = block.slice(at, at + 260)
+    expect(branch).toContain('409')
+    expect(branch).toContain("error: 'invoice_payment_processing'")
+    expect(branch).toContain('message: error.message')
+  })
+
+  it('branches before the catch-all 500', () => {
+    const refused = block.indexOf('error instanceof InvoicePaymentProcessingError')
+    const fallback = block.indexOf("error: 'invoice_update_failed'")
+    expect(refused).toBeGreaterThan(-1)
+    expect(fallback).toBeGreaterThan(-1)
+    expect(refused).toBeLessThan(fallback)
+  })
+
+  it('imports the error class it branches on', () => {
+    expect(serverSource).toMatch(
+      /import \{[\s\S]*?InvoicePaymentProcessingError,[\s\S]*?\} from '\.\/db\/store\.js'/,
+    )
+  })
+
+  // "Void & regenerate" reports how many invoices it left alone for this reason.
+  it('the regenerate route passes the clearing count to the page', () => {
+    const regen = routeBlock(/normalizedPath === '\/api\/invoices\/regenerate'/, 4500)
+    expect(regen).toContain('clearing: voided.clearing')
+  })
+})
+
+/**
  * The manual mark-paid glue — featreq-602d2c6e. Behavior is exercised on the
  * store (db/store-staleness.test.mjs); what can rot here is the wiring: owner
  * gate, the 409 sentence, and above all the SESSION EXPIRY — the one step that

@@ -1074,6 +1074,9 @@ export function InvoiceMonthRun({
       if (result.created.length > 0) setRatingPollStartedAt(Date.now())
       // 'already-generated' after a regenerate means the client's live invoice
       // was one of the ones we deliberately left alone.
+      const clearing = result.clearing ?? 0
+      // A client whose invoice has a payment clearing is also 'already-generated',
+      // so those are counted once, in their own sentence.
       const leftAlone = result.skipped.filter((row) => row.reason === 'already-generated').length
       const nothingToBill = result.skipped.filter((row) => row.reason === 'nothing-to-bill').length
       const optedOutCount = result.skipped.filter((row) => row.reason === 'opted-out').length
@@ -1081,8 +1084,11 @@ export function InvoiceMonthRun({
         `Voided ${result.voided} and rebuilt ${result.created.length} invoice${
           result.created.length === 1 ? '' : 's'
         }.` +
-          (leftAlone > 0
-            ? ` ${leftAlone} sent or paid invoice${leftAlone === 1 ? '' : 's'} left alone.`
+          (leftAlone - clearing > 0
+            ? ` ${leftAlone - clearing} sent or paid invoice${leftAlone - clearing === 1 ? '' : 's'} left alone.`
+            : '') +
+          (clearing > 0
+            ? ` ${clearing} invoice${clearing === 1 ? '' : 's'} left alone because a bank payment is still clearing.`
             : '') +
           (nothingToBill > 0
             ? ` ${nothingToBill} client${nothingToBill === 1 ? '' : 's'} had nothing to bill.`
@@ -1198,7 +1204,10 @@ export function InvoiceMonthRun({
         // Whatever the server knows about that retainer, we now do not. Re-ask
         // before offering it to anybody else.
         setRetainerToken((token) => token + 1)
-      } else {
+      } else if (code !== 'invoice_payment_processing') {
+        // A void refused because a bank payment is clearing is said by the
+        // editor beside its buttons — the banner above the whole list would
+        // repeat it without saying which invoice it is about.
         setError(message)
       }
       return { ok: false, message, retainer: refusedRetainer, locked, code }
@@ -2678,6 +2687,27 @@ function InvoiceEditor({
     }
   }
 
+  /**
+   * Void asks first, in words that say what it means for THIS invoice: a draft
+   * was never seen by the client, a sent one has a live payment link that dies,
+   * and a paid one is not refunded. A void is permanent, so there is no
+   * "undo" to lean on. Declining sends nothing. A refusal from the server (a
+   * bank payment still clearing) lands in the slot beside the buttons.
+   */
+  const voidInvoice = async () => {
+    const who = `${invoice.number ?? 'this invoice'} for ${clientName}`
+    const sentence =
+      invoice.status === 'paid'
+        ? `Void ${who}? This invoice is PAID. Voiding it does not refund the client and takes it out of your paid totals. This cannot be undone.`
+        : invoice.status === 'draft' || invoice.status === 'reviewed'
+          ? `Void ${who}? It was never sent. Generate the month again if you still need to bill it.`
+          : `Void ${who}? The client already has this invoice by email, and their payment link will stop working. This cannot be undone.`
+    if (!window.confirm(sentence)) return
+    setRetainerError(null)
+    const result = await onPatch({ status: 'void' })
+    if (!result.ok) setRetainerError(result.message)
+  }
+
   const unmarkPaid = async () => {
     const confirmed = window.confirm(
       `Undo the manual payment mark on ${invoice.number}?\n\nIt goes back to ${invoice.sentAt ? 'Sent' : 'Reviewed'} and can be edited and collected again.`,
@@ -3409,9 +3439,15 @@ function InvoiceEditor({
             <button
               type="button"
               className="secondary-action"
-              disabled={busy}
-              title="Void this invoice — it stays on the record and can be rebuilt by generating again"
-              onClick={() => void onPatch({ status: 'void' })}
+              disabled={busy || scope.previewMode || invoice.status === 'processing'}
+              title={
+                scope.previewMode
+                  ? 'Disabled in preview mode'
+                  : invoice.status === 'processing'
+                    ? 'A bank payment is still clearing on this invoice'
+                    : 'Void this invoice — it stays on the record and can be rebuilt by generating again'
+              }
+              onClick={() => void voidInvoice()}
             >
               Void
             </button>

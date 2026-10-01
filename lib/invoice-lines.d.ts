@@ -265,6 +265,13 @@ export function invoiceLockRefusal(
     | null
     | undefined,
 ): string | null
+export const INVOICE_PAYMENT_PROCESSING_CODE: 'invoice_payment_processing'
+export const INVOICE_PAYMENT_PROCESSING_MESSAGE: string
+/** A void aimed at an invoice whose bank payment is clearing — null when it may go ahead. */
+export function invoiceVoidRefusal(
+  invoice: { status?: string } | null | undefined,
+  patch: { status?: unknown } | null | undefined,
+): { code: string; message: string } | null
 
 /** The four staff tiers a line may print under (see lib/staff-tiers.js). */
 export type InvoiceRoleTier = 'CFO' | 'Accountant' | 'Bookkeeper' | 'Other'
