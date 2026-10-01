@@ -16,6 +16,7 @@ import {
   NothingToPushError,
   PackageApplyError,
   ProposalStateError,
+  PushConflictError,
   RateVersionError,
   RetainerCreditError,
   TimeEntrySplitError,
@@ -9566,6 +9567,13 @@ const server = createServer(async (request, response) => {
           sendJson(response, 409, { error: 'NOTHING_TO_PUSH', message: error.message })
           return
         }
+        // The split lost a race it could not see coming (a unique violation on
+        // the occurrence index: another request already took this cycle's
+        // identity). A clean conflict, not a 500.
+        if (error instanceof PushConflictError) {
+          sendJson(response, 409, { error: 'PUSH_CONFLICT', message: error.message })
+          return
+        }
         throw error
       }
       if (!pushResult || !pushResult.checklist) {
@@ -9609,7 +9617,9 @@ const server = createServer(async (request, response) => {
         })
         for (const userId of recipients) {
           await notify(appDataStore, userId, 'checklist_pushed', {
-            checklistId,
+            // The checklist that now holds the open work (the new row on a
+            // split, the same row otherwise) - not the done-only original.
+            checklistId: pushed.id,
             clientId: checklist.clientId,
             message:
               `${pusherName} pushed "${checklist.title}" to ${validatedPush.newDueDate} ` +
@@ -9960,8 +9970,13 @@ const server = createServer(async (request, response) => {
       // "Waiting on a task" notifications: if this toggle just COMPLETED the
       // whole checklist, notify the assignee of any step elsewhere that was
       // flagged waiting on it (so they know they're unblocked).
+      // A done-only original that a split push left behind (it points forward
+      // at the row holding the open work) is a record, not the task the
+      // waiters are waiting on - re-checking one of its steps announces nothing.
       const justCompleted =
-        updatedChecklist.items.length > 0 && updatedChecklist.items.every((entry) => entry.done)
+        updatedChecklist.items.length > 0 &&
+        updatedChecklist.items.every((entry) => entry.done) &&
+        !updatedChecklist.pushedToChecklistId
       if (justCompleted) {
         const allData = await appDataStore.read()
         const notified = new Set()

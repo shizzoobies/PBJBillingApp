@@ -91,6 +91,7 @@ import {
   formatHoursMinutes,
   getChecklistFrequencyLabel,
   groupChecklist,
+  isChecklistItemDone,
   itemDeletionKey,
   lastDayOfCurrentMonth,
   localDateOnly,
@@ -113,6 +114,19 @@ const TASK_AREAS: Array<{ key: TaskArea; label: string }> = [
   { key: 'completed', label: 'Completed' },
 ]
 type CreateMode = 'one-time' | 'repeating' | null
+
+/**
+ * A date-only string as a short label, or null when it is empty or not a real
+ * date. The push dialog's date field can be cleared or half-typed, and
+ * `Intl.DateTimeFormat.format` throws a RangeError on an Invalid Date - which
+ * took the whole page down - so every caller that formats a date the user is
+ * still typing goes through here.
+ */
+function shortDateOrNull(dateOnly: string | null | undefined): string | null {
+  if (!dateOnly) return null
+  const parsed = new Date(`${dateOnly}T12:00:00`)
+  return Number.isNaN(parsed.getTime()) ? null : shortDate.format(parsed)
+}
 
 function parseBulkLines(value: string): string[] {
   return value
@@ -1953,7 +1967,8 @@ function SkipTaskDialog({
           // a checklist can carry a mix of done and open steps.
           <>
             {doneStepCount} done step(s) stay here as a completed record; {openStepCount} open
-            step(s) move to {shortDate.format(new Date(`${newDueDate}T12:00:00`))}.
+            step(s) move to {shortDateOrNull(newDueDate) ?? 'the new date'}. A step with some
+            sub-steps done moves whole.
           </>
         ) : (
           <>
@@ -2125,6 +2140,10 @@ export function ChecklistCard({
   const todayDateOnly = localDateOnly()
   const completed = checklist.items.filter((item) => item.done).length
   const allDone = checklist.items.length > 0 && completed === checklist.items.length
+  // The push dialog counts with the SAME rule the server splits a push by
+  // (lib/checklist-step-done.js): a step marked done with an unchecked
+  // sub-step is still open, and moves.
+  const doneStepCount = checklist.items.filter((item) => isChecklistItemDone(item)).length
   const viewerIds = checklist.viewerIds ?? []
   const editorIds = checklist.editorIds ?? []
   const isAssignee = checklist.assigneeId === activeEmployeeId
@@ -2180,8 +2199,12 @@ export function ChecklistCard({
   // excluded too (featreq-fbab3370): every step is already done, so there is
   // no open work left to carry forward and the server refuses with
   // NOTHING_TO_PUSH.
+  // "Complete" here is the server's rule (a done step with an unchecked
+  // sub-step is still open), not the raw flag.
+  const hasOpenSteps =
+    checklist.items.length === 0 || doneStepCount < checklist.items.length
   const canPush =
-    !checklist.projected && !allDone && canOfferPush({ checklist, canWrite: canEditStructure })
+    !checklist.projected && hasOpenSteps && canOfferPush({ checklist, canWrite: canEditStructure })
   // The push date the dialog pre-fills: this task's own next cycle. A missing
   // template (a stray instance whose repeating setup was deleted) falls back to
   // a month, which is what the frequency helper defaults to anyway.
@@ -2197,6 +2220,14 @@ export function ChecklistCard({
     checklist.cycleDueDate && checklist.cycleDueDate !== checklist.dueDate
       ? checklist.cycleDueDate
       : null
+  // A split push leaves the done steps here as a completed record and moves the
+  // open ones to a new checklist. Say so on the record, with the date the open
+  // work now sits on when that row is in local data.
+  const pushedToDate = checklist.pushedToChecklistId
+    ? shortDateOrNull(
+        contextData.checklists.find((entry) => entry.id === checklist.pushedToChecklistId)?.dueDate,
+      )
+    : null
   // When the owner adds a task to a live RECURRING instance, ask whether it's
   // for this checklist only or the whole series. Holds the pending label(s)
   // until they pick; null = no prompt open.
@@ -2405,6 +2436,13 @@ export function ChecklistCard({
                     Pushed · was {shortDate.format(new Date(`${pushedFromDate}T12:00:00`))}
                   </span>
                 ) : null}
+                {checklist.pushedToChecklistId ? (
+                  <span className="checklist-pushed-flag">
+                    {pushedToDate
+                      ? `Pushed · open steps moved to ${pushedToDate}`
+                      : 'Pushed · open steps moved'}
+                  </span>
+                ) : null}
               </span>
             </>
           )}
@@ -2517,8 +2555,8 @@ export function ChecklistCard({
           title={checklist.title}
           currentDueDate={checklist.dueDate}
           defaultNewDueDate={pushDefaultDueDate}
-          doneStepCount={completed}
-          openStepCount={checklist.items.length - completed}
+          doneStepCount={doneStepCount}
+          openStepCount={checklist.items.length - doneStepCount}
           onCancel={() => setSkipOpen(null)}
           onConfirm={async ({ category, explanation, newDueDate }) => {
             if (skipOpen === 'push') {

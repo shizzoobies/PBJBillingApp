@@ -241,7 +241,7 @@ describe('the push endpoint answers a split the way the spec promises', () => {
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../server.js'),
     'utf8',
   )
-  const routeBlock = (startPattern: RegExp, length = 6200): string => {
+  const routeBlock = (startPattern: RegExp, length = 9000): string => {
     const at = serverSource.search(startPattern)
     expect(at, `route not found: ${startPattern}`).toBeGreaterThan(-1)
     return serverSource.slice(at, at + length)
@@ -262,5 +262,22 @@ describe('the push endpoint answers a split the way the spec promises', () => {
     const block = routeBlock(/const checklistPushMatch = normalizedPath\.match/)
     expect(block).toContain('sendJson(response, 200, { checklist: pushed, completed })')
     expect(block).not.toMatch(/sendJson\(response, 200, \{ checklist: pushed, skip:/)
+  })
+
+  it('maps a PushConflictError (a lost race on the occurrence index) to 409 PUSH_CONFLICT', () => {
+    const block = routeBlock(/const checklistPushMatch = normalizedPath\.match/)
+    expect(block).toContain('error instanceof PushConflictError')
+    expect(block).toContain("sendJson(response, 409, { error: 'PUSH_CONFLICT', message: error.message })")
+  })
+
+  it('names the checklist that holds the open work on the notification', () => {
+    const block = routeBlock(/const checklistPushMatch = normalizedPath\.match/, 9000)
+    const notice = block.slice(block.indexOf("'checklist_pushed', {"))
+    expect(notice).toMatch(/checklistId:\s*pushed\.id/)
+  })
+
+  it('does not announce "waiting_cleared" when a step of a pushed-away original is re-checked', () => {
+    const block = routeBlock(/const justCompleted =/, 600)
+    expect(block).toContain('!updatedChecklist.pushedToChecklistId')
   })
 })

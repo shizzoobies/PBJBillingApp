@@ -17,6 +17,7 @@ import {
   NothingToPushError,
   PackageApplyError,
   ProposalStateError,
+  PushConflictError,
   RateVersionError,
   mapChecklistItemRow,
   mapClientRow,
@@ -991,11 +992,75 @@ function fakePostgres({
   checklistRows = [],
   pushChecklistRows = [],
   pushItemRows = [],
+  // Sub-step waits on another checklist's steps: the rows the split's
+  // `position(<id> in sub_items::text)` read answers with.
+  subWaiterRows = [],
+  // Teach the fake the v3 instance index. Off by default so no other test
+  // pays for it; the split-push tests turn it on.
+  simulateChecklistUniqueness = false,
+  // { pattern, error }: throw `error` on the first statement matching `pattern`.
+  failOn = null,
 } = {}) {
   const statements = []
+  // The instance unique index
+  // (template_id, coalesce(cycle_due_date, due_date), stage_index)
+  //   where deleted_at is null and template_id is not null
+  //     and pushed_to_checklist_id is null
+  // simulated just far enough to refuse the wrong statement ORDER: a live row
+  // is one whose pushed_to is null; a second live row on the same tuple raises
+  // 23505, exactly as Postgres does (a unique index is never deferrable).
+  let liveRows = pushChecklistRows.map((row) => ({
+    id: row.id,
+    template_id: row.template_id ?? null,
+    cycle: row.cycle_due_date ?? row.due_date,
+    stage_index: row.stage_index ?? 0,
+    pushed_to: row.pushed_to_checklist_id ?? null,
+  }))
+  let liveRowsAtBegin = liveRows
+  const simulateUniqueness = (trimmed, params) => {
+    if (/^begin$/i.test(trimmed)) {
+      liveRowsAtBegin = liveRows.map((row) => ({ ...row }))
+    } else if (/^rollback$/i.test(trimmed)) {
+      liveRows = liveRowsAtBegin
+    } else if (/^update checklists\s+set pushed_at = now\(\), pushed_by = \$2, pushed_to_checklist_id = \$3/i.test(trimmed)) {
+      const row = liveRows.find((entry) => entry.id === params[0])
+      if (row) row.pushed_to = params[2]
+    } else if (/^insert into checklists \(/i.test(trimmed)) {
+      const columns = /^insert into checklists \(([\s\S]*?)\)\s*values/i
+        .exec(trimmed)[1]
+        .split(',')
+        .map((column) => column.trim())
+      const at = (name) => params[columns.indexOf(name)]
+      const fresh = {
+        id: at('id'),
+        template_id: at('template_id') ?? null,
+        cycle: at('cycle_due_date') ?? at('due_date'),
+        stage_index: at('stage_index') ?? 0,
+        pushed_to: null,
+      }
+      const clash =
+        fresh.template_id !== null &&
+        liveRows.some(
+          (row) =>
+            row.template_id === fresh.template_id &&
+            row.cycle === fresh.cycle &&
+            row.stage_index === fresh.stage_index &&
+            row.pushed_to === null,
+        )
+      if (clash) {
+        throw Object.assign(
+          new Error('duplicate key value violates unique constraint "checklists_template_instance_uniq_v3"'),
+          { code: '23505' },
+        )
+      }
+      liveRows = [...liveRows, fresh]
+    }
+  }
   const record = (text, params) => {
     const trimmed = String(text).trim()
     statements.push({ text: trimmed, params })
+    if (failOn && failOn.pattern.test(trimmed)) throw failOn.error
+    if (simulateChecklistUniqueness) simulateUniqueness(trimmed, params)
     // The workspace fingerprint (lib/workspace-version.js) — read()'s
     // pre-capture and write()'s in-transaction re-check issue the same SQL.
     // `versionResponses` scripts the answers in order, so a test can make the
@@ -1178,11 +1243,16 @@ function fakePostgres({
     // decide plain move / refuse / split. Anchored on `CHECKLIST_ITEM_SELECT_
     // COLUMNS` followed by the checklist_id where-clause this call alone uses.
     if (
-      /^select id, checklist_id, label, done, sort_order[\s\S]*from checklist_items\s*where checklist_id = \$1\s*order by sort_order asc, id asc$/i.test(
+      /^select id, checklist_id, label, done, sort_order[\s\S]*from checklist_items\s*where checklist_id = \$1\s*order by sort_order asc, id asc\s+for update$/i.test(
         trimmed,
       )
     ) {
       return { rows: pushItemRows, rowCount: pushItemRows.length }
+    }
+    // The split push's read of steps elsewhere whose sub-step waits mention the
+    // checklist being split (their waits live in the sub_items jsonb).
+    if (/^select id, sub_items from checklist_items\s+where position\(/i.test(trimmed)) {
+      return { rows: subWaiterRows, rowCount: subWaiterRows.length }
     }
     // The `for update` read a split adjustment starts with.
     if (/^select\b[\s\S]*\bfrom time_entries where group_id\b/i.test(trimmed)) {
@@ -6910,6 +6980,172 @@ describe('quiet skip (file backend)', () => {
     )
   })
 
+  it('carries the onboarding link and creator onto the new row and stamps createdAt', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            id: 'cl-meta',
+            onboardingForClientId: 'c1',
+            createdBy: 'emp-9',
+            items: [
+              { id: 'item-done', label: 'Reconcile', done: true },
+              { id: 'item-open', label: 'Send statements', done: false },
+            ],
+          }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+    const { checklist: moved } = await store.pushChecklistInstance('cl-meta', 'emp-1', '2026-09-30')
+    expect(moved.onboardingForClientId).toBe('c1')
+    expect(moved.createdBy).toBe('emp-9')
+    expect(moved.createdAt).toBeTruthy()
+    const row = (await persisted()).checklists.find((entry) => entry.id === moved.id)
+    expect(row.onboardingForClientId).toBe('c1')
+    expect(row.createdBy).toBe('emp-9')
+    expect(row.createdAt).toBeTruthy()
+  })
+
+  it('moves pending requests on the MOVED steps (and task-level edits) to the new checklist', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            id: 'cl-req',
+            items: [
+              { id: 'item-done', label: 'Reconcile', done: true },
+              { id: 'item-open', label: 'Send statements', done: false },
+            ],
+          }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+    const authState = await authPersisted()
+    authState.itemDeletionRequests = [
+      { id: 'idr-open', clientId: 'c1', checklistId: 'cl-req', itemId: 'item-open', label: 'x' },
+      { id: 'idr-done', clientId: 'c1', checklistId: 'cl-req', itemId: 'item-done', label: 'y' },
+      { id: 'idr-other', clientId: 'c1', checklistId: 'cl-else', itemId: 'item-open', label: 'z' },
+    ]
+    authState.pendingTaskEdits = [
+      { id: 'pte-open', checklistId: 'cl-req', itemId: 'item-open', scope: 'item', proposed: {} },
+      { id: 'pte-done', checklistId: 'cl-req', itemId: 'item-done', scope: 'item', proposed: {} },
+      { id: 'pte-details', checklistId: 'cl-req', itemId: null, scope: 'details', proposed: {} },
+      { id: 'pte-add', checklistId: 'cl-req', itemId: null, scope: 'add_item', proposed: {} },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    const { checklist: moved } = await store.pushChecklistInstance('cl-req', 'emp-1', '2026-09-30')
+
+    const after = await authPersisted()
+    const idr = Object.fromEntries(after.itemDeletionRequests.map((req) => [req.id, req.checklistId]))
+    expect(idr['idr-open']).toBe(moved.id)
+    // A request about a step that STAYED stays with it; one about another
+    // checklist is nobody's business here.
+    expect(idr['idr-done']).toBe('cl-req')
+    expect(idr['idr-other']).toBe('cl-else')
+    const pte = Object.fromEntries(after.pendingTaskEdits.map((req) => [req.id, req.checklistId]))
+    expect(pte['pte-open']).toBe(moved.id)
+    expect(pte['pte-done']).toBe('cl-req')
+    expect(pte['pte-details']).toBe(moved.id)
+    expect(pte['pte-add']).toBe(moved.id)
+  })
+
+  it('re-points waits held by steps elsewhere (items and sub-steps) at the new checklist', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            id: 'cl-target',
+            items: [
+              { id: 'item-done', label: 'Reconcile', done: true },
+              { id: 'item-open', label: 'Send statements', done: false },
+            ],
+          }),
+          instance({
+            id: 'cl-waiter',
+            templateId: null,
+            items: [
+              { id: 'w-item', label: 'Wait item', done: false },
+              { id: 'w-parent', label: 'Wait parent', done: false },
+            ],
+          }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+    // Written straight to the file: a bulk save would (rightly) refuse to author
+    // a wait, and this test is about what the PUSH does with existing ones.
+    const data = await persisted()
+    const waiter = data.checklists.find((entry) => entry.id === 'cl-waiter')
+    waiter.items[0].waiting = true
+    waiter.items[0].waitingForChecklistId = 'cl-target'
+    waiter.items[1].subItems = [
+      {
+        id: 'w-sub',
+        title: 'Sub',
+        done: false,
+        waiting: true,
+        waitingForChecklistId: 'cl-target',
+        subItems: [
+          { id: 'w-subsub', title: 'SubSub', done: false, waiting: true, waitingForChecklistId: 'cl-target' },
+          { id: 'w-subsub2', title: 'Other', done: false, waiting: true, waitingForChecklistId: 'cl-else' },
+        ],
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const { checklist: moved } = await store.pushChecklistInstance('cl-target', 'emp-1', '2026-09-30')
+
+    const after = (await persisted()).checklists.find((entry) => entry.id === 'cl-waiter')
+    expect(after.items[0].waitingForChecklistId).toBe(moved.id)
+    expect(after.items[1].subItems[0].waitingForChecklistId).toBe(moved.id)
+    expect(after.items[1].subItems[0].subItems[0].waitingForChecklistId).toBe(moved.id)
+    // A wait on some OTHER task is not this push's to move.
+    expect(after.items[1].subItems[0].subItems[1].waitingForChecklistId).toBe('cl-else')
+  })
+
+  it('a done-only original does not spawn the next stage when a step is re-checked', async () => {
+    const stagedTemplate = {
+      ...skippableTemplate,
+      id: 'tmpl-staged',
+      stages: [
+        { id: 'st-0', name: 'Prep', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-0', label: 'a' }] },
+        { id: 'st-1', name: 'Review', assigneeId: 'emp-1', offsetDays: 3, items: [{ id: 'ti-1', label: 'b' }] },
+      ],
+    }
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            id: 'cl-staged',
+            templateId: 'tmpl-staged',
+            stageId: 'st-0',
+            stageIndex: 0,
+            stageCount: 2,
+            items: [
+              { id: 'item-done', label: 'Reconcile', done: true },
+              { id: 'item-open', label: 'Send statements', done: false },
+            ],
+          }),
+        ],
+        checklistTemplates: [stagedTemplate],
+      }),
+    )
+    await store.pushChecklistInstance('cl-staged', 'emp-1', '2026-09-30')
+
+    // Un-check then re-check the done step on the original: it is all done
+    // again, but it is a completed RECORD now - the pushed copy carries the stage.
+    await store.toggleChecklistItem('cl-staged', 'item-done')
+    const result = await store.toggleChecklistItem('cl-staged', 'item-done')
+    expect(result.spawned).toBeNull()
+    const stageOnes = (await persisted()).checklists.filter(
+      (entry) => entry.templateId === 'tmpl-staged' && entry.stageIndex === 1,
+    )
+    expect(stageOnes).toHaveLength(0)
+  })
+
   it('files a one-off push on the review trail with a null template id', async () => {
     const record = await store.createChecklistSkip({
       checklistId: 'cl-oneoff',
@@ -7165,77 +7401,249 @@ describe('quiet skip (postgres branch)', () => {
     expect(fake.matching(/^insert into checklists\b/i)).toHaveLength(0)
   })
 
-  it('splits in one transaction: a new row is inserted, its open items are re-parented, the original hands off its identity', async () => {
+  const splitPushRow = {
+    id: 'cl-mixed',
+    title: 'Monthly close',
+    client_id: 'c1',
+    assignee_id: 'emp-1',
+    template_id: 'tmpl-skip',
+    frequency: 'monthly',
+    due_date: '2026-08-31',
+    viewer_ids: [],
+    editor_ids: [],
+    case_id: 'cl-mixed',
+    stage_id: null,
+    stage_index: 0,
+    stage_count: 1,
+    category_id: null,
+    cycle_due_date: null,
+    period_label: null,
+    onboarding_for_client_id: 'c1',
+    created_by: 'emp-9',
+  }
+  const splitPushItems = [
+    { id: 'item-done', checklist_id: 'cl-mixed', label: 'Reconcile', done: true, sort_order: 0 },
+    { id: 'item-open', checklist_id: 'cl-mixed', label: 'Send statements', done: false, sort_order: 1 },
+  ]
+
+  // The statement order of a split, as labels. This is the production-only
+  // failure (23505) the file backend cannot see: the original must hand its
+  // identity off BEFORE the new row is inserted.
+  const splitStatementOrder = (fake) =>
+    fake.statements
+      .map((statement) => {
+        const text = statement.text
+        if (/^begin$/i.test(text)) return 'begin'
+        if (/^commit$/i.test(text)) return 'commit'
+        if (/^rollback$/i.test(text)) return 'rollback'
+        if (/^select id, client_id, title, assignee_id[\s\S]*from checklists[\s\S]*for update$/i.test(text)) {
+          return 'lock-checklist'
+        }
+        if (/^select id, checklist_id, label[\s\S]*from checklist_items[\s\S]*for update$/i.test(text)) {
+          return 'lock-items'
+        }
+        if (/^update checklists\s+set pushed_at = now\(\), pushed_by = \$2, pushed_to_checklist_id/i.test(text)) {
+          return 'handoff'
+        }
+        if (/^insert into checklists \(/i.test(text)) return 'insert'
+        if (/^update checklist_items set checklist_id/i.test(text)) return 'reparent'
+        if (/^update item_deletion_requests/i.test(text)) return 'repoint-deletions'
+        if (/^update pending_task_edits/i.test(text)) return 'repoint-edits'
+        if (/^update checklist_items set waiting_for_checklist_id/i.test(text)) return 'repoint-waits'
+        if (/^select id, sub_items from checklist_items/i.test(text)) return 'find-sub-waits'
+        if (/^update checklist_items set sub_items/i.test(text)) return 'repoint-sub-waits'
+        return null
+      })
+      .filter(Boolean)
+
+  it('splits in one transaction: the original hands off its identity BEFORE the new row is inserted', async () => {
     const fake = fakePostgres({
-      pushChecklistRows: [
-        {
-          id: 'cl-mixed',
-          title: 'Monthly close',
-          client_id: 'c1',
-          assignee_id: 'emp-1',
-          template_id: 'tmpl-skip',
-          frequency: 'monthly',
-          due_date: '2026-08-31',
-          viewer_ids: [],
-          editor_ids: [],
-          case_id: 'cl-mixed',
-          stage_id: null,
-          stage_index: 0,
-          stage_count: 1,
-          category_id: null,
-          cycle_due_date: null,
-          period_label: null,
-        },
-      ],
-      pushItemRows: [
-        { id: 'item-done', checklist_id: 'cl-mixed', label: 'Reconcile', done: true, sort_order: 0 },
-        {
-          id: 'item-open',
-          checklist_id: 'cl-mixed',
-          label: 'Send statements',
-          done: false,
-          sort_order: 1,
-        },
-      ],
+      simulateChecklistUniqueness: true,
+      pushChecklistRows: [splitPushRow],
+      pushItemRows: splitPushItems,
     })
 
     await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
 
-    // One transaction: begin → … → commit, never a rollback on the happy path.
-    expect(fake.matching(/^begin$/i)).toHaveLength(1)
-    expect(fake.matching(/^commit$/i)).toHaveLength(1)
+    // The exact order. begin, lock, lock, HAND-OFF, insert, re-parent, requests,
+    // waits, commit. Nothing may be inserted while the original still holds the
+    // occurrence's identity.
+    expect(splitStatementOrder(fake)).toEqual([
+      'begin',
+      'lock-checklist',
+      'lock-items',
+      'handoff',
+      'insert',
+      'reparent',
+      'repoint-deletions',
+      'repoint-edits',
+      'repoint-waits',
+      'find-sub-waits',
+      'commit',
+    ])
     expect(fake.matching(/^rollback$/i)).toHaveLength(0)
 
     const [insert] = fake.matching(/^insert into checklists \(/i)
-    expect(insert).toBeTruthy()
+    const [handoff] = fake.matching(/^update checklists\s+set pushed_at = now\(\), pushed_by/i)
+    expect(handoff.text).toMatch(/pushed_to_checklist_id = \$3/i)
+    expect(handoff.params[0]).toBe('cl-mixed')
+    // The hand-off names the id the INSERT then creates.
+    expect(handoff.params[2]).toBe(insert.params[0])
+
     expect(insert.text).toMatch(/pushed_from_checklist_id/i)
     // The new row's cycle_due_date inherits exactly what the no-split branch
-    // would have stamped onto the original: coalesce(cycle_due_date, due_date)
-    // computed in JS since this row was never pushed before.
+    // would have stamped onto the original: coalesce(cycle_due_date, due_date).
     expect(insert.params).toContain('2026-08-31')
     expect(insert.params).toContain('cl-mixed') // pushed_from_checklist_id
     expect(insert.params).toContain('2026-09-30') // the new row's due_date
+    // Onboarding link and creator ride along.
+    expect(insert.params).toContain('emp-9')
+    expect(insert.params.filter((value) => value === 'c1').length).toBeGreaterThanOrEqual(2)
 
     const reparented = fake.matching(/^update checklist_items set checklist_id = \$1/i)
     expect(reparented).toHaveLength(1)
     expect(reparented[0].params[2]).toBe('item-open')
-    // The done step is never touched — no statement mentions it at all.
-    expect(fake.statements.some((s) => s.params?.includes('item-done'))).toBe(false)
+    // The done step is never touched.
+    expect(
+      fake.statements.some(
+        (statement) =>
+          !/^select\b/i.test(statement.text) && statement.params?.includes('item-done'),
+      ),
+    ).toBe(false)
 
-    const [handoff] = fake.matching(/^update checklists\s+set pushed_at = now\(\), pushed_by/i)
-    expect(handoff).toBeTruthy()
-    expect(handoff.text).toMatch(/pushed_to_checklist_id = \$3/i)
-    expect(handoff.params[0]).toBe('cl-mixed')
+    // The item rows are locked before the open/done decision is made.
+    const [itemLock] = fake.matching(/^select id, checklist_id, label[\s\S]*for update$/i)
+    expect(itemLock).toBeTruthy()
+  })
 
-    // The INSERT happens before the re-parent (the FK needs the row to exist
-    // first), and the hand-off UPDATE happens after — ordering that matters
-    // because `checklist_items.checklist_id` references `checklists(id)`.
-    expect(fake.statements.indexOf(insert)).toBeLessThan(
-      fake.statements.indexOf(reparented[0]),
+  it('the fake REFUSES the old order — insert before hand-off raises 23505', async () => {
+    // Guards the guard: if this stops throwing, the uniqueness simulation has
+    // gone vacuous and the order test above proves nothing.
+    const fake = fakePostgres({
+      simulateChecklistUniqueness: true,
+      pushChecklistRows: [splitPushRow],
+      pushItemRows: splitPushItems,
+    })
+    const columns =
+      'id, title, client_id, assignee_id, template_id, frequency, due_date, stage_index, cycle_due_date'
+    await expect(
+      fake.pool.query(
+        `insert into checklists (${columns}) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        ['cl-new', 't', 'c1', 'emp-1', 'tmpl-skip', 'monthly', '2026-09-30', 0, '2026-08-31'],
+      ),
+    ).rejects.toMatchObject({ code: '23505' })
+    // And once the original has handed off, the same insert is accepted.
+    await fake.pool.query(
+      `update checklists set pushed_at = now(), pushed_by = $2, pushed_to_checklist_id = $3 where id = $1`,
+      ['cl-mixed', 'emp-1', 'cl-new'],
     )
-    expect(fake.statements.indexOf(reparented[0])).toBeLessThan(
-      fake.statements.indexOf(handoff),
+    await expect(
+      fake.pool.query(
+        `insert into checklists (${columns}) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        ['cl-new', 't', 'c1', 'emp-1', 'tmpl-skip', 'monthly', '2026-09-30', 0, '2026-08-31'],
+      ),
+    ).resolves.toBeDefined()
+  })
+
+  it('rolls the whole split back when the INSERT throws mid-split', async () => {
+    const fake = fakePostgres({
+      pushChecklistRows: [splitPushRow],
+      pushItemRows: splitPushItems,
+      failOn: { pattern: /^insert into checklists \(/i, error: new Error('connection reset') },
+    })
+
+    await expect(
+      postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30'),
+    ).rejects.toThrow('connection reset')
+
+    expect(fake.matching(/^begin$/i)).toHaveLength(1)
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+    // Nothing after the failed INSERT ran: no re-parent, no re-pointing.
+    expect(fake.matching(/^update checklist_items\b/i)).toHaveLength(0)
+    expect(fake.matching(/^update item_deletion_requests\b/i)).toHaveLength(0)
+    expect(fake.matching(/^update pending_task_edits\b/i)).toHaveLength(0)
+  })
+
+  it('maps an unexpected unique violation (23505) from the split to a PushConflictError', async () => {
+    const fake = fakePostgres({
+      pushChecklistRows: [splitPushRow],
+      pushItemRows: splitPushItems,
+      failOn: {
+        pattern: /^insert into checklists \(/i,
+        error: Object.assign(new Error('duplicate key'), { code: '23505' }),
+      },
+    })
+
+    const pushing = postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
+    await expect(pushing).rejects.toBeInstanceOf(PushConflictError)
+    await expect(pushing).rejects.toThrow(
+      'This checklist changed while you were pushing it. Reload and try again.',
     )
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+  })
+
+  it('re-points pending requests: moved steps and task-level edits follow, stayed steps do not', async () => {
+    const fake = fakePostgres({
+      pushChecklistRows: [splitPushRow],
+      pushItemRows: splitPushItems,
+    })
+    await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
+
+    const [insert] = fake.matching(/^insert into checklists \(/i)
+    const newId = insert.params[0]
+    const [deletions] = fake.matching(/^update item_deletion_requests\b/i)
+    expect(deletions.text).toMatch(/set checklist_id = \$1/i)
+    expect(deletions.text).toMatch(/item_id = any\(\$3::text\[\]\)/i)
+    // Only the OPEN step's id is offered; the done step stays where it is.
+    expect(deletions.params).toEqual([newId, 'cl-mixed', ['item-open']])
+
+    const [edits] = fake.matching(/^update pending_task_edits\b/i)
+    expect(edits.text).toMatch(/set checklist_id = \$1/i)
+    expect(edits.text).toMatch(/scope in \('details', 'add_item'\)/i)
+    expect(edits.text).toMatch(/item_id = any\(\$3::text\[\]\)/i)
+    expect(edits.params).toEqual([newId, 'cl-mixed', ['item-open']])
+  })
+
+  it('re-points waits elsewhere: the step column in SQL, sub-step waits inside sub_items', async () => {
+    const fake = fakePostgres({
+      pushChecklistRows: [splitPushRow],
+      pushItemRows: splitPushItems,
+      subWaiterRows: [
+        {
+          id: 'w-parent',
+          sub_items: [
+            {
+              id: 'w-sub',
+              title: 'Sub',
+              waiting: true,
+              waitingForChecklistId: 'cl-mixed',
+              subItems: [
+                { id: 'w-subsub', title: 'SubSub', waiting: true, waitingForChecklistId: 'cl-mixed' },
+                { id: 'w-other', title: 'Other', waiting: true, waitingForChecklistId: 'cl-else' },
+              ],
+            },
+          ],
+        },
+        // Mentions the id in some other field: nothing to re-point, no write.
+        { id: 'w-noop', sub_items: [{ id: 'n1', title: 'cl-mixed in a title', done: false }] },
+      ],
+    })
+    await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
+
+    const [insert] = fake.matching(/^insert into checklists \(/i)
+    const newId = insert.params[0]
+    const [waits] = fake.matching(/^update checklist_items set waiting_for_checklist_id/i)
+    expect(waits.params).toEqual([newId, 'cl-mixed'])
+
+    const subWrites = fake.matching(/^update checklist_items set sub_items/i)
+    expect(subWrites).toHaveLength(1)
+    expect(subWrites[0].params[0]).toBe('w-parent')
+    const written = JSON.parse(subWrites[0].params[1])
+    expect(written[0].waitingForChecklistId).toBe(newId)
+    expect(written[0].subItems[0].waitingForChecklistId).toBe(newId)
+    expect(written[0].subItems[1].waitingForChecklistId).toBe('cl-else')
   })
 
   it('files a ONE-OFF push with a null template_id — the column is nullable', async () => {

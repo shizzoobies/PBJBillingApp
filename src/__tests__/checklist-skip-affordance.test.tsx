@@ -104,6 +104,57 @@ const ALL_DONE = checklist({
   items: [{ id: 'cl-alldone-done', label: 'Reconcile', done: true }],
 })
 
+/**
+ * The dialog counts with the server's rule (rollUpItemDone), not the raw flag:
+ * a step whose sub-steps are ALL done is done even if its own flag has not
+ * caught up, and the other step here is open.
+ */
+const HALF_DONE_STEP = checklist({
+  id: 'cl-halfdone',
+  title: 'Half done close',
+  templateId: 'tmpl-on',
+  items: [
+    {
+      id: 'cl-halfdone-parent',
+      label: 'Parent step',
+      done: false,
+      subItems: [
+        { id: 'cl-halfdone-a', title: 'First', done: true },
+        { id: 'cl-halfdone-b', title: 'Second', done: true },
+      ],
+    },
+    { id: 'cl-halfdone-open', label: 'Open step', done: false },
+  ],
+})
+/** The done-only record a split push left behind, pointing at the live row. */
+const PUSHED_ORIGINAL = checklist({
+  id: 'cl-orig',
+  title: 'Record close',
+  templateId: 'tmpl-on',
+  items: [{ id: 'cl-orig-done', label: 'Reconcile', done: true }],
+  pushedAt: '2026-08-20T12:00:00.000Z',
+  pushedBy: LISA,
+  pushedToChecklistId: 'cl-newrow',
+})
+const NEW_ROW = checklist({
+  id: 'cl-newrow',
+  title: 'Moved open work',
+  templateId: 'tmpl-on',
+  dueDate: '2026-10-15',
+  cycleDueDate: '2026-08-31',
+  pushedFromChecklistId: 'cl-orig',
+})
+/** Same, but the row it points at is not in local data. */
+const ORPHAN_ORIGINAL = checklist({
+  id: 'cl-orphan',
+  title: 'Orphan record close',
+  templateId: 'tmpl-on',
+  items: [{ id: 'cl-orphan-done', label: 'Reconcile', done: true }],
+  pushedAt: '2026-08-20T12:00:00.000Z',
+  pushedBy: LISA,
+  pushedToChecklistId: 'cl-gone',
+})
+
 const data = {
   clients: [CLIENT],
   employees: [
@@ -118,6 +169,10 @@ const data = {
     ALREADY_PUSHED,
     MIXED,
     ALL_DONE,
+    HALF_DONE_STEP,
+    PUSHED_ORIGINAL,
+    NEW_ROW,
+    ORPHAN_ORIGINAL,
   ],
   checklistTemplates: [template('tmpl-on', true), template('tmpl-off', false)],
   recycledChecklists: [],
@@ -367,6 +422,34 @@ describe('the push affordance', () => {
       dialog.getByText(/1 done step\(s\) stay here as a completed record/),
     ).toBeInTheDocument()
     expect(dialog.getByText(/1 open step\(s\) move to/)).toBeInTheDocument()
+    // Said up front: a step is never cut in half.
+    expect(dialog.getByText(/A step with some sub-steps done moves whole\./)).toBeInTheDocument()
+  })
+
+  it('counts steps with the same rule the server splits a push by', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Half done close')).getByText(PUSH_LABEL))
+
+    const dialog = within(
+      screen.getByRole('group', { name: /Push Half done close to a new date/i }),
+    )
+    expect(dialog.getByText(/1 done step\(s\) stay here as a completed record/)).toBeInTheDocument()
+    expect(dialog.getByText(/1 open step\(s\) move to/)).toBeInTheDocument()
+  })
+
+  it('still renders when the date field is cleared (no RangeError from an empty date)', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Mixed close')).getByText(PUSH_LABEL))
+    const dialog = within(
+      screen.getByRole('group', { name: /Push Mixed close to a new date/i }),
+    )
+
+    fireEvent.change(dialog.getByLabelText('New due date'), { target: { value: '' } })
+
+    // The dialog is still there, and says it without inventing a date.
+    expect(dialog.getByText(/1 open step\(s\) move to the new date\./)).toBeInTheDocument()
+    // And an empty date is not a pushable date.
+    expect(dialog.getByRole('button', { name: 'Push to this date' })).toBeDisabled()
   })
 })
 
@@ -391,6 +474,30 @@ describe('a complete checklist', () => {
     expect(
       within(cardFor('All done close')).queryByText('Push to a new date'),
     ).not.toBeInTheDocument()
+  })
+})
+
+describe('the done-only record a split push leaves behind', () => {
+  const openCompletedGroup = () => {
+    const completedToggle = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.checklist-group-header'),
+    ).find((button) => within(button).queryByText('Completed'))
+    fireEvent.click(completedToggle as HTMLButtonElement)
+  }
+
+  it('says its open steps moved, and to when (the new row is in local data)', () => {
+    renderPage()
+    openCompletedGroup()
+    expect(
+      within(cardFor('Record close')).getByText(/Pushed · open steps moved to Oct\s*15/),
+    ).toBeInTheDocument()
+  })
+
+  it('says it without a date when the new row is not in local data', () => {
+    renderPage()
+    openCompletedGroup()
+    const flag = within(cardFor('Orphan record close')).getByText(/Pushed · open steps moved/)
+    expect(flag.textContent).toBe('Pushed · open steps moved')
   })
 })
 

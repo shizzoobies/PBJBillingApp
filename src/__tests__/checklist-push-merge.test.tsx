@@ -70,6 +70,7 @@ const COMPLETED_ORIGINAL: Checklist = {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -79,6 +80,14 @@ it('adds the new checklist AND keeps the done-only original — not a replace, a
   // redirects on boot, and a URL set ahead of time to a deep route gets
   // yanked back the moment that redirect lands.
   window.history.pushState({}, '', '/')
+
+  // Pin "today" (the Date only - timers stay real so waitFor still works) to
+  // noon LOCAL time on the 30th, constructed from local parts so it holds in any
+  // timezone. The page groups and period-filters by the local calendar day; the
+  // real clock made this test depend on what time of day, and in which zone, it
+  // was run (UTC already being October fails the "this month" period).
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date(2026, 8, 30, 12, 0, 0))
 
   installFetchMock({
     sessionUser: OWNER_SESSION,

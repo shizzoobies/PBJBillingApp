@@ -587,6 +587,7 @@ import {
 } from '../../lib/waiting-on-state.js'
 import { inactiveClientIds } from '../../lib/recurring-gate.js'
 import { flooredCycleStart, templateStartFloor } from '../../lib/checklist-start-floor.js'
+import { rollUpItemDone } from '../../lib/checklist-step-done.js'
 
 /**
  * Recurring-instance identity, shared verbatim with the server materializer
@@ -749,10 +750,8 @@ export function isChecklistItemDone(item: {
   done: boolean
   subItems?: { done: boolean; subItems?: { done: boolean }[] }[]
 }): boolean {
-  if (Array.isArray(item.subItems) && item.subItems.length > 0) {
-    return item.subItems.every((sub) => isChecklistItemDone(sub))
-  }
-  return item.done
+  // One rule for client and server: lib/checklist-step-done.js.
+  return rollUpItemDone(item)
 }
 
 /**

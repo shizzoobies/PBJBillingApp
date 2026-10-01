@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile as fsWriteFile } from 'node:fs/promises'
 import { classifySplitTarget } from '../lib/group-allocation.js'
+import { rollUpItemDone } from '../lib/checklist-step-done.js'
 import { inactiveClientIds, isInactiveClientStage } from '../lib/recurring-gate.js'
 import {
   firstCycleOnOrAfter,
@@ -1875,18 +1876,9 @@ function normalizeSubItems(raw, { withDone = true } = {}) {
     })
 }
 
-/**
- * Roll-up completion for a checklist node, recursing up to three levels
- * (item → sub-item → sub-sub-item): a node with children is `done` exactly
- * when every child is `done`; a node with no children keeps its own `done`.
- * Mirrors `isChecklistItemDone` in src/lib/utils.ts.
- */
-function rollUpItemDone(item) {
-  if (Array.isArray(item.subItems) && item.subItems.length > 0) {
-    return item.subItems.every((sub) => rollUpItemDone(sub))
-  }
-  return Boolean(item.done)
-}
+// `rollUpItemDone` (the one "is this step done?" rule) lives in
+// lib/checklist-step-done.js so the push dialog on the client counts with the
+// very same predicate this file decides a push with.
 
 /**
  * Columns `mapChecklistItemRow` reads. Same contract as
@@ -2535,6 +2527,38 @@ export class NothingToPushError extends Error {
     super(message)
     this.name = 'NothingToPushError'
   }
+}
+
+/**
+ * Thrown by `pushChecklistInstance` when the split loses a race it cannot see
+ * coming (a unique violation, 23505, on the instance index: a concurrent
+ * request already handed this occurrence's identity to another row). The route
+ * maps it to 409 `PUSH_CONFLICT` rather than a 500.
+ */
+export class PushConflictError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'PushConflictError'
+  }
+}
+
+/**
+ * Re-point every `waitingForChecklistId === fromId` found on `nodes` (sub-items
+ * and, recursively, their sub-sub-items) to `toId`, in place. Returns whether
+ * anything changed. Used by the split push, which moves the open work to a new
+ * checklist id and so has to carry everyone else's "waiting on that task" with it.
+ */
+function repointWaitingForChecklist(nodes, fromId, toId) {
+  let changed = false
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (!node || typeof node !== 'object') continue
+    if (node.waitingForChecklistId === fromId) {
+      node.waitingForChecklistId = toId
+      changed = true
+    }
+    if (repointWaitingForChecklist(node.subItems, fromId, toId)) changed = true
+  }
+  return changed
 }
 
 /**
@@ -15327,6 +15351,10 @@ export class AppDataStore {
     }
     const allDone = checklist.items.every((item) => item.done)
     if (!allDone) return null
+    // A row that handed its open work to a pushed copy is a completed RECORD,
+    // not the live stage: re-checking one of its steps must not spawn the next
+    // stage (the new row carries that duty).
+    if (checklist.pushedToChecklistId) return null
     if (!checklist.templateId) return null
     const stageCount = typeof checklist.stageCount === 'number' ? checklist.stageCount : 1
     const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
@@ -19692,7 +19720,8 @@ export class AppDataStore {
           await client.query(
             `select id, client_id, title, assignee_id, template_id, frequency, due_date,
                     viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
-                    category_id, cycle_due_date, period_label
+                    category_id, cycle_due_date, period_label,
+                    onboarding_for_client_id, created_by
                from checklists
               where id = $1 and deleted_at is null and skipped_at is null
               for update`,
@@ -19708,7 +19737,8 @@ export class AppDataStore {
             `select ${CHECKLIST_ITEM_SELECT_COLUMNS}
                from checklist_items
               where checklist_id = $1
-              order by sort_order asc, id asc`,
+              order by sort_order asc, id asc
+              for update`,
             [checklistId],
           )
         ).rows
@@ -19748,20 +19778,42 @@ export class AppDataStore {
         // no-split branch above would have stamped onto THIS row.
         const newChecklistId = `check-${randomUUID().slice(0, 8)}`
         // One shared instant for pushed_at / created_at / updated_at, bound as
-        // a parameter rather than three separate `now()` calls — the balance
+        // a parameter rather than three separate `now()` calls - the balance
         // check in db/store-staleness.test.mjs (column count == value count)
         // walks these statements with a lazy paren match that stops at the
         // FIRST `)`, so more than one `now()` inside one values list breaks it.
         const splitNowIso = nowIso()
+
+        // ORDER MATTERS here, and it is the whole point of this block. The
+        // unique index (CHECKLIST_INSTANCE_UNIQUE_INDEX_V3) excludes a row
+        // whose `pushed_to_checklist_id` is set, and a unique index is never
+        // deferrable - so the original must hand its identity off BEFORE the
+        // new row exists, or the INSERT collides with it (23505) on every
+        // checklist that came from a template. `pushed_to_checklist_id` has no
+        // foreign key, so pointing at an id that does not exist yet is legal
+        // inside this one transaction. Rows are locked above (the checklist and
+        // its items, `for update`), so no concurrent toggle can flip a step
+        // between the read that decided open-vs-done and the re-parent below.
+        //
+        // (1) The original hands its identity off.
+        await client.query(
+          `update checklists
+              set pushed_at = now(), pushed_by = $2, pushed_to_checklist_id = $3
+            where id = $1`,
+          [checklistId, userId ?? null, newChecklistId],
+        )
+
+        // (2) The new row inherits the cycle identity the no-split branch above
+        // would have stamped onto THIS row.
         await client.query(
           `
             insert into checklists (
               id, title, client_id, assignee_id, template_id, frequency, due_date,
               viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
               category_id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id,
-              period_label, created_at, updated_at
+              period_label, onboarding_for_client_id, created_by, created_at, updated_at
             )
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
           `,
           [
             newChecklistId,
@@ -19783,12 +19835,14 @@ export class AppDataStore {
             userId ?? null,
             checklistId,
             checklistRow.period_label,
+            checklistRow.onboarding_for_client_id ?? null,
+            checklistRow.created_by ?? null,
             splitNowIso,
             splitNowIso,
           ],
         )
 
-        // Re-parent the OPEN items onto the new checklist, in one update per
+        // (3) Re-parent the OPEN items onto the new checklist, in one update per
         // item rather than a rebuild: every other column (sub_items, waiting
         // state, assignee, due date) rides along untouched, which is the only
         // way to satisfy "with their sub-items, waits, assignees and order"
@@ -19800,14 +19854,51 @@ export class AppDataStore {
           )
         }
 
-        // The original keeps its done steps untouched and hands its identity
-        // off — see CHECKLIST_INSTANCE_UNIQUE_INDEX_V3.
+        // (4) Pending requests follow the work they are about. Both tables key
+        // on a plain text checklist_id (no FK), so without this an approval
+        // would look for the step on the original, find none, and the request
+        // would silently vanish. Requests about a MOVED step go with it; so do
+        // task-level edits (details / add_item), because the live task is now
+        // the new row. Requests about a step that stayed behind stay behind.
+        const openItemIds = openItems.map((item) => item.id)
         await client.query(
-          `update checklists
-              set pushed_at = now(), pushed_by = $2, pushed_to_checklist_id = $3
-            where id = $1`,
-          [checklistId, userId ?? null, newChecklistId],
+          `update item_deletion_requests set checklist_id = $1
+            where checklist_id = $2 and item_id = any($3::text[])`,
+          [newChecklistId, checklistId, openItemIds],
         )
+        await client.query(
+          `update pending_task_edits set checklist_id = $1
+            where checklist_id = $2
+              and (scope in ('details', 'add_item') or item_id = any($3::text[]))`,
+          [newChecklistId, checklistId, openItemIds],
+        )
+
+        // (5) Waits on this task, held by steps elsewhere, follow the open work
+        // too: the "ready to continue" notice fires when the task they wait on
+        // is finished, and that is now the new row. A step's own wait is a
+        // column; a sub-step's lives inside the sub_items jsonb.
+        await client.query(
+          `update checklist_items set waiting_for_checklist_id = $1
+            where waiting_for_checklist_id = $2`,
+          [newChecklistId, checklistId],
+        )
+        const subWaiters = (
+          await client.query(
+            `select id, sub_items from checklist_items
+              where position($1 in sub_items::text) > 0`,
+            [checklistId],
+          )
+        ).rows
+        for (const row of subWaiters) {
+          const subItems = Array.isArray(row.sub_items)
+            ? row.sub_items
+            : JSON.parse(row.sub_items ?? '[]')
+          if (!repointWaitingForChecklist(subItems, checklistId, newChecklistId)) continue
+          await client.query(`update checklist_items set sub_items = $2::jsonb where id = $1`, [
+            row.id,
+            JSON.stringify(subItems),
+          ])
+        }
 
         await client.query('commit')
         const data = await this.read()
@@ -19821,6 +19912,13 @@ export class AppDataStore {
           await client.query('rollback')
         } catch {
           /* already rolled back, or the connection is gone */
+        }
+        // A unique violation here means another request got to this
+        // occurrence's identity first - a clean conflict, never a 500.
+        if (error?.code === '23505') {
+          throw new PushConflictError(
+            'This checklist changed while you were pushing it. Reload and try again.',
+          )
         }
         throw error
       } finally {
@@ -19866,6 +19964,9 @@ export class AppDataStore {
       stageCount: target.stageCount,
       categoryId: target.categoryId ?? null,
       periodLabel: target.periodLabel ?? null,
+      onboardingForClientId: target.onboardingForClientId ?? null,
+      createdBy: target.createdBy ?? null,
+      createdAt: now,
       cycleDueDate: target.cycleDueDate ?? target.dueDate,
       pushedAt: now,
       pushedBy: userId ?? null,
@@ -19876,8 +19977,39 @@ export class AppDataStore {
     target.pushedAt = now
     target.pushedBy = userId ?? null
     target.pushedToChecklistId = newChecklist.id
+
+    // Waits on this task, held by steps elsewhere, follow the open work.
+    for (const other of data.checklists ?? []) {
+      for (const item of other.items ?? []) {
+        if (item.waitingForChecklistId === target.id) item.waitingForChecklistId = newChecklist.id
+        repointWaitingForChecklist(item.subItems, target.id, newChecklist.id)
+      }
+    }
     data.checklists = [...(data.checklists ?? []), newChecklist]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    // Pending requests follow the work they are about (see the Postgres branch).
+    const authState = await readJson(localAuthPath)
+    const openItemIds = new Set(openItems.map((item) => item.id))
+    let authChanged = false
+    for (const req of Array.isArray(authState.itemDeletionRequests)
+      ? authState.itemDeletionRequests
+      : []) {
+      if (req.checklistId === target.id && openItemIds.has(req.itemId)) {
+        req.checklistId = newChecklist.id
+        authChanged = true
+      }
+    }
+    for (const req of Array.isArray(authState.pendingTaskEdits) ? authState.pendingTaskEdits : []) {
+      if (
+        req.checklistId === target.id &&
+        (req.scope === 'details' || req.scope === 'add_item' || openItemIds.has(req.itemId))
+      ) {
+        req.checklistId = newChecklist.id
+        authChanged = true
+      }
+    }
+    if (authChanged) await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return { checklist: newChecklist, completed: target }
   }
 
