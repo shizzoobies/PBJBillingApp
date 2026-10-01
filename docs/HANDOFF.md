@@ -25,7 +25,19 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-29, afternoon):** `main` = `81b2be1` (+ this
+**State right now (2026-09-30, late evening):** `main` = `a4f78ac` (+ this handoff),
+pushed, deployed, `/health` 200 with that commit, voice agent re-provisioned. Suite
+**4692 tests / 238 files**, green. Working tree clean. **The 2026-09-30 queue run
+shipped seven Brittany items plus one bug found on the way** - read the 2026-09-30 (late) entry at
+the top of section 5 FIRST; it holds the rules that bind, the production trials, and the
+follow-ups. All seven tracker items are Shipped with notes in her terms (two of them state
+an interpretation she may send back: Push splits; "Waiting" is a filter + badge). Two
+follow-up sessions were started by Alex the same night in separate worktrees (server
+business-time-zone "today"; the bulk save's version inside its transaction) - they branched
+before this ship and must rebase onto it. The manifest is at 203347 bytes against the
+205,000 tripwire: CONDENSE BEFORE THE NEXT MANIFEST EDIT.
+
+**Before that (2026-09-29, afternoon):** `main` = `81b2be1` (+ this
 handoff), pushed, deployed, `/health` 200 with that commit. Suite **4096 tests
 / 211 files**, green. Working tree clean. **09-29 afternoon:** the tracker was
 checked (read-only) and its two planned items, Brittany's 09-25 spitball
@@ -408,6 +420,95 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-09-30 (late) - the queue run: two client-page items, five checklist items, and the
+evening date bug.** Spec `docs/plans/queue-2026-09-30.md`. Built in three parallel worktree
+lanes by subagents, every task reviewed and re-reviewed, three whole-branch reviews (storage,
+routes/permissions, frontend), one post-review fix pass and a delta review; shipped as `a4f78ac`.
+
+- **Statement dates box** (`featreq-11ffb3a6`): client page, Overview, above Client notes.
+  Table `client_statement_accounts` (file key `authState.clientStatementAccounts`), endpoint-
+  managed, `GET`/`PUT /api/clients/:id/statement-accounts`; the PUT replaces the list under a
+  per-client advisory lock with an in-transaction version check (409 `stale_statement_accounts`).
+  `src/components/ClientStatementsPanel.tsx`. Reference only; nothing reads it.
+- **Pending notes for a future recurring checklist** (`featreq-b688e73c`): table
+  `client_pending_notes`; `attachPendingClientNotes` is an idempotent pass that runs AFTER a
+  persisted write (end of `read()` when the materializer write-back succeeded, after the bulk
+  `write()`, after generate, after a checklist delete or skip) - NEVER inside the pure
+  materializer. Task kind inserts a real step `item-pn-<note id>`; Note kind is rendered on
+  the card from the table (`GET /api/pending-notes/attached?checklistIds=`, one fetch per
+  page). Attaches only to a NEW cycle (`stage_index` 0/null), never to a split row or a
+  completed record; a deleted or skipped target releases the note. A released note carries
+  `released_at` / `releasedAt` (internal, never in the API row) until it lands again, and while
+  it does it skips any checklist whose steps are all done - the marker, not the cleared attach
+  stamp, is what makes that hold across passes. Cap: 100 unattached per client (soft under
+  concurrency, accepted).
+- **A waiting step cannot be finished** (`featreq-cdab1605`): ONE rule, decided by simulating the
+  store's own step math. `lib/checklist-step-ops.js` now owns `applyItemToggle`, the sub-step
+  normalizers and the removal cores (db/store.js imports them - never add a private copy);
+  `lib/waiting-on-state.js` refuses any tick, sub-step delete, or approved deletion whose
+  simulated result turns a waiting, not-yet-done node done. Guarded on the toggle route, both
+  sub-step DELETE routes and the approval path; the same helpers disable the UI controls.
+  The Delayed page's legacy action is "Clear wait" (clears, never ticks).
+- **Push moves only the open steps** (`featreq-fbab3370`): `pushChecklistInstance` - nothing done:
+  same instance moves; all done: 409 `NOTHING_TO_PUSH`; mixed: SPLIT. Statement order inside the
+  transaction is load-bearing: lock the checklist and its items, UPDATE the original with
+  `pushed_to_checklist_id` FIRST, then INSERT the new row (`pushed_from_checklist_id`, same
+  occurrence via `to_char(coalesce(cycle_due_date, due_date))`), then re-parent the open items,
+  requests, pending edits, waits and attached notes. The partial unique index is now
+  `checklists_template_instance_uniq_v3` (`... and pushed_to_checklist_id is null`); the v2 block
+  in `initialize()` is skipped once v3 exists. The completed record cannot be pushed again
+  (409 `PUSHED_RECORD`), never spawns a next stage, and its occurrence counts once everywhere.
+- **"Waiting" on the In progress Status filter** (`featreq-b0aa9f01`): per-option predicates
+  (`matchesStatusFilter` in `src/lib/inProgressFilter.ts`); Active and Overdue are exactly what
+  they were; Waiting = not complete with an open waiting step, the only overlapping option;
+  a "Waiting" badge on the card and the Board (the Board no longer says Pending).
+- **Reorder / completed to the bottom / Hide completed** (`featreq-8a01fe08`): `src/lib/orderSteps.ts`
+  (display-only order, roll-up reading of done); sub-step drag + Move up/down
+  (`POST /api/checklists/:id/items/:itemId/sub-items/reorder`, transactional on Postgres);
+  Hide completed per checklist in localStorage `pbj.hideDone.v1.<id>`, never hiding a live wait.
+- **Delete asks "this checklist only / this + all future"** (`featreq-01464e64`):
+  `deleteChecklistItemFromSeries` + `lib/series-step-delete.js` (owner only). Label match within
+  the instance's stage, by ordinal; later = later OCCURRENCE (`coalesce(cycle_due_date, due_date)`);
+  a later copy is removed only when UNTOUCHED (`stepCarriesWork` in JS = `untouchedStepSql` in
+  SQL - keep them in step); refuses a recurring checklist's last first-stage step (409
+  `last_recurring_step`); tells her what it removed and kept.
+- **Evening date bug (found during the run):** `ensureRecurringChecklists(data, today = localDateOnly())`
+  - the browser spawner mixed a UTC "today" with local month math, so after 8 pm Eastern a
+  checklist due today was born finished. Four clock-dependent test describes are frozen now.
+  The SERVER spawner still uses UTC (consistent on Railway); follow-up session started.
+- **Core read path:** `readWithVersion()` hands `GET /api/app-data` a version captured BEFORE the
+  snapshot it serves; plain `read()` issues no fingerprint query on Postgres. The invariant: a
+  tab's version must never be newer than its data. KNOWN, NOT CLOSED: the bulk PUT computes its
+  version after `write()` commits (and after the label restamp), and `write()` checks the
+  fingerprint then deletes under READ COMMITTED, so a targeted write committing in that window
+  can be folded in or undone - exists on main before this run; follow-up session started
+  (REPEATABLE READ + in-transaction version).
+- **Production trials run (all rolled back, HANDOFF section 4):** the split push with the real
+  DDL (old order refused with 23505 on v3, final order OK, identity preserved); the series-
+  delete SQL (a parity sweep of the SQL vs JS "untouched" predicate over all 2,458 steps: 0
+  mismatches); the REAL store methods for both new tables, the attach pass and the sub-step
+  reorder through a savepoint-wrapping pool; and the released-note path (skip releases, two
+  passes refuse a finished candidate, a new open one takes both notes and clears the marker).
+  Scripts are in the session scratchpad (`prod-split-trial.js`, `prod-series-delete-trial*.js`,
+  `prod-newtables-trial.mjs`, `prod-released-trial.mjs`).
+- **Open for Brittany:** the two interpretations above; whether a sub-step that carries a saved
+  wait should be deletable at all (only the roll-up is guarded); recurring notes are not built.
+- **Follow-ups (not blocking):** older checklist write routes still lack the origin check
+  (toggle, sub-step add/delete, item PATCH); the waiting guard runs before the store's unlocked
+  read-modify-write (a wait added in between can be ticked through); toggle/removal can undo a
+  concurrent sub-step reorder (order only); an owner edit within ~2.5 s of any targeted write can
+  hit the stale-tab reload notice; time logged before a split stays on the completed record;
+  the card chip and the Board read a waiting step by its STORED done flag while the Waiting
+  count, the checkbox guard and the Delayed page read the roll-up (they differ only on data
+  whose stored flag lags its sub-steps) - pick one rule; the released-note lookup likewise calls
+  a checklist finished by its top-level stored flags, so one whose only open work is a sub-step
+  is skipped.
+- **Process notes:** worktree lanes share node_modules through a junction (`New-Item -ItemType
+  Junction`); never run two vitest processes in one tree (file-backend tests share `tmp/`);
+  two tests flaked only under the full run and were fixed at the root (a page-scoped lookup
+  that raced the Dashboard; two materializer runs stamped a millisecond apart) - a red verify
+  that passes alone is still a real defect in the test, fix it, do not re-run until green;
+  `git diff --stat` on `db/store-staleness.test.mjs` misaligns badly - use `--histogram`.
 **2026-09-29 (afternoon) — Tracker check, two items routed to Brittany, and the
 outage-memo regression test (`2d7ded5`, `81b2be1`).** A read-only pass over
 `feature_requests` found Alex had moved both 09-25 spitball items to `planned`
