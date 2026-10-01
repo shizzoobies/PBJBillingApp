@@ -416,3 +416,141 @@ describe('a stale save (409) is told to reload, not shown the generic save error
     expect(screen.queryByRole('button', { name: /Reload/i })).not.toBeInTheDocument()
   })
 })
+
+describe('an explicit Reload always takes, and a recovered load clears its error', () => {
+  const staleOnce = () => {
+    saveAccounts = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiError(
+          409,
+          'Someone else changed these dates. Reload and try again.',
+          'stale_statement_accounts',
+        ),
+      )
+  }
+
+  it('disables the row inputs and remove buttons while a Reload is loading', async () => {
+    listAccounts = vi.fn(async () => LOADED)
+    staleOnce()
+    renderPanel()
+    await screen.findByDisplayValue('TD Bank 4920')
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
+    const reloadButton = await screen.findByRole('button', {
+      name: 'Reload (discards your unsaved changes)',
+    })
+
+    const pending = deferred<typeof LOADED>()
+    listAccounts = vi.fn(() => pending.promise)
+    fireEvent.click(reloadButton)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
+
+    expect(screen.getByDisplayValue('TD Bank 4920')).toBeDisabled()
+    expect(screen.getByLabelText('Day')).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Remove TD Bank 4920/ })).toBeDisabled()
+
+    pending.resolve(LOADED)
+    await flush()
+    expect(screen.getByDisplayValue('TD Bank 4920')).not.toBeDisabled()
+  })
+
+  it('applies the reloaded rows even when something was typed during the Reload, and the next Save does not 409', async () => {
+    listAccounts = vi.fn(async () => LOADED)
+    staleOnce()
+    renderPanel()
+    const input = await screen.findByDisplayValue('TD Bank 4920')
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
+    const reloadButton = await screen.findByRole('button', {
+      name: 'Reload (discards your unsaved changes)',
+    })
+
+    const pending = deferred<{ accounts: typeof LOADED.accounts; version: string }>()
+    listAccounts = vi.fn(() => pending.promise)
+    fireEvent.click(reloadButton)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
+    // Something still lands in the box while the Reload is in flight (the
+    // inputs are disabled, but a change event can still arrive).
+    fireEvent.change(input, { target: { value: 'typed during the reload' } })
+
+    pending.resolve({
+      accounts: [{ id: 'stmt-1', clientId: 'c1', name: 'Amex 1108', dayOfMonth: 5, sortOrder: 0 }],
+      version: 'v2',
+    })
+    await flush()
+
+    // The reloaded list wins: a Reload is a deliberate discard.
+    expect(screen.getByDisplayValue('Amex 1108')).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('typed during the reload')).not.toBeInTheDocument()
+
+    // And the box sits on the NEW version, so Save is sent under it (the
+    // server would refuse the old one again).
+    saveAccounts = vi.fn(async (_id: string, accounts: unknown[]) => ({
+      accounts: accounts as typeof LOADED.accounts,
+      version: 'v3',
+    }))
+    fireEvent.change(screen.getByDisplayValue('Amex 1108'), { target: { value: 'Amex 1108b' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
+    await waitFor(() => expect(saveAccounts).toHaveBeenCalled())
+    expect(saveAccounts).toHaveBeenCalledWith(
+      'c1',
+      [{ id: 'stmt-1', name: 'Amex 1108b', dayOfMonth: 5 }],
+      'v2',
+    )
+  })
+
+  it('a background refetch that recovers after a failed first load clears the error under the good rows', async () => {
+    listAccounts = vi.fn(async () => {
+      throw new Error('network down')
+    })
+    const view = renderPanel()
+    expect(await screen.findByText('Could not load statement dates.')).toBeInTheDocument()
+
+    listAccounts = vi.fn(async () => LOADED)
+    signalDataChanged(view, 1)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
+    await flush()
+
+    // A failed first load leaves `loadFailed` set, so the Retry block shows; the
+    // background load recovered it, so the rows AND no error text remain.
+    expect(await screen.findByDisplayValue('TD Bank 4920')).toBeInTheDocument()
+    expect(screen.queryByText('Could not load statement dates.')).not.toBeInTheDocument()
+  })
+
+  it('a foreground load retires a background fetch still in flight, so an older list cannot land after it', async () => {
+    listAccounts = vi.fn(async () => LOADED)
+    saveAccounts = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiError(409, 'Someone else changed these dates.', 'stale_statement_accounts'),
+      )
+    const view = renderPanel()
+    await screen.findByDisplayValue('TD Bank 4920')
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
+    const reloadButton = await screen.findByRole('button', {
+      name: 'Reload (discards your unsaved changes)',
+    })
+
+    // A background fetch starts, then the Reload; the background one resolves LAST
+    // with the older list.
+    const background = deferred<typeof LOADED>()
+    listAccounts = vi.fn(() => background.promise)
+    signalDataChanged(view, 1)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
+
+    const reloaded = deferred<typeof LOADED>()
+    listAccounts = vi.fn(() => reloaded.promise)
+    fireEvent.click(reloadButton)
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
+
+    reloaded.resolve({
+      accounts: [{ id: 'stmt-1', clientId: 'c1', name: 'Amex 1108', dayOfMonth: 5, sortOrder: 0 }],
+      version: 'v2',
+    })
+    await flush()
+    background.resolve(LOADED)
+    await flush()
+
+    expect(screen.getByDisplayValue('Amex 1108')).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('TD Bank 4920')).not.toBeInTheDocument()
+  })
+})

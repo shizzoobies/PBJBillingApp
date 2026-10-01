@@ -36,11 +36,19 @@ const DAYS = Array.from({ length: 31 }, (_, index) => index + 1)
  *    `loading`, which disables the controls. A BACKGROUND refetch, run on
  *    the app's live-sync signal (`dataRefreshCount`, the same one
  *    ClientNotesPanel's pending-notes block uses), never touches `loading`,
- *    so the controls never flicker or lock. Any load is applied only if the
- *    panel is still clean when it RESOLVES (`dirtyRef`), so what she typed
- *    always wins (the version stays what she loaded, so a real conflict still
- *    409s on save), and a failed background refetch is ignored — only a
- *    failed first load or Retry shows the Retry block.
+ *    so the controls never flicker or lock. A background or first load is
+ *    applied only if the panel is still clean when it RESOLVES (`dirtyRef`),
+ *    so what she typed always wins (the version stays what she loaded, so a
+ *    real conflict still 409s on save), and a failed background refetch is
+ *    ignored — only a failed first load or Retry shows the Retry block.
+ *  - An explicit Retry / Reload is a deliberate discard, so its result is
+ *    applied UNCONDITIONALLY (`forceApplyRef`): were it dropped because
+ *    something was typed while it ran, the box would sit on the OLD version
+ *    and its next Save would 409 again. The row inputs and remove buttons are
+ *    disabled while `loading`, so that is a belt-and-braces guarantee, not
+ *    the usual path. A recovered load (even a background one) clears the
+ *    "could not load" error, and every foreground load retires any background
+ *    fetch still in flight so an older list cannot land after it.
  */
 export function ClientStatementsPanel({ clientId }: { clientId: string }) {
   const { data, dataRefreshCount = 0 } = useAppContext()
@@ -62,6 +70,9 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
   // same kind started after it, or (background) when a save landed after it.
   const foregroundSeqRef = useRef(0)
   const backgroundSeqRef = useRef(0)
+  // Set by an explicit Retry / Reload: the next foreground load replaces the
+  // box whatever was typed while it ran.
+  const forceApplyRef = useRef(false)
   const loadingRef = useRef(true)
   const lastRefreshCountRef = useRef(dataRefreshCount)
 
@@ -86,6 +97,9 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
     setVersion(loadedVersion)
     setLoadFailed(false)
     setStaleReload(false)
+    // A load that recovers (a background refetch after a failed first load,
+    // say) must not leave the old "could not load" text under good rows.
+    setError('')
     dirtyRef.current = false
     loadedClientRef.current = clientId
   }
@@ -96,6 +110,11 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
   // unmount is the only thing that supersedes it.
   useEffect(() => {
     const seq = ++foregroundSeqRef.current
+    // Retire any background fetch still in flight: it read the list from
+    // before this load and must not land on top of it.
+    backgroundSeqRef.current += 1
+    const force = forceApplyRef.current
+    forceApplyRef.current = false
     if (loadedClientRef.current !== clientId) {
       // A different client: nothing of the previous one may stay on screen,
       // and its unsaved edits are not this client's.
@@ -112,7 +131,7 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
         const { accounts, version: loadedVersion } =
           await listClientStatementAccountsRequest(clientId)
         if (!mountedRef.current || seq !== foregroundSeqRef.current) return
-        if (!dirtyRef.current) applyLoaded(accounts, loadedVersion)
+        if (force || !dirtyRef.current) applyLoaded(accounts, loadedVersion)
       } catch {
         if (!mountedRef.current || seq !== foregroundSeqRef.current) return
         setError('Could not load statement dates.')
@@ -194,6 +213,7 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
    *  the same thing: drop any local edits and re-run the load. */
   const reload = () => {
     dirtyRef.current = false
+    forceApplyRef.current = true
     setReloadToken((token) => token + 1)
   }
 
@@ -272,10 +292,12 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
                 type="text"
                 value={row.name}
                 placeholder="Account name"
+                disabled={loading}
                 onChange={(event) => updateRow(index, { name: event.target.value })}
               />
               <select
                 aria-label="Day"
+                disabled={loading}
                 value={row.dayOfMonth ?? ''}
                 onChange={(event) =>
                   updateRow(index, {
@@ -293,6 +315,7 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
               <button
                 type="button"
                 className="statement-account-remove"
+                disabled={loading}
                 onClick={() => removeRow(index)}
                 aria-label={`Remove ${row.name.trim() || 'account'}`}
               >
