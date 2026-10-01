@@ -21,6 +21,10 @@ import type { Checklist, ChecklistTemplate, ItemDeletionRequest, SessionUser } f
 
 // A whole-app render is slow when the full suite runs in parallel; give the finders room.
 configure({ asyncUtilTimeout: 5000 })
+// And give each test more than one finder's worth: with the default 5 s test
+// limit, a single slow finder used the whole budget and the test timed out
+// instead of failing (or passing) on its assertion.
+vi.setConfig({ testTimeout: 20_000 })
 
 const STAFF_SESSION: SessionUser = {
   id: 'emp-jordan',
