@@ -1,6 +1,6 @@
 import { useSearchParams } from 'react-router-dom'
 
-export type StatusFilter = 'all' | 'active' | 'overdue' | 'completed'
+export type StatusFilter = 'all' | 'active' | 'overdue' | 'waiting' | 'completed'
 
 export function useFilters() {
   const [params, setParams] = useSearchParams()

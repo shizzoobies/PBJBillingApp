@@ -1793,6 +1793,32 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
   return (await response.json()) as ItemDeleteResult
 }
 
+/**
+ * Owner-only: delete a step from this checklist AND from its recurring series
+ * (the template step and the later open copies). The response carries what
+ * changed so the caller can merge it into local state.
+ */
+export type SeriesItemDeleteResult = {
+  removedFromTemplate: boolean
+  removedFromChecklists: string[]
+  /** Later checklists where a same-label copy stayed because work had started on it. */
+  keptOnChecklists: string[]
+  checklists: Checklist[]
+  template: ChecklistTemplate | null
+}
+
+export async function deleteChecklistItemFromSeriesRequest(checklistId: string, itemId: string) {
+  const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}?scope=series`, {
+    credentials: 'same-origin',
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to delete checklist step (${response.status})`)
+  }
+  return (await response.json()) as SeriesItemDeleteResult
+}
+
 // ---- Item-level deletion requests (staff request → owner approves) ----
 
 /** Every pending item-deletion request the caller can see. */

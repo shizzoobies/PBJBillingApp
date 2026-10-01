@@ -114,7 +114,9 @@ function GanttView({
     if (viewerId && checklist.assigneeId !== viewerId) return false
     if (assignee && checklist.assigneeId !== assignee) return false
     if (client && checklist.clientId !== client) return false
-    if (status && status !== 'all') {
+    // Only the Gantt's own buckets narrow: a hand-typed `?status=waiting` (the
+    // Gantt has no Waiting bucket) reads as All instead of hiding every bar.
+    if (status === 'active' || status === 'overdue' || status === 'completed') {
       if (checklistStatus(checklist, todayDateOnly) !== status) return false
     }
     if (q) {
@@ -213,7 +215,7 @@ function GanttView({
         </div>
       </div>
       <div className="filter-row">
-        <FilterBar employees={employees} clients={clients} />
+        <FilterBar employees={employees} clients={clients} showWaiting={false} />
         <ListSearch
           value={query}
           onChange={setQuery}

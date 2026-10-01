@@ -27,7 +27,7 @@ import type {
 } from './lib/types'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
 import type { ScopeTag } from '../lib/invoice-scope-retag.js'
-import type { RecurringReimbursementCoverageInput } from './lib/api'
+import type { RecurringReimbursementCoverageInput, SeriesItemDeleteResult } from './lib/api'
 
 export type AppContextValue = {
   data: AppData
@@ -434,6 +434,13 @@ export type AppContextValue = {
     patch: { waiting?: boolean; waitingOn?: string | null; waitingForChecklistId?: string | null },
   ) => Promise<void>
   deleteChecklistItem: (checklistId: string, itemId: string) => Promise<void>
+  /** Owner-only: delete a step from this checklist, its template and the later open copies. */
+  /**
+   * Resolves with what the server did (null when the call failed or was ignored);
+   * rejects with the server's refusal (a 409: the recurring checklist's last
+   * step cannot be removed) so the prompt can show its sentence.
+   */
+  deleteChecklistItemFromSeries: (checklistId: string, itemId: string) => Promise<SeriesItemDeleteResult | null>
   /**
    * Owner-only soft-delete: moves the checklist to `data.recycledChecklists`
    * (the recycle bin) without losing data. Use when a one-time task should

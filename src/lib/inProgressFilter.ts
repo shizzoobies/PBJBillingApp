@@ -1,7 +1,25 @@
-import { clientName, effectiveChecklistDue } from './utils'
+import { clientName, effectiveChecklistDue, stepIsWaiting } from './utils'
 import { inactiveClientIdSet } from './clientLifecycle'
 import { isInReportPeriod, type ReportPeriod } from './reportPeriod'
 import type { Checklist, Client } from './types'
+
+type WaitNode = Parameters<typeof stepIsWaiting>[0] & { done: boolean; subItems?: WaitNode[] }
+
+/**
+ * How many OPEN steps (top-level, sub-step or sub-sub-step) are waiting. A done
+ * step is not counted, and neither is anything beneath it; a verified wait is
+ * not waiting (`stepIsWaiting`). Derived on every read, never stored, so
+ * clearing or verifying the wait is what returns a checklist to Active.
+ */
+export function waitingStepCount(checklist: Checklist): number {
+  const walk = (nodes: WaitNode[]): number =>
+    nodes.reduce(
+      (sum, node) =>
+        node.done ? sum : sum + (stepIsWaiting(node) ? 1 : 0) + walk(node.subItems ?? []),
+      0,
+    )
+  return walk(checklist.items)
+}
 
 /**
  * Filter-bar status bucket for a checklist. Moved here from ChecklistsPage so
@@ -15,6 +33,21 @@ export function statusForChecklist(checklist: Checklist, todayDateOnly: string) 
   if (allDone) return 'completed'
   if (checklist.dueDate < todayDateOnly) return 'overdue'
   return 'active'
+}
+
+/**
+ * Does a checklist belong under a Status filter option? Active, Overdue and
+ * Completed are exactly what they were before Waiting existed (`statusForChecklist`
+ * decides: Active is not complete AND not overdue), so the Dashboard's
+ * `?status=active` links and the tab count are unchanged. Waiting is a lens over
+ * open work and the one option that overlaps the others: a checklist that is
+ * waiting and overdue shows under Overdue and Waiting, not Active.
+ */
+export function matchesStatusFilter(checklist: Checklist, status: string, todayDateOnly: string): boolean {
+  if (!status || status === 'all') return true
+  const derived = statusForChecklist(checklist, todayDateOnly)
+  if (status === 'waiting') return derived !== 'completed' && waitingStepCount(checklist) > 0
+  return derived === status
 }
 
 /**
@@ -78,9 +111,7 @@ export function filterInProgressChecklists(
     if (!isInReportPeriod(effectiveChecklistDue(checklist), scope.reportPeriod)) return false
     if (scope.assignee && checklist.assigneeId !== scope.assignee) return false
     if (scope.client && checklist.clientId !== scope.client) return false
-    if (scope.status && scope.status !== 'all') {
-      if (statusForChecklist(checklist, scope.today) !== scope.status) return false
-    }
+    if (!matchesStatusFilter(checklist, scope.status ?? '', scope.today)) return false
     if (q) {
       const nameMatch = clientName(clients, checklist.clientId).toLowerCase().includes(q)
       const titleMatch = checklist.title.toLowerCase().includes(q)

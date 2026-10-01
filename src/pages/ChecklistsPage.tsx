@@ -77,7 +77,7 @@ import type {
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { completedTaskRows } from '../lib/completedTasks'
-import { filterInProgressChecklists } from '../lib/inProgressFilter'
+import { filterInProgressChecklists, waitingStepCount } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { inactiveClientIdSet, workableClients } from '../lib/clientLifecycle'
@@ -2058,6 +2058,23 @@ function SkipTaskDialog({
   )
 }
 
+/** What the "this + all future" step delete did, in a sentence for the owner. */
+function seriesDeleteNotice(result: {
+  removedFromTemplate: boolean
+  removedFromChecklists: string[]
+  keptOnChecklists: string[]
+}): string {
+  const count = result.removedFromChecklists.length
+  const upcoming = `${count} upcoming ${count === 1 ? 'checklist' : 'checklists'}`
+  const kept =
+    result.keptOnChecklists.length > 0 ? ` Kept on ${result.keptOnChecklists.length} where work had started.` : ''
+  if (result.removedFromTemplate) return `Removed from the recurring checklist and ${upcoming}.${kept}`
+  const notOnTemplate = 'This step is not on the recurring checklist under that name'
+  return count > 0
+    ? `${notOnTemplate}, but it was removed from ${upcoming}.${kept}`
+    : `${notOnTemplate}, so only this checklist changed.${kept}`
+}
+
 export function ChecklistCard({
   activeEmployeeId,
   checklist,
@@ -2186,6 +2203,7 @@ export function ChecklistCard({
     pendingTaskEditChecklistIds,
     serviceCategories,
     addSeriesChecklistItem,
+    deleteChecklistItemFromSeries,
     data: contextData,
     skipChecklistOccurrence,
     pushChecklistOccurrence,
@@ -2244,6 +2262,22 @@ export function ChecklistCard({
   // for this checklist only or the whole series. Holds the pending label(s)
   // until they pick; null = no prompt open.
   const [seriesPromptLabels, setSeriesPromptLabels] = useState<string[] | null>(null)
+  // The step whose x was clicked, while the "this checklist only / this + all
+  // future" question is open. A checklist with no template has no series, so it
+  // gets a plain confirm instead and never sets this.
+  const [stepDeletePrompt, setStepDeletePrompt] = useState<{ itemId: string; label: string } | null>(null)
+  // What the series delete did (or why the server refused it), shown under the step list.
+  const [stepDeleteNote, setStepDeleteNote] = useState<string | null>(null)
+  const [stepDeleteError, setStepDeleteError] = useState<string | null>(null)
+  const requestStepDelete = (itemId: string) => {
+    setStepDeleteNote(null)
+    setStepDeleteError(null)
+    if (checklist.templateId) {
+      setStepDeletePrompt({ itemId, label: checklist.items.find((item) => item.id === itemId)?.label ?? '' })
+    } else if (window.confirm('Delete this step?')) {
+      void onDeleteItem(checklist.id, itemId)
+    }
+  }
   const [metaTitle, setMetaTitle] = useState(checklist.title)
   const [metaDue, setMetaDue] = useState(checklist.dueDate)
   const [metaAssignee, setMetaAssignee] = useState(checklist.assigneeId)
@@ -2455,6 +2489,17 @@ export function ChecklistCard({
                       : 'Pushed · open steps moved'}
                   </span>
                 ) : null}
+                {(() => {
+                  const waitingSteps = waitingStepCount(checklist)
+                  return waitingSteps > 0 ? (
+                    <span
+                      className="board-chip board-chip-pending checklist-waiting-badge"
+                      title={`${waitingSteps} ${waitingSteps === 1 ? 'step' : 'steps'} waiting`}
+                    >
+                      Waiting
+                    </span>
+                  ) : null
+                })()}
               </span>
             </>
           )}
@@ -2601,7 +2646,7 @@ export function ChecklistCard({
           onAddSubSubItem(checklist.id, itemId, subItemId, title)
         }
         onCanToggle={canToggleItem}
-        onDeleteItem={(itemId) => onDeleteItem(checklist.id, itemId)}
+        onDeleteItem={async (itemId) => requestStepDelete(itemId)}
         onRemoveSubItem={(itemId, subItemId) =>
           onRemoveSubItem(checklist.id, itemId, subItemId)
         }
@@ -2622,6 +2667,63 @@ export function ChecklistCard({
         onUpdateItem={(itemId, patch) => onUpdateItem(checklist.id, itemId, patch)}
         todayDateOnly={todayDateOnly}
       />
+      {stepDeletePrompt ? (
+        <div className="series-scope-prompt" role="group" aria-label="Where to delete this step">
+          <span className="series-scope-text">Delete “{stepDeletePrompt.label}” from…</span>
+          <div className="series-scope-actions">
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => {
+                void onDeleteItem(checklist.id, stepDeletePrompt.itemId)
+                setStepDeletePrompt(null)
+              }}
+            >
+              This checklist only
+            </button>
+            {role === 'owner' ? (
+              <button
+                type="button"
+                className="primary-action"
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      const result = await deleteChecklistItemFromSeries(checklist.id, stepDeletePrompt.itemId)
+                      setStepDeletePrompt(null)
+                      if (result) setStepDeleteNote(seriesDeleteNotice(result))
+                    } catch (error) {
+                      // A refusal (the recurring checklist's last step): keep the prompt open and say why.
+                      setStepDeleteError(error instanceof Error ? error.message : 'Could not remove the step.')
+                    }
+                  })()
+                }}
+              >
+                This + all future
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => {
+                setStepDeletePrompt(null)
+                setStepDeleteError(null)
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          {stepDeleteError ? (
+            <p className="waiting-editor-error" role="alert">
+              {stepDeleteError}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+      {stepDeleteNote ? (
+        <p className="series-scope-text" role="status">
+          {stepDeleteNote}
+        </p>
+      ) : null}
       {canEditStructure
         ? (() => {
             // On a live recurring instance ANYONE who can edit the checklist

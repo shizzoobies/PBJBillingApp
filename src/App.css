@@ -10067,6 +10067,11 @@ button.repeating-task-toggle-pill {
   color: var(--red);
 }
 
+/* The Waiting badge on a checklist card sits beside the Pushed flag; keep it off it. */
+.checklist-waiting-badge {
+  margin-left: 8px;
+}
+
 /* A teammate's checklist, folded in by an accountant's "Show my bookkeepers'"
    toggle. Muted + dashed (the same idiom the "Upcoming" ghosts use) so a
    revealed card never reads as your own work. */

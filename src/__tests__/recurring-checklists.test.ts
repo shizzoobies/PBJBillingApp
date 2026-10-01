@@ -1,13 +1,13 @@
-import { describe, expect, it } from 'vitest'
-import { ensureRecurringChecklists, dateOffset, isChecklistItemDone } from '../lib/utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ensureRecurringChecklists, dateOffset, isChecklistItemDone, localDateOnly } from '../lib/utils'
 import type { AppData, ChecklistTemplate } from '../lib/types'
 
 /**
- * `ensureRecurringChecklists` reads `new Date()` internally for "today" and
- * cannot take an injected clock. To stay deterministic regardless of when the
- * suite runs, every template's `nextDueDate` is expressed RELATIVE to the real
- * today via the codebase's own `dateOffset` helper: a negative offset is
- * unambiguously in the past, a positive offset unambiguously in the future.
+ * `ensureRecurringChecklists` takes an optional local `today` (default: the
+ * wall clock). The specific-months describes below freeze the system clock; the
+ * rest express every template's `nextDueDate` RELATIVE to the real today via the
+ * codebase's own `dateOffset` helper: a negative offset is unambiguously in the
+ * past, a positive offset unambiguously in the future.
  */
 
 function makeTemplate(overrides: Partial<ChecklistTemplate>): ChecklistTemplate {
@@ -188,10 +188,20 @@ describe('ensureRecurringChecklists', () => {
 })
 
 describe('ensureRecurringChecklists — specific-months scheduling', () => {
-  // Anchor the tests to the real clock so they stay deterministic regardless of
+  // Anchor the tests to a frozen clock so they stay deterministic regardless of
   // when the suite runs. The CURRENT calendar month has, by definition, already
   // started; a month several months in the future has not.
-  const now = new Date()
+  // 2026-09-15 at local noon: the UTC date and the local date agree in every zone
+  // the suite runs in, so nothing below depends on the runner clock or zone.
+  const FROZEN = new Date(2026, 8, 15, 12, 0, 0)
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(FROZEN)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+  const now = FROZEN
   const currentYear = now.getFullYear()
   const currentMonth = now.getMonth() + 1 // 1-12
   // A month that has unambiguously NOT started yet this year. When the current
@@ -448,8 +458,18 @@ describe('ensureRecurringChecklists — parity with the server materializer', ()
  * both generators read it.
  */
 describe('ensureRecurringChecklists — a recipe starts the day it is set up', () => {
-  const now = new Date()
-  const today = now.toISOString().slice(0, 10)
+  // 2026-09-15 at local noon: the UTC date and the local date agree in every zone
+  // the suite runs in, so nothing below depends on the runner clock or zone.
+  const FROZEN = new Date(2026, 8, 15, 12, 0, 0)
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(FROZEN)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+  const now = FROZEN
+  const today = localDateOnly(now)
   const currentMonth = now.getMonth() + 1
   const firstOfThisMonth = `${today.slice(0, 7)}-01`
   const elapsedMonths = Array.from({ length: currentMonth }, (_, i) => i + 1)

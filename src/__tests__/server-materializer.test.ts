@@ -19,7 +19,7 @@
  */
 // @ts-expect-error - plain-JS module without type declarations
 import { materializeRecurringChecklists } from '../../db/store.js'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 function daysAgo(n: number): string {
   const d = new Date()
@@ -376,9 +376,19 @@ describe('materializeRecurringChecklists — specific-months per-month due dates
 })
 
 describe('materializeRecurringChecklists — specific-months auto-complete past months', () => {
-  const thisYear = new Date().getFullYear()
-  const today = new Date().toISOString().slice(0, 10)
-  const currentMonth = new Date().getMonth() + 1 // 1–12
+  // 2026-09-15 at local noon: the UTC date and the local date agree in every zone
+  // the suite runs in, so nothing below depends on the runner clock or zone.
+  const FROZEN = new Date(2026, 8, 15, 12, 0, 0)
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(FROZEN)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+  const thisYear = FROZEN.getFullYear()
+  const today = '2026-09-15'
+  const currentMonth = FROZEN.getMonth() + 1 // 1–12
 
   type GenItem = {
     done: boolean
@@ -789,8 +799,18 @@ describe('materializeRecurringChecklists — inactive clients', () => {
  * recipe from filling in the cycle it is genuinely due for.
  */
 describe('materializeRecurringChecklists — a recipe starts the day it is set up', () => {
-  const todayDate = new Date()
-  const today = todayDate.toISOString().slice(0, 10)
+  // 2026-09-15 at local noon: the UTC date and the local date agree in every zone
+  // the suite runs in, so nothing below depends on the runner clock or zone.
+  const FROZEN = new Date(2026, 8, 15, 12, 0, 0)
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(FROZEN)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+  const todayDate = FROZEN
+  const today = '2026-09-15'
   const currentMonth = todayDate.getMonth() + 1
   const firstOfThisMonth = `${today.slice(0, 7)}-01`
 

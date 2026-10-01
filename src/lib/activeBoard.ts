@@ -15,6 +15,8 @@
  *      the view as you go week → month → quarter.
  */
 
+import { isWaitingOnOpen, type WaitingOnLike } from '../../lib/waiting-on-state.js'
+import { stepIsWaiting } from './utils'
 import type { Checklist, ChecklistTemplate, ServiceCategory } from './types'
 
 export type PeriodType = 'week' | 'month' | 'quarter'
@@ -164,10 +166,12 @@ export function boardChecklistStatus(
   const addWaiting = (
     waiting: boolean | undefined,
     waitingOn: string | undefined,
-    waitingOns: { blockerId: string; note?: string }[] | undefined,
+    waitingOns: (WaitingOnLike & { blockerId: string; note?: string })[] | undefined,
   ) => {
-    const structured = waitingOns ?? []
-    if (!waiting && structured.length === 0) return
+    // `stepIsWaiting` is the one definition of "waiting": a verified entry is a
+    // closed-out record, not a block, so it must not hold the chip on Pending.
+    if (!stepIsWaiting({ waiting, waitingOns })) return
+    const structured = (waitingOns ?? []).filter(isWaitingOnOpen)
     waitingCount += 1
     const reason =
       (waitingOn ?? '').trim() ||

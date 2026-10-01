@@ -232,6 +232,7 @@ function signInAs(viewerId: string, isOwner: boolean) {
     bulkAddChecklistItems: vi.fn(),
     deleteChecklist: vi.fn(),
     deleteChecklistItem: vi.fn(),
+    deleteChecklistItemFromSeries: vi.fn(),
     emptyChecklistRecycleBin: vi.fn(),
     rejectChecklistDeletion: vi.fn(),
     removeSubItem: vi.fn(),

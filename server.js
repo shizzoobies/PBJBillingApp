@@ -120,6 +120,7 @@ import {
   templateApplyScopeDenial,
 } from './lib/template-apply-permission.js'
 import { checklistWriteDenial } from './lib/checklist-write-permission.js'
+import { LAST_RECURRING_STEP_MESSAGE } from './lib/series-step-delete.js'
 import {
   isPreviewUnsupportedError,
   previewScopedSession as resolvePreviewScope,
@@ -11251,6 +11252,64 @@ const server = createServer(async (request, response) => {
         })
         if (deleteDenial) {
           sendJson(response, deleteDenial.status, { error: deleteDenial.error })
+          return
+        }
+
+        // ?scope=series: delete the step from this checklist AND the recurring
+        // template and the later open copies (featreq-01464e64). It edits the
+        // template, which only an owner may do, so a non-owner is refused here
+        // rather than falling through to a deletion request for one checklist.
+        if (requestUrl.searchParams.get('scope') === 'series') {
+          if (session.user.role !== 'owner') {
+            sendJson(response, 403, { error: 'Only owners can remove a step from the recurring checklist' })
+            return
+          }
+          if (isCrossSiteOrigin(request)) {
+            sendJson(response, 403, { error: 'Origin not allowed' })
+            return
+          }
+          if (!checklist.templateId) {
+            sendJson(response, 400, { error: 'This checklist is not part of a recurring series' })
+            return
+          }
+          // Defense in depth: the series delete edits a template and the later
+          // copies it made, so it is only for this client's own recurring
+          // checklist. A shared (standard) template, or one that belongs to
+          // another client, is refused rather than edited.
+          const seriesTemplate = data.checklistTemplates.find((entry) => entry.id === checklist.templateId)
+          if (seriesTemplate && (seriesTemplate.isStandard || seriesTemplate.clientId !== checklist.clientId)) {
+            sendJson(response, 409, {
+              error: 'This recurring checklist is shared or belongs to another client, so a step cannot be removed from it here.',
+            })
+            return
+          }
+          const removal = await appDataStore.deleteChecklistItemFromSeries(checklistId, itemId)
+          if (!removal) {
+            sendJson(response, 404, { error: 'Checklist item not found' })
+            return
+          }
+          // Taking the template's last first-stage step would silently stop the
+          // whole series (the materializer skips an empty first stage). Nothing
+          // was written; say so and let the owner pause or delete it instead.
+          if ('refusal' in removal) {
+            sendJson(response, 409, { error: removal.refusal, message: LAST_RECURRING_STEP_MESSAGE })
+            return
+          }
+          await appDataStore.recordActivity(
+            session.user.id,
+            'checklist_item_removed_series',
+            `${checklist.title}: ${targetItem.label}`,
+          )
+          broadcastDataChanged()
+          // Hand back what changed so the tab can merge it rather than keep a
+          // stale template that its next autosave would write straight back.
+          const fresh = await appDataStore.read()
+          const touched = new Set([checklistId, ...removal.removedFromChecklists])
+          sendJson(response, 200, {
+            ...removal,
+            checklists: fresh.checklists.filter((entry) => touched.has(entry.id)),
+            template: fresh.checklistTemplates.find((entry) => entry.id === checklist.templateId) ?? null,
+          })
           return
         }
 

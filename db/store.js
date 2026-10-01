@@ -36,6 +36,14 @@ import {
   sanitizeProposalPricing,
 } from '../lib/proposal-pricing.js'
 import { isWaitingOnOpen, waitingOnStage } from '../lib/waiting-on-state.js'
+import {
+  normalizedLabelSql,
+  normalizeStepLabel,
+  pickCopyToRemove,
+  sameLabelOrdinal,
+  stepCarriesWork,
+  untouchedStepSql,
+} from '../lib/series-step-delete.js'
 import { mergeContactIds, planPrimaryContact } from '../lib/primary-contact.js'
 import {
   buildConsolidatedInvoiceDraft,
@@ -15715,6 +15723,245 @@ export class AppDataStore {
     }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return updatedChecklist
+  }
+
+  /**
+   * Delete a step from a recurring checklist AND from its series: "this and
+   * every future one" (featreq-01464e64).
+   *
+   * Instance steps carry no link to the template step they were copied from
+   * (`buildChecklistFromStage` gives fresh ids), so the match is by LABEL,
+   * trimmed and case-insensitive, within the instance's stage (`stage_id`, else
+   * the template's first stage; a `stage_id` that is no longer on the template
+   * falls back to the first stage, on BOTH backends):
+   *   - the step itself is deleted;
+   *   - ONE template step in that stage is deleted: the one at the same ordinal
+   *     among same-label steps as the clicked step holds among this checklist's,
+   *     so no future instance is created with it. Refused (`last_recurring_step`)
+   *     when that would leave the template's FIRST stage empty, because the
+   *     materializer silently stops a template whose first stage has no steps;
+   *   - on the template's OTHER live checklists whose OCCURRENCE is later
+   *     (`coalesce(cycle_due_date, due_date)`, so a pushed instance compares by
+   *     the cycle it belongs to, not the day it was moved to), at most ONE
+   *     same-label copy per checklist is deleted, and only an UNTOUCHED one
+   *     (`stepCarriesWork` / `untouchedStepSql` in lib/series-step-delete.js:
+   *     not done, no done sub-step, no wait of any kind, a saved one included).
+   *     A copy that carries work stays and its checklist is reported in
+   *     `keptOnChecklists`. Earlier checklists stay; a skipped or recycled one
+   *     is closed out and stays too;
+   *   - any pending item-deletion request or pending item edit that points at a
+   *     step this removes is dropped with it, so the queue cannot hold a request
+   *     for a step that no longer exists.
+   *
+   * Postgres runs all of it in ONE transaction so a failure part-way leaves the
+   * step, the template and the later checklists exactly as they were; the file
+   * backend does it in one write per file. Both change the workspace
+   * fingerprint (the rows are gone), so a tab holding the old template is
+   * refused on its next bulk save instead of re-adding the step.
+   *
+   * @returns {Promise<
+   *   | { removedFromTemplate: boolean, removedFromChecklists: string[], keptOnChecklists: string[] }
+   *   | { refusal: 'last_recurring_step' }
+   *   | null
+   * >} null when the checklist or the step is not there; `refusal` (before any
+   *   write) when the delete would empty the template's first stage.
+   */
+  async deleteChecklistItemFromSeries(checklistId, itemId) {
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        const own = await client.query(
+          `select template_id, stage_id, to_char(coalesce(cycle_due_date, due_date), 'YYYY-MM-DD') as occurrence
+             from checklists where id = $1 for update`,
+          [checklistId],
+        )
+        const checklist = own.rows[0]
+        if (!checklist) {
+          await client.query('rollback')
+          return null
+        }
+        const ownItems = await client.query(
+          `select id, label from checklist_items where checklist_id = $1 order by sort_order asc, id asc`,
+          [checklistId],
+        )
+        const target = ownItems.rows.find((row) => row.id === itemId)
+        if (!target) {
+          await client.query('rollback')
+          return null
+        }
+        const label = normalizeStepLabel(target.label)
+        const ordinal = sameLabelOrdinal(ownItems.rows, itemId)
+
+        let templateItemId = null
+        let stageId = null
+        let stageIds = []
+        if (checklist.template_id) {
+          const stages = await client.query(
+            `select id from checklist_template_stages where template_id = $1 order by position asc, id asc`,
+            [checklist.template_id],
+          )
+          stageIds = stages.rows.map((row) => row.id)
+          stageId = stageIds.includes(checklist.stage_id) ? checklist.stage_id : (stageIds[0] ?? null)
+          if (stageId) {
+            const stageItems = await client.query(
+              `select id, label from checklist_template_items
+                where template_id = $1 and stage_id = $2
+                order by sort_order asc, id asc`,
+              [checklist.template_id, stageId],
+            )
+            const copies = stageItems.rows.filter((row) => normalizeStepLabel(row.label) === label)
+            templateItemId = copies[ordinal]?.id ?? null
+            if (templateItemId && stageId === stageIds[0] && stageItems.rows.length === 1) {
+              // Nothing has been written yet; the rollback only ends the transaction.
+              await client.query('rollback')
+              return { refusal: 'last_recurring_step' }
+            }
+          }
+        }
+
+        await client.query(`delete from checklist_items where checklist_id = $1 and id = $2`, [checklistId, itemId])
+        const removedSteps = [{ checklistId, itemId }]
+        const removedFromChecklists = []
+        const keptOnChecklists = []
+        if (templateItemId) {
+          await client.query(`delete from checklist_template_items where template_id = $1 and id = $2`, [
+            checklist.template_id,
+            templateItemId,
+          ])
+        }
+        if (stageId) {
+          const candidates = await client.query(
+            `select ci.id, ci.checklist_id, (${untouchedStepSql('ci')}) as untouched
+               from checklist_items ci
+               join checklists c on c.id = ci.checklist_id
+              where c.template_id = $1
+                and c.id <> $2
+                and coalesce(c.cycle_due_date, c.due_date) > $3::date
+                and c.deleted_at is null
+                and c.skipped_at is null
+                and case when c.stage_id = any($5::text[]) then c.stage_id else $6 end = $4
+                and ${normalizedLabelSql('ci.label')} = $7
+              order by ci.checklist_id asc, ci.sort_order asc, ci.id asc`,
+            [checklist.template_id, checklistId, checklist.occurrence, stageId, stageIds, stageIds[0] ?? '', label],
+          )
+          const byChecklist = new Map()
+          for (const row of candidates.rows) {
+            const list = byChecklist.get(row.checklist_id) ?? []
+            list.push({ id: row.id, carriesWork: !row.untouched })
+            byChecklist.set(row.checklist_id, list)
+          }
+          const removeIds = []
+          for (const [laterId, copies] of byChecklist) {
+            const pick = pickCopyToRemove(copies, ordinal)
+            if (pick.removeId) removeIds.push(pick.removeId)
+            if (pick.kept) keptOnChecklists.push(laterId)
+          }
+          if (removeIds.length) {
+            // The untouched rule is stated again on the delete itself, so a copy
+            // that picked up work between the read and the write is not removed.
+            const later = await client.query(
+              `delete from checklist_items ci
+                where ci.id = any($1::text[])
+                  and ${untouchedStepSql('ci')}
+                returning ci.id, ci.checklist_id`,
+              [removeIds],
+            )
+            for (const row of later.rows) {
+              removedSteps.push({ checklistId: row.checklist_id, itemId: row.id })
+              if (!removedFromChecklists.includes(row.checklist_id)) removedFromChecklists.push(row.checklist_id)
+            }
+          }
+        }
+        const stepChecklistIds = removedSteps.map((step) => step.checklistId)
+        const stepItemIds = removedSteps.map((step) => step.itemId)
+        await client.query(
+          `delete from item_deletion_requests r
+            using unnest($1::text[], $2::text[]) as gone(checklist_id, item_id)
+            where r.checklist_id = gone.checklist_id and r.item_id = gone.item_id`,
+          [stepChecklistIds, stepItemIds],
+        )
+        await client.query(
+          `delete from pending_task_edits e
+            using unnest($1::text[], $2::text[]) as gone(checklist_id, item_id)
+            where e.checklist_id = gone.checklist_id and e.item_id = gone.item_id`,
+          [stepChecklistIds, stepItemIds],
+        )
+        await client.query('commit')
+        return { removedFromTemplate: Boolean(templateItemId), removedFromChecklists, keptOnChecklists }
+      } catch (error) {
+        try {
+          await client.query('rollback')
+        } catch {
+          // The connection is already gone; the original error is the one to surface.
+        }
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const checklists = data.checklists ?? []
+    const checklist = checklists.find((entry) => entry.id === checklistId)
+    const target = checklist?.items.find((item) => item.id === itemId)
+    if (!checklist || !target) return null
+    const label = normalizeStepLabel(target.label)
+    const ordinal = sameLabelOrdinal(checklist.items, itemId)
+
+    const template = checklist.templateId
+      ? (data.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId)
+      : null
+    const stages = template?.stages ?? []
+    const stage = stages.find((entry) => entry.id === checklist.stageId) ?? stages[0] ?? null
+    const templateItem = stage
+      ? ((stage.items ?? []).filter((item) => normalizeStepLabel(item.label) === label)[ordinal] ?? null)
+      : null
+    if (templateItem && stage === stages[0] && stage.items.length === 1) {
+      return { refusal: 'last_recurring_step' }
+    }
+
+    const removedSteps = [{ checklistId, itemId }]
+    const removedFromChecklists = []
+    const keptOnChecklists = []
+    checklist.items = checklist.items.filter((item) => item.id !== itemId)
+    if (templateItem) stage.items = stage.items.filter((item) => item !== templateItem)
+    if (template && stage) {
+      const occurrence = checklist.cycleDueDate ?? checklist.dueDate
+      for (const other of checklists) {
+        if (other.id === checklistId || other.templateId !== checklist.templateId) continue
+        if (other.deletedAt || other.skippedAt) continue
+        if (!((other.cycleDueDate ?? other.dueDate) > occurrence)) continue
+        if ((stages.find((entry) => entry.id === other.stageId) ?? stages[0]) !== stage) continue
+        const copies = other.items
+          .filter((item) => normalizeStepLabel(item.label) === label)
+          .map((item) => ({ id: item.id, carriesWork: stepCarriesWork(item) }))
+        const pick = pickCopyToRemove(copies, ordinal)
+        if (pick.removeId) {
+          other.items = other.items.filter((item) => item.id !== pick.removeId)
+          removedSteps.push({ checklistId: other.id, itemId: pick.removeId })
+          removedFromChecklists.push(other.id)
+        }
+        if (pick.kept) keptOnChecklists.push(other.id)
+      }
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    // The queues live in the auth file here; drop anything aimed at a removed step.
+    const aimedAtRemoved = (request) =>
+      removedSteps.some((step) => step.checklistId === request.checklistId && step.itemId === request.itemId)
+    const authState = await readJson(localAuthPath)
+    let queuesChanged = false
+    for (const key of ['itemDeletionRequests', 'pendingTaskEdits']) {
+      if (!Array.isArray(authState[key])) continue
+      const kept = authState[key].filter((request) => !aimedAtRemoved(request))
+      if (kept.length !== authState[key].length) {
+        authState[key] = kept
+        queuesChanged = true
+      }
+    }
+    if (queuesChanged) await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return { removedFromTemplate: Boolean(templateItem), removedFromChecklists, keptOnChecklists }
   }
 
   /**
