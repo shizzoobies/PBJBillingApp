@@ -147,6 +147,7 @@ function signInAs(viewerId: string, isOwner: boolean, staffRole = 'Bookkeeper') 
     removeSubItem: vi.fn(),
     removeSubSubItem: vi.fn(),
     reorderChecklistItems: vi.fn(),
+    reorderChecklistSubItems: vi.fn(),
     restoreChecklist: vi.fn(),
     setChecklistViewers: vi.fn(),
     toggleChecklistItem: vi.fn(),

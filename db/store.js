@@ -2162,6 +2162,22 @@ function applyItemToggle(rawSubItems, itemDone, { subItemId, subSubItemId } = {}
   return { subItems, done: !itemDone }
 }
 
+/**
+ * `list` with the entries named by `orderedIds` first, in that order, then the
+ * rest in their existing order. Unknown and repeated ids are ignored. Pure.
+ */
+function reorderById(list, orderedIds) {
+  const byId = new Map(list.map((entry) => [entry?.id, entry]))
+  const seen = new Set()
+  const head = []
+  for (const id of orderedIds) {
+    if (seen.has(id) || !byId.has(id)) continue
+    seen.add(id)
+    head.push(byId.get(id))
+  }
+  return [...head, ...list.filter((entry) => !seen.has(entry?.id))]
+}
+
 function buildChecklistFromStage({
   template,
   stage,
@@ -16346,6 +16362,58 @@ export class AppDataStore {
       return updatedChecklist
     })
     if (!subItemFound || !updatedChecklist) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return updatedChecklist
+  }
+
+  /**
+   * Reorder the sub-items of one checklist item. `orderedIds` lists sub-item ids
+   * in their new order; a sub-item that is not listed keeps its relative order
+   * after the listed ones, and an unknown or repeated id is ignored. Only the
+   * ORDER changes: `done`, its roll-up, the completion stamp and every wait ride
+   * along untouched, so the stored array is reordered as it is rather than
+   * re-normalized. Returns the updated checklist, or null when the item is not
+   * found.
+   */
+  async reorderChecklistSubItems(checklistId, itemId, orderedIds) {
+    const ids = Array.isArray(orderedIds)
+      ? orderedIds.filter((id) => typeof id === 'string')
+      : []
+
+    if (this.pool) {
+      const itemResult = await this.pool.query(
+        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
+        [checklistId, itemId],
+      )
+      if (!itemResult.rowCount) return null
+      const current = Array.isArray(itemResult.rows[0].sub_items)
+        ? itemResult.rows[0].sub_items
+        : []
+      await this.pool.query(
+        `update checklist_items
+         set sub_items = $3::jsonb, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+        [checklistId, itemId, JSON.stringify(reorderById(current, ids))],
+      )
+      const data = await this.read()
+      return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
+    }
+
+    const data = await readJson(localDataPath)
+    let updatedChecklist = null
+    let itemFound = false
+    data.checklists = data.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) return checklist
+      const items = checklist.items.map((item) => {
+        if (item.id !== itemId) return item
+        itemFound = true
+        const current = Array.isArray(item.subItems) ? item.subItems : []
+        return { ...item, subItems: reorderById(current, ids) }
+      })
+      updatedChecklist = { ...checklist, items }
+      return updatedChecklist
+    })
+    if (!itemFound || !updatedChecklist) return null
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return updatedChecklist
   }

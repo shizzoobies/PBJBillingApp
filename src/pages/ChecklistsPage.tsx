@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Copy,
   GripVertical,
   MoreHorizontal,
@@ -78,6 +79,13 @@ import { filterInProgressChecklists } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { inactiveClientIdSet, workableClients } from '../lib/clientLifecycle'
+import {
+  orderAfterDrag,
+  orderAfterMove,
+  orderStepsForDisplay,
+  readHideDone,
+  writeHideDone,
+} from '../lib/orderSteps'
 import { waitForTaskOptions } from '../lib/waitForTaskOptions'
 import {
   addDays,
@@ -3355,9 +3363,21 @@ function DraggableTaskList({
     waitingOnVerify,
     waitingOnSendBack,
     waitingOnQuestion,
+    reorderChecklistSubItems,
     role,
   } = useAppContext()
   const isOwner = role === 'owner'
+  // "Hide completed" is a per-checklist, per-browser preference (like the
+  // section collapse bools), never workspace data.
+  const [hideDone, setHideDone] = useState(() => readHideDone(checklistId))
+  const setHideDonePref = (next: boolean) => {
+    setHideDone(next)
+    writeHideDone(checklistId, next)
+  }
+  // A sub-step being dragged, and the one it is over. Sub-steps only reorder
+  // within their own step, so the step id rides along.
+  const [draggingSub, setDraggingSub] = useState<{ itemId: string; subId: string } | null>(null)
+  const [dropSubTargetId, setDropSubTargetId] = useState<string | null>(null)
   // This task's client — the "waiting on the client" option needs a name to
   // show, and a resolved client wait needs one to keep showing afterwards.
   const clientName = useMemo(() => {
@@ -3440,20 +3460,85 @@ function DraggableTaskList({
       setDropTargetId(null)
       return
     }
-    const orderedIds = items.map((item) => item.id)
-    const fromIdx = orderedIds.indexOf(draggingId)
-    const toIdx = orderedIds.indexOf(targetId)
-    if (fromIdx === -1 || toIdx === -1) {
-      setDraggingId(null)
-      setDropTargetId(null)
-      return
-    }
-    orderedIds.splice(fromIdx, 1)
-    orderedIds.splice(toIdx, 0, draggingId)
-    onReorderItems(checklistId, orderedIds)
+    // Done steps sit below the open ones on screen only; a drag acts within the
+    // open group and sends the new open order followed by the existing done
+    // order, so nothing about where a done step is saved ever changes.
+    const orderedIds = orderAfterDrag(items, draggingId, targetId)
+    if (orderedIds) onReorderItems(checklistId, orderedIds)
     setDraggingId(null)
     setDropTargetId(null)
   }
+
+  const moveItem = (itemId: string, direction: 'up' | 'down') => {
+    const orderedIds = orderAfterMove(items, itemId, direction)
+    if (orderedIds) onReorderItems(checklistId, orderedIds)
+  }
+
+  const handleSubDragStart = (
+    event: DragEvent<HTMLDivElement>,
+    itemId: string,
+    subId: string,
+  ) => {
+    if (!canReorder) return
+    setDraggingSub({ itemId, subId })
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', subId)
+  }
+
+  const handleSubDragOver = (event: DragEvent<HTMLDivElement>, itemId: string, subId: string) => {
+    if (!canReorder || !draggingSub || draggingSub.itemId !== itemId || draggingSub.subId === subId) {
+      return
+    }
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    setDropSubTargetId(subId)
+  }
+
+  const handleSubDrop = (event: DragEvent<HTMLDivElement>, itemId: string, targetSubId: string) => {
+    event.preventDefault()
+    if (canReorder && draggingSub && draggingSub.itemId === itemId) {
+      const parent = items.find((entry) => entry.id === itemId)
+      const orderedIds = orderAfterDrag(
+        parent?.subItems ?? [],
+        draggingSub.subId,
+        targetSubId,
+      )
+      if (orderedIds) reorderChecklistSubItems(checklistId, itemId, orderedIds)
+    }
+    setDraggingSub(null)
+    setDropSubTargetId(null)
+  }
+
+  const handleSubDragEnd = () => {
+    setDraggingSub(null)
+    setDropSubTargetId(null)
+  }
+
+  const moveSubItem = (itemId: string, subId: string, direction: 'up' | 'down') => {
+    const parent = items.find((entry) => entry.id === itemId)
+    const orderedIds = orderAfterMove(parent?.subItems ?? [], subId, direction)
+    if (orderedIds) reorderChecklistSubItems(checklistId, itemId, orderedIds)
+  }
+
+  // What "Hide completed" can hide: done steps, and the done sub-steps of an
+  // open step. A done step that still carries a LIVE saved wait stays put - its
+  // Approve controls live on the row, and hiding it would bury an open hand-off.
+  // Hiding is display only; no step's data changes.
+  const hideable = (node: { done?: boolean; waitingOns?: ChecklistItem['waitingOns'] }) =>
+    Boolean(node.done) && !hasLiveSavedWait(node)
+  const hiddenCount = items.reduce(
+    (count, item) =>
+      count +
+      (hideable(item)
+        ? 1
+        : item.done
+          ? 0
+          : (item.subItems ?? []).filter(hideable).length),
+    0,
+  )
+  const orderedItems = orderStepsForDisplay(items)
+  const visibleItems = hideDone ? orderedItems.filter((item) => !hideable(item)) : orderedItems
+  const openItemIds = items.filter((entry) => !entry.done).map((entry) => entry.id)
 
   const handleDragEnd = () => {
     setDraggingId(null)
@@ -3462,10 +3547,42 @@ function DraggableTaskList({
 
   return (
     <div className="task-list">
-      {items.map((item) => {
+      {hiddenCount > 0 || hideDone ? (
+        <div className="task-list-controls">
+          <button
+            type="button"
+            className="hide-completed-toggle"
+            aria-pressed={hideDone}
+            onClick={() => setHideDonePref(!hideDone)}
+          >
+            Hide completed ({hiddenCount})
+          </button>
+          {hideDone && hiddenCount > 0 ? (
+            <span className="completed-hidden-note">
+              {hiddenCount} completed {hiddenCount === 1 ? 'step' : 'steps'} hidden -{' '}
+              <button
+                type="button"
+                className="completed-hidden-show"
+                onClick={() => setHideDonePref(false)}
+              >
+                Show
+              </button>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {visibleItems.map((item) => {
         const subItems = item.subItems ?? []
         const hasSubItems = subItems.length > 0
         const allowToggle = onCanToggle(item)
+        // Done sub-steps sit below the open ones, and fold away with the
+        // checklist's "Hide completed" (an open step only - a done step is
+        // hidden whole, or shown whole).
+        const shownSubItems = orderStepsForDisplay(subItems).filter(
+          (sub) => !(hideDone && !item.done && hideable(sub)),
+        )
+        const itemOpenIndex = openItemIds.indexOf(item.id)
+        const openSubIds = subItems.filter((sub) => !sub.done).map((sub) => sub.id)
         const overdue = Boolean(
           item.dueDate && !item.done && item.dueDate < todayDateOnly,
         )
@@ -3479,7 +3596,7 @@ function DraggableTaskList({
           <div key={item.id} className="task-item">
             <div
               className={classes.join(' ')}
-              draggable={canReorder}
+              draggable={canReorder && !item.done}
               onDragStart={(event) => handleDragStart(event, item.id)}
               onDragOver={(event) => handleDragOver(event, item.id)}
               onDragLeave={handleDragLeave}
@@ -3487,12 +3604,38 @@ function DraggableTaskList({
               onDragEnd={handleDragEnd}
             >
               {canReorder ? (
+                // Visible at rest. A done step is not part of the open group a
+                // drag reorders, so its handle is kept (for alignment) but idle.
                 <span
-                  className="drag-handle"
+                  className={item.done ? 'drag-handle drag-handle-idle' : 'drag-handle'}
                   aria-hidden="true"
-                  title="Drag to reorder"
+                  title={item.done ? undefined : 'Drag to reorder'}
                 >
                   <GripVertical size={14} />
+                </span>
+              ) : null}
+              {canReorder && !item.done ? (
+                <span className="reorder-buttons">
+                  <button
+                    type="button"
+                    className="reorder-btn"
+                    aria-label="Move up"
+                    title="Move up"
+                    disabled={itemOpenIndex <= 0}
+                    onClick={() => moveItem(item.id, 'up')}
+                  >
+                    <ChevronUp size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    className="reorder-btn"
+                    aria-label="Move down"
+                    title="Move down"
+                    disabled={itemOpenIndex === openItemIds.length - 1}
+                    onClick={() => moveItem(item.id, 'down')}
+                  >
+                    <ChevronDown size={13} />
+                  </button>
                 </span>
               ) : null}
               <input
@@ -3722,13 +3865,59 @@ function DraggableTaskList({
             />
             {(hasSubItems || canEdit) ? (
               <div className="sub-item-list">
-                {subItems.map((sub) => {
+                {shownSubItems.map((sub) => {
                   const subSubItems = sub.subItems ?? []
                   const hasSubSubItems = subSubItems.length > 0
                   const subSubDoneCount = subSubItems.filter((s) => s.done).length
+                  const subOpenIndex = openSubIds.indexOf(sub.id)
+                  const subRowClasses = ['sub-item-row']
+                  if (sub.done) subRowClasses.push('done')
+                  if (draggingSub?.subId === sub.id) subRowClasses.push('dragging')
+                  if (dropSubTargetId === sub.id) subRowClasses.push('drop-target')
                   return (
                     <div key={sub.id} className="sub-item-group">
-                      <div className={sub.done ? 'sub-item-row done' : 'sub-item-row'}>
+                      <div
+                        className={subRowClasses.join(' ')}
+                        draggable={canReorder && !sub.done}
+                        onDragStart={(event) => handleSubDragStart(event, item.id, sub.id)}
+                        onDragOver={(event) => handleSubDragOver(event, item.id, sub.id)}
+                        onDragLeave={() => setDropSubTargetId(null)}
+                        onDrop={(event) => handleSubDrop(event, item.id, sub.id)}
+                        onDragEnd={handleSubDragEnd}
+                      >
+                        {canReorder ? (
+                          <span
+                            className={sub.done ? 'drag-handle drag-handle-idle' : 'drag-handle'}
+                            aria-hidden="true"
+                            title={sub.done ? undefined : 'Drag to reorder'}
+                          >
+                            <GripVertical size={12} />
+                          </span>
+                        ) : null}
+                        {canReorder && !sub.done ? (
+                          <span className="reorder-buttons">
+                            <button
+                              type="button"
+                              className="reorder-btn"
+                              aria-label="Move up"
+                              title="Move up"
+                              disabled={subOpenIndex <= 0}
+                              onClick={() => moveSubItem(item.id, sub.id, 'up')}
+                            >
+                              <ChevronUp size={12} />
+                            </button>
+                            <button
+                              type="button"
+                              className="reorder-btn"
+                              aria-label="Move down"
+                              title="Move down"
+                              disabled={subOpenIndex === openSubIds.length - 1}
+                              onClick={() => moveSubItem(item.id, sub.id, 'down')}
+                            >
+                              <ChevronDown size={12} />
+                            </button>
+                          </span>
+                        ) : null}
                         <input
                           checked={sub.done}
                           disabled={

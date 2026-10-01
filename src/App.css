@@ -1818,9 +1818,11 @@ textarea.input {
 }
 
 .task-row .drag-handle,
+.sub-item-row .drag-handle,
 .template-item-row .drag-handle {
   align-items: center;
-  color: var(--muted);
+  color: var(--ink);
+  opacity: 0.55;
   cursor: grab;
   display: inline-flex;
   height: 18px;
@@ -1835,6 +1837,91 @@ textarea.input {
 .task-row.drop-target {
   border-top: 2px solid var(--berry);
   padding-top: 4px;
+}
+
+/* A done step is not part of the open group a drag reorders: its handle keeps
+   its place (so rows stay aligned) but is invisible and idle. */
+.drag-handle-idle {
+  cursor: default;
+  visibility: hidden;
+}
+
+.sub-item-row.dragging {
+  opacity: 0.4;
+}
+
+.sub-item-row.drop-target {
+  border-top: 2px solid var(--berry);
+}
+
+/* Move up / Move down - the keyboard and touch way to reorder. */
+.reorder-buttons {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.reorder-btn {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  height: 20px;
+  justify-content: center;
+  padding: 0;
+  width: 20px;
+}
+
+.reorder-btn:hover:not(:disabled) {
+  background: var(--soft);
+  color: var(--ink);
+}
+
+.reorder-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.task-list-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.hide-completed-toggle {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  padding: 2px 10px;
+}
+
+.hide-completed-toggle[aria-pressed='true'] {
+  background: var(--soft);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.completed-hidden-note {
+  color: var(--muted);
+}
+
+.completed-hidden-show {
+  background: transparent;
+  border: none;
+  color: var(--berry);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
 }
 
 .task-row {

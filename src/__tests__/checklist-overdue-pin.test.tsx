@@ -148,6 +148,7 @@ function signInAs(
     removeSubItem: vi.fn(),
     removeSubSubItem: vi.fn(),
     reorderChecklistItems: vi.fn(),
+    reorderChecklistSubItems: vi.fn(),
     restoreChecklist: vi.fn(),
     setChecklistViewers: vi.fn(),
     toggleChecklistItem: vi.fn(),

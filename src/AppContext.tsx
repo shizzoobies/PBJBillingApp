@@ -404,6 +404,7 @@ export type AppContextValue = {
    */
   setClientLifecycle: (clientId: string, stage: 'inactive' | 'active') => Promise<boolean>
   reorderChecklistItems: (checklistId: string, orderedIds: string[]) => void
+  reorderChecklistSubItems: (checklistId: string, itemId: string, orderedIds: string[]) => void
   bulkAddChecklistItems: (checklistId: string, labels: string[]) => void
   createChecklist: (payload: {
     title: string

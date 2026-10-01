@@ -70,6 +70,7 @@ function signInAs(viewerId: string, isOwner: boolean, checklists: Checklist[] = 
     removeSubItem: vi.fn(),
     removeSubSubItem: vi.fn(),
     reorderChecklistItems: vi.fn(),
+    reorderChecklistSubItems: vi.fn(),
     setChecklistViewers: vi.fn(),
     toggleChecklistItem: vi.fn(),
     toggleSubItem: vi.fn(),

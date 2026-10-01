@@ -88,6 +88,7 @@ import {
   removeChecklistSubItemRequest,
   removeChecklistSubSubItemRequest,
   reorderChecklistItemsRequest,
+  reorderChecklistSubItemsRequest,
   saveAppData,
   StaleWorkspaceApiError,
   setChecklistViewersRequest,
@@ -2967,6 +2968,33 @@ function App() {
     }
   }
 
+  const reorderChecklistSubItems = async (
+    checklistId: string,
+    itemId: string,
+    orderedIds: string[],
+  ) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updated = await reorderChecklistSubItemsRequest(checklistId, itemId, orderedIds)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklists: current.checklists.map((checklist) =>
+          checklist.id === checklistId ? updated : checklist,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+    }
+  }
+
   const bulkAddChecklistItems = async (checklistId: string, labels: string[]) => {
     if (previewActiveRef.current || labels.length === 0) return
     try {
@@ -4062,6 +4090,7 @@ function App() {
     startOnboarding,
     setClientLifecycle,
     reorderChecklistItems,
+    reorderChecklistSubItems,
     bulkAddChecklistItems,
     createChecklist,
     updateChecklistItem,

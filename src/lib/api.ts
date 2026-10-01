@@ -1673,6 +1673,28 @@ export async function reorderChecklistItemsRequest(checklistId: string, itemIds:
   return (await response.json()) as Checklist
 }
 
+/** Put one step's sub-steps in a new order; returns the updated checklist. */
+export async function reorderChecklistSubItemsRequest(
+  checklistId: string,
+  itemId: string,
+  order: string[],
+) {
+  const response = await apiFetch(
+    `/api/checklists/${checklistId}/items/${itemId}/sub-items/reorder`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to reorder sub-steps (${response.status})`)
+  }
+  return (await response.json()) as Checklist
+}
+
 export async function createChecklistRequest(payload: {
   title: string
   clientId: string

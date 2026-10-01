@@ -18858,3 +18858,173 @@ describe('proposal chat turns (both backends)', () => {
     expect(loaded.messages[loaded.messages.length - 1].text).toBe('reply 104')
   })
 })
+
+/**
+ * `reorderChecklistSubItems` (featreq-8a01fe08): put one step's sub-steps in a
+ * new order. Only the ORDER moves - `done`, the roll-up and every wait ride along
+ * untouched - and a sub-step the caller did not list keeps its relative order
+ * after the listed ones. Both backends.
+ */
+const SUB_REORDER_WORKSPACE = {
+  clients: [{ id: 'c1', name: 'Acme' }],
+  employees: [{ id: 'emp-brit', name: 'Brittany', role: 'owner' }],
+  checklists: [
+    {
+      id: 'cl-1',
+      title: 'August close',
+      clientId: 'c1',
+      items: [
+        { id: 'it-1', label: 'Reconcile the operating account', done: false },
+        {
+          id: 'it-2',
+          label: 'Payroll',
+          done: false,
+          subItems: [
+            { id: 'sub-a', title: 'Pull hours', done: false },
+            { id: 'sub-b', title: 'Review overtime', done: true },
+            { id: 'sub-c', title: 'Run the file', done: false },
+            { id: 'sub-d', title: 'Send stubs', done: false },
+          ],
+        },
+      ],
+    },
+  ],
+}
+
+const subIdsOf = (checklist, itemId) =>
+  checklist.items.find((item) => item.id === itemId).subItems.map((sub) => sub.id)
+
+describe('reorderChecklistSubItems (file backend)', () => {
+  beforeEach(async () => {
+    await store.write(workspace(SUB_REORDER_WORKSPACE))
+  })
+
+  it('puts the sub-steps in the order given and returns the updated checklist', async () => {
+    const updated = await store.reorderChecklistSubItems('cl-1', 'it-2', [
+      'sub-d',
+      'sub-c',
+      'sub-b',
+      'sub-a',
+    ])
+    expect(subIdsOf(updated, 'it-2')).toEqual(['sub-d', 'sub-c', 'sub-b', 'sub-a'])
+
+    const data = await store.read()
+    expect(subIdsOf(data.checklists.find((c) => c.id === 'cl-1'), 'it-2')).toEqual([
+      'sub-d',
+      'sub-c',
+      'sub-b',
+      'sub-a',
+    ])
+  })
+
+  it('sends ids that are not listed to the end, in their existing order', async () => {
+    const updated = await store.reorderChecklistSubItems('cl-1', 'it-2', ['sub-c'])
+    expect(subIdsOf(updated, 'it-2')).toEqual(['sub-c', 'sub-a', 'sub-b', 'sub-d'])
+  })
+
+  it('ignores unknown and repeated ids', async () => {
+    const updated = await store.reorderChecklistSubItems('cl-1', 'it-2', [
+      'sub-d',
+      'nope',
+      'sub-d',
+      'sub-a',
+    ])
+    expect(subIdsOf(updated, 'it-2')).toEqual(['sub-d', 'sub-a', 'sub-b', 'sub-c'])
+  })
+
+  it('changes nothing but the order: done flags, titles and the parent roll-up ride along', async () => {
+    await store.reorderChecklistSubItems('cl-1', 'it-2', ['sub-d', 'sub-b', 'sub-c', 'sub-a'])
+    const data = await store.read()
+    const item = data.checklists.find((c) => c.id === 'cl-1').items.find((i) => i.id === 'it-2')
+    expect(item.done).toBe(false)
+    const byId = Object.fromEntries(item.subItems.map((sub) => [sub.id, sub]))
+    expect(byId['sub-b']).toMatchObject({ title: 'Review overtime', done: true })
+    expect(byId['sub-a']).toMatchObject({ title: 'Pull hours', done: false })
+  })
+
+  it('leaves the other steps and their order alone', async () => {
+    const updated = await store.reorderChecklistSubItems('cl-1', 'it-2', ['sub-d'])
+    expect(updated.items.map((item) => item.id)).toEqual(['it-1', 'it-2'])
+  })
+
+  it('returns null for an unknown checklist or step and writes nothing', async () => {
+    expect(await store.reorderChecklistSubItems('cl-nope', 'it-2', ['sub-a'])).toBeNull()
+    expect(await store.reorderChecklistSubItems('cl-1', 'it-nope', ['sub-a'])).toBeNull()
+    const data = await store.read()
+    expect(subIdsOf(data.checklists.find((c) => c.id === 'cl-1'), 'it-2')).toEqual([
+      'sub-a',
+      'sub-b',
+      'sub-c',
+      'sub-d',
+    ])
+  })
+
+  it('tolerates a step with no sub-steps', async () => {
+    const updated = await store.reorderChecklistSubItems('cl-1', 'it-1', ['sub-a'])
+    expect(updated.items.find((item) => item.id === 'it-1').subItems ?? []).toEqual([])
+  })
+})
+
+describe('reorderChecklistSubItems (postgres branch)', () => {
+  const subRows = [
+    { id: 'sub-a', title: 'Pull hours', done: false, waitingOns: [{ id: 'wo-1' }] },
+    { id: 'sub-b', title: 'Review overtime', done: true },
+    { id: 'sub-c', title: 'Run the file', done: false },
+  ]
+
+  /** A store whose per-step sub_items read answers with `rows`. */
+  function pgStoreWithSubs(rows) {
+    const fake = fakePostgres()
+    const store = postgresStore(fake)
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      if (/^select sub_items\s+from checklist_items/i.test(String(text).trim())) {
+        return rows ? { rows: [{ sub_items: rows }], rowCount: 1 } : { rows: [], rowCount: 0 }
+      }
+      return result
+    }
+    return { fake, store }
+  }
+
+  it('rewrites the step sub_items jsonb in ONE update, in the order given', async () => {
+    const { fake, store } = pgStoreWithSubs(subRows)
+    await store.reorderChecklistSubItems('cl-1', 'item-1', ['sub-c', 'sub-a'])
+
+    const updates = fake.matching(/^update checklist_items\b/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toMatch(/set sub_items = \$3::jsonb, updated_at = now\(\)/i)
+    expect(updates[0].text).toMatch(/where checklist_id = \$1 and id = \$2/i)
+    expect(updates[0].params.slice(0, 2)).toEqual(['cl-1', 'item-1'])
+    // Listed ids first, then the rest in their existing order.
+    expect(JSON.parse(updates[0].params[2]).map((sub) => sub.id)).toEqual([
+      'sub-c',
+      'sub-a',
+      'sub-b',
+    ])
+  })
+
+  it('moves only the order: every field of every sub-step is written back as stored', async () => {
+    const { fake, store } = pgStoreWithSubs(subRows)
+    await store.reorderChecklistSubItems('cl-1', 'item-1', ['sub-c'])
+
+    const written = JSON.parse(fake.matching(/^update checklist_items\b/i)[0].params[2])
+    expect(written).toEqual([subRows[2], subRows[0], subRows[1]])
+  })
+
+  it('does not touch done, the completion stamp or sort_order', async () => {
+    const { fake, store } = pgStoreWithSubs(subRows)
+    await store.reorderChecklistSubItems('cl-1', 'item-1', ['sub-c'])
+
+    const update = fake.matching(/^update checklist_items\b/i)[0]
+    expect(update.text).not.toMatch(/\bdone\b/i)
+    expect(update.text).not.toMatch(/completed_at/i)
+    expect(update.text).not.toMatch(/sort_order/i)
+  })
+
+  it('returns null and writes nothing for an unknown step', async () => {
+    const { fake, store } = pgStoreWithSubs(null)
+    expect(await store.reorderChecklistSubItems('cl-1', 'item-nope', ['sub-a'])).toBeNull()
+    expect(fake.matching(/^update checklist_items\b/i)).toHaveLength(0)
+  })
+})

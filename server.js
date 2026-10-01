@@ -10226,6 +10226,74 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/checklists/:id/items/:itemId/sub-items/reorder  { order: [subItemId] }
+    // — put a step's sub-steps in a new order (owner / assignee / editor / the
+    // step's own assignee, like every sub-step write). Matched BEFORE the generic
+    // sub-items route below, which would read "reorder" as a sub-item id.
+    const checklistSubItemsReorderMatch = normalizedPath.match(
+      /^\/api\/checklists\/([^/]+)\/items\/([^/]+)\/sub-items\/reorder$/,
+    )
+    if (checklistSubItemsReorderMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+
+      const checklistId = checklistSubItemsReorderMatch[1]
+      const itemId = checklistSubItemsReorderMatch[2]
+      const data = await appDataStore.read()
+      const checklist = data.checklists.find((entry) => entry.id === checklistId)
+      if (!checklist) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+      const targetItem = checklist.items.find((item) => item.id === itemId)
+      if (!targetItem) {
+        sendJson(response, 404, { error: 'Checklist item not found' })
+        return
+      }
+
+      const visibleClientIds = visibleClientIdSet(session, data)
+      if (checklistOutOfScope(checklist, visibleClientIds)) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+
+      const reorderSubDenial = checklistWriteDenial({
+        user: session.user,
+        checklist,
+        item: targetItem,
+        visibleClientIds,
+        error: 'You do not have permission to reorder sub-steps',
+      })
+      if (reorderSubDenial) {
+        sendJson(response, reorderSubDenial.status, { error: reorderSubDenial.error })
+        return
+      }
+
+      const payload = await readJsonBody(request)
+      const order = Array.isArray(payload?.order)
+        ? payload.order.filter((id) => typeof id === 'string')
+        : []
+
+      const updated = await appDataStore.reorderChecklistSubItems(checklistId, itemId, order)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Checklist item not found' })
+        return
+      }
+
+      await appDataStore.recordActivity(
+        session.user.id,
+        'checklist_items_reordered',
+        `${checklist.title}: ${targetItem.label}`,
+      )
+      sendJson(response, 200, updated)
+      return
+    }
+
     // POST   /api/checklists/:id/items/:itemId/sub-items            — add a sub-item
     // DELETE /api/checklists/:id/items/:itemId/sub-items/:subItemId  — remove a sub-item
     // Sub-items inherit the parent item's permission context (owner / primary
