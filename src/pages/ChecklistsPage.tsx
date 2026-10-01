@@ -274,6 +274,15 @@ export function ChecklistsPage() {
     reportPeriod,
   } = useAppContext()
 
+  // What an approved "This + all future" request removed, as a passing notice
+  // (it outlives the request row, which leaves the list when approved).
+  const [deletionApprovalNote, setDeletionApprovalNote] = useState<string | null>(null)
+  useEffect(() => {
+    if (!deletionApprovalNote) return undefined
+    const timer = window.setTimeout(() => setDeletionApprovalNote(null), 8000)
+    return () => window.clearTimeout(timer)
+  }, [deletionApprovalNote])
+
   // Same filter state the in-progress list reads, so the tab count can apply it.
   const {
     assignee: areaAssignee,
@@ -518,9 +527,19 @@ export function ChecklistsPage() {
           onApprove={approveChecklistDeletion}
           onReject={rejectChecklistDeletion}
           itemRequests={itemDeletionRequests}
-          onApproveItem={approveItemDeletion}
+          onApproveItem={async (requestId) => {
+            const result = await approveItemDeletion(requestId)
+            // A "This + all future" approval says what it removed, in the same
+            // sentence the owner's own series delete shows.
+            if (result) setDeletionApprovalNote(seriesDeleteNotice(result))
+          }}
           onRejectItem={rejectItemDeletion}
         />
+      ) : null}
+      {deletionApprovalNote ? (
+        <p className="series-scope-text" role="status">
+          {deletionApprovalNote}
+        </p>
       ) : null}
       <section className="panel">
         <div className="section-heading">
@@ -1316,6 +1335,9 @@ function PendingDeletionsSection({
               >
                 <div>
                   <strong>{req.label || '(item)'}</strong>
+                  <span className="checklist-meta-line" style={{ marginLeft: 8 }}>
+                    {req.scope === 'series' ? 'This + all future' : 'This checklist only'}
+                  </span>
                   <div className="checklist-meta-line">
                     {clientName(clients, req.clientId)} · in &ldquo;{checklistTitleFor(req.checklistId)}
                     &rdquo; · Requested by{' '}
@@ -1334,7 +1356,9 @@ function PendingDeletionsSection({
                     title={
                       approveBlocked
                         ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
-                        : 'Approve — remove this item'
+                        : req.scope === 'series'
+                          ? 'Approve — remove this step here and from the recurring checklist and upcoming copies'
+                          : 'Approve — remove this item'
                     }
                   >
                     Approve
@@ -1610,7 +1634,7 @@ function ChecklistInProgressSection({
   ) => void
   onBulkAddItems: (checklistId: string, labels: string[]) => void
   onDeleteChecklist: (checklistId: string) => Promise<void>
-  onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
+  onDeleteItem: (checklistId: string, itemId: string) => Promise<'filed' | void>
   onRemoveSubItem: (checklistId: string, itemId: string, subItemId: string) => void
   onRemoveSubSubItem: (
     checklistId: string,
@@ -2116,6 +2140,11 @@ function SkipTaskDialog({
   )
 }
 
+/** What a team member sees after a step delete that only asked the owner (the passing notice). */
+const DELETE_REQUEST_SENT_NOTICE = 'Sent to the owner for approval.'
+const SERIES_DELETE_REQUEST_SENT_NOTICE =
+  'Sent to the owner for approval - this checklist and all future ones.'
+
 /** What the "this + all future" step delete did, in a sentence for the owner. */
 function seriesDeleteNotice(result: {
   removedFromTemplate: boolean
@@ -2222,7 +2251,7 @@ export function ChecklistCard({
   ) => void
   onBulkAddItems: (checklistId: string, labels: string[]) => void
   onDeleteChecklist: (checklistId: string) => Promise<void>
-  onDeleteItem: (checklistId: string, itemId: string) => Promise<void>
+  onDeleteItem: (checklistId: string, itemId: string) => Promise<'filed' | void>
   onRemoveSubItem: (checklistId: string, itemId: string, subItemId: string) => void
   onRemoveSubSubItem: (
     checklistId: string,
@@ -2778,18 +2807,20 @@ export function ChecklistCard({
           stepDeletePrompt ? (
             <StepDeletePrompt
               label={stepDeletePrompt.label}
-              canDeleteSeries={role === 'owner'}
               busy={stepDeleteBusy}
               error={stepDeleteError}
               onThisOnly={() => {
                 void (async () => {
                   setStepDeleteBusy(true)
+                  let outcome: 'filed' | void
                   try {
-                    await onDeleteItem(checklist.id, stepDeletePrompt.itemId)
+                    outcome = await onDeleteItem(checklist.id, stepDeletePrompt.itemId)
                   } finally {
                     setStepDeleteBusy(false)
                   }
                   setStepDeletePrompt(null)
+                  // A team member's delete only asks the owner; say so.
+                  if (outcome === 'filed') setStepDeleteNote(DELETE_REQUEST_SENT_NOTICE)
                 })()
               }}
               onSeries={() => {
@@ -2799,7 +2830,11 @@ export function ChecklistCard({
                   try {
                     const result = await deleteChecklistItemFromSeries(checklist.id, stepDeletePrompt.itemId)
                     setStepDeletePrompt(null)
-                    if (result) setStepDeleteNote(seriesDeleteNotice(result))
+                    if (result) {
+                      setStepDeleteNote(
+                        'request' in result ? SERIES_DELETE_REQUEST_SENT_NOTICE : seriesDeleteNotice(result),
+                      )
+                    }
                   } catch (error) {
                     // A refusal (the recurring checklist's last step, a step that is already
                     // gone): keep the prompt open and say why, in the server's own sentence.
@@ -3529,7 +3564,6 @@ export function WaitingEditor({
  */
 function StepDeletePrompt({
   label,
-  canDeleteSeries,
   busy,
   error,
   onThisOnly,
@@ -3537,7 +3571,6 @@ function StepDeletePrompt({
   onCancel,
 }: {
   label: string
-  canDeleteSeries: boolean
   busy: boolean
   error: string | null
   onThisOnly: () => void
@@ -3583,17 +3616,15 @@ function StepDeletePrompt({
         >
           This checklist only
         </button>
-        {canDeleteSeries ? (
-          <button
-            type="button"
-            className="primary-action"
-            disabled={locked}
-            title={lockedTitle}
-            onClick={onSeries}
-          >
-            This + all future
-          </button>
-        ) : null}
+        <button
+          type="button"
+          className="primary-action"
+          disabled={locked}
+          title={lockedTitle}
+          onClick={onSeries}
+        >
+          This + all future
+        </button>
         <button type="button" className="link-button" disabled={busy} onClick={cancelAndRestoreFocus}>
           Cancel
         </button>

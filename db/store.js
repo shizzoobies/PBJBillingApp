@@ -3873,9 +3873,15 @@ export class AppDataStore {
           label text not null,
           requested_by text,
           requested_by_name text,
-          requested_at timestamptz not null default now()
+          requested_at timestamptz not null default now(),
+          scope text not null default 'checklist'
         )
       `)
+      // 'series' = "this checklist and all future ones": approving it runs the
+      // owner's own series delete. Every row filed before the column is 'checklist'.
+      await this.pool.query(
+        `alter table item_deletion_requests add column if not exists scope text not null default 'checklist'`,
+      )
       await this.pool.query(
         `create index if not exists item_deletion_requests_checklist_idx on item_deletion_requests (checklist_id)`,
       )
@@ -20471,7 +20477,7 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, client_id, checklist_id, item_id, sub_item_id, sub_sub_item_id,
-                label, requested_by, requested_by_name, requested_at
+                label, requested_by, requested_by_name, requested_at, scope
            from item_deletion_requests order by requested_at desc`,
       )
       return result.rows.map((row) => ({
@@ -20485,6 +20491,7 @@ export class AppDataStore {
         requestedBy: row.requested_by ?? null,
         requestedByName: row.requested_by_name ?? null,
         requestedAt: row.requested_at ? new Date(row.requested_at).toISOString() : null,
+        scope: row.scope === 'series' ? 'series' : 'checklist',
       }))
     }
     const authState = await readJson(localAuthPath)
@@ -20503,6 +20510,7 @@ export class AppDataStore {
         requestedBy: req.requestedBy ?? null,
         requestedByName: req.requestedByName ?? null,
         requestedAt: req.requestedAt ?? null,
+        scope: req.scope === 'series' ? 'series' : 'checklist',
       }))
       .sort((a, b) => String(b.requestedAt).localeCompare(String(a.requestedAt)))
   }
@@ -20514,7 +20522,11 @@ export class AppDataStore {
     return all.find((req) => req.id === id) ?? null
   }
 
-  /** File an item-deletion request. Returns the created request. */
+  /**
+   * File an item-deletion request. Returns the created request. `scope` is
+   * 'series' ("this checklist and all future ones") or, for anything else,
+   * 'checklist'.
+   */
   async createItemDeletionRequest({
     clientId,
     checklistId,
@@ -20524,6 +20536,7 @@ export class AppDataStore {
     label,
     requestedBy,
     requestedByName,
+    scope,
   } = {}) {
     if (!clientId || !checklistId || !itemId) return null
     const request = {
@@ -20537,13 +20550,14 @@ export class AppDataStore {
       requestedBy: requestedBy ?? null,
       requestedByName: requestedByName ?? null,
       requestedAt: nowIso(),
+      scope: scope === 'series' ? 'series' : 'checklist',
     }
     if (this.pool) {
       await this.pool.query(
         `insert into item_deletion_requests
            (id, client_id, checklist_id, item_id, sub_item_id, sub_sub_item_id,
-            label, requested_by, requested_by_name, requested_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())`,
+            label, requested_by, requested_by_name, requested_at, scope)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10)`,
         [
           request.id,
           request.clientId,
@@ -20554,6 +20568,7 @@ export class AppDataStore {
           request.label,
           request.requestedBy,
           request.requestedByName,
+          request.scope,
         ],
       )
       return request
@@ -20563,6 +20578,32 @@ export class AppDataStore {
     authState.itemDeletionRequests.push(request)
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return request
+  }
+
+  /**
+   * Change which scope a pending request asks for (a second click on the same
+   * step with the other choice: her latest choice wins). Returns the updated
+   * request, or null when there is no such request.
+   */
+  async setItemDeletionRequestScope(id, scope) {
+    if (!id) return null
+    const next = scope === 'series' ? 'series' : 'checklist'
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update item_deletion_requests set scope = $2 where id = $1`,
+        [id, next],
+      )
+      if ((result.rowCount ?? 0) === 0) return null
+      return this.getItemDeletionRequest(id)
+    }
+    const authState = await readJson(localAuthPath)
+    const stored = Array.isArray(authState.itemDeletionRequests)
+      ? authState.itemDeletionRequests.find((req) => req.id === id)
+      : null
+    if (!stored) return null
+    stored.scope = next
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return this.getItemDeletionRequest(id)
   }
 
   /** Delete an item-deletion request by id. Returns true if a row was removed. */

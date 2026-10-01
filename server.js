@@ -126,7 +126,11 @@ import {
   checklistWriteDenial,
   pendingNoteWriteDenial,
 } from './lib/checklist-write-permission.js'
-import { LAST_RECURRING_STEP_MESSAGE } from './lib/series-step-delete.js'
+import {
+  reuseDuplicateDeletionRequest,
+  runSeriesStepDelete,
+  seriesDeleteDenial,
+} from './lib/series-step-delete.js'
 import {
   isPreviewUnsupportedError,
   previewScopedSession as resolvePreviewScope,
@@ -990,15 +994,16 @@ async function fileItemDeletionRequest(
   session,
   data,
   checklist,
-  { itemId, subItemId, subSubItemId, label },
+  { itemId, subItemId, subSubItemId, label, scope },
 ) {
-  const existing = await appDataStore.listItemDeletionRequests()
-  const duplicate = existing.find(
-    (req) =>
-      req.checklistId === checklist.id &&
-      req.itemId === itemId &&
-      (req.subItemId ?? null) === (subItemId ?? null) &&
-      (req.subSubItemId ?? null) === (subSubItemId ?? null),
+  // 'series' = "this checklist and all future ones" (top-level steps only).
+  const requestScope = scope === 'series' ? 'series' : 'checklist'
+  // One request per step: asking again keeps the one already pending, taking the
+  // scope just chosen (her latest choice wins).
+  const duplicate = await reuseDuplicateDeletionRequest(
+    appDataStore,
+    await appDataStore.listItemDeletionRequests(),
+    { checklistId: checklist.id, itemId, subItemId, subSubItemId, scope: requestScope },
   )
   if (duplicate) return duplicate
 
@@ -1015,11 +1020,12 @@ async function fileItemDeletionRequest(
     label,
     requestedBy: session.user.id,
     requestedByName: requesterName,
+    scope: requestScope,
   })
   await appDataStore.recordActivity(
     session.user.id,
     'checklist_item_deletion_requested',
-    `${checklist.title}: ${label}`,
+    `${checklist.title}: ${label}${requestScope === 'series' ? ' (this checklist and all future ones)' : ''}`,
   )
   try {
     const members = await appDataStore.getTeamMembers()
@@ -1027,7 +1033,10 @@ async function fileItemDeletionRequest(
     for (const owner of owners) {
       await notify(appDataStore, owner.id, 'checklist_item_deletion_requested', {
         checklistId: checklist.id,
-        message: `${requesterName} requested deletion of "${label}" in "${checklist.title}".`,
+        message:
+          requestScope === 'series'
+            ? `${requesterName} requested deletion of "${label}" in "${checklist.title}" - this checklist and all future ones.`
+            : `${requesterName} requested deletion of "${label}" in "${checklist.title}".`,
         link: '/checklists',
         appPublicUrl: getPublicAppUrl(request),
       })
@@ -9529,6 +9538,46 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // A "This + all future" request: approving runs the SAME series delete the
+      // owner's own route runs, with the same stops. A refusal (no longer
+      // recurring, a shared or another client's recurring checklist, the last
+      // first-stage step) answers 409 and the request STAYS, so it can be
+      // rejected; a step that is already gone drops the request.
+      if (req.scope === 'series') {
+        const seriesData = await appDataStore.read()
+        const seriesChecklist = seriesData.checklists.find((entry) => entry.id === req.checklistId)
+        const seriesStep = seriesChecklist?.items.find((entry) => entry.id === req.itemId)
+        if (!seriesChecklist || !seriesStep) {
+          await appDataStore.deleteItemDeletionRequest(requestId)
+          sendJson(response, 404, { error: 'Target item no longer exists' })
+          return
+        }
+        const seriesDenial = seriesDeleteDenial(seriesChecklist, seriesData.checklistTemplates)
+        if (seriesDenial) {
+          sendJson(response, 409, { error: seriesDenial.error })
+          return
+        }
+        const removal = await runSeriesStepDelete({
+          store: appDataStore,
+          actorId: session.user.id,
+          broadcast: broadcastDataChanged,
+          checklist: seriesChecklist,
+          itemId: req.itemId,
+          label: seriesStep.label ?? req.label,
+        })
+        if (removal.status === 409) {
+          sendJson(response, 409, removal.body)
+          return
+        }
+        await appDataStore.deleteItemDeletionRequest(requestId)
+        if (removal.status === 404) {
+          sendJson(response, 404, { error: 'Target item no longer exists' })
+          return
+        }
+        sendJson(response, removal.status, removal.body)
+        return
+      }
+
       // A removal that would roll a WAITING step up to done is refused the same
       // way the DELETE routes refuse it (the simulation runs the store's own
       // removal). The request stays in place so it can be approved once the wait
@@ -11683,59 +11732,41 @@ const server = createServer(async (request, response) => {
 
         // ?scope=series: delete the step from this checklist AND the recurring
         // template and the later open copies (featreq-01464e64). It edits the
-        // template, which only an owner may do, so a non-owner is refused here
-        // rather than falling through to a deletion request for one checklist.
+        // template, which only an owner may do, so a team member's choice files
+        // a deletion request with scope 'series' instead: nothing is deleted
+        // until the owner approves it (the approve route runs the same delete).
         if (requestUrl.searchParams.get('scope') === 'series') {
-          if (session.user.role !== 'owner') {
-            sendJson(response, 403, { error: 'Only owners can remove a step from the recurring checklist' })
-            return
-          }
           if (isCrossSiteOrigin(request)) {
             sendJson(response, 403, { error: 'Origin not allowed' })
             return
           }
-          if (!checklist.templateId) {
-            sendJson(response, 400, { error: 'This checklist is not part of a recurring series' })
+          // The checks that need no write: a recurring checklist, and this
+          // client's own (not a shared or another client's).
+          const seriesDenial = seriesDeleteDenial(checklist, data.checklistTemplates)
+          if (seriesDenial) {
+            sendJson(response, seriesDenial.status, { error: seriesDenial.error })
             return
           }
-          // Defense in depth: the series delete edits a template and the later
-          // copies it made, so it is only for this client's own recurring
-          // checklist. A shared (standard) template, or one that belongs to
-          // another client, is refused rather than edited.
-          const seriesTemplate = data.checklistTemplates.find((entry) => entry.id === checklist.templateId)
-          if (seriesTemplate && (seriesTemplate.isStandard || seriesTemplate.clientId !== checklist.clientId)) {
-            sendJson(response, 409, {
-              error: 'This recurring checklist is shared or belongs to another client, so a step cannot be removed from it here.',
+          if (session.user.role !== 'owner') {
+            const filed = await fileItemDeletionRequest(request, session, data, checklist, {
+              itemId,
+              subItemId: null,
+              subSubItemId: null,
+              label: targetItem.label ?? '',
+              scope: 'series',
             })
+            sendJson(response, 200, { request: filed, checklist })
             return
           }
-          const removal = await appDataStore.deleteChecklistItemFromSeries(checklistId, itemId)
-          if (!removal) {
-            sendJson(response, 404, { error: 'Checklist item not found' })
-            return
-          }
-          // Taking the template's last first-stage step would silently stop the
-          // whole series (the materializer skips an empty first stage). Nothing
-          // was written; say so and let the owner pause or delete it instead.
-          if ('refusal' in removal) {
-            sendJson(response, 409, { error: removal.refusal, message: LAST_RECURRING_STEP_MESSAGE })
-            return
-          }
-          await appDataStore.recordActivity(
-            session.user.id,
-            'checklist_item_removed_series',
-            `${checklist.title}: ${targetItem.label}`,
-          )
-          broadcastDataChanged()
-          // Hand back what changed so the tab can merge it rather than keep a
-          // stale template that its next autosave would write straight back.
-          const fresh = await appDataStore.read()
-          const touched = new Set([checklistId, ...removal.removedFromChecklists])
-          sendJson(response, 200, {
-            ...removal,
-            checklists: fresh.checklists.filter((entry) => touched.has(entry.id)),
-            template: fresh.checklistTemplates.find((entry) => entry.id === checklist.templateId) ?? null,
+          const removal = await runSeriesStepDelete({
+            store: appDataStore,
+            actorId: session.user.id,
+            broadcast: broadcastDataChanged,
+            checklist,
+            itemId,
+            label: targetItem.label,
           })
+          sendJson(response, removal.status, removal.body)
           return
         }
 

@@ -45,7 +45,14 @@ import {
   normalizeRecurringReimbursement,
   resolveCoverageForPeriod,
 } from '../lib/expense-coverage.js'
-import { normalizedLabelSql, untouchedStepSql } from '../lib/series-step-delete.js'
+import {
+  LAST_RECURRING_STEP_MESSAGE,
+  normalizedLabelSql,
+  reuseDuplicateDeletionRequest,
+  runSeriesStepDelete,
+  seriesDeleteDenial,
+  untouchedStepSql,
+} from '../lib/series-step-delete.js'
 
 /**
  * End-to-end `appDataStore.write()` contracts on the FILE backend: the
@@ -23594,5 +23601,369 @@ describe('post-review store hardening (postgres branch)', () => {
     pgStore.pool = { query, async connect() { return { query, release() {} } } }
     pgStore.mode = 'postgres'
     await expect(pgStore.reorderChecklistSubItems('cl-1', 'it-1', ['a'])).rejects.toThrow('real failure')
+  })
+})
+
+describe('item deletion request scope (file backend)', () => {
+  const persistedAuth = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+  const clearRequests = async () => {
+    const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    authState.itemDeletionRequests = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+  const filing = (over = {}) => ({
+    clientId: 'c1',
+    checklistId: 'cl-1',
+    itemId: 's1',
+    label: 'Reconcile',
+    requestedBy: 'emp-1',
+    requestedByName: 'Lisa',
+    ...over,
+  })
+  beforeEach(clearRequests)
+
+  it('stores a series request as series and reads it back', async () => {
+    const created = await store.createItemDeletionRequest(filing({ scope: 'series' }))
+    expect(created.scope).toBe('series')
+    expect((await store.getItemDeletionRequest(created.id)).scope).toBe('series')
+    expect((await persistedAuth()).itemDeletionRequests[0].scope).toBe('series')
+    expect((await store.listItemDeletionRequests()).map((req) => req.scope)).toEqual(['series'])
+  })
+
+  it('stores anything other than series as checklist, and no scope at all as checklist', async () => {
+    const none = await store.createItemDeletionRequest(filing({ itemId: 's2' }))
+    const odd = await store.createItemDeletionRequest(filing({ itemId: 's3', scope: 'everything' }))
+    const explicit = await store.createItemDeletionRequest(filing({ itemId: 's4', scope: 'checklist' }))
+    expect([none.scope, odd.scope, explicit.scope]).toEqual(['checklist', 'checklist', 'checklist'])
+    const stored = (await persistedAuth()).itemDeletionRequests.map((req) => req.scope)
+    expect(stored).toEqual(['checklist', 'checklist', 'checklist'])
+  })
+
+  it('reads a request filed before the scope existed as checklist', async () => {
+    const authState = await persistedAuth()
+    authState.itemDeletionRequests = [
+      { id: 'idr-old', clientId: 'c1', checklistId: 'cl-1', itemId: 's1', label: 'Reconcile', requestedAt: '2026-09-01T00:00:00.000Z' },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    expect((await store.getItemDeletionRequest('idr-old')).scope).toBe('checklist')
+    expect((await store.listItemDeletionRequests())[0].scope).toBe('checklist')
+  })
+
+  it('setItemDeletionRequestScope changes the scope in place and keeps everything else', async () => {
+    const created = await store.createItemDeletionRequest(filing())
+    const changed = await store.setItemDeletionRequestScope(created.id, 'series')
+    expect(changed).toEqual({ ...created, scope: 'series' })
+    expect((await store.listItemDeletionRequests())).toHaveLength(1)
+    expect((await persistedAuth()).itemDeletionRequests[0].scope).toBe('series')
+    expect((await store.setItemDeletionRequestScope(created.id, 'nonsense')).scope).toBe('checklist')
+  })
+
+  it('setItemDeletionRequestScope answers null for a request that is not there', async () => {
+    expect(await store.setItemDeletionRequestScope('idr-missing', 'series')).toBeNull()
+    expect(await store.setItemDeletionRequestScope('', 'series')).toBeNull()
+  })
+
+  describe('the duplicate rule', () => {
+    const path = { checklistId: 'cl-1', itemId: 's1' }
+
+    it('finds nothing to reuse when no request is pending for that step', async () => {
+      await store.createItemDeletionRequest(filing({ itemId: 'other-step' }))
+      expect(
+        await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), { ...path, scope: 'series' }),
+      ).toBeNull()
+    })
+
+    it('returns the pending request untouched when the scope is the same', async () => {
+      const created = await store.createItemDeletionRequest(filing({ scope: 'series' }))
+      const reused = await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), {
+        ...path,
+        scope: 'series',
+      })
+      expect(reused).toEqual(created)
+    })
+
+    it('updates the one pending request to the newer scope (her latest choice wins), both ways', async () => {
+      const created = await store.createItemDeletionRequest(filing())
+      const toSeries = await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), {
+        ...path,
+        scope: 'series',
+      })
+      expect(toSeries).toEqual({ ...created, scope: 'series' })
+      const back = await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), {
+        ...path,
+        scope: 'checklist',
+      })
+      expect(back.scope).toBe('checklist')
+      const all = await store.listItemDeletionRequests()
+      expect(all).toHaveLength(1)
+      expect(all[0].id).toBe(created.id)
+    })
+
+    it('treats a sub-step request as a different path', async () => {
+      await store.createItemDeletionRequest(filing({ subItemId: 'u1' }))
+      expect(
+        await reuseDuplicateDeletionRequest(store, await store.listItemDeletionRequests(), { ...path, scope: 'series' }),
+      ).toBeNull()
+    })
+  })
+})
+
+describe('staff "This + all future" delete requests, approved by the owner (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const persistedAuth = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+  const stageItems = (...labels) => labels.map((label, i) => ({ id: `ti-${i}`, label }))
+  const template = (over = {}) => ({
+    id: 'tmpl-1',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2026-12-31',
+    active: true,
+    viewerIds: [],
+    editorIds: [],
+    stages: [{ id: 'stage-a', name: 'Prep', assigneeId: 'emp-1', offsetDays: 0, items: stageItems('Reconcile', 'Send report') }],
+    ...over,
+  })
+  const step = (id, label, over = {}) => ({ id, label, done: false, ...over })
+  const checklist = (id, dueDate, items, over = {}) => ({
+    id,
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    templateId: 'tmpl-1',
+    stageId: 'stage-a',
+    stageIndex: 0,
+    dueDate,
+    viewerIds: [],
+    editorIds: [],
+    items,
+    ...over,
+  })
+  const seed = async (checklists, templates = [template()]) => {
+    await store.write(workspace({ checklists, checklistTemplates: templates }))
+    const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    authState.itemDeletionRequests = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+  const itemsOf = async (id) =>
+    (await persisted()).checklists.find((entry) => entry.id === id).items.map((item) => item.id)
+  const fileSeriesRequest = (over = {}) =>
+    store.createItemDeletionRequest({
+      clientId: 'c1',
+      checklistId: 'cl-sep',
+      itemId: 's1',
+      label: 'Reconcile',
+      requestedBy: 'emp-1',
+      requestedByName: 'Lisa',
+      scope: 'series',
+      ...over,
+    })
+  const approve = (broadcast, checklistId = 'cl-sep', itemId = 's1') =>
+    store.read().then((data) =>
+      runSeriesStepDelete({
+        store,
+        actorId: 'emp-owner',
+        broadcast,
+        checklist: data.checklists.find((entry) => entry.id === checklistId),
+        itemId,
+        label: 'Reconcile',
+      }),
+    )
+
+  it('filing the request changes nothing: the step, the recurring checklist and later copies all stay', async () => {
+    await seed([
+      checklist('cl-sep', '2026-09-30', [step('s1', 'Reconcile'), step('s2', 'Send report')]),
+      checklist('cl-oct', '2026-10-31', [step('o1', 'Reconcile'), step('o2', 'Send report')]),
+    ])
+    const before = await persisted()
+    const created = await fileSeriesRequest()
+    expect(created.scope).toBe('series')
+    expect(await persisted()).toEqual(before)
+    expect((await persistedAuth()).itemDeletionRequests.map((req) => req.id)).toEqual([created.id])
+  })
+
+  it('approving removes the step here, from the recurring checklist and untouched later copies, and keeps worked ones', async () => {
+    await seed([
+      checklist('cl-sep', '2026-09-30', [step('s1', 'Reconcile'), step('s2', 'Send report')]),
+      checklist('cl-oct', '2026-10-31', [step('o1', 'Reconcile', { done: true }), step('o2', 'Send report')]),
+      checklist('cl-nov', '2026-11-30', [step('n1', 'Reconcile'), step('n2', 'Send report')]),
+    ])
+    const created = await fileSeriesRequest()
+    const activity = vi.spyOn(store, 'recordActivity')
+    const broadcast = vi.fn()
+
+    const result = await approve(broadcast)
+
+    expect(result.status).toBe(200)
+    expect(result.body.removedFromTemplate).toBe(true)
+    expect(result.body.removedFromChecklists).toEqual(['cl-nov'])
+    expect(result.body.keptOnChecklists).toEqual(['cl-oct'])
+    expect(result.body.checklists.map((entry) => entry.id).sort()).toEqual(['cl-nov', 'cl-sep'])
+    expect(result.body.template.id).toBe('tmpl-1')
+    expect(result.body.template.stages[0].items.map((item) => item.label)).toEqual(['Send report'])
+
+    expect(await itemsOf('cl-sep')).toEqual(['s2'])
+    expect(await itemsOf('cl-oct')).toEqual(['o1', 'o2'])
+    expect(await itemsOf('cl-nov')).toEqual(['n2'])
+    // The store's own cascade drops the request for the removed step.
+    expect((await persistedAuth()).itemDeletionRequests.map((req) => req.id)).not.toContain(created.id)
+    expect(activity).toHaveBeenCalledWith('emp-owner', 'checklist_item_removed_series', 'Monthly close: Reconcile')
+    expect(broadcast).toHaveBeenCalledTimes(1)
+    activity.mockRestore()
+  })
+
+  it('refuses the recurring checklist\'s last first-stage step: 409, nothing written, the request stays', async () => {
+    await seed(
+      [checklist('cl-sep', '2026-09-30', [step('s1', 'Reconcile')]), checklist('cl-oct', '2026-10-31', [step('o1', 'Reconcile')])],
+      [template({ stages: [{ id: 'stage-a', name: 'Prep', assigneeId: 'emp-1', offsetDays: 0, items: stageItems('Reconcile') }] })],
+    )
+    const created = await fileSeriesRequest()
+    // read() tidies the file once (normalized fields); compare from after that.
+    await store.read()
+    const before = await persisted()
+    const activity = vi.spyOn(store, 'recordActivity')
+    const broadcast = vi.fn()
+
+    const result = await approve(broadcast)
+
+    expect(result.status).toBe(409)
+    expect(result.body).toEqual({ error: 'last_recurring_step', message: LAST_RECURRING_STEP_MESSAGE })
+    expect(await persisted()).toEqual(before)
+    expect((await persistedAuth()).itemDeletionRequests.map((req) => req.id)).toEqual([created.id])
+    expect(activity).not.toHaveBeenCalled()
+    expect(broadcast).not.toHaveBeenCalled()
+    activity.mockRestore()
+  })
+
+  it('answers 404 and writes nothing when the step is already gone', async () => {
+    await seed([checklist('cl-sep', '2026-09-30', [step('s2', 'Send report')])])
+    const broadcast = vi.fn()
+    const result = await approve(broadcast, 'cl-sep', 's1')
+    expect(result.status).toBe(404)
+    expect(broadcast).not.toHaveBeenCalled()
+    expect(await itemsOf('cl-sep')).toEqual(['s2'])
+  })
+
+  describe('the checks that need no write', () => {
+    const own = { templateId: 'tmpl-1', clientId: 'c1' }
+
+    it('lets this client\'s own recurring checklist through', () => {
+      expect(seriesDeleteDenial(own, [template()])).toBeNull()
+    })
+
+    it('says 400 with the existing sentence for a checklist that is not recurring', () => {
+      expect(seriesDeleteDenial({ clientId: 'c1' }, [template()])).toEqual({
+        status: 400,
+        error: 'This checklist is not part of a recurring series',
+      })
+    })
+
+    it('says 409 with the existing sentence for a standard template or another client\'s', () => {
+      const sentence =
+        'This recurring checklist is shared or belongs to another client, so a step cannot be removed from it here.'
+      expect(seriesDeleteDenial(own, [template({ isStandard: true })])).toEqual({ status: 409, error: sentence })
+      expect(seriesDeleteDenial(own, [template({ clientId: 'c2' })])).toEqual({ status: 409, error: sentence })
+    })
+
+    it('does not refuse when the template row is missing (as the owner route never did)', () => {
+      expect(seriesDeleteDenial(own, [])).toBeNull()
+    })
+  })
+})
+
+describe('item deletion request scope (postgres branch)', () => {
+  /** A pool that answers the item_deletion_requests statements from `rows` and records every statement. */
+  function requestsPool({ rows = [], updateCount = 1 } = {}) {
+    const statements = []
+    const query = async (text, params) => {
+      const trimmed = String(text).trim()
+      statements.push({ text: trimmed, params })
+      if (/^select id, client_id, checklist_id, item_id[\s\S]*from item_deletion_requests/i.test(trimmed)) return { rows }
+      if (/^update item_deletion_requests set scope/i.test(trimmed)) return { rows: [], rowCount: updateCount }
+      return { rows: [], rowCount: 0 }
+    }
+    const find = (pattern) => statements.filter((entry) => pattern.test(entry.text))
+    return { pool: { query }, statements, find }
+  }
+  const storeOn = (fake) => {
+    const pgStore = new AppDataStore()
+    pgStore.pool = fake.pool
+    pgStore.mode = 'postgres'
+    return pgStore
+  }
+  const row = (over = {}) => ({
+    id: 'idr-1',
+    client_id: 'c1',
+    checklist_id: 'cl-1',
+    item_id: 's1',
+    sub_item_id: null,
+    sub_sub_item_id: null,
+    label: 'Reconcile',
+    requested_by: 'emp-1',
+    requested_by_name: 'Lisa',
+    requested_at: '2026-09-30T12:00:00.000Z',
+    scope: 'checklist',
+    ...over,
+  })
+
+  it('boot adds the scope column to an existing table and declares it on a new one', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    const alters = fake.matching(/^alter table item_deletion_requests add column if not exists scope/i)
+    expect(alters).toHaveLength(1)
+    expect(alters[0].text).toBe(
+      "alter table item_deletion_requests add column if not exists scope text not null default 'checklist'",
+    )
+    const [create] = fake.matching(/^create table if not exists item_deletion_requests/i)
+    expect(create.text).toContain("scope text not null default 'checklist'")
+    // The column exists before anything can select it.
+    expect(fake.indexOf(/^alter table item_deletion_requests add column if not exists scope/i)).toBeGreaterThan(
+      fake.indexOf(/^create table if not exists item_deletion_requests/i),
+    )
+  })
+
+  it('selects the scope and maps it, reading anything but series as checklist', async () => {
+    const fake = requestsPool({ rows: [row({ id: 'idr-a', scope: 'series' }), row({ id: 'idr-b', scope: null })] })
+    const list = await storeOn(fake).listItemDeletionRequests()
+    expect(fake.find(/from item_deletion_requests order by requested_at desc/i)[0].text).toMatch(
+      /requested_at, scope\s+from item_deletion_requests/i,
+    )
+    expect(list.map((req) => [req.id, req.scope])).toEqual([
+      ['idr-a', 'series'],
+      ['idr-b', 'checklist'],
+    ])
+  })
+
+  it('inserts the scope as the tenth parameter, series only when asked for', async () => {
+    const fake = requestsPool()
+    const pgStore = storeOn(fake)
+    const filing = { clientId: 'c1', checklistId: 'cl-1', itemId: 's1', label: 'Reconcile', requestedBy: 'emp-1', requestedByName: 'Lisa' }
+    const series = await pgStore.createItemDeletionRequest({ ...filing, scope: 'series' })
+    const plain = await pgStore.createItemDeletionRequest(filing)
+    expect([series.scope, plain.scope]).toEqual(['series', 'checklist'])
+    const [first, second] = fake.find(/^insert into item_deletion_requests/i)
+    expect(first.text).toContain('label, requested_by, requested_by_name, requested_at, scope)')
+    expect(first.text).toContain('values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10)')
+    expect(first.params).toHaveLength(10)
+    expect(first.params[9]).toBe('series')
+    expect(second.params[9]).toBe('checklist')
+  })
+
+  it('setItemDeletionRequestScope updates by id and answers the stored request', async () => {
+    const fake = requestsPool({ rows: [row({ scope: 'series' })] })
+    const updated = await storeOn(fake).setItemDeletionRequestScope('idr-1', 'series')
+    const [update] = fake.find(/^update item_deletion_requests set scope/i)
+    expect(update.text).toBe('update item_deletion_requests set scope = $2 where id = $1')
+    expect(update.params).toEqual(['idr-1', 'series'])
+    expect(updated.scope).toBe('series')
+    const odd = requestsPool({ rows: [row()] })
+    await storeOn(odd).setItemDeletionRequestScope('idr-1', 'bogus')
+    expect(odd.find(/^update item_deletion_requests set scope/i)[0].params).toEqual(['idr-1', 'checklist'])
+    const none = requestsPool({ updateCount: 0 })
+    expect(await storeOn(none).setItemDeletionRequestScope('idr-gone', 'series')).toBeNull()
+    expect(none.find(/^select id, client_id/i)).toHaveLength(0)
   })
 })

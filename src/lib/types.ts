@@ -1500,6 +1500,12 @@ export type ItemDeletionRequest = {
   requestedByName: string | null
   /** ISO timestamp the request was filed. */
   requestedAt: string | null
+  /**
+   * 'series' = "This + all future": approving removes the step from the checklist,
+   * its recurring checklist and the untouched upcoming copies. Absent or
+   * 'checklist' = this checklist only (every request filed before the choice existed).
+   */
+  scope?: 'checklist' | 'series'
 }
 
 /** The kind of edit a {@link PendingTaskEdit} carries. */

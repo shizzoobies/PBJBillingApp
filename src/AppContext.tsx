@@ -27,7 +27,11 @@ import type {
 } from './lib/types'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
 import type { ScopeTag } from '../lib/invoice-scope-retag.js'
-import type { RecurringReimbursementCoverageInput, SeriesItemDeleteResult } from './lib/api'
+import type {
+  RecurringReimbursementCoverageInput,
+  SeriesItemDeleteResponse,
+  SeriesItemDeleteResult,
+} from './lib/api'
 
 export type AppContextValue = {
   data: AppData
@@ -433,14 +437,16 @@ export type AppContextValue = {
     subItemId: string,
     patch: { waiting?: boolean; waitingOn?: string | null; waitingForChecklistId?: string | null },
   ) => Promise<void>
-  deleteChecklistItem: (checklistId: string, itemId: string) => Promise<void>
-  /** Owner-only: delete a step from this checklist, its template and the later open copies. */
+  /** Resolves 'filed' when a team member's delete only filed a request for the owner. */
+  deleteChecklistItem: (checklistId: string, itemId: string) => Promise<'filed' | void>
   /**
-   * Resolves with what the server did (null when the call failed or was ignored);
-   * rejects with the server's refusal (a 409: the recurring checklist's last
-   * step cannot be removed) so the prompt can show its sentence.
+   * Delete a step from this checklist, its recurring checklist and the later open
+   * copies (the owner), or ask the owner to (a team member: a request is filed and
+   * nothing is removed). Resolves with what the server did (null when the call
+   * failed or was ignored); rejects with the server's refusal (a 409: the recurring
+   * checklist's last step cannot be removed) so the prompt can show its sentence.
    */
-  deleteChecklistItemFromSeries: (checklistId: string, itemId: string) => Promise<SeriesItemDeleteResult | null>
+  deleteChecklistItemFromSeries: (checklistId: string, itemId: string) => Promise<SeriesItemDeleteResponse | null>
   /**
    * Owner-only soft-delete: moves the checklist to `data.recycledChecklists`
    * (the recycle bin) without losing data. Use when a one-time task should
@@ -471,8 +477,12 @@ export type AppContextValue = {
    * for fast per-item "is a deletion pending?" lookup (see `itemDeletionKey`).
    */
   pendingItemDeletionKeys: Set<string>
-  /** Owner-only: approve a pending item-deletion request (executes the delete). */
-  approveItemDeletion: (requestId: string) => Promise<void>
+  /**
+   * Owner-only: approve a pending item-deletion request (executes the delete).
+   * Resolves with what a "This + all future" approval changed (so the page can
+   * say it), nothing for a one-checklist request or a refusal.
+   */
+  approveItemDeletion: (requestId: string) => Promise<SeriesItemDeleteResult | void>
   /** Owner-only: reject a pending item-deletion request (deletes nothing). */
   rejectItemDeletion: (requestId: string) => Promise<void>
   /**

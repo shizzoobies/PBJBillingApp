@@ -53,6 +53,7 @@ import {
   approveItemDeletion as approveItemDeletionRequest,
   rejectItemDeletion as rejectItemDeletionRequest,
   isItemDeletionFiled,
+  isSeriesDeleteResult,
   addWaitingOnRequest,
   waitingOnDoneRequest,
   waitingOnVerifyRequest,
@@ -101,6 +102,7 @@ import {
   updateChecklistSubItemRequest,
   appendTemplateStageItemsRequest,
   updateTimeEntryRequest,
+  type SeriesItemDeleteResponse,
   type SeriesItemDeleteResult,
 } from './lib/api'
 import { createEmptyAppData } from './lib/seed'
@@ -284,6 +286,23 @@ function isEditableElementFocused(): boolean {
 // genuine connectivity/save failure. Only network errors and 5xx warrant that.
 function isCleanRejection(error: unknown): boolean {
   return error instanceof ApiError && [400, 403, 409, 422, 423].includes(error.status)
+}
+
+// Merge a series delete's answer into local state: the checklists it changed and
+// the recurring checklist. Applied through the server-update path (not the
+// dirty-marking one). The server's copy of the template REPLACES the one in this
+// tab: any unsaved local edit to that same template is overwritten, which is what
+// keeps the next autosave from writing the removed step back.
+function withSeriesDeleteResult(result: SeriesItemDeleteResult) {
+  return (current: AppData): AppData => ({
+    ...current,
+    checklists: current.checklists.map(
+      (checklist) => result.checklists.find((updated) => updated.id === checklist.id) ?? checklist,
+    ),
+    checklistTemplates: current.checklistTemplates.map((template) =>
+      result.template && template.id === result.template.id ? result.template : template,
+    ),
+  })
 }
 
 function App() {
@@ -1239,9 +1258,9 @@ function App() {
   // Owner item-deletion decisions. Defined after `applyServerDataUpdate` since
   // approve merges the server-returned checklist into local state.
   const approveItemDeletion = useCallback(
-    async (requestId: string) => {
+    async (requestId: string): Promise<SeriesItemDeleteResult | void> => {
       if (previewActiveRef.current) return
-      let updated: Checklist
+      let updated: Checklist | SeriesItemDeleteResult
       try {
         updated = await approveItemDeletionRequest(requestId)
       } catch (error) {
@@ -1254,10 +1273,17 @@ function App() {
         }
         throw error
       }
+      if (isSeriesDeleteResult(updated)) {
+        // A "This + all future" request: the owner's own series delete ran.
+        applyServerDataUpdate(withSeriesDeleteResult(updated))
+        await refreshItemDeletionRequests()
+        return updated
+      }
+      const approved = updated
       applyServerDataUpdate((current) => ({
         ...current,
         checklists: current.checklists.map((checklist) =>
-          checklist.id === updated.id ? updated : checklist,
+          checklist.id === approved.id ? approved : checklist,
         ),
       }))
       await refreshItemDeletionRequests()
@@ -3159,8 +3185,9 @@ function App() {
     }
   }
 
-  const deleteChecklistItem = async (checklistId: string, itemId: string) => {
+  const deleteChecklistItem = async (checklistId: string, itemId: string): Promise<'filed' | void> => {
     if (previewActiveRef.current) return
+    let filed = false
     try {
       setDataSyncState('saving')
       const result = await deleteChecklistItemRequest(checklistId, itemId)
@@ -3168,6 +3195,7 @@ function App() {
         // Non-owner: a deletion REQUEST was filed; nothing removed. Reflect the
         // new pending state so the badge shows + the delete control disables.
         await refreshItemDeletionRequests()
+        filed = true
       } else {
         applyServerDataUpdate((current) => ({
           ...current,
@@ -3177,6 +3205,7 @@ function App() {
         }))
       }
       setDataSyncState('synced')
+      return filed ? 'filed' : undefined
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setSessionUser(null)
@@ -3188,31 +3217,25 @@ function App() {
     }
   }
 
-  // Owner-only "this and every future one" delete: the server removes the step
+  // "This and every future one" delete. The owner's: the server removes the step
   // here, the recurring template's step and the later open copies in one
   // transaction. Merge ALL of that into local state through the server-update
   // path (not the dirty-marking one): a stale template left in memory would be
   // written straight back by the next autosave and the step would reappear.
+  // A team member's only files a deletion request (nothing is removed yet).
   const deleteChecklistItemFromSeries = async (
     checklistId: string,
     itemId: string,
-  ): Promise<SeriesItemDeleteResult | null> => {
+  ): Promise<SeriesItemDeleteResponse | null> => {
     if (previewActiveRef.current) return null
     try {
       setDataSyncState('saving')
       const result = await deleteChecklistItemFromSeriesRequest(checklistId, itemId)
-      // The server's copy of the template REPLACES the one in this tab: any
-      // unsaved local edit to that same template is overwritten, which is what
-      // keeps the next autosave from writing the removed step back.
-      applyServerDataUpdate((current) => ({
-        ...current,
-        checklists: current.checklists.map(
-          (checklist) => result.checklists.find((updated) => updated.id === checklist.id) ?? checklist,
-        ),
-        checklistTemplates: current.checklistTemplates.map((template) =>
-          result.template && template.id === result.template.id ? result.template : template,
-        ),
-      }))
+      if (isItemDeletionFiled(result)) {
+        await refreshItemDeletionRequests()
+      } else {
+        applyServerDataUpdate(withSeriesDeleteResult(result))
+      }
       setDataSyncState('synced')
       return result
     } catch (error) {

@@ -10,8 +10,9 @@ import type { AppData, Checklist, Client } from '../lib/types'
 /**
  * Deleting a step on a recurring checklist asks where (featreq-01464e64): this
  * checklist only, or this and every future one. A one-off checklist has no
- * series, so it gets a plain confirm. Staff cannot edit the template, so they
- * are only ever offered the first choice (which files a deletion request).
+ * series, so it gets a plain confirm. Staff are offered the same two choices;
+ * either one only files a deletion request for the owner to approve, and says so
+ * (the round trip through the real app is in staff-series-delete-requests.test.tsx).
  */
 
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
@@ -469,13 +470,80 @@ describe('deleting a step on a recurring checklist', () => {
     })
   })
 
-  it('staff are offered only "This checklist only"', () => {
-    signInAs(LISA, false)
-    renderPage()
-    clickDelete('Recurring close')
-    const group = prompt('Recurring close')
-    expect(within(group).getByRole('button', { name: 'This checklist only' })).toBeInTheDocument()
-    expect(within(group).queryByRole('button', { name: 'This + all future' })).not.toBeInTheDocument()
+  describe('as a team member', () => {
+    const FILED = { request: { id: 'idr-1', scope: 'series' }, checklist: RECURRING }
+
+    it('is offered "This checklist only", "This + all future" and Cancel', () => {
+      signInAs(LISA, false)
+      renderPage()
+      clickDelete('Recurring close')
+      const group = within(prompt('Recurring close'))
+      expect(group.getByRole('button', { name: 'This checklist only' })).toBeInTheDocument()
+      expect(group.getByRole('button', { name: 'This + all future' })).toBeInTheDocument()
+      expect(group.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    })
+
+    it('"This + all future" asks the series delete for a request and says it was sent', async () => {
+      signInAs(LISA, false)
+      deleteChecklistItemFromSeries.mockResolvedValue(FILED)
+      renderPage()
+      clickDelete('Recurring close')
+      fireEvent.click(within(prompt('Recurring close')).getByRole('button', { name: 'This + all future' }))
+      expect(deleteChecklistItemFromSeries).toHaveBeenCalledWith('cl-recurring', 'cl-recurring-step')
+      expect(deleteChecklistItem).not.toHaveBeenCalled()
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        'Sent to the owner for approval - this checklist and all future ones.',
+      )
+      expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
+    })
+
+    it('"This checklist only" files a request and says it was sent', async () => {
+      signInAs(LISA, false)
+      deleteChecklistItem.mockResolvedValue('filed')
+      renderPage()
+      clickDelete('Recurring close')
+      fireEvent.click(within(prompt('Recurring close')).getByRole('button', { name: 'This checklist only' }))
+      expect(deleteChecklistItem).toHaveBeenCalledWith('cl-recurring', 'cl-recurring-step')
+      expect(deleteChecklistItemFromSeries).not.toHaveBeenCalled()
+      expect(await screen.findByRole('status')).toHaveTextContent('Sent to the owner for approval.')
+      expect(screen.getByRole('status')).not.toHaveTextContent('all future')
+    })
+
+    it('says nothing was sent when the request did not go through', async () => {
+      signInAs(LISA, false)
+      deleteChecklistItem.mockResolvedValue(undefined)
+      renderPage()
+      clickDelete('Recurring close')
+      fireEvent.click(within(prompt('Recurring close')).getByRole('button', { name: 'This checklist only' }))
+      await waitFor(() =>
+        expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument(),
+      )
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    })
+
+    it('keeps the plain confirm on a one-off checklist, with no notice', () => {
+      signInAs(LISA, false)
+      const confirm = vi.fn(() => true)
+      vi.stubGlobal('confirm', confirm)
+      renderPage()
+      clickDelete('One off cleanup')
+      expect(confirm).toHaveBeenCalledWith('Delete this step?')
+      expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
+      expect(deleteChecklistItem).toHaveBeenCalledWith('cl-oneoff', 'cl-oneoff-step')
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    })
+
+    it('has both choices disabled with "Disabled in preview mode" while previewing', () => {
+      signInAs(LISA, false)
+      contextValue = { ...contextValue, previewMode: true } as unknown as AppContextValue
+      renderPage()
+      clickDelete('Recurring close')
+      const group = within(prompt('Recurring close'))
+      for (const name of ['This checklist only', 'This + all future']) {
+        expect(group.getByRole('button', { name })).toBeDisabled()
+        expect(group.getByRole('button', { name })).toHaveAttribute('title', 'Disabled in preview mode')
+      }
+    })
   })
 })
 

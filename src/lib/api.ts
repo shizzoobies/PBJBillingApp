@@ -1237,10 +1237,13 @@ export type ItemDeleteResult =
   | Checklist
   | { request: ItemDeletionRequest; checklist: Checklist }
 
+/** What a non-owner's delete answers: a request was filed, nothing was removed. */
+export type ItemDeletionFiled = { request: ItemDeletionRequest; checklist: Checklist }
+
 /** Type guard: the DELETE only FILED a deletion request (non-owner path). */
 export function isItemDeletionFiled(
-  result: ItemDeleteResult,
-): result is { request: ItemDeletionRequest; checklist: Checklist } {
+  result: ItemDeleteResult | SeriesItemDeleteResponse,
+): result is ItemDeletionFiled {
   return typeof result === 'object' && result !== null && 'request' in result
 }
 
@@ -1808,9 +1811,10 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
 }
 
 /**
- * Owner-only: delete a step from this checklist AND from its recurring series
- * (the template step and the later open copies). The response carries what
- * changed so the caller can merge it into local state.
+ * Delete a step from this checklist AND from its recurring series (the template
+ * step and the later open copies). The owner's answer carries what changed so
+ * the caller can merge it into local state; a team member's only FILES a
+ * deletion request (scope 'series') and answers `{ request, checklist }`.
  */
 export type SeriesItemDeleteResult = {
   removedFromTemplate: boolean
@@ -1821,6 +1825,8 @@ export type SeriesItemDeleteResult = {
   template: ChecklistTemplate | null
 }
 
+export type SeriesItemDeleteResponse = SeriesItemDeleteResult | ItemDeletionFiled
+
 export async function deleteChecklistItemFromSeriesRequest(checklistId: string, itemId: string) {
   const response = await apiFetch(`/api/checklists/${checklistId}/items/${itemId}?scope=series`, {
     credentials: 'same-origin',
@@ -1830,7 +1836,7 @@ export async function deleteChecklistItemFromSeriesRequest(checklistId: string, 
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to delete checklist step (${response.status})`)
   }
-  return (await response.json()) as SeriesItemDeleteResult
+  return (await response.json()) as SeriesItemDeleteResponse
 }
 
 // ---- Item-level deletion requests (staff request → owner approves) ----
@@ -1850,7 +1856,11 @@ export async function listItemDeletionRequests() {
   return ((await response.json()) as { requests: ItemDeletionRequest[] }).requests
 }
 
-/** Owner-only: approve a pending item-deletion request. Returns the updated checklist. */
+/**
+ * Owner-only: approve a pending item-deletion request. Returns the updated
+ * checklist, or - for a "This + all future" request - what the series delete
+ * changed (the same body the owner's own series delete answers).
+ */
 export async function approveItemDeletion(requestId: string) {
   const response = await apiFetch(
     `/api/checklists/item-deletions/${encodeURIComponent(requestId)}/approve`,
@@ -1873,7 +1883,14 @@ export async function approveItemDeletion(requestId: string) {
       body?.message ?? body?.error ?? `Failed to approve deletion (${response.status})`,
     )
   }
-  return (await response.json()) as Checklist
+  return (await response.json()) as Checklist | SeriesItemDeleteResult
+}
+
+/** Type guard: an approval answered with a series delete's result, not one checklist. */
+export function isSeriesDeleteResult(
+  result: Checklist | SeriesItemDeleteResult,
+): result is SeriesItemDeleteResult {
+  return 'removedFromChecklists' in result
 }
 
 /** Owner-only: reject a pending item-deletion request (clears it, deletes nothing). */
