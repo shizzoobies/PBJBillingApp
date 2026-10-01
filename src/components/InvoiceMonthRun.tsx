@@ -2748,16 +2748,32 @@ function InvoiceEditor({
       // Saving or confirming the dates reloads this invoice from the server,
       // which would throw away any line, note or hours edit she has not saved
       // yet, so the dates wait until those are saved. The flagged Confirm is
-      // the same request with the same remount, so it waits too.
+      // the same request with the same remount, so it waits too - EXCEPT on a
+      // reviewed invoice. There the store refuses Save while a line is still
+      // flagged (the saved status would still be reviewed), so Save-first can
+      // never be the way out; the flagged Confirm stays available and asks
+      // before it throws her edits away (see `onConfirm`).
       disabledTitle:
         !flagged && scope.previewMode
           ? 'Disabled in preview mode'
-          : dirty
+          : dirty && !(flagged && invoice.status === 'reviewed')
             ? 'Save your other changes first'
             : undefined,
       onEdit: (range: { start: string; end: string }) =>
         setCoverageEdits((current) => ({ ...current, [recurringId]: range })),
-      onConfirm: () => void confirmCoverage(recurringId, coverageValue(line)),
+      onConfirm: () => {
+        if (
+          flagged &&
+          invoice.status === 'reviewed' &&
+          dirty &&
+          !window.confirm(
+            'Confirming these dates will discard your unsaved changes on this invoice. Confirm the dates first, then make your changes again?',
+          )
+        ) {
+          return
+        }
+        void confirmCoverage(recurringId, coverageValue(line))
+      },
       // One panel at a time: opening this one drops the dates typed into the
       // one that was open, which would otherwise come back stale later.
       onOpen: () => {

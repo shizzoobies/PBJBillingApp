@@ -475,6 +475,120 @@ describe('InvoiceMonthRun — a flagged Confirm waits for her unsaved edits', ()
   })
 })
 
+/**
+ * A REVIEWED invoice whose line still reads "confirm the covered dates" is not a
+ * dead end. The store refuses Save while a line is flagged (the saved status
+ * would still be reviewed), so "Save your other changes first" can never be the
+ * way out there: the flagged Confirm stays available, and because confirming
+ * reloads the invoice and drops her unsaved edits it asks first. Draft and sent
+ * invoices keep the Save-first rule exactly.
+ */
+describe('InvoiceMonthRun — a reviewed invoice with a flagged line can still be fixed', () => {
+  const flaggedLines = [
+    baseInvoice.lineItems[0],
+    { ...recurringLine, needsCoverageConfirmation: true, coverageReason: 'gap' as const },
+  ]
+  const DISCARD_SENTENCE =
+    'Confirming these dates will discard your unsaved changes on this invoice. Confirm the dates first, then make your changes again?'
+
+  // happy-dom ships no window.confirm, so it is stubbed (as the void tests do).
+  const stubConfirm = (answer: boolean) => {
+    const ask = vi.fn(() => answer)
+    vi.stubGlobal('confirm', ask)
+    return ask
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  async function openFlagged(status: 'draft' | 'reviewed' | 'sent', tab: RegExp | null) {
+    mockList.mockResolvedValue([{ ...baseInvoice, status, lineItems: flaggedLines }])
+    render(
+      <InvoiceMonthRun
+        clients={clients}
+        timeEntries={timeEntries}
+        employees={employees}
+        checklists={checklists}
+        onPrint={vi.fn()}
+      />,
+    )
+    if (tab) fireEvent.click(await screen.findByRole('tab', { name: tab }))
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+  }
+  const editALine = () =>
+    fireEvent.change(screen.getAllByLabelText('Line description')[0], {
+      target: { value: 'A label she is still typing' },
+    })
+  const confirmButton = () => screen.getByRole('button', { name: 'Confirm dates' })
+
+  it('stays enabled with unsaved edits, asks the discard question, and on yes confirms', async () => {
+    await openFlagged('reviewed', /^Reviewed/)
+    mockConfirm.mockResolvedValue({ ...movedInvoice, status: 'reviewed' })
+    const ask = stubConfirm(true)
+    editALine()
+
+    expect(confirmButton()).toBeEnabled()
+    expect(screen.queryByText('Save your other changes first')).not.toBeInTheDocument()
+    fireEvent.click(confirmButton())
+
+    expect(ask).toHaveBeenCalledTimes(1)
+    expect(ask).toHaveBeenCalledWith(DISCARD_SENTENCE)
+    await waitFor(() =>
+      expect(mockConfirm).toHaveBeenCalledWith('inv-1', 'recur-qbo', {
+        coverageStart: '2026-08-13',
+        coverageEnd: '2026-09-13',
+      }),
+    )
+  })
+
+  it('on no, nothing is called and her edit is still there', async () => {
+    await openFlagged('reviewed', /^Reviewed/)
+    const ask = stubConfirm(false)
+    editALine()
+
+    fireEvent.click(confirmButton())
+
+    expect(ask).toHaveBeenCalledWith(DISCARD_SENTENCE)
+    expect(mockConfirm).not.toHaveBeenCalled()
+    expect((screen.getAllByLabelText('Line description')[0] as HTMLInputElement).value).toBe(
+      'A label she is still typing',
+    )
+    expect(confirmButton()).toBeEnabled()
+  })
+
+  it('a clean editor confirms without asking', async () => {
+    await openFlagged('reviewed', /^Reviewed/)
+    mockConfirm.mockResolvedValue({ ...movedInvoice, status: 'reviewed' })
+    const ask = stubConfirm(true)
+
+    fireEvent.click(confirmButton())
+
+    expect(ask).not.toHaveBeenCalled()
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(1))
+  })
+
+  it('a DRAFT with unsaved edits is still disabled with "Save your other changes first"', async () => {
+    await openFlagged('draft', null)
+    const ask = stubConfirm(true)
+    editALine()
+
+    expect(confirmButton()).toBeDisabled()
+    expect(confirmButton()).toHaveAttribute('title', 'Save your other changes first')
+    expect(screen.getByText('Save your other changes first')).toBeInTheDocument()
+    fireEvent.click(confirmButton())
+    expect(ask).not.toHaveBeenCalled()
+    expect(mockConfirm).not.toHaveBeenCalled()
+  })
+
+  it('a SENT invoice with unsaved edits keeps the same rule', async () => {
+    await openFlagged('sent', /^Sent/)
+    editALine()
+
+    expect(confirmButton()).toBeDisabled()
+    expect(screen.getByText('Save your other changes first')).toBeInTheDocument()
+  })
+})
+
 describe('InvoiceMonthRun — the derived mark is not an edit', () => {
   it('a re-fetch that changes only the mark leaves a clean editor clean', async () => {
     await openEditor()

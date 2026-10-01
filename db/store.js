@@ -1589,6 +1589,48 @@ export function mapInvoiceRow(row) {
 }
 
 /**
+ * One invoice as the JSON file stores it -> the shape `mapInvoiceRow` gives for
+ * the same invoice on Postgres. Lifted out of `listInvoices` so the covered-date
+ * confirmation, which reads the file inside its own queue slot, answers the same
+ * shape and the two cannot drift.
+ */
+function normalizeStoredInvoice(invoice) {
+  // Postgres answers `kind` 'monthly' and `applied_to_invoice_id` null for every
+  // row written before those columns existed. The file backend has to say the
+  // same thing, or a test passes on a shape production never produces (cardinal
+  // rule 1 — this is exactly how `email_log` got away).
+  return {
+    ...invoice,
+    kind: invoice.kind ?? 'monthly',
+    appliedToInvoiceId: invoice.appliedToInvoiceId ?? null,
+    // Null, never `[]` — the same distinction `mapInvoiceRow` draws.
+    originalLineItems: Array.isArray(invoice.originalLineItems) ? invoice.originalLineItems : null,
+    // Same as `mapInvoiceRow`: null, never undefined, so the two backends answer
+    // the same shape for a row minted before the column existed.
+    payToken: invoice.payToken ?? null,
+  }
+}
+
+/**
+ * The file backend's ledger write on an already-read workspace: records the
+ * window an expense was billed for in one period, clears its resume flag and
+ * moves the anchor only when one is given. Returns false (and changes nothing)
+ * when there is no such expense. Shared by `_writeCoverageLedgerEntry` and the
+ * covered-date confirmation, which writes the ledger and the invoice in one go.
+ */
+function applyCoverageLedgerEntry(data, id, period, value, anchorDay = null) {
+  const target = (data.recurringReimbursements ?? []).find((expense) => expense.id === id)
+  if (!target) return false
+  if (!target.coverageHistory || typeof target.coverageHistory !== 'object') {
+    target.coverageHistory = {}
+  }
+  target.coverageHistory[period] = value
+  target.coverageResumePending = false
+  if (anchorDay !== null) target.coverageAnchorDay = anchorDay
+  return true
+}
+
+/**
  * The clients columns every Postgres read selects, and the row map that turns
  * one of them into the shape the app speaks.
  *
@@ -11707,9 +11749,9 @@ export class AppDataStore {
   }
 
   /** One recurring reimbursement by id, in app shape, from either backend. */
-  async _readRecurringReimbursement(id) {
+  async _readRecurringReimbursement(id, { dbClient = null } = {}) {
     if (this.pool) {
-      const result = await this.pool.query(
+      const result = await (dbClient ?? this.pool).query(
         `select id, client_id, description, amount, frequency, start_date,
                 coverage_enabled, coverage_template, coverage_start, coverage_end,
                 coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history
@@ -11789,14 +11831,7 @@ export class AppDataStore {
     // The file backend is single-writer and its queue serializes reads against
     // writes, so one read-modify-write IS the atomic unit here.
     const data = await readJson(localDataPath)
-    const target = (data.recurringReimbursements ?? []).find((expense) => expense.id === id)
-    if (!target) return
-    if (!target.coverageHistory || typeof target.coverageHistory !== 'object') {
-      target.coverageHistory = {}
-    }
-    target.coverageHistory[period] = value
-    target.coverageResumePending = false
-    if (anchorDay !== null) target.coverageAnchorDay = anchorDay
+    if (!applyCoverageLedgerEntry(data, id, period, value, anchorDay)) return
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
   }
 
@@ -12024,10 +12059,100 @@ export class AppDataStore {
    * Returns the updated invoice, or null when there is no such invoice.
    */
   async confirmExpenseCoverage(invoiceId, recurringId, { start, end } = {}) {
-    const all = await this.listInvoices()
-    const current = all.find((invoice) => invoice.id === invoiceId)
-    if (!current) return null
+    // READ, DECIDE AND WRITE UNDER ONE LOCK. The invoice is rewritten whole
+    // (`line_items` is one array), so two answers for two lines of the same
+    // invoice that each read it first and wrote it second were last-writer-wins:
+    // the first line went back to its flagged proposal on the invoice while its
+    // expense's ledger said it was confirmed. Every refusal below is decided on
+    // the row that is about to be written.
+    if (this.pool) {
+      const dbClient = await this.pool.connect()
+      try {
+        await dbClient.query('BEGIN')
+        // The invoice row is locked FIRST, then the expense row is written (by
+        // the ledger update): the order `updateInvoice`'s void, the month void
+        // and generation all take, so no pair of them can wait on each other.
+        const locked = await dbClient.query(
+          `select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1 for update`,
+          [invoiceId],
+        )
+        if (!locked.rows?.length) {
+          await dbClient.query('ROLLBACK')
+          return null
+        }
+        const current = mapInvoiceRow(locked.rows[0])
+        const plan = await this._planCoverageConfirmation(current, recurringId, { start, end }, () =>
+          this._readRecurringReimbursement(recurringId, { dbClient }),
+        )
+        // The line and the ledger land TOGETHER. Confirming is the one moment the
+        // two are guaranteed to agree, and a connection lost between them would
+        // leave the invoice settled while the cycle it advances still asks.
+        const next = { ...current, lineItems: plan.lineItems, updatedAt: nowIso() }
+        await dbClient.query(
+          `update invoices set line_items = $2::jsonb, updated_at = now() where id = $1`,
+          [invoiceId, JSON.stringify(plan.lineItems)],
+        )
+        // The ledger gets the CONFIRMED window, so the next cycle steps from what
+        // she approved rather than from what was proposed.
+        await this._writeCoverageLedgerEntry(
+          recurringId,
+          current.period,
+          { start: plan.nextStart, end: plan.nextEnd, needsConfirmation: false, reason: null },
+          { dbClient, anchorDay: plan.anchorDay },
+        )
+        await dbClient.query('COMMIT')
+        return next
+      } catch (error) {
+        try {
+          await dbClient.query('ROLLBACK')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        throw error
+      } finally {
+        dbClient.release()
+      }
+    }
 
+    // The file backend: the read, the decision and BOTH writes (the invoice's
+    // line and the expense's ledger live in the same file) inside ONE queue slot.
+    // Raw fs calls only in here: `readJson` / `writeFile` enqueue behind this
+    // very slot and would deadlock.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const stored = (data.invoices ?? []).find((invoice) => invoice.id === invoiceId)
+      if (!stored) return null
+      const current = normalizeStoredInvoice(stored)
+      const plan = await this._planCoverageConfirmation(current, recurringId, { start, end }, () => {
+        const found = (data.recurringReimbursements ?? []).find((entry) => entry.id === recurringId)
+        // Through the SAME normalizer `_readRecurringReimbursement` uses.
+        return found ? normalizeRecurringReimbursement(found) : null
+      })
+      const next = { ...current, lineItems: plan.lineItems, updatedAt: nowIso() }
+      // The same guard `_writeCoverageLedgerEntry` applies.
+      if (recurringId && /^\d{4}-\d{2}$/.test(String(current.period))) {
+        applyCoverageLedgerEntry(
+          data,
+          recurringId,
+          current.period,
+          { start: plan.nextStart, end: plan.nextEnd, needsConfirmation: false, reason: null },
+          plan.anchorDay,
+        )
+      }
+      stored.lineItems = plan.lineItems
+      stored.updatedAt = next.updatedAt
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return next
+    })
+  }
+
+  /**
+   * Every refusal `confirmExpenseCoverage` makes, and the line and anchor it
+   * would write, decided on the invoice row the caller holds under its lock.
+   * Writes nothing. `readExpense` is called at the point the expense is first
+   * needed, so a request refused before that never reads it.
+   */
+  async _planCoverageConfirmation(current, recurringId, { start, end }, readExpense) {
     // A withdrawn invoice is not a thing to confirm dates on. Writing the ledger
     // for one would advance a cycle on behalf of a document nobody is paying —
     // and voiding is precisely the escape hatch offered to an owner who does not
@@ -12064,7 +12189,7 @@ export class AppDataStore {
       throw new CoverageConfirmationError('The end of the covered period must come after its start.')
     }
 
-    const expense = await this._readRecurringReimbursement(recurringId)
+    const expense = await readExpense()
 
     // WHOSE WORDING IS THIS? The template exists to put dates into a sentence,
     // so a confirmed window should refresh that sentence — unless she has since
@@ -12138,36 +12263,7 @@ export class AppDataStore {
         ? movedAnchor
         : null
 
-    // The line and the ledger land TOGETHER. Confirming is the one moment the
-    // two are guaranteed to agree, and a connection lost between them would
-    // leave the invoice settled while the cycle it advances still asks.
-    const next = { ...current, lineItems, updatedAt: nowIso() }
-    await this._withTransaction(async (dbClient) => {
-      if (this.pool) {
-        await dbClient.query(
-          `update invoices set line_items = $2::jsonb, updated_at = now() where id = $1`,
-          [invoiceId, JSON.stringify(lineItems)],
-        )
-      }
-      // The ledger gets the CONFIRMED window, so the next cycle steps from what
-      // she approved rather than from what was proposed.
-      await this._writeCoverageLedgerEntry(
-        recurringId,
-        current.period,
-        { start: nextStart, end: nextEnd, needsConfirmation: false, reason: null },
-        { dbClient, anchorDay },
-      )
-      if (!this.pool) {
-        const data = await readJson(localDataPath)
-        const stored = (data.invoices ?? []).find((invoice) => invoice.id === invoiceId)
-        if (stored) {
-          stored.lineItems = lineItems
-          stored.updatedAt = next.updatedAt
-          await writeFile(localDataPath, JSON.stringify(data, null, 2))
-        }
-      }
-    })
-    return next
+    return { lineItems, nextStart, nextEnd, anchorDay }
   }
 
   /**
@@ -12470,18 +12566,7 @@ export class AppDataStore {
       // every row written before those columns existed. The file backend has to
       // say the same thing, or a test passes on a shape production never
       // produces (cardinal rule 1 — this is exactly how `email_log` got away).
-      .map((invoice) => ({
-        ...invoice,
-        kind: invoice.kind ?? 'monthly',
-        appliedToInvoiceId: invoice.appliedToInvoiceId ?? null,
-        // Null, never `[]` — the same distinction `mapInvoiceRow` draws.
-        originalLineItems: Array.isArray(invoice.originalLineItems)
-          ? invoice.originalLineItems
-          : null,
-        // Same as `mapInvoiceRow`: null, never undefined, so the two backends
-        // answer the same shape for a row minted before the column existed.
-        payToken: invoice.payToken ?? null,
-      }))
+      .map(normalizeStoredInvoice)
       .sort((a, b) => String(a.number ?? '').localeCompare(String(b.number ?? '')))
   }
 

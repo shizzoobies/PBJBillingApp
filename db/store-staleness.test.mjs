@@ -1132,7 +1132,8 @@ function fakePostgres({
     // reasons: before the general invoices select, and actually filtering.
     // Answering every row would let a pay link for an invoice that is not there
     // file an open against somebody else's.
-    if (/^select\b[\s\S]*\bfrom invoices where id = \$1$/i.test(trimmed)) {
+    // `confirmExpenseCoverage` reads the same row `for update` inside its transaction.
+    if (/^select\b[\s\S]*\bfrom invoices where id = \$1( for update)?$/i.test(trimmed)) {
       const found = invoices.find((invoice) => invoice.id === params?.[0])
       return { rows: found ? [found] : [], rowCount: found ? 1 : 0 }
     }
@@ -13383,6 +13384,88 @@ describe('covered dates — the gate cannot be talked around (file backend)', ()
       coverageEnd: '2026-09-05',
     })
   })
+
+  // Two answers for two lines of ONE invoice, arriving together. The read, the
+  // decision and both writes sit in one file-queue slot, so the second is decided
+  // on the invoice the first wrote.
+  describe('two confirmations on one invoice arriving together', () => {
+    const november = async () => {
+      await seedTwoExpenses()
+      await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+      const run = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+      const invoice = run.created[0]
+      expect(lineFor(invoice, 'recur-qbo').needsCoverageConfirmation).toBe(true)
+      expect(lineFor(invoice, 'recur-payroll').needsCoverageConfirmation).toBe(true)
+      return invoice
+    }
+    const stored = async (id) =>
+      JSON.parse(await readFile(localDataPath, 'utf8')).invoices.find((entry) => entry.id === id)
+
+    it('both lines end confirmed on the invoice and in both ledgers', async () => {
+      const invoice = await november()
+
+      const [qbo, payroll] = await Promise.all([
+        store.confirmExpenseCoverage(invoice.id, 'recur-qbo'),
+        store.confirmExpenseCoverage(invoice.id, 'recur-payroll', {
+          start: '2026-10-05',
+          end: '2026-11-20',
+        }),
+      ])
+
+      const after = await stored(invoice.id)
+      expect(lineFor(after, 'recur-qbo').needsCoverageConfirmation).toBe(false)
+      expect(lineFor(after, 'recur-payroll')).toMatchObject({
+        needsCoverageConfirmation: false,
+        coverageEnd: '2026-11-20',
+      })
+      expect((await readExpense('recur-qbo')).coverageHistory['2026-11'].needsConfirmation).toBe(false)
+      expect((await readExpense('recur-payroll')).coverageHistory['2026-11']).toMatchObject({
+        needsConfirmation: false,
+        end: '2026-11-20',
+      })
+      // The one that ran second was answered with the invoice it wrote: both lines.
+      expect(
+        [qbo, payroll].some((answer) =>
+          answer.lineItems
+            .filter((line) => line.kind === 'recurring')
+            .every((line) => line.needsCoverageConfirmation === false),
+        ),
+      ).toBe(true)
+    })
+
+    it('the other order lands the same way, and the gate then lets the invoice be reviewed', async () => {
+      const invoice = await november()
+
+      await Promise.all([
+        store.confirmExpenseCoverage(invoice.id, 'recur-payroll'),
+        store.confirmExpenseCoverage(invoice.id, 'recur-qbo'),
+      ])
+
+      const reviewed = await store.updateInvoice(invoice.id, { status: 'reviewed' })
+      expect(reviewed.status).toBe('reviewed')
+      expect(reviewed.lineItems.filter((line) => line.needsCoverageConfirmation)).toEqual([])
+    })
+
+    it('a refusal in the middle writes nothing and does not hold the next one up', async () => {
+      const invoice = await november()
+      const before = await readFile(localDataPath, 'utf8')
+
+      const settled = await Promise.allSettled([
+        store.confirmExpenseCoverage(invoice.id, 'recur-ghost'),
+        store.confirmExpenseCoverage(invoice.id, 'recur-qbo', { start: '2026-11-13', end: '2026-10-13' }),
+      ])
+      expect(settled.map((entry) => entry.status)).toEqual(['rejected', 'rejected'])
+      expect(await readFile(localDataPath, 'utf8')).toBe(before)
+
+      await store.confirmExpenseCoverage(invoice.id, 'recur-qbo')
+      expect(lineFor(await stored(invoice.id), 'recur-qbo').needsCoverageConfirmation).toBe(false)
+    })
+
+    it('answers null for an invoice that is not there', async () => {
+      await november()
+      expect(await store.confirmExpenseCoverage('inv-missing', 'recur-qbo')).toBeNull()
+    })
+  })
 })
 
 describe('covered dates — voiding un-bills the window (file backend)', () => {
@@ -14240,7 +14323,11 @@ describe('covered dates — changing an unflagged window (postgres branch)', () 
         }),
       ).rejects.toThrow(/A later month has already been billed/)
 
-      expect(fake.matching(/^BEGIN$/i)).toHaveLength(0)
+      // Decided on the locked row: the transaction opens, the invoice is read
+      // `for update`, and the refusal rolls back with nothing written.
+      expect(fake.matching(/for update$/i)).toHaveLength(1)
+      expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
+      expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
       expect(fake.matching(/^update invoices/i)).toHaveLength(0)
       expect(fake.matching(/jsonb_set\(/i)).toHaveLength(0)
     })
@@ -14318,7 +14405,7 @@ describe('covered dates — changing an unflagged window (postgres branch)', () 
     })
   })
 
-  it('refuses a paid invoice before it opens a transaction or reads the expense', async () => {
+  it('refuses a paid invoice on the locked row, before it reads the expense', async () => {
     const fake = fakePostgres({ invoices: [unflaggedRow('paid')], recurringRows: [recurringRow] })
 
     await expect(
@@ -14328,9 +14415,291 @@ describe('covered dates — changing an unflagged window (postgres branch)', () 
       }),
     ).rejects.toBeInstanceOf(CoverageConfirmationError)
 
-    expect(fake.matching(/^BEGIN$/i)).toHaveLength(0)
+    // The paid check is decided on the row read `for update` inside the
+    // transaction; the expense is never read and nothing is written.
+    expect(fake.matching(/for update$/i)).toHaveLength(1)
+    expect(fake.matching(/from recurring_reimbursements/i)).toHaveLength(0)
+    expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
     expect(fake.matching(/^update invoices/i)).toHaveLength(0)
     expect(fake.matching(/jsonb_set\(/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * Two answers for two lines of ONE invoice, arriving together (two tabs, or two
+ * people), must never undo each other. The invoice is rewritten whole, so the
+ * confirmation reads it `for update` inside its transaction and builds the new
+ * lines from THAT row. The fake below models just the lock: a second `for update`
+ * read of the row waits until the holder's COMMIT or ROLLBACK, and the row it
+ * then reads is whatever the first one wrote.
+ */
+describe('covered dates — two confirmations on one invoice (postgres branch)', () => {
+  const FOR_UPDATE =
+    /^select id, client_id, period, number, kind, status, line_items, subtotal, total,[\s\S]*from invoices where id = \$1 for update$/i
+
+  const expenseRow = (id, description, startDate, endDate) => ({
+    id,
+    client_id: 'c1',
+    description,
+    amount: '50.00',
+    frequency: 'monthly',
+    start_date: new Date(2026, 6, 1),
+    coverage_enabled: true,
+    coverage_template: '{description} — {range}',
+    coverage_start: new Date(startDate),
+    coverage_end: new Date(endDate),
+    coverage_anchor_day: Number(endDate.slice(8, 10)),
+    coverage_paused: false,
+    coverage_resume_pending: false,
+    coverage_history: {
+      '2026-11': { start: startDate, end: endDate, needsConfirmation: true, reason: 'gap' },
+    },
+  })
+
+  const flaggedLine = (recurringId, label, coverageStart, coverageEnd) => ({
+    kind: 'recurring',
+    label,
+    detail: 'monthly',
+    amount: 50,
+    recurringId,
+    coverageStart,
+    coverageEnd,
+    needsCoverageConfirmation: true,
+    coverageReason: 'gap',
+  })
+
+  const invoiceRow = (status = 'draft') => ({
+    ...existingInvoice,
+    id: 'inv-1',
+    period: '2026-11',
+    status,
+    line_items: [
+      flaggedLine('recur-qbo', 'QuickBooks Online — October 13 – November 13, 2026', '2026-10-13', '2026-11-13'),
+      flaggedLine('recur-payroll', 'Payroll service — October 5 – November 5, 2026', '2026-10-05', '2026-11-05'),
+    ],
+    subtotal: '100.00',
+    total: '100.00',
+  })
+
+  /**
+   * The shared fake, plus the pieces a two-connection race needs: a row lock on
+   * the invoice, a live invoice row the update writes back to, and per-id
+   * expense rows whose ledger the update writes back to.
+   */
+  function lockingPostgres({ invoice = invoiceRow(), failOn = null } = {}) {
+    const expenses = [
+      expenseRow('recur-qbo', 'QuickBooks Online', '2026-10-13', '2026-11-13'),
+      expenseRow('recur-payroll', 'Payroll service', '2026-10-05', '2026-11-05'),
+    ]
+    const fake = fakePostgres({ invoices: [invoice], recurringRows: expenses, failOn })
+    const record = fake.pool.query
+    let holder = null
+    let waiting = []
+    let released = 0
+    let opened = 0
+    const handOver = (me) => {
+      if (holder !== me) return
+      holder = null
+      const next = waiting
+      waiting = []
+      next.forEach((wake) => wake())
+    }
+    const answer = async (me, text, params) => {
+      const trimmed = String(text).trim()
+      if (FOR_UPDATE.test(trimmed)) {
+        // The row lock: wait for whoever holds it, then READ (record) the row as
+        // it stands NOW.
+        while (holder && holder !== me) await new Promise((wake) => waiting.push(wake))
+        holder = me
+      }
+      if (/^update invoices set line_items/i.test(trimmed)) {
+        // Give the other connection every chance to read before this one writes.
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      try {
+        const result = await record(text, params)
+        if (/^select\b[\s\S]*\bfrom recurring_reimbursements where id = \$1$/i.test(trimmed)) {
+          const found = expenses.filter((row) => row.id === params[0])
+          return { rows: found, rowCount: found.length }
+        }
+        if (/^update invoices set line_items/i.test(trimmed)) {
+          invoice.line_items = JSON.parse(params[1])
+        }
+        if (/jsonb_set\(/i.test(trimmed)) {
+          const expense = expenses.find((row) => row.id === params[0])
+          expense.coverage_history = { ...expense.coverage_history, [params[1]]: JSON.parse(params[2]) }
+        }
+        return result
+      } finally {
+        if (/^(COMMIT|ROLLBACK)$/i.test(trimmed)) handOver(me)
+      }
+    }
+    fake.pool.query = (text, params) => answer({}, text, params)
+    fake.pool.connect = async () => {
+      opened += 1
+      const me = {}
+      return {
+        // A statement that throws inside a transaction is followed by the store's
+        // ROLLBACK, which is what hands the lock on.
+        query: (text, params) => answer(me, text, params),
+        release: () => {
+          released += 1
+          // A connection returned to the pool never keeps a lock.
+          handOver(me)
+        },
+      }
+    }
+    return { fake, invoice, expenses, counts: () => ({ opened, released }) }
+  }
+
+  const ledgerOf = (expenses, id) => expenses.find((row) => row.id === id).coverage_history['2026-11']
+  const lineOf = (invoice, id) => invoice.line_items.find((line) => line.recurringId === id)
+
+  it('two confirmations for two lines, the second arriving before the first writes, both end confirmed on the invoice and in both ledgers', async () => {
+    const { fake, invoice, expenses, counts } = lockingPostgres()
+    const store = postgresStore(fake)
+
+    const [qbo, payroll] = await Promise.all([
+      store.confirmExpenseCoverage('inv-1', 'recur-qbo'),
+      store.confirmExpenseCoverage('inv-1', 'recur-payroll', { start: '2026-10-05', end: '2026-11-20' }),
+    ])
+
+    // Both lines on the invoice the second one wrote, not just its own.
+    expect(lineOf(invoice, 'recur-qbo')).toMatchObject({
+      needsCoverageConfirmation: false,
+      coverageStart: '2026-10-13',
+      coverageEnd: '2026-11-13',
+    })
+    expect(lineOf(invoice, 'recur-payroll')).toMatchObject({
+      needsCoverageConfirmation: false,
+      coverageEnd: '2026-11-20',
+    })
+    // ...and the caller that went second was handed the invoice with both lines
+    // answered, the one it wrote.
+    expect([qbo, payroll].every(Boolean)).toBe(true)
+    expect(
+      [qbo, payroll].some((answer) =>
+        answer.lineItems.every((line) => line.needsCoverageConfirmation === false),
+      ),
+    ).toBe(true)
+    // Both ledgers say confirmed.
+    expect(ledgerOf(expenses, 'recur-qbo')).toMatchObject({ needsConfirmation: false })
+    expect(ledgerOf(expenses, 'recur-payroll')).toMatchObject({ needsConfirmation: false, end: '2026-11-20' })
+
+    // The second read the row only after the first committed.
+    const reads = fake.statements
+      .map((entry, at) => ({ entry, at }))
+      .filter(({ entry }) => FOR_UPDATE.test(entry.text))
+      .map(({ at }) => at)
+    expect(reads).toHaveLength(2)
+    expect(fake.statements.findIndex((entry) => /^COMMIT$/i.test(entry.text))).toBeLessThan(reads[1])
+    expect(counts()).toEqual({ opened: 2, released: 2 })
+  })
+
+  it('the other order lands the same way', async () => {
+    const { fake, invoice, expenses } = lockingPostgres()
+    const store = postgresStore(fake)
+
+    await Promise.all([
+      store.confirmExpenseCoverage('inv-1', 'recur-payroll'),
+      store.confirmExpenseCoverage('inv-1', 'recur-qbo', { start: '2026-10-13', end: '2026-11-15' }),
+    ])
+
+    expect(invoice.line_items.map((line) => line.needsCoverageConfirmation)).toEqual([false, false])
+    expect(lineOf(invoice, 'recur-qbo').coverageEnd).toBe('2026-11-15')
+    expect(ledgerOf(expenses, 'recur-qbo').needsConfirmation).toBe(false)
+    expect(ledgerOf(expenses, 'recur-payroll').needsConfirmation).toBe(false)
+  })
+
+  it('a confirmation that does not race sends the same statements as before, with the invoice read for update inside the transaction', async () => {
+    const { fake } = lockingPostgres()
+
+    await postgresStore(fake).confirmExpenseCoverage('inv-1', 'recur-qbo')
+
+    expect(fake.statements.map((entry) => entry.text.split(/\s+/).slice(0, 3).join(' '))).toEqual([
+      'BEGIN',
+      'select id, client_id,',
+      'select id, client_id,',
+      'update invoices set',
+      'update recurring_reimbursements set',
+      'COMMIT',
+    ])
+    const [lock] = fake.matching(FOR_UPDATE)
+    expect(lock.text).toMatch(/^select id, client_id, period, number, kind, status, line_items, subtotal, total,/)
+    expect(lock.text).toMatch(/ from invoices where id = \$1 for update$/)
+    expect(lock.params).toEqual(['inv-1'])
+    expect(fake.statements[2].text).toMatch(/from recurring_reimbursements where id = \$1$/)
+    expect(fake.statements[2].params).toEqual(['recur-qbo'])
+    expect(fake.statements[3].text).toBe(
+      'update invoices set line_items = $2::jsonb, updated_at = now() where id = $1',
+    )
+    expect(fake.statements[3].params[0]).toBe('inv-1')
+    expect(fake.statements[4].params.slice(0, 2)).toEqual(['recur-qbo', '2026-11'])
+  })
+
+  it('a refusal on the locked row rolls back and releases, and the next confirmation is not left waiting', async () => {
+    const { fake, invoice, counts } = lockingPostgres({ invoice: invoiceRow('paid') })
+    const store = postgresStore(fake)
+
+    await expect(store.confirmExpenseCoverage('inv-1', 'recur-qbo')).rejects.toThrow(
+      /locked because it has been paid/i,
+    )
+    expect(fake.statements.map((entry) => entry.text.split(/\s+/)[0])).toEqual([
+      'BEGIN',
+      'select',
+      'ROLLBACK',
+    ])
+    expect(counts()).toEqual({ opened: 1, released: 1 })
+
+    // Whoever comes next gets the lock at once.
+    invoice.status = 'draft'
+    await store.confirmExpenseCoverage('inv-1', 'recur-qbo')
+    expect(lineOf(invoice, 'recur-qbo').needsCoverageConfirmation).toBe(false)
+  })
+
+  it('an expense that is not on the invoice, and a window the end of which is not after its start, refuse on the locked row with nothing written', async () => {
+    const { fake, counts } = lockingPostgres()
+    const store = postgresStore(fake)
+
+    await expect(store.confirmExpenseCoverage('inv-1', 'recur-ghost')).rejects.toThrow(
+      'That expense is not on this invoice.',
+    )
+    await expect(
+      store.confirmExpenseCoverage('inv-1', 'recur-qbo', { start: '2026-11-13', end: '2026-10-13' }),
+    ).rejects.toThrow('The end of the covered period must come after its start.')
+    await expect(
+      store.confirmExpenseCoverage('inv-1', 'recur-qbo', { start: 'soon', end: '2026-10-13' }),
+    ).rejects.toBeInstanceOf(CoverageConfirmationError)
+
+    expect(fake.matching(/^BEGIN$/i)).toHaveLength(3)
+    expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(3)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+    expect(fake.matching(/^update/i)).toHaveLength(0)
+    expect(counts()).toEqual({ opened: 3, released: 3 })
+  })
+
+  it('an invoice that is not there answers null, rolled back and released', async () => {
+    const { fake, counts } = lockingPostgres()
+
+    expect(await postgresStore(fake).confirmExpenseCoverage('inv-missing', 'recur-qbo')).toBeNull()
+    expect(fake.statements.map((entry) => entry.text.split(/\s+/)[0])).toEqual(['BEGIN', 'select', 'ROLLBACK'])
+    expect(counts()).toEqual({ opened: 1, released: 1 })
+  })
+
+  it('a write that throws rolls back, releases the connection and leaves the row for the next one', async () => {
+    const { fake, invoice, counts } = lockingPostgres({
+      failOn: { pattern: /^update invoices set line_items/i, error: new Error('boom') },
+    })
+    const store = postgresStore(fake)
+
+    await expect(store.confirmExpenseCoverage('inv-1', 'recur-qbo')).rejects.toThrow('boom')
+
+    expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+    expect(fake.matching(/jsonb_set\(/i)).toHaveLength(0)
+    expect(counts()).toEqual({ opened: 1, released: 1 })
+    expect(lineOf(invoice, 'recur-qbo').needsCoverageConfirmation).toBe(true)
   })
 })
 
