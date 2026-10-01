@@ -397,11 +397,19 @@ function formatPastDueLine(due: string) {
   return Number.isNaN(parsed.getTime()) ? due : pastDueLineDate.format(parsed)
 }
 
-function formatDue(due: string | null) {
-  if (!due) return 'no due date'
-  const parsed = new Date(`${due}T12:00:00`)
-  if (Number.isNaN(parsed.getTime())) return 'no due date'
-  return `due ${new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(parsed)}`
+/**
+ * The row's date wording. A client asked to pay on receipt is told so, and the
+ * stored date is named for what it is, the firm's follow-up line; a client whose
+ * own terms name a longer window keeps "due <date>".
+ */
+function formatDue(due: string | null, dueOnReceipt = false) {
+  const parsed = due ? new Date(`${due}T12:00:00`) : null
+  const short =
+    parsed && !Number.isNaN(parsed.getTime())
+      ? new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(parsed)
+      : null
+  if (dueOnReceipt) return short ? `Due on receipt · follow up ${short}` : 'Due on receipt'
+  return short ? `due ${short}` : 'no due date'
 }
 
 export function InvoiceMonthRun({
@@ -1569,7 +1577,7 @@ function InvoiceRow({
                   : undefined
               }
             >
-              {formatDue(invoice.dueDate)}
+              {formatDue(invoice.dueDate, dueOnReceipt)}
             </span>
             {adjustment
               ? ` · carries ${currency.format(adjustment.amount)} from last month`

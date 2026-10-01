@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoicesPage } from '../pages/InvoicesPage'
 import { DETAIL_SECTION_TITLE } from '../../lib/invoice-lines.js'
@@ -234,6 +234,20 @@ async function printStored(invoice: PersistedInvoice, tab?: string) {
   if (tab) fireEvent.click(await screen.findByRole('tab', { name: new RegExp(`^${tab}`) }))
   fireEvent.click(await screen.findByText(invoice.number as string))
   fireEvent.click(screen.getByRole('button', { name: 'Print' }))
+  await waitFor(() => expect(printInvoice).toHaveBeenCalled())
+}
+
+/**
+ * "Print invoice" asks which month first. The month run opens on the real
+ * current month while the mocked page is on August 2026, so these tests name
+ * the page's own month in the dialog — which is the on-screen invoice, edits
+ * and all, exactly what they printed before the question existed.
+ */
+async function printLive(month = '2026-08') {
+  fireEvent.click(await screen.findByRole('button', { name: 'Print invoice' }))
+  const dialog = within(await screen.findByRole('dialog', { name: 'Print invoice' }))
+  fireEvent.change(dialog.getByLabelText('Billing month'), { target: { value: month } })
+  fireEvent.click(dialog.getByRole('button', { name: 'Print' }))
   await waitFor(() => expect(printInvoice).toHaveBeenCalled())
 }
 
@@ -527,8 +541,7 @@ describe('InvoicesPage — Customize’s "Add line" (B1)', () => {
     })
     fireEvent.change(amountInputs[amountInputs.length - 1], { target: { value: '75' } })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Print invoice' }))
-    await waitFor(() => expect(printInvoice).toHaveBeenCalled())
+    await printLive()
 
     const text = printed()
     const occurrences = (needle: string) => text.split(needle).length - 1
@@ -564,8 +577,7 @@ describe('InvoicesPage — live per-client preview does not double-list hourly w
     mockList.mockImplementation(async () => [])
     renderInShell()
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Print invoice' }))
-    await waitFor(() => expect(printInvoice).toHaveBeenCalled())
+    await printLive()
 
     const text = printed()
     const occurrences = (needle: string) => text.split(needle).length - 1

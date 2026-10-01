@@ -2,6 +2,7 @@ import { ExternalLink, FileText, Mail, Plus, Printer, RotateCcw, Sliders, Trash2
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useAppContext } from '../AppContext'
+import { AddModal } from '../components/AddModal'
 import { InvoiceHistory } from '../components/InvoiceHistory'
 import { InvoiceMonthRun, type InvoiceMonthRunHandle } from '../components/InvoiceMonthRun'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
@@ -43,7 +44,7 @@ import {
   normalizeTimeBreakdownMode,
   renderedInvoiceLines,
 } from '../../lib/invoice-lines.js'
-import { paymentTermsLabel } from '../../lib/invoice-draft.js'
+import { invoiceDisplayDate, paymentTermsLabel } from '../../lib/invoice-draft.js'
 import type { InvoiceLineOut, InvoiceRoleTier } from '../../lib/invoice-lines.js'
 import { InvoiceDeliveryBadge } from '../components/InvoiceDeliveryBadge'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
@@ -78,10 +79,12 @@ type DisplayInvoice = {
   /** The stored invoice's number. Null for the live preview, which has none. */
   number: string | null
   /**
-   * The invoice's OWN date — sent, else created. Null for the live preview,
-   * which is a calculation rather than a document and so has no date; the sheet
-   * falls back to today only for that case. Printing `new Date()` for a stored
-   * invoice was a real bug: an August invoice reprinted in October said October.
+   * The invoice's OWN date, from `invoiceDisplayDate` — sent, else created, or
+   * the last day of its billing month from September 2026 on. The live preview
+   * is a calculation rather than a document and carries today run through the
+   * same rule (`liveInvoiceDate`); the sheet falls back to today only when this
+   * is null. Printing `new Date()` for a stored invoice was a real bug: an
+   * August invoice reprinted in October said October.
    */
   invoiceDate: string | null
   lines: DisplayLine[]
@@ -210,7 +213,7 @@ function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoi
     invoice: { ...baseInvoice, lines, total },
     kind: 'monthly',
     number: null,
-    invoiceDate: null,
+    invoiceDate: liveInvoiceDate(baseInvoice.period),
     lines,
     groupSubtotals: [],
     hideTimeBreakdown: false,
@@ -250,6 +253,20 @@ function formatInvoiceDate(value: string | null | undefined) {
     }
   }
   return invoiceDateFormat.format(new Date())
+}
+
+/**
+ * The date the live per-client preview prints: today's LOCAL date run through
+ * the same rule a stored invoice uses (`invoiceDisplayDate`), so a finished
+ * month from September 2026 on prints its last day and the current month prints
+ * today. Never the stored-invoice path — the preview is not a document yet.
+ */
+function liveInvoiceDate(period: string): string | null {
+  const now = new Date()
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+    now.getDate(),
+  ).padStart(2, '0')}`
+  return invoiceDisplayDate({ period, createdAt: today })
 }
 
 function formatEntryDate(date: string) {
@@ -297,7 +314,7 @@ function buildDisplayInvoice(
       ],
       kind: 'monthly',
       number: null,
-      invoiceDate: null,
+      invoiceDate: liveInvoiceDate(billingPeriod),
       groupSubtotals: [],
       hideTimeBreakdown: true,
       hideInternal,
@@ -381,7 +398,7 @@ function buildDisplayInvoice(
     invoice,
     kind: 'monthly',
     number: null,
-    invoiceDate: null,
+    invoiceDate: liveInvoiceDate(billingPeriod),
     lines,
     groupSubtotals,
     hideTimeBreakdown: false,
@@ -444,7 +461,7 @@ function persistedToDisplay(
     number: stored.number,
     // Sent, else created. NOT today: this sheet is a copy of a document that
     // already has a date, and reprinting it may not re-date it.
-    invoiceDate: stored.sentAt ?? stored.createdAt ?? null,
+    invoiceDate: invoiceDisplayDate(stored),
     lines,
     groupSubtotals: [],
     hideTimeBreakdown: true,
@@ -554,6 +571,11 @@ export function InvoicesPage() {
   // live per-client calculation. Cleared by the live Print button so the two
   // cannot print each other's content.
   const [storedPrint, setStoredPrint] = useState<PersistedInvoice | null>(null)
+  // "Print invoice" asks which month first. `printDialog` is that question while
+  // it is open; `monthPrint` is the live calculation for a month OTHER than the
+  // top-bar one, held just long enough for the sheet to commit and print.
+  const [printDialog, setPrintDialog] = useState<{ period: string } | null>(null)
+  const [monthPrint, setMonthPrint] = useState<DisplayInvoice | null>(null)
 
   // "Email invoice" really sends. Its outcome is reported here rather than in a
   // toast because it is the only evidence a client was just emailed.
@@ -617,7 +639,10 @@ export function InvoicesPage() {
     setView('month')
   }
 
-  const printStored = (stored: PersistedInvoice) => setStoredPrint(stored)
+  const printStored = (stored: PersistedInvoice) => {
+    setMonthPrint(null)
+    setStoredPrint(stored)
+  }
 
   // Print AFTER the sheet holding this invoice has actually been committed —
   // an effect, not a timeout racing the render. A 60ms guess is the difference
@@ -627,9 +652,12 @@ export function InvoicesPage() {
   // a plain Ctrl+P on this page later has to print what the page is showing,
   // not whichever archived row she last hit Print on.
   useEffect(() => {
-    if (!storedPrint) return
+    if (!storedPrint && !monthPrint) return
     printInvoice()
-    const done = () => setStoredPrint(null)
+    const done = () => {
+      setStoredPrint(null)
+      setMonthPrint(null)
+    }
     window.addEventListener('afterprint', done)
     // Not every browser fires afterprint, and cancelling the dialog may not
     // either — without this the page would stay stuck on the stored invoice.
@@ -641,7 +669,7 @@ export function InvoicesPage() {
     // printInvoice is re-created every render; depending on it would re-fire
     // this effect — and re-open the print dialog — on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storedPrint])
+  }, [storedPrint, monthPrint])
 
   const storedPrintDisplay = useMemo(() => {
     if (!storedPrint) return null
@@ -836,8 +864,47 @@ export function InvoicesPage() {
     }
   }
 
+  /**
+   * The Print button of the "which month?" dialog. The page's own month prints
+   * exactly what is on screen, Customize edits included. Any other month prints
+   * the live calculation for that month, built by the same two functions the
+   * page itself uses, with no edits — Customize belongs to the month it was
+   * opened on. That sheet is committed by the effect above before it prints.
+   */
+  const confirmPrint = (period: string) => {
+    setPrintDialog(null)
+    setStoredPrint(null)
+    if (period === billingPeriod) {
+      setMonthPrint(null)
+      printInvoice()
+      return
+    }
+    const invoice = getInvoice(
+      selectedClient,
+      data.timeEntries,
+      data.plans,
+      period,
+      data.reimbursements ?? [],
+      data.recurringReimbursements ?? [],
+      data.employees,
+      firmSettings.clientDefaults?.hourlyRate ?? 0,
+      billRateVersions,
+    )
+    setMonthPrint(buildDisplayInvoice(invoice, data.timeEntries, period))
+  }
+
   return (
     <>
+      {printDialog ? (
+        <PrintInvoiceDialog
+          clientName={selectedClient.name}
+          initialPeriod={printDialog.period}
+          customizeNote={customizing ? billingPeriodLabel : null}
+          onPrint={confirmPrint}
+          onCancel={() => setPrintDialog(null)}
+        />
+      ) : null}
+
       {/* The checkbox list for a client with more than one address on file.
           Rendered at the page root so it overlays whichever half is showing. */}
       {pickingSend ? (
@@ -944,10 +1011,9 @@ export function InvoicesPage() {
                 </button>
                 <button
                   className="primary-action"
-                  onClick={() => {
-                    setStoredPrint(null)
-                    printInvoice()
-                  }}
+                  onClick={() =>
+                    setPrintDialog({ period: monthRunRef.current?.showingPeriod() ?? billingPeriod })
+                  }
                   type="button"
                 >
                   <Printer size={16} />
@@ -1058,6 +1124,8 @@ export function InvoicesPage() {
         <div className="print-document invoice-print" aria-hidden="true">
           {storedPrintDisplay ? (
             <InvoiceDocument display={storedPrintDisplay} custom={null} />
+          ) : monthPrint ? (
+            <InvoiceDocument display={monthPrint} custom={null} />
           ) : (
             <InvoiceDocument display={effectiveDisplay} custom={customMeta} />
           )}
@@ -1065,6 +1133,65 @@ export function InvoicesPage() {
         document.body,
       )}
     </>
+  )
+}
+
+/**
+ * "Which month is this invoice for?" — asked before the live invoice prints, so
+ * the sheet cannot quietly be the top-bar month (the current one) while she is
+ * invoicing the month before. Nothing prints until Print; Escape and Cancel
+ * print nothing.
+ */
+function PrintInvoiceDialog({
+  clientName,
+  initialPeriod,
+  customizeNote,
+  onPrint,
+  onCancel,
+}: {
+  clientName: string
+  initialPeriod: string
+  /** The month Customize edits belong to, while Customize is open. */
+  customizeNote: string | null
+  onPrint: (period: string) => void
+  onCancel: () => void
+}) {
+  const [period, setPeriod] = useState(initialPeriod)
+  const valid = /^\d{4}-(0[1-9]|1[0-2])$/.test(period)
+  return (
+    <AddModal title="Print invoice" onClose={onCancel}>
+      <p className="modal-intro">Which month is this invoice for?</p>
+      <label className="field">
+        <span>Billing month</span>
+        <input
+          className="input"
+          type="month"
+          value={period}
+          onChange={(event) => setPeriod(event.target.value)}
+        />
+      </label>
+      {valid ? (
+        <p className="modal-intro">
+          {clientName} · {getBillingPeriodLabel(period)}
+        </p>
+      ) : null}
+      {customizeNote ? (
+        <p className="modal-intro">Customize edits apply to {customizeNote} only.</p>
+      ) : null}
+      <div className="button-row">
+        <button type="button" className="secondary-action" onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="primary-action"
+          disabled={!valid}
+          onClick={() => onPrint(period)}
+        >
+          Print
+        </button>
+      </div>
+    </AddModal>
   )
 }
 

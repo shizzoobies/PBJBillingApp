@@ -37,3 +37,18 @@ export declare function paymentTermsLabel(
   terms?: string | null,
   windowDays?: number,
 ): string
+
+/** First billing month the period-end invoice date applies to. */
+export declare const PERIOD_END_INVOICE_DATE_FROM: string
+
+/**
+ * The date PRINTED on an invoice (YYYY-MM-DD), or null when it has none: the
+ * issue day, except a monthly invoice from September 2026 on prints the last
+ * day of its billing month when that day is earlier than the issue day.
+ */
+export declare function invoiceDisplayDate(invoice?: {
+  period?: string | null
+  kind?: string | null
+  sentAt?: string | null
+  createdAt?: string | null
+}): string | null
