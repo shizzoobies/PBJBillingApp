@@ -36,20 +36,18 @@ export function statusForChecklist(checklist: Checklist, todayDateOnly: string) 
 }
 
 /**
- * Does a checklist belong under a Status filter option? Per-option predicates,
- * NOT one derived status: Waiting is a lens over open work, so a checklist that
- * is both waiting and overdue shows under Overdue, Waiting and Active alike.
- * Overdue work is never buried by a wait.
+ * Does a checklist belong under a Status filter option? Active, Overdue and
+ * Completed are exactly what they were before Waiting existed (`statusForChecklist`
+ * decides: Active is not complete AND not overdue), so the Dashboard's
+ * `?status=active` links and the tab count are unchanged. Waiting is a lens over
+ * open work and the one option that overlaps the others: a checklist that is
+ * waiting and overdue shows under Overdue and Waiting, not Active.
  */
 export function matchesStatusFilter(checklist: Checklist, status: string, todayDateOnly: string): boolean {
   if (!status || status === 'all') return true
-  const complete = statusForChecklist(checklist, todayDateOnly) === 'completed'
-  if (status === 'completed') return complete
-  if (complete) return false
-  if (status === 'waiting') return waitingStepCount(checklist) > 0
-  if (status === 'overdue') return checklist.dueDate < todayDateOnly
-  if (status === 'active') return true
-  return false
+  const derived = statusForChecklist(checklist, todayDateOnly)
+  if (status === 'waiting') return derived !== 'completed' && waitingStepCount(checklist) > 0
+  return derived === status
 }
 
 /**

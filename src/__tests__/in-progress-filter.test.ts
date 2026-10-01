@@ -162,15 +162,35 @@ describe('waiting steps and the status filter', () => {
     expect(statusForChecklist(withItems('2026-07-01', [open({ waiting: true })]), TODAY)).toBe('overdue')
   })
 
-  it('a waiting AND overdue checklist shows under Overdue, Waiting and Active', () => {
+  it('a waiting AND overdue checklist shows under Overdue and Waiting, NOT Active', () => {
     const both = mk('both', '2026-07-01', { items: [open({ waiting: true })] } as unknown as Partial<Checklist>)
     expect(idsFor([both], 'overdue')).toEqual(['both'])
     expect(idsFor([both], 'waiting')).toEqual(['both'])
-    expect(idsFor([both], 'active')).toEqual(['both'])
+    expect(idsFor([both], 'active')).toEqual([])
     expect(idsFor([both], 'completed')).toEqual([])
   })
 
-  it('a waiting-only checklist shows under Active and Waiting, not Overdue', () => {
+  it('a plain overdue checklist does not show under Active (regression)', () => {
+    const overdue = mk('late', '2026-07-01', { items: [open()] } as unknown as Partial<Checklist>)
+    expect(idsFor([overdue], 'active')).toEqual([])
+    expect(idsFor([overdue], 'overdue')).toEqual(['late'])
+    expect(idsFor([overdue], 'waiting')).toEqual([])
+  })
+
+  it('the Active count is what it was before Waiting existed', () => {
+    const list = [
+      mk('fresh', '2026-12-01', { items: [open()] } as unknown as Partial<Checklist>),
+      mk('late', '2026-07-01', { items: [open()] } as unknown as Partial<Checklist>),
+      mk('waits', '2026-12-01', { items: [open({ waiting: true })] } as unknown as Partial<Checklist>),
+      mk('late-waits', '2026-07-01', { items: [open({ waiting: true })] } as unknown as Partial<Checklist>),
+      mk('done', '2026-07-01', { items: [open({ done: true })] } as unknown as Partial<Checklist>),
+    ]
+    const legacyActive = list.filter((c) => statusForChecklist(c, TODAY) === 'active').map((c) => c.id)
+    expect(idsFor(list, 'active')).toEqual(legacyActive)
+    expect(idsFor(list, 'active')).toEqual(['fresh', 'waits'])
+  })
+
+  it('a waiting, not-overdue checklist shows under Active and Waiting, not Overdue', () => {
     const only = mk('only', '2026-12-01', { items: [open({ waiting: true })] } as unknown as Partial<Checklist>)
     expect(idsFor([only], 'active')).toEqual(['only'])
     expect(idsFor([only], 'waiting')).toEqual(['only'])
@@ -190,6 +210,15 @@ describe('waiting steps and the status filter', () => {
     const c = withItems('2026-12-01', [open({ id: 'a', done: true, waiting: true }), open({ id: 'b' })])
     expect(waitingStepCount(c)).toBe(0)
     expect(statusForChecklist(c, TODAY)).toBe('active')
+  })
+
+  it('a done parent with an open waiting sub-step counts 0', () => {
+    const c = withItems('2026-12-01', [
+      open({ id: 'a', done: true, subItems: [{ id: 's', label: 's', done: false, waiting: true }] }),
+      open({ id: 'b' }),
+    ])
+    expect(waitingStepCount(c)).toBe(0)
+    expect(idsFor([c], 'waiting')).toEqual([])
   })
 
   it('a waiting sub-step and a waiting sub-sub-step count', () => {

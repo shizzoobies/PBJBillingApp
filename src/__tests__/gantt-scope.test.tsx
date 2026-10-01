@@ -58,9 +58,9 @@ function signInAs(viewerId: string, isOwner: boolean) {
   } as unknown as AppContextValue
 }
 
-const renderGantt = () =>
+const renderGantt = (url = '/') =>
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[url]}>
       <GanttPage />
     </MemoryRouter>,
   )
@@ -82,6 +82,11 @@ describe('Gantt scoping', () => {
     const options = screen.getAllByRole('option').map((option) => option.textContent)
     expect(options).toContain('Brittany Bookkeepington')
     expect(options).not.toContain('Lisa Chen')
+  })
+
+  it('reads a hand-typed ?status=waiting (no such Gantt bucket) as All', () => {
+    renderGantt('/?status=waiting')
+    expect(screen.getAllByText('Brittany payroll').length).toBeGreaterThan(0)
   })
 
   it('leaves the owner every lane', () => {

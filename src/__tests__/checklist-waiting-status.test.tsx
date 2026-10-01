@@ -56,11 +56,37 @@ const TWO_WAITS = checklist({
   ],
 } as Partial<Checklist>)
 const QUIET = checklist({ id: 'cl-quiet', title: 'Quiet close' })
+const VERIFIED = checklist({
+  id: 'cl-verified',
+  title: 'Verified wait close',
+  items: [
+    {
+      id: 'a',
+      label: 'Reconcile',
+      done: false,
+      waitingOns: [
+        {
+          id: 'w',
+          blockerId: 'emp-pat',
+          requestedBy: LISA,
+          createdAt: '2026-08-01T00:00:00Z',
+          resolvedAt: '2026-08-02T00:00:00Z',
+          verifiedAt: '2026-08-03T00:00:00Z',
+        },
+      ],
+    },
+  ],
+} as Partial<Checklist>)
+const COMPLETE = checklist({
+  id: 'cl-complete',
+  title: 'Complete close',
+  items: [{ id: 'a', label: 'Reconcile', done: true, waiting: true }],
+} as Partial<Checklist>)
 
 const data = {
   clients: [CLIENT],
   employees: [{ id: LISA, name: 'Lisa Chen', role: 'Bookkeeper' }],
-  checklists: [ONE_WAIT, TWO_WAITS, QUIET],
+  checklists: [ONE_WAIT, TWO_WAITS, QUIET, VERIFIED, COMPLETE],
   checklistTemplates: [],
   recycledChecklists: [],
   timeEntries: [],
@@ -163,6 +189,14 @@ describe('the Waiting badge on an In progress row', () => {
   it('is absent on a checklist with nothing waiting', () => {
     renderPage()
     expect(badge(cardFor('Quiet close'))).toBeNull()
+  })
+
+  it('is absent on a verified wait and on a complete checklist', () => {
+    renderPage()
+    expect(badge(cardFor('Verified wait close'))).toBeNull()
+    cleanup()
+    renderPage('/checklists?status=completed&focus=cl-complete')
+    expect(badge(cardFor('Complete close'))).toBeNull()
   })
 
   it('?status=waiting lists only the waiting checklists', () => {

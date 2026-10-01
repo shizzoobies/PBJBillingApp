@@ -92,6 +92,33 @@ describe('boardChecklistStatus', () => {
     expect(status.kind).toBe('due')
   })
 
+  it('a verified wait is a record, not a block: the board reads Due', () => {
+    const status = boardChecklistStatus(
+      open({
+        dueDate: '2026-06-20',
+        items: [
+          {
+            id: 'i',
+            label: 'l',
+            done: false,
+            waitingOns: [
+              {
+                id: 'w',
+                blockerId: 'e2',
+                requestedBy: 'e1',
+                createdAt: '2026-06-10T00:00:00Z',
+                resolvedAt: '2026-06-11T00:00:00Z',
+                verifiedAt: '2026-06-12T00:00:00Z',
+              },
+            ],
+          },
+        ],
+      }),
+      TODAY,
+    )
+    expect(status).toEqual({ kind: 'due', due: '2026-06-20' })
+  })
+
   it('structured person-blockers pend too, resolving the blocker name', () => {
     const status = boardChecklistStatus(
       open({
