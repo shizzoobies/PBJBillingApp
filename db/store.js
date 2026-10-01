@@ -14801,7 +14801,15 @@ export class AppDataStore {
    */
   async recordInvoiceSent(
     invoiceId,
-    { to = [], subject = '', ok = true, error = null, kind = null, providerId = null } = {},
+    {
+      to = [],
+      subject = '',
+      ok = true,
+      error = null,
+      kind = null,
+      providerId = null,
+      stamp = null,
+    } = {},
   ) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
@@ -14817,8 +14825,18 @@ export class AppDataStore {
       return null
     }
 
+    // THE SEND MOMENT. The send route decides it once, before it builds the
+    // email and the PDF, and hands the same value here, so what the documents
+    // printed and what is stored cannot land on different sides of UTC midnight.
+    // Anything that is not a real ISO moment (or no stamp at all, as for a
+    // payment email) falls back to now. A re-send never moves `sent_at`: the
+    // row's own value wins below, on both backends.
+    const at =
+      typeof stamp === 'string' && !Number.isNaN(Date.parse(stamp))
+        ? new Date(stamp).toISOString()
+        : nowIso()
     const entry = {
-      at: nowIso(),
+      at,
       to: Array.isArray(to) ? to : [to].filter(Boolean),
       subject: String(subject ?? ''),
       ok: Boolean(ok),

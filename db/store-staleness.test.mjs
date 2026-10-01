@@ -58,6 +58,9 @@ import {
   waitingOnStage,
   waitingToggleRefusal,
 } from '../lib/waiting-on-state.js'
+import { invoiceAsSent, invoiceDisplayDate } from '../lib/invoice-draft.js'
+import { buildInvoiceEmail } from '../lib/invoice-email.js'
+import { buildInvoicePdf } from '../lib/invoice-pdf.js'
 import {
   LAST_RECURRING_STEP_MESSAGE,
   approvalDenial,
@@ -4144,6 +4147,300 @@ describe('recordInvoiceSent past-due line (postgres branch)', () => {
     })
 
     const update = fake.matching(/^update invoices/i)[0]
+    expect(update.params[4]).toBeNull()
+  })
+})
+
+/**
+ * ONE SEND MOMENT (featreq-29c6dac1). The send route decides a stamp once,
+ * builds the email and the PDF from the invoice as the record will hold it
+ * after this send (`invoiceAsSent`), and hands the SAME stamp to
+ * `recordInvoiceSent`. server.js is not booted by tests, so this runs the same
+ * three calls in the same order the route does, on the file backend: a first
+ * send of an invoice built before its month ended and sent after it must give
+ * one date on the email, the PDF and a later reprint of the stored row.
+ */
+describe('the send stamp: documents, record and reprint agree (file backend)', () => {
+  const stamp = '2026-11-02T14:00:00.000Z'
+  const seedInvoice = {
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-10',
+    kind: 'monthly',
+    number: '1050',
+    status: 'reviewed',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    // The provisional line generation wrote on Oct 20: thirty days out.
+    dueDate: '2026-11-19',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: null,
+    paidAt: null,
+    paymentMethod: null,
+    createdAt: '2026-10-20T15:00:00.000Z',
+    updatedAt: '2026-10-20T15:00:00.000Z',
+  }
+  const clientRecord = {
+    id: 'c1',
+    name: 'Acme',
+    contact: 'Pat',
+    billingMode: 'hourly',
+    hourlyRate: 0,
+    paymentTerms: 'Net 45',
+  }
+
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [{ ...seedInvoice, ...overrides }]
+    data.clients = [clientRecord]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  /** Every text a client can read the dates from: the email and the PDF. */
+  async function documentsFor(invoice) {
+    const { html } = buildInvoiceEmail({ invoice, client: clientRecord })
+    const raw = (await buildInvoicePdf({ invoice, client: clientRecord, compress: false })).toString(
+      'latin1',
+    )
+    const runs = []
+    for (const match of raw.matchAll(/\[([^\]]*)\]\s*TJ/g)) runs.push(match[1])
+    for (const match of raw.matchAll(/<([0-9A-Fa-f]+)>\s*Tj/g)) runs.push(`<${match[1]}>`)
+    const pdf = runs
+      .map((run) =>
+        [...run.matchAll(/<([0-9A-Fa-f]*)>/g)]
+          .map((hex) => Buffer.from(hex[1], 'hex').toString('latin1'))
+          .join(''),
+      )
+      .join('\n')
+    return { html, pdf }
+  }
+
+  async function firstSend(overrides = {}) {
+    await seed(overrides)
+    const stored = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-1')
+    const sendInvoice = invoiceAsSent(stored, { client: clientRecord, stamp })
+    const documents = await documentsFor(sendInvoice)
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1050',
+      ok: true,
+      stamp,
+    })
+    return { stored, sendInvoice, documents, updated }
+  }
+
+  it('hands the builders the invoice as the record will hold it', async () => {
+    const { stored, sendInvoice, updated } = await firstSend()
+
+    expect(stored.sentAt).toBeNull()
+    expect(sendInvoice.sentAt).toBe(stamp)
+    expect(sendInvoice.dueDate).toBe('2026-12-17')
+    // What the store then writes is exactly what the documents were built from.
+    expect(updated.sentAt).toBe(stamp)
+    expect(updated.dueDate).toBe(sendInvoice.dueDate)
+    expect(updated.emailLog[0].at).toBe(stamp)
+  })
+
+  it('dates the email, the PDF and a later reprint the same day', async () => {
+    const { documents, updated } = await firstSend()
+
+    // Built Oct 20, sent Nov 2: a monthly October invoice prints the 31st.
+    expect(invoiceDisplayDate(updated)).toBe('2026-10-31')
+    expect(documents.html).toContain('October 31, 2026')
+    expect(documents.pdf).toContain('October 31, 2026')
+    expect(documents.html).not.toContain('October 20, 2026')
+    expect(documents.pdf).not.toContain('October 20, 2026')
+    // And the documents rebuilt from the stored row say the same thing.
+    const reprint = await documentsFor(updated)
+    expect(reprint.html).toContain('October 31, 2026')
+    expect(reprint.pdf).toContain('October 31, 2026')
+  })
+
+  it('prints the due date the first send stores, not the provisional one', async () => {
+    const { documents, updated } = await firstSend()
+
+    // A Net 45 client is shown their own date: Nov 2 + 45 days.
+    expect(updated.dueDate).toBe('2026-12-17')
+    expect(documents.html).toContain('December 17, 2026')
+    expect(documents.pdf).toContain('December 17, 2026')
+    expect(documents.html).not.toContain('November 19, 2026')
+    expect(documents.pdf).not.toContain('November 19, 2026')
+  })
+
+  // A period before the cutoff keeps its issue day, which is the SEND day —
+  // the email used to say the day it was built.
+  it('dates an August invoice built Aug 20 and sent Nov 2 November 2 everywhere', async () => {
+    const { documents, updated } = await firstSend({
+      period: '2026-08',
+      createdAt: '2026-08-20T15:00:00.000Z',
+      dueDate: '2026-09-19',
+    })
+
+    expect(invoiceDisplayDate(updated)).toBe('2026-11-02')
+    for (const text of [documents.html, documents.pdf]) {
+      expect(text).toContain('November 2, 2026')
+      expect(text).not.toContain('August 20, 2026')
+    }
+  })
+
+  it('dates a retainer on the day it was sent, not the day it was built', async () => {
+    const { documents, updated } = await firstSend({ kind: 'retainer' })
+
+    expect(invoiceDisplayDate(updated)).toBe('2026-11-02')
+    for (const text of [documents.html, documents.pdf]) {
+      expect(text).toContain('November 2, 2026')
+      expect(text).not.toContain('October 20, 2026')
+    }
+  })
+
+  it('moves nothing on a resend: same sentAt, same date, same due date', async () => {
+    const sentAt = '2026-11-02T14:00:00.000Z'
+    await seed({ status: 'sent', sentAt, dueDate: '2026-12-17' })
+    const stored = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-1')
+    const sendInvoice = invoiceAsSent(stored, {
+      client: clientRecord,
+      stamp: '2026-11-09T09:00:00.000Z',
+    })
+    // Built exactly as stored.
+    expect(sendInvoice).toBe(stored)
+    const resendDocuments = await documentsFor(sendInvoice)
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1050',
+      ok: true,
+      stamp: '2026-11-09T09:00:00.000Z',
+    })
+
+    expect(updated.sentAt).toBe(sentAt)
+    expect(updated.dueDate).toBe('2026-12-17')
+    expect(invoiceDisplayDate(updated)).toBe(invoiceDisplayDate(stored))
+    expect(resendDocuments.html).toContain('October 31, 2026')
+    expect(resendDocuments.pdf).toContain('October 31, 2026')
+    expect(resendDocuments.html).toContain('December 17, 2026')
+    // The log still records the moment of THIS send.
+    expect(updated.emailLog.at(-1).at).toBe('2026-11-09T09:00:00.000Z')
+  })
+
+  it('stamps nothing when the provider refuses the email', async () => {
+    await seed()
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1050',
+      ok: false,
+      error: 'The domain is not verified.',
+    })
+
+    expect(updated.sentAt).toBeNull()
+    expect(updated.status).toBe('reviewed')
+    expect(updated.dueDate).toBe('2026-11-19')
+    expect(invoiceDisplayDate(updated)).toBe('2026-10-20')
+  })
+
+  // Even if a stamp were passed, a send that did not go out never uses it.
+  it('ignores a stamp on a failed attempt', async () => {
+    await seed()
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1050',
+      ok: false,
+      error: 'refused',
+      stamp,
+    })
+
+    expect(updated.sentAt).toBeNull()
+    expect(updated.dueDate).toBe('2026-11-19')
+  })
+
+  it('falls back to now for a stamp that is not a moment in time', async () => {
+    await seed()
+    const before = Date.now()
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1050',
+      ok: true,
+      stamp: 'not a date',
+    })
+
+    expect(Date.parse(updated.sentAt)).toBeGreaterThanOrEqual(before)
+  })
+
+  it('invoiceAsSent re-stamps the line thirty days from the send day for a client with no longer terms', () => {
+    const shaped = invoiceAsSent(
+      { ...seedInvoice, dueDate: '2026-11-19' },
+      { client: { paymentTerms: '' }, stamp },
+    )
+    // Thirty days from the SEND day, which is what recordInvoiceSent stores.
+    expect(shaped.dueDate).toBe('2026-12-02')
+    expect(shaped.sentAt).toBe(stamp)
+  })
+})
+
+describe('the send stamp (postgres branch)', () => {
+  const stamp = '2026-11-02T23:59:59.500Z'
+  const flat = (text) => String(text).replace(/\s+/g, ' ').trim()
+
+  it('writes exactly the stamp it was given as the first send’s sent_at and log time', async () => {
+    const fake = fakePostgres({
+      invoices: [{ ...existingInvoice, status: 'reviewed', sent_at: null }],
+      clientRows: [
+        { id: 'c1', name: 'Acme', contact: 'Pat', billing_mode: 'hourly', hourly_rate: 0, payment_terms: 'Net 45' },
+      ],
+    })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+      stamp,
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    // The statement is unchanged: sent_at and due_date are still decided from
+    // the row's own pre-update value, so a resend can never move either.
+    expect(flat(update.text)).toContain(
+      'sent_at = case when $3::boolean then coalesce(sent_at, $4::timestamptz) else sent_at end',
+    )
+    expect(flat(update.text)).toContain(
+      'due_date = case when $3::boolean and sent_at is null and $5::date is not null' +
+        ' then $5::date::text else due_date end',
+    )
+    expect(update.params[3]).toBe(stamp)
+    expect(JSON.parse(update.params[1])[0].at).toBe(stamp)
+    // Net 45 from the stamp's UTC day, not from "now".
+    expect(update.params[4]).toBe('2026-12-17')
+  })
+
+  it('passes the same stamp on a resend, and the SQL leaves sent_at and due_date to the row', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+      stamp,
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    // `coalesce(sent_at, $4)` keeps the row's original value on a resend, and
+    // `sent_at is null` keeps the due date: both are in the statement itself.
+    expect(flat(update.text)).toContain('coalesce(sent_at, $4::timestamptz)')
+    expect(flat(update.text)).toContain('and sent_at is null and $5::date is not null')
+    expect(update.params[3]).toBe(stamp)
+  })
+
+  it('writes no sent_at and sends no date for a failed attempt', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: false,
+      error: 'refused',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    // No stamp was passed (the route passes one only after the provider
+    // accepts), and $3 is false so `sent_at` cannot be written either way.
+    expect(update.params[2]).toBe(false)
     expect(update.params[4]).toBeNull()
   })
 })

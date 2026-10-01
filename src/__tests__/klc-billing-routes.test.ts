@@ -48,6 +48,19 @@ function routeBlock(startPattern: RegExp, length = 4000): string {
   return serverSource.slice(at, at + length)
 }
 
+/**
+ * A route block from its opening guard to a marker that follows it: bounded
+ * exactly, so growing the route can never push what a test looks for out of a
+ * fixed-length window and report it as missing.
+ */
+function routeBlockUntil(startPattern: RegExp, endMarker: string): string {
+  const at = serverSource.search(startPattern)
+  expect(at, `route not found: ${startPattern}`).toBeGreaterThan(-1)
+  const end = serverSource.indexOf(endMarker, at)
+  expect(end, `${endMarker} no longer follows ${startPattern}`).toBeGreaterThan(at)
+  return serverSource.slice(at, end)
+}
+
 /** One module-scope function, from its declaration to roughly the next one. */
 function functionSource(declaration: string, length: number): string {
   const at = serverSource.indexOf(declaration)
@@ -110,10 +123,14 @@ describe('who a billing master’s invoice is emailed to', () => {
 })
 
 describe('the send route refuses before it sends anything', () => {
-  // Widened when the durable pay link landed: the route grew a token mint and
-  // its comment between the refusal and `sendInvoiceEmail`, and a window that
-  // stopped short reports the send call as MISSING rather than as out of order.
-  const block = () => routeBlock(/const invoiceSendMatch = normalizedPath\.match\(/, 13600)
+  // Bounded by the NEXT route, not by a length: the send route keeps growing
+  // between the refusal and `sendInvoiceEmail`, and a window that stopped short
+  // reports the send call as MISSING rather than as out of order.
+  const block = () =>
+    routeBlockUntil(
+      /const invoiceSendMatch = normalizedPath\.match\(/,
+      '// GET /api/invoices/export.csv',
+    )
 
   it('answers 409 with the unset-recipient sentence', () => {
     const text = block()

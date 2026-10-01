@@ -96,7 +96,7 @@ import {
 // review's hours summary has to read a person's rate exactly as the lines did,
 // or the model reports a correctly-priced line as an arithmetic error.
 import { billRateAt, ratePeriodAsOf } from './lib/rate-history.js'
-import { previousPeriod } from './lib/invoice-draft.js'
+import { invoiceAsSent, previousPeriod } from './lib/invoice-draft.js'
 import { pastDueInvoice } from './lib/invoice-overdue.js'
 import { rateInvoiceDraft } from './lib/invoice-confidence.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
@@ -4965,8 +4965,17 @@ const server = createServer(async (request, response) => {
       // the builder's default. A settings read that fails is not worth failing a
       // send over — buildInvoiceEmail's default is the fallback.
       const firmSettings = await appDataStore.getFirmSettings().catch(() => null)
+      // THE SEND MOMENT, decided once and used for everything below: the email,
+      // the PDF and the stored `sent_at` all carry this one stamp, so the date
+      // the client reads, a later reprint and the record cannot disagree. A
+      // first send is built as the record will hold it afterwards (its `sentAt`
+      // and, for a first send, the due date it is about to store); a resend is
+      // built exactly as stored. Nothing is stamped here - the store does that
+      // only after the provider accepts the email.
+      const sendStamp = new Date().toISOString()
+      const sendInvoice = invoiceAsSent(invoice, { client: sendClient, stamp: sendStamp })
       const email = buildInvoiceEmail({
-        invoice,
+        invoice: sendInvoice,
         client: sendClient,
         payUrl,
         cardPayUrl,
@@ -4983,11 +4992,11 @@ const server = createServer(async (request, response) => {
       let sendAttachments = []
       try {
         const pdf = await buildInvoicePdf({
-          invoice,
+          invoice: sendInvoice,
           client: sendClient,
           firmSettings,
         })
-        sendAttachments = [{ filename: invoicePdfFilename(invoice), content: pdf }]
+        sendAttachments = [{ filename: invoicePdfFilename(sendInvoice), content: pdf }]
       } catch (error) {
         console.error('[invoice] PDF attachment failed, sending without it:', error?.message || error)
       }
@@ -5034,6 +5043,8 @@ const server = createServer(async (request, response) => {
             // Resend's own id for the message. Without it on the entry, a
             // delivery event that carries no tag can never be placed.
             providerId: sendResult.providerId ?? null,
+            // The moment the documents above were built from.
+            stamp: sendStamp,
           })) ?? invoice
         await appDataStore.recordActivity(
           session.user.id,

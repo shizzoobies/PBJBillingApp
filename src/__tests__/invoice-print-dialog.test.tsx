@@ -317,3 +317,92 @@ describe('Print invoice asks which month', () => {
     expect(dialog.queryByText(/Customize edits apply to/)).toBeNull()
   })
 })
+
+describe('the live preview follows the clock', () => {
+  // The date used to be computed once inside a memo, so a page left open
+  // overnight on the current month kept printing yesterday.
+  it('re-dates the current month when the day changes under an open page', async () => {
+    renderInShell()
+    await screen.findByRole('button', { name: 'Print invoice' })
+    expect(printed()).toContain('October 1, 2026')
+
+    vi.setSystemTime(new Date(2026, 9, 2, 0, 5, 0)) // Oct 2, 2026, local
+    // Any re-render of the page, as a click or a poll would cause.
+    const dialog = await openDialog()
+    fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }))
+
+    expect(printed()).toContain('October 2, 2026')
+    expect(printed()).not.toContain('October 1, 2026')
+  })
+
+  it('keeps a finished month on its last day however many days pass', async () => {
+    page.billingPeriod = '2026-09'
+    renderInShell()
+    await screen.findByRole('button', { name: 'Print invoice' })
+    expect(printed()).toContain('September 30, 2026')
+
+    vi.setSystemTime(new Date(2026, 9, 5, 9, 0, 0))
+    const dialog = await openDialog()
+    fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }))
+
+    expect(printed()).toContain('September 30, 2026')
+  })
+})
+
+describe('the Print invoice dialog is keyboard-first', () => {
+  it('puts the cursor in the month input when it opens', async () => {
+    renderInShell()
+    const dialog = await openDialog()
+
+    expect(dialog.getByLabelText('Billing month')).toHaveFocus()
+  })
+
+  it('prints on Enter: Print is the submit button of a form around the month', async () => {
+    renderInShell()
+    const dialog = await openDialog()
+    const month = dialog.getByLabelText('Billing month')
+    setMonth(dialog, '2026-09')
+
+    // Print waits on the dialog's look for a saved invoice; Enter is refused
+    // the same way until it has answered.
+    fireEvent.submit(month.closest('form')!)
+    expect(printInvoice).not.toHaveBeenCalled()
+    await waitFor(() => expect(dialog.getByRole('button', { name: 'Print' })).toBeEnabled())
+
+    // A real Enter in a field of a form with an enabled submit button submits
+    // that form; jsdom does not synthesize that, so submit it directly and pin
+    // the wiring that makes the browser do it.
+    expect(month.closest('form')).not.toBeNull()
+    expect(dialog.getByRole('button', { name: 'Print' })).toHaveAttribute('type', 'submit')
+    expect(dialog.getByRole('button', { name: 'Cancel' })).toHaveAttribute('type', 'button')
+    fireEvent.submit(month.closest('form')!)
+
+    await waitFor(() => expect(printInvoice).toHaveBeenCalledOnce())
+    expect(printed()).toContain('$300.00')
+    expect(printed()).toContain('September 30, 2026')
+  })
+
+  it('prints nothing on Enter while the month is empty or invalid', async () => {
+    renderInShell()
+    const dialog = await openDialog()
+    const form = dialog.getByLabelText('Billing month').closest('form')!
+
+    setMonth(dialog, '')
+    expect(dialog.getByRole('button', { name: 'Print' })).toBeDisabled()
+    fireEvent.submit(form)
+    expect(printInvoice).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: 'Print invoice' })).toBeInTheDocument()
+  })
+
+  it('still closes on Escape and Cancel without printing', async () => {
+    renderInShell()
+    await openDialog()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Print invoice' })).toBeNull()
+
+    const dialog = await openDialog()
+    fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: 'Print invoice' })).toBeNull()
+    expect(printInvoice).not.toHaveBeenCalled()
+  })
+})

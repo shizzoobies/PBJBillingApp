@@ -52,3 +52,13 @@ export declare function invoiceDisplayDate(invoice?: {
   sentAt?: string | null
   createdAt?: string | null
 }): string | null
+
+/**
+ * The invoice as the record will hold it after this send is stamped: a first
+ * send carries `stamp` as `sentAt` and the re-stamped due date, a resend is
+ * returned unchanged.
+ */
+export declare function invoiceAsSent<T extends { sentAt?: string | null; dueDate?: string | null }>(
+  invoice: T,
+  options: { client?: { paymentTerms?: string | null } | null; stamp: string },
+): T

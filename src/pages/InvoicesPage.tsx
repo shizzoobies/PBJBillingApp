@@ -83,12 +83,19 @@ type DisplayInvoice = {
   /**
    * The invoice's OWN date, from `invoiceDisplayDate` — sent, else created, or
    * the last day of its billing month from September 2026 on. The live preview
-   * is a calculation rather than a document and carries today run through the
-   * same rule (`liveInvoiceDate`); the sheet falls back to today only when this
-   * is null. Printing `new Date()` for a stored invoice was a real bug: an
-   * August invoice reprinted in October said October.
+   * is a calculation rather than a document, so it leaves this null and sets
+   * `liveForPeriod` instead: the sheet works its date out from that, through the
+   * same rule (`liveInvoiceDate`), when it renders. Printing `new Date()` for a
+   * stored invoice was a real bug: an August invoice reprinted in October said
+   * October.
    */
   invoiceDate: string | null
+  /**
+   * Set on the live preview only: the billing month it calculates. Its date is
+   * worked out when the sheet RENDERS (`liveInvoiceDate`), never stored here,
+   * so a page left open overnight does not keep printing yesterday.
+   */
+  liveForPeriod?: string
   lines: DisplayLine[]
   groupSubtotals: Array<{ label: string; total: number }>
   hideTimeBreakdown: boolean
@@ -215,7 +222,8 @@ function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoi
     invoice: { ...baseInvoice, lines, total },
     kind: 'monthly',
     number: null,
-    invoiceDate: liveInvoiceDate(baseInvoice.period),
+    invoiceDate: null,
+    liveForPeriod: baseInvoice.period,
     lines,
     groupSubtotals: [],
     hideTimeBreakdown: false,
@@ -316,7 +324,8 @@ function buildDisplayInvoice(
       ],
       kind: 'monthly',
       number: null,
-      invoiceDate: liveInvoiceDate(billingPeriod),
+      invoiceDate: null,
+      liveForPeriod: billingPeriod,
       groupSubtotals: [],
       hideTimeBreakdown: true,
       hideInternal,
@@ -400,7 +409,8 @@ function buildDisplayInvoice(
     invoice,
     kind: 'monthly',
     number: null,
-    invoiceDate: liveInvoiceDate(billingPeriod),
+    invoiceDate: null,
+    liveForPeriod: billingPeriod,
     lines,
     groupSubtotals,
     hideTimeBreakdown: false,
@@ -1186,6 +1196,7 @@ function PrintInvoiceDialog({
   onCancel: () => void
 }) {
   const [period, setPeriod] = useState(initialPeriod)
+  const monthInputRef = useRef<HTMLInputElement>(null)
   const valid = /^\d{4}-(0[1-9]|1[0-2])$/.test(period)
   const lookupKey = `${clientId}::${period}`
   const [lookup, setLookup] = useState<{
@@ -1224,68 +1235,79 @@ function PrintInvoiceDialog({
   // Customize is her deliberate one-off sheet for the page's own month.
   const customizedHere = Boolean(customizeNote) && period === pagePeriod
   const savedLabel = saved ? `saved invoice${saved.number ? ` ${saved.number}` : ''}` : ''
+  const printable = valid && (customizedHere || Boolean(answer && !answer.failed))
+  // The month is the one thing this dialog asks, so the cursor starts there.
+  useEffect(() => {
+    monthInputRef.current?.focus()
+  }, [])
   return (
     <AddModal title="Print invoice" onClose={onCancel}>
-      <p className="modal-intro">Which month is this invoice for?</p>
-      <label className="field">
-        <span>Billing month</span>
-        <input
-          className="input"
-          type="month"
-          value={period}
-          onChange={(event) => setPeriod(event.target.value)}
-        />
-      </label>
-      {valid ? (
-        <p className="modal-intro">
-          {clientName} · {getBillingPeriodLabel(period)}
-        </p>
-      ) : null}
-      {customizeNote ? (
-        <p className="modal-intro">Customize edits apply to {customizeNote} only.</p>
-      ) : null}
-      {customizedHere ? (
-        // Her Customize sheet prints whatever the lookup says, so the lookup
-        // neither holds Print nor shows its own progress or failure here.
-        <p className="modal-intro">
-          {saved
-            ? `Prints this page with your Customize edits, not the ${savedLabel}.`
-            : 'Prints this page with your Customize edits.'}
-        </p>
-      ) : checking ? (
-        <p className="modal-intro">Checking for a saved invoice...</p>
-      ) : answer?.failed ? (
-        <p className="modal-intro" role="alert">
-          Could not check for a saved invoice. Try again.
-        </p>
-      ) : saved ? (
-        <p className="modal-intro">
-          Prints the {savedLabel} ({INVOICE_STATUS_LABELS[saved.status] ?? saved.status}).
-        </p>
-      ) : answer && billedOnName ? (
-        <p className="modal-intro">
-          {clientName} is billed on {billedOnName}'s invoice. Print that invoice from the list above.
-          This prints a preview of {clientName}'s own lines.
-        </p>
-      ) : answer ? (
-        <p className="modal-intro">
-          No {answer.retainerOnly ? 'monthly ' : ''}invoice has been generated for{' '}
-          {getBillingPeriodLabel(period)} yet. Prints a preview from current time and rates.
-        </p>
-      ) : null}
-      <div className="button-row">
-        <button type="button" className="secondary-action" onClick={onCancel}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="primary-action"
-          disabled={!valid || (!customizedHere && (!answer || answer.failed))}
-          onClick={() => onPrint(period, customizedHere ? null : saved)}
-        >
-          Print
-        </button>
-      </div>
+      {/* A form so Enter prints, with Print as its submit button. A disabled
+          submit blocks the browser's implicit submission, and the guard below
+          keeps an unanswered, failed or invalid lookup from printing either way. */}
+      <form
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (printable) onPrint(period, customizedHere ? null : saved)
+        }}
+      >
+        <p className="modal-intro">Which month is this invoice for?</p>
+        <label className="field">
+          <span>Billing month</span>
+          <input
+            ref={monthInputRef}
+            className="input"
+            type="month"
+            value={period}
+            onChange={(event) => setPeriod(event.target.value)}
+          />
+        </label>
+        {valid ? (
+          <p className="modal-intro">
+            {clientName} · {getBillingPeriodLabel(period)}
+          </p>
+        ) : null}
+        {customizeNote ? (
+          <p className="modal-intro">Customize edits apply to {customizeNote} only.</p>
+        ) : null}
+        {customizedHere ? (
+          // Her Customize sheet prints whatever the lookup says, so the lookup
+          // neither holds Print nor shows its own progress or failure here.
+          <p className="modal-intro">
+            {saved
+              ? `Prints this page with your Customize edits, not the ${savedLabel}.`
+              : 'Prints this page with your Customize edits.'}
+          </p>
+        ) : checking ? (
+          <p className="modal-intro">Checking for a saved invoice...</p>
+        ) : answer?.failed ? (
+          <p className="modal-intro" role="alert">
+            Could not check for a saved invoice. Try again.
+          </p>
+        ) : saved ? (
+          <p className="modal-intro">
+            Prints the {savedLabel} ({INVOICE_STATUS_LABELS[saved.status] ?? saved.status}).
+          </p>
+        ) : answer && billedOnName ? (
+          <p className="modal-intro">
+            {clientName} is billed on {billedOnName}'s invoice. Print that invoice from the list above.
+            This prints a preview of {clientName}'s own lines.
+          </p>
+        ) : answer ? (
+          <p className="modal-intro">
+            No {answer.retainerOnly ? 'monthly ' : ''}invoice has been generated for{' '}
+            {getBillingPeriodLabel(period)} yet. Prints a preview from current time and rates.
+          </p>
+        ) : null}
+        <div className="button-row">
+          <button type="button" className="secondary-action" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="submit" className="primary-action" disabled={!printable}>
+            Print
+          </button>
+        </div>
+      </form>
     </AddModal>
   )
 }
@@ -1627,7 +1649,9 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
    * preview, which is a calculation and not yet an invoice, so it carries no
    * date of its own.
    */
-  const invoiceDate = formatInvoiceDate(display.invoiceDate)
+  const invoiceDate = formatInvoiceDate(
+    display.liveForPeriod !== undefined ? liveInvoiceDate(display.liveForPeriod) : display.invoiceDate,
+  )
 
   const billingClient = invoice.client
   const showField = (key: keyof IncludeFlags) => (custom ? custom.include[key] : true)
