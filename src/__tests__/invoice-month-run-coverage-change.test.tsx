@@ -304,4 +304,17 @@ describe('InvoiceMonthRun — changing the covered dates on an unflagged line', 
     expect(changeButton()).toBeDisabled()
     expect(changeButton()).toHaveAttribute('title', 'Disabled in preview mode')
   })
+
+  // Saving the dates reloads the invoice from the server, so an unsaved line
+  // edit would be thrown away. The dates wait until the other changes are saved.
+  it('waits for her other unsaved changes, and says so', async () => {
+    await openEditor(baseInvoice)
+    expect(changeButton()).toBeEnabled()
+
+    const description = screen.getAllByLabelText('Line description')[0]
+    fireEvent.change(description, { target: { value: 'A label she is still typing' } })
+
+    expect(changeButton()).toBeDisabled()
+    expect(changeButton()).toHaveAttribute('title', 'Save your other changes first')
+  })
 })

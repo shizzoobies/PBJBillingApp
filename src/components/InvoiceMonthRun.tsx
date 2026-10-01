@@ -2527,7 +2527,16 @@ function InvoiceEditor({
       ...coverageValue(line),
       busy: coverageBusyId === recurringId,
       open: coverageOpenId === recurringId,
-      disabledTitle: !flagged && scope.previewMode ? 'Disabled in preview mode' : undefined,
+      // Saving the dates reloads this invoice from the server, which would
+      // throw away any line, note or hours edit she has not saved yet — so
+      // the dates wait until those are saved.
+      disabledTitle: flagged
+        ? undefined
+        : scope.previewMode
+          ? 'Disabled in preview mode'
+          : dirty
+            ? 'Save your other changes first'
+            : undefined,
       onEdit: (range: { start: string; end: string }) =>
         setCoverageEdits((current) => ({ ...current, [recurringId]: range })),
       onConfirm: () => void confirmCoverage(recurringId, coverageValue(line)),
