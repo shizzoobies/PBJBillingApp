@@ -213,7 +213,7 @@ function GanttView({
         </div>
       </div>
       <div className="filter-row">
-        <FilterBar employees={employees} clients={clients} />
+        <FilterBar employees={employees} clients={clients} showWaiting={false} />
         <ListSearch
           value={query}
           onChange={setQuery}

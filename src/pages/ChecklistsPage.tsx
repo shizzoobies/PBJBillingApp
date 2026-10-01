@@ -71,7 +71,7 @@ import type {
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { completedTaskRows } from '../lib/completedTasks'
-import { filterInProgressChecklists } from '../lib/inProgressFilter'
+import { filterInProgressChecklists, waitingStepCount } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { inactiveClientIdSet, workableClients } from '../lib/clientLifecycle'
@@ -2389,6 +2389,17 @@ export function ChecklistCard({
                     Pushed · was {shortDate.format(new Date(`${pushedFromDate}T12:00:00`))}
                   </span>
                 ) : null}
+                {(() => {
+                  const waitingSteps = waitingStepCount(checklist)
+                  return waitingSteps > 0 ? (
+                    <span
+                      className="board-chip board-chip-pending checklist-waiting-badge"
+                      title={`${waitingSteps} ${waitingSteps === 1 ? 'step' : 'steps'} waiting`}
+                    >
+                      Waiting
+                    </span>
+                  ) : null
+                })()}
               </span>
             </>
           )}

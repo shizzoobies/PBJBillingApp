@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { filterInProgressChecklists, statusForChecklist } from '../lib/inProgressFilter'
+import { filterInProgressChecklists, statusForChecklist, waitingStepCount } from '../lib/inProgressFilter'
 import type { Checklist, Client } from '../lib/types'
 import type { ReportPeriod } from '../lib/reportPeriod'
 
@@ -145,5 +145,69 @@ describe('statusForChecklist', () => {
 
   it('an EMPTY checklist is not "completed" just because nothing is undone', () => {
     expect(statusForChecklist(mk('a', '2026-12-01'), TODAY)).toBe('active')
+  })
+})
+
+describe('statusForChecklist - waiting', () => {
+  const open = (extra: Record<string, unknown> = {}) => ({ id: 'i', label: 'x', done: false, ...extra })
+  const withItems = (dueDate: string, items: unknown[]) =>
+    mk('a', dueDate, { items } as unknown as Partial<Checklist>)
+
+  it('an open step that is waiting makes the checklist Waiting', () => {
+    expect(statusForChecklist(withItems('2026-12-01', [open({ waiting: true })]), TODAY)).toBe('waiting')
+  })
+
+  it('Waiting beats Overdue', () => {
+    expect(statusForChecklist(withItems('2026-07-01', [open({ waiting: true })]), TODAY)).toBe('waiting')
+  })
+
+  it('a complete checklist is never Waiting', () => {
+    const c = withItems('2026-07-01', [open({ done: true, waiting: true })])
+    expect(statusForChecklist(c, TODAY)).toBe('completed')
+  })
+
+  it('a DONE waiting step does not count while another step is open', () => {
+    const c = withItems('2026-12-01', [open({ id: 'a', done: true, waiting: true }), open({ id: 'b' })])
+    expect(waitingStepCount(c)).toBe(0)
+    expect(statusForChecklist(c, TODAY)).toBe('active')
+  })
+
+  it('a waiting sub-step and a waiting sub-sub-step count', () => {
+    const sub = withItems('2026-12-01', [open({ subItems: [{ id: 's', label: 's', done: false, waiting: true }] })])
+    expect(statusForChecklist(sub, TODAY)).toBe('waiting')
+    const subSub = withItems('2026-12-01', [
+      open({
+        subItems: [
+          {
+            id: 's',
+            label: 's',
+            done: false,
+            subItems: [{ id: 'ss', label: 'ss', done: false, waitingOns: [{ id: 'w', blockerId: 'emp-pat', requestedBy: 'emp-lisa', createdAt: '2026-07-20T00:00:00Z' }] }],
+          },
+        ],
+      }),
+    ])
+    expect(waitingStepCount(subSub)).toBe(1)
+    expect(statusForChecklist(subSub, TODAY)).toBe('waiting')
+  })
+
+  it('a verified wait does not count: clearing it returns the checklist to Active', () => {
+    const verified = withItems('2026-12-01', [
+      open({ waitingOns: [{ id: 'w', blockerId: 'emp-pat', requestedBy: 'emp-lisa', createdAt: '2026-07-19T00:00:00Z', resolvedAt: '2026-07-20T00:00:00Z', verifiedAt: '2026-07-21T00:00:00Z' }] }),
+    ])
+    expect(statusForChecklist(verified, TODAY)).toBe('active')
+    expect(statusForChecklist(withItems('2026-12-01', [open({ waiting: false })]), TODAY)).toBe('active')
+  })
+
+  it('counts every waiting step and the status filter picks the checklist out', () => {
+    const c = withItems('2026-12-01', [open({ id: 'a', waiting: true }), open({ id: 'b', waiting: true })])
+    expect(waitingStepCount(c)).toBe(2)
+    const quiet = mk('q', '2026-12-01', { items: [open()] } as unknown as Partial<Checklist>)
+    const out = filterInProgressChecklists([c, quiet], {
+      reportPeriod: period('2026-01-01', '2026-12-31'),
+      today: TODAY,
+      status: 'waiting',
+    })
+    expect(out.map((x) => x.id)).toEqual(['a'])
   })
 })

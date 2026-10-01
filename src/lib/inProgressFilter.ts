@@ -1,18 +1,41 @@
-import { clientName, effectiveChecklistDue } from './utils'
+import { clientName, effectiveChecklistDue, stepIsWaiting } from './utils'
 import { inactiveClientIdSet } from './clientLifecycle'
 import { isInReportPeriod, type ReportPeriod } from './reportPeriod'
 import type { Checklist, Client } from './types'
+
+type WaitNode = Parameters<typeof stepIsWaiting>[0] & { done: boolean; subItems?: WaitNode[] }
+
+/**
+ * How many OPEN steps (top-level, sub-step or sub-sub-step) are waiting. A done
+ * step is not counted, and neither is anything beneath it; a verified wait is
+ * not waiting (`stepIsWaiting`). Derived on every read, never stored, so
+ * clearing or verifying the wait is what returns a checklist to Active.
+ */
+export function waitingStepCount(checklist: Checklist): number {
+  const walk = (nodes: WaitNode[]): number =>
+    nodes.reduce(
+      (sum, node) =>
+        node.done ? sum : sum + (stepIsWaiting(node) ? 1 : 0) + walk(node.subItems ?? []),
+      0,
+    )
+  return walk(checklist.items)
+}
 
 /**
  * Filter-bar status bucket for a checklist. Moved here from ChecklistsPage so
  * the page and the tab count share one definition rather than two that can
  * drift apart.
+ *
+ * 'waiting' is checked BEFORE overdue / active so a checklist with a step
+ * waiting reads Waiting even when it is also past due; a finished checklist is
+ * never waiting.
  */
 export function statusForChecklist(checklist: Checklist, todayDateOnly: string) {
   const completed = checklist.items.filter((item) => item.done).length
   const total = checklist.items.length
   const allDone = total > 0 && completed === total
   if (allDone) return 'completed'
+  if (waitingStepCount(checklist) > 0) return 'waiting'
   if (checklist.dueDate < todayDateOnly) return 'overdue'
   return 'active'
 }

@@ -6,10 +6,13 @@ export function FilterBar({
   employees,
   clients,
   showStatus = true,
+  showWaiting = true,
 }: {
   employees: Employee[]
   clients: Client[]
   showStatus?: boolean
+  /** Off where the page's own status buckets have no "waiting" (the Gantt). */
+  showWaiting?: boolean
 }) {
   const { assignee, client, status, setAssignee, setClient, setStatus, clear, isActive } =
     useFilters()
@@ -66,6 +69,7 @@ export function FilterBar({
             <option value="all">All</option>
             <option value="active">Active</option>
             <option value="overdue">Overdue</option>
+            {showWaiting ? <option value="waiting">Waiting</option> : null}
             <option value="completed">Completed</option>
           </select>
         </label>
