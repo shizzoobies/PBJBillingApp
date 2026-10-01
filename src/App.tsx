@@ -1054,7 +1054,7 @@ function App() {
           if (error instanceof ClientHasHistoryApiError) {
             staleWorkspaceRef.current = true
             setStaleWorkspaceTitle('A client could not be deleted')
-            setStaleWorkspaceDetail('Reload to put this client back. Nothing was deleted.')
+            setStaleWorkspaceDetail('Reload to put this client back. Nothing was deleted, and any change since your last save was not saved.')
             setStaleWorkspaceMessage(error.message)
             setDataSyncState('error')
             return

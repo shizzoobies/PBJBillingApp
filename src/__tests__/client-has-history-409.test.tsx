@@ -89,10 +89,10 @@ describe('the notice it puts up', () => {
       <StaleWorkspaceNotice
         message={SENTENCE}
         title="A client could not be deleted"
-        detail="Reload to put this client back. Nothing was deleted."
+        detail="Reload to put this client back. Nothing was deleted, and any change since your last save was not saved."
       />,
     )
-    expect(screen.getByText('Reload to put this client back. Nothing was deleted.')).toBeInTheDocument()
+    expect(screen.getByText('Reload to put this client back. Nothing was deleted, and any change since your last save was not saved.')).toBeInTheDocument()
     expect(screen.queryByText(/overwritten with this tab/)).not.toBeInTheDocument()
   })
 
@@ -109,7 +109,7 @@ describe('the notice it puts up', () => {
     )
     const at = appSource.indexOf('if (error instanceof ClientHasHistoryApiError) {')
     const branch = appSource.slice(at, appSource.indexOf('return', at))
-    expect(branch).toContain("setStaleWorkspaceDetail('Reload to put this client back. Nothing was deleted.')")
+    expect(branch).toContain("setStaleWorkspaceDetail('Reload to put this client back. Nothing was deleted, and any change since your last save was not saved.')")
     const stale = appSource.indexOf('if (error instanceof StaleWorkspaceApiError) {')
     expect(appSource.slice(stale, at)).not.toContain('setStaleWorkspaceDetail')
   })
