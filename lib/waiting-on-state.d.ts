@@ -75,6 +75,11 @@ export function waitingBlocksCompletion(
 export function waitingBlocksCascadedCompletion(
   node: (WaitingStepLike & { done?: boolean; subItems?: unknown[] }) | undefined,
 ): boolean
+export function waitingAncestorBlocksCompletion(
+  item: { subItems?: unknown[] } | undefined,
+  subItemId: string | undefined,
+  subSubItemId?: string,
+): boolean
 export function waitForTaskLinkDenial(args: {
   checklist: { id?: string; clientId?: string } | undefined
   pool?: Array<{ id?: string; clientId?: string }>

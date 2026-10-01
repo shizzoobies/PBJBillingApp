@@ -86,6 +86,23 @@ describe('POST /api/checklists/:id/items/:itemId/toggle refuses a waiting step',
     expect(serverSource).toContain("waitingBlocksCompletion,")
     expect(serverSource).toContain("from './lib/waiting-on-state.js'")
   })
+
+  // The upward half: ticking the last open sub-step rolls the parent up to done,
+  // so a waiting PARENT is refused here too, through the shared helper.
+  it('refuses the tick that would complete a waiting ancestor, before the write', () => {
+    const block = toggleBlock()
+    const guardAt = block.indexOf(
+      'if (waitingAncestorBlocksCompletion(targetItem, toggleSubItemId, toggleSubSubItemId)) {',
+    )
+    expect(guardAt).toBeGreaterThan(-1)
+    const guard = block.slice(guardAt, guardAt + 400)
+    expect(guard).toContain('sendJson(response, 409, {')
+    expect(guard).toContain("error: 'STEP_IS_WAITING',")
+    expect(guard).toContain("'The step above is waiting. Clear its wait first.'")
+    expect(guardAt).toBeGreaterThan(block.indexOf("error: 'Sub-sub-item not found'"))
+    expect(guardAt).toBeLessThan(block.indexOf('appDataStore.toggleChecklistItem('))
+    expect(serverSource).toContain('waitingAncestorBlocksCompletion,')
+  })
 })
 
 /**

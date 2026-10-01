@@ -219,3 +219,132 @@ describe('a parent with a waiting sub-step', () => {
     expect(itemCheckbox(container, 'Bank rec')).not.toBeDisabled()
   })
 })
+
+// The roll-up completes a parent when its last open child is ticked, so a step
+// that is itself waiting must not be finished through that tick. The child's
+// checkbox is disabled instead, with its own sentence.
+describe('the last open sub-step of a waiting step', () => {
+  const rowBox = (container: HTMLElement, label: string) => {
+    const row = Array.from(container.querySelectorAll('.sub-item-row')).find((el) =>
+      el.textContent?.includes(label),
+    )
+    return row?.querySelector('input[type="checkbox"]') as HTMLInputElement
+  }
+
+  const waitingParent = (subs: Array<Record<string, unknown>>) =>
+    [
+      { id: 'it-1', label: 'Bank rec', done: false, assigneeId: OWNER, waiting: true, subItems: subs },
+    ] as unknown as Checklist['items']
+
+  it('disables the last open sub-item with "The step above is waiting - clear it first"', () => {
+    signInWith(
+      waitingParent([
+        { id: 'sub-1', title: 'Pull statements', done: true },
+        { id: 'sub-2', title: 'Match deposits', done: false },
+      ]),
+    )
+    const { container } = renderProgress()
+    const box = rowBox(container, 'Match deposits')
+    expect(box).toBeDisabled()
+    expect(box.title).toBe('The step above is waiting - clear it first')
+  })
+
+  it('leaves a sub-item alone while another sub-item is still open', () => {
+    signInWith(
+      waitingParent([
+        { id: 'sub-1', title: 'Pull statements', done: false },
+        { id: 'sub-2', title: 'Match deposits', done: false },
+      ]),
+    )
+    const { container } = renderProgress()
+    expect(rowBox(container, 'Match deposits')).not.toBeDisabled()
+  })
+
+  it('leaves the last open sub-item of an ordinary step checkable', () => {
+    signInWith([
+      {
+        id: 'it-1',
+        label: 'Bank rec',
+        done: false,
+        assigneeId: OWNER,
+        subItems: [{ id: 'sub-1', title: 'Match deposits', done: false }],
+      },
+    ] as unknown as Checklist['items'])
+    const { container } = renderProgress()
+    expect(rowBox(container, 'Match deposits')).not.toBeDisabled()
+  })
+
+  it('keeps an already-done sub-item un-checkable', () => {
+    signInWith(waitingParent([{ id: 'sub-1', title: 'Pull statements', done: true }]))
+    const { container } = renderProgress()
+    expect(rowBox(container, 'Pull statements')).not.toBeDisabled()
+  })
+
+  it('disables the last open sub-sub-item when its sub-item is waiting', () => {
+    signInWith([
+      {
+        id: 'it-1',
+        label: 'Bank rec',
+        done: false,
+        assigneeId: OWNER,
+        subItems: [
+          {
+            id: 'sub-1',
+            title: 'Match deposits',
+            done: false,
+            waiting: true,
+            subItems: [
+              { id: 'ss-1', title: 'Chase client', done: true },
+              { id: 'ss-2', title: 'File receipt', done: false },
+            ],
+          },
+        ],
+      },
+    ] as unknown as Checklist['items'])
+    const { container } = renderProgress()
+    const box = rowBox(container, 'File receipt')
+    expect(box).toBeDisabled()
+    expect(box.title).toBe('The step above is waiting - clear it first')
+  })
+})
+
+// Someone else's step: the permission sentence wins on the sub-item and
+// sub-sub-item boxes just as it does on the item's own.
+describe('a step assigned to someone else', () => {
+  it('titles the sub-item and sub-sub-item checkboxes with the permission sentence', () => {
+    signInWith([
+      {
+        id: 'it-1',
+        label: 'Bank rec',
+        done: false,
+        assigneeId: 'emp-lisa',
+        subItems: [
+          {
+            id: 'sub-1',
+            title: 'Match deposits',
+            done: false,
+            subItems: [{ id: 'ss-1', title: 'Chase client', done: false }],
+          },
+        ],
+      },
+    ] as unknown as Checklist['items'])
+    contextValue = {
+      ...contextValue,
+      role: 'staff',
+      ownerMode: false,
+      activeEmployeeId: 'emp-avery',
+      effectiveUser: { id: 'emp-avery', role: 'staff', staffRole: 'Bookkeeper' },
+      sessionUser: { id: 'emp-avery', role: 'staff', staffRole: 'Bookkeeper' },
+    } as unknown as AppContextValue
+    const { container } = renderProgress()
+    const sentence = 'This step is assigned to someone else — only they can check it off.'
+    for (const label of ['Match deposits', 'Chase client']) {
+      const row = Array.from(container.querySelectorAll('.sub-item-row')).find((el) =>
+        el.textContent?.includes(label),
+      )
+      const box = row?.querySelector('input[type="checkbox"]') as HTMLInputElement
+      expect(box, label).toBeDisabled()
+      expect(box.title, label).toBe(sentence)
+    }
+  })
+})

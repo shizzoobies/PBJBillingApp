@@ -156,6 +156,7 @@ import {
   REFUSED_WAITING_ON_ACTIONS,
   SELF_WAIT_REFUSAL,
   waitForTaskLinkDenial,
+  waitingAncestorBlocksCompletion,
   waitingBlocksCascadedCompletion,
   waitingBlocksCompletion,
   waitingLockRefusal,
@@ -9943,6 +9944,16 @@ const server = createServer(async (request, response) => {
           message: waitingBlocksCompletion(toggleTarget)
             ? 'Clear the wait on this step first.'
             : 'Clear the wait on this step (or one of its sub-steps) first.',
+        })
+        return
+      }
+      // The same rule going UP: the store rolls a parent's `done` up from its
+      // children, so ticking the last open sub-step would complete a step that
+      // is itself waiting. A waiting step cannot become done by any path.
+      if (waitingAncestorBlocksCompletion(targetItem, toggleSubItemId, toggleSubSubItemId)) {
+        sendJson(response, 409, {
+          error: 'STEP_IS_WAITING',
+          message: 'The step above is waiting. Clear its wait first.',
         })
         return
       }
