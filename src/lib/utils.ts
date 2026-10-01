@@ -1125,7 +1125,14 @@ export function resolveSpecificMonthsStageDueDate(
   return resolveSpecificMonthsDueDate(template, year, month)
 }
 
-export function ensureRecurringChecklists(data: AppData) {
+/**
+ * `today` is the one LOCAL calendar date (YYYY-MM-DD) that drives every
+ * comparison below: the current year, whether a designated month has started,
+ * whether a due date already passed (born completed), and the cadence horizon.
+ * Mixing a UTC date with local getters made a due-today instance come out
+ * already finished from 8pm on for US users.
+ */
+export function ensureRecurringChecklists(data: AppData, today: string = localDateOnly()) {
   const templates = (data.checklistTemplates ?? []).map((template) => ensureTemplateStages(template))
   const existingChecklists = (data.checklists ?? []).map((checklist) => ({
     ...checklist,
@@ -1175,7 +1182,6 @@ export function ensureRecurringChecklists(data: AppData) {
   // disagreed, the two paths each spawned their own instance for the same
   // period, which is how production collected duplicate checklists carrying two
   // different id styles (server `check-<uuid8>` vs browser `check-<rand7>`).
-  const today = new Date().toISOString().slice(0, 10)
   const checklists = [...checklistsBackfilled]
 
   // Recycled instances count as "this period already happened" — otherwise a
@@ -1185,7 +1191,8 @@ export function ensureRecurringChecklists(data: AppData) {
   const { instanceKeys: existingKeys, monthKeys: existingMonthKeys } =
     buildChecklistInstanceKeys(checklistsBackfilled, data.recycledChecklists)
 
-  const todayDate = new Date()
+  const [todayYear, todayMonth, todayDay] = today.split('-').map(Number)
+  const todayDate = new Date(todayYear, todayMonth - 1, todayDay)
   const currentYear = todayDate.getFullYear()
   // Same gate the server materializer applies: a retired client generates
   // nothing new. Its existing instances are already in `checklists` and stay.
