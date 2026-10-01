@@ -1104,7 +1104,6 @@ function EmployeeDashboardView() {
               onToggle={toggleChecklistItem}
               clients={data.clients}
               disabled={previewMode}
-              ownerTicks={role === 'owner' && !previewMode}
             />
             <QueueGroup
               title="This week"
@@ -1112,7 +1111,6 @@ function EmployeeDashboardView() {
               onToggle={toggleChecklistItem}
               clients={data.clients}
               disabled={previewMode}
-              ownerTicks={role === 'owner' && !previewMode}
             />
             <QueueGroup
               title="Later"
@@ -1120,7 +1118,6 @@ function EmployeeDashboardView() {
               onToggle={toggleChecklistItem}
               clients={data.clients}
               disabled={previewMode}
-              ownerTicks={role === 'owner' && !previewMode}
             />
           </div>
         )}

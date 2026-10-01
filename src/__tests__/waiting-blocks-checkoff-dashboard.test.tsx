@@ -176,7 +176,7 @@ describe('the Dashboard queue checkbox for the owner', () => {
     expect(box.closest('label')?.title).toBe(TITLE)
   })
 
-  it('stays disabled in preview mode, with the staff sentence', () => {
+  it('stays disabled in preview mode, with the preview-mode title', () => {
     signInWith(waitingStep, 'owner-previewing')
     renderDashboard()
     const box = queueBox('Bank rec')

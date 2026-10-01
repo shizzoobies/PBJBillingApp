@@ -24128,6 +24128,46 @@ describe('the owner ticks a waiting step (file backend)', () => {
     expect(item.subItems[1].subItems[0].waitingOns[0].verifiedAt).toBeUndefined()
   })
 
+  it('a sub-step tick leaves the top-level wait fields of a step it did not finish untouched', async () => {
+    // A step that is not flagged waiting but carries a note and a saved wait of
+    // its own, with a waiting sub-step: ticking the sub-step must not close, flip
+    // or rewrite anything on the top node.
+    const topWait = openWait({ id: 'wo-top' })
+    await store.write(
+      workspace({
+        ...OWNER_WAITING_WORKSPACE,
+        checklists: [
+          {
+            ...OWNER_WAITING_WORKSPACE.checklists[0],
+            items: [
+              {
+                id: 'it-3',
+                label: 'Review',
+                done: false,
+                waiting: false,
+                waitingOn: 'a note',
+                waitingOns: [topWait],
+                subItems: [
+                  { id: 'sub-1', title: 'Check', done: false, waitingOns: [openWait({ id: 'wo-sub' })] },
+                  { id: 'sub-2', title: 'Other', done: false },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    )
+    const result = await store.toggleChecklistItem('cl-1', 'it-3', 'sub-1', undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    expect(result.closedWaits.map(({ path }) => path)).toEqual([['sub-1']])
+    const item = await itemOf('it-3')
+    expect(item.waiting).toBe(false)
+    expect(item.waitingOn).toBe('a note')
+    expect(item.waitingOns).toEqual([topWait])
+    expect(item.subItems[0].waitingOns[0].verifiedBy).toBe(OWNER_ID)
+  })
+
   it('closes a parent tick\'s whole sweep: the sub-step wait and the sub-sub-step wait', async () => {
     const result = await store.toggleChecklistItem('cl-1', 'it-2', undefined, undefined, {
       closeWaitsBy: OWNER_ID,
@@ -24288,7 +24328,7 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
     })
   })
 
-  it('writes a sub-step wait inside sub_items, with the top-level wait columns carried unchanged', async () => {
+  it('writes a sub-step wait inside sub_items with the PLAIN statement: the top-level wait columns are not written', async () => {
     const { fake, pgStore } = pgStoreWithItem(
       itemRow({
         sub_items: [
@@ -24301,17 +24341,41 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
       closeWaitsBy: OWNER_ID,
     })
     const [update] = fake.matching(/^update checklist_items/i)
-    expect(update.text).toBe(CLOSING_UPDATE)
+    expect(update.text).toBe(PLAIN_UPDATE)
     const subItems = JSON.parse(update.params[3])
     expect(subItems[0].done).toBe(true)
     expect(subItems[0].waitingOns[0]).toMatchObject({ id: 'wo-2', verifiedBy: OWNER_ID })
     expect(subItems[1]).toEqual({ id: 'sub-2', title: 'Approve', done: false })
-    // The step itself was not waiting and not finished.
+    // The step itself was not finished: just done + sub_items, nothing else.
+    expect(update.params).toHaveLength(4)
     expect(update.params[2]).toBe(false)
-    expect(update.params[4]).toBe(false)
-    expect(update.params[5]).toBe('[]')
     expect(result.closedWaits).toEqual([{ path: ['sub-1'], label: 'Confirm the hours' }])
     expect(result.checklist.items[0].subItems[0].waitingOns[0].verifiedBy).toBe(OWNER_ID)
+  })
+
+  it('a sub-step tick on a row with waiting = false plus a note never writes waiting or waiting_ons', async () => {
+    // The page reads a note as waiting; the column is false. Ticking a sub-step
+    // must not turn the column on, nor rewrite waiting_ons from this read.
+    const { fake, pgStore } = pgStoreWithItem(
+      itemRow({
+        waiting: false,
+        waiting_on: 'a note',
+        waiting_ons: [openWait({ id: 'wo-top' })],
+        sub_items: [
+          { id: 'sub-1', title: 'Check', done: false, waitingOns: [openWait({ id: 'wo-sub' })] },
+          { id: 'sub-2', title: 'Other', done: false },
+        ],
+      }),
+    )
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1', 'sub-1', undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    const updates = fake.matching(/^update checklist_items/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toBe(PLAIN_UPDATE)
+    expect(updates[0].text).not.toMatch(/\bwaiting\b|waiting_ons/)
+    expect(updates[0].params).toHaveLength(4)
+    expect(result.closedWaits).toEqual([{ path: ['sub-1'], label: 'Check' }])
   })
 
   it('reads a legacy note with the flag exactly as the page does, and closes that wait', async () => {

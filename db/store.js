@@ -15357,14 +15357,18 @@ export class AppDataStore {
         )
         if (!result) return null
         toggled = { subItems: result.item.subItems, done: result.item.done }
-        // Nothing waiting finished: the plain statement below, unchanged.
         if (result.closedWaits.length > 0) closing = result
       } else {
         toggled = applyItemToggle(row.sub_items, row.done, { subItemId, subSubItemId })
       }
       if (!toggled) return null
 
-      const updateResult = closing
+      // The top-level wait columns are rewritten only when the TOP node's own wait
+      // closed. A sub-step's closure lives in sub_items, so a tick that finished
+      // only sub-steps keeps the plain statement: it must not flip `waiting` on a
+      // node it did not finish, nor rewrite `waiting_ons` from this unlocked read.
+      const closesTop = Boolean(closing?.closedWaits.some(({ path }) => path.length === 0))
+      const updateResult = closesTop
         ? await this.pool.query(
             `update checklist_items
          set done = $3, sub_items = $4::jsonb, waiting = $5, waiting_ons = $6::jsonb, ${completedAtClause(3)}, updated_at = now()
@@ -15425,11 +15429,14 @@ export class AppDataStore {
           itemUpdated = true
           closedWaits = closing.closedWaits
           // Same shape as the plain toggle below, plus the item's own wait
-          // fields (only the ones it already carries).
+          // fields (only the ones it already carries) - and only when the TOP
+          // node's own wait closed; a sub-step's closure lives in subItems.
           const next = { ...item }
           if (closing.item.subItems.length > 0) next.subItems = closing.item.subItems
-          for (const key of ['waiting', 'waitingOns']) {
-            if (key in closing.item) next[key] = closing.item[key]
+          if (closing.closedWaits.some(({ path }) => path.length === 0)) {
+            for (const key of ['waiting', 'waitingOns']) {
+              if (key in closing.item) next[key] = closing.item[key]
+            }
           }
           return withCompletionStamp(next, closing.item.done)
         }
