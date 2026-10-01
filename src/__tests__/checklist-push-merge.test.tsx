@@ -110,10 +110,22 @@ it('adds the new checklist AND keeps the done-only original — not a replace, a
   await page.findByRole('navigation')
   fireEvent.click(page.getByRole('link', { name: 'Checklists' }))
 
-  const card = (await page.findByText('Mixed close')).closest(
-    'article, li, section',
-  ) as HTMLElement
-  fireEvent.click(within(card).getByText('Push to a new date'))
+  // The Dashboard (where the app starts) also lists "Mixed close" in its queue,
+  // so a bare findByText('Mixed close') can resolve against that row before the
+  // Checklists page has rendered. Wait for the Push button on the card that
+  // carries the title - only the Checklists page renders that pair.
+  const pushButton = await waitFor(() => {
+    const match = page
+      .getAllByText('Push to a new date')
+      .find((button) =>
+        (button.closest('article, li, section') as HTMLElement | null)?.textContent?.includes(
+          'Mixed close',
+        ),
+      )
+    if (!match) throw new Error('The Mixed close card is not on the Checklists page yet')
+    return match
+  })
+  fireEvent.click(pushButton)
 
   const dialog = within(page.getByRole('group', { name: /Push Mixed close to a new date/i }))
   fireEvent.change(dialog.getByRole('combobox'), { target: { value: 'client' } })
