@@ -17461,9 +17461,10 @@ export class AppDataStore {
   // entry is a permanent record: the stage methods below EDIT it in place and
   // there is no method that removes one. Top-level items persist the list in the
   // `waiting_ons` column; sub-items / sub-sub ride the parent item's `sub_items`
-  // JSONB. The file backend keeps the array on each node object. All of them
-  // reuse `this.read()` for the in-memory shape, then persist the one affected
-  // node.
+  // JSONB. The file backend keeps the array on each node object. On Postgres
+  // `this.read()` only FINDS the step; the change is applied to that step's row,
+  // locked (`_withLockedChecklistItem`). On the file backend the read, the change
+  // and the write share one queue slot.
 
   /**
    * Locate a node (item / sub-item / sub-sub-item) inside a checklist by path.

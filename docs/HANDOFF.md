@@ -25,16 +25,25 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-01, night - the New-queue run):** `main` = `6d7382e`, deployed,
-`/health` 200. Alex's instruction for the run: WORK THE NEW TICKETS A COUPLE AT A TIME, IN THE
-ORDER YOU JUDGE BEST, AND DEPLOY EACH AS IT FINISHES - never a batch deploy. Eight more ships
-since the paragraph below (list and lessons: the "2026-10-01 (evening and night)" entry at the
-top of section 5). Suite **5089 tests / 253 files**; manifest about 193,100 bytes (condensed
-today, ample room). ONE BRANCH IS HELD ON PURPOSE: `fix/invoice-send-stamp` (`6fd6211`,
-`featreq-29c6dac1`) changes what an outgoing invoice email says, and Brittany's 38 September
-invoices were reviewed but NOT YET SENT - ship it after they are out (rebase onto main and
-re-verify first), or sooner only on Alex's word. ONE BRANCH IS IN REVIEW:
-`fix/void-closes-payment-pages` (`featreq-61347136`). The second lane is a worktree at
+**State right now (2026-10-01, night - the New-queue run):** `main` = the checklist follow-up
+ship (`e22d5ec` + this handoff), deployed, `/health` 200. Alex's instruction for the run: WORK
+THE NEW TICKETS A COUPLE AT A TIME, IN THE ORDER YOU JUDGE BEST, AND DEPLOY EACH AS IT
+FINISHES - never a batch deploy. Ten more ships since the paragraph below (list and lessons:
+the "2026-10-01 (evening and night)" entry at the top of section 5). Suite **5178 tests**;
+manifest about 193,200 bytes (condensed today, ample room). **READ FIRST - AN OPEN FINDING
+WAITING ON ALEX:** the whole-workspace save (`write()`) snapshots every invoice, deletes them
+all and re-inserts the snapshot, so an invoice write that lands while a save is running (a
+Stripe payment, a "sent" stamp, an edit) is either overwritten or finds no row and is dropped -
+and the webhook does not retry. No payment has been lost so far (every `payment_intent.succeeded`
+event since live mode matches a paid invoice). Details and the two fix options are on
+`featreq-6a5c6162`; the recommended one (make `invoices.client_id` deferrable and take invoices
+out of the bulk save) is a production schema change and needs his yes. ONE BRANCH IS HELD ON
+PURPOSE: `fix/invoice-send-stamp` (`6fd6211`, `featreq-29c6dac1`) changes what an outgoing
+invoice email says, and Brittany's 38 September invoices were reviewed but NOT YET SENT - ship
+it after they are out (rebase onto main and re-verify first), or sooner only on Alex's word;
+`featreq-beec1ccc`, `featreq-051122e4` and item 8 of `featreq-459bdfc2` touch the same send
+route and wait with it. ONE BRANCH IS IN REVIEW: `fix/coverage-confirm-lock`
+(`featreq-a501d644` parts 1 and 3). The second lane is a worktree at
 `D:\PBJ Accounting Work\AP-laneB` (`node_modules` is a junction: remove the LINK, never its
 target, before `git worktree remove`). The run's ledger is `.superpowers/sdd/new-queue-2026-10-01.md`
 (git-ignored, this machine). Brittany should refresh her tab once to pick up the day's changes.
@@ -470,7 +479,7 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
-**2026-10-01 (evening and night) - the New-queue run: eight ships, one at a time.**
+**2026-10-01 (evening and night) - the New-queue run: ten ships, one at a time.**
 
 - **How the run works.** Two lanes (the primary tree and the `AP-laneB` worktree), one writer
   per tree, each item: brief -> builder -> independent reviewer -> fix round -> re-review -> my own
@@ -492,7 +501,15 @@ with instructions rather than failing. Run it by hand after any print change.
   and the bulk save locks the omitted client rows before it checks them (`featreq-27836ea0`);
   `789c793` the lower "Print invoice" button prints the SAVED invoice when the month has one and
   the dialog says which sheet it will print (`featreq-1755dbf2`); `1288115` the covered-dates
-  leftovers (`featreq-f3386a6a`); `6d7382e` the checklist loose ends (`featreq-165b4001`).
+  leftovers (`featreq-f3386a6a`); `6d7382e` the checklist loose ends (`featreq-165b4001`);
+  `9714db9` voiding closes the client's open Stripe payment pages (`expireInvoiceSessions` in
+  `server.js`, shared with Mark paid) and `updateInvoice` writes `where id = $1 and status = $8`
+  so a save or void that races a payment is refused (`InvoiceChangedError`, 409 `invoice_changed`)
+  and the month run reloads itself (`featreq-61347136`); `e22d5ec` a wait is written against the
+  step's locked row (`_withLockedChecklistItem`) and the template write routes check the origin
+  (`featreq-6bb0d8a5`). The last four each passed a rolled-back production trial of the REAL
+  store method through a savepoint-wrapping pool (scripts `prod-*-trial.mjs` in the session
+  scratchpad; the pattern is in section 4).
 - **Covered dates, what changed (`1288115`).** While a dates save is in flight the whole editor is
   held (one dates save at a time); the flagged "Confirm dates" is disabled while the editor has
   unsaved edits, as the quiet control already was (before, confirming threw the edits away);
@@ -767,10 +784,14 @@ routes/permissions, frontend), one post-review fix pass and a delta review; ship
   caller's read is kept; all seven `/api/checklist-templates/**` write routes check the origin;
   the toggle's locked select uses `CHECKLIST_ITEM_SELECT_COLUMNS`; a deletion request re-filed
   after the pending one vanished is not created for a step the approval just deleted (the
-  requester gets the route's own "not found" sentence). STILL OPEN: other step writers with the
-  same unlocked read-modify-write shape (sub-step add / update / reorder, and the file
-  backend's `updateChecklistItem`); the deletion re-check is a read before the insert, not
-  atomic with it. Closed 2026-10-01 (62510ff; rolled-back production trial passed):
+  requester gets the route's own "not found" sentence). STILL OPEN (tracker featreq-3c7f9e5a): the
+  sub-step add / update / remove and sub-sub add / remove writers are unlocked read-modify-writes
+  of `sub_items` on Postgres and can still erase a concurrent wait (Postgres sub-step REORDER is
+  already locked; its file branch and the file backend's `updateChecklistItem` are not); the
+  hand-off stage checks and the task-link lock run in the route on a stale copy, so two racing
+  actions on one wait both apply; the deletion re-check is a read before the insert, not
+  atomic with it; and the whole-workspace save can still erase any of these (featreq-6a5c6162).
+  Closed 2026-10-01 (62510ff; rolled-back production trial passed):
   every `/api/checklists/**` write route checks the origin; the toggle's waiting refusal is decided inside the store
   (`StepIsWaitingError`; Postgres reads the row `for update` in a transaction, the file backend
   reads inside the queue slot) so the route no longer asks first; the step chip, the Board and the
