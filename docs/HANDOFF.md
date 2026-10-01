@@ -25,14 +25,19 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-01, late afternoon):** `main` = `3e8e769` (+ this handoff). A FOURTH
-ship followed (staff "This + all future" delete requests, last bullets of the 2026-10-01 entry);
-suite **4821 tests / 242 files**; manifest 204,297 bytes (703 under the tripwire - TRIM FIRST).
-One send-back is OPEN and waiting on Alex/Brittany: `featreq-8a01fe08` "no longer able to check
-off sub task under a step" - not reproducible as a bug, almost certainly the waiting rule (see
-the entry). Nine invoice-control items are filed as ONE New ticket, `featreq-459bdfc2`. Two
-more New items from Brittany are untouched: `featreq-27836ea0` (no deleting a client once time
-is entered) and `featreq-87b20ed7` (invoice shows only the sections a client has).
+**State right now (2026-10-01, evening):** `main` = `3eb502f` (+ this handoff). FIVE ships today.
+The last: the OWNER can check off a waiting step and that closes the wait (send-back
+`featreq-8a01fe08`). Suite **4871 tests / 242 files**; manifest 204,523 bytes (477 under the
+tripwire - ticket `featreq-65473ff4` is to condense it; DO THAT BEFORE ANY MANIFEST EDIT).
+NOTHING IS IN FLIGHT. Every piece of pending work has its own New ticket (list at the end of
+the 2026-10-01 entry) and Brittany's open questions are in the tracker as needs_input items
+`featreq-21d0bba8` (invoices) and `featreq-1f352c4f` (checklists). Alex's rule from today:
+QUESTIONS THAT ARE BRITTANY'S GO TO HER THROUGH THE TRACKER, not to him in chat. Two New items
+she filed are untouched: `featreq-27836ea0` (no deleting a client once time is entered) and
+`featreq-87b20ed7` (an invoice shows only the sections the client has).
+
+**Late afternoon:** `main` = `3e8e769` (+ handoff `1f0bd9d`): the staff "This + all future"
+delete requests (fourth ship).
 
 **Earlier that afternoon:** `main` = `67e50cb` (+ handoff `085a5b7`). A THIRD ship
 landed after the two below: the "Change covered dates" control, plus a one-time production
@@ -563,16 +568,39 @@ with instructions rather than failing. Run it by hand after any print change.
   source-reading tests; I exercised it over real HTTP on the dev server (staff files, stale
   approve refused, owner approve removes step + template step and it survives the autosave) and
   trialed the Postgres statements on production in a rolled-back transaction.
-- **OPEN send-back, `featreq-8a01fe08`: "no longer able to check it off sub task under a step".**
-  Reproduce-first result: a sub-step ticks and stays ticked for owner AND staff in a real
-  browser; production has 4 open sub-steps and the guard refuses none. At the minute she wrote
-  it, Lisa had just added a task to XAct's Monthly Reconciliations and marked it WAITING ON
-  BRITTANY; that task and one more are still waiting on her (checkbox gray, "Clear the wait
-  first"), and Bright Tower's were ticked seconds after its wait was cleared. Reading: "sub task
-  under a step" = a task under a STAGE ("Step 1 of 3"), blocked by the waiting rule she asked
-  for in `featreq-cdab1605`. Alex was asked which she meant; offered fix if the rule is too
-  strict: the owner may tick a waiting task directly, which clears the wait. NOTHING CHANGED;
-  the ticket is still Planned.
+- **Send-back `featreq-8a01fe08`, "no longer able to check it off sub task under a step" -
+  NOT A BUG, a rule change.** Reproduce-first: a sub-step ticks and stays ticked for owner and
+  staff in a real browser; production had 4 open sub-steps and the guard refused none. At the
+  minute she wrote it, staff tasks on XAct's Monthly Reconciliations were WAITING ON BRITTANY
+  ("sub task under a step" = a task under a STAGE, "Step 1 of 3"). Alex: "she would want her to
+  be able to check it off". Shipped (`67550d9`, `3eb502f`): an OWNER tick is not refused, and
+  the tick closes the wait on exactly the nodes it completed - flag false, open saved waits
+  get `resolvedAt/By` if missing and `verifiedAt/By` = the owner; nothing is deleted. One pure
+  function, `toggleClosingWaits` in `lib/waiting-on-state.js`, built on the SAME simulation as
+  the guard; `toggleChecklistItem(..., { closeWaitsBy })` writes it in one statement, and
+  writes the top-level `waiting` / `waiting_ons` columns ONLY when the top node itself closed
+  (a sub-step closure lives in `sub_items`). Staff still get 409 `STEP_IS_WAITING`; preview-as
+  stays read-only; the sub-step delete routes and deletion-request approval keep their guard
+  for everyone. Owner is decided from the session role only. Checked over real HTTP on the dev
+  server (owner ticks through, staff refused even when the body claims owner) and by a
+  rolled-back production trial on a real waiting step. Known and ticketed: on Postgres a
+  `waiting_on` NOTE still reads as waiting (`mapChecklistItemRow`), and an owner tick sends no
+  notification (Brittany was asked).
+- **Tickets filed 2026-10-01 so nothing pending lives only in this file (all status New):**
+  `featreq-459bdfc2` nine invoice controls (Payment link marks a draft Sent; Void has no
+  confirm; no PDF preview; changes after Generate; per-invoice date/terms; rate not editable;
+  note does not carry over; footer missing from email; carry-forward does not exist) ·
+  `featreq-29c6dac1` email vs reprint invoice date · `featreq-f3386a6a` covered-dates leftovers ·
+  `featreq-3be1524a` refusals mistaken for a retainer problem · `featreq-65473ff4` condense the
+  manifest · `featreq-165b4001` checklist loose ends · `featreq-1755dbf2` lower Print prints a
+  live calculation · `featreq-4caec5d3` off-site backups (waiting on Alex, week of 10-05) ·
+  `featreq-8c535f42` server clock and `featreq-6a5c6162` bulk-save race (both being worked in
+  Alex's two side sessions, which must rebase onto main). File more with
+  `scripts/prod/tracker-update.mjs --file-new --description-file ... --dev-notes-file ...`.
+- **A near miss worth remembering:** prose passed through a double-quoted `node -e "..."` in
+  the Bash tool has its backticks EXECUTED by the shell; a note quoting a production `--apply`
+  command nearly ran. Write notes, memory and handoff text with the Write/Edit tools or from a
+  script file, never through a shell string.
 - **When she reports a date or "due" on an invoice:** first pin down the SURFACE (list row, print
   sheet, PDF, email) and WHICH Print button. The row date is internal; the client copies say Due
   on receipt. This one was two interpretation gaps and one real default problem, not a bug in
